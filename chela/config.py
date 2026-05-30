@@ -37,5 +37,7 @@ DISPATCH_WORKFLOWS = [
 ]
 
 # Embedded ttyd terminal wall on/off (read by the dashboard and the ttyd
-# supervisor in scripts/agent-terminals.sh). Set false to drop the wall.
-TERMINALS_ENABLED = os.environ.get("CHELA_TERMINALS_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
+# supervisor in scripts/agent-terminals.sh). Defaults OFF until the wall ships
+# (terminals.js + agent-terminals.sh + the /term ttyd proxy land in a later
+# step); set CHELA_TERMINALS_ENABLED=true to opt in once those are present.
+TERMINALS_ENABLED = os.environ.get("CHELA_TERMINALS_ENABLED", "false").strip().lower() not in ("false", "0", "no", "off")
