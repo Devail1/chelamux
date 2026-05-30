@@ -1,17 +1,22 @@
 """chela CLI entry point.
 
 `chela status` proves tmux-native discovery. `chela run` is the daemon loop
-(currently the scheduler tick; the dispatcher and context capture wire in here
-as they are ported). `chela schedule ...` manages the scheduled tasks the
-daemon fires.
+(scheduler tick + work-item dispatcher). `chela schedule ...` manages scheduled
+tasks; `chela dispatch ...` runs the markdown-TODO → worktree → PR dispatcher.
 """
 from __future__ import annotations
 import argparse
 import logging
+import sys
 import time
 
-from chela import discovery, scheduler
-from chela.config import TMUX_SESSION, SCHEDULER_POLL_INTERVAL
+from chela import discovery, dispatcher, scheduler
+from chela.config import (
+    TMUX_SESSION,
+    SCHEDULER_POLL_INTERVAL,
+    DISPATCH_TICK_INTERVAL,
+    DISPATCH_WORKFLOWS,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,13 +40,29 @@ def cmd_status(args) -> None:
 
 
 def cmd_run(args) -> None:
-    """Run the daemon loop: poll the scheduler and fire due tasks."""
+    """Run the daemon loop: scheduler tick every pass, dispatcher on its own cadence."""
     log.info("chela daemon starting (session=%s, poll=%ds)", TMUX_SESSION, SCHEDULER_POLL_INTERVAL)
+    if DISPATCH_WORKFLOWS:
+        log.info("Dispatcher enabled for %d workflow(s): %s",
+                 len(DISPATCH_WORKFLOWS), ", ".join(str(p) for p in DISPATCH_WORKFLOWS))
+    last_dispatch_check = 0.0
+
     while True:
         try:
             executed = scheduler.tick()
             if executed:
                 log.info("Scheduler executed %d task(s)", executed)
+
+            now = time.time()
+            if DISPATCH_WORKFLOWS and now - last_dispatch_check >= DISPATCH_TICK_INTERVAL:
+                for wf_path in DISPATCH_WORKFLOWS:
+                    try:
+                        summary = dispatcher.tick(wf_path)
+                        if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
+                            log.info("Dispatch %s: %s", wf_path.name, summary)
+                    except Exception:
+                        log.exception("Dispatch tick failed for %s", wf_path)
+                last_dispatch_check = now
         except Exception:
             log.exception("Error in daemon loop")
         time.sleep(SCHEDULER_POLL_INTERVAL)
@@ -82,6 +103,66 @@ def cmd_schedule_remove(args) -> None:
         print(f"Task {args.id} not found")
 
 
+def cmd_dispatch(args) -> None:
+    """Run the work-item dispatcher against a WORKFLOW.md."""
+    if args.dry_run:
+        plans = dispatcher.dry_run(args.workflow)
+        if not plans:
+            print("No open tasks")
+            return
+        for i, p in enumerate(plans):
+            if i:
+                print()
+            print(f"=== task {p['task_id']}: {p['title']}")
+            print(f"  worktree: {p['worktree_path']}")
+            print(f"  branch:   {p['branch']}")
+            print("  prompt:")
+            for line in p["prompt"].splitlines():
+                print(f"    {line}")
+        return
+    interval = max(5, int(args.interval))
+    if args.once:
+        summary = dispatcher.tick(args.workflow)
+        print(summary)
+        return
+    log.info("Dispatcher starting (workflow=%s, interval=%ds)", args.workflow, interval)
+    while True:
+        try:
+            summary = dispatcher.tick(args.workflow)
+            if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
+                log.info("Dispatch tick: %s", summary)
+        except Exception:
+            log.exception("Dispatch tick failed")
+        time.sleep(interval)
+
+
+def cmd_dispatch_runs(args) -> None:
+    """Show dispatcher runs."""
+    runs = dispatcher.list_runs()
+    if not runs:
+        print("No runs")
+        return
+    for r in runs:
+        title = (r["title"] or "")[:60]
+        print(f"  {r['task_id']}  {r['status']:<16}  attempt={r['attempt']}  {r.get('window_name') or '-':<24}  {title}")
+
+
+def cmd_task_finished(args) -> None:
+    """Mark a dispatcher run as awaiting_review and kill its tmux window.
+
+    Invoked by the agent as the last step of its workflow: PR is open, the
+    in-branch TODO strike is committed. chela transitions the row to
+    awaiting_review (so the dispatcher won't re-dispatch the task) and kills the
+    agent's tmux window. The row flips to `done` automatically on the next tick
+    after the user merges the PR (which removes the TODO line from the base branch).
+    """
+    result = dispatcher.mark_awaiting_review(args.task_id)
+    if not result.get("ok"):
+        print(f"task-finished: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"Task {result['task_id']} awaiting review (pr_url={result.get('pr_url') or 'unknown'})")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="chela",
@@ -107,6 +188,26 @@ def main() -> None:
     p_rm = sched_sub.add_parser("remove", help="Remove a task")
     p_rm.add_argument("id", type=int)
 
+    # dispatch
+    p_disp = sub.add_parser("dispatch", help="Run the work-item dispatcher")
+    p_disp.add_argument("workflow", help="Path to WORKFLOW.md")
+    p_disp.add_argument("--once", action="store_true", help="Run one tick and exit")
+    p_disp.add_argument("--interval", type=int, default=60, help="Poll interval in seconds (default 60)")
+    p_disp.add_argument(
+        "--dry-run", action="store_true",
+        help="Print rendered prompt and worktree path for each open task; do not spawn windows or run hooks",
+    )
+
+    # dispatch-runs (inspection)
+    sub.add_parser("dispatch-runs", help="List dispatcher runs")
+
+    # task-finished — final step in the dispatcher work-item lifecycle
+    p_tf = sub.add_parser(
+        "task-finished",
+        help="Mark a dispatcher run as awaiting_review and kill its tmux window",
+    )
+    p_tf.add_argument("task_id")
+
     args = parser.parse_args()
 
     if args.command == "status":
@@ -122,6 +223,12 @@ def main() -> None:
             cmd_schedule_remove(args)
         else:
             p_sched.print_help()
+    elif args.command == "dispatch":
+        cmd_dispatch(args)
+    elif args.command == "dispatch-runs":
+        cmd_dispatch_runs(args)
+    elif args.command == "task-finished":
+        cmd_task_finished(args)
     else:
         parser.print_help()
 
