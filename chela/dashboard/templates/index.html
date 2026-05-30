@@ -268,6 +268,47 @@
                 </div>
             </div>
         </div>
+        <!-- Mobile keybar v2: a persistent, horizontally-scrollable accessory
+             row (phone-only) modeled on Moshi's terminal keyboard — special
+             chars one tap away, Ctrl as a sticky/lock modifier that reveals a
+             Ctrl-letter layer. Keys go through termKey()/api/term/key. -->
+        <div id="term-keybar" class="term-keybar" data-ctrl="off">
+          <button class="kb2-key" onclick="termKey('Escape')">Esc</button>
+          <button class="kb2-key" onclick="termKey('Tab')">Tab</button>
+          <button class="kb2-key" onclick="termKey('Enter')" aria-label="Enter">&#9166;</button>
+          <span class="kb2-sep" aria-hidden="true"></span>
+          <button class="kb2-key kb2-strong" onclick="termKey('C-c')" title="Ctrl-C (interrupt)">^C</button>
+          <button id="kb2-ctrl" class="kb2-key kb2-mod" onclick="kbCtrlTap()"
+                  title="Ctrl — tap: arm for next key · tap again: lock · again: off">Ctrl</button>
+          <span class="kb2-ctrl-letters" id="kb2-ctrl-letters">
+            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('a')" title="Ctrl-A">A</button>
+            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('d')" title="Ctrl-D (EOF)">D</button>
+            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('e')" title="Ctrl-E">E</button>
+            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('k')" title="Ctrl-K">K</button>
+            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('l')" title="Ctrl-L (clear)">L</button>
+            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('r')" title="Ctrl-R (search)">R</button>
+            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('u')" title="Ctrl-U">U</button>
+            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('w')" title="Ctrl-W">W</button>
+            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('z')" title="Ctrl-Z (suspend)">Z</button>
+          </span>
+          <span class="kb2-sep" aria-hidden="true"></span>
+          <button class="kb2-key" onclick="termKey('Left')" aria-label="Left">&#8592;</button>
+          <button class="kb2-key" onclick="termKey('Up')" aria-label="Up">&#8593;</button>
+          <button class="kb2-key" onclick="termKey('Down')" aria-label="Down">&#8595;</button>
+          <button class="kb2-key" onclick="termKey('Right')" aria-label="Right">&#8594;</button>
+          <span class="kb2-sep" aria-hidden="true"></span>
+          <button class="kb2-key" onclick="termKey('|')">|</button>
+          <button class="kb2-key" onclick="termKey('/')">/</button>
+          <button class="kb2-key" onclick="termKey('\\')">\</button>
+          <button class="kb2-key" onclick="termKey('~')">~</button>
+          <button class="kb2-key" onclick="termKey('-')">-</button>
+          <button class="kb2-key" onclick="termKey('_')">_</button>
+          <span class="kb2-sep" aria-hidden="true"></span>
+          <button class="kb2-key" onclick="termKey('Home')">Home</button>
+          <button class="kb2-key" onclick="termKey('End')">End</button>
+          <button class="kb2-key" onclick="termKey('PageUp')">PgUp</button>
+          <button class="kb2-key" onclick="termKey('PageDown')">PgDn</button>
+        </div>
     </div>
     {% endif %}
 

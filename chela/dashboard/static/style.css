@@ -1703,3 +1703,58 @@ input[type="text"]:focus, textarea:focus, select:focus {
     /* The status dot inside a pill keeps its colour from _colorTermDots. */
     .term-pill .term-status-dot { flex: 0 0 auto; }
 }
+
+/* ---- Mobile keybar v2 (Moshi-style accessory row) ----
+   A persistent, horizontally-scrollable key row pinned to the bottom (above the
+   on-screen keyboard via _kbPin). Phone-only — replaces the desktop collapsible
+   #term-bar. Special chars are one tap; Ctrl is a sticky/lock modifier that
+   reveals a Ctrl-letter layer. */
+.term-keybar { display: none; }
+
+@media (max-width: 768px) {
+    /* The persistent v2 bar replaces the old collapsible keybar on phones. */
+    #term-bar { display: none !important; }
+
+    .term-keybar {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        z-index: 35;
+        padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+        overflow-x: auto; overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        white-space: nowrap;
+        will-change: transform;   /* smooth keyboard-pin translate */
+    }
+    .term-keybar::-webkit-scrollbar { display: none; }
+
+    .kb2-key {
+        flex: 0 0 auto;
+        min-width: 38px; min-height: 40px;
+        padding: 0 11px;
+        background: var(--bg); border: 1px solid var(--border); color: var(--text);
+        border-radius: 7px; font-size: 13px; line-height: 1; cursor: pointer;
+    }
+    .kb2-key:active { background: var(--border); }
+    .kb2-strong { color: var(--red); border-color: rgba(248, 81, 73, 0.4); }   /* ^C stands out */
+    .kb2-sep { flex: 0 0 auto; width: 1px; height: 22px; background: var(--border); margin: 0 3px; }
+
+    /* Ctrl modifier — armed (outlined) vs locked (filled). */
+    .kb2-mod { font-size: 12px; }
+    .term-keybar[data-ctrl="armed"] #kb2-ctrl { border-color: var(--accent); color: var(--accent); }
+    .term-keybar[data-ctrl="locked"] #kb2-ctrl { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+    /* Ctrl-letter layer: hidden until Ctrl is engaged. */
+    .kb2-ctrl-letters { display: none; align-items: center; gap: 5px; }
+    .term-keybar[data-ctrl="armed"] .kb2-ctrl-letters,
+    .term-keybar[data-ctrl="locked"] .kb2-ctrl-letters { display: inline-flex; }
+    .kb2-cl { color: var(--accent); border-color: rgba(88, 166, 255, 0.4); min-width: 34px; }
+
+    /* Reserve space so the fixed bar never covers the terminal's bottom rows. */
+    #term-stage { margin-bottom: 52px; }
+}
