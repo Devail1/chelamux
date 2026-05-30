@@ -652,7 +652,6 @@ def api_cron():
     chela scheduler. Honors CRON_TZ lines: entries below one are evaluated in
     that timezone, earlier entries in system-local time.
     """
-    from datetime import datetime, timezone
     try:
         from zoneinfo import ZoneInfo
     except ImportError:
