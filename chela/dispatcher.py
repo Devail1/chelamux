@@ -268,11 +268,11 @@ def _kill_windows_named(window_name: str) -> None:
 
     A retry (failed → re-dispatch) re-enters _spawn with the same window_name;
     tmux happily creates a *second* window of that name, after which the by-name
-    target `ccbot:<name>` is ambiguous and send-keys can exit non-zero — the
-    exact failure that stacked three `pclw-14` windows and flapped `failed` on
-    PCLW-14. Enumerating by id and killing each match before the new-window
-    guarantees a retry starts from a clean slate. Best-effort: a missing
-    session or "no such window" is ignored (nothing to clean up).
+    target `<session>:<name>` is ambiguous and send-keys can exit non-zero —
+    stacking duplicate windows that flap a run between `failed` states.
+    Enumerating by id and killing each match before the new-window guarantees a
+    retry starts from a clean slate. Best-effort: a missing session or "no such
+    window" is ignored (nothing to clean up).
     """
     out = subprocess.run(
         ["tmux", "list-windows", "-t", TMUX_SESSION, "-F", "#{window_id} #{window_name}"],
@@ -478,10 +478,10 @@ def tick(workflow_path: str | Path) -> dict:
         for row in rows:
             if row["task_id"] not in open_ids:
                 # Read the agent's transcript *before* killing the window —
-                # discovery resolves window_name → cwd/session_id via ccbot's
-                # state, and that mapping disappears once tmux drops the window.
-                # For awaiting_review rows the window is already dead (the
-                # task-finished CLI kills it), so the transcript read is a
+                # transcript resolution maps window_name → cwd → transcript via
+                # the live tmux pane, and that mapping disappears once tmux drops
+                # the window. For awaiting_review rows the window is already dead
+                # (the task-finished CLI kills it), so the transcript read is a
                 # no-op fallback for the rare case where it wasn't killed.
                 pr_url = _read_pr_url(row["window_name"])
                 if row["window_name"]:
