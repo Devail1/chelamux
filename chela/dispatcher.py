@@ -569,8 +569,8 @@ def tick(workflow_path: str | Path) -> dict:
         conn.commit()
 
         # 2b. Fire after_done hook (post-commit so the row state is durable in
-        # case the hook restarts this very process — picoclaw self-dogfood
-        # runs `pm2 restart picoclaw`). Detached via start_new_session=True so
+        # case the hook restarts this very process — e.g. an after_done that
+        # redeploys the daemon itself). Detached via start_new_session=True so
         # the restart doesn't take down the current reconcile.
         if merged_in_tick:
             _fire_after_done(wf)
