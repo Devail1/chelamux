@@ -12,6 +12,20 @@
 let _agentFilter = 'all';   // all | claude | shell | server  (sidebar filter)
 let _detailAgent = null;    // window name focused in the agent-detail view
 
+// --- Mobile sidebar drawer -------------------------------------------------
+// On phone widths the 264px sidebar is off-canvas (see the @media block in
+// style.css); a hamburger in the topbar slides it in over a scrim. No-op on
+// desktop, where the sidebar is a static grid column and `.open` does nothing.
+function toggleSidebar(force) {
+    const sb = document.querySelector('.sidebar');
+    const scrim = document.getElementById('sidebar-scrim');
+    if (!sb) return;
+    const open = (force === undefined) ? !sb.classList.contains('open') : !!force;
+    sb.classList.toggle('open', open);
+    if (scrim) scrim.classList.toggle('open', open);
+}
+function closeSidebar() { toggleSidebar(false); }
+
 // --- View switching --------------------------------------------------------
 
 function selectView(view) {
@@ -32,6 +46,7 @@ function selectView(view) {
     if (TERMINALS_ON && view === 'terminals') startTermTimer();
     else if (TERMINALS_ON) stopTermTimer();
 
+    closeSidebar();   // navigating dismisses the mobile drawer (no-op on desktop)
     refresh();
 }
 
@@ -49,6 +64,7 @@ function selectAgent(name) {
     renderAgentDetail();
     refreshSummary();
     checkContext();   // fills the detail context bar via ctx-<name>
+    closeSidebar();   // navigating dismisses the mobile drawer (no-op on desktop)
 }
 
 function _syncSidebarActive(view, agentName) {
