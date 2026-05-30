@@ -181,6 +181,53 @@ def cmd_dispatch_runs(args) -> None:
         print(f"  {r['task_id']}  {r['status']:<16}  attempt={r['attempt']}  {r.get('window_name') or '-':<24}  {title}")
 
 
+def cmd_install_statusline(args) -> None:
+    """Print (or write) the Claude Code statusLine hook that feeds the context bar.
+
+    The hook caches Claude Code's status payload (context %, the 5h/7d rate-limit
+    blocks, cost) to ``$CHELA_DIR/context/<window>.json`` — the only place those
+    numbers are exposed. Default is to print the snippet; ``--write`` edits the
+    settings file and refuses to clobber an existing statusLine without ``--force``.
+    """
+    import json as _json
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "cache-statusline.sh"
+    snippet = {"type": "command", "command": str(script)}
+    settings_path = Path(args.settings).expanduser() if args.settings else Path.home() / ".claude" / "settings.json"
+
+    if not args.write:
+        print(f'Add this "statusLine" key to your Claude Code settings')
+        print(f"({settings_path}, or a repo's .claude/settings.json):\n")
+        print('  "statusLine": ' + _json.dumps(snippet, indent=2).replace("\n", "\n  "))
+        print(f"\nScript: {script}")
+        print("Then restart the agents. Already run a statusLine? Keep it — chela falls")
+        print("back to a transcript estimate, or point your script at $CHELA_DIR/context/ too.")
+        print("\nTo apply automatically:  chela install-statusline --write")
+        return
+
+    if not script.exists():
+        print(f"Script not found at {script} — run this from a chela checkout.")
+        sys.exit(1)
+    settings = {}
+    if settings_path.exists():
+        try:
+            settings = _json.loads(settings_path.read_text())
+        except (_json.JSONDecodeError, OSError) as e:
+            print(f"Could not read/parse {settings_path}: {e}")
+            sys.exit(1)
+    existing = settings.get("statusLine")
+    if existing and not args.force:
+        print(f"A statusLine is already configured in {settings_path}:")
+        print("  " + _json.dumps(existing))
+        print("Refusing to overwrite. Re-run with --force, or wire chela in by hand so both coexist.")
+        sys.exit(1)
+    settings["statusLine"] = snippet
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(_json.dumps(settings, indent=2) + "\n")
+    print(f"Installed chela statusLine into {settings_path}. Restart agents to apply.")
+
+
 def cmd_dashboard(args) -> None:
     """Launch the optional web dashboard (requires the 'dashboard' extra).
 
@@ -272,6 +319,15 @@ def main() -> None:
     # dispatch-runs (inspection)
     sub.add_parser("dispatch-runs", help="List dispatcher runs")
 
+    # install-statusline — wire the context-bar producer into Claude Code
+    p_sl = sub.add_parser(
+        "install-statusline",
+        help="Print or install the Claude Code statusLine hook that feeds the context bar",
+    )
+    p_sl.add_argument("--write", action="store_true", help="Write into the settings file (default: just print the snippet)")
+    p_sl.add_argument("--force", action="store_true", help="Overwrite an existing statusLine (with --write)")
+    p_sl.add_argument("--settings", default=None, help="settings.json path (default: ~/.claude/settings.json)")
+
     # dashboard (optional component)
     p_dash = sub.add_parser("dashboard", help="Launch the optional web dashboard (needs the 'dashboard' extra)")
     p_dash.add_argument("--host", default=None, help="Bind host (default 127.0.0.1)")
@@ -307,6 +363,8 @@ def main() -> None:
         cmd_dispatch(args)
     elif args.command == "dispatch-runs":
         cmd_dispatch_runs(args)
+    elif args.command == "install-statusline":
+        cmd_install_statusline(args)
     elif args.command == "dashboard":
         cmd_dashboard(args)
     elif args.command == "task-finished":

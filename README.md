@@ -9,11 +9,10 @@ chela runs as a small daemon over a single tmux session. It does two things:
 - **Dispatches** work — turn a markdown `TODO.md` (or GitHub issues) into one
   **git worktree per task**, spawn an agent in it, and let it **open a PR**.
 
-Where [clawmux](https://github.com/zeulewan/clawmux) and
-[ccmux](https://github.com/skzv/ccmux) help you *talk to and supervise* agents,
-chela is for **putting them to work** and walking away. You watch them however
-you already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
-optional web dashboard (think *ccmux, weblized*).
+Most tmux + Claude Code tools help you *talk to and supervise* agents; chela is
+for **putting them to work** and walking away. You watch them however you
+already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the optional
+web dashboard.
 
 > Status: early. Core (scheduler + dispatcher + messaging) is solid and tested;
 > the dashboard is an optional extra; the embedded terminal **wall** streams
@@ -82,6 +81,7 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 | `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
 | `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux |
 | `chela broadcast <text>` | Message every other live agent |
+| `chela install-statusline [--write]` | Print/install the Claude Code statusLine hook for the context bar |
 | `chela dashboard [--host] [--port]` | Launch the optional web UI (needs `[dashboard]` extra) |
 
 ---
@@ -101,7 +101,8 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 | `CHELA_NOTIFY_CHAT_ID` | — | Telegram chat id (if not in the URL) |
 | `CHELA_NOTIFY_INTERVAL` | `20` | Pane-state scan interval (s) |
 | `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind |
-| `CHELA_TERMINALS_ENABLED` | `false` | Embedded ttyd terminal wall (in progress) |
+| `CHELA_TERMINALS_ENABLED` | `false` | Embedded ttyd terminal wall (opt-in; streams live) |
+| `CHELA_DEFAULT_CONTEXT_WINDOW` | `200000` | Window size assumed by the transcript-based context estimate (fallback only) |
 
 ---
 
@@ -119,6 +120,24 @@ export CHELA_NOTIFY_URL=https://example.com/hook                    # generic JS
 Transport is auto-detected from the URL; it's edge-triggered (one ping per
 entry into `waiting`, not per tick). Pair it with ntfy on your phone for a
 push-to-pocket "your agent needs you" alert.
+
+---
+
+## Context & rate-limit tracking
+
+The dashboard shows each agent's **context-window usage** and the account-wide
+**5h / 7d rate-limit** pills. Those numbers live only in Claude Code's statusLine
+payload (they aren't in the transcript), so chela ships a tiny statusLine hook
+that caches the payload to `$CHELA_DIR/context/<window>.json`:
+
+```bash
+chela install-statusline           # prints the snippet to add to settings.json
+chela install-statusline --write   # writes it for you (won't clobber an existing one)
+```
+
+It's optional. Without it, the context bar falls back to a coarser estimate
+derived from the agent's transcript (no rate-limit pills, and the window size is
+a guess — see `CHELA_DEFAULT_CONTEXT_WINDOW`). Install the hook for exact numbers.
 
 ---
 
@@ -149,8 +168,9 @@ panes. A QR of the connect string makes this one tap.
 `127.0.0.1:5001` with tabs for **agents** (liveness from `claude agents --json`:
 alive / waiting / offline), **schedules**, the **dispatcher**, and a **Kanban**
 of runs. Liveness is derived live from the native session status — no heartbeat
-daemon. An embedded ttyd **terminal wall** (a ccmux-style multi-pane view) is in
-progress and currently off (`CHELA_TERMINALS_ENABLED=false`).
+daemon. An embedded ttyd **terminal wall** (a multi-pane view that streams the
+live panes) is opt-in — off by default; enable it with
+`CHELA_TERMINALS_ENABLED=true`.
 
 ### HTTP API (selected)
 
@@ -184,9 +204,7 @@ progress and currently off (`CHELA_TERMINALS_ENABLED=false`).
 
 The work-item dispatcher is an adaptation of OpenAI's **Symphony** pattern
 (task-list → isolated git worktree → autonomous agent → PR) — chela does not
-claim novelty for that shape. The needs-input notification idea is borrowed from
-**[ccmux](https://github.com/skzv/ccmux)**; the positioning contrast is with
-ccmux and **[clawmux](https://github.com/zeulewan/clawmux)**.
+claim novelty for that shape.
 
 ## License
 
