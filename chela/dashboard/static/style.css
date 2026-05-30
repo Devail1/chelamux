@@ -1729,23 +1729,23 @@ input[type="text"]:focus, textarea:focus, select:focus {
         -webkit-overflow-scrolling: touch;
         scrollbar-width: none;
         white-space: nowrap;
-        will-change: transform;   /* smooth keyboard-pin translate */
+        will-change: top;   /* _kbPin anchors `top` to the visual-viewport bottom */
     }
     .term-keybar::-webkit-scrollbar { display: none; }
 
     .kb2-key {
         flex: 0 0 auto;
-        min-width: 38px; min-height: 40px;
-        padding: 0 11px;
+        min-width: 32px; min-height: 34px;
+        padding: 0 8px;
         background: var(--bg); border: 1px solid var(--border); color: var(--text);
-        border-radius: 7px; font-size: 13px; line-height: 1; cursor: pointer;
+        border-radius: 6px; font-size: 12px; line-height: 1; cursor: pointer;
     }
     .kb2-key:active { background: var(--border); }
     .kb2-strong { color: var(--red); border-color: rgba(248, 81, 73, 0.4); }   /* ^C stands out */
-    .kb2-sep { flex: 0 0 auto; width: 1px; height: 22px; background: var(--border); margin: 0 3px; }
+    .kb2-sep { flex: 0 0 auto; width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
 
     /* Ctrl modifier — armed (outlined) vs locked (filled). */
-    .kb2-mod { font-size: 12px; }
+    .kb2-mod { font-size: 11px; }
     .term-keybar[data-ctrl="armed"] #kb2-ctrl { border-color: var(--accent); color: var(--accent); }
     .term-keybar[data-ctrl="locked"] #kb2-ctrl { background: var(--accent); color: #fff; border-color: var(--accent); }
 
@@ -1753,8 +1753,8 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .kb2-ctrl-letters { display: none; align-items: center; gap: 5px; }
     .term-keybar[data-ctrl="armed"] .kb2-ctrl-letters,
     .term-keybar[data-ctrl="locked"] .kb2-ctrl-letters { display: inline-flex; }
-    .kb2-cl { color: var(--accent); border-color: rgba(88, 166, 255, 0.4); min-width: 34px; }
+    .kb2-cl { color: var(--accent); border-color: rgba(88, 166, 255, 0.4); min-width: 28px; }
 
     /* Reserve space so the fixed bar never covers the terminal's bottom rows. */
-    #term-stage { margin-bottom: 52px; }
+    #term-stage { margin-bottom: 46px; }
 }

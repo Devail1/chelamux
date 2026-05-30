@@ -90,12 +90,30 @@
   .how-item h4 .step{color:var(--accent); font-family:var(--mono); margin-right:8px}
   .how-item p{margin:0; color:var(--text-dim); font-size:14.5px}
 
+  /* docs — a grouped command reference (command on the left, what it does right) */
+  .docs{max-width:860px}
+  .docs-group{margin-bottom:36px}
+  .docs-group:last-child{margin-bottom:0}
+  .docs-group h3{
+    font-size:12.5px; text-transform:uppercase; letter-spacing:0.08em;
+    color:var(--text-dim); font-weight:600; margin:0 0 6px;
+  }
+  .cmd{
+    display:grid; grid-template-columns:300px 1fr; gap:8px 22px;
+    padding:13px 0; border-top:1px solid var(--border); align-items:baseline;
+  }
+  .cmd code{font-family:var(--mono); font-size:13px; color:var(--text); word-break:break-word}
+  .cmd code .opt{color:var(--text-dim)}
+  .cmd p{margin:0; color:var(--text-dim); font-size:14px}
+  .cmd p code{background:var(--surface2); padding:1px 5px; border-radius:4px; font-size:12.5px}
+
   footer{text-align:center; padding:40px 24px; color:var(--text-dim); font-size:13.5px}
   footer a{color:var(--text-dim); text-decoration:underline}
 
   @media (max-width:760px){
     .features{grid-template-columns:1fr}
     .how-grid{grid-template-columns:1fr}
+    .cmd{grid-template-columns:1fr; gap:5px; padding:14px 0}
   }
 </style>
 </head>
@@ -109,6 +127,7 @@
     <a href="#features">Features</a>
     <a href="#how">How it works</a>
     <a href="#install">Install</a>
+    <a href="#docs">Docs</a>
   </span>
 </nav>
 
@@ -207,6 +226,81 @@ uv run chela status
 <span class="c"># optional web dashboard + terminal wall</span>
 uv sync --extra dashboard
 uv run chela dashboard</pre>
+  </div>
+</section>
+
+<section id="docs" class="wrap docs">
+  <div class="section-head">
+    <h2>Command reference</h2>
+    <p>One CLI, <code>chela</code>. Every command targets agents by their tmux window name.</p>
+  </div>
+
+  <div class="docs-group">
+    <h3>Core</h3>
+    <div class="cmd">
+      <code>chela status</code>
+      <p>List the agent windows discovered in your tmux session — the source of truth.</p>
+    </div>
+    <div class="cmd">
+      <code>chela run</code>
+      <p>Run the scheduler daemon: it fires due tasks into their panes. Leave it running.</p>
+    </div>
+    <div class="cmd">
+      <code>chela dashboard <span class="opt">[--host] [--port]</span></code>
+      <p>Launch the optional web dashboard + terminal wall (needs the <code>dashboard</code> extra).
+      Binds <code>127.0.0.1:5001</code> by default.</p>
+    </div>
+  </div>
+
+  <div class="docs-group">
+    <h3>Scheduling</h3>
+    <div class="cmd">
+      <code>chela schedule add <span class="opt">&lt;agent&gt; --prompt … (--every | --cron | --once)</span></code>
+      <p>Schedule a prompt for an agent — an interval (<code>30s</code>/<code>5m</code>/<code>1h</code>/<code>1d</code>),
+      a cron expression (<code>0 */8 * * *</code>), or a one-shot ISO timestamp.</p>
+    </div>
+    <div class="cmd">
+      <code>chela schedule list</code>
+      <p>List every scheduled task with its id.</p>
+    </div>
+    <div class="cmd">
+      <code>chela schedule remove <span class="opt">&lt;id&gt;</span></code>
+      <p>Delete a task by id.</p>
+    </div>
+  </div>
+
+  <div class="docs-group">
+    <h3>Messaging</h3>
+    <div class="cmd">
+      <code>chela msg <span class="opt">&lt;agent&gt; &lt;message&gt; [--from] [--priority]</span></code>
+      <p>Drop a message into one agent's pane. Priority: <code>critical|high|normal|low</code>.</p>
+    </div>
+    <div class="cmd">
+      <code>chela broadcast <span class="opt">&lt;message&gt; [--from] [--priority]</span></code>
+      <p>Send the same message to every other live agent at once.</p>
+    </div>
+  </div>
+
+  <div class="docs-group">
+    <h3>Dispatch</h3>
+    <div class="cmd">
+      <code>chela dispatch <span class="opt">&lt;WORKFLOW.md&gt; [--once] [--interval]</span></code>
+      <p>Turn each open <code>- [ ]</code> item into a worktree, an agent, and a pull request.
+      Polls every 60s; <code>--once</code> runs a single tick and exits.</p>
+    </div>
+    <div class="cmd">
+      <code>chela dispatch-runs</code>
+      <p>List past dispatcher runs.</p>
+    </div>
+  </div>
+
+  <div class="docs-group">
+    <h3>Setup</h3>
+    <div class="cmd">
+      <code>chela install-statusline <span class="opt">[--write] [--force] [--settings]</span></code>
+      <p>Print (or <code>--write</code>) a statusline snippet for <code>~/.claude/settings.json</code>
+      so each pane reports its live context window.</p>
+    </div>
   </div>
 </section>
 
