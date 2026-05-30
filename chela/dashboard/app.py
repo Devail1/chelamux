@@ -48,6 +48,15 @@ app = Flask(
 # {agent: ttyd_port} map written by scripts/agent-terminals.sh on each poll.
 TERMINALS_MAP = CHELA_DIR / "agent_terminals.json"
 
+# WebSocket support for the embedded terminal wall. flask-sock is in the
+# [dashboard] extra; guard the import so a dashboard install missing it still
+# serves everything else (the wall iframes just won't connect).
+try:
+    from flask_sock import Sock
+    _sock = Sock(app)
+except Exception:  # pragma: no cover - optional dep
+    _sock = None
+
 
 def require_auth(f):
     """No-op decorator — there is no built-in auth (see module docstring).
@@ -250,6 +259,118 @@ def _terminals_port_map() -> dict:
         return json.loads(TERMINALS_MAP.read_text())
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# Terminal wall: same-origin ttyd reverse proxy (/term/<wid>/...)
+#
+# AUTH-FREE by design (see module docstring): the dashboard binds 127.0.0.1 and
+# the tailnet is the trust boundary. Each ttyd is spawned by
+# scripts/agent-terminals.sh with `--base-path /term/<wid>`, so it emits its
+# own asset/websocket URLs under that prefix. The proxy forwards `/term/<wid>/*`
+# verbatim to 127.0.0.1:<port>/term/<wid>/* — HTTP passthrough for the page +
+# assets, WebSocket upgrade for the live tty stream. No path rewriting: the
+# base-path makes the upstream path identical to what the browser requested.
+# ---------------------------------------------------------------------------
+
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+# Hop-by-hop / length headers we must not copy from the ttyd response (Flask
+# recomputes them; copying breaks the connection or double-counts the body).
+_PROXY_DROP_HEADERS = {
+    "transfer-encoding", "content-encoding", "content-length",
+    "connection", "keep-alive",
+}
+
+
+@app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
+@app.route("/term/<wid>/<path:rest>", methods=["GET", "POST"])
+@require_auth
+def term_http(wid, rest):
+    """HTTP passthrough for a ttyd's page + assets (the non-WebSocket half)."""
+    _require_terminals()
+    port = _terminals_port_map().get(wid)
+    if not port:
+        abort(404)
+    upstream = f"http://127.0.0.1:{port}/term/{wid}/{rest}"
+    if request.query_string:
+        upstream += "?" + request.query_string.decode()
+    data = request.get_data() or None
+    req = urllib.request.Request(upstream, data=data, method=request.method)
+    for h in ("Content-Type", "Accept", "Accept-Language"):
+        v = request.headers.get(h)
+        if v:
+            req.add_header(h, v)
+    try:
+        resp = urllib.request.urlopen(req, timeout=15)  # noqa: S310 - loopback only
+    except urllib.error.HTTPError as e:
+        resp = e
+    except Exception:
+        abort(502)
+    body = resp.read()
+    status = getattr(resp, "status", None) or getattr(resp, "code", 200)
+    headers = [
+        (k, v) for k, v in resp.getheaders()
+        if k.lower() not in _PROXY_DROP_HEADERS
+    ]
+    return Response(body, status=status, headers=headers)
+
+
+if _sock is not None:
+    @_sock.route("/term/<wid>/ws")
+    def term_ws(ws, wid):
+        """Bridge the browser's ttyd WebSocket to the upstream ttyd on 127.0.0.1.
+
+        ttyd requires the `tty` subprotocol, so the upstream client offers it
+        (the browser already does). Two directions are pumped: a daemon thread
+        copies upstream→browser while this handler thread copies browser→
+        upstream; either side closing tears both down.
+        """
+        if not config.TERMINALS_ENABLED:
+            return
+        port = _terminals_port_map().get(wid)
+        if not port:
+            return
+        import simple_websocket
+        import threading
+        try:
+            upstream = simple_websocket.Client(
+                f"ws://127.0.0.1:{port}/term/{wid}/ws", subprotocols=["tty"]
+            )
+        except Exception:
+            return
+
+        def _pump_upstream_to_browser():
+            try:
+                while True:
+                    data = upstream.receive()
+                    if data is None:
+                        break
+                    ws.send(data)
+            except Exception:
+                pass
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_pump_upstream_to_browser, daemon=True)
+        t.start()
+        try:
+            while True:
+                data = ws.receive()
+                if data is None:
+                    break
+                upstream.send(data)
+        except Exception:
+            pass
+        finally:
+            try:
+                upstream.close()
+            except Exception:
+                pass
 
 
 @app.route("/api/term/ready")
