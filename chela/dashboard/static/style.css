@@ -1686,6 +1686,12 @@ input[type="text"]:focus, textarea:focus, select:focus {
     /* Dropdown is replaced by the pill strip; the empty toolbar above collapses. */
     #term-agent { display: none !important; }
 
+    /* The terminals toolbar (wall mode toggle + grid presets + "New shell") is
+       desktop/wall-only — on phones it's an empty row with a bottom margin that
+       pushes the agent pills well below the topbar. Hide it so the pills sit
+       right under the header. */
+    #panel-terminals > div:first-child { display: none; }
+
     .term-switcher {
         display: flex;
         gap: 6px;
