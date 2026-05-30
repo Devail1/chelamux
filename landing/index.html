@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>chela — put a fleet of Claude Code agents to work</title>
+<meta name="description" content="A tiny control plane that schedules Claude Code agents, dispatches a TODO list into pull requests, and streams the whole fleet on one live terminal wall — over a single tmux session.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta property="og:title" content="chela — put a fleet of Claude Code agents to work">
+<meta property="og:description" content="Schedule agents, dispatch TODOs into PRs, and watch the fleet on a live terminal wall. Unattended.">
+<meta property="og:type" content="website">
+<style>
+  :root{
+    --bg:#0d1117; --surface:#161b22; --surface2:#1c2230; --border:#21262d;
+    --text:#e6edf3; --text-dim:#8b949e; --accent:#58a6ff; --green:#3fb950;
+    --yellow:#d29922; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1000px; margin:0 auto; padding:0 24px}
+  code,.mono{font-family:var(--mono)}
+
+  /* nav */
+  nav{display:flex; align-items:center; gap:10px; padding:20px 24px; max-width:1000px; margin:0 auto}
+  nav .mark{height:24px}
+  nav .name{font-weight:700; font-size:17px; color:var(--accent)}
+  nav .spacer{flex:1}
+  nav .links a{color:var(--text-dim); font-size:14px; margin-left:18px}
+  nav .links a:hover{color:var(--text); text-decoration:none}
+
+  /* hero */
+  .hero{text-align:center; padding:56px 0 40px}
+  .hero img.banner{width:min(560px,86vw); margin-bottom:8px}
+  .hero h1{font-size:clamp(28px,5vw,44px); line-height:1.15; margin:18px 0 10px; letter-spacing:-0.02em}
+  .hero h1 .accent{color:var(--accent)}
+  .hero p.sub{font-size:clamp(16px,2.4vw,19px); color:var(--text-dim); max-width:620px; margin:0 auto 28px}
+  .cta{display:flex; gap:12px; justify-content:center; flex-wrap:wrap}
+  .btn{display:inline-block; padding:11px 20px; border-radius:8px; font-weight:600; font-size:15px}
+  .btn-primary{background:#1f6feb; color:#fff; border:1px solid #1f6feb}
+  .btn-primary:hover{background:#388bfd; text-decoration:none}
+  .btn-ghost{background:transparent; color:var(--text); border:1px solid var(--border)}
+  .btn-ghost:hover{border-color:var(--accent); text-decoration:none}
+
+  /* install strip */
+  .install{max-width:640px; margin:32px auto 0; text-align:left}
+  .install pre{
+    background:#010409; border:1px solid var(--border); border-radius:10px;
+    padding:16px 18px; overflow-x:auto; font-size:13.5px; color:var(--text); margin:0;
+  }
+  .install pre .c{color:var(--text-dim)}
+  .install pre .g{color:var(--green)}
+
+  /* sections */
+  section{padding:48px 0}
+  .pitch{text-align:center; max-width:680px; margin:0 auto}
+  .pitch h2{font-size:24px; margin:0 0 12px}
+  .pitch p{color:var(--text-dim); font-size:17px}
+  .pitch strong{color:var(--text)}
+
+  .features{display:grid; grid-template-columns:repeat(3,1fr); gap:18px; margin-top:8px}
+  .card{background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:22px}
+  .card .ic{font-size:22px; line-height:1; color:var(--accent); margin-bottom:12px; display:block}
+  .card h3{margin:0 0 8px; font-size:17px}
+  .card p{margin:0; color:var(--text-dim); font-size:14.5px}
+  .card code{background:var(--surface2); padding:1px 5px; border-radius:4px; font-size:12.5px}
+
+  .how{background:var(--surface); border-top:1px solid var(--border); border-bottom:1px solid var(--border)}
+  .how h2{text-align:center; font-size:24px; margin:0 0 28px}
+  .how-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:22px}
+  .how-item h4{margin:0 0 6px; font-size:15px}
+  .how-item h4 .step{color:var(--accent); font-family:var(--mono); margin-right:8px}
+  .how-item p{margin:0; color:var(--text-dim); font-size:14.5px}
+
+  footer{text-align:center; padding:40px 24px; color:var(--text-dim); font-size:13.5px}
+  footer a{color:var(--text-dim); text-decoration:underline}
+
+  @media (max-width:760px){
+    .features{grid-template-columns:1fr}
+    .how-grid{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <img class="mark" src="favicon.svg" alt="">
+  <span class="name">chela</span>
+  <span class="spacer"></span>
+  <span class="links">
+    <a href="#features">Features</a>
+    <a href="#how">How it works</a>
+    <a href="#install">Install</a>
+  </span>
+</nav>
+
+<header class="hero wrap">
+  <img class="banner" src="banner.svg" alt="chela">
+  <h1>Put a fleet of Claude Code agents<br>to work — <span class="accent">unattended.</span></h1>
+  <p class="sub">
+    chela is a tiny control plane over a single tmux session. It <strong>schedules</strong>
+    agents, <strong>dispatches</strong> a TODO list into pull requests, and streams the whole
+    fleet on one <strong>live terminal wall</strong>. You walk away; the agents keep working.
+  </p>
+  <div class="cta">
+    <a class="btn btn-primary" href="#install">Get started</a>
+    <a class="btn btn-ghost" href="#features">See what it does</a>
+  </div>
+
+  <div class="install">
+    <pre><span class="c"># one tmux session whose windows are your agents</span>
+tmux new-session -d -s chela -n researcher
+
+<span class="c"># schedule one, then run the daemon</span>
+uv run chela schedule add researcher --every 1h --prompt <span class="g">"Run your cycle."</span>
+uv run chela run</pre>
+  </div>
+</header>
+
+<section class="pitch wrap">
+  <h2>Most tools help you <em>talk to</em> agents.</h2>
+  <p>chela is for <strong>putting them to work and walking away</strong> — and watching them
+  however you already watch tmux: <code>tmux&nbsp;attach</code>, Mosh, or the optional web dashboard.</p>
+</section>
+
+<section id="features" class="wrap">
+  <div class="features">
+    <div class="card">
+      <span class="ic">◷</span>
+      <h3>Schedule agents</h3>
+      <p>Poke an agent on an interval or cron — <code>every 1h</code>, <code>0 */8 * * *</code>,
+      or once at a set time. chela types the prompt into its pane when it fires.</p>
+    </div>
+    <div class="card">
+      <span class="ic">⇶</span>
+      <h3>Dispatch TODOs → PRs</h3>
+      <p>Point chela at a <code>WORKFLOW.md</code>. Each open <code>- [ ]</code> becomes a git
+      worktree, an agent that implements it, and an opened pull request.</p>
+    </div>
+    <div class="card">
+      <span class="ic">▦</span>
+      <h3>The wall</h3>
+      <p>A live grid of every agent's terminal — drag, lock, maximize — with a context-window
+      bar on each tile and 5h / weekly rate-limit pills up top.</p>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <div class="how-grid">
+      <div class="how-item">
+        <h4><span class="step">01</span>tmux is the source of truth</h4>
+        <p>Discovery is <code>tmux list-windows</code> + <code>pane_current_path</code> — no
+        external state file, no daemon to coordinate with. tmux never lies about what's live.</p>
+      </div>
+      <div class="how-item">
+        <h4><span class="step">02</span>One window per agent</h4>
+        <p>Each window of your session is an agent; the window name is its display name.
+        Schedules and messages target it by name.</p>
+      </div>
+      <div class="how-item">
+        <h4><span class="step">03</span>Dispatch is isolated</h4>
+        <p>Every task runs in its own worktree on branch <code>&lt;project&gt;-&lt;n&gt;</code>,
+        opens a PR, and auto-closes when you merge — many tasks in flight at once.</p>
+      </div>
+      <div class="how-item">
+        <h4><span class="step">04</span>Watch from anywhere</h4>
+        <p>The dashboard binds loopback; put it behind a tailnet or SSH tunnel. Or skip the UI
+        entirely and <code>tmux attach</code> from a phone over Mosh.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="wrap" style="max-width:680px">
+  <div class="pitch" style="margin-bottom:24px">
+    <h2>Install</h2>
+    <p>Python ≥ 3.11, <code>tmux</code>, <code>git</code>, and the <code>claude</code> CLI.
+    The core is two small deps; the dashboard is an optional extra.</p>
+  </div>
+  <div class="install" style="margin-top:0">
+    <pre><span class="c"># core</span>
+git clone https://github.com/Devail1/chelamux && cd chelamux
+uv sync
+uv run chela status
+
+<span class="c"># optional web dashboard + terminal wall</span>
+uv sync --extra dashboard
+uv run chela dashboard</pre>
+  </div>
+</section>
+
+<footer>
+  chela · MIT licensed · a control plane for Claude Code agents on tmux
+</footer>
+
+</body>
+</html>
