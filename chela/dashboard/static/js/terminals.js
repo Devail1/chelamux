@@ -204,6 +204,26 @@ async function termKeyFor(wid, key) {
 // own wid.
 async function termKey(key) { return termKeyFor($('#term-agent').value, key); }
 
+// Paste the device clipboard into the active pane. xterm.js can't surface iOS's
+// native "Paste" callout inside its hidden textarea, so phones had no reliable
+// paste path; this reads the clipboard on tap (the gesture unlocks readText() on
+// iOS) and ships it to /api/term/paste, which delivers a bracketed paste at the
+// tmux layer. No-op where the Clipboard API is unavailable or permission denied.
+async function termPaste(btn) {
+    const wid = $('#term-agent').value;
+    if (!wid || !navigator.clipboard || !navigator.clipboard.readText) return;
+    let text = '';
+    try { text = await navigator.clipboard.readText(); } catch (e) { return; }
+    if (!text) return;
+    try {
+        await api('/api/term/paste', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent: wid, text }),
+        });
+    } catch (e) { console.error('termPaste', e); }
+}
+
 function termScrollToggle() {
     const btn = $('#term-scroll-btn');
     if (!_termScroll) {
