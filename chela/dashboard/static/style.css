@@ -1716,9 +1716,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
     #term-bar { display: none !important; }
 
     /* The bottom keybar already covers PgUp/PgDn/scroll/Esc/^C, so drop the
-       duplicates from every pane header on phones — keep the window controls
-       (maximize/kill) in .gs-win-ctl, which aren't direct .gs-keys children. */
-    .gs-keys > button, .gs-keys-sep { display: none; }
+       duplicates from every pane header on phones. Maximize is meaningless in
+       the forced single-pane view too — hide it. Keep only kill (✕). */
+    .gs-keys > button, .gs-keys-sep, .gs-max-btn { display: none; }
 
     .term-keybar {
         display: flex;
