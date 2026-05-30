@@ -1494,7 +1494,8 @@ input[type="text"]:focus, textarea:focus, select:focus {
     border-bottom: 1px solid var(--border);
     background: var(--surface);
 }
-.topbar .brand { font-size: 16px; font-weight: 700; color: var(--accent); }
+.topbar .brand { font-size: 16px; font-weight: 700; color: var(--accent); display: inline-flex; align-items: center; gap: 7px; }
+.topbar .brand .brand-mark { height: 22px; width: auto; display: block; }
 .topbar-pills { display: flex; gap: 8px; }
 .topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .topbar-updated { color: var(--text-dim); font-size: 11px; }
