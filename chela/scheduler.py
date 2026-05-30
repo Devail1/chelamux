@@ -1,0 +1,181 @@
+"""Time-based task scheduler.
+
+Persists scheduled tasks in ``~/.chela/scheduler.db`` and, on each ``tick()``,
+sends the prompt of any due task to its agent's tmux window. Three schedule
+types: ``interval`` ("15m"), ``cron`` ("0 */8 * * *"), and ``once`` (an ISO
+timestamp, fired a single time then disabled).
+"""
+from __future__ import annotations
+import logging
+import re
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
+from croniter import croniter
+
+from chela.config import CHELA_DIR
+from chela.discovery import get_window_id
+from chela.messenger import send_tmux
+from chela.models import ScheduledTask
+
+log = logging.getLogger(__name__)
+
+DB_PATH = CHELA_DIR / "scheduler.db"
+
+INTERVAL_RE = re.compile(r"^(\d+)(s|m|h|d)$")
+INTERVAL_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _get_db() -> sqlite3.Connection:
+    CHELA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            schedule_type TEXT NOT NULL,
+            schedule_value TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            last_run TEXT,
+            next_run TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def parse_interval_seconds(value: str) -> int:
+    """Parse interval string like '30s', '5m', '1h', '8h', '1d' to seconds."""
+    m = INTERVAL_RE.match(value)
+    if not m:
+        raise ValueError(f"Invalid interval: {value}")
+    return int(m.group(1)) * INTERVAL_MULTIPLIERS[m.group(2)]
+
+
+def compute_next_run(schedule_type: str, schedule_value: str, from_time: datetime | None = None) -> str:
+    """Compute the next run time as ISO string."""
+    now = from_time or datetime.now(timezone.utc)
+
+    if schedule_type == "interval":
+        seconds = parse_interval_seconds(schedule_value)
+        return (now + timedelta(seconds=seconds)).isoformat()
+    elif schedule_type == "cron":
+        cron = croniter(schedule_value, now)
+        return cron.get_next(datetime).isoformat()
+    elif schedule_type == "once":
+        return schedule_value  # already an ISO timestamp
+    else:
+        raise ValueError(f"Unknown schedule type: {schedule_type}")
+
+
+def add_task(agent_name: str, schedule_type: str, schedule_value: str, prompt: str) -> int:
+    """Add a new scheduled task. Returns task ID."""
+    now = datetime.now(timezone.utc)
+    next_run = compute_next_run(schedule_type, schedule_value, now)
+
+    conn = _get_db()
+    cursor = conn.execute(
+        "INSERT INTO tasks (agent_name, schedule_type, schedule_value, prompt, enabled, next_run, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+        (agent_name, schedule_type, schedule_value, prompt, next_run, now.isoformat()),
+    )
+    conn.commit()
+    task_id = cursor.lastrowid
+    conn.close()
+    log.info("Added task %d: %s %s %s -> %s", task_id, agent_name, schedule_type, schedule_value, prompt[:50])
+    return task_id
+
+
+def remove_task(task_id: int) -> bool:
+    conn = _get_db()
+    cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def agents_with_enabled_schedules() -> set[str]:
+    """Return set of agent names that have at least one enabled schedule."""
+    conn = _get_db()
+    rows = conn.execute("SELECT DISTINCT agent_name FROM tasks WHERE enabled = 1").fetchall()
+    conn.close()
+    return {r["agent_name"] for r in rows}
+
+
+def list_tasks() -> list[ScheduledTask]:
+    conn = _get_db()
+    rows = conn.execute("SELECT * FROM tasks ORDER BY id").fetchall()
+    conn.close()
+    return [
+        ScheduledTask(
+            id=r["id"],
+            agent_name=r["agent_name"],
+            schedule_type=r["schedule_type"],
+            schedule_value=r["schedule_value"],
+            prompt=r["prompt"],
+            enabled=bool(r["enabled"]),
+            last_run=r["last_run"],
+            next_run=r["next_run"],
+        )
+        for r in rows
+    ]
+
+
+def tick() -> int:
+    """Check all tasks and execute any that are due. Returns number executed."""
+    now = datetime.now(timezone.utc)
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE enabled = 1 AND next_run IS NOT NULL"
+    ).fetchall()
+
+    executed = 0
+    for row in rows:
+        next_run_str = row["next_run"]
+        try:
+            next_run = datetime.fromisoformat(next_run_str)
+        except (ValueError, TypeError):
+            continue
+
+        # Make naive datetimes UTC-aware
+        if next_run.tzinfo is None:
+            next_run = next_run.replace(tzinfo=timezone.utc)
+
+        if now >= next_run:
+            agent_name = row["agent_name"]
+            prompt = row["prompt"]
+            task_id = row["id"]
+            schedule_type = row["schedule_type"]
+            schedule_value = row["schedule_value"]
+
+            # Find agent window and send
+            window_id = get_window_id(agent_name)
+            if window_id:
+                success = send_tmux(window_id, prompt)
+                if success:
+                    log.info("Task %d: sent to %s: %s", task_id, agent_name, prompt[:50])
+                    executed += 1
+                else:
+                    log.error("Task %d: failed to send to %s", task_id, agent_name)
+            else:
+                log.warning("Task %d: agent %s not found, skipping", task_id, agent_name)
+
+            # Update last_run and next_run (even if send failed, to avoid spam)
+            if schedule_type == "once":
+                conn.execute(
+                    "UPDATE tasks SET last_run = ?, enabled = 0, next_run = NULL WHERE id = ?",
+                    (now.isoformat(), task_id),
+                )
+            else:
+                new_next = compute_next_run(schedule_type, schedule_value, now)
+                conn.execute(
+                    "UPDATE tasks SET last_run = ?, next_run = ? WHERE id = ?",
+                    (now.isoformat(), new_next, task_id),
+                )
+
+    conn.commit()
+    conn.close()
+    return executed
