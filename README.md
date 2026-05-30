@@ -80,9 +80,8 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 | `chela dispatch <WORKFLOW.md> [--once] [--interval N] [--dry-run]` | Run the work-item dispatcher |
 | `chela dispatch-runs` | List dispatcher runs and their status |
 | `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
-| `chela msg <agent> <text> [--from] [--priority]` | Message an agent (mailbox fallback if offline) |
+| `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux |
 | `chela broadcast <text>` | Message every other live agent |
-| `chela mailbox <agent> [--clear]` | Read/clear an offline agent's mailbox |
 | `chela dashboard [--host] [--port]` | Launch the optional web UI (needs `[dashboard]` extra) |
 
 ---
@@ -92,7 +91,7 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 | Variable | Default | Purpose |
 |---|---|---|
 | `CHELA_TMUX_SESSION` | `chela` | tmux session chela orchestrates |
-| `CHELA_DIR` | `~/.chela` | State dir (scheduler.db, mailbox, worktrees, context) |
+| `CHELA_DIR` | `~/.chela` | State dir (scheduler.db, worktrees, context) |
 | `CHELA_SCHEDULER_POLL_INTERVAL` | `30` | Daemon loop interval (s) |
 | `CHELA_DISPATCH_WORKFLOWS` | — | Colon-separated WORKFLOW.md paths the daemon dispatches |
 | `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick interval in the daemon (s) |

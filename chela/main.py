@@ -3,7 +3,7 @@
 `chela status` proves tmux-native discovery. `chela run` is the daemon loop
 (scheduler tick + work-item dispatcher). `chela schedule ...` manages scheduled
 tasks; `chela dispatch ...` runs the markdown-TODO → worktree → PR dispatcher;
-`chela msg`/`broadcast` route messages between agents (mailbox fallback).
+`chela msg`/`broadcast` route messages between live agents over tmux.
 `chela dashboard` launches the optional web UI (requires the `dashboard` extra).
 """
 from __future__ import annotations
@@ -119,12 +119,12 @@ def cmd_schedule_remove(args) -> None:
 
 
 def cmd_msg(args) -> None:
-    """Send a message to one agent (mailbox fallback if offline)."""
+    """Send a message to one live agent over tmux."""
     delivered = messenger.send_message(args.from_agent, args.agent, args.message, args.priority)
     if delivered:
         print(f"Sent to {args.agent}")
     else:
-        print(f"{args.agent} offline — written to mailbox")
+        print(f"{args.agent} offline — not delivered")
 
 
 def cmd_broadcast(args) -> None:
@@ -134,22 +134,7 @@ def cmd_broadcast(args) -> None:
         print("No other agents online")
         return
     for agent, delivered in sorted(results.items()):
-        print(f"  {agent:<24} {'sent' if delivered else 'mailbox'}")
-
-
-def cmd_mailbox(args) -> None:
-    """Read or clear an agent's mailbox."""
-    if args.clear:
-        n = messenger.clear_mailbox(args.agent)
-        print(f"Cleared {n} message(s) from {args.agent}'s mailbox")
-        return
-    msgs = messenger.read_mailbox(args.agent)
-    if not msgs:
-        print(f"No messages in {args.agent}'s mailbox")
-        return
-    for m in msgs:
-        text = m.data.get("message", "") if isinstance(m.data, dict) else ""
-        print(f"  [{m.priority}] from {m.from_agent} @ {m.ts}: {text}")
+        print(f"  {agent:<24} {'sent' if delivered else 'offline'}")
 
 
 def cmd_dispatch(args) -> None:
@@ -274,11 +259,6 @@ def main() -> None:
     p_bc.add_argument("--from", dest="from_agent", default="chela-cli", help="Sender label")
     p_bc.add_argument("--priority", default="normal", help="critical|high|normal|low")
 
-    # mailbox
-    p_mb = sub.add_parser("mailbox", help="Read or clear an agent's mailbox")
-    p_mb.add_argument("agent", help="Agent whose mailbox to inspect")
-    p_mb.add_argument("--clear", action="store_true", help="Delete the mailbox instead of reading it")
-
     # dispatch
     p_disp = sub.add_parser("dispatch", help="Run the work-item dispatcher")
     p_disp.add_argument("workflow", help="Path to WORKFLOW.md")
@@ -323,8 +303,6 @@ def main() -> None:
         cmd_msg(args)
     elif args.command == "broadcast":
         cmd_broadcast(args)
-    elif args.command == "mailbox":
-        cmd_mailbox(args)
     elif args.command == "dispatch":
         cmd_dispatch(args)
     elif args.command == "dispatch-runs":

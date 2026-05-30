@@ -23,10 +23,6 @@ IGNORE_WINDOWS = {
     w.strip() for w in os.environ.get("CHELA_IGNORE_WINDOWS", "").split(",") if w.strip()
 }
 
-# Per-agent mailbox files (JSONL), written when a message can't be delivered to
-# a live tmux window (agent offline). One file per recipient: mailbox_<agent>.jsonl.
-MAILBOX_DIR = CHELA_DIR / "mailbox"
-
 # Context-window status-line cache, written by scripts/cache-statusline.sh after
 # each assistant turn. The daemon reads these to track per-agent context usage.
 CONTEXT_CACHE_DIR = CHELA_DIR / "context"
