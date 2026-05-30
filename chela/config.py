@@ -36,6 +36,16 @@ DISPATCH_WORKFLOWS = [
     for p in _dispatch_raw.split(":") if p.strip()
 ]
 
+# Needs-input notification: when an agent's pane enters the `waiting` state
+# (blocked on a permission prompt or a question), fire a notification once per
+# edge. Empty = off. The kind is auto-detected from the URL (ntfy / Telegram /
+# generic webhook); override with CHELA_NOTIFY_KIND. CHELA_NOTIFY_INTERVAL is
+# how often (seconds) the daemon scans pane states.
+NOTIFY_URL = os.environ.get("CHELA_NOTIFY_URL", "").strip()
+NOTIFY_KIND = os.environ.get("CHELA_NOTIFY_KIND", "").strip().lower()  # "", ntfy, telegram, webhook
+NOTIFY_TITLE = os.environ.get("CHELA_NOTIFY_TITLE", "chela: agent needs input")
+NOTIFY_INTERVAL = int(os.environ.get("CHELA_NOTIFY_INTERVAL", "20"))
+
 # Embedded ttyd terminal wall on/off (read by the dashboard and the ttyd
 # supervisor in scripts/agent-terminals.sh). Defaults OFF until the wall ships
 # (terminals.js + agent-terminals.sh + the /term ttyd proxy land in a later
