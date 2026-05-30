@@ -12,6 +12,14 @@ dependencies = [
     "pyyaml>=6.0",       # WORKFLOW.md front-matter parsing for the dispatcher
 ]
 
+# The dashboard is an OPTIONAL flourish. The core (status/run/dispatch/msg)
+# installs and runs without Flask. Install with `pip install chelamux[dashboard]`
+# (or `uv sync --extra dashboard`) to enable `chela dashboard`.
+[project.optional-dependencies]
+dashboard = [
+    "flask>=3.0",        # dashboard web app (agent wall + dispatch Kanban)
+]
+
 [project.scripts]
 chela = "chela.main:main"
 
