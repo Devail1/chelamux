@@ -1,0 +1,22 @@
+[project]
+name = "chelamux"
+version = "0.1.0"
+description = "A tiny control plane for a fleet of Claude Code agents on tmux — schedule long-lived ones, dispatch ephemeral ones into git worktrees that open PRs."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Liav Edry" }]
+keywords = ["claude-code", "tmux", "agent-orchestration", "ai-agents", "developer-tools"]
+dependencies = [
+    "croniter>=2.0.0",   # cron expression parsing for the scheduler
+]
+
+[project.scripts]
+chela = "chela.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chela"]
