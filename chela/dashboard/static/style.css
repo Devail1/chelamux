@@ -1715,6 +1715,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
     /* The persistent v2 bar replaces the old collapsible keybar on phones. */
     #term-bar { display: none !important; }
 
+    /* The bottom keybar already covers PgUp/PgDn/scroll/Esc/^C, so drop the
+       duplicates from every pane header on phones — keep the window controls
+       (maximize/kill) in .gs-win-ctl, which aren't direct .gs-keys children. */
+    .gs-keys > button, .gs-keys-sep { display: none; }
+
     .term-keybar {
         display: flex;
         align-items: center;
