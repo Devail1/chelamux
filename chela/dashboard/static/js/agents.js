@@ -12,7 +12,7 @@ function _renderCard(a) {
 
     // Health dot comes straight from /api/agents liveness:
     // green (alive) / yellow (waiting on input) / red (offline).
-    const dotColor = a.health || (a.claude_running ? 'green' : 'red');
+    const dotColor = a.health || (a.claude_running ? 'green' : 'grey');
 
     // Kebab menu — same controls for all agents
     let menuItems = `

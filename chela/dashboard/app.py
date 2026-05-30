@@ -83,22 +83,24 @@ def require_auth(f):
 def _liveness(claude_running: bool, session_status: str | None) -> tuple[str, str]:
     """Derive (liveness, health_color) from native session state — no heartbeat.
 
-    Liveness comes straight from what `claude agents --json` reports (via
-    agent_manager.session_status_map) plus whether a claude process is in the
-    pane. This replaces the old firm heartbeat: there is no firm.db to read.
+    discovery only ever lists LIVE windows (tmux list-windows), so a listed
+    window is never "dead" — the dot reflects what KIND of live it is, not
+    presence. A plain shell or dev-server window is genuinely live; showing it
+    red/"offline" reads as broken when it isn't.
 
-      - "waiting"  → the session is blocked on input (needs attention)
-      - "alive"    → claude is running / busy / idle
-      - "offline"  → no claude in the pane (a bare shell or dead session)
+      - "waiting" → claude blocked on input (needs attention) — yellow
+      - "alive"   → claude running / busy / idle — green
+      - "live"    → no claude in the pane (a shell or dev server), but present
+                    and streaming — grey (neutral; the window-type icon says
+                    which). Red is reserved for a genuinely unreachable window.
 
-    health_color is the agent-card dot: green (alive) / yellow (waiting) /
-    red (offline).
+    health_color is the agent-row dot: green / yellow / grey.
     """
     if session_status == "waiting":
         return "waiting", "yellow"
-    if claude_running or session_status in ("busy", "idle", "waiting"):
+    if claude_running or session_status in ("busy", "idle"):
         return "alive", "green"
-    return "offline", "red"
+    return "live", "grey"
 
 
 def _require_terminals() -> None:

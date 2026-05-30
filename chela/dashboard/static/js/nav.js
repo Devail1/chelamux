@@ -92,7 +92,7 @@ function renderSidebarAgents(agents) {
     // matter which child was clicked) — avoids escaping a window name into the
     // inline handler.
     host.innerHTML = rows.map(a => {
-        const dot = a.health || (a.claude_running ? 'green' : 'red');
+        const dot = a.health || (a.claude_running ? 'green' : 'grey');
         const type = _agentType(a);
         const active = a.name === _detailAgent ? ' active' : '';
         return `<div class="agent-row${active}" data-agent="${attrEsc(a.name)}" onclick="selectAgent(this.dataset.agent)">
@@ -147,7 +147,7 @@ function renderAgentDetail() {
         <div class="side-empty">This agent's window is no longer present.</div>`;
         return;
     }
-    const dot = a.health || (a.claude_running ? 'green' : 'red');
+    const dot = a.health || (a.claude_running ? 'green' : 'grey');
     const type = _agentType(a);
 
     const actions = [`<button onclick="openSendMsg('${attrEsc(a.name)}')">Message</button>`];
