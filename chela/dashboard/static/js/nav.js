@@ -257,8 +257,8 @@ function renderSettings(focus) {
 
         <h4>Terminal wall</h4>
         <div class="drawer-field">
-            <div class="k">The embedded ttyd wall is ${TERMINALS_ON ? 'enabled' : 'off by default'}.
-            Toggle with <code>CHELA_TERMINALS_ENABLED</code> (live ttyd serving still in progress).</div>
+            <div class="k">The embedded ttyd wall streams live and is ${TERMINALS_ON ? 'enabled' : 'off by default'}.
+            Toggle with <code>CHELA_TERMINALS_ENABLED</code>.</div>
         </div>`;
     if (focus === 'notify') body.scrollTop = 0;
 }
