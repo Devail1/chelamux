@@ -516,7 +516,7 @@ def tick(workflow_path: str | Path) -> dict:
 
             # Watchdog: a running row whose window is alive but stuck at an
             # idle, empty Claude prompt means the startup race dropped the
-            # prompt (this is the pclw-2 strand). Re-send the prompt once; if it
+            # prompt (the startup-race strand). Re-send the prompt once; if it
             # stays idle for another WATCHDOG_IDLE_MINUTES, fail it so the
             # attempt-capped re-dispatch path takes over.
             if (
@@ -697,7 +697,7 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
 
     # Spawn tmux window. Kill any pre-existing window(s) of this name first so a
     # retry starts clean — tmux allows duplicate names, and a stacked second
-    # window makes the by-name target ambiguous (the PCLW-14 orphan-window bug).
+    # window makes the by-name target ambiguous (the orphan-window bug).
     _kill_windows_named(window_name)
 
     # Create the window and capture its @id; target THIS spawn by id (not name)
