@@ -2,7 +2,8 @@
 
 `chela status` proves tmux-native discovery. `chela run` is the daemon loop
 (scheduler tick + work-item dispatcher). `chela schedule ...` manages scheduled
-tasks; `chela dispatch ...` runs the markdown-TODO → worktree → PR dispatcher.
+tasks; `chela dispatch ...` runs the markdown-TODO → worktree → PR dispatcher;
+`chela msg`/`broadcast` route messages between agents (mailbox fallback).
 """
 from __future__ import annotations
 import argparse
@@ -10,7 +11,7 @@ import logging
 import sys
 import time
 
-from chela import discovery, dispatcher, scheduler
+from chela import discovery, dispatcher, messenger, scheduler
 from chela.config import (
     TMUX_SESSION,
     SCHEDULER_POLL_INTERVAL,
@@ -103,6 +104,40 @@ def cmd_schedule_remove(args) -> None:
         print(f"Task {args.id} not found")
 
 
+def cmd_msg(args) -> None:
+    """Send a message to one agent (mailbox fallback if offline)."""
+    delivered = messenger.send_message(args.from_agent, args.agent, args.message, args.priority)
+    if delivered:
+        print(f"Sent to {args.agent}")
+    else:
+        print(f"{args.agent} offline — written to mailbox")
+
+
+def cmd_broadcast(args) -> None:
+    """Send a message to every other live agent."""
+    results = messenger.broadcast(args.from_agent, args.message, args.priority)
+    if not results:
+        print("No other agents online")
+        return
+    for agent, delivered in sorted(results.items()):
+        print(f"  {agent:<24} {'sent' if delivered else 'mailbox'}")
+
+
+def cmd_mailbox(args) -> None:
+    """Read or clear an agent's mailbox."""
+    if args.clear:
+        n = messenger.clear_mailbox(args.agent)
+        print(f"Cleared {n} message(s) from {args.agent}'s mailbox")
+        return
+    msgs = messenger.read_mailbox(args.agent)
+    if not msgs:
+        print(f"No messages in {args.agent}'s mailbox")
+        return
+    for m in msgs:
+        text = m.data.get("message", "") if isinstance(m.data, dict) else ""
+        print(f"  [{m.priority}] from {m.from_agent} @ {m.ts}: {text}")
+
+
 def cmd_dispatch(args) -> None:
     """Run the work-item dispatcher against a WORKFLOW.md."""
     if args.dry_run:
@@ -188,6 +223,24 @@ def main() -> None:
     p_rm = sched_sub.add_parser("remove", help="Remove a task")
     p_rm.add_argument("id", type=int)
 
+    # msg
+    p_msg = sub.add_parser("msg", help="Send a message to an agent")
+    p_msg.add_argument("agent", help="Recipient agent (tmux window name)")
+    p_msg.add_argument("message", help="Message text")
+    p_msg.add_argument("--from", dest="from_agent", default="chela-cli", help="Sender label")
+    p_msg.add_argument("--priority", default="normal", help="critical|high|normal|low")
+
+    # broadcast
+    p_bc = sub.add_parser("broadcast", help="Send a message to all other live agents")
+    p_bc.add_argument("message", help="Message text")
+    p_bc.add_argument("--from", dest="from_agent", default="chela-cli", help="Sender label")
+    p_bc.add_argument("--priority", default="normal", help="critical|high|normal|low")
+
+    # mailbox
+    p_mb = sub.add_parser("mailbox", help="Read or clear an agent's mailbox")
+    p_mb.add_argument("agent", help="Agent whose mailbox to inspect")
+    p_mb.add_argument("--clear", action="store_true", help="Delete the mailbox instead of reading it")
+
     # dispatch
     p_disp = sub.add_parser("dispatch", help="Run the work-item dispatcher")
     p_disp.add_argument("workflow", help="Path to WORKFLOW.md")
@@ -223,6 +276,12 @@ def main() -> None:
             cmd_schedule_remove(args)
         else:
             p_sched.print_help()
+    elif args.command == "msg":
+        cmd_msg(args)
+    elif args.command == "broadcast":
+        cmd_broadcast(args)
+    elif args.command == "mailbox":
+        cmd_mailbox(args)
     elif args.command == "dispatch":
         cmd_dispatch(args)
     elif args.command == "dispatch-runs":
