@@ -63,6 +63,13 @@ for name, wid in sorted(discovery.get_all_windows().items()):
 
 sanitize() { printf '%s' "$1" | tr -c 'A-Za-z0-9_' '_'; }
 
+# Grouped-session prefix namespaced by the tmux session this supervisor serves,
+# so two chela instances (or chela co-resident with another webterm tool) never
+# spawn into, nor reap, each other's sessions. cleanup() only kills sessions
+# under THIS prefix. The dashboard proxies by port (the wid->port map), never by
+# session name, so this name is purely internal — safe to namespace freely.
+WEBTERM_PREFIX="webterm_$(sanitize "${TMUX_SESSION}")_"
+
 # lowest free port >= BASE_PORT not already assigned
 free_port() {
     local p="${BASE_PORT}" v used
@@ -83,7 +90,7 @@ free_port() {
 # client). -A reattaches the same grouped session on reconnect.
 spawn() {
     local wid="$1" port="$2" grp
-    grp="webterm_$(sanitize "$wid")"
+    grp="${WEBTERM_PREFIX}$(sanitize "$wid")"
     # --base-path /term/<wid>: ttyd serves its page, assets, and /ws under that
     # prefix so the same-origin dashboard proxy (app.py term_http / term_ws) can
     # forward /term/<wid>/* verbatim with no path rewriting. The iframe src in
@@ -104,7 +111,7 @@ spawn() {
 despawn() {
     local wid="$1"
     [[ -n "${PID_OF[$wid]:-}" ]] && kill "${PID_OF[$wid]}" 2>/dev/null
-    tmux kill-session -t "webterm_$(sanitize "$wid")" 2>/dev/null
+    tmux kill-session -t "${WEBTERM_PREFIX}$(sanitize "$wid")" 2>/dev/null
     unset 'PID_OF[$wid]' 'PORT_OF[$wid]'
 }
 
@@ -129,9 +136,10 @@ cleanup() {
         for wid in "${!PID_OF[@]}"; do kill "${PID_OF[$wid]}" 2>/dev/null; done
     fi
     rm -f "${MAP_FILE}"
-    # drop our grouped viewer sessions (harmless if gone)
+    # drop ONLY our own grouped viewer sessions (scoped to this supervisor's
+    # prefix — never touch another instance's / another tool's webterm_*).
     tmux list-sessions -F '#{session_name}' 2>/dev/null \
-        | grep '^webterm_' | xargs -r -n1 tmux kill-session -t 2>/dev/null
+        | grep "^${WEBTERM_PREFIX}" | xargs -r -n1 tmux kill-session -t 2>/dev/null
 }
 # cleanup runs once on real exit. INT/TERM must EXIT (not just run a handler and
 # resume) — bash with a non-exiting TERM handler would swallow the signal, run
