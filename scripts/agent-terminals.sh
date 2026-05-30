@@ -34,6 +34,11 @@ TMUX_SESSION="${CHELA_TMUX_SESSION:-chela}"
 BASE_PORT="${CHELA_TERM_BASE:-5101}"
 POLL="${CHELA_TERM_POLL:-12}"
 MAP_FILE="${CHELA_DIR:-${HOME}/.chela}/agent_terminals.json"
+# Ensure the state dir exists — a fresh install has no ~/.chela yet, and the
+# atomic map write (write_map: printf > "$MAP_FILE.tmp" && mv) silently fails
+# if the parent is missing, leaving the dashboard with no port map (404 ->
+# black wall tiles on first run).
+mkdir -p "$(dirname "${MAP_FILE}")"
 
 # xterm.js font stack: use whatever Nerd Font the viewer has installed
 # (powerline / dev glyphs for lazygit, yazi, starship, eza), else plain
@@ -128,7 +133,14 @@ cleanup() {
     tmux list-sessions -F '#{session_name}' 2>/dev/null \
         | grep '^webterm_' | xargs -r -n1 tmux kill-session -t 2>/dev/null
 }
-trap cleanup EXIT INT TERM
+# cleanup runs once on real exit. INT/TERM must EXIT (not just run a handler and
+# resume) — bash with a non-exiting TERM handler would swallow the signal, run
+# cleanup, then continue the poll loop, leaving the supervisor un-killable by
+# SIGTERM (what PM2 and `kill` send) and respawning the ttyds cleanup just
+# reaped. Exiting here fires the EXIT trap, so cleanup still runs exactly once.
+trap cleanup EXIT
+trap 'exit 143' TERM   # 128+15
+trap 'exit 130' INT    # 128+2
 
 # Feature flag (mirrors chela/config.py TERMINALS_ENABLED). When disabled we
 # spawn NO ttyds: write one empty map so the dashboard sees "no terminals",

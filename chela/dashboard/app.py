@@ -53,6 +53,14 @@ TERMINALS_MAP = CHELA_DIR / "agent_terminals.json"
 # serves everything else (the wall iframes just won't connect).
 try:
     from flask_sock import Sock
+    # ttyd's browser client opens its WebSocket requesting the `tty`
+    # subprotocol, and browsers abort the handshake (close 1006, no `onopen`)
+    # if the server's 101 response doesn't echo an agreed subprotocol back.
+    # flask-sock forwards these options to simple_websocket.Server, which then
+    # selects+echoes `tty`. Without this every wall tile fails to connect and
+    # shows ttyd's "Press ⏎ to Reconnect" (the black-tile symptom). Lenient
+    # non-browser clients don't need it, so it's invisible outside the browser.
+    app.config["SOCK_SERVER_OPTIONS"] = {"subprotocols": ["tty"]}
     _sock = Sock(app)
 except Exception:  # pragma: no cover - optional dep
     _sock = None
