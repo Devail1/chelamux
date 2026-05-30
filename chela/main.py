@@ -13,12 +13,13 @@ import os
 import sys
 import time
 
-from chela import discovery, dispatcher, messenger, scheduler
+from chela import discovery, dispatcher, messenger, notify, scheduler
 from chela.config import (
     TMUX_SESSION,
     SCHEDULER_POLL_INTERVAL,
     DISPATCH_TICK_INTERVAL,
     DISPATCH_WORKFLOWS,
+    NOTIFY_INTERVAL,
 )
 
 logging.basicConfig(
@@ -48,7 +49,11 @@ def cmd_run(args) -> None:
     if DISPATCH_WORKFLOWS:
         log.info("Dispatcher enabled for %d workflow(s): %s",
                  len(DISPATCH_WORKFLOWS), ", ".join(str(p) for p in DISPATCH_WORKFLOWS))
+    if notify.enabled():
+        log.info("Needs-input notifications enabled (every %ds)", NOTIFY_INTERVAL)
     last_dispatch_check = 0.0
+    last_notify_check = 0.0
+    waiting_seen: set[str] = set()
 
     while True:
         try:
@@ -66,6 +71,13 @@ def cmd_run(args) -> None:
                     except Exception:
                         log.exception("Dispatch tick failed for %s", wf_path)
                 last_dispatch_check = now
+
+            if notify.enabled() and now - last_notify_check >= NOTIFY_INTERVAL:
+                try:
+                    waiting_seen = notify.check_waiting(waiting_seen)
+                except Exception:
+                    log.exception("Needs-input check failed")
+                last_notify_check = now
         except Exception:
             log.exception("Error in daemon loop")
         time.sleep(SCHEDULER_POLL_INTERVAL)
