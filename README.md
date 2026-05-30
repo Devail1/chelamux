@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="chela/dashboard/static/img/banner.svg" alt="chela" width="560">
+</p>
+
 # chelamux
 
 **A tiny control plane that puts a fleet of Claude Code agents to work — unattended.**
