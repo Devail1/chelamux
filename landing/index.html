@@ -18,13 +18,17 @@
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
   body{
-    margin:0; background:var(--bg); color:var(--text);
+    margin:0; color:var(--text);
+    background:radial-gradient(820px 380px at 50% -40px, rgba(88,166,255,0.10), transparent 70%), var(--bg);
+    background-repeat:no-repeat;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     line-height:1.6; -webkit-font-smoothing:antialiased;
   }
   a{color:var(--accent); text-decoration:none}
   a:hover{text-decoration:underline}
-  .wrap{max-width:1000px; margin:0 auto; padding:0 24px}
+  /* horizontal only — vertical rhythm comes from section{} so a section.wrap
+     keeps its top/bottom padding (a `padding:0 24px` shorthand would zero it) */
+  .wrap{max-width:1000px; margin:0 auto; padding-left:24px; padding-right:24px}
   code,.mono{font-family:var(--mono)}
 
   /* nav */
@@ -57,21 +61,29 @@
   .install pre .c{color:var(--text-dim)}
   .install pre .g{color:var(--green)}
 
-  /* sections */
-  section{padding:48px 0}
+  /* sections — generous vertical rhythm; a hairline rule reinforces the break */
+  section{padding:64px 0}
+  section + section{border-top:1px solid var(--border)}
+  .section-head{text-align:center; max-width:640px; margin:0 auto 36px}
+  .section-head h2{font-size:25px; margin:0 0 10px; letter-spacing:-0.01em}
+  .section-head p{color:var(--text-dim); font-size:15px; margin:0}
   .pitch{text-align:center; max-width:680px; margin:0 auto}
-  .pitch h2{font-size:24px; margin:0 0 12px}
+  .pitch h2{font-size:25px; margin:0 0 12px; letter-spacing:-0.01em}
   .pitch p{color:var(--text-dim); font-size:17px}
   .pitch strong{color:var(--text)}
 
-  .features{display:grid; grid-template-columns:repeat(3,1fr); gap:18px; margin-top:8px}
-  .card{background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:22px}
-  .card .ic{font-size:22px; line-height:1; color:var(--accent); margin-bottom:12px; display:block}
+  .features{display:grid; grid-template-columns:repeat(3,1fr); gap:20px}
+  .card{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:24px; transition:border-color .15s ease, transform .15s ease;
+  }
+  .card:hover{border-color:var(--accent); transform:translateY(-3px)}
+  .card .ic{font-size:24px; line-height:1; color:var(--accent); margin-bottom:14px; display:block}
   .card h3{margin:0 0 8px; font-size:17px}
   .card p{margin:0; color:var(--text-dim); font-size:14.5px}
   .card code{background:var(--surface2); padding:1px 5px; border-radius:4px; font-size:12.5px}
 
-  .how{background:var(--surface); border-top:1px solid var(--border); border-bottom:1px solid var(--border)}
+  .how{background:var(--surface)}  /* section+section rules supply the dividers */
   .how h2{text-align:center; font-size:24px; margin:0 0 28px}
   .how-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:22px}
   .how-item h4{margin:0 0 6px; font-size:15px}
