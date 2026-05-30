@@ -263,12 +263,17 @@ function _renderContextData(data) {
         if (a.used_pct != null) {
             fill.style.width = a.used_pct + '%';
             fill.className = 'context-bar-fill' + (a.used_pct > 80 ? ' ctx-danger' : a.used_pct > 60 ? ' ctx-warn' : '');
-            let parts = [`Context: ${a.used}/${a.total} (${a.used_pct}%)`];
+            let parts = [`Context: ${a.used}/${a.total} (${a.used_pct}%${a.estimated ? '~' : ''})`];
             if (a.model) parts.push(a.model);
             if (a.cost_usd != null) parts.push(`$${a.cost_usd}`);
+            if (a.estimated) parts.push('est');
             label.textContent = parts.join(' · ');
-            // Show session name as title tooltip
-            if (a.session_name) label.title = a.session_name;
+            // Tooltip: session name, plus a note when the reading is a transcript
+            // estimate (install the statusLine hook for exact context %).
+            const tips = [];
+            if (a.session_name) tips.push(a.session_name);
+            if (a.estimated) tips.push('estimate from transcript — run `chela install-statusline` for exact context %');
+            if (tips.length) label.title = tips.join(' · '); else label.removeAttribute('title');
         } else {
             label.textContent = 'Context: unavailable';
         }

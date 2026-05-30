@@ -10,12 +10,20 @@ Agents' Claude Code status-line scripts cache JSON to
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from chela import transcripts
 from chela.config import CHELA_DIR, CONTEXT_CACHE_DIR, CACHE_STALE_SECONDS
+
+# Context-window size (tokens) assumed when deriving usage from the transcript
+# (the fallback): the transcript records token counts but not the window size.
+# The statusLine payload, when installed, carries the exact size and overrides
+# this. Default 200k; bumped to 1M automatically when observed usage exceeds it.
+DEFAULT_CONTEXT_WINDOW = int(os.environ.get("CHELA_DEFAULT_CONTEXT_WINDOW", "200000"))
 
 log = logging.getLogger(__name__)
 
@@ -193,7 +201,12 @@ def capture_all() -> list[dict]:
 
 
 def get_latest() -> list[dict]:
-    """Get most recent context snapshot for each agent from DB. Instant."""
+    """Get most recent context snapshot for each agent from DB. Instant.
+
+    History path: populated by ``capture_all`` (optional). The dashboard reads
+    live snapshots via ``live_snapshot`` instead, so the bar never depends on
+    the DB being populated.
+    """
     conn = _get_db()
     rows = conn.execute("""
         SELECT c.* FROM context_snapshots c
@@ -203,3 +216,71 @@ def get_latest() -> list[dict]:
     """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Live snapshots (read on demand — no DB dependency)
+#
+# The dashboard reads these directly so the context bar works the moment chela
+# runs. Per agent we prefer a fresh statusLine cache file (authoritative: exact
+# context %, the 5h/7d rate-limit blocks, and cost); when none exists we fall
+# back to a coarser context-only estimate derived from the agent's transcript.
+# ---------------------------------------------------------------------------
+
+def _cache_snapshot(agent_name: str) -> dict | None:
+    """Full snapshot from a fresh statusLine cache file, or None if absent/stale."""
+    path = CONTEXT_CACHE_DIR / f"{agent_name}.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    if time.time() - mtime > CACHE_STALE_SECONDS:
+        return None
+    snap = _parse_cache_file(path)
+    if not snap:
+        return None
+    snap["name"] = agent_name
+    snap["ts"] = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+    snap["source"] = "statusline"
+    snap["estimated"] = False
+    return snap
+
+
+def _transcript_snapshot(agent_name: str) -> dict | None:
+    """Context-only snapshot derived from the agent's active transcript.
+
+    Zero-setup fallback when no statusLine cache exists: no rate-limit/cost data,
+    and the window size is estimated (the transcript doesn't record it). The
+    window is bumped to 1M when observed usage exceeds the 200k default, so 1M
+    sessions don't read as >100%.
+    """
+    u = transcripts.agent_context_from_transcript(agent_name)
+    if not u or not u.get("used_tokens"):
+        return None
+    used = u["used_tokens"]
+    window = DEFAULT_CONTEXT_WINDOW
+    if used > window and used <= 1_000_000:
+        window = 1_000_000
+    total_k = round(window / 1000, 1)
+    used_k = round(used / 1000, 1)
+    used_pct = min(100, round(used / window * 100))
+    return {
+        "name": agent_name,
+        "used_k": used_k, "total_k": total_k, "used_pct": used_pct,
+        "messages_k": None, "messages_pct": None,
+        "free_k": round(total_k - used_k, 1), "free_pct": max(0, 100 - used_pct),
+        "model": u.get("model"), "cost_usd": None,
+        "rate_limit_pct": None, "rate_limit_resets_at": None,
+        "weekly_rl_pct": None, "weekly_rl_resets_at": None,
+        "session_name": None, "ts": None,
+        "source": "transcript", "estimated": True,
+    }
+
+
+def live_snapshot(agent_name: str) -> dict | None:
+    """Best available context snapshot for one agent.
+
+    Fresh statusLine cache (full, authoritative) if present, else a
+    transcript-derived estimate, else None.
+    """
+    return _cache_snapshot(agent_name) or _transcript_snapshot(agent_name)

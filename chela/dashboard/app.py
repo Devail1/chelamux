@@ -666,15 +666,19 @@ def api_agents_kill():
 @app.route("/api/agents/context")
 @require_auth
 def api_agents_context():
+    # Live, per discovered agent: a fresh statusLine cache file (authoritative —
+    # context %, 5h/7d rate limits, cost) when present, else a transcript-derived
+    # context estimate. No dependency on the snapshot DB being populated.
     agent_name = request.args.get("agent")
-    snapshots = context.get_latest()
-    if agent_name:
-        snapshots = [s for s in snapshots if s["agent"] == agent_name]
+    names = [agent_name] if agent_name else list(discovery.get_all_windows().keys())
 
     results = []
-    for s in snapshots:
+    for name in names:
+        s = context.live_snapshot(name)
+        if not s:
+            continue
         results.append({
-            "name": s["agent"],
+            "name": s["name"],
             "used": f"{s['used_k']:g}k" if s.get("used_k") else None,
             "total": f"{s['total_k']:g}k" if s.get("total_k") else None,
             "used_pct": s.get("used_pct"),
@@ -689,6 +693,8 @@ def api_agents_context():
             "weekly_rl_pct": s.get("weekly_rl_pct"),
             "weekly_rl_resets_at": s.get("weekly_rl_resets_at"),
             "session_name": s.get("session_name"),
+            "source": s.get("source"),
+            "estimated": s.get("estimated", False),
             "ts": s.get("ts"),
         })
     return jsonify(results)
