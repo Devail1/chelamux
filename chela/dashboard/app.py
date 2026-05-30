@@ -297,6 +297,45 @@ _PROXY_DROP_HEADERS = {
     "connection", "keep-alive",
 }
 
+# Clipboard-image paste shim injected into ttyd's HTML (see term_http). xterm.js
+# silently drops non-text clipboard items, so a screenshot (Win+Shift+S, "Copy
+# image", etc.) never reaches Claude Code in a pane. We listen for paste in the
+# capture phase before xterm.js: if a clipboard item is an image/* blob, POST it
+# to /api/term/paste-image and type the returned file path into the pane via
+# /api/term/paste — matching how Claude Code consumes pasted images on a native
+# terminal (a file path, not inline bytes). Text pastes fall through untouched.
+# The window id comes from the iframe path (/term/<wid>/), chela's routing key.
+_TERM_PASTE_SHIM = (
+    "<script>(function(){"
+    "var m=location.pathname.match(/\\/term\\/([^\\/]+)/);"
+    "if(!m)return;"
+    "var wid=decodeURIComponent(m[1]);"
+    "async function handle(e){"
+    "var items=(e.clipboardData&&e.clipboardData.items)||[];"
+    "var blob=null;"
+    "for(var i=0;i<items.length;i++){"
+    "var it=items[i];"
+    "if(it.kind==='file'&&it.type&&it.type.indexOf('image/')===0){"
+    "blob=it.getAsFile();break;}}"
+    "if(!blob)return;"
+    "e.preventDefault();e.stopPropagation();"
+    "try{"
+    "var fd=new FormData();fd.append('agent',wid);"
+    "fd.append('image',blob,blob.name||'paste');"
+    "var r=await fetch('/api/term/paste-image',"
+    "{method:'POST',body:fd,credentials:'same-origin'});"
+    "if(!r.ok)return;"
+    "var j=await r.json();"
+    "if(!j||!j.path)return;"
+    "await fetch('/api/term/paste',"
+    "{method:'POST',headers:{'Content-Type':'application/json'},"
+    "credentials:'same-origin',"
+    "body:JSON.stringify({agent:wid,text:j.path})});"
+    "}catch(err){console.error('paste-image',err);}}"
+    "document.addEventListener('paste',handle,true);"
+    "})();</script>"
+)
+
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
 @app.route("/term/<wid>/<path:rest>", methods=["GET", "POST"])
@@ -328,6 +367,17 @@ def term_http(wid, rest):
         (k, v) for k, v in resp.getheaders()
         if k.lower() not in _PROXY_DROP_HEADERS
     ]
+    # Inject the clipboard-image paste shim into ttyd's HTML page. xterm.js drops
+    # non-text clipboard items, so a pasted screenshot never reaches Claude Code;
+    # the shim intercepts it and routes it through /api/term/paste-image. Only the
+    # (small) HTML doc is rewritten; assets pass through untouched. content-length
+    # is in _PROXY_DROP_HEADERS, so Flask recomputes it for the modified body.
+    ctype = (resp.headers.get("Content-Type") or "")
+    if "text/html" in ctype.lower():
+        html = body.decode("utf-8", "replace")
+        html = (html.replace("</head>", _TERM_PASTE_SHIM + "</head>", 1)
+                if "</head>" in html else html + _TERM_PASTE_SHIM)
+        body = html.encode("utf-8")
     return Response(body, status=status, headers=headers)
 
 
