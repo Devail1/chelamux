@@ -1122,8 +1122,9 @@ function _wallFill() {
     const top = stage ? stage.getBoundingClientRect().top : 120;
     // The dock lives below the stage, so its height (+ its 8px top-margin gap)
     // eats into the space the wall may fill. Subtract it when it's showing.
+    // Phones force single mode (no wall, no dock), so skip the measurement there.
     const dock = $('#term-min-dock');
-    const dockH = (dock && dock.style.display !== 'none')
+    const dockH = (!_isMobileTerm() && dock && dock.style.display !== 'none')
         ? dock.getBoundingClientRect().height + 8 : 0;
     const avail = Math.max(240, window.innerHeight - top - dockH - 4);  // leave a hair at the bottom
     const rows = Math.max(3, Math.floor(avail / WALL_CELL_H));
@@ -1488,16 +1489,21 @@ function kbCtrlKey(letter) {
 }
 
 // Pin the keybar just above the on-screen keyboard. When the soft keyboard
-// opens, the visual viewport shrinks below the layout viewport; translate the
-// bottom-fixed bar up by that overlap so it rides above the keyboard instead of
-// hiding behind it. Best-effort: no-op where VisualViewport is unavailable
-// (the bar then just sits at the bottom of the screen).
+// opens, the visual viewport shrinks below the layout viewport. We anchor the
+// bar's TOP to the visual viewport's bottom edge — (offsetTop + height) in
+// layout-viewport coords, minus the bar's own height — rather than lifting a
+// bottom:0 bar with translateY. The translate approach floats the bar up over
+// the terminal on iOS: rubber-band scrolling fires `scroll` with a changing
+// offsetTop, and a translated bottom-fixed bar chases it mid-gesture. Anchoring
+// `top` to the live viewport bottom is stable through that scroll. Best-effort:
+// where VisualViewport is unavailable the CSS bottom:0 keeps the bar in place.
 function _kbPin() {
     const bar = document.getElementById('term-keybar');
     const vv = window.visualViewport;
     if (!bar || !vv) return;
-    const overlap = window.innerHeight - (vv.height + vv.offsetTop);
-    bar.style.transform = overlap > 1 ? `translateY(${-overlap}px)` : '';
+    const top = Math.max(0, Math.round(vv.offsetTop + vv.height - bar.offsetHeight));
+    bar.style.bottom = 'auto';
+    bar.style.top = top + 'px';
 }
 if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', _kbPin);
