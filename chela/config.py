@@ -14,6 +14,10 @@ CHELA_DIR = Path(os.environ.get("CHELA_DIR", Path.home() / ".chela"))
 # CHELA_TMUX_SESSION; defaults to "chela".
 TMUX_SESSION = os.environ.get("CHELA_TMUX_SESSION", "chela")
 
+# Per-agent mailbox files (JSONL), written when a message can't be delivered to
+# a live tmux window (agent offline). One file per recipient: mailbox_<agent>.jsonl.
+MAILBOX_DIR = CHELA_DIR / "mailbox"
+
 # Context-window status-line cache, written by scripts/cache-statusline.sh after
 # each assistant turn. The daemon reads these to track per-agent context usage.
 CONTEXT_CACHE_DIR = CHELA_DIR / "context"
