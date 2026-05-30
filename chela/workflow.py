@@ -59,7 +59,7 @@ def load_workflow(path: str | Path) -> WorkflowDef:
     if not isinstance(pk, str) or not PROJECT_KEY_RE.match(pk):
         raise ValueError(
             f"{p}: front matter is missing a valid `project_key` "
-            f"(must match {PROJECT_KEY_RE.pattern!r}, e.g. `project_key: PCLW`); got {pk!r}"
+            f"(must match {PROJECT_KEY_RE.pattern!r}, e.g. `project_key: PROJ`); got {pk!r}"
         )
 
     return WorkflowDef(path=p, config=config, prompt_template=body.strip())
@@ -73,7 +73,7 @@ def render_prompt(template: str, vars: dict) -> str:
 
 
 def resolve_workspace_root(wf: WorkflowDef) -> Path:
-    root = wf.get("workspace", "root", default="~/.picoclaw/worktrees/default")
+    root = wf.get("workspace", "root", default="~/.chela/worktrees/default")
     root = _expand(root)
     p = Path(root)
     if not p.is_absolute():

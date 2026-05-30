@@ -22,7 +22,7 @@ def ensure_worktree(
     setup (e.g. `hooks.after_create`) exactly once on creation.
 
     Branch name follows the Jira-style scheme `{project_key.lower()}-{task_number}`
-    (e.g. `pclw-7`). The worktree directory is still keyed by `task_id` so the
+    (e.g. `proj-7`). The worktree directory is still keyed by `task_id` so the
     SHA-stable identity that powers idempotent dispatch survives — only the
     branch and tmux window name use the human-readable display.
 
