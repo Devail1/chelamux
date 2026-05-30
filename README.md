@@ -16,8 +16,9 @@ you already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
 optional web dashboard (think *ccmux, weblized*).
 
 > Status: early. Core (scheduler + dispatcher + messaging) is solid and tested;
-> the dashboard is an optional extra; the embedded terminal **wall** is in
-> progress (off by default).
+> the dashboard is an optional extra; the embedded terminal **wall** streams
+> live ttyd sessions and is opt-in (off by default — it spawns writable shells,
+> so enable it only behind loopback/Tailscale).
 
 ---
 
