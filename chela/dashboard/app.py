@@ -214,11 +214,18 @@ def api_agents_msg():
 
 # Mobile control bar: whitelisted key / scroll injection via tmux send-keys.
 # Keys are delivered at the tmux layer (robust, ttyd/xterm-independent).
+# The full C-<a..z> set is whitelisted so the mobile keybar's sticky-Ctrl layer
+# can compose Ctrl with any letter (control codes — harmless), not just a fixed
+# handful.
 _TERM_KEYS = {
     "Up", "Down", "Left", "Right", "Escape", "Tab", "Enter", "BSpace",
     "PageUp", "PageDown", "Home", "End",
-    "C-c", "C-d", "C-z", "C-r", "C-l", "C-b", "C-a", "C-e", "C-u", "C-k", "C-w",
-}
+} | {f"C-{c}" for c in "abcdefghijklmnopqrstuvwxyz"}
+
+# Punctuation that's a chore to reach on a phone keyboard — sent literally
+# (`send-keys -l` disables key-name lookup) so the mobile keybar can offer them
+# as one-tap keys. Matches Moshi's terminal-keyboard special-character row.
+_TERM_LITERAL = {"|", "/", "\\", "~", "-", "_"}
 
 
 def _term_target(agent: str) -> str | None:
@@ -240,6 +247,8 @@ def _term_keyargv(target: str, key: str) -> list[str] | None:
         return ["tmux", "copy-mode", "-t", target]
     if key == "scroll-exit":          # leave copy-mode
         return ["tmux", "send-keys", "-t", target, "-X", "cancel"]
+    if key in _TERM_LITERAL:          # punctuation — send the char, not a key name
+        return ["tmux", "send-keys", "-t", target, "-l", key]
     if key in _TERM_KEYS:
         return ["tmux", "send-keys", "-t", target, key]
     return None

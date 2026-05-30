@@ -1454,3 +1454,52 @@ function _bindHeaderSwipe() {
 window.addEventListener('resize', () => {
     if (TERMINALS_ON && currentTab === 'terminals') renderMobileSwitcher();
 });
+
+// ---- Mobile keybar v2: sticky-Ctrl modifier -------------------------------
+//
+// Modeled on Moshi's terminal keyboard. The Ctrl key is a three-state toggle
+// (tap cycles off → armed → locked → off). Engaging it reveals a Ctrl-letter
+// layer; tapping a letter sends C-<letter>. Armed = consumed after one letter
+// (Moshi's "next keystroke"); locked = stays for sequences (^C ^D ^Z without
+// re-tapping). The other keys (Esc/arrows/chars/paging) are independent of the
+// modifier — they have no useful Ctrl variant — and go straight through
+// termKey(). State lives in the keybar's data-ctrl attr (CSS reveals the layer).
+const _KB_CTRL_STATES = ['off', 'armed', 'locked'];
+
+function _kbCtrlState() {
+    const bar = document.getElementById('term-keybar');
+    return bar ? (bar.dataset.ctrl || 'off') : 'off';
+}
+function _kbSetCtrl(state) {
+    const bar = document.getElementById('term-keybar');
+    if (bar) bar.dataset.ctrl = state;
+}
+
+// Tap the Ctrl key: advance the three-state cycle.
+function kbCtrlTap() {
+    const i = _KB_CTRL_STATES.indexOf(_kbCtrlState());
+    _kbSetCtrl(_KB_CTRL_STATES[(i + 1) % _KB_CTRL_STATES.length]);
+}
+
+// Tap a Ctrl-letter: send C-<letter>; disarm if armed (one-shot), keep if locked.
+function kbCtrlKey(letter) {
+    termKey('C-' + letter);
+    if (_kbCtrlState() === 'armed') _kbSetCtrl('off');
+}
+
+// Pin the keybar just above the on-screen keyboard. When the soft keyboard
+// opens, the visual viewport shrinks below the layout viewport; translate the
+// bottom-fixed bar up by that overlap so it rides above the keyboard instead of
+// hiding behind it. Best-effort: no-op where VisualViewport is unavailable
+// (the bar then just sits at the bottom of the screen).
+function _kbPin() {
+    const bar = document.getElementById('term-keybar');
+    const vv = window.visualViewport;
+    if (!bar || !vv) return;
+    const overlap = window.innerHeight - (vv.height + vv.offsetTop);
+    bar.style.transform = overlap > 1 ? `translateY(${-overlap}px)` : '';
+}
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', _kbPin);
+    window.visualViewport.addEventListener('scroll', _kbPin);
+}
