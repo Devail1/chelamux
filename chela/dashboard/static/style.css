@@ -1674,7 +1674,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .sidebar.open { transform: translateX(0); box-shadow: 0 10px 48px rgba(0,0,0,0.6); }
 
     /* Canvas now owns the full width; ease the padding for small screens. */
-    .canvas { grid-column: 1; padding: 14px 14px max(14px, env(safe-area-inset-bottom)); }
+    .canvas { grid-column: 1; padding: 8px 14px max(14px, env(safe-area-inset-bottom)); }
 }
 
 /* ---- Mobile agent switcher (pill strip) ----
