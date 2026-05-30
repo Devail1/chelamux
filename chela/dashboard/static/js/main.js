@@ -23,6 +23,9 @@ async function refresh() {
     }
 }
 
+// Wall is the flagship default canvas when terminals are enabled.
+if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) selectView('terminals');
+
 refresh().then(() => {
     if (currentTab === 'agents') checkContext();
 });

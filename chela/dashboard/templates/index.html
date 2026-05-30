@@ -47,6 +47,16 @@
   <!-- Left sidebar: AGENTS + WORK -->
   <aside class="sidebar">
 
+    {% if terminals_enabled %}
+    <section class="side-section">
+      <div class="side-list">
+        <div class="side-item" data-view="terminals" onclick="selectView('terminals')">
+          <span class="side-item-label">▦ Wall</span>
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
     <section class="side-section">
       <div class="side-head" onclick="selectView('agents')" title="Show all agents">
         <span class="side-title">Agents</span>
@@ -172,18 +182,61 @@
     {% if terminals_enabled %}
     <!-- Terminals wall (flagship view mode; ttyd serving still deferred) -->
     <div class="panel" id="panel-terminals">
-      <div class="term-toolbar" id="term-toolbar">
-        <div class="term-modes">
-          <button class="term-mode-btn active" data-mode="wall" onclick="setTermMode('wall')">Wall</button>
-          <button class="term-mode-btn" data-mode="single" onclick="setTermMode('single')">Single</button>
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+            <!-- mode toggle + single-agent picker kept (terminals.js refs them) but hidden: wall-only -->
+            <button id="term-mode-single" onclick="setTermMode('single')" style="display:none;">Single</button>
+            <button id="term-mode-wall" onclick="setTermMode('wall')" style="display:none;">Wall</button>
+            <select id="term-agent" onchange="renderTerminals()" style="display:none;"></select>
+            <span id="term-wall-grid" style="display:none; gap:6px; align-items:center;">
+                <span style="color:var(--text-dim); font-size:11px;">Grid:</span>
+                <span id="term-grid-presets" style="display:inline-flex; gap:4px; align-items:center;"></span>
+                <button id="term-lock-btn" class="gl-btn" onclick="toggleWallLock(this)"
+                        title="Lock layout — drag swaps panes, resize off" aria-label="Lock layout"
+                        style="margin-left:6px;"></button>
+            </span>
+            <button id="term-new-shell" onclick="spawnShell(this)" title="Spawn a new plain-shell window" style="margin-left:auto;">+ New shell</button>
         </div>
-        <select id="term-agent-select" onchange="onTermAgentChange(this.value)"></select>
-        <div class="term-grid-presets" id="term-grid-presets"></div>
-        <button id="term-lock-btn" onclick="toggleWallLock()" title="Lock / unlock layout">🔓</button>
-        <button id="term-new-btn" class="btn-accent" onclick="spawnShell()">+ New shell</button>
-      </div>
-      <div id="term-wall" class="term-wall"></div>
-      <div id="term-single" class="term-single" style="display:none;"></div>
+        <div id="term-stage"></div>
+        <div id="term-min-dock" style="display:none;"></div>
+        <div id="term-bar" class="kb-collapsed" style="display:none;">
+            <button class="kb-toggle" id="kb-toggle" onclick="kbToggle()"
+                    aria-expanded="false" aria-controls="kb-body" title="Show/hide on-screen keys">
+                <span>&#9000; Keys</span>
+                <span class="kb-chevron" aria-hidden="true">&#9650;</span>
+            </button>
+            <div class="kb-body" id="kb-body">
+                <div class="kb-row">
+                    <div class="kb-group" aria-label="Special keys">
+                        <button onclick="termKey('Escape')" title="Escape">Esc</button>
+                        <button onclick="termKey('Tab')" title="Tab">Tab</button>
+                        <button onclick="termKey('Enter')" title="Enter" aria-label="Enter">&#9166;</button>
+                    </div>
+                    <div class="kb-group" aria-label="Control keys">
+                        <button onclick="termKey('C-c')" title="Ctrl-C (interrupt)">^C</button>
+                        <button onclick="termKey('C-d')" title="Ctrl-D (EOF)">^D</button>
+                        <button onclick="termKey('C-l')" title="Ctrl-L (clear)">^L</button>
+                        <button onclick="termKey('C-b')" title="Ctrl-B (tmux prefix)">^B</button>
+                    </div>
+                    <div class="kb-group" aria-label="Scrollback">
+                        <button id="term-scroll-btn" onclick="termScrollToggle()">&#10514; Scroll</button>
+                    </div>
+                </div>
+                <div class="kb-row">
+                    <div class="kb-dpad" aria-label="Arrow keys">
+                        <button class="kb-up" onclick="termKey('Up')" title="Up" aria-label="Up">&#8593;</button>
+                        <button class="kb-left" onclick="termKey('Left')" title="Left" aria-label="Left">&#8592;</button>
+                        <button class="kb-down" onclick="termKey('Down')" title="Down" aria-label="Down">&#8595;</button>
+                        <button class="kb-right" onclick="termKey('Right')" title="Right" aria-label="Right">&#8594;</button>
+                    </div>
+                    <div class="kb-nav" aria-label="Navigation keys">
+                        <button onclick="termKey('Home')" title="Home">Home</button>
+                        <button onclick="termKey('PageUp')" title="Page Up">PgUp</button>
+                        <button onclick="termKey('End')" title="End">End</button>
+                        <button onclick="termKey('PageDown')" title="Page Down">PgDn</button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
     {% endif %}
 
