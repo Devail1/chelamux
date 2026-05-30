@@ -557,6 +557,42 @@ function _applyTermStatus(agents) {
     }
 }
 
+// Fill the per-tile context bars from /api/agents/context, keyed by window_id.
+// statusline source = exact; transcript source = estimate (dimmed fill, "~"/est).
+let _ctxCache = [];
+function _applyTermContext(ctx) {
+    if (!ctx) return;
+    _ctxCache = ctx;
+    const by = {};
+    ctx.forEach(c => { if (c.window_id) by[c.window_id] = c; });
+    document.querySelectorAll('#panel-terminals .term-ctx-bar').forEach(bar => {
+        const c = by[bar.dataset.ctxFor];
+        const fill = bar.querySelector('.term-ctx-fill');
+        if (!fill) return;
+        if (!c || c.used_pct == null) {
+            fill.style.width = '0';
+            fill.className = 'term-ctx-fill';
+            bar.title = 'Context: —';
+            return;
+        }
+        const pct = c.used_pct;
+        fill.style.width = Math.min(100, pct) + '%';
+        fill.className = 'term-ctx-fill'
+            + (pct > 80 ? ' ctx-danger' : pct > 60 ? ' ctx-warn' : '')
+            + (c.estimated ? ' est' : '');
+        const bits = [`Context: ${c.used}/${c.total} (${pct}%${c.estimated ? '~' : ''})`];
+        if (c.model) bits.push(c.model);
+        if (c.cost_usd != null) bits.push(`$${c.cost_usd}`);
+        if (c.estimated) bits.push('estimate — run `chela install-statusline` for exact');
+        const tip = bits.join(' · ');
+        bar.title = tip;
+        // The bar is pointer-events:none (so it can't block resize), so mirror
+        // the tooltip onto the tile header — a safe, hoverable surface.
+        const head = bar.parentElement && bar.parentElement.querySelector('.gs-head');
+        if (head) head.title = tip;
+    });
+}
+
 // Taskbar order: most-recently-busy first (MRU), with the manual order as a
 // stable tiebreak for panes with equal/zero activity. Decoupled from the wall
 // grid — a chip moving never disturbs a pane's seat on the wall.
@@ -713,13 +749,16 @@ async function renderTerminals() {
         destroyGrid();
         stage.className = 'term-single';
         const sw = sel.value || wids[0];
-        stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}</div>`;
+        stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}${_ctxBarHTML(sw)}</div>`;
         _renderedWids = [sw];
     }
     // Seed readiness pollers for whatever placeholders we just rendered.
     _startPlaceholderPolls();
     renderMinDock();   // single / no-agents → hides the dock; wall already rebuilt it
     _applyTermStatus(_agentsCache);   // colour pane dots (single + wall) from cached state
+    _applyTermContext(_ctxCache);     // repaint ctx bars from cache instantly…
+    api('/api/agents/context').then(_applyTermContext).catch(() => {});  // …then refresh
+
     // Fit the wall AFTER the taskbar is at its final rendered height, so the grid
     // leaves exactly the right room above it (dock height feeds _wallFill).
     _refitWallForDock();
@@ -801,6 +840,7 @@ async function termTick() {
     // refresh labels in case a rename changed a pane's friendly name.
     _applyTermStatus(agents);
     _refreshPaneLabels();
+    try { _applyTermContext(await api('/api/agents/context')); } catch (e) { /* keep prior fills */ }
 }
 
 // Update the visible label of every on-screen pane + chip from current state,
@@ -902,8 +942,15 @@ function _wallTileHTML(wid, x, y, w, h) {
   <div class="grid-stack-item-content">
     ${paneHead(wid, true)}
     ${body}
+    ${_ctxBarHTML(wid)}
   </div>
 </div>`;
+}
+
+// Per-tile context-window bar pinned to the tile bottom edge. Filled/coloured by
+// _applyTermContext from /api/agents/context, keyed by window_id.
+function _ctxBarHTML(wid) {
+    return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —"><i class="term-ctx-fill"></i></div>`;
 }
 
 function buildWall(wids) {

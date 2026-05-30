@@ -670,7 +670,8 @@ def api_agents_context():
     # context %, 5h/7d rate limits, cost) when present, else a transcript-derived
     # context estimate. No dependency on the snapshot DB being populated.
     agent_name = request.args.get("agent")
-    names = [agent_name] if agent_name else list(discovery.get_all_windows().keys())
+    windows = discovery.get_all_windows()  # {name: window_id}
+    names = [agent_name] if agent_name else list(windows.keys())
 
     results = []
     for name in names:
@@ -679,6 +680,7 @@ def api_agents_context():
             continue
         results.append({
             "name": s["name"],
+            "window_id": windows.get(s["name"]),
             "used": f"{s['used_k']:g}k" if s.get("used_k") else None,
             "total": f"{s['total_k']:g}k" if s.get("total_k") else None,
             "used_pct": s.get("used_pct"),

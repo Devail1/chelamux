@@ -162,6 +162,24 @@ body {
 }
 .gs-grip { cursor: move; }
 
+/* Per-tile context-window bar, pinned to the tile's bottom edge. Ambient: scan
+   the wall and read each agent's context fill at a glance; hover for the exact
+   numbers. Sits above the iframe; pointer-events confined to the thin strip so
+   it doesn't fight gridstack's bottom resize handle (which overlays at a higher
+   z-index). */
+.term-ctx-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+    background: rgba(110, 118, 129, 0.25); z-index: 4;
+    pointer-events: none;   /* never intercept gridstack's bottom resize handle */
+}
+.term-ctx-fill {
+    display: block; height: 100%; width: 0;
+    background: var(--green); transition: width 0.4s ease;
+}
+.term-ctx-fill.ctx-warn { background: var(--yellow); }
+.term-ctx-fill.ctx-danger { background: var(--red); }
+.term-ctx-fill.est { opacity: 0.55; }
+
 /* Inline split-glyph layout picker. Icon-only buttons; active preset is
    accent-tinted. The glyph inherits color via fill:currentColor. */
 .gl-btn {
