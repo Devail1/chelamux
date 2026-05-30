@@ -106,6 +106,48 @@ def claude_pid(window_id: str) -> int | None:
         return None
 
 
+# Foreground commands that indicate a dev server / long-running process running
+# in a pane (best-effort heuristic for the dashboard's window-type icon/filter).
+# Matched as a prefix of tmux's #{pane_current_command} (e.g. "python3.11").
+_SERVER_COMMANDS = (
+    "node", "vite", "next", "webpack", "deno", "bun",
+    "npm", "pnpm", "yarn",
+    "python", "uv", "uvicorn", "gunicorn", "flask", "hypercorn",
+    "rails", "puma", "rackup", "ruby",
+    "cargo", "air", "nodemon",
+)
+
+
+def pane_command(window_id: str) -> str:
+    """tmux #{pane_current_command} for a window (foreground process), or ""."""
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", f"{TMUX_SESSION}:{window_id}",
+             "#{pane_current_command}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+
+def window_type(window_id: str, claude_running: bool | None = None) -> str:
+    """Classify a window for the dashboard: 'claude' | 'server' | 'shell'.
+
+    claude wins (an interactive claude session); else a dev-server heuristic on
+    the pane's foreground command; else a plain shell. Best-effort — anything
+    unknown degrades to 'shell'.
+    """
+    if claude_running is None:
+        claude_running = claude_pid(window_id) is not None
+    if claude_running:
+        return "claude"
+    cmd = pane_command(window_id).lower()
+    if cmd and any(cmd.startswith(s) for s in _SERVER_COMMANDS):
+        return "server"
+    return "shell"
+
+
 def stop_agent(agent_name: str) -> dict:
     """Stop a claude session by sending /exit. Returns result dict."""
     window_id = get_window_id(agent_name)

@@ -146,11 +146,13 @@ def api_agents():
         sess_cwd = status_map["cwd_by_pid"].get(cpid) if cpid is not None else None
 
         liveness, health = _liveness(claude_running, sess_status)
+        win_type = agent_manager.window_type(window_id, claude_running)
 
         agents.append({
             "name": name,
             "online": True,
             "window_id": window_id,
+            "window_type": win_type,
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
             "session_status": sess_status,
