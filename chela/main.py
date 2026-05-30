@@ -4,10 +4,12 @@
 (scheduler tick + work-item dispatcher). `chela schedule ...` manages scheduled
 tasks; `chela dispatch ...` runs the markdown-TODO → worktree → PR dispatcher;
 `chela msg`/`broadcast` route messages between agents (mailbox fallback).
+`chela dashboard` launches the optional web UI (requires the `dashboard` extra).
 """
 from __future__ import annotations
 import argparse
 import logging
+import os
 import sys
 import time
 
@@ -182,6 +184,30 @@ def cmd_dispatch_runs(args) -> None:
         print(f"  {r['task_id']}  {r['status']:<16}  attempt={r['attempt']}  {r.get('window_name') or '-':<24}  {title}")
 
 
+def cmd_dashboard(args) -> None:
+    """Launch the optional web dashboard (requires the 'dashboard' extra).
+
+    Imported lazily so the core CLI never depends on Flask: a plain
+    `chelamux` install runs status/run/dispatch/msg without it.
+    """
+    try:
+        from chela.dashboard import app as dashboard_app
+    except ImportError as e:
+        print("The dashboard is an optional component and needs Flask.")
+        print("Install the extra:  uv sync --extra dashboard")
+        print("              (or:  pip install 'chelamux[dashboard]')")
+        print(f"  import error: {e}")
+        sys.exit(1)
+    if args.host:
+        os.environ["CHELA_DASH_HOST"] = args.host
+    if args.port:
+        os.environ["CHELA_DASHBOARD_PORT"] = str(args.port)
+    host = os.environ.get("CHELA_DASH_HOST", "127.0.0.1")
+    port = os.environ.get("CHELA_DASHBOARD_PORT", "5001")
+    log.info("chela dashboard on http://%s:%s (zero auth — keep it loopback/tailnet)", host, port)
+    dashboard_app.main()
+
+
 def cmd_task_finished(args) -> None:
     """Mark a dispatcher run as awaiting_review and kill its tmux window.
 
@@ -254,6 +280,11 @@ def main() -> None:
     # dispatch-runs (inspection)
     sub.add_parser("dispatch-runs", help="List dispatcher runs")
 
+    # dashboard (optional component)
+    p_dash = sub.add_parser("dashboard", help="Launch the optional web dashboard (needs the 'dashboard' extra)")
+    p_dash.add_argument("--host", default=None, help="Bind host (default 127.0.0.1)")
+    p_dash.add_argument("--port", type=int, default=None, help="Bind port (default 5001)")
+
     # task-finished — final step in the dispatcher work-item lifecycle
     p_tf = sub.add_parser(
         "task-finished",
@@ -286,6 +317,8 @@ def main() -> None:
         cmd_dispatch(args)
     elif args.command == "dispatch-runs":
         cmd_dispatch_runs(args)
+    elif args.command == "dashboard":
+        cmd_dashboard(args)
     elif args.command == "task-finished":
         cmd_task_finished(args)
     else:
