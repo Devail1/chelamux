@@ -60,7 +60,11 @@ try:
     # selects+echoes `tty`. Without this every wall tile fails to connect and
     # shows ttyd's "Press ⏎ to Reconnect" (the black-tile symptom). Lenient
     # non-browser clients don't need it, so it's invisible outside the browser.
-    app.config["SOCK_SERVER_OPTIONS"] = {"subprotocols": ["tty"]}
+    # ping_interval keeps idle terminal sockets alive: with no traffic on a quiet
+    # pane, a proxy in the path (Tailscale / Caddy) closes the WebSocket after its
+    # idle timeout and ttyd shows its "reconnect" screen. 25s stays under the
+    # common 60s cutoffs. (browser↔Flask hop; the Flask↔ttyd hop is pinged too.)
+    app.config["SOCK_SERVER_OPTIONS"] = {"subprotocols": ["tty"], "ping_interval": 25}
     _sock = Sock(app)
 except Exception:  # pragma: no cover - optional dep
     _sock = None
@@ -346,7 +350,8 @@ if _sock is not None:
         import threading
         try:
             upstream = simple_websocket.Client(
-                f"ws://127.0.0.1:{port}/term/{wid}/ws", subprotocols=["tty"]
+                f"ws://127.0.0.1:{port}/term/{wid}/ws", subprotocols=["tty"],
+                ping_interval=25,   # keepalive on the Flask↔ttyd hop (see SOCK_SERVER_OPTIONS)
             )
         except Exception:
             return
