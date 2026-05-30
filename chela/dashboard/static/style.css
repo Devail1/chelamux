@@ -1638,9 +1638,16 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .topbar {
         padding-left: max(10px, env(safe-area-inset-left));
         padding-right: max(10px, env(safe-area-inset-right));
-        padding-top: max(10px, env(safe-area-inset-top));
+        padding-top: max(7px, env(safe-area-inset-top));
+        padding-bottom: 7px;
         gap: 8px;
     }
+    /* Bump the action icons + logo: 30px/16px reads small and sits well under a
+       comfortable touch target. Trimming the topbar padding above keeps the bar
+       roughly the same height while the glyphs fill it. */
+    .icon-btn { width: 38px; height: 38px; font-size: 18px; }
+    .icon-btn svg { width: 20px; height: 20px; }
+    .topbar .brand .brand-mark { height: 26px; }
     /* The phone topbar can't hold the wordmark + every pill + the action icons
        (it overflowed by ~100px). Trim to essentials: logo mark only (drop the
        "chela" wordmark — the hamburger already anchors the left), hide the
