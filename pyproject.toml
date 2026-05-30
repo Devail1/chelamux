@@ -9,6 +9,7 @@ authors = [{ name = "Liav Edry" }]
 keywords = ["claude-code", "tmux", "agent-orchestration", "ai-agents", "developer-tools"]
 dependencies = [
     "croniter>=2.0.0",   # cron expression parsing for the scheduler
+    "pyyaml>=6.0",       # WORKFLOW.md front-matter parsing for the dispatcher
 ]
 
 [project.scripts]
