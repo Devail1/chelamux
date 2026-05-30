@@ -457,8 +457,8 @@ function termMinFor(btn) {
     if (item) minimizePane(item.getAttribute('gs-id'));
 }
 
-// Taskbar chip click: minimized → restore, visible → minimize. The dock lists
-// every pane, so a chip is the one-gesture min/restore toggle.
+// Dock chip click: the dock holds only minimized panes now, so a click always
+// restores. (minimizePane is invoked from the tile header's minimize button.)
 function toggleDockChip(wid) {
     if (_minimized.has(wid)) restoreFromDock(wid);
     else minimizePane(wid);
@@ -597,11 +597,16 @@ function _flipDock(dock, mutate) {
 function renderMinDock() {
     const dock = $('#term-min-dock');
     if (!dock) return;
-    const wids = _termMode === 'wall' ? _taskbarOrder(_renderedWids) : [];
+    // A TRUE taskbar: only MINIMIZED panes dock here. The sidebar already lists
+    // every agent, so mirroring all panes in the dock was redundant (two lists
+    // of the same thing). Now the dock is "things I've tucked away" and is empty
+    // (hidden) until you minimize a tile; visible tiles are reordered on the wall.
+    const wids = _termMode === 'wall'
+        ? _taskbarOrder(_renderedWids).filter(w => _minimized.has(w)) : [];
     if (!wids.length) { dock.style.display = 'none'; dock.innerHTML = ''; _dockOrderSig = ''; return; }
     dock.style.display = 'flex';
     _flipDock(dock, () => {
-        dock.innerHTML = '<span class="min-dock-label">Panes:</span>' + wids.map(wid => {
+        dock.innerHTML = '<span class="min-dock-label">Minimized:</span>' + wids.map(wid => {
             const j = _jsStr(wid);
             const min = _minimized.has(wid);
             const cls = min ? 'min-chip min-chip-minimized' : 'min-chip min-chip-active';

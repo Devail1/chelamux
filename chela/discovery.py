@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from chela.config import TMUX_SESSION
+from chela.config import IGNORE_WINDOWS, TMUX_SESSION
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def _get_live_windows() -> dict[str, str]:
             for line in result.stdout.splitlines():
                 wid, _, name = line.partition("\t")
                 wid, name = wid.strip(), name.strip()
-                if wid and name:
+                if wid and name and name not in IGNORE_WINDOWS:
                     out[wid] = name
             return out
     except (subprocess.TimeoutExpired, FileNotFoundError):
