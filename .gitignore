@@ -11,6 +11,17 @@ build/
 .chela/
 *.db
 
+# secrets / credentials — never commit
+.env
+.env.*
+*.cred
+*.pem
+*.key
+*.p12
+secrets.*
+*_token
+*.secret
+
 # OS / editor
 .DS_Store
 *.swp
