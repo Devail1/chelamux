@@ -81,6 +81,7 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 | `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
 | `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux |
 | `chela broadcast <text>` | Message every other live agent |
+| `chela install-statusline [--write]` | Print/install the Claude Code statusLine hook for the context bar |
 | `chela dashboard [--host] [--port]` | Launch the optional web UI (needs `[dashboard]` extra) |
 
 ---
@@ -101,6 +102,7 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 | `CHELA_NOTIFY_INTERVAL` | `20` | Pane-state scan interval (s) |
 | `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind |
 | `CHELA_TERMINALS_ENABLED` | `false` | Embedded ttyd terminal wall (opt-in; streams live) |
+| `CHELA_DEFAULT_CONTEXT_WINDOW` | `200000` | Window size assumed by the transcript-based context estimate (fallback only) |
 
 ---
 
@@ -118,6 +120,24 @@ export CHELA_NOTIFY_URL=https://example.com/hook                    # generic JS
 Transport is auto-detected from the URL; it's edge-triggered (one ping per
 entry into `waiting`, not per tick). Pair it with ntfy on your phone for a
 push-to-pocket "your agent needs you" alert.
+
+---
+
+## Context & rate-limit tracking
+
+The dashboard shows each agent's **context-window usage** and the account-wide
+**5h / 7d rate-limit** pills. Those numbers live only in Claude Code's statusLine
+payload (they aren't in the transcript), so chela ships a tiny statusLine hook
+that caches the payload to `$CHELA_DIR/context/<window>.json`:
+
+```bash
+chela install-statusline           # prints the snippet to add to settings.json
+chela install-statusline --write   # writes it for you (won't clobber an existing one)
+```
+
+It's optional. Without it, the context bar falls back to a coarser estimate
+derived from the agent's transcript (no rate-limit pills, and the window size is
+a guess — see `CHELA_DEFAULT_CONTEXT_WINDOW`). Install the hook for exact numbers.
 
 ---
 
