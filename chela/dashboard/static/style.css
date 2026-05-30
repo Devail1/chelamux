@@ -1715,10 +1715,12 @@ input[type="text"]:focus, textarea:focus, select:focus {
     /* The persistent v2 bar replaces the old collapsible keybar on phones. */
     #term-bar { display: none !important; }
 
-    /* The bottom keybar already covers PgUp/PgDn/scroll/Esc/^C, so drop the
-       duplicates from every pane header on phones. Maximize is meaningless in
-       the forced single-pane view too — hide it. Keep only kill (✕). */
-    .gs-keys > button, .gs-keys-sep, .gs-max-btn { display: none; }
+    /* The whole pane header is redundant on phones: the agent name + status dot
+       live in the switcher pills, the keys are in the bottom keybar, and wall-only
+       controls (drag/min/max) don't apply to the forced single pane. Hide it and
+       give the rows back to the terminal. (Kill/rename move out of reach on mobile
+       — switch agents via the pills.) */
+    .gs-head { display: none; }
 
     .term-keybar {
         display: flex;
