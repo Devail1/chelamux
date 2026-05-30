@@ -101,7 +101,7 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 | `CHELA_NOTIFY_CHAT_ID` | — | Telegram chat id (if not in the URL) |
 | `CHELA_NOTIFY_INTERVAL` | `20` | Pane-state scan interval (s) |
 | `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind |
-| `CHELA_TERMINALS_ENABLED` | `false` | Embedded ttyd terminal wall (in progress) |
+| `CHELA_TERMINALS_ENABLED` | `false` | Embedded ttyd terminal wall (opt-in; streams live) |
 
 ---
 
@@ -149,8 +149,9 @@ panes. A QR of the connect string makes this one tap.
 `127.0.0.1:5001` with tabs for **agents** (liveness from `claude agents --json`:
 alive / waiting / offline), **schedules**, the **dispatcher**, and a **Kanban**
 of runs. Liveness is derived live from the native session status — no heartbeat
-daemon. An embedded ttyd **terminal wall** (a ccmux-style multi-pane view) is in
-progress and currently off (`CHELA_TERMINALS_ENABLED=false`).
+daemon. An embedded ttyd **terminal wall** (a ccmux-style multi-pane view that
+streams the live panes) is opt-in — off by default; enable it with
+`CHELA_TERMINALS_ENABLED=true`.
 
 ### HTTP API (selected)
 

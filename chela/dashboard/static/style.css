@@ -422,6 +422,39 @@ body.term-dragging { overflow: hidden; }
     letter-spacing: 0.5px;
 }
 
+/* ---- Teaching empty-states (WORK views) ----
+   Shown when Schedules / Dispatch / Kanban have nothing yet. They explain what
+   the feature does (orchestration is chela's differentiator) and offer a CTA,
+   so an empty WORK section reads as "capability you haven't used" rather than
+   "this is just a terminal viewer". */
+.work-empty {
+    max-width: 560px;
+    margin: 32px auto;
+    padding: 28px 26px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    text-align: center;
+}
+.work-empty-icon { font-size: 30px; line-height: 1; margin-bottom: 12px; }
+.work-empty-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+.work-empty-body { font-size: 12.5px; line-height: 1.7; color: var(--text-dim); margin-bottom: 18px; text-align: left; }
+.work-empty-body code {
+    background: rgba(110, 118, 129, 0.18);
+    padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
+}
+.work-empty-cta {
+    display: inline-block; cursor: pointer;
+    background: #1f6feb; border: 1px solid #1f6feb; color: #fff;
+    padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500;
+}
+.work-empty-cta:hover { background: #388bfd; }
+.work-empty-hint { font-size: 11px; color: var(--text-dim); margin-top: 12px; }
+.work-empty-hint code {
+    background: rgba(110, 118, 129, 0.18);
+    padding: 1px 5px; border-radius: 4px;
+}
+
 /* ---- Agent grid ---- */
 
 .agent-grid {
