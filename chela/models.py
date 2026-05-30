@@ -11,7 +11,7 @@ def _from_dict(cls, d: dict):
 
 @dataclass
 class AgentMessage:
-    """A message routed from one agent to another (via tmux or a mailbox)."""
+    """A message routed from one agent to another (via tmux)."""
     from_agent: str
     to_agent: str
     type: str          # message | alert | request | decision
