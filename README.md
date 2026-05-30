@@ -9,11 +9,10 @@ chela runs as a small daemon over a single tmux session. It does two things:
 - **Dispatches** work — turn a markdown `TODO.md` (or GitHub issues) into one
   **git worktree per task**, spawn an agent in it, and let it **open a PR**.
 
-Where [clawmux](https://github.com/zeulewan/clawmux) and
-[ccmux](https://github.com/skzv/ccmux) help you *talk to and supervise* agents,
-chela is for **putting them to work** and walking away. You watch them however
-you already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
-optional web dashboard (think *ccmux, weblized*).
+Most tmux + Claude Code tools help you *talk to and supervise* agents; chela is
+for **putting them to work** and walking away. You watch them however you
+already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the optional
+web dashboard.
 
 > Status: early. Core (scheduler + dispatcher + messaging) is solid and tested;
 > the dashboard is an optional extra; the embedded terminal **wall** streams
@@ -149,8 +148,8 @@ panes. A QR of the connect string makes this one tap.
 `127.0.0.1:5001` with tabs for **agents** (liveness from `claude agents --json`:
 alive / waiting / offline), **schedules**, the **dispatcher**, and a **Kanban**
 of runs. Liveness is derived live from the native session status — no heartbeat
-daemon. An embedded ttyd **terminal wall** (a ccmux-style multi-pane view that
-streams the live panes) is opt-in — off by default; enable it with
+daemon. An embedded ttyd **terminal wall** (a multi-pane view that streams the
+live panes) is opt-in — off by default; enable it with
 `CHELA_TERMINALS_ENABLED=true`.
 
 ### HTTP API (selected)
@@ -185,9 +184,7 @@ streams the live panes) is opt-in — off by default; enable it with
 
 The work-item dispatcher is an adaptation of OpenAI's **Symphony** pattern
 (task-list → isolated git worktree → autonomous agent → PR) — chela does not
-claim novelty for that shape. The needs-input notification idea is borrowed from
-**[ccmux](https://github.com/skzv/ccmux)**; the positioning contrast is with
-ccmux and **[clawmux](https://github.com/zeulewan/clawmux)**.
+claim novelty for that shape.
 
 ## License
 
