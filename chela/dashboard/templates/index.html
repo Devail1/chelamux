@@ -9,265 +9,248 @@
 </head>
 <body>
 
-<!-- Header bar -->
-<div class="header">
-    <h1>chela</h1>
-    <div class="stat-pill">
-        <span class="label">Agents </span>
-        <span class="value" id="hdr-agents">-/-</span>
-    </div>
-    <div class="stat-pill">
-        <span class="label">Schedules </span>
-        <span class="value" id="hdr-schedules">-</span>
-    </div>
-    <div class="stat-pill" id="hdr-next-pill">
-        <span class="label">Next run </span>
-        <span class="value ts" id="hdr-next">-</span>
-    </div>
-    <div class="stat-pill" id="hdr-ratelimit-pill" style="display:none">
-        <span class="label">5h RL </span>
+<div class="app">
+
+  <!-- Top bar: brand · usage pills · actions -->
+  <header class="topbar">
+    <div class="brand">chela</div>
+
+    <div class="topbar-pills">
+      <div class="stat-pill" id="hdr-ratelimit-pill" style="display:none">
+        <span class="label">5h</span>
         <span class="value" id="hdr-ratelimit">-</span>
-    </div>
-    <div class="stat-pill" id="hdr-weekly-rl-pill" style="display:none">
-        <span class="label">7d RL </span>
+      </div>
+      <div class="stat-pill" id="hdr-weekly-rl-pill" style="display:none">
+        <span class="label">7d</span>
         <span class="value" id="hdr-weekly-rl">-</span>
+      </div>
     </div>
-    <div class="stat-pill" style="margin-left:auto">
-        <span class="label">Updated </span>
-        <span class="value ts" id="hdr-updated">-</span>
+
+    <div class="topbar-actions">
+      <span class="stat-pill" id="hdr-next-pill" title="Soonest scheduled run">
+        <span class="label">Next</span>
+        <span class="value ts" id="hdr-next">-</span>
+      </span>
+      <span class="topbar-updated">upd <span class="ts" id="hdr-updated">-</span></span>
+      <button class="icon-btn" id="btn-new" title="New…" onclick="openNewMenu(event)">+</button>
+      <button class="icon-btn" id="btn-bell" title="Needs-input notifications" onclick="toggleSettings('notify')">🔔</button>
+      <button class="icon-btn" id="btn-gear" title="Settings" onclick="toggleSettings()">⚙</button>
     </div>
-</div>
+  </header>
 
-<!-- Tab navigation -->
-<div class="tabs">
-    <div class="tab active" data-tab="agents">Agents</div>
-    <div class="tab" data-tab="schedules">Schedules</div>
-    <div class="tab" data-tab="dispatcher">Dispatcher</div>
-    <div class="tab" data-tab="kanban">Kanban</div>
-    {% if terminals_enabled %}
-    <div class="tab" data-tab="terminals" style="margin-left:auto">Terminals</div>
-    {% endif %}
-</div>
+  <!-- Left sidebar: AGENTS + WORK -->
+  <aside class="sidebar">
 
-<!-- Content panels -->
-<div class="content">
+    <section class="side-section">
+      <div class="side-head" onclick="selectView('agents')" title="Show all agents">
+        <span class="side-title">Agents</span>
+        <span class="side-count" id="hdr-agents">-/-</span>
+        <button class="side-add" title="New window" onclick="event.stopPropagation(); openNewMenu(event)">+</button>
+      </div>
+      <div class="agent-filter" id="agent-filter">
+        <button data-filter="all" class="active" onclick="setAgentFilter('all')">All</button>
+        <button data-filter="claude" onclick="setAgentFilter('claude')">Claude</button>
+        <button data-filter="shell" onclick="setAgentFilter('shell')">Shell</button>
+        <button data-filter="server" onclick="setAgentFilter('server')">Server</button>
+      </div>
+      <div class="side-list" id="sidebar-agents">
+        <div class="side-empty">No agents</div>
+      </div>
+    </section>
 
-    <!-- Agents panel -->
+    <section class="side-section">
+      <div class="side-head"><span class="side-title">Work</span></div>
+      <div class="side-list">
+        <div class="side-item" data-view="dispatcher" onclick="selectView('dispatcher')">
+          <span class="side-item-label">Dispatch</span>
+          <span class="side-badges">
+            <span class="badge" id="side-runs-count" title="Active runs">0</span>
+            <span class="badge badge-pr" id="side-pr-count" title="Open PRs">0 PR</span>
+          </span>
+        </div>
+        <div class="side-item" data-view="kanban" onclick="selectView('kanban')">
+          <span class="side-item-label">Kanban</span>
+        </div>
+        <div class="side-item" data-view="schedules" onclick="selectView('schedules')">
+          <span class="side-item-label">Schedules</span>
+          <span class="side-badges"><span class="badge" id="hdr-schedules">-</span></span>
+        </div>
+      </div>
+    </section>
+
+  </aside>
+
+  <!-- Main canvas: context-driven by sidebar selection -->
+  <main class="canvas" id="canvas">
+
+    <!-- Agents grid (default view) -->
     <div class="panel active" id="panel-agents">
-        <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center;">
-            <input type="text" id="broadcast-input" placeholder="Broadcast to all agents..." style="flex:1;"
-                   onkeydown="if(event.key==='Enter')doBroadcast()">
-            <button class="btn-accent" onclick="doBroadcast()">Broadcast</button>
-            <button onclick="doRediscover()">Rediscover</button>
-        </div>
-        <div class="agent-grid" id="agent-grid"></div>
+      <div class="canvas-toolbar">
+        <input type="text" id="broadcast-input" placeholder="Broadcast to all agents…"
+               onkeydown="if(event.key==='Enter')doBroadcast()">
+        <button class="btn-accent" onclick="doBroadcast()">Broadcast</button>
+        <button onclick="doRediscover()">Rediscover</button>
+      </div>
+      <div class="agent-grid" id="agent-grid"></div>
     </div>
 
-    <!-- Schedules panel -->
+    <!-- Agent detail (focused single agent) -->
+    <div class="panel" id="panel-agent-detail">
+      <div id="agent-detail"></div>
+    </div>
+
+    <!-- Schedules -->
     <div class="panel" id="panel-schedules">
-        <div style="margin-bottom:12px">
-            <button class="btn-accent" onclick="showAddSchedule()">+ Add Task</button>
+      <div class="canvas-toolbar">
+        <button class="btn-accent" onclick="showAddSchedule()">+ Add Task</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>Agent</th><th>Schedule</th><th>Prompt</th>
+                <th>Last Run</th><th>Next Run</th><th>Status</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="sched-tbody"></tbody>
+          </table>
         </div>
-        <div class="card">
-            <div class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Agent</th>
-                        <th>Schedule</th>
-                        <th>Prompt</th>
-                        <th>Last Run</th>
-                        <th>Next Run</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody id="sched-tbody"></tbody>
-            </table>
-            </div>
-            <div id="sched-empty" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">No scheduled tasks</div>
-        </div>
+        <div id="sched-empty" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">No scheduled tasks</div>
+      </div>
 
-        <div style="margin:22px 0 8px; color:var(--text-dim); font-size:12px; font-weight:600;">
-            System cron <span style="font-weight:400;">— read-only, from <code>crontab -l</code></span>
+      <div style="margin:22px 0 8px; color:var(--text-dim); font-size:12px; font-weight:600;">
+        System cron <span style="font-weight:400;">— read-only, from <code>crontab -l</code></span>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Schedule</th><th>Project</th><th>Command</th><th>Next Run</th></tr>
+            </thead>
+            <tbody id="cron-tbody"></tbody>
+          </table>
         </div>
-        <div class="card">
-            <div class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Schedule</th>
-                        <th>Project</th>
-                        <th>Command</th>
-                        <th>Next Run</th>
-                    </tr>
-                </thead>
-                <tbody id="cron-tbody"></tbody>
-            </table>
-            </div>
-            <div id="cron-empty" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">No cron jobs</div>
-        </div>
+        <div id="cron-empty" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">No cron jobs</div>
+      </div>
     </div>
 
-    <!-- Dispatcher panel -->
+    <!-- Dispatcher -->
     <div class="panel" id="panel-dispatcher">
-        <div id="dispatcher-list"></div>
-        <div id="dispatcher-empty" class="card" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">
-            <div style="margin-bottom:8px; font-weight:600;">No dispatcher workflows configured</div>
-            <div style="font-size:11px; line-height:1.6;">
-                Set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of WORKFLOW.md paths
-                and restart the daemon. Same convention chela's run loop uses.
-            </div>
+      <div id="dispatcher-empty" class="dispatcher-empty" style="display:none;">
+        <div style="margin-bottom:8px; font-weight:600;">No dispatcher workflows configured</div>
+        <div style="font-size:11px; line-height:1.6;">
+          Set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of WORKFLOW.md paths
+          and restart the daemon. Same convention chela's run loop uses.
         </div>
+      </div>
+      <div id="dispatcher-list"></div>
     </div>
 
-    <!-- Kanban panel -->
+    <!-- Kanban -->
     <div class="panel" id="panel-kanban">
-        <div class="kanban-filters" id="kanban-filters"></div>
-        <!-- Mobile-only column selector: only one column fits on phone widths,
-             so this dropdown picks which of the six columns (Backlog + five
-             status columns) is visible. -->
-        <select class="kanban-col-select" id="kanban-col-select"
-                onchange="setKanbanCol(this.value)" aria-label="Kanban column"></select>
-        <div class="kanban-board" id="kanban-board"></div>
-        <div id="kanban-empty" class="card" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">
-            <div style="margin-bottom:8px; font-weight:600;">No dispatcher workflows configured</div>
-            <div style="font-size:11px; line-height:1.6;">
-                Set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of WORKFLOW.md paths
-                and restart the daemon. The Kanban board aggregates tasks/runs across all configured workflows.
-            </div>
+      <div class="kanban-filters" id="kanban-filters"></div>
+      <!-- Mobile-only column selector (one column fits on phone widths). -->
+      <select class="kanban-col-select" id="kanban-col-select"
+              onchange="setKanbanCol(this.value)" aria-label="Kanban column"></select>
+      <div class="kanban-board" id="kanban-board"></div>
+      <div id="kanban-empty" class="card" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">
+        <div style="margin-bottom:8px; font-weight:600;">No dispatcher workflows configured</div>
+        <div style="font-size:11px; line-height:1.6;">
+          Set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of WORKFLOW.md paths
+          and restart the daemon. The Kanban board aggregates across all configured workflows.
         </div>
+      </div>
     </div>
 
-    <!-- Terminals panel -->
     {% if terminals_enabled %}
+    <!-- Terminals wall (flagship view mode; ttyd serving still deferred) -->
     <div class="panel" id="panel-terminals">
-        <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
-            <button id="term-mode-single" onclick="setTermMode('single')">Single</button>
-            <button id="term-mode-wall" onclick="setTermMode('wall')">Wall</button>
-            <select id="term-agent" onchange="renderTerminals()" style="margin-left:8px;"></select>
-            <span id="term-wall-grid" style="display:none; gap:6px; align-items:center; margin-left:8px;">
-                <span style="color:var(--text-dim); font-size:11px;">Grid:</span>
-                <span id="term-grid-presets" style="display:inline-flex; gap:4px; align-items:center;"></span>
-                <button id="term-lock-btn" class="gl-btn" onclick="toggleWallLock(this)"
-                        title="Lock layout — drag swaps panes, resize off" aria-label="Lock layout"
-                        style="margin-left:6px;"></button>
-            </span>
-            <button id="term-new-shell" onclick="spawnShell(this)" title="Spawn a new plain-shell window" style="margin-left:auto; display:none;">+ New shell</button>
+      <div class="term-toolbar" id="term-toolbar">
+        <div class="term-modes">
+          <button class="term-mode-btn active" data-mode="wall" onclick="setTermMode('wall')">Wall</button>
+          <button class="term-mode-btn" data-mode="single" onclick="setTermMode('single')">Single</button>
         </div>
-        <div id="term-stage"></div>
-        <div id="term-min-dock" style="display:none;"></div>
-        <div id="term-bar" class="kb-collapsed" style="display:none;">
-            <button class="kb-toggle" id="kb-toggle" onclick="kbToggle()"
-                    aria-expanded="false" aria-controls="kb-body" title="Show/hide on-screen keys">
-                <span>&#9000; Keys</span>
-                <span class="kb-chevron" aria-hidden="true">&#9650;</span>
-            </button>
-            <div class="kb-body" id="kb-body">
-                <div class="kb-row">
-                    <div class="kb-group" aria-label="Special keys">
-                        <button onclick="termKey('Escape')" title="Escape">Esc</button>
-                        <button onclick="termKey('Tab')" title="Tab">Tab</button>
-                        <button onclick="termKey('Enter')" title="Enter" aria-label="Enter">&#9166;</button>
-                    </div>
-                    <div class="kb-group" aria-label="Control keys">
-                        <button onclick="termKey('C-c')" title="Ctrl-C (interrupt)">^C</button>
-                        <button onclick="termKey('C-d')" title="Ctrl-D (EOF)">^D</button>
-                        <button onclick="termKey('C-z')" title="Ctrl-Z (suspend)">^Z</button>
-                        <button onclick="termKey('C-r')" title="Ctrl-R (reverse search)">^R</button>
-                        <button onclick="termKey('C-l')" title="Ctrl-L (clear)">^L</button>
-                        <button onclick="termKey('C-b')" title="Ctrl-B (tmux prefix)">^B</button>
-                    </div>
-                    <div class="kb-group" aria-label="Scrollback">
-                        <button id="term-scroll-btn" onclick="termScrollToggle()">&#10514; Scroll</button>
-                    </div>
-                </div>
-                <div class="kb-row">
-                    <div class="kb-dpad" aria-label="Arrow keys">
-                        <button class="kb-up" onclick="termKey('Up')" title="Up" aria-label="Up">&#8593;</button>
-                        <button class="kb-left" onclick="termKey('Left')" title="Left" aria-label="Left">&#8592;</button>
-                        <button class="kb-down" onclick="termKey('Down')" title="Down" aria-label="Down">&#8595;</button>
-                        <button class="kb-right" onclick="termKey('Right')" title="Right" aria-label="Right">&#8594;</button>
-                    </div>
-                    <div class="kb-nav" aria-label="Navigation keys">
-                        <button onclick="termKey('Home')" title="Home">Home</button>
-                        <button onclick="termKey('PageUp')" title="Page Up">PgUp</button>
-                        <button onclick="termKey('End')" title="End">End</button>
-                        <button onclick="termKey('PageDown')" title="Page Down">PgDn</button>
-                    </div>
-                </div>
-            </div>
-        </div>
+        <select id="term-agent-select" onchange="onTermAgentChange(this.value)"></select>
+        <div class="term-grid-presets" id="term-grid-presets"></div>
+        <button id="term-lock-btn" onclick="toggleWallLock()" title="Lock / unlock layout">🔓</button>
+        <button id="term-new-btn" class="btn-accent" onclick="spawnShell()">+ New shell</button>
+      </div>
+      <div id="term-wall" class="term-wall"></div>
+      <div id="term-single" class="term-single" style="display:none;"></div>
     </div>
     {% endif %}
 
+  </main>
+
 </div>
 
-<!-- Send message modal -->
-<div class="modal-overlay" id="modal-msg">
-    <div class="modal">
-        <h3>Send Message to <span id="modal-msg-agent"></span></h3>
-        <div class="form-row">
-            <label>Message</label>
-            <textarea id="modal-msg-text" placeholder="Type message..."
-                      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();doSendMsg()}"></textarea>
-        </div>
-        <div class="form-actions">
-            <button onclick="closeModal('modal-msg')">Cancel</button>
-            <button class="btn-accent" onclick="doSendMsg()">Send</button>
-        </div>
-    </div>
+<!-- Settings drawer (gear / bell) -->
+<div class="drawer-scrim" id="drawer-scrim" onclick="toggleSettings()"></div>
+<aside class="drawer" id="settings-drawer">
+  <div class="drawer-head">
+    <span>Settings</span>
+    <button class="icon-btn" onclick="toggleSettings()">✕</button>
+  </div>
+  <div class="drawer-body" id="drawer-body">
+    <!-- populated by nav.js renderSettings() -->
+  </div>
+</aside>
+
+<!-- "+ new" popover -->
+<div class="popover" id="new-menu" style="display:none;">
+  <div class="popover-item" onclick="hideNewMenu(); showAddSchedule()">Scheduled task</div>
+  <div class="popover-item" id="new-shell-item" onclick="hideNewMenu(); newShellWindow()">Shell window</div>
 </div>
 
-<!-- Add schedule modal -->
+<!-- Add Schedule Modal -->
 <div class="modal-overlay" id="modal-sched">
-    <div class="modal">
-        <h3>Add Scheduled Task</h3>
-        <div class="form-row">
-            <label>Agent</label>
-            <select id="sched-agent">
-                <!-- Populated dynamically from /api/agents -->
-            </select>
-        </div>
-        <div class="form-row">
-            <label>Type</label>
-            <select id="sched-type">
-                <option value="interval">Interval (e.g. 15m, 2h, 1d)</option>
-                <option value="cron">Cron (e.g. 0 */8 * * *)</option>
-                <option value="once">Once (ISO timestamp)</option>
-            </select>
-        </div>
-        <div class="form-row">
-            <label>Value</label>
-            <input type="text" id="sched-value" placeholder="e.g. 8h">
-        </div>
-        <div class="form-row">
-            <label>Prompt</label>
-            <textarea id="sched-prompt" placeholder="Message to send to agent..."></textarea>
-        </div>
-        <div class="form-actions">
-            <button onclick="closeModal('modal-sched')">Cancel</button>
-            <button class="btn-accent" onclick="doAddSchedule()">Add</button>
-        </div>
+  <div class="modal">
+    <h3>Add Scheduled Task</h3>
+    <label>Agent</label>
+    <select id="sched-agent"></select>
+    <label>Schedule type</label>
+    <select id="sched-type" onchange="onSchedTypeChange()">
+      <option value="interval">Interval</option>
+      <option value="cron">Cron</option>
+      <option value="once">Once</option>
+    </select>
+    <label id="sched-value-label">Interval (e.g. 30s, 5m, 1h)</label>
+    <input type="text" id="sched-value" placeholder="5m">
+    <label>Prompt</label>
+    <textarea id="sched-prompt" rows="3"></textarea>
+    <div class="modal-actions">
+      <button onclick="closeModal('modal-sched')">Cancel</button>
+      <button class="btn-accent" onclick="doAddSchedule()">Add</button>
     </div>
+  </div>
 </div>
 
-<div class="footer">chela &middot; auto-refreshes every 30s</div>
+<!-- Send Message Modal -->
+<div class="modal-overlay" id="modal-msg">
+  <div class="modal">
+    <h3>Send Message to <span id="modal-msg-agent"></span></h3>
+    <textarea id="modal-msg-text" rows="4" placeholder="Message…"></textarea>
+    <div class="modal-actions">
+      <button onclick="closeModal('modal-msg')">Cancel</button>
+      <button class="btn-accent" onclick="doSendMsg()">Send</button>
+    </div>
+  </div>
+</div>
 
-<script src="static/vendor/gridstack-all.js"></script>
 {% if terminals_enabled %}<script>window.TERMINALS_ENABLED = true;</script>{% endif %}
-<!-- app.js was split into ordered modules (classic scripts → shared global scope,
-     so inline onclick handlers + cross-file calls keep working; no build step).
-     Load order = dependency order; main.js (bootstrap) loads last. -->
+<script src="static/vendor/gridstack-all.js"></script>
+<!-- Ordered modules (classic scripts → shared global scope; no build step).
+     util first (globals), feature renderers, nav (sidebar+canvas controller),
+     sse, then main (bootstrap) last. -->
 <script src="static/js/util.js"></script>
-<script src="static/js/tabs.js"></script>
 <script src="static/js/header.js"></script>
 <script src="static/js/agents.js"></script>
 <script src="static/js/schedules.js"></script>
 <script src="static/js/dispatcher.js"></script>
 <script src="static/js/kanban.js"></script>
 {% if terminals_enabled %}<script src="static/js/terminals.js"></script>{% endif %}
+<script src="static/js/nav.js"></script>
 <script src="static/js/sse.js"></script>
 <script src="static/js/main.js"></script>
 </body>
