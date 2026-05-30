@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>chela — Mission Control</title>
     <link rel="icon" href="static/img/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="static/vendor/gridstack.min.css">
@@ -14,6 +14,9 @@
 
   <!-- Top bar: brand · usage pills · actions -->
   <header class="topbar">
+    <button class="icon-btn sidebar-toggle" id="btn-menu" title="Menu" aria-label="Open menu" onclick="toggleSidebar()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
     <div class="brand"><img src="static/img/claw-mark.svg" class="brand-mark" alt=""><span>chela</span></div>
 
     <div class="topbar-pills">
@@ -221,6 +224,9 @@
             </span>
             <button id="term-new-shell" onclick="spawnShell(this)" title="Spawn a new plain-shell window" style="margin-left:auto;">+ New shell</button>
         </div>
+        <!-- Mobile-only agent switcher: a scrollable pill strip that replaces the
+             dropdown on phones (single mode). Populated by renderMobileSwitcher(). -->
+        <div id="term-switcher" class="term-switcher"></div>
         <div id="term-stage"></div>
         <div id="term-min-dock" style="display:none;"></div>
         <div id="term-bar" class="kb-collapsed" style="display:none;">
@@ -268,6 +274,9 @@
   </main>
 
 </div>
+
+<!-- Mobile sidebar scrim (off-canvas drawer backdrop) -->
+<div class="drawer-scrim" id="sidebar-scrim" onclick="closeSidebar()"></div>
 
 <!-- Settings drawer (gear / bell) -->
 <div class="drawer-scrim" id="drawer-scrim" onclick="toggleSettings()"></div>
