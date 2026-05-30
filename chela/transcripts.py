@@ -193,6 +193,41 @@ def _resolve_agent_transcript(agent_name: str) -> Path | None:
     return transcripts[0] if transcripts else None
 
 
+def latest_context_usage(path: Path) -> dict | None:
+    """Context-window token usage from the most recent assistant message.
+
+    Returns ``{"used_tokens": int, "model": str | None}`` where ``used_tokens``
+    is ``input + cache_read + cache_creation`` of the last assistant turn — i.e.
+    everything resident in the context window on that turn. None if no assistant
+    message with a usage block is found. This is the zero-setup fallback for the
+    context bar; the statusLine payload (when installed) is authoritative and
+    also carries the exact window size, which the transcript does not record.
+    """
+    rec = latest_record(
+        path,
+        lambda o: o.get("type") == "assistant"
+        and isinstance(o.get("message"), dict)
+        and isinstance(o["message"].get("usage"), dict),
+    )
+    if not rec:
+        return None
+    u = rec["message"]["usage"]
+    used = (
+        (u.get("input_tokens") or 0)
+        + (u.get("cache_read_input_tokens") or 0)
+        + (u.get("cache_creation_input_tokens") or 0)
+    )
+    return {"used_tokens": used, "model": rec["message"].get("model")}
+
+
+def agent_context_from_transcript(agent_name: str) -> dict | None:
+    """`latest_context_usage` for an agent, resolving its active transcript."""
+    path = _resolve_agent_transcript(agent_name)
+    if path is None:
+        return None
+    return latest_context_usage(path)
+
+
 def agent_transcript_summary(agent_name: str) -> dict:
     """Return `{"recap": str|None, "recap_ts": str|None, "pr": dict|None}`.
 

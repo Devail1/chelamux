@@ -132,7 +132,17 @@
             <tbody id="sched-tbody"></tbody>
           </table>
         </div>
-        <div id="sched-empty" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">No scheduled tasks</div>
+        <div id="sched-empty" class="work-empty" style="display:none;">
+          <div class="work-empty-icon">◷</div>
+          <div class="work-empty-title">Put an agent on a schedule</div>
+          <div class="work-empty-body">
+            A schedule pokes an agent on a recurring cadence — every <code>30m</code>, a
+            <code>cron</code> expression, or <code>once</code> at a set time. When it fires,
+            chela types your prompt into that agent's tmux window. Use it to let a researcher
+            refresh itself hourly, or run a risk check every 20&nbsp;minutes — no human in the loop.
+          </div>
+          <span class="work-empty-cta" onclick="showAddSchedule()">Schedule an agent →</span>
+        </div>
       </div>
 
       <div style="margin:22px 0 8px; color:var(--text-dim); font-size:12px; font-weight:600;">
@@ -153,11 +163,19 @@
 
     <!-- Dispatcher -->
     <div class="panel" id="panel-dispatcher">
-      <div id="dispatcher-empty" class="dispatcher-empty" style="display:none;">
-        <div style="margin-bottom:8px; font-weight:600;">No dispatcher workflows configured</div>
-        <div style="font-size:11px; line-height:1.6;">
-          Set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of WORKFLOW.md paths
-          and restart the daemon. Same convention chela's run loop uses.
+      <div id="dispatcher-empty" class="work-empty" style="display:none;">
+        <div class="work-empty-icon">⇶</div>
+        <div class="work-empty-title">Turn a TODO list into pull requests</div>
+        <div class="work-empty-body">
+          Point chela at a <code>WORKFLOW.md</code> — a plain markdown checklist. For every open
+          <code>- [ ]</code> item it spins up a git worktree, launches a Claude agent in a fresh
+          tmux window with that task as its prompt, and opens a PR when the agent finishes. Merge
+          the PR and the line checks itself off on the next tick. This is what makes chela an
+          orchestrator, not just a viewer.
+        </div>
+        <div class="work-empty-hint">
+          Enable it: set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
+          <code>WORKFLOW.md</code> paths, then restart the daemon.
         </div>
       </div>
       <div id="dispatcher-list"></div>
@@ -170,17 +188,23 @@
       <select class="kanban-col-select" id="kanban-col-select"
               onchange="setKanbanCol(this.value)" aria-label="Kanban column"></select>
       <div class="kanban-board" id="kanban-board"></div>
-      <div id="kanban-empty" class="card" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">
-        <div style="margin-bottom:8px; font-weight:600;">No dispatcher workflows configured</div>
-        <div style="font-size:11px; line-height:1.6;">
-          Set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of WORKFLOW.md paths
-          and restart the daemon. The Kanban board aggregates across all configured workflows.
+      <div id="kanban-empty" class="work-empty" style="display:none;">
+        <div class="work-empty-icon">▤</div>
+        <div class="work-empty-title">A board for work in flight</div>
+        <div class="work-empty-body">
+          The Kanban board tracks dispatched work across all your <code>WORKFLOW.md</code> files —
+          open tasks, agents running now, PRs awaiting review, and done — in one place. It fills in
+          once the dispatcher has workflows to watch.
+        </div>
+        <div class="work-empty-hint">
+          Enable it: set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
+          <code>WORKFLOW.md</code> paths, then restart the daemon.
         </div>
       </div>
     </div>
 
     {% if terminals_enabled %}
-    <!-- Terminals wall (flagship view mode; ttyd serving still deferred) -->
+    <!-- Terminals wall (flagship view mode; streams live ttyd panes) -->
     <div class="panel" id="panel-terminals">
         <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
             <!-- mode toggle + single-agent picker kept (terminals.js refs them) but hidden: wall-only -->
