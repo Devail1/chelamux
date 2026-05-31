@@ -139,7 +139,7 @@ uv run chela run</pre>
 <section class="pitch wrap">
   <h2>Most tools help you <em>talk to</em> agents.</h2>
   <p>chela is for <strong>putting them to work and walking away</strong> — and watching them
-  however you already watch tmux: <code>tmux&nbsp;attach</code>, Mosh, or the optional web dashboard.</p>
+  however you already watch tmux: <code>tmux&nbsp;attach</code>, Mosh, or the live terminal-wall dashboard.</p>
 </section>
 
 <section id="features" class="wrap">
@@ -197,7 +197,7 @@ uv run chela run</pre>
   <div class="pitch" style="margin-bottom:24px">
     <h2>Install</h2>
     <p>Python ≥ 3.11, <code>tmux</code>, <code>git</code>, and the <code>claude</code> CLI.
-    The core is two small deps; the dashboard is an optional extra.</p>
+    The core is two small deps; the dashboard + live wall ship as a separate install to keep the core lean.</p>
   </div>
   <div class="install" style="margin-top:0">
     <pre><span class="c"># core</span>
@@ -205,7 +205,7 @@ git clone https://github.com/Devail1/chelamux && cd chelamux
 uv sync
 uv run chela status
 
-<span class="c"># optional web dashboard + terminal wall</span>
+<span class="c"># dashboard + live terminal wall (separate install — keeps the core lean)</span>
 uv sync --extra dashboard
 uv run chela dashboard</pre>
   </div>

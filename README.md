@@ -22,27 +22,30 @@ chela runs as a small daemon over a single tmux session. It does two things:
 
 Most tmux + Claude Code tools help you *talk to and supervise* agents; chela is
 for **putting them to work** and walking away. You watch them however you
-already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the optional
-web dashboard.
+already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
+**live terminal-wall dashboard**.
 
-> Status: early. Core (scheduler + dispatcher + messaging) is solid and tested;
-> the dashboard is an optional extra; the embedded terminal **wall** streams
-> live ttyd sessions and is opt-in (off by default — it spawns writable shells,
-> so enable it only behind loopback/Tailscale).
+> Status: early. Core (scheduler + dispatcher + messaging) is solid and tested.
+> The **dashboard + live terminal wall** is a first-class feature, shipped as a
+> separate install (`--extra dashboard`) to keep the core lean for headless use.
+> The wall streams live ttyd sessions and is opt-in (off by default — it spawns
+> writable shells, so enable it only behind loopback/Tailscale).
 
 ---
 
 ## Install
 
 chela uses [`uv`](https://docs.astral.sh/uv/). The core has two small deps
-(`croniter`, `pyyaml`); the dashboard is an **optional extra**.
+(`croniter`, `pyyaml`); the **dashboard + live terminal wall** ships as a
+**separate install** (adds Flask) — same feature, kept out of the core so a
+headless/CLI-only setup stays lean.
 
 ```bash
 git clone https://github.com/Devail1/chelamux && cd chelamux
 uv sync                       # core only — no Flask
 uv run chela status
 
-# optional web dashboard:
+# dashboard + live terminal wall (separate install — keeps the core lean):
 uv sync --extra dashboard
 ```
 
@@ -100,7 +103,7 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 | `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux |
 | `chela broadcast <text>` | Message every other live agent |
 | `chela install-statusline [--write]` | Print/install the Claude Code statusLine hook for the context bar |
-| `chela dashboard [--host] [--port]` | Launch the optional web UI (needs `[dashboard]` extra) |
+| `chela dashboard [--host] [--port]` | Launch the dashboard + live terminal wall (needs the `[dashboard]` install) |
 
 ---
 
@@ -180,8 +183,9 @@ panes. A QR of the connect string makes this one tap.
 
 ---
 
-## Dashboard (optional)
+## Dashboard & live terminal wall
 
+A first-class feature, shipped as a separate install to keep the core lean.
 `uv sync --extra dashboard && uv run chela dashboard` serves a web UI on
 `127.0.0.1:5001` with tabs for **agents** (liveness from `claude agents --json`:
 alive / waiting / offline), **schedules**, the **dispatcher**, and a **Kanban**
