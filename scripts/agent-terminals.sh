@@ -33,6 +33,15 @@ TTYD="${TTYD:-ttyd}"
 TMUX_SESSION="${CHELA_TMUX_SESSION:-chela}"
 BASE_PORT="${CHELA_TERM_BASE:-5101}"
 POLL="${CHELA_TERM_POLL:-12}"
+# Each ttyd allows this many concurrent browser connections (= tmux clients on
+# its grouped session). Generous headroom: a dropped/backgrounded tab leaves a
+# client attached until reaped (see CLIENT_IDLE_MAX), and a tight cap would lock
+# the tile out of new connections once a few stale ones pile up.
+MAX_CLIENTS="${CHELA_TERM_MAX_CLIENTS:-10}"
+# Detach a wall ttyd client after this many seconds idle, so an abandoned tab
+# can't hold a --max-clients slot forever. Scoped to webterm_* clients only — the
+# user's own interactive tmux session is never reaped.
+CLIENT_IDLE_MAX="${CHELA_TERM_CLIENT_IDLE_MAX:-3600}"
 MAP_FILE="${CHELA_DIR:-${HOME}/.chela}/agent_terminals.json"
 # Ensure the state dir exists — a fresh install has no ~/.chela yet, and the
 # atomic map write (write_map: printf > "$MAP_FILE.tmp" && mv) silently fails
@@ -104,7 +113,7 @@ spawn() {
     # prefix so the same-origin dashboard proxy (app.py term_http / term_ws) can
     # forward /term/<wid>/* verbatim with no path rewriting. The iframe src in
     # terminals.js is /term/<wid>/, which matches this base-path exactly.
-    "${TTYD}" --interface 127.0.0.1 --port "${port}" --writable --max-clients 3 \
+    "${TTYD}" --interface 127.0.0.1 --port "${port}" --writable --max-clients "${MAX_CLIENTS}" \
         --base-path "/term/${wid}" \
         --terminal-type xterm-256color \
         --client-option fontSize=14 \
@@ -117,6 +126,24 @@ spawn() {
         >/dev/null 2>&1 &
     PID_OF["$wid"]=$!
     PORT_OF["$wid"]=$port
+}
+
+# Detach wall ttyd clients idle longer than CLIENT_IDLE_MAX. ttyd keeps one tmux
+# client per WebSocket; a dropped or backgrounded browser tab can leave its client
+# attached indefinitely, consuming a --max-clients slot until the grouped session
+# refuses new connections. Filtered to WEBTERM_PREFIX sessions so the user's own
+# interactive `${TMUX_SESSION}` client is never touched.
+reap_stale_clients() {
+    local now act tty sess
+    now="$(date +%s)"
+    while IFS='|' read -r act tty sess; do
+        [[ -z "$tty" ]] && continue
+        [[ "$sess" == "${WEBTERM_PREFIX}"* ]] || continue
+        if (( now - act > CLIENT_IDLE_MAX )); then
+            tmux detach-client -t "$tty" 2>/dev/null \
+                && echo "agent-terminals: reaped idle client ${tty} (${sess}, idle $((now-act))s)"
+        fi
+    done < <(tmux list-clients -F '#{client_activity}|#{client_name}|#{client_session}' 2>/dev/null)
 }
 
 despawn() {
@@ -229,5 +256,6 @@ while :; do
     fi
 
     (( changed )) && write_map
+    reap_stale_clients      # free --max-clients slots held by abandoned tabs
     sleep "${POLL}"
 done
