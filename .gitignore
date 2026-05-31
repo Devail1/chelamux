@@ -11,6 +11,9 @@ build/
 .chela/
 *.db
 
+# Cloudflare Wrangler local cache (holds account_id; deploy-only, not source)
+.wrangler/
+
 # secrets / credentials — never commit
 .env
 .env.*

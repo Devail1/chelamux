@@ -68,6 +68,13 @@ async function api(path, opts) {
     return res.json();
 }
 
+// Modal show/hide — the .modal-overlay shows on `.active` (see style.css). The
+// Add-Schedule and Send-Message modals rely on these; the sidebar refactor
+// (4a71b9e) dropped the definitions while leaving every call site, so without
+// them those modals were dead on click.
+function showModal(id) { const el = $('#' + id); if (el) el.classList.add('active'); }
+function closeModal(id) { const el = $('#' + id); if (el) el.classList.remove('active'); }
+
 function toggleMenu(btn) {
     const menu = btn.nextElementSibling;
     const isOpen = menu.classList.contains('open');
