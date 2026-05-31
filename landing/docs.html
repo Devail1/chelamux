@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>chela — docs</title>
+<meta name="description" content="chela documentation: quickstart, concepts, scheduling agents, dispatching a TODO list into pull requests, the dashboard and terminal wall, the CLI, and configuration.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<style>
+  :root{
+    --bg:#0d1117; --surface:#161b22; --surface2:#1c2230; --border:#21262d;
+    --text:#e6edf3; --text-dim:#8b949e; --accent:#58a6ff; --green:#3fb950;
+    --yellow:#d29922; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; color:var(--text);
+    background:radial-gradient(820px 380px at 50% -40px, rgba(88,166,255,0.10), transparent 70%), var(--bg);
+    background-repeat:no-repeat;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:880px; margin:0 auto; padding-left:24px; padding-right:24px}
+  code,.mono{font-family:var(--mono)}
+
+  /* nav */
+  nav{display:flex; align-items:center; gap:10px; padding:20px 24px; max-width:880px; margin:0 auto}
+  nav .mark{height:24px}
+  nav .name{font-weight:700; font-size:17px; color:var(--accent)}
+  nav .name a{color:var(--accent)}
+  nav .spacer{flex:1}
+  nav .links a{color:var(--text-dim); font-size:14px; margin-left:18px}
+  nav .links a:hover{color:var(--text); text-decoration:none}
+
+  /* doc header */
+  .doc-hero{padding:36px 0 8px}
+  .doc-hero h1{font-size:clamp(26px,4vw,36px); margin:0 0 8px; letter-spacing:-0.02em}
+  .doc-hero p{color:var(--text-dim); font-size:16px; margin:0; max-width:640px}
+
+  /* table of contents */
+  .toc{background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px 22px; margin:28px 0 8px}
+  .toc h4{margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-dim)}
+  .toc ul{list-style:none; margin:0; padding:0; columns:2; column-gap:28px}
+  .toc li{margin:3px 0; break-inside:avoid}
+  .toc a{font-size:14px}
+
+  /* doc sections */
+  .doc-section{padding:40px 0; border-top:1px solid var(--border)}
+  .doc-section:first-of-type{border-top:0}
+  .doc-section h2{font-size:23px; margin:0 0 14px; letter-spacing:-0.01em; scroll-margin-top:18px}
+  .doc-section h3{font-size:15.5px; margin:26px 0 8px}
+  .doc-section p{color:var(--text-dim); margin:0 0 14px}
+  .doc-section strong{color:var(--text)}
+  .doc-section ul{color:var(--text-dim); margin:0 0 14px; padding-left:20px}
+  .doc-section li{margin:5px 0}
+  .doc-section code{background:var(--surface2); padding:1px 5px; border-radius:4px; font-size:12.5px; color:var(--text)}
+  .lede{color:var(--text)!important; font-size:16px}
+
+  /* code blocks */
+  pre{
+    background:#010409; border:1px solid var(--border); border-radius:10px;
+    padding:15px 18px; overflow-x:auto; font-size:13px; line-height:1.55;
+    color:var(--text); margin:0 0 18px;
+  }
+  pre code{background:none; padding:0; font-size:13px; color:var(--text)}
+  pre .c{color:var(--text-dim)}
+  pre .g{color:var(--green)}
+  pre .k{color:var(--accent)}
+
+  /* command reference (command left, description right) */
+  .cmd{
+    display:grid; grid-template-columns:320px 1fr; gap:8px 22px;
+    padding:13px 0; border-top:1px solid var(--border); align-items:baseline;
+  }
+  .cmd:first-of-type{border-top:0}
+  .cmd code{background:none; padding:0; font-family:var(--mono); font-size:13px; color:var(--text); word-break:break-word}
+  .cmd code .opt{color:var(--text-dim)}
+  .cmd p{margin:0; color:var(--text-dim); font-size:14px}
+  .cmd-group{margin-bottom:30px}
+  .cmd-group:last-child{margin-bottom:0}
+  .cmd-group h3{font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-dim); font-weight:600; margin:0 0 4px}
+
+  /* config table */
+  .cfg{width:100%; border-collapse:collapse; font-size:13.5px; margin:0 0 18px; display:block; overflow-x:auto}
+  .cfg th,.cfg td{text-align:left; padding:8px 12px; border-bottom:1px solid var(--border); vertical-align:top}
+  .cfg th{color:var(--text-dim); font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:0.04em}
+  .cfg td:first-child{font-family:var(--mono); font-size:12.5px; color:var(--text); white-space:nowrap}
+
+  .note{
+    border-left:3px solid var(--accent); background:var(--surface);
+    border-radius:0 8px 8px 0; padding:12px 16px; margin:0 0 18px;
+  }
+  .note p{margin:0; font-size:14px}
+
+  footer{text-align:center; padding:40px 24px; color:var(--text-dim); font-size:13.5px; border-top:1px solid var(--border)}
+  footer a{color:var(--text-dim); text-decoration:underline}
+
+  @media (max-width:760px){
+    .toc ul{columns:1}
+    .cmd{grid-template-columns:1fr; gap:5px; padding:14px 0}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <img class="mark" src="favicon.svg" alt="">
+  <span class="name"><a href="index.html">chela</a></span>
+  <span class="spacer"></span>
+  <span class="links">
+    <a href="index.html">Home</a>
+    <a href="index.html#features">Features</a>
+    <a href="https://github.com/Devail1/chelamux">GitHub</a>
+  </span>
+</nav>
+
+<header class="doc-hero wrap">
+  <h1>Documentation</h1>
+  <p>chela is a tiny control plane over a single tmux session: it <strong>schedules</strong>
+  long-lived agents and <strong>dispatches</strong> a TODO list into pull requests, then lets
+  you watch the whole fleet on a live terminal wall.</p>
+</header>
+
+<div class="wrap">
+  <nav class="toc" aria-label="Table of contents">
+    <h4>On this page</h4>
+    <ul>
+      <li><a href="#quickstart">Quickstart</a></li>
+      <li><a href="#concepts">Concepts</a></li>
+      <li><a href="#scheduling">Scheduling agents</a></li>
+      <li><a href="#dispatch">Dispatching work</a></li>
+      <li><a href="#dashboard">Dashboard &amp; the wall</a></li>
+      <li><a href="#cli">Command reference</a></li>
+      <li><a href="#config">Configuration</a></li>
+      <li><a href="#security">Remote access &amp; security</a></li>
+    </ul>
+  </nav>
+</div>
+
+<main class="wrap">
+
+  <!-- ───────── Quickstart ───────── -->
+  <section class="doc-section" id="quickstart">
+    <h2>Quickstart</h2>
+    <p class="lede">Five minutes from clone to a scheduled agent.</p>
+
+    <h3>1. Install</h3>
+    <p>chela uses <a href="https://docs.astral.sh/uv/">uv</a>. The core has two small deps; the
+    dashboard is an optional extra. You also need <code>tmux</code>, <code>git</code>, the
+    <code>claude</code> CLI on <code>PATH</code> (and <code>gh</code> for the dispatcher's PR flow).</p>
+    <pre><span class="c"># core</span>
+git clone https://github.com/Devail1/chelamux && cd chelamux
+uv sync
+uv run chela status
+
+<span class="c"># optional web dashboard + terminal wall</span>
+uv sync --extra dashboard
+uv run chela dashboard</pre>
+
+    <div class="note"><p><strong>Authenticate Claude once.</strong> chela never touches credentials —
+    it drives the <code>claude</code> CLI inside your tmux windows. Log in once on the machine
+    (<code>claude</code>, then <code>/login</code> — or <code>claude setup-token</code> for a
+    headless token); every agent window reuses the cached <code>~/.claude</code> credentials. The
+    whole fleet therefore runs as <strong>one Claude account</strong> and shares its 5h / 7d rate limits.</p></div>
+
+    <h3>2. Make a session, schedule an agent</h3>
+    <p>A tmux session is your fleet; each window is an agent (the window name is its display name).</p>
+    <pre><span class="c"># one tmux session whose windows are your agents</span>
+tmux new-session -d -s chela -n researcher
+
+<span class="c"># see what chela can see</span>
+uv run chela status
+
+<span class="c"># poke the agent every hour, then run the daemon</span>
+uv run chela schedule add researcher --every 1h --prompt <span class="g">"Run your research cycle."</span>
+uv run chela run</pre>
+
+    <h3>3. Dispatch a TODO list into PRs</h3>
+    <p>Drop a <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo (copy <code>examples/</code>),
+    then point chela at it. Each open <code>- [ ]</code> becomes a worktree → an agent → a PR.</p>
+    <pre>uv run chela dispatch /path/to/repo/WORKFLOW.md --once   <span class="c"># one pass</span>
+uv run chela dispatch /path/to/repo/WORKFLOW.md          <span class="c"># poll forever</span></pre>
+  </section>
+
+  <!-- ───────── Concepts ───────── -->
+  <section class="doc-section" id="concepts">
+    <h2>Concepts</h2>
+
+    <h3>tmux is the source of truth</h3>
+    <p>chela holds no separate registry of agents. Discovery is <code>tmux list-windows</code> +
+    <code>pane_current_path</code>, read live every tick — so what chela sees is exactly what's
+    running right now. A window rename keeps the same agent; nothing to re-register.</p>
+
+    <h3>One window per agent</h3>
+    <p>Each window of your session (<code>CHELA_TMUX_SESSION</code>, default <code>chela</code>) is an
+    agent. The window name is how you target it — schedules, messages, and the dashboard all key off it.</p>
+
+    <h3>Two ways to put agents to work</h3>
+    <ul>
+      <li><strong>Schedule</strong> — for <em>long-lived</em> agents with a standing role. chela types
+      a prompt into the agent's pane on an interval, a cron expression, or once at a set time. The
+      agent persists between pokes; give it a <code>CLAUDE.md</code> for stable context.</li>
+      <li><strong>Dispatch</strong> — for <em>ephemeral, one-shot</em> work. Each <code>- [ ]</code> in a
+      <code>TODO.md</code> spawns a throwaway agent in its own git worktree that implements the item,
+      opens a PR, and tears its window down. Many tasks run in parallel.</li>
+    </ul>
+
+    <h3>The wall</h3>
+    <p>The optional dashboard streams every agent's live terminal in one grid (drag, lock, maximize),
+    with a context-window bar per tile and account-wide rate-limit pills. It's opt-in
+    (<code>CHELA_TERMINALS_ENABLED=true</code>) because it exposes writable shells — keep it on loopback
+    or a tailnet. See <a href="#security">Remote access &amp; security</a>.</p>
+  </section>
+
+  <!-- ───────── Scheduling ───────── -->
+  <section class="doc-section" id="scheduling">
+    <h2>Scheduling agents</h2>
+    <p>A schedule pokes an agent's pane with a prompt on a cadence — the agent does the rest.</p>
+    <pre><span class="c"># interval: 30s / 5m / 1h / 1d</span>
+chela schedule add researcher --every 1h --prompt <span class="g">"Run your research cycle."</span>
+
+<span class="c"># cron expression</span>
+chela schedule add reporter --cron <span class="g">"0 */8 * * *"</span> --prompt <span class="g">"Post the 8-hourly summary."</span>
+
+<span class="c"># one-shot at an ISO timestamp</span>
+chela schedule add deployer --once <span class="g">"2026-06-01T09:00"</span> --prompt <span class="g">"Cut the release."</span>
+
+chela schedule list            <span class="c"># every task + its id</span>
+chela schedule remove 3        <span class="c"># delete by id</span></pre>
+
+    <h3>Standing context: the agent CLAUDE.md</h3>
+    <p>A scheduled agent wakes into whatever its working directory contains. Drop a
+    <code>CLAUDE.md</code> at the root to give it a stable role — what it is, what to do each cycle,
+    and its boundaries (see <code>examples/agent-template.md</code>). The schedule supplies the
+    recurring nudge; <code>CLAUDE.md</code> supplies the identity.</p>
+  </section>
+
+  <!-- ───────── Dispatch ───────── -->
+  <section class="doc-section" id="dispatch">
+    <h2>Dispatching work (the headline feature)</h2>
+    <p class="lede">Turn a markdown checklist into a stream of pull requests, each built by its own
+    isolated agent.</p>
+
+    <h3>TODO.md — the work list</h3>
+    <p>Every unchecked <code>- [ ]</code> bullet is a work item. Append
+    <code>&lt;!-- blocked: reason --&gt;</code> to make the dispatcher skip a line.</p>
+    <pre><span class="c">## Open</span>
+- [ ] Add a --version flag to the CLI
+- [ ] Write a docstring for the public API entry point
+- [ ] Add a unit test for the config loader <span class="c">&lt;!-- blocked: waiting on fixtures --&gt;</span></pre>
+
+    <h3>WORKFLOW.md — the config + agent brief</h3>
+    <p>A YAML front-matter block configures the dispatcher; the markdown body below it is the prompt
+    template handed to each agent (with <code>{{placeholders}}</code> like <code>{{task_title}}</code>,
+    <code>{{branch_name}}</code>, <code>{{workspace_path}}</code>). Put both files in the repo root.</p>
+    <pre><span class="k">project_key:</span> PROJ          <span class="c"># branches/windows are &lt;key&gt;-&lt;n&gt;, e.g. proj-1</span>
+
+<span class="k">tracker:</span>
+  <span class="k">kind:</span> markdown          <span class="c"># markdown TODO.md — also: gh_issues</span>
+  <span class="k">path:</span> TODO.md           <span class="c"># relative to this file</span>
+
+<span class="k">workspace:</span>
+  <span class="k">root:</span> ~/.chela/worktrees/proj   <span class="c"># where per-task worktrees go</span>
+  <span class="k">base_branch:</span> main            <span class="c"># branch worktrees fork from + PRs target</span>
+
+<span class="k">concurrency:</span>
+  <span class="k">max:</span> 1                  <span class="c"># tasks in flight at once</span>
+
+<span class="k">agent:</span>
+  <span class="k">cmd:</span> claude --permission-mode auto   <span class="c"># or: bypassPermissions on a trusted repo</span>
+  <span class="k">startup_delay_seconds:</span> 4
+  <span class="k">ready_timeout_seconds:</span> 60
+
+<span class="k">hooks:</span>                       <span class="c"># all optional, run in the worktree</span>
+  <span class="c"># after_create: seed .claude/settings.local.json (least-privilege perms)</span>
+  <span class="c"># before_run:   uv sync --quiet || true   (lockfile sync / codegen)</span>
+  <span class="c"># after_done:   runs in the repo when the PR merges (e.g. a deploy)</span></pre>
+
+    <h3>The lifecycle</h3>
+    <p>Each task is keyed by a stable SHA of its source line (idempotent — a task is never picked up
+    twice). For each open item the dispatcher:</p>
+    <ul>
+      <li>creates a git worktree on branch <code>&lt;project_key&gt;-&lt;n&gt;</code>, forked from
+      <code>base_branch</code>;</li>
+      <li>runs the optional <code>after_create</code> / <code>before_run</code> hooks, then spawns an
+      agent in that worktree with your prompt body;</li>
+      <li>the agent implements the task, strikes its <code>- [ ]</code> → <code>- [x]</code>
+      <em>on its own branch</em>, pushes, and opens a PR;</li>
+      <li>the agent's last step is <code>chela task-finished &lt;task_id&gt;</code>, which marks the run
+      <code>awaiting_review</code>, records the PR URL, and kills its window;</li>
+      <li>when you merge, the struck line lands on <code>base_branch</code>, the item disappears, and the
+      run flips to <code>done</code> on the next tick.</li>
+    </ul>
+    <div class="note"><p>The dispatcher shape (task-list → isolated worktree → autonomous agent → PR)
+    is an adaptation of OpenAI's <strong>Symphony</strong> pattern.</p></div>
+  </section>
+
+  <!-- ───────── Dashboard ───────── -->
+  <section class="doc-section" id="dashboard">
+    <h2>Dashboard &amp; the wall</h2>
+    <pre>uv sync --extra dashboard
+uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span></pre>
+    <p>The web UI has tabs for <strong>agents</strong> (live liveness — alive / waiting / offline),
+    <strong>schedules</strong>, the <strong>dispatcher</strong>, and a <strong>Kanban</strong> of runs.
+    Liveness is derived from the native session status — no heartbeat daemon.</p>
+    <p>The embedded <strong>terminal wall</strong> streams the live ttyd panes in a grid. It's
+    <strong>off by default</strong> because it serves writable shells; enable it explicitly:</p>
+    <pre><span class="k">CHELA_TERMINALS_ENABLED</span>=true uv run chela dashboard</pre>
+
+    <h3>Context &amp; rate-limit pills</h3>
+    <p>Exact context-window usage and the 5h / 7d rate-limit pills come from Claude Code's statusLine
+    payload, which chela caches via a tiny hook. Install it once for precise numbers (without it, the
+    context bar falls back to a coarse transcript estimate):</p>
+    <pre>chela install-statusline           <span class="c"># prints the snippet</span>
+chela install-statusline --write   <span class="c"># writes it (won't clobber an existing one)</span></pre>
+  </section>
+
+  <!-- ───────── CLI ───────── -->
+  <section class="doc-section" id="cli">
+    <h2>Command reference</h2>
+    <p>One CLI, <code>chela</code>. Every command targets agents by their tmux window name.</p>
+
+    <div class="cmd-group">
+      <h3>Core</h3>
+      <div class="cmd"><code>chela status</code><p>List the agent windows discovered in your tmux session — the source of truth.</p></div>
+      <div class="cmd"><code>chela run</code><p>Run the daemon: scheduler tick + dispatcher + needs-input notify. Leave it running.</p></div>
+      <div class="cmd"><code>chela dashboard <span class="opt">[--host] [--port]</span></code><p>Launch the optional web dashboard + wall (needs the <code>dashboard</code> extra). Binds <code>127.0.0.1:5001</code>.</p></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Scheduling</h3>
+      <div class="cmd"><code>chela schedule add <span class="opt">&lt;agent&gt; --prompt … (--every|--cron|--once)</span></code><p>Schedule a prompt — an interval (<code>30s</code>/<code>5m</code>/<code>1h</code>/<code>1d</code>), a cron expression, or a one-shot ISO timestamp.</p></div>
+      <div class="cmd"><code>chela schedule list</code><p>List every scheduled task with its id.</p></div>
+      <div class="cmd"><code>chela schedule remove <span class="opt">&lt;id&gt;</span></code><p>Delete a task by id.</p></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Dispatch</h3>
+      <div class="cmd"><code>chela dispatch <span class="opt">&lt;WORKFLOW.md&gt; [--once] [--interval N] [--dry-run]</span></code><p>Turn each open <code>- [ ]</code> item into a worktree, an agent, and a PR. Polls every 60s; <code>--once</code> runs one tick.</p></div>
+      <div class="cmd"><code>chela dispatch-runs</code><p>List dispatcher runs and their status.</p></div>
+      <div class="cmd"><code>chela task-finished <span class="opt">&lt;task_id&gt;</span></code><p>(agents call this) mark a run awaiting-review, record the PR, and kill its window.</p></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Messaging</h3>
+      <div class="cmd"><code>chela msg <span class="opt">&lt;agent&gt; &lt;message&gt; [--from] [--priority]</span></code><p>Drop a message into one agent's pane. Priority: <code>critical|high|normal|low</code>.</p></div>
+      <div class="cmd"><code>chela broadcast <span class="opt">&lt;message&gt; [--from] [--priority]</span></code><p>Send the same message to every other live agent at once.</p></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Setup</h3>
+      <div class="cmd"><code>chela install-statusline <span class="opt">[--write] [--force] [--settings]</span></code><p>Print (or <code>--write</code>) the statusLine snippet for <code>~/.claude/settings.json</code> so panes report live context + rate limits.</p></div>
+    </div>
+  </section>
+
+  <!-- ───────── Config ───────── -->
+  <section class="doc-section" id="config">
+    <h2>Configuration</h2>
+    <p>All configuration is environment variables, with sensible defaults.</p>
+    <table class="cfg">
+      <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td>CHELA_TMUX_SESSION</td><td>chela</td><td>tmux session chela orchestrates</td></tr>
+        <tr><td>CHELA_DIR</td><td>~/.chela</td><td>State dir (scheduler.db, worktrees, context)</td></tr>
+        <tr><td>CHELA_SCHEDULER_POLL_INTERVAL</td><td>30</td><td>Daemon loop interval (s)</td></tr>
+        <tr><td>CHELA_DISPATCH_WORKFLOWS</td><td>—</td><td>Colon-separated WORKFLOW.md paths the daemon dispatches</td></tr>
+        <tr><td>CHELA_DISPATCH_TICK_INTERVAL</td><td>60</td><td>Dispatcher tick interval in the daemon (s)</td></tr>
+        <tr><td>CHELA_AGENT_CMD</td><td>claude</td><td>Launch command for the dashboard Start button</td></tr>
+        <tr><td>CHELA_NOTIFY_URL</td><td>—</td><td>Needs-input notification target (ntfy / Telegram / webhook)</td></tr>
+        <tr><td>CHELA_DASH_HOST / CHELA_DASHBOARD_PORT</td><td>127.0.0.1 / 5001</td><td>Dashboard bind address</td></tr>
+        <tr><td>CHELA_TERMINALS_ENABLED</td><td>false</td><td>Embedded ttyd terminal wall (opt-in; streams live)</td></tr>
+        <tr><td>CHELA_DEFAULT_CONTEXT_WINDOW</td><td>200000</td><td>Window size assumed by the transcript-based context estimate (fallback)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Needs-input notifications</h3>
+    <p>When an agent's pane enters the <code>waiting</code> state (a permission prompt or a question),
+    chela fires one edge-triggered notification — so you don't have to babysit. Transport is
+    auto-detected from the URL:</p>
+    <pre><span class="k">CHELA_NOTIFY_URL</span>=https://ntfy.sh/my-chela-topic                                  <span class="c"># ntfy</span>
+<span class="k">CHELA_NOTIFY_URL</span>=<span class="g">"https://api.telegram.org/bot&lt;token&gt;/sendMessage?chat_id=&lt;id&gt;"</span>  <span class="c"># Telegram</span>
+<span class="k">CHELA_NOTIFY_URL</span>=https://example.com/hook                                       <span class="c"># generic webhook</span></pre>
+  </section>
+
+  <!-- ───────── Security ───────── -->
+  <section class="doc-section" id="security">
+    <h2>Remote access &amp; security</h2>
+    <div class="note"><p><strong>chela ships with zero built-in auth, by design.</strong> The dashboard and
+    the ttyd terminals bind <code>127.0.0.1</code>. The wall is a <em>writable shell</em> — exposing it
+    on an untrusted network is remote code execution. <strong>The tailnet is the trust boundary</strong>,
+    not a password.</p></div>
+    <p>For remote access, put the loopback dashboard behind one of:</p>
+    <ul>
+      <li><strong><a href="https://tailscale.com/">Tailscale</a></strong> — <code>tailscale serve 5001</code>
+      gives you TLS + tailnet ACLs for free (recommended).</li>
+      <li>An <strong>SSH tunnel</strong> — <code>ssh -L 5001:127.0.0.1:5001 host</code>.</li>
+      <li>A reverse proxy <strong>with your own auth</strong>.</li>
+    </ul>
+    <p>Or skip the web UI entirely: SSH/Mosh in from a mobile terminal and <code>tmux attach -t chela</code>
+    for the live panes straight from your phone.</p>
+  </section>
+
+</main>
+
+<footer>
+  <a href="index.html">← Back to chela</a> · MIT licensed · <a href="https://github.com/Devail1/chelamux">GitHub</a>
+</footer>
+
+</body>
+</html>
