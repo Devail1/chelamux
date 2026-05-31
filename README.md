@@ -31,7 +31,7 @@ chela uses [`uv`](https://docs.astral.sh/uv/). The core has two small deps
 (`croniter`, `pyyaml`); the dashboard is an **optional extra**.
 
 ```bash
-git clone https://github.com/<you>/chelamux && cd chelamux
+git clone https://github.com/Devail1/chelamux && cd chelamux
 uv sync                       # core only — no Flask
 uv run chela status
 
@@ -41,6 +41,13 @@ uv sync --extra dashboard
 
 Requirements: Python ≥ 3.11, `tmux`, `git`, the `claude` CLI on `PATH`
 (plus `gh` for the dispatcher's PR flow).
+
+**Authenticate Claude once.** chela doesn't manage credentials — it drives the
+`claude` CLI inside your tmux windows. Log in once on the machine (`claude`, then
+`/login` — or `claude setup-token` for a headless/long-lived token); every agent
+window reuses the cached `~/.claude` credentials. The whole fleet therefore runs
+as **one Claude account** and shares its 5h / 7d rate limits (which is exactly
+what the dashboard's rate-limit pills track).
 
 ---
 
