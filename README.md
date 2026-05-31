@@ -2,6 +2,13 @@
   <img src="chela/dashboard/static/img/banner.svg" alt="chela" width="560">
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/deps-uv-261230.svg" alt="uv-managed">
+  <img src="https://img.shields.io/badge/tmux-native-1bb91f.svg" alt="tmux-native">
+</p>
+
 # chelamux
 
 **A tiny control plane that puts a fleet of Claude Code agents to work — unattended.**
