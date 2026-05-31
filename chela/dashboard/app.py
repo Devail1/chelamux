@@ -214,11 +214,18 @@ def api_agents_msg():
 
 # Mobile control bar: whitelisted key / scroll injection via tmux send-keys.
 # Keys are delivered at the tmux layer (robust, ttyd/xterm-independent).
+# The full C-<a..z> set is whitelisted so the mobile keybar's sticky-Ctrl layer
+# can compose Ctrl with any letter (control codes — harmless), not just a fixed
+# handful.
 _TERM_KEYS = {
     "Up", "Down", "Left", "Right", "Escape", "Tab", "Enter", "BSpace",
     "PageUp", "PageDown", "Home", "End",
-    "C-c", "C-d", "C-z", "C-r", "C-l", "C-b", "C-a", "C-e", "C-u", "C-k", "C-w",
-}
+} | {f"C-{c}" for c in "abcdefghijklmnopqrstuvwxyz"}
+
+# Punctuation that's a chore to reach on a phone keyboard — sent literally
+# (`send-keys -l` disables key-name lookup) so the mobile keybar can offer them
+# as one-tap keys. Matches Moshi's terminal-keyboard special-character row.
+_TERM_LITERAL = {"|", "/", "\\", "~", "-", "_"}
 
 
 def _term_target(agent: str) -> str | None:
@@ -240,6 +247,8 @@ def _term_keyargv(target: str, key: str) -> list[str] | None:
         return ["tmux", "copy-mode", "-t", target]
     if key == "scroll-exit":          # leave copy-mode
         return ["tmux", "send-keys", "-t", target, "-X", "cancel"]
+    if key in _TERM_LITERAL:          # punctuation — send the char, not a key name
+        return ["tmux", "send-keys", "-t", target, "-l", key]
     if key in _TERM_KEYS:
         return ["tmux", "send-keys", "-t", target, key]
     return None
@@ -336,6 +345,41 @@ _TERM_PASTE_SHIM = (
     "})();</script>"
 )
 
+# Touch-to-scroll shim injected into ttyd's HTML (see term_http). tmux mouse mode
+# is on, so xterm.js already turns wheel events into scroll sequences (scrollback
+# in a shell, forwarded to TUI apps like Claude Code) — that's why scrolling works
+# with a trackpad/wheel on desktop. But a touch drag never emits a wheel event, so
+# phones can't scroll the pane. This translates a vertical one-finger drag into
+# synthetic line WheelEvents on the element under the finger; xterm.js does the
+# rest. A tap (movement under the slop) falls through untouched, so it still
+# focuses the pane / opens the keyboard. Desktop is unaffected (no touch events).
+_TERM_SCROLL_SHIM = (
+    "<script>(function(){"
+    "var SLOP=8,LINE=18,acc=0,refY=0,active=false,moved=false;"
+    "function onStart(e){"
+    "if(e.touches.length!==1){active=false;return;}"
+    "active=true;moved=false;acc=0;refY=e.touches[0].clientY;}"
+    "function onMove(e){"
+    "if(!active||e.touches.length!==1)return;"
+    "var t=e.touches[0],y=t.clientY;"
+    "if(!moved&&Math.abs(y-refY)<SLOP)return;"
+    "moved=true;e.preventDefault();"
+    "acc+=y-refY;refY=y;"
+    "while(Math.abs(acc)>=LINE){"
+    "var dir=acc>0?1:-1;acc-=dir*LINE;"
+    "var el=document.elementFromPoint(t.clientX,t.clientY)||document.body;"
+    "el.dispatchEvent(new WheelEvent('wheel',"
+    "{deltaY:-dir,deltaMode:1,clientX:t.clientX,clientY:t.clientY,"
+    "bubbles:true,cancelable:true}));}}"
+    "function onEnd(){active=false;}"
+    "var o={passive:false,capture:true};"
+    "document.addEventListener('touchstart',onStart,o);"
+    "document.addEventListener('touchmove',onMove,o);"
+    "document.addEventListener('touchend',onEnd,o);"
+    "document.addEventListener('touchcancel',onEnd,o);"
+    "})();</script>"
+)
+
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
 @app.route("/term/<wid>/<path:rest>", methods=["GET", "POST"])
@@ -375,8 +419,9 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        html = (html.replace("</head>", _TERM_PASTE_SHIM + "</head>", 1)
-                if "</head>" in html else html + _TERM_PASTE_SHIM)
+        shims = _TERM_PASTE_SHIM + _TERM_SCROLL_SHIM
+        html = (html.replace("</head>", shims + "</head>", 1)
+                if "</head>" in html else html + shims)
         body = html.encode("utf-8")
     return Response(body, status=status, headers=headers)
 

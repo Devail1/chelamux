@@ -204,6 +204,26 @@ async function termKeyFor(wid, key) {
 // own wid.
 async function termKey(key) { return termKeyFor($('#term-agent').value, key); }
 
+// Paste the device clipboard into the active pane. xterm.js can't surface iOS's
+// native "Paste" callout inside its hidden textarea, so phones had no reliable
+// paste path; this reads the clipboard on tap (the gesture unlocks readText() on
+// iOS) and ships it to /api/term/paste, which delivers a bracketed paste at the
+// tmux layer. No-op where the Clipboard API is unavailable or permission denied.
+async function termPaste(btn) {
+    const wid = $('#term-agent').value;
+    if (!wid || !navigator.clipboard || !navigator.clipboard.readText) return;
+    let text = '';
+    try { text = await navigator.clipboard.readText(); } catch (e) { return; }
+    if (!text) return;
+    try {
+        await api('/api/term/paste', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent: wid, text }),
+        });
+    } catch (e) { console.error('termPaste', e); }
+}
+
 function termScrollToggle() {
     const btn = $('#term-scroll-btn');
     if (!_termScroll) {
@@ -762,6 +782,9 @@ async function renderTerminals() {
     // Fit the wall AFTER the taskbar is at its final rendered height, so the grid
     // leaves exactly the right room above it (dock height feeds _wallFill).
     _refitWallForDock();
+
+    renderMobileSwitcher();   // phone single-mode agent pills (no-op on desktop)
+    _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
 }
 
 // ---- Reactive pane lifecycle ----------------------------------------------
@@ -869,6 +892,7 @@ function _refreshPaneLabels() {
             if (o.textContent !== lbl) o.textContent = lbl;
         });
     }
+    renderMobileSwitcher();   // reflect renames / added / dropped agents in the pills
 }
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
@@ -1118,8 +1142,9 @@ function _wallFill() {
     const top = stage ? stage.getBoundingClientRect().top : 120;
     // The dock lives below the stage, so its height (+ its 8px top-margin gap)
     // eats into the space the wall may fill. Subtract it when it's showing.
+    // Phones force single mode (no wall, no dock), so skip the measurement there.
     const dock = $('#term-min-dock');
-    const dockH = (dock && dock.style.display !== 'none')
+    const dockH = (!_isMobileTerm() && dock && dock.style.display !== 'none')
         ? dock.getBoundingClientRect().height + 8 : 0;
     const avail = Math.max(240, window.innerHeight - top - dockH - 4);  // leave a hair at the bottom
     const rows = Math.max(3, Math.floor(avail / WALL_CELL_H));
@@ -1362,4 +1387,145 @@ function applyGridLayout(cols, rows, btn) {
         if (nd.id != null) out[nd.id] = { x: nd.x, y: nd.y, w: nd.w, h: nd.h };
     });
     localStorage.setItem('pc_wall_layout', JSON.stringify(out));
+}
+
+// ---- Mobile agent switcher -------------------------------------------------
+//
+// On phones the wall is forced to single mode (one full-width pane); the desktop
+// dropdown is a poor touch target, so we render a horizontally-scrollable strip
+// of agent pills above the pane instead (status dot + label, active highlighted).
+// Tapping a pill switches the pane; the live ttyd terminal is a same-origin
+// iframe that swallows its own touches, so direct swipe-on-terminal can't be
+// caught — we instead allow a swipe on the pane HEADER (parent DOM) to step
+// prev/next. The dropdown (#term-agent) stays in the DOM as the value holder; the
+// strip reads/writes sel.value and calls renderTerminals(), so it reuses the
+// exact single-mode switch path with no new state.
+
+function _isMobileTerm() {
+    return window.matchMedia('(max-width: 768px)').matches;
+}
+
+// Build/refresh the pill strip. Hidden unless mobile + single mode with panes.
+function renderMobileSwitcher() {
+    const host = document.getElementById('term-switcher');
+    if (!host) return;
+    const sel = $('#term-agent');
+    const wids = sel ? Array.from(sel.options).map(o => o.value) : [];
+    const show = TERMINALS_ON && _isMobileTerm() && _termMode === 'single' && wids.length > 0;
+    if (!show) { host.style.display = 'none'; host.innerHTML = ''; return; }
+    host.style.display = 'flex';
+    const active = sel.value || wids[0];
+    host.innerHTML = wids.map(w => {
+        const cls = 'term-pill' + (w === active ? ' active' : '');
+        return `<button class="${cls}" data-wid="${attrEsc(w)}" onclick="switchAgentMobile('${_jsStr(w)}')">
+          ${_statusDot(w)}<span class="term-pill-label">${escHtml(_paneTitle(w))}</span>
+        </button>`;
+    }).join('');
+    _colorTermDots(_agentsCache);   // tint the just-built pill dots
+    // Centre the active pill without scrolling the page (no scrollIntoView).
+    const activeEl = host.querySelector('.term-pill.active');
+    if (activeEl) {
+        host.scrollLeft = activeEl.offsetLeft - (host.clientWidth - activeEl.clientWidth) / 2;
+    }
+}
+
+// Switch the single-mode pane to `wid` via the dropdown's existing path.
+function switchAgentMobile(wid) {
+    const sel = $('#term-agent');
+    if (!sel || sel.value === wid) return;
+    sel.value = wid;
+    renderTerminals();
+}
+
+// Step to the previous/next agent (dir -1 / +1), wrapping. Drives header swipe.
+function stepAgentMobile(dir) {
+    const sel = $('#term-agent');
+    if (!sel) return;
+    const wids = Array.from(sel.options).map(o => o.value);
+    if (wids.length < 2) return;
+    const i = Math.max(0, wids.indexOf(sel.value));
+    switchAgentMobile(wids[(i + dir + wids.length) % wids.length]);
+}
+
+// Attach a horizontal-swipe listener to the single-mode pane header (delegated
+// off #term-stage so it survives pane rebuilds). Swiping the header left → next
+// agent, right → previous. Ignored on the iframe itself (it owns its touches).
+let _termSwipeBound = false;
+function _bindHeaderSwipe() {
+    if (_termSwipeBound) return;
+    const stage = document.getElementById('term-stage');
+    if (!stage) return;
+    let x0 = null, y0 = null;
+    stage.addEventListener('touchstart', e => {
+        const head = e.target.closest && e.target.closest('.gs-head, .gs-label, .pane-title');
+        if (!head || !_isMobileTerm() || _termMode !== 'single') { x0 = null; return; }
+        x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
+    }, { passive: true });
+    stage.addEventListener('touchend', e => {
+        if (x0 == null) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - x0, dy = t.clientY - y0;
+        x0 = null;
+        if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) stepAgentMobile(dx < 0 ? 1 : -1);
+    }, { passive: true });
+    _termSwipeBound = true;
+}
+
+// Keep the strip in sync when the viewport crosses the mobile breakpoint.
+window.addEventListener('resize', () => {
+    if (TERMINALS_ON && currentTab === 'terminals') renderMobileSwitcher();
+});
+
+// ---- Mobile keybar v2: sticky-Ctrl modifier -------------------------------
+//
+// Modeled on Moshi's terminal keyboard. The Ctrl key is a three-state toggle
+// (tap cycles off → armed → locked → off). Engaging it reveals a Ctrl-letter
+// layer; tapping a letter sends C-<letter>. Armed = consumed after one letter
+// (Moshi's "next keystroke"); locked = stays for sequences (^C ^D ^Z without
+// re-tapping). The other keys (Esc/arrows/chars/paging) are independent of the
+// modifier — they have no useful Ctrl variant — and go straight through
+// termKey(). State lives in the keybar's data-ctrl attr (CSS reveals the layer).
+const _KB_CTRL_STATES = ['off', 'armed', 'locked'];
+
+function _kbCtrlState() {
+    const bar = document.getElementById('term-keybar');
+    return bar ? (bar.dataset.ctrl || 'off') : 'off';
+}
+function _kbSetCtrl(state) {
+    const bar = document.getElementById('term-keybar');
+    if (bar) bar.dataset.ctrl = state;
+}
+
+// Tap the Ctrl key: advance the three-state cycle.
+function kbCtrlTap() {
+    const i = _KB_CTRL_STATES.indexOf(_kbCtrlState());
+    _kbSetCtrl(_KB_CTRL_STATES[(i + 1) % _KB_CTRL_STATES.length]);
+}
+
+// Tap a Ctrl-letter: send C-<letter>; disarm if armed (one-shot), keep if locked.
+function kbCtrlKey(letter) {
+    termKey('C-' + letter);
+    if (_kbCtrlState() === 'armed') _kbSetCtrl('off');
+}
+
+// Pin the keybar just above the on-screen keyboard. When the soft keyboard
+// opens, the visual viewport shrinks below the layout viewport. We anchor the
+// bar's TOP to the visual viewport's bottom edge — (offsetTop + height) in
+// layout-viewport coords, minus the bar's own height — rather than lifting a
+// bottom:0 bar with translateY. The translate approach floats the bar up over
+// the terminal on iOS: rubber-band scrolling fires `scroll` with a changing
+// offsetTop, and a translated bottom-fixed bar chases it mid-gesture. Anchoring
+// `top` to the live viewport bottom is stable through that scroll. Best-effort:
+// where VisualViewport is unavailable the CSS bottom:0 keeps the bar in place.
+function _kbPin() {
+    const bar = document.getElementById('term-keybar');
+    const vv = window.visualViewport;
+    if (!bar || !vv) return;
+    const top = Math.max(0, Math.round(vv.offsetTop + vv.height - bar.offsetHeight));
+    bar.style.bottom = 'auto';
+    bar.style.top = top + 'px';
+}
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', _kbPin);
+    window.visualViewport.addEventListener('scroll', _kbPin);
 }
