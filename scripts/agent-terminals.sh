@@ -88,6 +88,15 @@ free_port() {
 # an independent current-window pointer, so each wall tile shows its own pane
 # (plain `attach -t <session>` would mirror one shared active window across every
 # client). -A reattaches the same grouped session on reconnect.
+#
+# window-size largest + aggressive-resize on: the grouped sessions SHARE the real
+# windows, and a tmux window has exactly one size. With the default `latest`
+# policy, whichever client resized most recently (often a small phone tile or a
+# stale ttyd connection — ttyd allows up to --max-clients) shrinks the shared
+# window for everyone, so other tiles render undersized with dead space. `largest`
+# sizes each window to its biggest current viewer, so a small/stale client can't
+# shrink the active wall; `aggressive-resize` only counts clients actually viewing
+# the window. Set globally on the server (idempotent) so it survives restarts.
 spawn() {
     local wid="$1" port="$2" grp
     grp="${WEBTERM_PREFIX}$(sanitize "$wid")"
@@ -102,6 +111,8 @@ spawn() {
         --client-option "fontFamily=${FONT_FAMILY}" \
         tmux new-session -A -s "${grp}" -t "${TMUX_SESSION}" ';' \
                  set-option destroy-unattached off ';' \
+                 set-option -g window-size largest ';' \
+                 set-window-option -g aggressive-resize on ';' \
                  select-window -t "${wid}" \
         >/dev/null 2>&1 &
     PID_OF["$wid"]=$!
