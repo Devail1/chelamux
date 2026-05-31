@@ -17,8 +17,9 @@
 
 /* Slick, minimal scrollbars across the dashboard chrome (page, panels, wall-tile
    overflow, dropdowns). Thin track-less bars with a subtle thumb that brightens
-   on hover. Terminal contents live in cross-origin ttyd iframes, so those keep
-   their own scrollbars — this can't reach inside them. */
+   on hover. This `*` rule can't cross into the ttyd iframes, so the terminal panes
+   get a matching scrollbar via CSS injected into ttyd's HTML — see
+   `_TERM_SCROLLBAR_CSS` in app.py (keep the two in sync). */
 * {
     scrollbar-width: thin;                          /* Firefox */
     scrollbar-color: var(--border) transparent;
