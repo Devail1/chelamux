@@ -23,11 +23,11 @@
   }
   a{color:var(--accent); text-decoration:none}
   a:hover{text-decoration:underline}
-  .wrap{max-width:880px; margin:0 auto; padding-left:24px; padding-right:24px}
+  .wrap{max-width:1000px; margin:0 auto; padding-left:24px; padding-right:24px}
   code,.mono{font-family:var(--mono)}
 
   /* nav */
-  nav{display:flex; align-items:center; gap:10px; padding:20px 24px; max-width:880px; margin:0 auto}
+  nav{display:flex; align-items:center; gap:10px; padding:20px 24px; max-width:1000px; margin:0 auto}
   nav .mark{height:24px}
   nav .name{font-weight:700; font-size:17px; color:var(--accent)}
   nav .name a{color:var(--accent)}
@@ -40,15 +40,24 @@
   .doc-hero h1{font-size:clamp(26px,4vw,36px); margin:0 0 8px; letter-spacing:-0.02em}
   .doc-hero p{color:var(--text-dim); font-size:16px; margin:0; max-width:640px}
 
-  /* table of contents */
-  .toc{background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px 22px; margin:28px 0 8px}
-  .toc h4{margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-dim)}
-  .toc ul{list-style:none; margin:0; padding:0; columns:2; column-gap:28px}
-  .toc li{margin:3px 0; break-inside:avoid}
-  .toc a{font-size:14px}
+  /* table of contents — labelled card, numbered entries down each column */
+  .toc{display:block; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px 22px; margin:28px 0 8px; max-width:680px}
+  .toc h4{margin:0 0 12px; font-size:11px; text-transform:uppercase; letter-spacing:0.11em; color:var(--text-dim)}
+  .toc ol{
+    list-style:none; margin:0; padding:0; counter-reset:toc;
+    display:grid; grid-template-rows:repeat(4,auto); grid-auto-flow:column; gap:2px 24px;
+  }
+  .toc li{counter-increment:toc}
+  .toc a{
+    display:flex; align-items:baseline; gap:11px;
+    padding:7px 9px; margin:0 -9px; border-radius:7px;
+    font-size:14.5px; color:var(--text); transition:background .12s ease, color .12s ease;
+  }
+  .toc a::before{content:counter(toc,decimal-leading-zero); font-family:var(--mono); font-size:12px; color:var(--accent); min-width:16px}
+  .toc a:hover{background:var(--bg); color:var(--accent); text-decoration:none}
 
   /* doc sections */
-  .doc-section{padding:40px 0; border-top:1px solid var(--border)}
+  .doc-section{padding:40px 0; border-top:1px solid var(--border); max-width:820px}
   .doc-section:first-of-type{border-top:0}
   .doc-section h2{font-size:23px; margin:0 0 14px; letter-spacing:-0.01em; scroll-margin-top:18px}
   .doc-section h3{font-size:15.5px; margin:26px 0 8px}
@@ -99,7 +108,7 @@
   footer a{color:var(--text-dim); text-decoration:underline}
 
   @media (max-width:760px){
-    .toc ul{columns:1}
+    .toc ol{grid-template-rows:none; grid-auto-flow:row; grid-template-columns:1fr}
     .cmd{grid-template-columns:1fr; gap:5px; padding:14px 0}
   }
 </style>
@@ -127,7 +136,7 @@
 <div class="wrap">
   <nav class="toc" aria-label="Table of contents">
     <h4>On this page</h4>
-    <ul>
+    <ol>
       <li><a href="#quickstart">Quickstart</a></li>
       <li><a href="#concepts">Concepts</a></li>
       <li><a href="#scheduling">Scheduling agents</a></li>
@@ -136,7 +145,7 @@
       <li><a href="#cli">Command reference</a></li>
       <li><a href="#config">Configuration</a></li>
       <li><a href="#security">Remote access &amp; security</a></li>
-    </ul>
+    </ol>
   </nav>
 </div>
 
@@ -149,14 +158,14 @@
 
     <h3>1. Install</h3>
     <p>chela uses <a href="https://docs.astral.sh/uv/">uv</a>. The core has two small deps; the
-    dashboard is an optional extra. You also need <code>tmux</code>, <code>git</code>, the
+    dashboard + live terminal wall ship as a separate install (keeps the core lean). You also need <code>tmux</code>, <code>git</code>, the
     <code>claude</code> CLI on <code>PATH</code> (and <code>gh</code> for the dispatcher's PR flow).</p>
     <pre><span class="c"># core</span>
 git clone https://github.com/Devail1/chelamux && cd chelamux
 uv sync
 uv run chela status
 
-<span class="c"># optional web dashboard + terminal wall</span>
+<span class="c"># dashboard + live terminal wall (separate install — keeps the core lean)</span>
 uv sync --extra dashboard
 uv run chela dashboard</pre>
 
@@ -209,8 +218,9 @@ uv run chela dispatch /path/to/repo/WORKFLOW.md          <span class="c"># poll 
     </ul>
 
     <h3>The wall</h3>
-    <p>The optional dashboard streams every agent's live terminal in one grid (drag, lock, maximize),
-    with a context-window bar per tile and account-wide rate-limit pills. It's opt-in
+    <p>The dashboard streams every agent's live terminal in one grid (drag, lock, maximize),
+    with a context-window bar per tile and account-wide rate-limit pills — a first-class feature,
+    just a separate install. The wall itself is opt-in
     (<code>CHELA_TERMINALS_ENABLED=true</code>) because it exposes writable shells — keep it on loopback
     or a tailnet. See <a href="#security">Remote access &amp; security</a>.</p>
   </section>
@@ -327,7 +337,7 @@ chela install-statusline --write   <span class="c"># writes it (won't clobber an
       <h3>Core</h3>
       <div class="cmd"><code>chela status</code><p>List the agent windows discovered in your tmux session — the source of truth.</p></div>
       <div class="cmd"><code>chela run</code><p>Run the daemon: scheduler tick + dispatcher + needs-input notify. Leave it running.</p></div>
-      <div class="cmd"><code>chela dashboard <span class="opt">[--host] [--port]</span></code><p>Launch the optional web dashboard + wall (needs the <code>dashboard</code> extra). Binds <code>127.0.0.1:5001</code>.</p></div>
+      <div class="cmd"><code>chela dashboard <span class="opt">[--host] [--port]</span></code><p>Launch the dashboard + live terminal wall (needs the <code>dashboard</code> install). Binds <code>127.0.0.1:5001</code>.</p></div>
     </div>
 
     <div class="cmd-group">
