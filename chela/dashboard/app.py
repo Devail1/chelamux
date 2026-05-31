@@ -380,6 +380,25 @@ _TERM_SCROLL_SHIM = (
     "})();</script>"
 )
 
+# Scrollbar CSS injected into ttyd's HTML (see term_http). The dashboard's global
+# `*{scrollbar-…}` rule can't cross the iframe boundary into the ttyd document, so
+# the terminal panes would otherwise show the OS default scrollbar. This mirrors
+# the dashboard's scrollbar (style.css :root --border #21262d, hover #30363d) so the
+# wall's scrollbars match the rest of the UI. Literal hex — the ttyd page has no
+# CSS vars.
+_TERM_SCROLLBAR_CSS = (
+    "<style>"
+    "*{scrollbar-width:thin;scrollbar-color:#21262d transparent}"
+    "*:hover{scrollbar-color:#30363d transparent}"
+    "::-webkit-scrollbar{width:8px;height:8px}"
+    "::-webkit-scrollbar-track{background:transparent}"
+    "::-webkit-scrollbar-thumb{background:#21262d;border-radius:8px;"
+    "border:2px solid transparent;background-clip:content-box}"
+    "::-webkit-scrollbar-thumb:hover{background:#30363d;background-clip:content-box}"
+    "::-webkit-scrollbar-corner{background:transparent}"
+    "</style>"
+)
+
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
 @app.route("/term/<wid>/<path:rest>", methods=["GET", "POST"])
@@ -419,7 +438,7 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        shims = _TERM_PASTE_SHIM + _TERM_SCROLL_SHIM
+        shims = _TERM_PASTE_SHIM + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
         body = html.encode("utf-8")
