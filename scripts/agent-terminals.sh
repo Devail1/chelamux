@@ -58,6 +58,16 @@ mkdir -p "$(dirname "${MAP_FILE}")"
 FONT_FAMILY='JetBrainsMono Nerd Font, FiraCode Nerd Font, Hack Nerd Font, Symbols Nerd Font, monospace'
 FONT_FAMILY="${CHELA_TERM_FONT:-$FONT_FAMILY}"
 
+# xterm colour theme (an ITheme JSON object) passed to ttyd via --client-option,
+# matching the dashboard palette (style.css :root — GitHub Dark): bg #0d1117 /
+# text #c9d1d9 / accent #58a6ff cursor, with the same green (#3fb950) and yellow
+# (#d29922) the wall uses for status dots, so the embedded panes read as native
+# to the wall instead of the OS default xterm colours. ttyd's documented theme
+# syntax is `--client-option theme={...}` (value starts with `{` → JSON-parsed).
+# Override the whole object via CHELA_TERM_THEME (a JSON ITheme string).
+TERM_THEME='{"background":"#0d1117","foreground":"#c9d1d9","cursor":"#58a6ff","cursorAccent":"#0d1117","selectionBackground":"#264f78","black":"#484f58","red":"#ff7b72","green":"#3fb950","yellow":"#d29922","blue":"#58a6ff","magenta":"#bc8cff","cyan":"#39c5cf","white":"#b1bac4","brightBlack":"#6e7681","brightRed":"#ffa198","brightGreen":"#56d364","brightYellow":"#e3b341","brightBlue":"#79c0ff","brightMagenta":"#d2a8ff","brightCyan":"#56d4dd","brightWhite":"#f0f6fc"}'
+TERM_THEME="${CHELA_TERM_THEME:-$TERM_THEME}"
+
 declare -A PORT_OF PID_OF              # wid -> port / ttyd pid
 LAST_MAP=""
 
@@ -118,8 +128,10 @@ spawn() {
         --terminal-type xterm-256color \
         --client-option fontSize=14 \
         --client-option "fontFamily=${FONT_FAMILY}" \
+        --client-option "theme=${TERM_THEME}" \
         tmux new-session -A -s "${grp}" -t "${TMUX_SESSION}" ';' \
                  set-option destroy-unattached off ';' \
+                 set-option status off ';' \
                  set-option -g window-size largest ';' \
                  set-window-option -g aggressive-resize on ';' \
                  select-window -t "${wid}" \
