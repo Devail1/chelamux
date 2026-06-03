@@ -96,6 +96,10 @@ function _swapToFrame(wid) {
     if (!ph) return;
     const ifr = document.createElement('iframe');
     ifr.className = 'term-frame';
+    // Delegate the Clipboard API into the same-origin ttyd frame so the injected
+    // Ctrl+V shim can read the clipboard (the paste event path works without it,
+    // but clipboard.read()/readText() is blocked in a subframe lacking this).
+    ifr.setAttribute('allow', 'clipboard-read; clipboard-write');
     ifr.src = '/term/' + encodeURIComponent(wid) + '/';
     ifr.title = _paneTitle(wid);
     ph.replaceWith(ifr);
@@ -753,7 +757,7 @@ async function renderTerminals() {
     // Ready -> real iframe; not ready -> spinner placeholder (polled into an
     // iframe by _startPlaceholderPolls once the ttyd port lands).
     const frame = w => _termReady.has(w)
-        ? `<iframe class="term-frame" src="/term/${encodeURIComponent(w)}/" title="${escHtml(_paneTitle(w))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="/term/${encodeURIComponent(w)}/" title="${escHtml(_paneTitle(w))}"></iframe>`
         : _termPlaceholder(w);
     const stage = $('#term-stage');
     if (!wids.length) {
@@ -960,7 +964,7 @@ function destroyGrid() {
 // gs-id is the stable wid so a rename never re-keys the tile.
 function _wallTileHTML(wid, x, y, w, h) {
     const body = _termReady.has(wid)
-        ? `<iframe class="term-frame" src="/term/${encodeURIComponent(wid)}/" title="${escHtml(_paneTitle(wid))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="/term/${encodeURIComponent(wid)}/" title="${escHtml(_paneTitle(wid))}"></iframe>`
         : _termPlaceholder(wid);
     return `<div class="grid-stack-item" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
