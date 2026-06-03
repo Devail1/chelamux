@@ -10,9 +10,9 @@ function _sortAgents(agents) {
 function _renderCard(a) {
     const name = escHtml(a.name);
 
-    // Health dot comes straight from /api/agents liveness:
-    // green (alive) / yellow (waiting on input) / red (offline).
-    const dotColor = a.health || (a.claude_running ? 'green' : 'grey');
+    // Activity dot, shared with the sidebar + wall (agentDotColor): busy → green,
+    // waiting → yellow, idle / no Claude → grey. Matches the wall's pane dots.
+    const dotColor = agentDotColor(a);
 
     // Kebab menu — same controls for all agents
     let menuItems = `

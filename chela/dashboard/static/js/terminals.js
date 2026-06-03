@@ -96,6 +96,10 @@ function _swapToFrame(wid) {
     if (!ph) return;
     const ifr = document.createElement('iframe');
     ifr.className = 'term-frame';
+    // Delegate the Clipboard API into the same-origin ttyd frame so the injected
+    // Ctrl+V shim can read the clipboard (the paste event path works without it,
+    // but clipboard.read()/readText() is blocked in a subframe lacking this).
+    ifr.setAttribute('allow', 'clipboard-read; clipboard-write');
     ifr.src = '/term/' + encodeURIComponent(wid) + '/';
     ifr.title = _paneTitle(wid);
     ph.replaceWith(ifr);
@@ -753,7 +757,7 @@ async function renderTerminals() {
     // Ready -> real iframe; not ready -> spinner placeholder (polled into an
     // iframe by _startPlaceholderPolls once the ttyd port lands).
     const frame = w => _termReady.has(w)
-        ? `<iframe class="term-frame" src="/term/${encodeURIComponent(w)}/" title="${escHtml(_paneTitle(w))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="/term/${encodeURIComponent(w)}/" title="${escHtml(_paneTitle(w))}"></iframe>`
         : _termPlaceholder(w);
     const stage = $('#term-stage');
     if (!wids.length) {
@@ -960,7 +964,7 @@ function destroyGrid() {
 // gs-id is the stable wid so a rename never re-keys the tile.
 function _wallTileHTML(wid, x, y, w, h) {
     const body = _termReady.has(wid)
-        ? `<iframe class="term-frame" src="/term/${encodeURIComponent(wid)}/" title="${escHtml(_paneTitle(wid))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="/term/${encodeURIComponent(wid)}/" title="${escHtml(_paneTitle(wid))}"></iframe>`
         : _termPlaceholder(wid);
     return `<div class="grid-stack-item" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
@@ -1140,13 +1144,25 @@ const WALL_CELL_H = 70, WALL_MARGIN = 6;
 function _wallFill() {
     const stage = $('#term-stage');
     const top = stage ? stage.getBoundingClientRect().top : 120;
+    // The wall lives inside the scrollable .canvas, whose padding-bottom sits
+    // BELOW the wall — so the real floor is the canvas content-box bottom, not
+    // the viewport. Measuring it (rather than window.innerHeight) stops the wall
+    // from overrunning that padding and pushing the canvas into a scroll. Falls
+    // back to the viewport if the canvas isn't found.
+    const canvas = stage ? stage.closest('.canvas') : null;
+    let floorY = window.innerHeight;
+    if (canvas) {
+        const cr = canvas.getBoundingClientRect();
+        const padB = parseFloat(getComputedStyle(canvas).paddingBottom) || 0;
+        floorY = Math.min(window.innerHeight, cr.bottom) - padB;
+    }
     // The dock lives below the stage, so its height (+ its 8px top-margin gap)
     // eats into the space the wall may fill. Subtract it when it's showing.
     // Phones force single mode (no wall, no dock), so skip the measurement there.
     const dock = $('#term-min-dock');
     const dockH = (!_isMobileTerm() && dock && dock.style.display !== 'none')
         ? dock.getBoundingClientRect().height + 8 : 0;
-    const avail = Math.max(240, window.innerHeight - top - dockH - 4);  // leave a hair at the bottom
+    const avail = Math.max(240, floorY - top - dockH - 4);  // leave a hair at the bottom
     const rows = Math.max(3, Math.floor(avail / WALL_CELL_H));
     const cellPx = Math.max(40, Math.floor(avail / rows));      // exact divisor -> fills
     return { rows, cellPx };
