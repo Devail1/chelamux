@@ -345,6 +345,51 @@ _TERM_PASTE_SHIM = (
     "})();</script>"
 )
 
+# Ctrl/Cmd+V paste shim injected into ttyd's HTML (see term_http). By terminal
+# convention xterm.js sends a literal ^V on Ctrl+V and only pastes on
+# Ctrl+Shift+V / right-click, which surprises people who expect Ctrl+V to paste.
+# This catches plain Ctrl/Cmd+V in the capture phase (before xterm), swallows it
+# so no ^V reaches the shell, reads the clipboard, and routes it through
+# /api/term/paste (bracketed paste at the tmux layer). It also handles an image
+# on the clipboard — via /api/term/paste-image, like the paste-event shim — so
+# Ctrl+V never regresses image paste. Ctrl+Shift+V / right-click are left to the
+# native path. wid comes from the iframe path (/term/<wid>/), as above.
+_TERM_PASTE_KEY_SHIM = (
+    "<script>(function(){"
+    "var m=location.pathname.match(/\\/term\\/([^\\/]+)/);"
+    "if(!m)return;"
+    "var wid=decodeURIComponent(m[1]);"
+    "function postJSON(p,b){return fetch(p,{method:'POST',"
+    "headers:{'Content-Type':'application/json'},credentials:'same-origin',"
+    "body:JSON.stringify(b)});}"
+    "async function pasteText(t){if(t)await postJSON('/api/term/paste',{agent:wid,text:t});}"
+    "async function pasteImage(blob){"
+    "var fd=new FormData();fd.append('agent',wid);"
+    "fd.append('image',blob,blob.name||'paste');"
+    "var r=await fetch('/api/term/paste-image',{method:'POST',body:fd,"
+    "credentials:'same-origin'});"
+    "if(!r.ok)return;var j=await r.json();if(j&&j.path)await pasteText(j.path);}"
+    "async function onKey(e){"
+    "if(!(e.ctrlKey||e.metaKey)||e.shiftKey||e.altKey)return;"
+    "if(e.key!=='v'&&e.key!=='V')return;"
+    "if(!navigator.clipboard)return;"
+    "e.preventDefault();e.stopImmediatePropagation();"
+    "try{"
+    "if(navigator.clipboard.read){"
+    "var items=await navigator.clipboard.read();"
+    "for(var i=0;i<items.length;i++){"
+    "var t=(items[i].types||[]).filter(function(x){return x.indexOf('image/')===0;})[0];"
+    "if(t){await pasteImage(await items[i].getType(t));return;}}"
+    "for(var n=0;n<items.length;n++){"
+    "if((items[n].types||[]).indexOf('text/plain')>=0){"
+    "await pasteText(await (await items[n].getType('text/plain')).text());return;}}"
+    "}else if(navigator.clipboard.readText){"
+    "await pasteText(await navigator.clipboard.readText());}"
+    "}catch(err){console.error('paste-key',err);}}"
+    "document.addEventListener('keydown',onKey,true);"
+    "})();</script>"
+)
+
 # Touch-to-scroll shim injected into ttyd's HTML (see term_http). tmux mouse mode
 # is on, so xterm.js already turns wheel events into scroll sequences (scrollback
 # in a shell, forwarded to TUI apps like Claude Code) — that's why scrolling works
@@ -438,7 +483,8 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        shims = _TERM_PASTE_SHIM + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS
+        shims = (_TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM
+                 + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
         body = html.encode("utf-8")

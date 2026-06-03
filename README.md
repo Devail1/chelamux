@@ -194,6 +194,14 @@ daemon. An embedded ttyd **terminal wall** (a multi-pane view that streams the
 live panes) is opt-in — off by default; enable it with
 `CHELA_TERMINALS_ENABLED=true`.
 
+**Keys not reaching the terminal?** If `Esc` (or other keys) never reaches an
+embedded terminal, a vim-style browser extension such as **Vimium** is almost
+certainly capturing them at the page level — it injects into the terminal's
+iframe too. Fix: exclude the dashboard's URL in the extension's settings (in
+Vimium, *Options → "Excluded URLs and keys"* → add the dashboard URL and leave
+the *Keys* field blank). Quick workaround: `Ctrl+3` (or `Ctrl+[`) sends a
+literal Escape.
+
 ### HTTP API (selected)
 
 | Route | Returns |

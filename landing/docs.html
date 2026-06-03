@@ -326,6 +326,15 @@ uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span><
     context bar falls back to a coarse transcript estimate):</p>
     <pre>chela install-statusline           <span class="c"># prints the snippet</span>
 chela install-statusline --write   <span class="c"># writes it (won't clobber an existing one)</span></pre>
+
+    <h3>Keys not reaching the terminal</h3>
+    <p>If <code>Esc</code> (or other keys) never reaches an embedded terminal, a vim-style browser
+    extension such as <strong>Vimium</strong> is almost certainly capturing them at the page level —
+    it injects into the terminal's iframe too and swallows the keypress.</p>
+    <div class="note"><p>Exclude the dashboard's URL in the extension's settings. In Vimium:
+    <strong>Options → "Excluded URLs and keys"</strong> → add the dashboard URL and leave the
+    <em>Keys</em> field blank to disable it on that site. Quick workaround: <code>Ctrl+3</code>
+    (or <code>Ctrl+[</code>) sends a literal Escape.</p></div>
   </section>
 
   <!-- ───────── CLI ───────── -->
