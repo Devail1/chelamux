@@ -62,6 +62,20 @@ function attrEsc(s) {
     return escHtml(s).replace(/"/g, '&quot;');
 }
 
+// Status dot colour shared by the sidebar list, the agent detail view, and the
+// agents canvas, so one agent reads the same in every view as it does on the
+// wall. Mirrors the wall's term-status-dot (terminals.js _colorTermDots): busy →
+// green (working), waiting → yellow, idle or no Claude session → grey. These
+// views previously coloured from the server `health` field, which collapses
+// busy+idle+running all into green and so disagreed with the wall's grey "idle"
+// dot for an agent that's running but not actively working.
+function agentDotColor(a) {
+    const st = a && a.session_status;
+    if (st === 'busy') return 'green';
+    if (st === 'waiting') return 'yellow';
+    return 'grey';   // idle, or no Claude in the window — matches the wall
+}
+
 const BASE_PATH = window.location.pathname.replace(/\/$/, '');
 async function api(path, opts) {
     const res = await fetch(BASE_PATH + path, opts);

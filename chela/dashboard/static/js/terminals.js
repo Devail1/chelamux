@@ -1140,13 +1140,25 @@ const WALL_CELL_H = 70, WALL_MARGIN = 6;
 function _wallFill() {
     const stage = $('#term-stage');
     const top = stage ? stage.getBoundingClientRect().top : 120;
+    // The wall lives inside the scrollable .canvas, whose padding-bottom sits
+    // BELOW the wall — so the real floor is the canvas content-box bottom, not
+    // the viewport. Measuring it (rather than window.innerHeight) stops the wall
+    // from overrunning that padding and pushing the canvas into a scroll. Falls
+    // back to the viewport if the canvas isn't found.
+    const canvas = stage ? stage.closest('.canvas') : null;
+    let floorY = window.innerHeight;
+    if (canvas) {
+        const cr = canvas.getBoundingClientRect();
+        const padB = parseFloat(getComputedStyle(canvas).paddingBottom) || 0;
+        floorY = Math.min(window.innerHeight, cr.bottom) - padB;
+    }
     // The dock lives below the stage, so its height (+ its 8px top-margin gap)
     // eats into the space the wall may fill. Subtract it when it's showing.
     // Phones force single mode (no wall, no dock), so skip the measurement there.
     const dock = $('#term-min-dock');
     const dockH = (!_isMobileTerm() && dock && dock.style.display !== 'none')
         ? dock.getBoundingClientRect().height + 8 : 0;
-    const avail = Math.max(240, window.innerHeight - top - dockH - 4);  // leave a hair at the bottom
+    const avail = Math.max(240, floorY - top - dockH - 4);  // leave a hair at the bottom
     const rows = Math.max(3, Math.floor(avail / WALL_CELL_H));
     const cellPx = Math.max(40, Math.floor(avail / rows));      // exact divisor -> fills
     return { rows, cellPx };
