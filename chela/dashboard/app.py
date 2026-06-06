@@ -431,6 +431,20 @@ _TERM_SCROLL_SHIM = (
 # the dashboard's scrollbar (style.css :root --border #21262d, hover #30363d) so the
 # wall's scrollbars match the rest of the UI. Literal hex — the ttyd page has no
 # CSS vars.
+# Bundled icon-only Nerd Font, served from /static and injected as an @font-face
+# into the ttyd page so xterm.js can resolve the PUA glyphs (lazygit/yazi file &
+# git icons) on ANY viewer — no device-side font install needed. The ttyd
+# fontFamily stack (see scripts/agent-terminals.sh) already lists "Symbols Nerd
+# Font" as a fallback; this @font-face supplies it. font-display:block avoids an
+# icon-flash where glyphs briefly render as boxes before the font loads. The URL
+# is same-origin absolute (/static/...) so it resolves against the dashboard, not
+# the iframe's /term/<wid>/ base path.
+_TERM_FONT_CSS = (
+    "<style>@font-face{font-family:'Symbols Nerd Font';"
+    "src:url('/static/fonts/SymbolsNerdFontMono-Regular.ttf') format('truetype');"
+    "font-display:block}</style>"
+)
+
 _TERM_SCROLLBAR_CSS = (
     "<style>"
     "*{scrollbar-width:thin;scrollbar-color:#21262d transparent}"
@@ -483,7 +497,7 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        shims = (_TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM
+        shims = (_TERM_FONT_CSS + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM
                  + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
