@@ -844,8 +844,59 @@ function stopTermTimer() {
     if (_termTimer) { clearInterval(_termTimer); _termTimer = null; }
 }
 
+// ---- Background-tab teardown ----------------------------------------------
+//
+// Grouped tmux sessions SHARE one real window, and a tmux window has exactly one
+// size. With `window-size largest` (scripts/agent-terminals.sh), a wall left open
+// in a backgrounded tab keeps its ttyd WebSocket alive indefinitely — the
+// keepalive pings auto-pong even while hidden — and pins every shared window to
+// that ghost's dimensions, so the wall you're actively viewing gets its rows/cols
+// CROPPED to the stale tab's size. Terminal activity can't tell a quiet-but-
+// watched pane from an abandoned one (that's what the old server-side reaper got
+// wrong, and why it disconnected live panes). The browser CAN: Page Visibility
+// reports when THIS tab is hidden. So when the tab goes hidden past a short grace,
+// blank its ttyd iframes — closing their sockets, which drops the backing tmux
+// clients so they stop distorting window-size — and reconnect when it's shown
+// again. A quick tab flip stays under the grace, so there's no needless reload.
+const TERM_HIDE_GRACE_MS = 45000;   // hidden this long → release ttyd clients
+let _termSuspended = false;
+let _termHideTimer = null;
+
+function _teardownTermFrames() {
+    document.querySelectorAll('#term-stage iframe.term-frame').forEach(ifr => {
+        const src = ifr.getAttribute('src') || '';
+        if (!src || src === 'about:blank') return;     // nothing live to release
+        ifr.dataset.suspendedSrc = src;                // stash for restore
+        ifr.src = 'about:blank';                        // unload → WS close → tmux client drops
+    });
+    _termSuspended = true;
+}
+
+function _restoreTermFrames() {
+    _termSuspended = false;
+    document.querySelectorAll('#term-stage iframe.term-frame[data-suspended-src]').forEach(ifr => {
+        ifr.src = ifr.dataset.suspendedSrc;             // reconnect, freshly sized to the now-visible tile
+        delete ifr.dataset.suspendedSrc;
+    });
+    // Reconcile any agent adds/drops we skipped while suspended (guarded below).
+    if (TERMINALS_ON && currentTab === 'terminals') termTick();
+}
+
+// Single registration at module load. TERMINALS_ON is checked at fire time (it
+// may not be resolved yet here), mirroring the window 'resize' handler above.
+document.addEventListener('visibilitychange', () => {
+    if (!TERMINALS_ON) return;
+    clearTimeout(_termHideTimer);
+    if (document.hidden) {
+        _termHideTimer = setTimeout(_teardownTermFrames, TERM_HIDE_GRACE_MS);
+    } else if (_termSuspended) {
+        _restoreTermFrames();
+    }
+});
+
 async function termTick() {
     if (!TERMINALS_ON || currentTab !== 'terminals') return;
+    if (_termSuspended) return;   // tab hidden: don't add/reconnect iframes we just released
     let agents;
     try { agents = await api('/api/agents'); } catch (e) { return; }   // transient — try again next tick
     _agentsCache = agents;
@@ -1109,6 +1160,7 @@ async function addWallTiles(wids) {
 // only refreshes the dropdown so a new shell is selectable (the displayed
 // iframe is never touched). Shared by the 4s termTick and the SSE windows event.
 async function _absorbFreshTerminals(live) {
+    if (_termSuspended) return;   // tab hidden: defer new tiles until _restoreTermFrames re-ticks
     const fresh = live.filter(w => !_renderedWids.includes(w));
     if (!fresh.length) return;
     if (_termMode === 'wall') {
