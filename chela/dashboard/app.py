@@ -576,6 +576,47 @@ def api_term_ready():
     return jsonify({"ready": bool(port), "port": port if port else None})
 
 
+def _webterm_session(wid: str) -> str:
+    """The grouped tmux session name a wid's ttyd attaches to. Mirrors
+    scripts/agent-terminals.sh: WEBTERM_PREFIX = webterm_<sanitized session>_,
+    grp = WEBTERM_PREFIX<sanitized wid>, where sanitize = tr -c 'A-Za-z0-9_' '_'.
+    Kept in lockstep with that script — both must agree for the count to be
+    meaningful (a mismatch just yields 0, which the wall treats as "no contention,
+    don't tear down")."""
+    san = lambda s: re.sub(r"[^A-Za-z0-9_]", "_", s)
+    return f"webterm_{san(TMUX_SESSION)}_{san(wid)}"
+
+
+@app.route("/api/term/clients")
+@require_auth
+def api_term_clients():
+    """Per-wid ttyd client count: how many browser connections currently share
+    each pane's grouped tmux session. The wall reads this so a backgrounded tab
+    only releases panes that actually have >1 viewer — with a single viewer there
+    is no window-size contention to resolve (a tmux window has one size shared by
+    all its clients), so tearing it down would churn the connection for nothing.
+    One `tmux list-clients` call, counted by session; never touches ttyd."""
+    _require_terminals()
+    wids = list(_terminals_port_map().keys())
+    counts = {w: 0 for w in wids}
+    try:
+        out = subprocess.run(
+            ["tmux", "list-clients", "-F", "#{client_session}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            per_session: dict = {}
+            for line in out.stdout.splitlines():
+                s = line.strip()
+                if s:
+                    per_session[s] = per_session.get(s, 0) + 1
+            for w in wids:
+                counts[w] = per_session.get(_webterm_session(w), 0)
+    except Exception:
+        pass  # tmux hiccup → all-zero counts → wall skips teardown (safe)
+    return jsonify(counts)
+
+
 _TERM_PASTE_MAX = 64 * 1024  # reject pastes larger than 64 KB
 
 

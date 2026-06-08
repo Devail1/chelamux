@@ -34,14 +34,11 @@ TMUX_SESSION="${CHELA_TMUX_SESSION:-chela}"
 BASE_PORT="${CHELA_TERM_BASE:-5101}"
 POLL="${CHELA_TERM_POLL:-12}"
 # Each ttyd allows this many concurrent browser connections (= tmux clients on
-# its grouped session). Generous headroom: a dropped/backgrounded tab leaves a
-# client attached until reaped (see CLIENT_IDLE_MAX), and a tight cap would lock
-# the tile out of new connections once a few stale ones pile up.
+# its grouped session). Generous headroom: a dropped/backgrounded tab can leave a
+# client attached until its socket is torn down, and a tight cap would lock the
+# tile out of new connections once a few stale ones pile up. We deliberately do
+# NOT time-reap quiet clients — see the WHY-NO-REAPER note above the poll loop.
 MAX_CLIENTS="${CHELA_TERM_MAX_CLIENTS:-10}"
-# Detach a wall ttyd client after this many seconds idle, so an abandoned tab
-# can't hold a --max-clients slot forever. Scoped to webterm_* clients only — the
-# user's own interactive tmux session is never reaped.
-CLIENT_IDLE_MAX="${CHELA_TERM_CLIENT_IDLE_MAX:-3600}"
 MAP_FILE="${CHELA_DIR:-${HOME}/.chela}/agent_terminals.json"
 # Ensure the state dir exists — a fresh install has no ~/.chela yet, and the
 # atomic map write (write_map: printf > "$MAP_FILE.tmp" && mv) silently fails
@@ -140,24 +137,6 @@ spawn() {
     PORT_OF["$wid"]=$port
 }
 
-# Detach wall ttyd clients idle longer than CLIENT_IDLE_MAX. ttyd keeps one tmux
-# client per WebSocket; a dropped or backgrounded browser tab can leave its client
-# attached indefinitely, consuming a --max-clients slot until the grouped session
-# refuses new connections. Filtered to WEBTERM_PREFIX sessions so the user's own
-# interactive `${TMUX_SESSION}` client is never touched.
-reap_stale_clients() {
-    local now act tty sess
-    now="$(date +%s)"
-    while IFS='|' read -r act tty sess; do
-        [[ -z "$tty" ]] && continue
-        [[ "$sess" == "${WEBTERM_PREFIX}"* ]] || continue
-        if (( now - act > CLIENT_IDLE_MAX )); then
-            tmux detach-client -t "$tty" 2>/dev/null \
-                && echo "agent-terminals: reaped idle client ${tty} (${sess}, idle $((now-act))s)"
-        fi
-    done < <(tmux list-clients -F '#{client_activity}|#{client_name}|#{client_session}' 2>/dev/null)
-}
-
 despawn() {
     local wid="$1"
     [[ -n "${PID_OF[$wid]:-}" ]] && kill "${PID_OF[$wid]}" 2>/dev/null
@@ -224,6 +203,17 @@ echo "agent-terminals: dynamic supervisor (poll ${POLL}s, base port ${BASE_PORT}
 
 write_map               # write an (empty) map even before any agent is seen
 
+# WHY-NO-REAPER: we used to detach wall ttyd clients idle past a timeout to free
+# --max-clients slots held by abandoned tabs. That was wrong: the only idle signal
+# tmux exposes is `client_activity`, which advances on terminal I/O — NOT on the
+# WebSocket keepalive pings (app.py ping_interval=25) that keep a quiet pane's
+# socket warm. An agent terminal that simply produces no output (the normal case
+# for a wall you're watching) thus looked "idle" and got force-detached after the
+# timeout, dropping a perfectly live tile to ttyd's reconnect screen. tmux cannot
+# tell an abandoned tab from a live-but-quiet one, so any activity-based reaper
+# kills real sessions. Genuinely dead sockets are already torn down by the
+# keepalive: a failed ping raises in the proxy pumps, ttyd drops the client, and
+# tmux detaches it — which frees the slot. --max-clients headroom absorbs the rest.
 declare -A CUR NAME_OF
 while :; do
     # snapshot the live window set, keyed by stable window id
@@ -268,6 +258,5 @@ while :; do
     fi
 
     (( changed )) && write_map
-    reap_stale_clients      # free --max-clients slots held by abandoned tabs
     sleep "${POLL}"
 done
