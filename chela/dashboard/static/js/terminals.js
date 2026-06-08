@@ -858,18 +858,40 @@ function stopTermTimer() {
 // blank its ttyd iframes — closing their sockets, which drops the backing tmux
 // clients so they stop distorting window-size — and reconnect when it's shown
 // again. A quick tab flip stays under the grace, so there's no needless reload.
-const TERM_HIDE_GRACE_MS = 45000;   // hidden this long → release ttyd clients
+//
+// CONTENTION GATE: a pane is only torn down when its window has >1 viewer
+// (/api/term/clients). With a single viewer there's no size contention to resolve
+// — a tmux window has one size shared by all its clients, so a lone client always
+// fits — and tearing it down would just churn the connection for nothing. So a
+// backgrounded wall that's the only thing watching its agents keeps its terminals;
+// teardown only fires for panes a second tab/device is also viewing.
+const TERM_HIDE_GRACE_MS = 45000;   // hidden this long → release contended ttyd clients
 let _termSuspended = false;
 let _termHideTimer = null;
 
-function _teardownTermFrames() {
+// /term/<wid>/ → wid. Reads the live src (or the stashed one once blanked).
+function _widOfFrame(ifr) {
+    const src = ifr.dataset.suspendedSrc || ifr.getAttribute('src') || '';
+    const m = src.match(/\/term\/([^/]+)\//);
+    return m ? decodeURIComponent(m[1]) : null;
+}
+
+async function _teardownTermFrames() {
+    let counts;
+    try { counts = await api('/api/term/clients'); }
+    catch (e) { return; }                              // can't tell contention → disturb nothing
+    if (document.visibilityState !== 'hidden') return; // became visible mid-fetch → abort
+    let released = 0;
     document.querySelectorAll('#term-stage iframe.term-frame').forEach(ifr => {
         const src = ifr.getAttribute('src') || '';
-        if (!src || src === 'about:blank') return;     // nothing live to release
-        ifr.dataset.suspendedSrc = src;                // stash for restore
-        ifr.src = 'about:blank';                        // unload → WS close → tmux client drops
+        if (!src || src === 'about:blank') return;      // nothing live to release
+        const wid = _widOfFrame(ifr);
+        if (!wid || (counts[wid] || 0) <= 1) return;    // sole viewer → leave it connected
+        ifr.dataset.suspendedSrc = src;                 // stash for restore
+        ifr.src = 'about:blank';                         // unload → WS close → tmux client drops
+        released++;
     });
-    _termSuspended = true;
+    if (released) _termSuspended = true;   // only suspend reactive ticks if we actually released
 }
 
 function _restoreTermFrames() {
