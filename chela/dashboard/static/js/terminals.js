@@ -915,8 +915,11 @@ async function termTick() {
     await _absorbFreshTerminals(live);
 
     // Refresh the busy/idle/waiting dots from this poll's fresh status. Also
-    // refresh labels in case a rename changed a pane's friendly name.
+    // recolour the sidebar dots off the SAME poll so they stay in lockstep with
+    // the wall instead of lagging until the next 30s refresh, and refresh labels
+    // in case a rename changed a pane's friendly name.
     _applyTermStatus(agents);
+    syncSidebarDots(agents);
     _refreshPaneLabels();
     try { _applyTermContext(await api('/api/agents/context')); } catch (e) { /* keep prior fills */ }
 }
