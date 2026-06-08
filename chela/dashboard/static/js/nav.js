@@ -119,6 +119,24 @@ function renderSidebarAgents(agents) {
     }).join('');
 }
 
+// Recolour the sidebar dots in place from fresh /api/agents data — no list
+// rebuild (rows are name-sorted, so status never reorders them; only the dot
+// colour changes). This lets a fast caller (the 4s wall tick) keep the sidebar
+// in lockstep with the wall's pane dots instead of lagging up to REFRESH_MS (30s)
+// behind it. Both read the same a.session_status, so once they refresh off the
+// same poll they agree exactly. Row add/remove still rides the 30s refreshSidebar.
+function syncSidebarDots(agents) {
+    if (!agents) return;
+    const by = {};
+    agents.forEach(a => { if (a && a.name) by[a.name] = a; });
+    document.querySelectorAll('#sidebar-agents .agent-row').forEach(row => {
+        const a = by[row.dataset.agent];
+        if (!a) return;
+        const dot = row.querySelector('.health-dot');
+        if (dot) dot.className = 'health-dot ' + agentDotColor(a);
+    });
+}
+
 // Single source of the always-visible sidebar agent list. Owns the /api/agents
 // fetch that also primes _agentsCache (schedule dropdown, detail view, etc.).
 async function refreshSidebar() {
