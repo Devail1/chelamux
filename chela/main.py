@@ -13,7 +13,7 @@ import os
 import sys
 import time
 
-from chela import discovery, dispatcher, messenger, notify, scheduler
+from chela import agent_manager, discovery, dispatcher, messenger, notify, scheduler
 from chela.config import (
     TMUX_SESSION,
     SCHEDULER_POLL_INTERVAL,
@@ -60,6 +60,16 @@ def cmd_run(args) -> None:
             executed = scheduler.tick()
             if executed:
                 log.info("Scheduler executed %d task(s)", executed)
+
+            # Relabel any hand-started/resumed claude window to its cwd basename
+            # (the dashboard Start button already names windows; this catches the
+            # ones launched directly in tmux). Idempotent — only acts on a mismatch.
+            try:
+                renamed = agent_manager.reconcile_window_names()
+                if renamed:
+                    log.info("Reconciled window names: %s", ", ".join(renamed))
+            except Exception:
+                log.exception("Window-name reconcile failed")
 
             now = time.time()
             if DISPATCH_WORKFLOWS and now - last_dispatch_check >= DISPATCH_TICK_INTERVAL:
