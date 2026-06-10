@@ -1607,6 +1607,31 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .popover-item { padding: 7px 10px; cursor: pointer; border-radius: 4px; font-size: 12px; }
 .popover-item:hover { background: var(--accent); color: #fff; }
+.popover-item.popover-note { cursor: default; color: var(--text-dim); }
+.popover-item.popover-note:hover { background: transparent; color: var(--text-dim); }
+.popover-hint { opacity: 0.7; }
+.popover-hint code, .popover-note .popover-hint { font-size: 11px; }
+
+/* --- Launcher (Recent + Favorites click-to-launch) --- */
+.launch-group-label {
+    padding: 6px 14px 2px; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-dim); opacity: 0.75;
+}
+.launch-row .lr-icon { width: 12px; text-align: center; color: var(--accent); font-size: 10px; }
+.launch-row .lr-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.launch-row .lr-actions { display: inline-flex; gap: 2px; }
+.launch-row .lr-shell, .launch-row .lr-star {
+    background: transparent; border: 0; cursor: pointer; padding: 0 3px;
+    color: var(--text-dim); font-size: 13px; line-height: 1;
+    /* Actions are hover-revealed per-button (opacity on the wrapper would clip a
+       child's opacity, hiding the always-on pinned star below). */
+    opacity: 0; transition: opacity 0.12s;
+}
+.launch-row:hover .lr-shell, .launch-row:hover .lr-star { opacity: 1; }
+.launch-row .lr-star.pinned { opacity: 1; color: var(--yellow); }  /* favorites always show the star */
+.launch-row .lr-shell:hover, .launch-row .lr-star:hover { color: var(--accent); }
+.launch-row.lr-gone .lr-icon { color: var(--red); }
+.launch-row.lr-gone .lr-label { color: var(--text-dim); text-decoration: line-through; }
 
 /* --- Agent detail --- */
 .detail-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }

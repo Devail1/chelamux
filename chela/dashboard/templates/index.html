@@ -59,6 +59,17 @@
         </div>
       </div>
     </section>
+
+    <section class="side-section" id="launcher-section">
+      <div class="side-head" title="Launch a Claude agent in a project directory">
+        <span class="side-title">Launch</span>
+        <button class="side-add" title="Add a project to Favorites"
+                onclick="event.stopPropagation(); openFavAdd(event)">+</button>
+      </div>
+      <div class="side-list" id="launcher-list">
+        <div class="side-empty">No projects yet</div>
+      </div>
+    </section>
     {% endif %}
 
     <section class="side-section">
@@ -338,6 +349,9 @@
   <div class="popover-item" id="new-shell-item" onclick="hideNewMenu(); newShellWindow()">Shell window</div>
 </div>
 
+<!-- Launcher: "add a project to Favorites" picker (filled from /api/launcher/suggest) -->
+<div class="popover" id="fav-add-menu" style="display:none;"></div>
+
 <!-- Add Schedule Modal -->
 <div class="modal-overlay" id="modal-sched">
   <div class="modal">
@@ -386,6 +400,7 @@
 <script src="static/js/kanban.js"></script>
 {% if terminals_enabled %}<script src="static/js/terminals.js"></script>{% endif %}
 <script src="static/js/nav.js"></script>
+{% if terminals_enabled %}<script src="static/js/launcher.js"></script>{% endif %}
 <script src="static/js/sse.js"></script>
 <script src="static/js/main.js"></script>
 </body>
