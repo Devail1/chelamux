@@ -940,6 +940,18 @@ def api_launcher_unpin():
     return jsonify({"ok": True, **launcher.unpin(resolved)})
 
 
+@app.route("/api/launcher/forget", methods=["POST"])
+@require_auth
+def api_launcher_forget():
+    """Drop a directory from Recent (the × on a Recent row). Returns the view."""
+    data = request.get_json(silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"ok": False, "error": "path required"}), 400
+    resolved = os.path.realpath(os.path.expanduser(path))
+    return jsonify({"ok": True, **launcher.forget_recent(resolved)})
+
+
 @app.route("/api/agents/kill", methods=["POST"])
 @require_auth
 def api_agents_kill():

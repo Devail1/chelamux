@@ -74,6 +74,17 @@ def record_recent(path: str) -> None:
     _save(data)
 
 
+def forget_recent(path: str) -> dict:
+    """Drop ``path`` from the recent list (the × on a Recent row). Returns view()."""
+    p = _norm(path)
+    data = _load()
+    kept = [e for e in data["recent"] if e.get("path") != p]
+    if len(kept) != len(data["recent"]):
+        data["recent"] = kept
+        _save(data)
+    return view()
+
+
 def pin(path: str, label: str | None = None) -> dict:
     """Add ``path`` to favorites (idempotent). Returns the fresh view()."""
     p = _norm(path)

@@ -58,6 +58,17 @@ def test_pin_is_idempotent_and_unpin_removes(launcher, tmp_path):
     assert launcher.view()["favorites"] == []
 
 
+def test_forget_recent_removes_one_entry(launcher, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    launcher.record_recent(str(a))
+    launcher.record_recent(str(b))
+    launcher.forget_recent(str(a))
+    paths = [e["path"] for e in launcher.view()["recent"]]
+    assert launcher._norm(str(a)) not in paths
+    assert launcher._norm(str(b)) in paths
+
+
 def test_favorited_dir_excluded_from_recent(launcher, tmp_path):
     d = tmp_path / "shared"
     d.mkdir()

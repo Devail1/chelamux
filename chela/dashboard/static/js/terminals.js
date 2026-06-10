@@ -833,6 +833,34 @@ function startTermFocusTracking() {
     window.addEventListener('focus', _applyTermFocus);   // returning to the parent clears it promptly
 }
 
+// Bring an existing pane to the user's attention: switch to the wall, restore it
+// if minimized, scroll it into view, focus its iframe (which lights the focus
+// ring), and flash it briefly. The launcher's dedup calls this when you click a
+// project that already has a live agent, so the click lands you ON that pane
+// instead of silently no-op'ing because the wall was already showing.
+function focusPaneByWid(wid) {
+    if (!TERMINALS_ON || !wid) return;
+    if (typeof selectView === 'function') selectView('terminals');
+    if (_termMode === 'single') {
+        const sel = $('#term-agent');
+        if (sel && sel.value !== wid) { sel.value = wid; renderTerminals(); }
+        return;
+    }
+    // Defer so selectView's render settles before we hunt for the tile.
+    setTimeout(() => {
+        if (_minimized.has(wid)) restoreFromDock(wid);
+        const item = Array.from($('#term-stage').querySelectorAll('.grid-stack-item'))
+            .find(it => it.getAttribute('gs-id') === wid);
+        if (!item) return;
+        item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        const ifr = item.querySelector('iframe.term-frame');
+        if (ifr) { try { ifr.contentWindow.focus(); } catch (e) { /* cross-doc guard */ } ifr.focus(); }
+        const content = item.querySelector('.grid-stack-item-content') || item;
+        content.classList.add('pane-flash');
+        setTimeout(() => content.classList.remove('pane-flash'), 1100);
+    }, 60);
+}
+
 function startTermTimer() {
     if (!TERMINALS_ON) return;
     stopTermTimer();

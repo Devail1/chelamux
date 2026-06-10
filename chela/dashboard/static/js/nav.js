@@ -111,13 +111,29 @@ function renderSidebarAgents(agents) {
         const dot = agentDotColor(a);
         const type = _agentType(a);
         const active = a.name === _detailAgent ? ' active' : '';
+        // One indicator, not two: the type glyph (shape = kind) is itself
+        // coloured by status (busy/waiting/idle), replacing the old separate
+        // status-dot + type-icon pair that read as a duplicate marker.
+        const stWord = _AGENT_STATUS_WORD[dot] || '';
+        // Pin-to-Launch star: only when terminals are on (the launcher exists)
+        // and the agent has a resolved cwd to pin.
+        const canPin = (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) && a.cwd;
+        const faved = canPin && typeof _isFav === 'function' && _isFav(a.cwd);
+        const pin = canPin
+            ? `<button class="agent-pin${faved ? ' pinned' : ''}" data-cwd="${attrEsc(a.cwd)}"
+                 title="${faved ? 'Unpin from Launch favorites' : 'Pin this directory to Launch favorites'}"
+                 onclick="event.stopPropagation(); toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
+            : '';
         return `<div class="agent-row${active}" data-agent="${attrEsc(a.name)}" onclick="selectAgent(this.dataset.agent)">
-            <span class="health-dot ${dot}"></span>
-            <span class="type-icon" title="${attrEsc(type)}">${_typeIcon(type)}</span>
+            <span class="type-icon status-${dot}" title="${attrEsc(type)}${stWord ? ' · ' + stWord : ''}">${_typeIcon(type)}</span>
             <span class="agent-row-name" title="${attrEsc(a.name)}">${escHtml(a.name)}</span>
+            ${pin}
         </div>`;
     }).join('');
 }
+
+// Status colour → human word, for the merged type-glyph's tooltip.
+const _AGENT_STATUS_WORD = { green: 'working', yellow: 'waiting', grey: 'idle' };
 
 // Recolour the sidebar dots in place from fresh /api/agents data — no list
 // rebuild (rows are name-sorted, so status never reorders them; only the dot
@@ -132,8 +148,12 @@ function syncSidebarDots(agents) {
     document.querySelectorAll('#sidebar-agents .agent-row').forEach(row => {
         const a = by[row.dataset.agent];
         if (!a) return;
-        const dot = row.querySelector('.health-dot');
-        if (dot) dot.className = 'health-dot ' + agentDotColor(a);
+        // Recolour the merged type glyph in place (shape stays, colour tracks status).
+        const glyph = row.querySelector('.type-icon');
+        if (glyph) {
+            glyph.classList.remove('status-green', 'status-yellow', 'status-grey');
+            glyph.classList.add('status-' + agentDotColor(a));
+        }
     });
 }
 

@@ -34,6 +34,10 @@ function _launchRow(e, pinned) {
              onclick="event.stopPropagation(); unpinFav('${j}')">&#9733;</button>`
         : `<button class="lr-star" title="Pin to Favorites"
              onclick="event.stopPropagation(); pinFav('${j}')">&#9734;</button>`;
+    // Recent rows carry a × to forget them; favorites are removed via the star.
+    const forget = pinned ? '' :
+        `<button class="lr-forget" title="Remove from Recent"
+           onclick="event.stopPropagation(); forgetRecent('${j}')">&#10005;</button>`;
     const gone = e.exists ? '' : ' lr-gone';
     return `<div class="side-item launch-row${gone}" data-path="${attrEsc(e.path)}"
         title="${attrEsc(e.path)}${e.exists ? '' : ' (missing)'}"
@@ -43,7 +47,7 @@ function _launchRow(e, pinned) {
         <span class="lr-actions">
           <button class="lr-shell" title="Open a plain shell here"
             onclick="event.stopPropagation(); launchProject(this.closest('.launch-row').dataset.path, {shell:true})">&#9003;</button>
-          ${star}
+          ${star}${forget}
         </span>
       </div>`;
 }
@@ -78,13 +82,18 @@ function _samePath(a, b) {
 }
 
 // Launch `claude` (default) or a plain shell in `path`. Dedup: a claude launch
-// into a dir that already has a live claude agent just shows the wall instead of
-// spawning a duplicate. Plain-shell launches always spawn (you may want several).
+// into a dir that already has a live claude agent focuses that pane on the wall
+// rather than spawning a duplicate. Plain-shell launches always spawn (you may
+// want several shells in one repo).
 async function launchProject(path, opts) {
     opts = opts || {};
     if (!opts.shell) {
         const existing = (_agentsCache || []).find(a => a.claude_running && _samePath(a.cwd, path));
-        if (existing) { selectView('terminals'); return; }
+        if (existing) {
+            if (typeof focusPaneByWid === 'function') focusPaneByWid(existing.window_id);
+            else if (typeof selectView === 'function') selectView('terminals');
+            return;
+        }
     }
     const body = { cwd: path };
     if (!opts.shell) body.command = 'claude';
@@ -104,25 +113,37 @@ async function launchProject(path, opts) {
     }
 }
 
-async function pinFav(path) {
-    try {
-        const d = await api('/api/launcher/pin', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path }),
-        });
-        if (d && d.ok) { _launcherData = { recent: d.recent || [], favorites: d.favorites || [] }; renderLauncher(); }
-    } catch (e) { /* noop */ }
+// Is `path` already a favorite? (Used to toggle the star on agent rows.)
+function _isFav(path) {
+    return (_launcherData.favorites || []).some(f => _samePath(f.path, path));
 }
 
-async function unpinFav(path) {
+// Apply a launcher-mutation response: refresh the Launch section AND the agent
+// rows (whose pin star reflects favorite state), so a pin from either surface
+// updates both immediately rather than waiting for the next 30s tick.
+function _applyLauncherResp(d) {
+    if (!d || !d.ok) return;
+    _launcherData = { recent: d.recent || [], favorites: d.favorites || [] };
+    renderLauncher();
+    if (typeof renderSidebarAgents === 'function') renderSidebarAgents(_agentsCache || []);
+}
+
+async function _launcherPost(route, path) {
     try {
-        const d = await api('/api/launcher/unpin', {
+        const d = await api(route, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path }),
         });
-        if (d && d.ok) { _launcherData = { recent: d.recent || [], favorites: d.favorites || [] }; renderLauncher(); }
-    } catch (e) { /* noop */ }
+        _applyLauncherResp(d);
+    } catch (e) { /* transient — leave the last render */ }
 }
+
+async function pinFav(path)      { return _launcherPost('/api/launcher/pin', path); }
+async function unpinFav(path)    { return _launcherPost('/api/launcher/unpin', path); }
+async function forgetRecent(path) { return _launcherPost('/api/launcher/forget', path); }
+
+// Toggle a directory's favorite state — drives the star on Agents-list rows.
+function toggleFavCwd(path) { return _isFav(path) ? unpinFav(path) : pinFav(path); }
 
 // "Add a project to Favorites" picker: a popover of git-repo dirs under
 // CHELA_PROJECTS_DIR that aren't pinned yet. Mirrors openNewMenu's anchoring +
