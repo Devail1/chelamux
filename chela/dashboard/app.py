@@ -218,7 +218,7 @@ def api_agents_msg():
 # can compose Ctrl with any letter (control codes — harmless), not just a fixed
 # handful.
 _TERM_KEYS = {
-    "Up", "Down", "Left", "Right", "Escape", "Tab", "Enter", "BSpace",
+    "Up", "Down", "Left", "Right", "Escape", "Tab", "BTab", "Enter", "BSpace",
     "PageUp", "PageDown", "Home", "End",
 } | {f"C-{c}" for c in "abcdefghijklmnopqrstuvwxyz"}
 
@@ -859,8 +859,12 @@ def api_agents_spawn():
     if not _WINDOW_NAME_RE.match(name):
         return jsonify({"ok": False, "error": f"invalid window name: {name}"}), 500
     try:
+        # Trailing ':' forces session resolution. A bare session name is
+        # ambiguous to tmux when a *window* shares that name (e.g. a Claude
+        # window opened in a dir whose basename == the session name); tmux then
+        # targets that window's index and fails with "index N in use".
         proc = subprocess.run(
-            ["tmux", "new-window", "-t", TMUX_SESSION, "-n", name, "-c", cwd],
+            ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd],
             capture_output=True, text=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
