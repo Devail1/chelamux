@@ -36,6 +36,10 @@
         <span class="value ts" id="hdr-next">-</span>
       </span>
       <span class="topbar-updated">upd <span class="ts" id="hdr-updated">-</span></span>
+      <button class="palette-trigger" id="btn-palette" title="Jump to… (⌘K / Ctrl-K)" aria-label="Open command palette" onclick="openPalette()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <span class="pt-kbd">⌘K</span>
+      </button>
       <button class="icon-btn" id="btn-new" title="New…" aria-label="New" onclick="openNewMenu(event)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
       </button>
@@ -286,6 +290,7 @@
         <div id="term-keybar" class="term-keybar" data-ctrl="off">
           <button class="kb2-key" onclick="termKey('Escape')">Esc</button>
           <button class="kb2-key" onclick="termKey('Tab')">Tab</button>
+          <button class="kb2-key" onclick="termKey('BTab')" title="Shift-Tab (back-tab · toggle agent mode)" aria-label="Shift Tab">&#8679;Tab</button>
           <button class="kb2-key" onclick="termKey('Enter')" aria-label="Enter">&#9166;</button>
           <button class="kb2-key" onclick="termPaste(this)" title="Paste from clipboard">Paste</button>
           <span class="kb2-sep" aria-hidden="true"></span>
@@ -326,6 +331,17 @@
 
   </main>
 
+</div>
+
+<!-- Command palette (⌘K / Ctrl-K): fuzzy jump to any agent, view, or project -->
+<div class="palette-overlay" id="palette" onclick="if(event.target===this)closePalette()">
+  <div class="palette">
+    <input id="palette-input" class="palette-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="Jump to an agent, view, or project…"
+           oninput="_palSel=0;_renderPalette(this.value)">
+    <div class="palette-list" id="palette-list"></div>
+    <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></div>
+  </div>
 </div>
 
 <!-- Mobile sidebar scrim (off-canvas drawer backdrop) -->

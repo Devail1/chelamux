@@ -80,12 +80,6 @@ function _syncSidebarActive(view, agentName) {
 function _agentType(a) {
     return a.window_type || (a.claude_running ? 'claude' : 'shell');
 }
-function _typeIcon(type) {
-    if (type === 'claude') return '◆';
-    if (type === 'server') return '⊕';
-    return '❯';   // shell
-}
-
 // --- Sidebar agent list ----------------------------------------------------
 
 function setAgentFilter(f) {
@@ -94,46 +88,166 @@ function setAgentFilter(f) {
     renderSidebarAgents(_agentsCache || []);
 }
 
+// Per-window context cache (used_pct etc.), fed by both the sidebar refresh and
+// the wall tick so rows can show ctx% even when the wall isn't open.
+let _ctxByWid = {};
+function updateCtxCache(ctx) {
+    if (!Array.isArray(ctx)) return;
+    const m = {};
+    ctx.forEach(c => { if (c && c.window_id) m[c.window_id] = c; });
+    _ctxByWid = m;
+}
+
+// Project key for grouping = basename of the session's cwd. Shells / sessions
+// with no resolved cwd collect under one "other" group.
+function _agentProject(a) {
+    if (!a || !a.cwd) return null;
+    const parts = String(a.cwd).replace(/\/+$/, '').split('/');
+    return parts[parts.length - 1] || null;
+}
+
+// Friendly label, shared with the wall panes (_displayLabel): a custom rename
+// wins, else a generic shell-N is relabelled to its repo, else the raw name —
+// so a session reads identically in the sidebar and on its pane title. Falls
+// back to the raw name when terminals.js isn't loaded.
+function _agentLabel(a) {
+    if (typeof _displayLabel === 'function' && a && a.window_id) return _displayLabel(a.window_id);
+    return a ? a.name : '';
+}
+
+// Collapsed-group state persists in localStorage — the list rebuilds on every
+// tick, so DOM-only state would be lost.
+function _collapsedGroups() {
+    try { return new Set(JSON.parse(localStorage.getItem('chela_grp_collapsed') || '[]')); }
+    catch { return new Set(); }
+}
+function toggleGroup(name) {
+    const s = _collapsedGroups();
+    if (s.has(name)) s.delete(name); else s.add(name);
+    localStorage.setItem('chela_grp_collapsed', JSON.stringify([...s]));
+    renderSidebarAgents(_agentsCache || []);
+}
+
+// One richer agent row: status dot + name + ctx% chip, plus a sub-line with the
+// live state word, age of the last update, and a recap snippet — so you can read
+// what a session is doing without opening it. onclick reads data-agent (handler
+// is on the row, so `this` is the row no matter which child was clicked).
+function _agentRowHtml(a) {
+    const dot = agentDotColor(a);
+    const active = a.name === _detailAgent ? ' active' : '';
+    const stWord = _AGENT_STATUS_WORD[dot] || 'idle';
+    const stCls = _SIDEBAR_DOT_CLASS[dot] || 'idle';
+    const label = _agentLabel(a);
+
+    const c = a.window_id ? _ctxByWid[a.window_id] : null;
+    let ctxChip = '';
+    if (c && c.used_pct != null) {
+        const p = Math.round(c.used_pct);
+        const cls = p > 80 ? 'danger' : p > 60 ? 'warn' : '';
+        ctxChip = `<span class="ar-ctx ${cls}" title="context ${p}%">${p}%</span>`;
+    }
+
+    let age = '';
+    if (a.recap_ts) age = ageStr((Date.now() - new Date(a.recap_ts)) / 1000).replace(' ago', '');
+    const recap = a.recap ? `<span class="ar-recap" title="${attrEsc(a.recap)}">${escHtml(a.recap)}</span>` : '';
+
+    const sub = `<span class="ar-state ${stCls}">${stWord}</span>`
+        + (age ? `<span class="ar-age">· ${age}</span>` : '')
+        + (recap ? ` ${recap}` : '');
+
+    const canPin = TERMINALS_ON && a.cwd;
+    const faved = canPin && typeof _isFav === 'function' && _isFav(a.cwd);
+    const pin = canPin
+        ? `<button class="agent-pin${faved ? ' pinned' : ''}" data-cwd="${attrEsc(a.cwd)}"
+             title="${faved ? 'Unpin from Launch favorites' : 'Pin this directory to Launch favorites'}"
+             onclick="event.stopPropagation(); toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
+        : '';
+
+    return `<div class="agent-row rich${active}" data-agent="${attrEsc(a.name)}" onclick="selectAgent(this.dataset.agent)">
+        <span class="term-status-dot ${stCls}" title="${attrEsc(_agentType(a))} · ${stWord}"></span>
+        <div class="ar-main">
+            <div class="ar-top">
+                <span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span>
+                ${ctxChip}
+            </div>
+            <div class="ar-sub">${sub}</div>
+        </div>
+        ${pin}
+    </div>`;
+}
+
 function renderSidebarAgents(agents) {
     const host = document.getElementById('sidebar-agents');
     if (!host) return;
     const rows = (agents || [])
-        .filter(a => _agentFilter === 'all' || _agentType(a) === _agentFilter)
-        .sort((a, b) => a.name.localeCompare(b.name));
+        .filter(a => _agentFilter === 'all' || _agentType(a) === _agentFilter);
     if (!rows.length) {
         host.innerHTML = '<div class="side-empty">No agents</div>';
         return;
     }
-    // onclick reads data-agent (handler is on the row, so `this` is the row no
-    // matter which child was clicked) — avoids escaping a window name into the
-    // inline handler.
-    host.innerHTML = rows.map(a => {
-        const dot = agentDotColor(a);
-        const type = _agentType(a);
-        const active = a.name === _detailAgent ? ' active' : '';
-        // One indicator, not two: the type glyph (shape = kind) is itself
-        // coloured by status (busy/waiting/idle), replacing the old separate
-        // status-dot + type-icon pair that read as a duplicate marker.
-        const stWord = _AGENT_STATUS_WORD[dot] || '';
-        // Pin-to-Launch star: only when terminals are on (the launcher exists)
-        // and the agent has a resolved cwd to pin.
-        const canPin = (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) && a.cwd;
-        const faved = canPin && typeof _isFav === 'function' && _isFav(a.cwd);
-        const pin = canPin
-            ? `<button class="agent-pin${faved ? ' pinned' : ''}" data-cwd="${attrEsc(a.cwd)}"
-                 title="${faved ? 'Unpin from Launch favorites' : 'Pin this directory to Launch favorites'}"
-                 onclick="event.stopPropagation(); toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
-            : '';
-        return `<div class="agent-row${active}" data-agent="${attrEsc(a.name)}" onclick="selectAgent(this.dataset.agent)">
-            <span class="type-icon status-${dot}" title="${attrEsc(type)}${stWord ? ' · ' + stWord : ''}">${_typeIcon(type)}</span>
-            <span class="agent-row-name" title="${attrEsc(a.name)}">${escHtml(a.name)}</span>
-            ${pin}
+
+    // Triage: agents waiting on input float into a "Needs you" cluster above the
+    // project groups. Each agent shows in exactly one place — lifted out of its
+    // group while it's blocked, like a starred item.
+    const waiting = rows.filter(a => a.session_status === 'waiting')
+        .sort((a, b) => a.name.localeCompare(b.name));
+    const rest = rows.filter(a => a.session_status !== 'waiting');
+
+    let html = '';
+    if (waiting.length) {
+        html += `<div class="side-triage">
+            <div class="triage-head">Needs you <span class="triage-count">${waiting.length}</span></div>
+            ${waiting.map(_agentRowHtml).join('')}
         </div>`;
-    }).join('');
+    }
+
+    // Partition the rest by project (cwd basename). A project earns a collapsible
+    // group header only when 2+ sessions share it; lone sessions render as plain
+    // rows (their label is already the repo name, so a header would just repeat
+    // it). Entries — single rows and groups alike — interleave alphabetically by
+    // project so the order is stable as sessions come and go.
+    const byProj = {};
+    rest.forEach(a => { const k = _agentProject(a) || '~other'; (byProj[k] = byProj[k] || []).push(a); });
+    const collapsed = _collapsedGroups();
+
+    const entries = Object.keys(byProj).map(k => {
+        const list = byProj[k].sort((a, b) => _agentLabel(a).localeCompare(_agentLabel(b)));
+        // ~other holds cwd-less shells; never collapse them into a "other" group —
+        // render each as its own row.
+        const grouped = list.length >= 2 && k !== '~other';
+        return { key: k, list, grouped, sortKey: grouped ? k : _agentLabel(list[0]) };
+    });
+    // Explode the ~other bucket into individual single-row entries.
+    const flatEntries = [];
+    for (const e of entries) {
+        if (e.key === '~other') e.list.forEach(a => flatEntries.push({ list: [a], grouped: false, sortKey: _agentLabel(a) }));
+        else flatEntries.push(e);
+    }
+    flatEntries.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+    for (const e of flatEntries) {
+        if (!e.grouped) { html += e.list.map(_agentRowHtml).join(''); continue; }
+        const isColl = collapsed.has(e.key);
+        const working = e.list.filter(a => agentDotColor(a) === 'green').length;
+        html += `<div class="side-group${isColl ? ' collapsed' : ''}">
+            <div class="group-head" data-g="${attrEsc(e.key)}" onclick="toggleGroup(this.dataset.g)">
+                <span class="group-caret">▾</span>
+                <span class="group-name" title="${attrEsc(e.key)}">${escHtml(e.key)}</span>
+                ${working ? `<span class="group-dot working" title="${working} working"></span>` : ''}
+                <span class="group-count">${e.list.length}</span>
+            </div>
+            <div class="group-rows">${e.list.map(_agentRowHtml).join('')}</div>
+        </div>`;
+    }
+
+    host.innerHTML = html;
 }
 
-// Status colour → human word, for the merged type-glyph's tooltip.
+// Status colour → human word, for the dot's tooltip.
 const _AGENT_STATUS_WORD = { green: 'working', yellow: 'waiting', grey: 'idle' };
+// Status colour → the pane dot's CSS state class, so the sidebar dot pulses
+// identically to the wall's .term-status-dot (working/waiting/idle).
+const _SIDEBAR_DOT_CLASS = { green: 'working', yellow: 'waiting', grey: 'idle' };
 
 // Recolour the sidebar dots in place from fresh /api/agents data — no list
 // rebuild (rows are name-sorted, so status never reorders them; only the dot
@@ -148,11 +262,13 @@ function syncSidebarDots(agents) {
     document.querySelectorAll('#sidebar-agents .agent-row').forEach(row => {
         const a = by[row.dataset.agent];
         if (!a) return;
-        // Recolour the merged type glyph in place (shape stays, colour tracks status).
-        const glyph = row.querySelector('.type-icon');
-        if (glyph) {
-            glyph.classList.remove('status-green', 'status-yellow', 'status-grey');
-            glyph.classList.add('status-' + agentDotColor(a));
+        // Restate the dot's status class in place (working/waiting/idle), matching
+        // how _colorTermDots recolours the wall's pane dots off the same poll.
+        const dotEl = row.querySelector('.term-status-dot');
+        if (dotEl) {
+            const cls = _SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle';
+            dotEl.classList.remove('working', 'waiting', 'idle');
+            dotEl.classList.add(cls);
         }
     });
 }
@@ -161,8 +277,15 @@ function syncSidebarDots(agents) {
 // fetch that also primes _agentsCache (schedule dropdown, detail view, etc.).
 async function refreshSidebar() {
     try {
-        const agents = await api('/api/agents');
+        // Fetch context alongside agents so rows can show ctx% even when the wall
+        // (which owns the 4s context poll) isn't the active view. Best-effort:
+        // a context failure must not blank the agent list.
+        const [agents, ctx] = await Promise.all([
+            api('/api/agents'),
+            TERMINALS_ON ? api('/api/agents/context').catch(() => null) : Promise.resolve(null),
+        ]);
         _agentsCache = agents || [];
+        if (ctx) updateCtxCache(ctx);
         renderSidebarAgents(_agentsCache);
     } catch (e) {
         // transient — keep the last render; the next tick retries.
@@ -270,52 +393,58 @@ function renderSettings(focus) {
     if (!body) return;
     const theme = localStorage.getItem('chela_theme') || 'dark';
     body.innerHTML = `
-        <h4>Needs-input notifications</h4>
-        <div class="drawer-field">
-            <div class="k">Fires a one-shot ping when an agent's pane enters
-            <code>waiting</code> (blocked on a prompt or question).</div>
-        </div>
-        <div class="drawer-field">
-            <div class="k">Set on the daemon (env), then restart <code>chela run</code>:</div>
-            <div class="v"><code>CHELA_NOTIFY_URL</code> — ntfy / Telegram / webhook (auto-detected)</div>
-        </div>
-        <div class="drawer-field">
-            <div class="v" style="color:var(--text-dim); font-size:11px;">
-            ntfy: <code>https://ntfy.sh/your-topic</code><br>
-            Telegram: <code>https://api.telegram.org/bot&lt;token&gt;/sendMessage?chat_id=&lt;id&gt;</code><br>
-            webhook: any URL (receives JSON <code>{title,message,event}</code>)
+        <section class="settings-section">
+            <h4>Needs-input notifications</h4>
+            <p class="s-desc">Fires a one-shot ping when an agent's pane enters
+            <code>waiting</code> (blocked on a prompt or question).</p>
+            <p class="s-desc">Set on the daemon (env), then restart <code>chela run</code>:</p>
+            <div class="s-kv"><code>CHELA_NOTIFY_URL</code><span>ntfy / Telegram / webhook (auto-detected)</span></div>
+            <div class="s-examples">
+                <div class="s-ex"><span class="s-tag">ntfy</span><code>https://ntfy.sh/your-topic</code></div>
+                <div class="s-ex"><span class="s-tag">Telegram</span><code>https://api.telegram.org/bot&lt;token&gt;/sendMessage?chat_id=&lt;id&gt;</code></div>
+                <div class="s-ex"><span class="s-tag">webhook</span><span class="s-exnote">any URL — receives JSON <code>{title,message,event}</code></span></div>
             </div>
-        </div>
+        </section>
 
-        <h4>Remote access</h4>
-        <div class="drawer-field">
-            <div class="k">Zero built-in auth — the dashboard binds <code>127.0.0.1</code>.
-            Put it behind a tailnet or SSH tunnel; that is the trust boundary.</div>
-        </div>
-        <div class="drawer-field">
-            <div class="v"><code>tailscale serve 5001</code> &nbsp;·&nbsp; or
-            <code>ssh -L 5001:127.0.0.1:5001 host</code></div>
-        </div>
-        <div class="drawer-field">
-            <div class="k">Phone: SSH/Mosh in (Blink / Termius), then
-            <code>tmux attach</code> for the live panes.</div>
-        </div>
+        <section class="settings-section">
+            <h4>Remote access</h4>
+            <p class="s-desc">Zero built-in auth — the dashboard binds <code>127.0.0.1</code>.
+            Put it behind a tailnet or SSH tunnel; that is the trust boundary.</p>
+            <div class="s-examples">
+                <div class="s-ex"><span class="s-tag">tailnet</span><code>tailscale serve 5001</code></div>
+                <div class="s-ex"><span class="s-tag">tunnel</span><code>ssh -L 5001:127.0.0.1:5001 host</code></div>
+            </div>
+            <p class="s-desc">Phone: SSH/Mosh in (Blink / Termius), then
+            <code>tmux attach</code> for the live panes.</p>
+        </section>
 
-        <h4>Theme</h4>
-        <div class="drawer-field">
-            <select id="theme-select" onchange="setTheme(this.value)">
-                <option value="dark"${theme === 'dark' ? ' selected' : ''}>Dark</option>
-                <option value="dim"${theme === 'dim' ? ' selected' : ''}>Dim</option>
-            </select>
-        </div>
+        <section class="settings-section">
+            <h4>Theme</h4>
+            <div class="s-row">
+                <span class="s-rowlabel">Appearance</span>
+                <select id="theme-select" class="s-select" onchange="setTheme(this.value)">
+                    ${['dark','dim','midnight','nord','gruvbox','solarized','rose']
+                        .map(t => `<option value="${t}"${theme === t ? ' selected' : ''}>${THEME_LABELS[t]}</option>`)
+                        .join('')}
+                </select>
+            </div>
+        </section>
 
-        <h4>Terminal wall</h4>
-        <div class="drawer-field">
-            <div class="k">The embedded ttyd wall streams live and is ${TERMINALS_ON ? 'enabled' : 'off by default'}.
-            Toggle with <code>CHELA_TERMINALS_ENABLED</code>.</div>
-        </div>`;
+        <section class="settings-section">
+            <h4>Terminal wall</h4>
+            <div class="s-row">
+                <span class="s-rowlabel">Embedded ttyd wall</span>
+                <span class="s-badge ${TERMINALS_ON ? 'on' : 'off'}">${TERMINALS_ON ? 'Enabled' : 'Off'}</span>
+            </div>
+            <p class="s-desc">Streams live when on. Toggle with <code>CHELA_TERMINALS_ENABLED</code>.</p>
+        </section>`;
     if (focus === 'notify') body.scrollTop = 0;
 }
+
+const THEME_LABELS = {
+    dark: 'Dark', dim: 'Dim', midnight: 'Midnight', nord: 'Nord',
+    gruvbox: 'Gruvbox', solarized: 'Solarized', rose: 'Rosé Pine',
+};
 
 function setTheme(t) {
     localStorage.setItem('chela_theme', t);
@@ -353,6 +482,172 @@ async function newShellWindow() {
         alert('Could not spawn a window (enable terminals, or use tmux directly).');
     }
 }
+
+// Touch-friendly tooltips. Native `title` only surfaces on hover, so on a
+// phone the rate-limit pills (and any other titled pill) have no tooltip at
+// all. Tapping a titled element pops a floating bubble; tapping elsewhere or
+// after a few seconds dismisses it. Desktop hover still uses the native title.
+(function () {
+    let tipEl = null, hideTimer = null;
+
+    function hideTip() {
+        if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+        if (tipEl) { tipEl.remove(); tipEl = null; }
+    }
+
+    function showTip(target, text) {
+        hideTip();
+        tipEl = document.createElement('div');
+        tipEl.className = 'tap-tip';
+        tipEl.textContent = text;
+        document.body.appendChild(tipEl);
+        const r = target.getBoundingClientRect();
+        // Centre under the target, clamped to the viewport.
+        const tw = tipEl.offsetWidth;
+        let left = r.left + r.width / 2 - tw / 2;
+        left = Math.max(6, Math.min(left, window.innerWidth - tw - 6));
+        tipEl.style.left = left + 'px';
+        tipEl.style.top = (r.bottom + 6) + 'px';
+        hideTimer = setTimeout(hideTip, 4000);
+    }
+
+    // Only react to touch — desktop keeps the native hover tooltip. CRITICAL:
+    // never touch interactive controls. preventDefault() on touchend suppresses
+    // the follow-up click, so hijacking a tap on a button/link/onclick row (the
+    // hamburger, bell, gear, sidebar rows…) would silently kill its action. Bail
+    // on anything actionable and let the tap through; only non-interactive titled
+    // elements (e.g. the rate-limit pills) get the tap-tooltip.
+    document.addEventListener('touchend', function (e) {
+        if (e.target.closest('button, a, input, select, textarea, label, [onclick], [role="button"]')) {
+            hideTip();
+            return;
+        }
+        const el = e.target.closest('[title], [data-tip]');
+        if (!el) { hideTip(); return; }
+        const text = el.getAttribute('data-tip') || el.getAttribute('title');
+        if (!text) { hideTip(); return; }
+        e.preventDefault();
+        showTip(el, text);
+    }, { passive: false });
+
+    window.addEventListener('scroll', hideTip, true);
+})();
+
+// --- Command palette (⌘K / Ctrl-K) ----------------------------------------
+// One fuzzy jump-to for everything: agents (→ detail), views, project launches,
+// and a couple of global actions. The fastest way to navigate once you're past a
+// handful of sessions. Built fresh each open from live caches.
+let _palItems = [], _palSel = 0;
+
+function _paletteItems() {
+    const items = [];
+    const views = [];
+    if (TERMINALS_ON) views.push(['terminals', 'Wall']);
+    views.push(['agents', 'Agents'], ['dispatcher', 'Dispatch'], ['kanban', 'Kanban'], ['schedules', 'Schedules']);
+    views.forEach(([v, label]) => items.push({ icon: '▦', title: label, sub: 'view', run: () => selectView(v) }));
+
+    (_agentsCache || []).forEach(a => {
+        const word = _AGENT_STATUS_WORD[agentDotColor(a)] || 'idle';
+        items.push({ dot: _SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle', title: _agentLabel(a),
+                     sub: 'session · ' + word, run: () => selectAgent(a.name) });
+    });
+
+    if (TERMINALS_ON && typeof _launcherData !== 'undefined' && _launcherData) {
+        const seen = new Set();
+        [...(_launcherData.favorites || []), ...(_launcherData.recent || [])].forEach(e => {
+            if (!e || seen.has(e.path)) return;
+            seen.add(e.path);
+            items.push({ icon: '▸', title: 'Launch ' + (e.label || e.path), sub: 'project',
+                         run: () => launchProject(e.path) });
+        });
+    }
+
+    items.push({ icon: '+', title: 'New shell window', sub: 'action', run: () => newShellWindow() });
+    items.push({ icon: '◷', title: 'Add scheduled task', sub: 'action',
+                 run: () => { if (typeof showAddSchedule === 'function') showAddSchedule(); } });
+    return items;
+}
+
+// Subsequence fuzzy score with a word-boundary bonus; -1 = no match.
+function _fuzzyScore(q, s) {
+    q = q.toLowerCase(); s = s.toLowerCase();
+    if (!q) return 0;
+    let si = 0, score = 0, run = 0, first = -1;
+    for (const c of q) {
+        let found = -1;
+        for (; si < s.length; si++) { if (s[si] === c) { found = si; break; } }
+        if (found < 0) return -1;
+        if (first < 0) first = found;
+        run = (found === 0 || s[found - 1] === ' ') ? run + 2 : 1;
+        score += run; si = found + 1;
+    }
+    return score - first * 0.1;
+}
+
+function _renderPalette(q) {
+    const list = document.getElementById('palette-list');
+    if (!list) return;
+    let items = _paletteItems();
+    if (q) {
+        items = items
+            .map(it => ({ it, sc: _fuzzyScore(q, it.title + ' ' + it.sub) }))
+            .filter(x => x.sc >= 0)
+            .sort((a, b) => b.sc - a.sc)
+            .map(x => x.it);
+    }
+    _palItems = items;
+    if (_palSel >= items.length) _palSel = 0;
+    list.innerHTML = items.map((it, i) => {
+        const icon = it.dot
+            ? `<span class="term-status-dot ${it.dot}"></span>`
+            : `<span class="pi-glyph">${it.icon || ''}</span>`;
+        return `<div class="palette-item${i === _palSel ? ' sel' : ''}" data-i="${i}"
+                  onmouseenter="_palHover(${i})" onclick="_palRun(${i})">
+            <span class="pi-icon">${icon}</span>
+            <span class="pi-title">${escHtml(it.title)}</span>
+            <span class="pi-sub">${escHtml(it.sub)}</span>
+        </div>`;
+    }).join('') || '<div class="palette-empty">No matches</div>';
+}
+
+function openPalette() {
+    const ov = document.getElementById('palette');
+    if (!ov) return;
+    ov.classList.add('open');
+    _palSel = 0;
+    const inp = document.getElementById('palette-input');
+    if (inp) inp.value = '';
+    _renderPalette('');
+    setTimeout(() => inp && inp.focus(), 0);
+}
+function closePalette() { const ov = document.getElementById('palette'); if (ov) ov.classList.remove('open'); }
+function _palHover(i) { _palSel = i; _palPaint(); }
+function _palPaint() {
+    document.querySelectorAll('#palette-list .palette-item').forEach((el, i) => el.classList.toggle('sel', i === _palSel));
+}
+function _palRun(i) { const it = _palItems[i]; if (!it) return; closePalette(); try { it.run(); } catch (e) { /* no-op */ } }
+function _palMove(d) {
+    if (!_palItems.length) return;
+    _palSel = (_palSel + d + _palItems.length) % _palItems.length;
+    _palPaint();
+    const el = document.querySelector('#palette-list .palette-item.sel');
+    if (el) el.scrollIntoView({ block: 'nearest' });
+}
+
+document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        const ov = document.getElementById('palette');
+        (ov && ov.classList.contains('open')) ? closePalette() : openPalette();
+        return;
+    }
+    const ov = document.getElementById('palette');
+    if (!ov || !ov.classList.contains('open')) return;
+    if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); _palMove(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); _palMove(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); _palRun(_palSel); }
+});
 
 // Apply the saved theme immediately on load.
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';

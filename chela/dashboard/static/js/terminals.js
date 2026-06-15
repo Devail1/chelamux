@@ -969,9 +969,17 @@ async function termTick() {
     // the wall instead of lagging until the next 30s refresh, and refresh labels
     // in case a rename changed a pane's friendly name.
     _applyTermStatus(agents);
-    syncSidebarDots(agents);
     _refreshPaneLabels();
-    try { _applyTermContext(await api('/api/agents/context')); } catch (e) { /* keep prior fills */ }
+    try {
+        const ctx = await api('/api/agents/context');
+        _applyTermContext(ctx);
+        updateCtxCache(ctx);
+    } catch (e) { /* keep prior fills */ }
+    // Full sidebar re-render off the same poll: keeps the dots in lockstep with
+    // the wall AND lets the "Needs you" triage cluster reorder live as sessions
+    // start/finish waiting. Cheap for a short list; group collapse state lives in
+    // localStorage so it survives the rebuild.
+    renderSidebarAgents(agents);
 }
 
 // Update the visible label of every on-screen pane + chip from current state,

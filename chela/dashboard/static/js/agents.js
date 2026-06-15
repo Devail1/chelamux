@@ -195,7 +195,8 @@ async function restartAgent(agent) {
 function _rlResetTooltip(resetsAt) {
     // resetsAt is Unix epoch seconds (or null/missing). Returns a human
     // countdown like "Resets in 1 hr 28 min", or null when there's nothing
-    // sensible to show (never produces "Resets in NaN").
+    // sensible to show (never produces "Resets in NaN"). Long waits (the 7d
+    // weekly limit can be ~50 hr out) read in days, not a pile of hours.
     if (resetsAt == null || !isFinite(resetsAt)) return null;
     const msLeft = resetsAt * 1000 - Date.now();
     if (msLeft <= 0) return 'Resets now';
@@ -203,7 +204,16 @@ function _rlResetTooltip(resetsAt) {
     if (totalMin < 1) return 'Resets soon';
     const h = Math.floor(totalMin / 60);
     const m = totalMin % 60;
-    const span = h >= 1 ? `${h} hr ${m} min` : `${m} min`;
+    let span;
+    if (h >= 24) {
+        const d = Math.floor(h / 24);
+        const rh = h % 24;
+        span = rh >= 1 ? `${d} day${d > 1 ? 's' : ''} ${rh} hr` : `${d} day${d > 1 ? 's' : ''}`;
+    } else if (h >= 1) {
+        span = `${h} hr ${m} min`;
+    } else {
+        span = `${m} min`;
+    }
     return `Resets in ${span}`;
 }
 
