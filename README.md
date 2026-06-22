@@ -34,8 +34,10 @@ already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
 > Status: early. Core (scheduler + dispatcher + messaging) is solid and tested.
 > The **dashboard + live terminal wall** is a first-class feature, shipped as a
 > separate install (`--extra dashboard`) to keep the core lean for headless use.
-> The wall streams live ttyd sessions and is opt-in (off by default — it spawns
-> writable shells, so enable it only behind loopback/Tailscale).
+> The wall streams live ttyd sessions and is **on by default but loopback-guarded**:
+> it serves writable shells, so the dashboard only serves it on a `127.0.0.1`
+> bind (the documented model — front it with a tailnet/SSH tunnel). A
+> non-loopback bind refuses the wall unless you set `CHELA_TERMINALS_EXPOSE=true`.
 
 ---
 
@@ -150,7 +152,8 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 | `CHELA_NOTIFY_CHAT_ID` | — | Telegram chat id (if not in the URL) |
 | `CHELA_NOTIFY_INTERVAL` | `20` | Pane-state scan interval (s) |
 | `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind |
-| `CHELA_TERMINALS_ENABLED` | `false` | Embedded ttyd terminal wall (opt-in; streams live) |
+| `CHELA_TERMINALS_ENABLED` | `true` | Embedded ttyd terminal wall (streams live; loopback-guarded — see below) |
+| `CHELA_TERMINALS_EXPOSE` | `false` | Serve the writable wall on a **non-loopback** bind too (RCE risk — opt-in) |
 | `CHELA_DEFAULT_CONTEXT_WINDOW` | `200000` | Window size assumed by the transcript-based context estimate (fallback only) |
 
 ---
@@ -219,8 +222,12 @@ A first-class feature, shipped as a separate install to keep the core lean.
 alive / waiting / offline), **schedules**, the **dispatcher**, and a **Kanban**
 of runs. Liveness is derived live from the native session status — no heartbeat
 daemon. An embedded ttyd **terminal wall** (a multi-pane view that streams the
-live panes) is opt-in — off by default; enable it with
-`CHELA_TERMINALS_ENABLED=true`.
+live panes) is **on by default**, but **loopback-guarded**: because it serves
+writable shells, the dashboard only serves it on a `127.0.0.1` bind. Bind to a
+non-loopback interface (e.g. `--host 0.0.0.0`) and the wall is refused — its
+routes 404 and its UI is hidden — unless you explicitly set
+`CHELA_TERMINALS_EXPOSE=true`. Turn the wall off entirely with
+`CHELA_TERMINALS_ENABLED=false`.
 
 <p align="center">
   <img src="docs/img/agents.png" alt="Agents view — per-agent context, cost, schedule, recap and liveness" width="900">

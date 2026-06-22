@@ -207,7 +207,7 @@ def cmd_install_statusline(args) -> None:
     settings_path = Path(args.settings).expanduser() if args.settings else Path.home() / ".claude" / "settings.json"
 
     if not args.write:
-        print(f'Add this "statusLine" key to your Claude Code settings')
+        print('Add this "statusLine" key to your Claude Code settings')
         print(f"({settings_path}, or a repo's .claude/settings.json):\n")
         print('  "statusLine": ' + _json.dumps(snippet, indent=2).replace("\n", "\n  "))
         print(f"\nScript: {script}")

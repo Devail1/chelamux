@@ -52,7 +52,22 @@ NOTIFY_TITLE = os.environ.get("CHELA_NOTIFY_TITLE", "chela: agent needs input")
 NOTIFY_INTERVAL = int(os.environ.get("CHELA_NOTIFY_INTERVAL", "20"))
 
 # Embedded ttyd terminal wall on/off (read by the dashboard and the ttyd
-# supervisor in scripts/agent-terminals.sh). The wall streams live; it's opt-in
-# rather than on-by-default because it serves writable shells (security posture).
-# Set CHELA_TERMINALS_ENABLED=true to enable it.
-TERMINALS_ENABLED = os.environ.get("CHELA_TERMINALS_ENABLED", "false").strip().lower() not in ("false", "0", "no", "off")
+# supervisor in scripts/agent-terminals.sh). The wall — the flagship feature —
+# is ON by default, but it serves writable shells, so the dashboard gates it on
+# the bind host: a loopback bind (the documented model — fronted by a tailnet /
+# SSH tunnel) serves the wall; a non-loopback bind refuses to unless you opt in
+# with CHELA_TERMINALS_EXPOSE=true. Set CHELA_TERMINALS_ENABLED=false to turn
+# the wall off entirely.
+TERMINALS_ENABLED = os.environ.get("CHELA_TERMINALS_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
+
+# Explicit opt-in to serve the writable terminal wall on a NON-loopback bind
+# (e.g. --host 0.0.0.0 or a LAN/tailnet IP). Off by default: a public bind would
+# otherwise hand out unauthenticated remote shells (RCE). Loopback binds, fronted
+# by a tailnet or SSH tunnel (the recommended setup), never need this.
+TERMINALS_EXPOSE = os.environ.get("CHELA_TERMINALS_EXPOSE", "false").strip().lower() not in ("false", "0", "no", "off")
+
+
+def is_loopback_host(host: str) -> bool:
+    """True when the dashboard bind host is the local loopback (the safe case
+    for serving the writable terminal wall)."""
+    return (host or "").strip().lower() in ("127.0.0.1", "::1", "localhost", "")

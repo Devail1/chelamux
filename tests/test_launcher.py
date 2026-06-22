@@ -60,7 +60,8 @@ def test_pin_is_idempotent_and_unpin_removes(launcher, tmp_path):
 
 def test_forget_recent_removes_one_entry(launcher, tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
-    a.mkdir(); b.mkdir()
+    a.mkdir()
+    b.mkdir()
     launcher.record_recent(str(a))
     launcher.record_recent(str(b))
     launcher.forget_recent(str(a))

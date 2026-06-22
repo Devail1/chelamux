@@ -583,7 +583,8 @@ def _webterm_session(wid: str) -> str:
     Kept in lockstep with that script — both must agree for the count to be
     meaningful (a mismatch just yields 0, which the wall treats as "no contention,
     don't tear down")."""
-    san = lambda s: re.sub(r"[^A-Za-z0-9_]", "_", s)
+    def san(s):
+        return re.sub(r"[^A-Za-z0-9_]", "_", s)
     return f"webterm_{san(TMUX_SESSION)}_{san(wid)}"
 
 
@@ -2038,11 +2039,26 @@ def main():
     # Binds 127.0.0.1 by default — ZERO auth (see module docstring); put it
     # behind a tailnet / SSH tunnel for remote access. Override host/port with
     # CHELA_DASH_HOST / CHELA_DASHBOARD_PORT.
-    app.run(
-        host=os.environ.get("CHELA_DASH_HOST", "127.0.0.1"),
-        port=int(os.environ.get("CHELA_DASHBOARD_PORT", "5001")),
-        debug=False, threaded=True,
-    )
+    host = os.environ.get("CHELA_DASH_HOST", "127.0.0.1")
+    port = int(os.environ.get("CHELA_DASHBOARD_PORT", "5001"))
+
+    # Loopback guard for the writable terminal wall. The wall is ON by default,
+    # but it serves unauthenticated, writable shells — so if we're binding a
+    # non-loopback interface and the operator hasn't explicitly opted into
+    # exposing it, disable the wall (its routes 404 and its UI is hidden). This
+    # makes a public bind safe by default; loopback binds (fronted by a tailnet /
+    # SSH tunnel) are unaffected.
+    if config.TERMINALS_ENABLED and not config.is_loopback_host(host) and not config.TERMINALS_EXPOSE:
+        config.TERMINALS_ENABLED = False
+        log.warning(
+            "terminal wall disabled: bound to %s (non-loopback) without "
+            "CHELA_TERMINALS_EXPOSE=true. The wall serves unauthenticated, "
+            "writable shells — keep the dashboard on 127.0.0.1 behind a "
+            "tailnet/SSH tunnel, or set CHELA_TERMINALS_EXPOSE=true to override "
+            "(remote-code-execution risk).", host,
+        )
+
+    app.run(host=host, port=port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
