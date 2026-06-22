@@ -575,6 +575,10 @@ function _applyTermStatus(agents) {
         _paneStatus[a.window_id] = st;
     });
     _colorTermDots(agents);
+    // Wall tick is the fast path (4s) — refresh the tab signal here too so the
+    // title/favicon update promptly on the flagship view, not just on the 30s
+    // sidebar refresh. updateTabSignal is idempotent, so the two callers agree.
+    updateTabSignal(agents);
     if (_termMode === 'wall' && _renderedWids.length
         && _taskbarOrder(_renderedWids).join(',') !== _dockOrderSig) {
         renderMinDock();   // a pane's recency changed → reflow the chips

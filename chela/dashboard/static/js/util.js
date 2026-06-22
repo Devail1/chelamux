@@ -76,6 +76,60 @@ function agentDotColor(a) {
     return 'grey';   // idle, or no Claude in the window — matches the wall
 }
 
+// --- Tab signal: surface "agents waiting on input" in the title + favicon ----
+// Ambient at-a-glance for a backgrounded/pinned tab: when one or more Claude
+// panes block on a prompt (session_status === 'waiting'), prefix the title with
+// a count and paint a badged favicon so the tab itself shows it needs you — the
+// same `waiting` signal the sidebar's "Needs you" triage and the daemon's
+// push notification fire on. Idempotent and driven off the existing polls
+// (renderSidebarAgents every 30s + SSE; _applyTermStatus every 4s on the wall),
+// so it only touches the DOM / redraws the favicon when the count changes.
+const _TAB_BASE_TITLE = document.title;   // captured before any prefix is applied
+// The page ships a relative favicon href; capture it so we can restore the
+// brand mark when nothing is waiting (and so a base-path deploy still resolves).
+const _favLink0 = document.querySelector('link[rel~="icon"]');
+const _FAVICON_DEFAULT = _favLink0 ? _favLink0.getAttribute('href') : 'static/img/favicon.svg';
+let _tabWaiting = -1;   // last applied count; -1 forces the first paint
+
+function updateTabSignal(agents) {
+    const n = (agents || []).filter(a => a && a.session_status === 'waiting').length;
+    if (n === _tabWaiting) return;   // unchanged → no title churn, no favicon redraw
+    _tabWaiting = n;
+    document.title = n > 0 ? `(${n}) Needs you · ${_TAB_BASE_TITLE}` : _TAB_BASE_TITLE;
+    _drawFavicon(n);
+}
+
+function _faviconLink() {
+    let l = document.querySelector('link[rel~="icon"]');
+    if (!l) { l = document.createElement('link'); l.rel = 'icon'; document.head.appendChild(l); }
+    return l;
+}
+
+// Badge the favicon with the waiting count. n === 0 restores the brand SVG;
+// n > 0 paints an amber disc + count, amber pulled live from the active theme's
+// --yellow so it tracks theme switches (falls back to the dark-theme value).
+function _drawFavicon(n) {
+    const link = _faviconLink();
+    if (n <= 0) { link.type = 'image/svg+xml'; link.href = _FAVICON_DEFAULT; return; }
+    const amber = (getComputedStyle(document.body).getPropertyValue('--yellow') || '').trim() || '#d29922';
+    const size = 32;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = size;
+    const c = cv.getContext('2d');
+    c.beginPath();
+    c.arc(size / 2, size / 2, size / 2, 0, 2 * Math.PI);
+    c.fillStyle = amber;
+    c.fill();
+    const label = n > 9 ? '9+' : String(n);
+    c.fillStyle = '#1b1f24';   // dark ink — same as the favicon's light-scheme color
+    c.font = `bold ${label.length > 1 ? 17 : 22}px system-ui, -apple-system, sans-serif`;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText(label, size / 2, size / 2 + 1);
+    link.type = 'image/png';
+    link.href = cv.toDataURL('image/png');
+}
+
 const BASE_PATH = window.location.pathname.replace(/\/$/, '');
 async function api(path, opts) {
     const res = await fetch(BASE_PATH + path, opts);
