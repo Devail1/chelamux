@@ -426,6 +426,11 @@ chela install-statusline --write   <span class="c"># writes it (won't clobber an
     </ul>
     <p>Or skip the web UI entirely: SSH/Mosh in from a mobile terminal and <code>tmux attach -t chela</code>
     for the live panes straight from your phone.</p>
+    <p><strong>Pairs well with <a href="https://github.com/six-ddc/ccbot">ccbot</a></strong> — a
+    Telegram&nbsp;↔&nbsp;tmux bridge for Claude Code (1 topic = 1 window = 1 session). It shares chela's
+    model (a tmux window per agent), so chela can put the fleet to work while you drive or supervise any
+    agent from a Telegram topic. Distinct from chela's built-in needs-input notifications, which only ping
+    you; ccbot is a full two-way bridge. Independent project, not required by chela.</p>
   </section>
 
 </main>

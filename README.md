@@ -212,6 +212,13 @@ a mobile terminal — [Blink](https://blink.sh/) (iOS), [Termius](https://termiu
 or any Mosh-capable client — then `tmux attach -t chela` and you've got the live
 panes. A QR of the connect string makes this one tap.
 
+> **Pairs well with [ccbot](https://github.com/six-ddc/ccbot)** — a Telegram ↔ tmux
+> bridge for Claude Code (1 topic = 1 window = 1 session). It shares chela's model
+> — a tmux window per agent — so you can let chela put the fleet to work and
+> *drive or supervise any agent from a Telegram topic* on your phone. (chela's
+> built-in needs-input notifications just ping you; ccbot is a full two-way bridge.)
+> Independent project, not required by chela.
+
 ---
 
 ## Dashboard & live terminal wall
