@@ -25,11 +25,39 @@ for **putting them to work** and walking away. You watch them however you
 already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
 **live terminal-wall dashboard**.
 
+<p align="center">
+  <img src="docs/img/wall.png" alt="chela's live terminal wall — five Claude Code agents working in one grid" width="900">
+  <br>
+  <em>The live terminal wall — every agent's pane streamed into one grid.</em>
+</p>
+
 > Status: early. Core (scheduler + dispatcher + messaging) is solid and tested.
 > The **dashboard + live terminal wall** is a first-class feature, shipped as a
 > separate install (`--extra dashboard`) to keep the core lean for headless use.
 > The wall streams live ttyd sessions and is opt-in (off by default — it spawns
 > writable shells, so enable it only behind loopback/Tailscale).
+
+---
+
+## Features
+
+- **Schedule agents** — poke any agent's tmux pane on an interval (`every 45m`),
+  a cron expression (`0 */6 * * *`), or a one-shot timestamp. No human in the loop.
+- **Dispatch TODOs → PRs** — turn each `- [ ] task` in a `WORKFLOW.md` / `TODO.md`
+  (or a GitHub issue) into a git worktree on a fresh branch, spawn an agent to
+  implement it, and let it open a PR.
+- **Live terminal wall** — a web dashboard that streams every agent's pane (ttyd)
+  into one grid, so you can watch the whole fleet work in real time.
+- **Per-agent monitoring** — context-window usage, session cost, liveness
+  (alive / working / waiting), latest recap, and next scheduled run, per agent.
+- **Account-wide rate-limit pills** — the fleet shares one Claude account; the
+  dashboard tracks the 5h / 7d limits so you can see headroom at a glance.
+- **Needs-input alerts** — when an agent blocks on a prompt, chela fires a
+  one-shot push (ntfy / Telegram / webhook) so you're not babysitting.
+- **tmux-native discovery** — windows are agents; `tmux list-windows` is the
+  single source of truth. No external registry, no heartbeat daemon.
+- **Lean core, optional dashboard** — a two-dependency headless core; the Flask
+  dashboard + terminal wall is a separate `--extra dashboard` install.
 
 ---
 
@@ -193,6 +221,18 @@ of runs. Liveness is derived live from the native session status — no heartbea
 daemon. An embedded ttyd **terminal wall** (a multi-pane view that streams the
 live panes) is opt-in — off by default; enable it with
 `CHELA_TERMINALS_ENABLED=true`.
+
+<p align="center">
+  <img src="docs/img/agents.png" alt="Agents view — per-agent context, cost, schedule, recap and liveness" width="900">
+  <br>
+  <em>Agents view — context usage, cost, liveness, latest recap and next run, per agent.</em>
+</p>
+
+<p align="center">
+  <img src="docs/img/schedules.png" alt="Schedules view — interval, cron and one-shot pokes per agent" width="900">
+  <br>
+  <em>Schedules — interval, cron, and one-shot pokes that type a prompt into an agent's window.</em>
+</p>
 
 **Keys not reaching the terminal?** If `Esc` (or other keys) never reaches an
 embedded terminal, a vim-style browser extension such as **Vimium** is almost

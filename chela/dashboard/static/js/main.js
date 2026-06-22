@@ -9,6 +9,7 @@ async function refresh() {
         // it on every tick regardless of which canvas view is active.
         await refreshSidebar();
         updateWorkBadges();
+        if (typeof refreshLauncher === 'function') refreshLauncher();
         if (currentTab === 'agents') await refreshAgents();
         else if (currentTab === 'schedules') await refreshSchedules();
         else if (currentTab === 'agent-detail') renderAgentDetail();

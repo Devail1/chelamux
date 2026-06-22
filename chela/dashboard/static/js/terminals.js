@@ -4,7 +4,7 @@
 //
 // Identity model: every pane is keyed by its tmux WINDOW ID (`@N`), never its
 // display name. Window ids are stable for a window's lifetime, so a rename
-// (picoclaw relabelling shell-N -> cwd basename) leaves the tile, iframe, and
+// (e.g. relabelling shell-N -> cwd basename) leaves the tile, iframe, and
 // backing ttyd completely untouched — only the visible label changes. The
 // human-readable name/label is resolved on demand via _paneTitle(wid) and is
 // used for display only. localStorage (layout/order/minimized/titles) is also
@@ -575,6 +575,10 @@ function _applyTermStatus(agents) {
         _paneStatus[a.window_id] = st;
     });
     _colorTermDots(agents);
+    // Wall tick is the fast path (4s) — refresh the tab signal here too so the
+    // title/favicon update promptly on the flagship view, not just on the 30s
+    // sidebar refresh. updateTabSignal is idempotent, so the two callers agree.
+    updateTabSignal(agents);
     if (_termMode === 'wall' && _renderedWids.length
         && _taskbarOrder(_renderedWids).join(',') !== _dockOrderSig) {
         renderMinDock();   // a pane's recency changed → reflow the chips
@@ -833,6 +837,34 @@ function startTermFocusTracking() {
     window.addEventListener('focus', _applyTermFocus);   // returning to the parent clears it promptly
 }
 
+// Bring an existing pane to the user's attention: switch to the wall, restore it
+// if minimized, scroll it into view, focus its iframe (which lights the focus
+// ring), and flash it briefly. The launcher's dedup calls this when you click a
+// project that already has a live agent, so the click lands you ON that pane
+// instead of silently no-op'ing because the wall was already showing.
+function focusPaneByWid(wid) {
+    if (!TERMINALS_ON || !wid) return;
+    if (typeof selectView === 'function') selectView('terminals');
+    if (_termMode === 'single') {
+        const sel = $('#term-agent');
+        if (sel && sel.value !== wid) { sel.value = wid; renderTerminals(); }
+        return;
+    }
+    // Defer so selectView's render settles before we hunt for the tile.
+    setTimeout(() => {
+        if (_minimized.has(wid)) restoreFromDock(wid);
+        const item = Array.from($('#term-stage').querySelectorAll('.grid-stack-item'))
+            .find(it => it.getAttribute('gs-id') === wid);
+        if (!item) return;
+        item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        const ifr = item.querySelector('iframe.term-frame');
+        if (ifr) { try { ifr.contentWindow.focus(); } catch (e) { /* cross-doc guard */ } ifr.focus(); }
+        const content = item.querySelector('.grid-stack-item-content') || item;
+        content.classList.add('pane-flash');
+        setTimeout(() => content.classList.remove('pane-flash'), 1100);
+    }, 60);
+}
+
 function startTermTimer() {
     if (!TERMINALS_ON) return;
     stopTermTimer();
@@ -941,9 +973,17 @@ async function termTick() {
     // the wall instead of lagging until the next 30s refresh, and refresh labels
     // in case a rename changed a pane's friendly name.
     _applyTermStatus(agents);
-    syncSidebarDots(agents);
     _refreshPaneLabels();
-    try { _applyTermContext(await api('/api/agents/context')); } catch (e) { /* keep prior fills */ }
+    try {
+        const ctx = await api('/api/agents/context');
+        _applyTermContext(ctx);
+        updateCtxCache(ctx);
+    } catch (e) { /* keep prior fills */ }
+    // Full sidebar re-render off the same poll: keeps the dots in lockstep with
+    // the wall AND lets the "Needs you" triage cluster reorder live as sessions
+    // start/finish waiting. Cheap for a short list; group collapse state lives in
+    // localStorage so it survives the rebuild.
+    renderSidebarAgents(agents);
 }
 
 // Update the visible label of every on-screen pane + chip from current state,

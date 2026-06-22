@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION
-from chela import agent_manager, context, discovery, dispatcher, messenger, scheduler, transcripts
+from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, scheduler, transcripts
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -218,7 +218,7 @@ def api_agents_msg():
 # can compose Ctrl with any letter (control codes — harmless), not just a fixed
 # handful.
 _TERM_KEYS = {
-    "Up", "Down", "Left", "Right", "Escape", "Tab", "Enter", "BSpace",
+    "Up", "Down", "Left", "Right", "Escape", "Tab", "BTab", "Enter", "BSpace",
     "PageUp", "PageDown", "Home", "End",
 } | {f"C-{c}" for c in "abcdefghijklmnopqrstuvwxyz"}
 
@@ -808,6 +808,10 @@ def api_agents_rediscover():
 # window name containing either is unaddressable. Our generated shell-N names
 # never hit this, but validate defensively before shelling out.
 _WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Only `claude` (optionally with args) may be auto-launched into a fresh window.
+# A plain shell is the no-command default; this keeps the spawn endpoint's reach
+# intentional ("launch claude or a shell") rather than an arbitrary-exec route.
+_LAUNCH_CMD_RE = re.compile(r"^claude(\s.+)?$")
 
 
 def _next_shell_name(existing: set[str]) -> str:
@@ -821,22 +825,46 @@ def _next_shell_name(existing: set[str]) -> str:
 @app.route("/api/agents/spawn", methods=["POST"])
 @require_auth
 def api_agents_spawn():
-    """Spawn a fresh plain-shell tmux window in the chela session.
+    """Spawn a tmux window in the chela session, optionally launching `claude`.
 
-    No command is sent — a bare interactive shell (deliberately NOT `claude`).
-    The ttyd supervisor (scripts/agent-terminals.sh) discovers the new window
-    on its own poll and assigns a ttyd port within ~12s. Until then the new
-    pane's /term/<name>/ iframe 404s — known latency.
+    Body (JSON, all optional):
+      cwd     — directory to open the window in (default $HOME); must exist.
+      command — a command to run once the shell is up. Only `claude` (with
+                optional args) is accepted; omit it for a bare interactive shell.
+
+    The ttyd supervisor (scripts/agent-terminals.sh) discovers the new window on
+    its own poll and assigns a port within ~12s; until then the pane's iframe
+    404s (known latency). When an explicit cwd is given, it's recorded in the
+    launcher's Recent list so the sidebar can offer it back as a one-click target.
     """
     _require_terminals()
+    body = request.get_json(silent=True) or {}
+
+    cwd_arg = (body.get("cwd") or "").strip()
+    launched_dir = None
+    if cwd_arg:
+        cwd = os.path.realpath(os.path.expanduser(cwd_arg))
+        if not os.path.isdir(cwd):
+            return jsonify({"ok": False, "error": f"no such directory: {cwd_arg}"}), 400
+        launched_dir = cwd
+    else:
+        cwd = str(Path.home())
+
+    command = (body.get("command") or "").strip()
+    if command and not _LAUNCH_CMD_RE.match(command):
+        return jsonify({"ok": False, "error": "only `claude` may be auto-launched"}), 400
+
     existing = set(discovery.get_all_windows())
     name = _next_shell_name(existing)
     if not _WINDOW_NAME_RE.match(name):
         return jsonify({"ok": False, "error": f"invalid window name: {name}"}), 500
-    home = str(Path.home())
     try:
+        # Trailing ':' forces session resolution. A bare session name is
+        # ambiguous to tmux when a *window* shares that name (e.g. a Claude
+        # window opened in a dir whose basename == the session name); tmux then
+        # targets that window's index and fails with "index N in use".
         proc = subprocess.run(
-            ["tmux", "new-window", "-t", TMUX_SESSION, "-n", name, "-c", home],
+            ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd],
             capture_output=True, text=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
@@ -844,8 +872,88 @@ def api_agents_spawn():
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "tmux new-window failed").strip()
         return jsonify({"ok": False, "error": err}), 500
-    log.info("spawned plain-shell window %s in session %s", name, TMUX_SESSION)
-    return jsonify({"ok": True, "name": name})
+
+    if command:
+        # Send the command literally (-l, no key-name lookup) then Enter. tmux
+        # buffers send-keys into the pty, so this lands even before the shell has
+        # finished drawing its prompt. We start a shell and *send* `claude` rather
+        # than running it as the window command so the pane survives claude exiting.
+        target = f"{TMUX_SESSION}:{name}"
+        try:
+            subprocess.run(["tmux", "send-keys", "-t", target, "-l", command],
+                           capture_output=True, text=True, timeout=10)
+            subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
+                           capture_output=True, text=True, timeout=10)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log.warning("spawned %s but could not send %r: %s", name, command, e)
+
+    if launched_dir:
+        try:
+            launcher.record_recent(launched_dir)
+        except Exception:  # noqa: BLE001 — a store hiccup must never fail the spawn
+            log.warning("launcher.record_recent failed for %s", launched_dir, exc_info=True)
+
+    log.info("spawned window %s in %s%s", name, cwd,
+             f" running {command!r}" if command else "")
+    return jsonify({"ok": True, "name": name, "cwd": cwd})
+
+
+# ---------------------------------------------------------------------------
+# API: Launcher (Recent + Favorites click-to-launch targets)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/launcher")
+@require_auth
+def api_launcher():
+    """Recent + Favorites launch directories. Server-side, so the list is shared
+    across every device viewing this chela instance."""
+    return jsonify(launcher.view())
+
+
+@app.route("/api/launcher/suggest")
+@require_auth
+def api_launcher_suggest():
+    """Git-repo subdirs of CHELA_PROJECTS_DIR offered as favorite candidates."""
+    return jsonify(launcher.suggest())
+
+
+@app.route("/api/launcher/pin", methods=["POST"])
+@require_auth
+def api_launcher_pin():
+    """Pin a directory to Favorites. Returns the refreshed launcher view."""
+    data = request.get_json(silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"ok": False, "error": "path required"}), 400
+    resolved = os.path.realpath(os.path.expanduser(path))
+    if not os.path.isdir(resolved):
+        return jsonify({"ok": False, "error": f"no such directory: {path}"}), 400
+    label = (data.get("label") or "").strip() or None
+    return jsonify({"ok": True, **launcher.pin(resolved, label)})
+
+
+@app.route("/api/launcher/unpin", methods=["POST"])
+@require_auth
+def api_launcher_unpin():
+    """Remove a directory from Favorites. Returns the refreshed launcher view."""
+    data = request.get_json(silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"ok": False, "error": "path required"}), 400
+    resolved = os.path.realpath(os.path.expanduser(path))
+    return jsonify({"ok": True, **launcher.unpin(resolved)})
+
+
+@app.route("/api/launcher/forget", methods=["POST"])
+@require_auth
+def api_launcher_forget():
+    """Drop a directory from Recent (the × on a Recent row). Returns the view."""
+    data = request.get_json(silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"ok": False, "error": "path required"}), 400
+    resolved = os.path.realpath(os.path.expanduser(path))
+    return jsonify({"ok": True, **launcher.forget_recent(resolved)})
 
 
 @app.route("/api/agents/kill", methods=["POST"])

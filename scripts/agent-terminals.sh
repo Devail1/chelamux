@@ -113,6 +113,17 @@ free_port() {
 # sizes each window to its biggest current viewer, so a small/stale client can't
 # shrink the active wall; `aggressive-resize` only counts clients actually viewing
 # the window. Set globally on the server (idempotent) so it survives restarts.
+#
+# disableLeaveAlert=true is LOAD-BEARING, not cosmetic. ttyd registers a
+# `beforeunload` handler that pops the browser's "Leave site? Changes may not be
+# saved" modal whenever its iframe navigates away. The wall's background-teardown
+# (_teardownTermFrames) releases a stale tile's ttyd client by setting its iframe
+# src to about:blank — which fires exactly that modal. Worse, if the user dismisses
+# it with Cancel the iframe never unloads, the stale tmux client never drops, and
+# `window-size largest` stays pinned to that ghost's dimensions — so the pane
+# "grows but won't shrink". Disabling the alert removes the modal AND lets the
+# teardown actually complete, resolving the size contention. disableResizeOverlay
+# suppresses ttyd's per-resize WxH overlay flash so layout changes don't strobe.
 spawn() {
     local wid="$1" port="$2" grp
     grp="${WEBTERM_PREFIX}$(sanitize "$wid")"
@@ -126,6 +137,8 @@ spawn() {
         --client-option fontSize=14 \
         --client-option "fontFamily=${FONT_FAMILY}" \
         --client-option "theme=${TERM_THEME}" \
+        --client-option disableLeaveAlert=true \
+        --client-option disableResizeOverlay=true \
         tmux new-session -A -s "${grp}" -t "${TMUX_SESSION}" ';' \
                  set-option destroy-unattached off ';' \
                  set-option status off ';' \

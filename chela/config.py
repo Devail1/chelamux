@@ -15,9 +15,9 @@ CHELA_DIR = Path(os.environ.get("CHELA_DIR", Path.home() / ".chela"))
 TMUX_SESSION = os.environ.get("CHELA_TMUX_SESSION", "chela")
 
 # Window names to hide from discovery everywhere (dashboard, status, the ttyd
-# supervisor). For placeholder / keep-alive windows that aren't agents — e.g.
-# ccbot pins a "__main__" remain-on-exit window so its tmux session survives
-# when the last agent window exits; it's noise on the wall, not an agent.
+# supervisor). For placeholder / keep-alive windows that aren't agents — e.g. a
+# pinned "__main__" remain-on-exit window kept so the tmux session survives when
+# the last agent window exits; it's noise on the wall, not an agent.
 # Comma-separated; default empty so a generic install shows every window.
 IGNORE_WINDOWS = {
     w.strip() for w in os.environ.get("CHELA_IGNORE_WINDOWS", "").split(",") if w.strip()

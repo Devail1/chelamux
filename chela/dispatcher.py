@@ -299,8 +299,11 @@ def _new_window(window_name: str, cwd: str) -> str:
     pane. Falls back to the bare window_name if the id can't be parsed (e.g.
     under a subprocess mock that returns no stdout).
     """
+    # Trailing ':' forces session resolution; a bare session name is ambiguous
+    # to tmux when a window shares that name, making it target that window's
+    # index and fail with "index N in use".
     out = subprocess.run(
-        ["tmux", "new-window", "-t", TMUX_SESSION, "-n", window_name,
+        ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", window_name,
          "-c", cwd, "-P", "-F", "#{window_id}"],
         check=True, capture_output=True, text=True,
     )
