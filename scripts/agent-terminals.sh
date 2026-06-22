@@ -55,6 +55,10 @@ mkdir -p "$(dirname "${MAP_FILE}")"
 FONT_FAMILY='JetBrainsMono Nerd Font, FiraCode Nerd Font, Hack Nerd Font, Symbols Nerd Font, monospace'
 FONT_FAMILY="${CHELA_TERM_FONT:-$FONT_FAMILY}"
 
+# xterm.js font size (px). Override with CHELA_TERM_FONTSIZE to fit more columns
+# per tile on a dense wall (or larger for readability on a single big pane).
+FONT_SIZE="${CHELA_TERM_FONTSIZE:-14}"
+
 # xterm colour theme (an ITheme JSON object) passed to ttyd via --client-option,
 # matching the dashboard palette (style.css :root — GitHub Dark): bg #0d1117 /
 # text #c9d1d9 / accent #58a6ff cursor, with the same green (#3fb950) and yellow
@@ -134,7 +138,7 @@ spawn() {
     "${TTYD}" --interface 127.0.0.1 --port "${port}" --writable --max-clients "${MAX_CLIENTS}" \
         --base-path "/term/${wid}" \
         --terminal-type xterm-256color \
-        --client-option fontSize=14 \
+        --client-option "fontSize=${FONT_SIZE}" \
         --client-option "fontFamily=${FONT_FAMILY}" \
         --client-option "theme=${TERM_THEME}" \
         --client-option disableLeaveAlert=true \
