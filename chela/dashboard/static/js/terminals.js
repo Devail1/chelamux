@@ -4,7 +4,7 @@
 //
 // Identity model: every pane is keyed by its tmux WINDOW ID (`@N`), never its
 // display name. Window ids are stable for a window's lifetime, so a rename
-// (picoclaw relabelling shell-N -> cwd basename) leaves the tile, iframe, and
+// (e.g. relabelling shell-N -> cwd basename) leaves the tile, iframe, and
 // backing ttyd completely untouched — only the visible label changes. The
 // human-readable name/label is resolved on demand via _paneTitle(wid) and is
 // used for display only. localStorage (layout/order/minimized/titles) is also
