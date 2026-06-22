@@ -220,9 +220,10 @@ uv run chela dispatch /path/to/repo/WORKFLOW.md          <span class="c"># poll 
     <h3>The wall</h3>
     <p>The dashboard streams every agent's live terminal in one grid (drag, lock, maximize),
     with a context-window bar per tile and account-wide rate-limit pills — a first-class feature,
-    just a separate install. The wall itself is opt-in
-    (<code>CHELA_TERMINALS_ENABLED=true</code>) because it exposes writable shells — keep it on loopback
-    or a tailnet. See <a href="#security">Remote access &amp; security</a>.</p>
+    just a separate install. The wall is <strong>on by default but loopback-guarded</strong>: because
+    it serves writable shells, the dashboard only serves it on a <code>127.0.0.1</code> bind. A
+    non-loopback bind refuses it unless you set <code>CHELA_TERMINALS_EXPOSE=true</code>. See
+    <a href="#security">Remote access &amp; security</a>.</p>
   </section>
 
   <!-- ───────── Scheduling ───────── -->
@@ -317,8 +318,12 @@ uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span><
     <strong>schedules</strong>, the <strong>dispatcher</strong>, and a <strong>Kanban</strong> of runs.
     Liveness is derived from the native session status — no heartbeat daemon.</p>
     <p>The embedded <strong>terminal wall</strong> streams the live ttyd panes in a grid. It's
-    <strong>off by default</strong> because it serves writable shells; enable it explicitly:</p>
-    <pre><span class="k">CHELA_TERMINALS_ENABLED</span>=true uv run chela dashboard</pre>
+    <strong>on by default but loopback-guarded</strong>: it serves writable shells, so the dashboard
+    only serves it on a <code>127.0.0.1</code> bind. On a non-loopback bind it's refused unless you
+    opt in explicitly:</p>
+    <pre><span class="k">CHELA_TERMINALS_EXPOSE</span>=true uv run chela dashboard --host 0.0.0.0
+<span class="c"># or turn the wall off entirely:</span>
+<span class="k">CHELA_TERMINALS_ENABLED</span>=false uv run chela dashboard</pre>
 
     <h3>Context &amp; rate-limit pills</h3>
     <p>Exact context-window usage and the 5h / 7d rate-limit pills come from Claude Code's statusLine
@@ -390,7 +395,8 @@ chela install-statusline --write   <span class="c"># writes it (won't clobber an
         <tr><td>CHELA_AGENT_CMD</td><td>claude</td><td>Launch command for the dashboard Start button</td></tr>
         <tr><td>CHELA_NOTIFY_URL</td><td>—</td><td>Needs-input notification target (ntfy / Telegram / webhook)</td></tr>
         <tr><td>CHELA_DASH_HOST / CHELA_DASHBOARD_PORT</td><td>127.0.0.1 / 5001</td><td>Dashboard bind address</td></tr>
-        <tr><td>CHELA_TERMINALS_ENABLED</td><td>false</td><td>Embedded ttyd terminal wall (opt-in; streams live)</td></tr>
+        <tr><td>CHELA_TERMINALS_ENABLED</td><td>true</td><td>Embedded ttyd terminal wall (streams live; loopback-guarded)</td></tr>
+        <tr><td>CHELA_TERMINALS_EXPOSE</td><td>false</td><td>Serve the writable wall on a non-loopback bind too (RCE risk — opt-in)</td></tr>
         <tr><td>CHELA_DEFAULT_CONTEXT_WINDOW</td><td>200000</td><td>Window size assumed by the transcript-based context estimate (fallback)</td></tr>
       </tbody>
     </table>

@@ -93,6 +93,20 @@
   footer{text-align:center; padding:40px 24px; color:var(--text-dim); font-size:13.5px}
   footer a{color:var(--text-dim); text-decoration:underline}
 
+  /* honest status note */
+  .status-note{
+    max-width:660px; margin:26px auto 0; padding:14px 18px; text-align:left;
+    background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:8px; color:var(--text-dim); font-size:13.5px;
+  }
+  .status-note strong{color:var(--text)}
+
+  /* screenshots */
+  .shots{display:grid; gap:26px}
+  .shots figure{margin:0}
+  .shots img{width:100%; border:1px solid var(--border); border-radius:12px; display:block}
+  .shots figcaption{margin-top:10px; text-align:center; color:var(--text-dim); font-size:13.5px}
+
   @media (max-width:760px){
     .features{grid-template-columns:1fr}
     .how-grid{grid-template-columns:1fr}
@@ -107,6 +121,7 @@
   <span class="spacer"></span>
   <span class="links">
     <a href="#features">Features</a>
+    <a href="#screenshots">Screenshots</a>
     <a href="#how">How it works</a>
     <a href="#install">Install</a>
     <a href="docs.html">Docs</a>
@@ -135,6 +150,13 @@ tmux new-session -d -s chela -n researcher
 uv run chela schedule add researcher --every 1h --prompt <span class="g">"Run your cycle."</span>
 uv run chela run</pre>
   </div>
+
+  <p class="status-note">
+    <strong>Status: early.</strong> The core — scheduler, dispatcher, messaging — is solid and
+    tested; the dashboard + live wall is a first-class, separately-installed feature. chela is
+    <strong>self-hosted and single-user</strong>: you run it on your own machine, driving one
+    Claude account (the whole fleet shares its 5h / weekly rate limits).
+  </p>
 </header>
 
 <section class="pitch wrap">
@@ -166,6 +188,25 @@ uv run chela run</pre>
   </div>
 </section>
 
+<section id="screenshots" class="wrap">
+  <div class="section-head">
+    <h2>See the fleet</h2>
+    <p>Every agent's context, cost, schedule, and liveness at a glance — and the scheduler that
+    pokes them on cadence. (The live terminal wall is the dashboard's centerpiece; grab it from the
+    <a href="https://github.com/Devail1/chelamux">repo</a>.)</p>
+  </div>
+  <div class="shots">
+    <figure>
+      <img src="img/agents.png" alt="chela agents view — per-agent context, cost, schedule, recap and liveness">
+      <figcaption>Agents — context usage, session cost, liveness, latest recap and next run, per agent.</figcaption>
+    </figure>
+    <figure>
+      <img src="img/schedules.png" alt="chela schedules view — interval, cron and one-shot pokes per agent">
+      <figcaption>Schedules — interval, cron, and one-shot pokes that type a prompt into an agent's window.</figcaption>
+    </figure>
+  </div>
+</section>
+
 <section id="how" class="how">
   <div class="wrap">
     <h2>How it works</h2>
@@ -187,7 +228,8 @@ uv run chela run</pre>
       </div>
       <div class="how-item">
         <h4><span class="step">04</span>Watch from anywhere</h4>
-        <p>The dashboard binds loopback; put it behind a tailnet or SSH tunnel. Or skip the UI
+        <p>The dashboard binds loopback; put it behind a tailnet or SSH tunnel. The live wall is on
+        by default but only served on a loopback bind (it's a writable shell). Or skip the UI
         entirely and <code>tmux attach</code> from a phone over Mosh.</p>
       </div>
     </div>
