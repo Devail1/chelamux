@@ -340,10 +340,30 @@ body.pane-is-maximized .grid-stack-item:has(.pane-maximized) {
 .pane-maximized {
     border-radius: 0 !important;
     border: 0 !important;
+    /* Loud "you are zoomed" ring — inset so it never changes layout/scroll. */
+    box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 22px -4px var(--accent);
 }
 body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
     visibility: hidden;
 }
+/* Floating "you're maximized" pill — fixed to the wall corner, points at ESC.
+   Click anywhere on it restores. Rendered once and toggled by termMaxFor. */
+#pane-max-banner {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    z-index: 60; display: none; align-items: center; gap: 8px;
+    padding: 5px 12px; border-radius: 999px; cursor: pointer;
+    background: var(--accent); color: var(--bg);
+    font-size: 12px; font-weight: 600; letter-spacing: .02em;
+    box-shadow: 0 4px 14px -2px rgba(0,0,0,.5);
+    border: 0; line-height: 1.4;
+}
+body.pane-is-maximized #pane-max-banner { display: inline-flex; }
+#pane-max-banner kbd {
+    background: var(--bg); color: var(--accent);
+    border-radius: 4px; padding: 0 5px; font-size: 11px; font-weight: 700;
+    font-family: inherit;
+}
+#pane-max-banner .pmb-count { opacity: .85; font-weight: 500; }
 /* Always-on taskbar below the stage: one chip per wall pane (visible = accent
    border, minimized = dimmed). Click toggles min/restore. Shown whenever there
    are panes in wall mode; its height is subtracted from the wall fill geometry
