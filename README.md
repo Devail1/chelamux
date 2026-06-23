@@ -28,7 +28,7 @@ already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
 <p align="center">
   <video src="https://github.com/Devail1/chelamux/releases/download/media/chela-demo.mp4" poster="docs/img/wall.png" width="900" controls muted loop autoplay playsinline></video>
   <br>
-  <em>The live terminal wall — every agent's pane streamed into one grid, plus the Dispatch board, Kanban and Schedules. (<a href="https://github.com/Devail1/chelamux/releases/download/media/chela-demo.mp4">watch the MP4</a>)</em>
+  <em>The live terminal wall — every agent's pane streamed into one grid, plus the Dispatch board, Kanban and Schedules — on desktop and phone. (<a href="https://github.com/Devail1/chelamux/releases/download/media/chela-demo.mp4">watch the MP4</a>)</em>
 </p>
 
 > Status: early. Core (scheduler + dispatcher + messaging) is solid and tested.
