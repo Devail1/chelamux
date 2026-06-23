@@ -185,6 +185,9 @@
 
     <!-- Dispatcher -->
     <div class="panel" id="panel-dispatcher">
+      <div class="dispatcher-toolbar">
+        <button class="btn-accent" onclick="openInitRepo()">+ Init a repo</button>
+      </div>
       <div id="dispatcher-empty" class="work-empty" style="display:none;">
         <div class="work-empty-icon">⇶</div>
         <div class="work-empty-title">Turn a TODO list into pull requests</div>
@@ -196,8 +199,10 @@
           orchestrator, not just a viewer.
         </div>
         <div class="work-empty-hint">
-          Enable it: set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
-          <code>WORKFLOW.md</code> paths, then restart the daemon.
+          <button class="btn-accent" onclick="openInitRepo()">Init a repo…</button>
+          seeds a starter <code>WORKFLOW.md</code> + <code>TODO.md</code>. Then set
+          <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
+          <code>WORKFLOW.md</code> paths and restart the daemon.
         </div>
       </div>
       <div id="dispatcher-list"></div>
@@ -402,6 +407,24 @@
     <div class="modal-actions">
       <button onclick="closeModal('modal-msg')">Cancel</button>
       <button class="btn-accent" onclick="doSendMsg()">Send</button>
+    </div>
+  </div>
+</div>
+
+<!-- Init a repo for the dispatcher -->
+<div class="modal-overlay" id="modal-init">
+  <div class="modal">
+    <h3>Init a repo for the dispatcher</h3>
+    <p class="modal-desc">Writes a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into the
+      repo (existing files are left untouched). Then point chela at it.</p>
+    <label>Repo path</label>
+    <input type="text" id="init-path" list="init-suggestions" autocomplete="off"
+           placeholder="/home/you/projects/my-repo">
+    <datalist id="init-suggestions"></datalist>
+    <div id="init-result" class="init-result"></div>
+    <div class="modal-actions">
+      <button onclick="closeModal('modal-init')">Cancel</button>
+      <button class="btn-accent" onclick="doInitRepo()">Seed files</button>
     </div>
   </div>
 </div>

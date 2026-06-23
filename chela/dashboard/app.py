@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION
-from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, scheduler, transcripts
+from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, scheduler, starter, transcripts
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -1218,6 +1218,23 @@ def _runs_for_workflow(
     awaiting = [r for r in matching if r.get("status") == "awaiting_review"][:10]
     recent = [r for r in matching if r.get("status") in ("done", "failed")][:10]
     return active, awaiting, recent
+
+
+@app.route("/api/dispatcher/init", methods=["POST"])
+@require_auth
+def api_dispatcher_init():
+    """Seed a starter WORKFLOW.md + TODO.md into a repo (never overwriting)."""
+    data = request.get_json(silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"ok": False, "error": "no path given"}), 400
+    try:
+        result = starter.seed_repo(path)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"write failed: {e}"}), 400
+    return jsonify(result)
 
 
 @app.route("/api/dispatcher")

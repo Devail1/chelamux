@@ -10,6 +10,51 @@
 const DISPATCHER_REFRESH_MS = 30000;
 let _dispatcherTimer = null;
 
+// --- Init a repo -----------------------------------------------------------
+// Seed a starter WORKFLOW.md + TODO.md into a repo via POST /api/dispatcher/init
+// (server-side starter.seed_repo, which never overwrites). The path field offers
+// the launcher's known project dirs as datalist suggestions when available.
+function openInitRepo() {
+    const result = document.getElementById('init-result');
+    if (result) { result.textContent = ''; result.className = 'init-result'; }
+    const dl = document.getElementById('init-suggestions');
+    if (dl && typeof _launcherData !== 'undefined' && _launcherData) {
+        const paths = [...(_launcherData.favorites || []), ...(_launcherData.recent || [])]
+            .map(e => e && e.path).filter(Boolean);
+        dl.innerHTML = [...new Set(paths)].map(p => `<option value="${attrEsc(p)}"></option>`).join('');
+    }
+    showModal('modal-init');
+    const inp = document.getElementById('init-path');
+    setTimeout(() => inp && inp.focus(), 50);
+}
+
+async function doInitRepo() {
+    const inp = document.getElementById('init-path');
+    const result = document.getElementById('init-result');
+    const path = ((inp && inp.value) || '').trim();
+    const setMsg = (cls, text) => { if (result) { result.className = 'init-result ' + cls; result.textContent = text; } };
+    if (!path) { setMsg('err', 'Enter a repo path.'); return; }
+    setMsg('', 'Seeding…');
+    let res;
+    try {
+        res = await api('/api/dispatcher/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+    } catch (e) { setMsg('err', 'Request failed.'); return; }
+    if (!res || !res.ok) { setMsg('err', (res && res.error) || 'Failed.'); return; }
+
+    const lines = [];
+    if (res.created.length) lines.push('✓ Created ' + res.created.join(' + '));
+    if (res.skipped.length) lines.push('• Skipped (already exist): ' + res.skipped.join(' + '));
+    if (!res.is_git) lines.push('⚠ Not a git repo — the dispatcher needs one to branch & open PRs.');
+    lines.push('Next: add ' + res.path + '/WORKFLOW.md to CHELA_DISPATCH_WORKFLOWS and restart the'
+        + ' daemon, or run:  chela dispatch ' + res.path + '/WORKFLOW.md');
+    setMsg('ok', lines.join('\n'));
+    if (typeof refreshDispatcher === 'function') refreshDispatcher();
+}
+
 function _runStatusBadge(status) {
     const cls = (status === 'running' || status === 'claimed') ? 'badge-on'
               : (status === 'failed') ? 'badge-off'
