@@ -26,9 +26,9 @@ already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
 **live terminal-wall dashboard**.
 
 <p align="center">
-  <img src="docs/img/wall.png" alt="chela's live terminal wall — five Claude Code agents working in one grid" width="900">
+  <video src="https://github.com/Devail1/chelamux/releases/download/media/chela-demo.mp4" poster="docs/img/wall.png" width="900" controls muted loop autoplay playsinline></video>
   <br>
-  <em>The live terminal wall — every agent's pane streamed into one grid.</em>
+  <em>The live terminal wall — every agent's pane streamed into one grid, plus the Dispatch board, Kanban and Schedules. (<a href="https://github.com/Devail1/chelamux/releases/download/media/chela-demo.mp4">watch the MP4</a>)</em>
 </p>
 
 > Status: early. Core (scheduler + dispatcher + messaging) is solid and tested.
