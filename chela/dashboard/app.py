@@ -390,6 +390,27 @@ _TERM_PASTE_KEY_SHIM = (
     "})();</script>"
 )
 
+# Command-palette key shim injected into ttyd's HTML (see term_http). When focus
+# is inside a pane, keydown fires in the iframe document, so the dashboard's
+# ⌘K / Ctrl+K palette handler never sees it and the fast jump-to is unreachable
+# from a pane. This catches the same combo in the capture phase (before xterm),
+# swallows it so no ^K reaches the shell, and calls the parent's openPalette()
+# (same-origin — the iframe is proxied through the dashboard, so window.parent is
+# accessible). Note: this shadows readline's Ctrl+K (kill-to-end-of-line) inside
+# panes, which is the documented trade-off for a global palette hotkey.
+_TERM_PALETTE_KEY_SHIM = (
+    "<script>(function(){"
+    "function onKey(e){"
+    "if(!(e.ctrlKey||e.metaKey)||e.altKey||e.shiftKey)return;"
+    "if(e.key!=='k'&&e.key!=='K')return;"
+    "if(!window.parent||window.parent===window)return;"
+    "e.preventDefault();e.stopImmediatePropagation();"
+    "try{if(typeof window.parent.openPalette==='function')window.parent.openPalette();}"
+    "catch(err){}}"
+    "document.addEventListener('keydown',onKey,true);"
+    "})();</script>"
+)
+
 # Touch-to-scroll shim injected into ttyd's HTML (see term_http). tmux mouse mode
 # is on, so xterm.js already turns wheel events into scroll sequences (scrollback
 # in a shell, forwarded to TUI apps like Claude Code) — that's why scrolling works
@@ -498,7 +519,7 @@ def term_http(wid, rest):
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
         shims = (_TERM_FONT_CSS + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM
-                 + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
+                 + _TERM_PALETTE_KEY_SHIM + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
         body = html.encode("utf-8")
