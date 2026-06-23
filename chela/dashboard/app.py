@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION
-from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, scheduler, starter, transcripts
+from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -937,6 +937,22 @@ def api_launcher():
 def api_launcher_suggest():
     """Git-repo subdirs of CHELA_PROJECTS_DIR offered as favorite candidates."""
     return jsonify(launcher.suggest())
+
+
+@app.route("/api/config", methods=["GET", "POST"])
+@require_auth
+def api_config():
+    """Dashboard-editable user prefs (userconfig.json). GET reports the stored
+    projects_dir plus the effective dir the launcher will scan (after env/default
+    fallback); POST {projects_dir} sets or (empty) clears it."""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if "projects_dir" in data:
+            userconfig.set_("projects_dir", (data.get("projects_dir") or "").strip())
+    return jsonify({
+        "projects_dir": userconfig.get("projects_dir", ""),
+        "projects_dir_effective": str(launcher._projects_dir()),
+    })
 
 
 @app.route("/api/launcher/pin", methods=["POST"])

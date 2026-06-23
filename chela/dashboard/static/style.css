@@ -1877,6 +1877,17 @@ input[type="text"]:focus, textarea:focus, select:focus {
     cursor: pointer;
 }
 .s-select:hover { border-color: var(--accent); }
+/* Text input + inline save in a settings row (e.g. projects folder). */
+.s-input {
+    flex: 1 1 auto; min-width: 0;
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-family: var(--font); font-size: 12px;
+}
+.s-input:focus { outline: none; border-color: var(--accent); }
+.s-savemsg { font-size: 11px; color: var(--text-dim); margin-top: 6px; min-height: 14px; }
+.s-savemsg:empty { display: none; }
+.s-savemsg.ok { color: var(--green); }
+.s-savemsg.err { color: var(--red); }
 .s-badge {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
     padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);

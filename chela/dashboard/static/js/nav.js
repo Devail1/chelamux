@@ -391,6 +391,20 @@ function renderSettings(focus) {
     const theme = localStorage.getItem('chela_theme') || 'dark';
     body.innerHTML = `
         <section class="settings-section">
+            <h4>Projects folder</h4>
+            <p class="s-desc">Scanned for git repos to suggest in the <strong>Launch</strong>
+            sidebar. Defaults to <code>~/projects</code> (or the <code>CHELA_PROJECTS_DIR</code>
+            env var). Takes effect immediately — no restart.</p>
+            <div class="s-row">
+                <input id="cfg-projects-dir" class="s-input" type="text"
+                       placeholder="~/projects" autocomplete="off"
+                       onkeydown="if(event.key==='Enter')saveProjectsDir()">
+                <button class="btn-accent" onclick="saveProjectsDir()">Save</button>
+            </div>
+            <div id="cfg-projects-msg" class="s-savemsg"></div>
+        </section>
+
+        <section class="settings-section">
             <h4>Needs-input notifications</h4>
             <p class="s-desc">Fires a one-shot ping when an agent's pane enters
             <code>waiting</code> (blocked on a prompt or question).</p>
@@ -436,6 +450,41 @@ function renderSettings(focus) {
             <p class="s-desc">Streams live when on. Toggle with <code>CHELA_TERMINALS_ENABLED</code>.</p>
         </section>`;
     if (focus === 'notify') body.scrollTop = 0;
+    _loadProjectsSetting();
+}
+
+// Fill the projects-dir input from /api/config: the stored value goes in the
+// field, the effective (env/default-resolved) dir becomes the placeholder so an
+// unset field still shows what's actually scanned.
+async function _loadProjectsSetting() {
+    const inp = document.getElementById('cfg-projects-dir');
+    if (!inp) return;
+    try {
+        const cfg = await api('/api/config');
+        if (!cfg) return;
+        inp.value = cfg.projects_dir || '';
+        if (cfg.projects_dir_effective) inp.placeholder = cfg.projects_dir_effective;
+    } catch (e) { /* keep the default placeholder */ }
+}
+
+async function saveProjectsDir() {
+    const inp = document.getElementById('cfg-projects-dir');
+    const msg = document.getElementById('cfg-projects-msg');
+    if (!inp) return;
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    setMsg('', 'Saving…');
+    let cfg;
+    try {
+        cfg = await api('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projects_dir: inp.value.trim() }),
+        });
+    } catch (e) { setMsg('err', 'Save failed.'); return; }
+    if (cfg && cfg.projects_dir_effective) inp.placeholder = cfg.projects_dir_effective;
+    setMsg('ok', 'Saved · scanning ' + ((cfg && cfg.projects_dir_effective) || inp.value.trim()));
+    // Refresh the Launch sidebar so new suggestions appear right away.
+    if (typeof refreshLauncher === 'function') refreshLauncher();
 }
 
 const THEME_LABELS = {

@@ -181,6 +181,7 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | `CHELA_DISPATCH_WORKFLOWS` | — | Colon-separated WORKFLOW.md paths the daemon dispatches |
 | `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick interval in the daemon (s) |
 | `CHELA_AGENT_CMD` | `claude` | Launch command for the dashboard Start button |
+| `CHELA_PROJECTS_DIR` | `~/projects` | Folder scanned for git repos to suggest in the Launch sidebar (also settable in dashboard **Settings → Projects folder**, which wins) |
 | `CHELA_NOTIFY_URL` | — | Needs-input notification target (ntfy / Telegram / webhook) |
 | `CHELA_NOTIFY_KIND` | auto | Force `ntfy` \| `telegram` \| `webhook` |
 | `CHELA_NOTIFY_CHAT_ID` | — | Telegram chat id (if not in the URL) |

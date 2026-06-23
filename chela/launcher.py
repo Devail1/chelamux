@@ -29,11 +29,16 @@ _STORE = CHELA_DIR / "launcher.json"
 _MAX_RECENT = 12
 
 # Base dir scanned for "add a favorite" suggestions (immediate git-repo subdirs).
-# No personal paths are baked in — it defaults to ~/projects and is overridable,
-# so a fresh public install suggests nothing surprising.
-_PROJECTS_DIR = Path(
-    os.path.expanduser(os.environ.get("CHELA_PROJECTS_DIR", str(Path.home() / "projects")))
-)
+# Resolved fresh each call (not cached at import) so the Settings drawer can
+# change it at runtime without a restart. Precedence: the GUI-set value in
+# config.json, then the CHELA_PROJECTS_DIR env var, then ~/projects. No personal
+# paths are baked in, so a fresh public install suggests nothing surprising.
+def _projects_dir() -> Path:
+    from chela import userconfig
+    val = (userconfig.get("projects_dir")
+           or os.environ.get("CHELA_PROJECTS_DIR")
+           or str(Path.home() / "projects"))
+    return Path(os.path.expanduser(val))
 
 
 def _norm(path: str) -> str:
@@ -126,11 +131,11 @@ def view() -> dict:
 
 
 def suggest() -> list[dict]:
-    """Immediate subdirs of ``CHELA_PROJECTS_DIR`` that are git repos, offered as
-    favorite candidates (each flagged with whether it's already pinned). Empty
-    when the base dir is absent — nothing personal is baked in."""
+    """Immediate subdirs of the configured projects dir (see ``_projects_dir``)
+    that are git repos, offered as favorite candidates (each flagged with whether
+    it's already pinned). Empty when the base dir is absent."""
     try:
-        entries = sorted(_PROJECTS_DIR.iterdir())
+        entries = sorted(_projects_dir().iterdir())
     except OSError:
         return []
     fav_paths = {e.get("path") for e in _load()["favorites"]}
