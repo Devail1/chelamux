@@ -116,10 +116,19 @@
   .shots figure{margin:0}
   .shots img,.shots video{width:100%; border:1px solid var(--border); border-radius:12px; display:block}
   .shots figcaption{margin-top:10px; text-align:center; color:var(--text-dim); font-size:13.5px}
+  /* Responsive demo: desktop clip for wide viewports, portrait phone clip for narrow.
+     Scoped under .shots so these beat the `.shots video` display:block above. */
+  .shots .demo-mobile{display:none; max-width:420px; margin-inline:auto}
+  @media(max-width:768px){ .shots .demo-desktop{display:none} .shots .demo-mobile{display:block} }
 
   @media (max-width:760px){
     .features{grid-template-columns:1fr}
     .how-grid{grid-template-columns:1fr}
+    /* Stacked, centered header: logo on top, links wrap evenly below. */
+    nav{flex-wrap:wrap; justify-content:center; gap:4px; padding:16px}
+    nav .spacer{display:none}
+    nav .links{flex-basis:100%; display:flex; flex-wrap:wrap; justify-content:center; gap:8px 18px; margin-top:8px}
+    nav .links a{margin-left:0}
   }
 </style>
 </head>
@@ -206,16 +215,9 @@ uv run chela run</pre>
   </div>
   <div class="shots">
     <figure>
-      <video src="chela-demo.mp4" poster="img/wall.png" autoplay loop muted playsinline preload="metadata"></video>
-      <figcaption>The wall — every agent's live terminal in one grid — plus the Dispatch board, Kanban and Schedules, on desktop and phone.</figcaption>
-    </figure>
-    <figure>
-      <img src="img/agents.png" alt="chela agents view — per-agent context, cost, schedule, recap and liveness">
-      <figcaption>Agents — context usage, session cost, liveness, latest recap and next run, per agent.</figcaption>
-    </figure>
-    <figure>
-      <img src="img/schedules.png" alt="chela schedules view — interval, cron and one-shot pokes per agent">
-      <figcaption>Schedules — interval, cron, and one-shot pokes that type a prompt into an agent's window.</figcaption>
+      <video class="demo-desktop" src="chela-demo-desktop.mp4" poster="img/wall.png" autoplay loop muted playsinline preload="metadata"></video>
+      <video class="demo-mobile" src="chela-demo-mobile.mp4" autoplay loop muted playsinline preload="metadata"></video>
+      <figcaption>The live wall, Dispatch board, Kanban and Schedules. On a phone it collapses to a single pane with an agent pill switcher and a keybar — this clip follows your screen.</figcaption>
     </figure>
   </div>
 </section>

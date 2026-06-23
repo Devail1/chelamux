@@ -25,11 +25,20 @@ for **putting them to work** and walking away. You watch them however you
 already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
 **live terminal-wall dashboard**.
 
-<p align="center">
-  <img src="docs/img/chela-demo.gif" alt="chela demo — the live terminal wall, Dispatch board, Kanban and Schedules, on desktop and phone" width="900">
-  <br>
-  <em>The live terminal wall — every agent's pane streamed into one grid, plus the Dispatch board, Kanban and Schedules — on desktop and phone. (<a href="https://github.com/Devail1/chelamux/releases/download/media/chela-demo.mp4">crisp MP4</a> · <a href="https://chela.pages.dev">live site</a>)</em>
-</p>
+<table align="center">
+  <tr>
+    <td align="center" valign="top">
+      <img src="docs/img/chela-demo-desktop.gif" alt="chela on desktop — the live terminal wall plus the Dispatch board, Kanban and Schedules" width="600"><br>
+      <sub>Desktop — the live wall, Dispatch, Kanban &amp; Schedules</sub>
+    </td>
+    <td align="center" valign="top">
+      <img src="docs/img/chela-demo-mobile.gif" alt="chela on a phone — single-pane wall, agent pill switcher and keybar" width="150"><br>
+      <sub>Phone — single-pane, pill switcher, keybar</sub>
+    </td>
+  </tr>
+</table>
+
+<p align="center"><em>The dashboard, live — see it at <a href="https://chela.pages.dev">chela.pages.dev</a>.</em></p>
 
 > Status: early. Core (scheduler + dispatcher + messaging) is solid and tested.
 > The **dashboard + live terminal wall** is a first-class feature, shipped as a
