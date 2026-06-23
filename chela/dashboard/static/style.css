@@ -537,9 +537,6 @@ body.term-dragging { overflow: hidden; }
     padding: 1px 5px; border-radius: 4px;
 }
 
-/* Dispatcher toolbar: the persistent "+ Init a repo" action above the list. */
-.dispatcher-toolbar { display: flex; justify-content: flex-end; margin-bottom: 10px; }
-
 /* Init-a-repo modal: muted description + a result block that keeps newlines and
    colour-codes success/error. */
 .modal-desc { font-size: 12px; color: var(--text-dim); line-height: 1.6; margin-bottom: 12px; }

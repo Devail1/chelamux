@@ -185,9 +185,6 @@
 
     <!-- Dispatcher -->
     <div class="panel" id="panel-dispatcher">
-      <div class="dispatcher-toolbar">
-        <button class="btn-accent" onclick="openInitRepo()">+ Init a repo</button>
-      </div>
       <div id="dispatcher-empty" class="work-empty" style="display:none;">
         <div class="work-empty-icon">⇶</div>
         <div class="work-empty-title">Turn a TODO list into pull requests</div>
@@ -369,6 +366,7 @@
 
 <!-- "+ new" popover -->
 <div class="popover" id="new-menu" style="display:none;">
+  <div class="popover-item" onclick="hideNewMenu(); openInitRepo()">Init a repo</div>
   <div class="popover-item" onclick="hideNewMenu(); showAddSchedule()">Scheduled task</div>
   <div class="popover-item" id="new-shell-item" onclick="hideNewMenu(); newShellWindow()">Shell window</div>
 </div>
