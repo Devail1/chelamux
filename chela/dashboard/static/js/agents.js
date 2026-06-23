@@ -14,8 +14,11 @@ function _renderCard(a) {
     // waiting → yellow, idle / no Claude → grey. Matches the wall's pane dots.
     const dotColor = agentDotColor(a);
 
-    // Kebab menu — same controls for all agents
-    let menuItems = `
+    // Kebab menu — same controls for all agents. "Message" is redundant when the
+    // terminal wall is on (you just type into the pane), so it's offered only as
+    // the fallback send-channel when terminals are off.
+    const _termsOn = typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON;
+    let menuItems = _termsOn ? '' : `
         <div class="menu-item" onclick="openSendMsg('${name}')">Message</div>`;
     if (a.has_schedules) {
         menuItems += `

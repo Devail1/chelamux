@@ -31,6 +31,7 @@ function closeSidebar() { toggleSidebar(false); }
 function selectView(view) {
     currentTab = view;
     _detailAgent = null;
+    document.body.classList.remove('term-mobile-expanded');   // never outlive the wall
 
     $$('.panel').forEach(p => p.classList.remove('active'));
     const panel = document.getElementById('panel-' + view);
@@ -320,7 +321,11 @@ function renderAgentDetail() {
     const dot = agentDotColor(a);
     const type = _agentType(a);
 
-    const actions = [`<button onclick="openSendMsg('${attrEsc(a.name)}')">Message</button>`];
+    // "Message" only when there's no wall to type into directly (terminals off).
+    const actions = [];
+    if (!(typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON)) {
+        actions.push(`<button onclick="openSendMsg('${attrEsc(a.name)}')">Message</button>`);
+    }
     if (a.has_schedules) actions.push(`<button onclick="triggerSchedule('${attrEsc(a.name)}')">Trigger</button>`);
     if (a.claude_running) {
         actions.push(`<button onclick="restartAgent('${attrEsc(a.name)}')">Restart</button>`);

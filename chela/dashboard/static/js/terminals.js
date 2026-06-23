@@ -342,16 +342,13 @@ function paneHead(wid, draggable) {
     // nothing to dock it beside) — only render it for draggable wall tiles.
     const min = draggable
         ? `<button class="gs-min-btn" onclick="termMinFor(this)" title="Minimize to dock">&#128469;</button>` : '';
+    // No PgUp/PgDn/scroll/Esc/^C here: with focus in the pane those keys reach the
+    // terminal natively (wheel/keys scroll, Esc and Ctrl-C pass through), so the
+    // header carries only the window controls (minimize / maximize / kill).
     return `<div class="gs-head">
       ${_statusDot(wid)}
       ${label}
       <span class="gs-keys">
-        <button onclick="termKeyFor('${j}','PageUp')" title="Page Up">PgUp</button>
-        <button onclick="termKeyFor('${j}','PageDown')" title="Page Down">PgDn</button>
-        <button onclick="termScrollFor(this,'${j}')" title="Scroll (tmux copy-mode)">&#10514;</button>
-        <button onclick="termKeyFor('${j}','Escape')" title="Escape">Esc</button>
-        <button onclick="termKeyFor('${j}','C-c')" title="Ctrl-C">^C</button>
-        <span class="gs-keys-sep" aria-hidden="true"></span>
         <span class="gs-win-ctl">
           ${min}
           <button class="gs-max-btn" onclick="termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
@@ -1550,18 +1547,36 @@ function renderMobileSwitcher() {
     if (!show) { host.style.display = 'none'; host.innerHTML = ''; return; }
     host.style.display = 'flex';
     const active = sel.value || wids[0];
-    host.innerHTML = wids.map(w => {
+    const pills = wids.map(w => {
         const cls = 'term-pill' + (w === active ? ' active' : '');
         return `<button class="${cls}" data-wid="${attrEsc(w)}" onclick="switchAgentMobile('${_jsStr(w)}')">
           ${_statusDot(w)}<span class="term-pill-label">${escHtml(_paneTitle(w))}</span>
         </button>`;
     }).join('');
+    // Pills scroll inside their own container; the expand toggle stays pinned to
+    // the right so it's always reachable (including while expanded — it's the
+    // restore control). 🗖 / 🗗 mirror the desktop maximize button's glyphs.
+    const expanded = document.body.classList.contains('term-mobile-expanded');
+    host.innerHTML = `<div class="tsw-pills">${pills}</div>`
+        + `<button class="tsw-expand" onclick="toggleMobileExpand()" aria-pressed="${expanded}"`
+        + ` title="${expanded ? 'Restore chrome' : 'Expand terminal'}" aria-label="Expand terminal">`
+        + `${expanded ? '&#128471;' : '&#128470;'}</button>`;
     _colorTermDots(_agentsCache);   // tint the just-built pill dots
     // Centre the active pill without scrolling the page (no scrollIntoView).
-    const activeEl = host.querySelector('.term-pill.active');
-    if (activeEl) {
-        host.scrollLeft = activeEl.offsetLeft - (host.clientWidth - activeEl.clientWidth) / 2;
+    const pillsHost = host.querySelector('.tsw-pills');
+    const activeEl = pillsHost && pillsHost.querySelector('.term-pill.active');
+    if (activeEl && pillsHost) {
+        pillsHost.scrollLeft = activeEl.offsetLeft - (pillsHost.clientWidth - activeEl.clientWidth) / 2;
     }
+}
+
+// Mobile "maximize": hide the topbar chrome to give the terminal more height.
+// The pill strip (and this toggle) stay visible, so you can still switch agents
+// and restore. Scoped to phone widths via CSS; cleared on any view change (the
+// hamburger lives in the hidden topbar, so leaving the wall must reset it).
+function toggleMobileExpand() {
+    document.body.classList.toggle('term-mobile-expanded');
+    renderMobileSwitcher();   // refresh the toggle glyph/title
 }
 
 // Switch the single-mode pane to `wid` via the dropdown's existing path.

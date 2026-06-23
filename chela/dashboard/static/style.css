@@ -2014,16 +2014,38 @@ input[type="text"]:focus, textarea:focus, select:focus {
        right under the header. */
     #panel-terminals > div:first-child { display: none; }
 
+    /* Switcher = scrolling pill strip + a pinned expand toggle on the right. */
     .term-switcher {
         display: flex;
         gap: 6px;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
+        align-items: center;
         margin-bottom: 8px;
         padding-bottom: 2px;
     }
-    .term-switcher::-webkit-scrollbar { display: none; }
+    .tsw-pills {
+        display: flex; gap: 6px; flex: 1 1 auto; min-width: 0;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        padding-bottom: 2px;
+    }
+    .tsw-pills::-webkit-scrollbar { display: none; }
+    .tsw-expand {
+        flex: 0 0 auto;
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 36px; height: 36px;
+        background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
+        border-radius: 9px; font-size: 15px; line-height: 1; cursor: pointer;
+    }
+    .tsw-expand[aria-pressed="true"] {
+        background: var(--accent); color: var(--bg); border-color: var(--accent);
+    }
+
+    /* Expanded ("maximized") terminal: drop the topbar to reclaim its height and
+       grow the single pane to fill the viewport minus the pill strip + keybar.
+       The pills + expand toggle stay so you can still switch agents and restore. */
+    body.term-mobile-expanded .topbar { display: none; }
+    body.term-mobile-expanded .term-single .term-pane { height: calc(100dvh - 96px); }
 
     .term-pill {
         flex: 0 0 auto;
@@ -2084,6 +2106,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     }
     .kb2-key:active { background: var(--border); }
     .kb2-strong { color: var(--red); border-color: rgba(248, 81, 73, 0.4); }   /* ^C stands out */
+    .kb2-go { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }  /* Enter — accent */
     .kb2-sep { flex: 0 0 auto; width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
 
     /* Ctrl modifier — armed (outlined) vs locked (filled). */
