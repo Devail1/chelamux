@@ -185,6 +185,10 @@
 
     <!-- Dispatcher -->
     <div class="panel" id="panel-dispatcher">
+      <div class="work-toolbar">
+        <button class="btn-accent" onclick="openInitRepo()">+ Init a repo</button>
+        <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
+      </div>
       <div id="dispatcher-empty" class="work-empty" style="display:none;">
         <div class="work-empty-icon">⇶</div>
         <div class="work-empty-title">Turn a TODO list into pull requests</div>
@@ -196,8 +200,7 @@
           orchestrator, not just a viewer.
         </div>
         <div class="work-empty-hint">
-          <button class="btn-accent" onclick="openInitRepo()">Init a repo…</button>
-          seeds a starter <code>WORKFLOW.md</code> + <code>TODO.md</code>. Then set
+          Use <strong>+ Init a repo</strong> above to seed the files, then set
           <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
           <code>WORKFLOW.md</code> paths and restart the daemon.
         </div>
@@ -207,6 +210,10 @@
 
     <!-- Kanban -->
     <div class="panel" id="panel-kanban">
+      <div class="work-toolbar">
+        <button class="btn-accent" onclick="openInitRepo()">+ Init a repo</button>
+        <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
+      </div>
       <div class="kanban-filters" id="kanban-filters"></div>
       <!-- Mobile-only column selector (one column fits on phone widths). -->
       <select class="kanban-col-select" id="kanban-col-select"
