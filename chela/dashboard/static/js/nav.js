@@ -31,7 +31,6 @@ function closeSidebar() { toggleSidebar(false); }
 function selectView(view) {
     currentTab = view;
     _detailAgent = null;
-    document.body.classList.remove('term-mobile-expanded');   // never outlive the wall
 
     $$('.panel').forEach(p => p.classList.remove('active'));
     const panel = document.getElementById('panel-' + view);
