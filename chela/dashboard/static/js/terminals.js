@@ -419,12 +419,14 @@ function _termKillShowError(confirmEl, killBtn, msg) {
     if (killBtn) killBtn.style.visibility = '';
 }
 
-// Maximize/shrink toggle for the shared pane header. Visual-only overlay:
-// the maximized pane gets `position:fixed; inset:0`, and a body class hides
-// the other Gridstack tiles. We deliberately do NOT touch Gridstack's saved
-// layout, so shrink is a true inverse — the tile snaps back to its exact
-// prior x/y/w/h with no recompute. Icon flips between 🗖 (maximize) and 🗗
-// (restore down) to match the current state.
+// Maximize/restore toggle for the shared pane header. The pane is lifted to a
+// full-viewport overlay (fixed inset:0 over the header AND sidebar — see the CSS
+// at .pane-maximized) and a body class hides the other Gridstack tiles. We
+// deliberately do NOT touch Gridstack's saved layout, so restore is a true
+// inverse — the tile snaps back to its exact prior x/y/w/h with no recompute.
+// There is no separate banner or ESC binding (ESC is the agent's interrupt key):
+// the way out is the same button, which goes accent-filled while maximized so
+// it reads as the obvious exit. Icon flips between 🗖 and 🗗 to match state.
 function termMaxFor(btn) {
     if (!btn) return;
     const pane = btn.closest('.term-pane, .grid-stack-item-content');
@@ -434,54 +436,7 @@ function termMaxFor(btn) {
     btn.innerHTML = isMax ? '&#128471;' : '&#128470;';
     btn.title = isMax ? 'Restore pane' : 'Maximize pane';
     btn.setAttribute('aria-pressed', isMax ? 'true' : 'false');
-    _updateMaxBanner(isMax ? pane : null);
 }
-
-// Restore whichever pane is currently maximized (if any). Used by the banner
-// click and the ESC key — both route back through termMaxFor so the button
-// glyph/title/aria stay in sync with the class toggle.
-function termRestoreMax() {
-    const pane = document.querySelector('.pane-maximized');
-    if (!pane) return;
-    const btn = pane.querySelector('.gs-max-btn');
-    if (btn) termMaxFor(btn);
-}
-
-// Floating "you're zoomed" pill. Created lazily, shown via the body class; we
-// only refresh its hidden-pane count here. Counts wall tiles other than the
-// maximized one (minimized tiles are display:none and already excluded).
-function _updateMaxBanner(maxPane) {
-    let banner = document.getElementById('pane-max-banner');
-    if (!banner) {
-        banner = document.createElement('div');
-        banner.id = 'pane-max-banner';
-        banner.setAttribute('role', 'button');
-        banner.setAttribute('tabindex', '0');
-        banner.title = 'Restore pane (Esc)';
-        banner.onclick = termRestoreMax;
-        document.body.appendChild(banner);
-    }
-    if (!maxPane) return;   // hidden by the body class; nothing to recompute
-    const items = document.querySelectorAll('.grid-stack-item');
-    let hidden = 0;
-    items.forEach((it) => {
-        if (it.querySelector('.pane-maximized')) return;
-        if (it.style.display === 'none') return;   // minimized
-        hidden++;
-    });
-    const label = hidden ? ` <span class="pmb-count">${hidden} pane${hidden === 1 ? '' : 's'} hidden</span>` : '';
-    banner.innerHTML = `&#11008; Maximized &middot; <kbd>Esc</kbd> to restore${label}`;
-}
-
-// ESC restores a maximized pane (when one is up and focus isn't in a field).
-document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    if (!document.querySelector('.pane-maximized')) return;
-    const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-    e.preventDefault();
-    termRestoreMax();
-});
 
 // ---- Minimize-to-dock (wall mode) -----------------------------------------
 //

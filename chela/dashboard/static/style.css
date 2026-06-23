@@ -323,47 +323,40 @@ body {
    saved x/y/w/h are untouched, so toggling off snaps the tile back to its
    exact prior slot. Other wall tiles are hidden via visibility (not display)
    to avoid confusing Gridstack about its own layout. */
-#term-stage, .grid-stack { position: relative; }   /* anchors for the maximized pane */
+#term-stage, .grid-stack { position: relative; }
+/* Maximize = full-viewport takeover. The pane is lifted to fixed/inset:0 over
+   the sticky header (z-index 100) AND the sidebar, at z-index 150 — above both,
+   but below the ⌘K palette (200) so search still opens on top. The pane's own
+   header rides along at the top, so its restore button stays visible/clickable;
+   that button (accent-filled while maximized) is the only way out, so no banner
+   or ESC binding is needed. */
 body.pane-is-maximized .grid-stack-item:has(.pane-maximized) {
-    position: absolute !important;
+    position: fixed !important;
     inset: 0 !important;
     transform: none !important;
-    width: 100% !important;
-    height: 100% !important;
-    z-index: 50;
+    width: 100vw !important;
+    height: 100vh !important;
+    z-index: 150;
 }
 .term-pane.pane-maximized {
-    position: absolute;
+    position: fixed;
     inset: 0;
-    z-index: 50;
+    z-index: 150;
 }
 .pane-maximized {
     border-radius: 0 !important;
     border: 0 !important;
-    /* Loud "you are zoomed" ring — inset so it never changes layout/scroll. */
-    box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 22px -4px var(--accent);
+    box-shadow: inset 0 0 0 2px var(--accent);   /* thin "maximized" frame */
 }
 body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
     visibility: hidden;
 }
-/* Floating "you're maximized" pill — fixed to the wall corner, points at ESC.
-   Click anywhere on it restores. Rendered once and toggled by termMaxFor. */
-#pane-max-banner {
-    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
-    z-index: 60; display: none; align-items: center; gap: 8px;
-    padding: 5px 12px; border-radius: 999px; cursor: pointer;
-    background: var(--accent); color: var(--bg);
-    font-size: 12px; font-weight: 600; letter-spacing: .02em;
-    box-shadow: 0 4px 14px -2px rgba(0,0,0,.5);
-    border: 0; line-height: 1.4;
+/* The restore affordance: while maximized, the max/restore button goes
+   accent-filled with a halo so the exit is unmistakable without a banner. */
+.pane-maximized .gs-max-btn {
+    background: var(--accent); color: var(--bg); border-radius: 5px;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
 }
-body.pane-is-maximized #pane-max-banner { display: inline-flex; }
-#pane-max-banner kbd {
-    background: var(--bg); color: var(--accent);
-    border-radius: 4px; padding: 0 5px; font-size: 11px; font-weight: 700;
-    font-family: inherit;
-}
-#pane-max-banner .pmb-count { opacity: .85; font-weight: 500; }
 /* Always-on taskbar below the stage: one chip per wall pane (visible = accent
    border, minimized = dimmed). Click toggles min/restore. Shown whenever there
    are panes in wall mode; its height is subtracted from the wall fill geometry
