@@ -50,8 +50,20 @@ function selectView(view) {
     refresh();
 }
 
-// Focus a single agent in the canvas (detail / transcript).
+// Clicking an agent (sidebar row or command palette) lands you ON its live
+// pane — switch to the wall, restore/scroll/flash it (focusPaneByWid). The
+// metadata "detail" card is the fallback only when there's no wall to land on
+// (terminals off) or the window isn't resolved yet.
 function selectAgent(name) {
+    if (TERMINALS_ON && typeof focusPaneByWid === 'function') {
+        const a = (_agentsCache || []).find(x => x.name === name);
+        if (a && a.window_id) { focusPaneByWid(a.window_id); return; }
+    }
+    showAgentDetail(name);
+}
+
+// Focus a single agent in the canvas (metadata detail / transcript).
+function showAgentDetail(name) {
     currentTab = 'agent-detail';
     _detailAgent = name;
     $$('.panel').forEach(p => p.classList.remove('active'));
@@ -68,9 +80,11 @@ function selectAgent(name) {
 }
 
 function _syncSidebarActive(view, agentName) {
-    $$('.side-item').forEach(el => el.classList.toggle('active', el.dataset.view === view));
-    const root = document.querySelector('.side-section .side-head[onclick]');
-    if (root) root.classList.toggle('active', view === 'agents');
+    // The agent-detail view has no nav item of its own; keep the Agents nav item
+    // lit while drilled into a single agent so the sidebar still shows where you
+    // are.
+    const navView = view === 'agent-detail' ? 'agents' : view;
+    $$('.side-item').forEach(el => el.classList.toggle('active', el.dataset.view === navView));
     $$('.agent-row').forEach(el => el.classList.toggle('active', el.dataset.agent === agentName));
 }
 

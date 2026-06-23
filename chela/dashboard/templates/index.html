@@ -52,18 +52,39 @@
     </div>
   </header>
 
-  <!-- Left sidebar: AGENTS + WORK -->
+  <!-- Left sidebar: Navigate (views) · Launch (projects) · Sessions (live agents) -->
   <aside class="sidebar">
 
-    {% if terminals_enabled %}
+    <!-- Primary navigation: every view in one consistent block. -->
     <section class="side-section">
+      <div class="side-head"><span class="side-title">Navigate</span></div>
       <div class="side-list">
+        {% if terminals_enabled %}
         <div class="side-item" data-view="terminals" onclick="selectView('terminals')">
-          <span class="side-item-label">▦ Wall</span>
+          <span class="side-item-icon">▦</span><span class="side-item-label">Wall</span>
+        </div>
+        {% endif %}
+        <div class="side-item" data-view="agents" onclick="selectView('agents')">
+          <span class="side-item-icon">▢</span><span class="side-item-label">Agents</span>
+        </div>
+        <div class="side-item" data-view="dispatcher" onclick="selectView('dispatcher')">
+          <span class="side-item-icon">▤</span><span class="side-item-label">Dispatch</span>
+          <span class="side-badges">
+            <span class="badge" id="side-runs-count" title="Active runs">0</span>
+            <span class="badge badge-pr" id="side-pr-count" title="Open PRs">0 PR</span>
+          </span>
+        </div>
+        <div class="side-item" data-view="kanban" onclick="selectView('kanban')">
+          <span class="side-item-icon">▥</span><span class="side-item-label">Kanban</span>
+        </div>
+        <div class="side-item" data-view="schedules" onclick="selectView('schedules')">
+          <span class="side-item-icon">◷</span><span class="side-item-label">Schedules</span>
+          <span class="side-badges"><span class="badge" id="hdr-schedules">-</span></span>
         </div>
       </div>
     </section>
 
+    {% if terminals_enabled %}
     <section class="side-section" id="launcher-section">
       <div class="side-head" title="Launch a Claude agent in a project directory">
         <span class="side-title">Launch</span>
@@ -76,9 +97,11 @@
     </section>
     {% endif %}
 
+    <!-- Live tmux sessions. The header is a plain label; click a row to land on
+         its pane (selectAgent → focusPaneByWid). -->
     <section class="side-section">
-      <div class="side-head" onclick="selectView('agents')" title="Show all agents">
-        <span class="side-title">Agents</span>
+      <div class="side-head">
+        <span class="side-title">Sessions</span>
         <span class="side-count" id="hdr-agents">-/-</span>
         <button class="side-add" title="New window" onclick="event.stopPropagation(); openNewMenu(event)">+</button>
       </div>
@@ -90,26 +113,6 @@
       </div>
       <div class="side-list" id="sidebar-agents">
         <div class="side-empty">No agents</div>
-      </div>
-    </section>
-
-    <section class="side-section">
-      <div class="side-head"><span class="side-title">Work</span></div>
-      <div class="side-list">
-        <div class="side-item" data-view="dispatcher" onclick="selectView('dispatcher')">
-          <span class="side-item-label">Dispatch</span>
-          <span class="side-badges">
-            <span class="badge" id="side-runs-count" title="Active runs">0</span>
-            <span class="badge badge-pr" id="side-pr-count" title="Open PRs">0 PR</span>
-          </span>
-        </div>
-        <div class="side-item" data-view="kanban" onclick="selectView('kanban')">
-          <span class="side-item-label">Kanban</span>
-        </div>
-        <div class="side-item" data-view="schedules" onclick="selectView('schedules')">
-          <span class="side-item-label">Schedules</span>
-          <span class="side-badges"><span class="badge" id="hdr-schedules">-</span></span>
-        </div>
       </div>
     </section>
 

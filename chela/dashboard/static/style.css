@@ -1659,6 +1659,13 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .side-item.active .side-item-label,
 .agent-row.active .agent-row-name { color: var(--accent); font-weight: 600; }
 .side-item-label { flex: 1; }
+/* Fixed-width nav glyph so every label starts on the same x — the block reads as
+   one aligned menu. Dim by default, accent when the row is active. */
+.side-item-icon {
+    flex: 0 0 16px; text-align: center; font-size: 12px;
+    color: var(--text-dim); line-height: 1;
+}
+.side-item.active .side-item-icon { color: var(--accent); }
 .agent-row .agent-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- Triage cluster: sessions waiting on input, lifted above the project
