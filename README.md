@@ -124,6 +124,35 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 
 ---
 
+## Agent autonomy (permission modes)
+
+chela never manages permissions itself — it just launches `claude`, so the
+agent's autonomy is set by the `claude --permission-mode <mode>` it's started
+with. The modes (`claude --help`):
+
+| Mode | Behaviour | Good for |
+|---|---|---|
+| `default` | Asks before every non-trivial action | Watching closely / untrusted repo |
+| `plan` | Read-only; proposes a plan, changes nothing | Scoping before you let it run |
+| `acceptEdits` | Auto-accepts file edits, still gates the rest (commands, etc.) | "Accept edits on" — light supervision |
+| `auto` | A classifier auto-approves safe ops and gates dangerous ones | **chela's dispatcher default** — rarely hangs, still gated |
+| `dontAsk` / `bypassPermissions` | No gating at all | Zero-hang autonomy on a repo you fully trust |
+
+Two launch paths set the mode independently — **this is the part to know:**
+
+- **Dispatcher agents** read `agent.cmd` from each repo's `WORKFLOW.md`
+  (version-controlled, per-repo). Default: `claude --permission-mode auto`.
+- **Dashboard Start button / launcher** use the `CHELA_AGENT_CMD` env (global).
+  Default: plain `claude`, i.e. **`default` mode — it asks on every action**, so
+  a launched agent you're not watching will sit waiting on a prompt.
+
+To change the launcher/Start default, set the full command, e.g.
+`export CHELA_AGENT_CMD="claude --permission-mode acceptEdits"` (or `auto`), then
+restart the daemon. Prefer `auto` or `acceptEdits` for agents on a wall you don't
+babysit; reserve `bypassPermissions` for repos you fully trust.
+
+---
+
 ## CLI
 
 | Command | What it does |

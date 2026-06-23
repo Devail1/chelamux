@@ -28,9 +28,10 @@ concurrency:
 
 agent:
   # Default is `claude --permission-mode auto`: a classifier auto-approves safe
-  # ops and gates dangerous ones, so the agent rarely hangs on a prompt. On a
-  # repo you fully trust you can opt into zero-hang autonomy with:
-  #   cmd: claude --permission-mode bypassPermissions
+  # ops and gates dangerous ones, so the agent rarely hangs on a prompt. Other
+  # modes (claude --help): `acceptEdits` (auto-accept edits, gate the rest),
+  # `plan` (read-only), `bypassPermissions` (no gates — zero-hang autonomy on a
+  # repo you fully trust). E.g. cmd: claude --permission-mode acceptEdits
   cmd: claude --permission-mode auto
   startup_delay_seconds: 4    # minimum wait before polling the pane for readiness
   ready_timeout_seconds: 60   # cap on the readiness poll, then send anyway
