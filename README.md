@@ -117,6 +117,11 @@ a repo (copy `examples/`), and each `- [ ] task` becomes: a worktree on a fresh
 branch → an agent that implements it, strikes the line, and opens a PR → a run
 that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKFLOW.md).
 
+> **Prefer to have an agent set it up?** Copy
+> [`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/` and
+> a Claude Code agent can install chela and seed a starter `WORKFLOW.md` + `TODO.md`
+> for the current repo for you.
+
 ---
 
 ## CLI
@@ -215,7 +220,8 @@ panes. A QR of the connect string makes this one tap.
 > **Pairs well with [ccbot](https://github.com/six-ddc/ccbot)** — a Telegram ↔ tmux
 > bridge for Claude Code (1 topic = 1 window = 1 session). It shares chela's model
 > — a tmux window per agent — so you can let chela put the fleet to work and
-> *drive or supervise any agent from a Telegram topic* on your phone. (chela's
+> *drive or supervise any agent from a Telegram topic* on your phone (text,
+> images, and file attachments flow both ways). (chela's
 > built-in needs-input notifications just ping you; ccbot is a full two-way bridge.)
 > Independent project, not required by chela.
 
