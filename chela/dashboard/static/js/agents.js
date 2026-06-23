@@ -73,7 +73,7 @@ function _renderCard(a) {
             ageTag = ` <span class="${cls}">${ageStr(ageS)}</span>`;
         }
         recapBlock = `
-        <details class="agent-recap">
+        <details class="agent-recap" open>
             <summary><span class="recap-label">Recap</span>${ageTag} <span class="recap-head">${escHtml(head)}</span></summary>
             <div class="recap-body">${escHtml(a.recap)}</div>
         </details>`;
@@ -93,7 +93,7 @@ function _renderCard(a) {
         <div class="agent-header">
             <div class="agent-name">
                 <span class="health-dot ${dotColor}"></span>
-                ${escHtml(_displayLabel(a.window_id || a.name))}
+                <span class="agent-name-link" data-agent="${attrEsc(a.name)}" onclick="selectAgent(this.dataset.agent)" title="Open this agent's pane">${escHtml(_displayLabel(a.window_id || a.name))}</span>
                 <span class="claude-badge ${a.claude_running ? 'claude-on' : 'claude-off'}">${a.claude_running ? 'running' : 'stopped'}</span>
                 ${prBadge}
             </div>

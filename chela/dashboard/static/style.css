@@ -591,6 +591,9 @@ body.term-dragging { overflow: hidden; }
     font-weight: 600;
     margin-bottom: 6px;
 }
+/* The name links to the agent's live pane (selectAgent → focusPaneByWid). */
+.agent-name-link { cursor: pointer; }
+.agent-name-link:hover { color: var(--accent); text-decoration: underline; }
 
 .context-bar-wrap {
     margin-top: 8px;
