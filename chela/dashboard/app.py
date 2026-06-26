@@ -25,8 +25,8 @@ from pathlib import Path
 from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
-from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION
-from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, scheduler, starter, transcripts, userconfig
+from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
+from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, notify, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -2093,6 +2093,31 @@ def api_events():
 # Run
 # ---------------------------------------------------------------------------
 
+def _start_notifier():
+    """Run needs-input push notifications from inside the dashboard process.
+
+    ``notify.check_waiting`` is normally driven by the ``chela run`` daemon, but
+    the dashboard is the always-on process in most deployments — so when
+    ``CHELA_NOTIFY_URL`` is set we run the same edge-triggered scan here in a
+    single daemon thread (every ``CHELA_NOTIFY_INTERVAL`` seconds) rather than
+    requiring a second long-lived process. No-op when notifications are off."""
+    if not notify.enabled():
+        return
+    import threading
+
+    def _loop():
+        waiting_seen: set[str] = set()
+        while True:
+            try:
+                waiting_seen = notify.check_waiting(waiting_seen)
+            except Exception:
+                log.exception("notify: check_waiting failed")
+            time.sleep(NOTIFY_INTERVAL)
+
+    threading.Thread(target=_loop, name="chela-notifier", daemon=True).start()
+    log.info("Needs-input notifications enabled (every %ds)", NOTIFY_INTERVAL)
+
+
 def main():
     # threaded=True is required: the SSE generator at /api/events holds its
     # request thread open for the life of the connection, so a single-threaded
@@ -2123,6 +2148,7 @@ def main():
             "(remote-code-execution risk).", host,
         )
 
+    _start_notifier()
     app.run(host=host, port=port, debug=False, threaded=True)
 
 
