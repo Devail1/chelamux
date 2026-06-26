@@ -348,6 +348,8 @@ function paneHead(wid, draggable) {
     return `<div class="gs-head">
       ${_statusDot(wid)}
       ${label}
+      <span class="gs-branch" hidden></span>
+      <span class="gs-ctx" hidden></span>
       <span class="gs-keys">
         <span class="gs-win-ctl">
           ${min}
@@ -596,17 +598,21 @@ function _applyTermContext(ctx) {
         const c = by[bar.dataset.ctxFor];
         const fill = bar.querySelector('.term-ctx-fill');
         if (!fill) return;
+        const head = bar.parentElement && bar.parentElement.querySelector('.gs-head');
+        const ctxChip = head && head.querySelector('.gs-ctx');
+        const branchChip = head && head.querySelector('.gs-branch');
         if (!c || c.used_pct == null) {
             fill.style.width = '0';
             fill.className = 'term-ctx-fill';
             bar.title = 'Context: —';
+            if (ctxChip) ctxChip.hidden = true;
+            if (branchChip) branchChip.hidden = true;
             return;
         }
         const pct = c.used_pct;
         fill.style.width = Math.min(100, pct) + '%';
-        fill.className = 'term-ctx-fill'
-            + (pct > 80 ? ' ctx-danger' : pct > 60 ? ' ctx-warn' : '')
-            + (c.estimated ? ' est' : '');
+        const sev = pct > 80 ? ' ctx-danger' : pct > 60 ? ' ctx-warn' : '';
+        fill.className = 'term-ctx-fill' + sev + (c.estimated ? ' est' : '');
         const bits = [`Context: ${c.used}/${c.total} (${pct}%${c.estimated ? '~' : ''})`];
         if (c.model) bits.push(c.model);
         if (c.cost_usd != null) bits.push(`$${c.cost_usd}`);
@@ -615,8 +621,24 @@ function _applyTermContext(ctx) {
         bar.title = tip;
         // The bar is pointer-events:none (so it can't block resize), so mirror
         // the tooltip onto the tile header — a safe, hoverable surface.
-        const head = bar.parentElement && bar.parentElement.querySelector('.gs-head');
         if (head) head.title = tip;
+        // Visible header chips: branch + "74% · 147.5K/1M". The bottom bar gives
+        // the at-a-glance color; these give the exact numbers without hovering.
+        if (ctxChip) {
+            const counter = (c.used && c.total) ? ` · ${c.used}/${c.total}` : '';
+            ctxChip.textContent = `${pct}%${c.estimated ? '~' : ''}${counter}`;
+            ctxChip.className = 'gs-ctx' + (sev ? ' ' + sev.trim() : '');
+            ctxChip.hidden = false;
+        }
+        if (branchChip) {
+            if (c.branch) {
+                branchChip.textContent = '⎇ ' + c.branch;
+                branchChip.title = 'branch: ' + c.branch;
+                branchChip.hidden = false;
+            } else {
+                branchChip.hidden = true;
+            }
+        }
     });
 }
 

@@ -217,6 +217,20 @@ body {
 .term-ctx-fill.ctx-danger { background: var(--red); }
 .term-ctx-fill.est { opacity: 0.55; }
 
+/* Tile-header chips: exact context "74% · 147.5K/1M" + git branch. The 3px
+   bottom bar is too thin for text, so the readable numbers live up here next to
+   the window controls. Both are pushed right by the flex:1 label. */
+.gs-ctx, .gs-branch {
+    flex: 0 0 auto; font-size: 10px; font-weight: 600; line-height: 16px;
+    color: var(--text-dim); padding: 0 6px; border-radius: 999px;
+    background: var(--surface); white-space: nowrap;
+}
+.gs-ctx.ctx-warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
+.gs-ctx.ctx-danger { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
+.gs-branch {
+    font-weight: 500;
+}
+
 /* Inline split-glyph layout picker. Icon-only buttons; active preset is
    accent-tinted. The glyph inherits color via fill:currentColor. */
 .gl-btn {

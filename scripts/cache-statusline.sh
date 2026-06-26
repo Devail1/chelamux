@@ -29,6 +29,30 @@ INPUT=$(cat)
 WINDOW_NAME=$(tmux display-message -t "$TMUX_PANE" -p '#{window_name}' 2>/dev/null)
 [ -z "$WINDOW_NAME" ] && exit 0
 
+# Claude Code's payload carries cwd/model/context/cost/rate-limits but NOT the
+# git branch — so we compute it here (once per turn, from the payload's cwd) and
+# splice a top-level "branch" key in. This keeps the dashboard server free of any
+# per-request git calls; branch rides the same cache→server→browser path as the
+# rest. python3 is always present (chela runs on it); on any failure we fall back
+# to the verbatim payload so the context bar never breaks.
+ENRICHED=$(printf '%s' "$INPUT" | python3 -c '
+import sys, json, subprocess
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+    cwd = (d.get("workspace") or {}).get("current_dir") or d.get("cwd")
+    if cwd:
+        r = subprocess.run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, text=True, timeout=2)
+        br = r.stdout.strip()
+        if br and br != "HEAD":
+            d["branch"] = br
+    sys.stdout.write(json.dumps(d))
+except Exception:
+    sys.stdout.write(raw)
+' 2>/dev/null)
+[ -z "$ENRICHED" ] && ENRICHED="$INPUT"
+
 # Atomic write (tmp + mv) so the dashboard never reads a half-written file.
-printf '%s' "$INPUT" > "${CACHE_DIR}/${WINDOW_NAME}.json.tmp"
+printf '%s' "$ENRICHED" > "${CACHE_DIR}/${WINDOW_NAME}.json.tmp"
 mv "${CACHE_DIR}/${WINDOW_NAME}.json.tmp" "${CACHE_DIR}/${WINDOW_NAME}.json"

@@ -1029,6 +1029,16 @@ def api_agents_kill():
 # API: Context Usage
 # ---------------------------------------------------------------------------
 
+def _fmt_k(v):
+    """Format a thousands-of-tokens value as a compact counter: 147.5 -> "147.5K",
+    1000 -> "1M". Returns None for falsy input so the UI can skip it."""
+    if not v:
+        return None
+    if v >= 1000:
+        return f"{v / 1000:g}M"
+    return f"{v:g}K"
+
+
 @app.route("/api/agents/context")
 @require_auth
 def api_agents_context():
@@ -1047,12 +1057,12 @@ def api_agents_context():
         results.append({
             "name": s["name"],
             "window_id": windows.get(s["name"]),
-            "used": f"{s['used_k']:g}k" if s.get("used_k") else None,
-            "total": f"{s['total_k']:g}k" if s.get("total_k") else None,
+            "used": _fmt_k(s.get("used_k")),
+            "total": _fmt_k(s.get("total_k")),
             "used_pct": s.get("used_pct"),
-            "messages_tokens": f"{s['messages_k']:g}k" if s.get("messages_k") else None,
+            "messages_tokens": _fmt_k(s.get("messages_k")),
             "messages_pct": s.get("messages_pct"),
-            "free": f"{s['free_k']:g}k" if s.get("free_k") else None,
+            "free": _fmt_k(s.get("free_k")),
             "free_pct": s.get("free_pct"),
             "model": s.get("model"),
             "cost_usd": round(s["cost_usd"], 2) if s.get("cost_usd") else None,
@@ -1061,6 +1071,7 @@ def api_agents_context():
             "weekly_rl_pct": s.get("weekly_rl_pct"),
             "weekly_rl_resets_at": s.get("weekly_rl_resets_at"),
             "session_name": s.get("session_name"),
+            "branch": s.get("branch"),
             "source": s.get("source"),
             "estimated": s.get("estimated", False),
             "ts": s.get("ts"),

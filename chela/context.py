@@ -122,6 +122,9 @@ def _parse_cache_file(path: Path) -> dict | None:
     # Session name
     session_name = data.get("session_name")
 
+    # Git branch — injected by the statusLine hook (not in Claude's payload).
+    branch = data.get("branch")
+
     return {
         "used_k": used_k,
         "total_k": total_k,
@@ -137,6 +140,7 @@ def _parse_cache_file(path: Path) -> dict | None:
         "weekly_rl_pct": weekly_rl_pct,
         "weekly_rl_resets_at": weekly_rl_resets_at,
         "session_name": session_name,
+        "branch": branch,
     }
 
 
@@ -272,7 +276,7 @@ def _transcript_snapshot(agent_name: str) -> dict | None:
         "model": u.get("model"), "cost_usd": None,
         "rate_limit_pct": None, "rate_limit_resets_at": None,
         "weekly_rl_pct": None, "weekly_rl_resets_at": None,
-        "session_name": None, "ts": None,
+        "session_name": None, "branch": None, "ts": None,
         "source": "transcript", "estimated": True,
     }
 
