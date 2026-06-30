@@ -1,0 +1,424 @@
+"""OKF serializer — export chela's fleet knowledge as an Open Knowledge Format bundle.
+
+Turns chela's runtime state (dispatcher ``runs``, scheduled ``tasks``, live agent
+windows, the projects they touch) into a portable `Open Knowledge Format
+<https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf>`_ (OKF
+v0.1) bundle: a directory of typed markdown files with YAML frontmatter, plus the
+reserved ``index.md`` (per-directory listing) and ``log.md`` (date-grouped
+history) files. See ``docs/OKF.md`` for the design.
+
+Conformance is deliberately small: every non-reserved ``.md`` carries frontmatter
+with a non-empty ``type``. We emit the recommended soft fields too (``title``,
+``description``, ``resource``, ``tags``, ``timestamp``) and extension keys; a
+consumer must tolerate unknown keys / broken links / missing optionals.
+
+⚠️ Boundary (see ``docs/OKF.md`` → Security / exposure): the *bundle is local
+fleet data and is never published.* The default output lives outside the repo
+(``~/.chela/knowledge/``); exporting into a git working tree is flagged.
+
+Pure serializer: state in → files out. No daemon, no new deps (``pyyaml`` is
+already required for WORKFLOW.md parsing).
+"""
+from __future__ import annotations
+
+import logging
+import posixpath
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+from chela import discovery, dispatcher, scheduler, transcripts
+from chela.config import CHELA_DIR
+
+log = logging.getLogger(__name__)
+
+OKF_VERSION = "0.1"
+DEFAULT_OUT = CHELA_DIR / "knowledge"
+
+# OKF type names for chela's concepts (see docs/OKF.md producer table).
+TYPE_RUN = "Dispatch Run"
+TYPE_SCHEDULE = "Scheduled Task"
+TYPE_AGENT = "Agent"
+TYPE_PROJECT = "Project"
+
+_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+# ---------------------------------------------------------------------------
+# Small serialization helpers
+# ---------------------------------------------------------------------------
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _slug(value: str) -> str:
+    """Filesystem-safe stem for a concept filename (never empty)."""
+    s = _SLUG_RE.sub("-", (value or "").strip()).strip("-.")
+    return s or "unnamed"
+
+
+def _frontmatter(meta: dict) -> str:
+    """Render an OKF frontmatter block, dropping empty optional fields.
+
+    ``type`` is always kept (it's the one required field); other keys are
+    omitted when their value is empty so the bundle stays terse.
+    """
+    clean = {k: v for k, v in meta.items() if k == "type" or v not in (None, "", [], {})}
+    body = yaml.safe_dump(clean, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    return f"---\n{body}---\n"
+
+
+def _rel(from_rel: str, to_rel: str) -> str:
+    """Bundle-relative markdown link from one file to another (both repo-root-relative).
+
+    Relative (``../runs/x.md``) rather than absolute (``/runs/x.md``) so links
+    resolve under ``file://`` for the portable viewer too.
+    """
+    rel = posixpath.relpath(to_rel, posixpath.dirname(from_rel))
+    return rel if rel.startswith(".") else f"./{rel}"
+
+
+def _doc(meta: dict, *body: str, citations: list[str] | None = None) -> str:
+    """Assemble a concept file: frontmatter + body sections + optional citations."""
+    parts = [_frontmatter(meta), ""]
+    parts.extend(s for s in body if s)
+    if citations:
+        parts.append("\n# Citations\n")
+        parts.extend(f"- {c}" for c in citations)
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def _index(title: str, description: str, entries: list[str], *, root: bool = False) -> str:
+    """A reserved ``index.md`` — a progressive-disclosure listing.
+
+    Per spec, index files carry NO frontmatter except the bundle-root index,
+    which is the only place ``okf_version`` is declared.
+    """
+    head = ""
+    if root:
+        head = _frontmatter({
+            "okf_version": OKF_VERSION,
+            "title": title,
+            "description": description,
+            "timestamp": _now(),
+        }) + "\n"
+    lines = [head, f"# {title}\n", description, ""]
+    lines.extend(entries or ["_(empty)_"])
+    return "\n".join(ln for ln in lines if ln is not None).rstrip() + "\n"
+
+
+def _listing(title: str, url: str, desc: str = "") -> str:
+    """One ``index.md`` entry: ``* [Title](url) - description`` (reserved format)."""
+    line = f"* [{title}]({url})"
+    return f"{line} - {desc}" if desc else line
+
+
+def _within_git_repo(path: Path) -> Path | None:
+    """The nearest ancestor that is a git working tree, or None.
+
+    Used to warn when an export would land inside version control — the bundle
+    is private fleet data and must not be committed (docs/OKF.md → Security).
+    """
+    for parent in [path, *path.parents]:
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Producers — one per OKF type
+# ---------------------------------------------------------------------------
+
+def _run_doc(run: dict) -> str:
+    title = run.get("title") or run.get("task_id") or "run"
+    status = run.get("status") or "unknown"
+    workflow = Path(run.get("workflow_path") or "").name
+    window = run.get("window_name") or ""
+    body = [f"**Status:** `{status}` · attempt {run.get('attempt', 1)}"]
+    if workflow:
+        body.append(f"**Workflow:** `{workflow}`")
+    if run.get("branch_name"):
+        body.append(f"**Branch:** `{run['branch_name']}`")
+    if run.get("pr_url"):
+        body.append(f"**PR:** {run['pr_url']}" + (f" ({run['pr_state']})" if run.get("pr_state") else ""))
+    if window:
+        body.append(f"**Agent:** [{window}]({_rel('runs/x.md', f'agents/{_slug(window)}.md')})")
+    if run.get("last_error"):
+        body.append(f"\n> error: {run['last_error']}")
+    meta = {
+        "type": TYPE_RUN,
+        "title": title,
+        "description": f"{status} — {workflow}" if workflow else status,
+        "resource": run.get("pr_url") or "",
+        "timestamp": run.get("ended_at") or run.get("started_at") or "",
+        "tags": [t for t in (status, workflow) if t],
+        # extension keys (consumers preserve unknown keys)
+        "status": status,
+        "workflow_path": run.get("workflow_path") or "",
+        "window_name": window,
+        "branch_name": run.get("branch_name") or "",
+        "pr_state": run.get("pr_state") or "",
+        "started_at": run.get("started_at") or "",
+        "ended_at": run.get("ended_at") or "",
+    }
+    citations = [f"`{run['worktree_path']}`"] if run.get("worktree_path") else None
+    return _doc(meta, "\n".join(body), citations=citations)
+
+
+def _schedule_doc(task) -> str:
+    first_line = (task.prompt or "").strip().splitlines()[0] if task.prompt else ""
+    title = f"{task.agent_name}: {task.schedule_type} {task.schedule_value}"
+    body = [
+        f"**Agent:** [{task.agent_name}]({_rel('schedules/x.md', f'agents/{_slug(task.agent_name)}.md')})",
+        f"**Schedule:** `{task.schedule_type}` = `{task.schedule_value}` · "
+        f"{'enabled' if task.enabled else 'disabled'}",
+        f"**Last run:** {task.last_run or '—'} · **Next run:** {task.next_run or '—'}",
+        "\n## Prompt\n",
+        (task.prompt or "").strip() or "_(empty)_",
+    ]
+    meta = {
+        "type": TYPE_SCHEDULE,
+        "title": title,
+        "description": first_line[:140],
+        "timestamp": task.next_run or "",
+        "tags": [t for t in (task.schedule_type, task.agent_name) if t],
+        "agent_name": task.agent_name,
+        "schedule_type": task.schedule_type,
+        "schedule_value": task.schedule_value,
+        "enabled": bool(task.enabled),
+        "last_run": task.last_run or "",
+        "next_run": task.next_run or "",
+    }
+    return _doc(meta, "\n".join(body))
+
+
+def _agent_doc(name: str, wid: str, runs_by_window: dict[str, list[dict]]) -> tuple[str, str | None]:
+    """Return (markdown, cwd). cwd is surfaced so the caller can build projects."""
+    self_rel = f"agents/{_slug(name)}.md"
+    cwd = discovery.get_window_cwd(name)
+    recap = None
+    pr = None
+    tpath = transcripts._resolve_agent_transcript(name)
+    if tpath:
+        try:
+            recap = transcripts.latest_recap(tpath)
+            pr = transcripts.latest_pr(tpath)
+        except OSError:
+            log.debug("Could not read transcript for agent %s", name)
+
+    body = [f"**Window:** `{wid}`" + (f" · **CWD:** `{cwd}`" if cwd else "")]
+    if cwd:
+        proj = Path(cwd).name
+        body.append(f"**Project:** [{proj}]({_rel(self_rel, f'projects/{_slug(proj)}.md')})")
+    if pr:
+        body.append(f"**Latest PR:** {pr.url}")
+    if recap:
+        body.append("\n## Latest recap\n")
+        body.append(recap.strip())
+
+    my_runs = runs_by_window.get(name, [])
+    if my_runs:
+        body.append("\n## Runs\n")
+        body.extend(
+            _listing(
+                r.get("title") or r.get("task_id") or "run",
+                _rel(self_rel, f"runs/{_slug(r['task_id'])}.md"),
+                r.get("status") or "",
+            )
+            for r in my_runs
+        )
+
+    meta = {
+        "type": TYPE_AGENT,
+        "title": name,
+        "description": f"agent window {name}" + (f" @ {Path(cwd).name}" if cwd else ""),
+        "resource": f"file://{cwd}" if cwd else "",
+        "timestamp": _now(),
+        "tags": ["agent"],
+        "window_id": wid,
+        "cwd": cwd or "",
+    }
+    citations = [f"`{tpath}`"] if tpath else None
+    return _doc(meta, "\n".join(body), citations=citations), cwd
+
+
+def _project_doc(name: str, path: str, agents: list[str], runs: list[dict]) -> str:
+    self_rel = f"projects/{_slug(name)}.md"
+    body = [f"**Path:** `{path}`" if path else ""]
+    if agents:
+        body.append("\n## Agents\n")
+        body.extend(_listing(a, _rel(self_rel, f"agents/{_slug(a)}.md")) for a in sorted(set(agents)))
+    if runs:
+        body.append("\n## Runs\n")
+        body.extend(
+            _listing(
+                r.get("title") or r.get("task_id") or "run",
+                _rel(self_rel, f"runs/{_slug(r['task_id'])}.md"),
+                r.get("status") or "",
+            )
+            for r in runs
+        )
+    meta = {
+        "type": TYPE_PROJECT,
+        "title": name,
+        "description": f"project at {path}" if path else f"project {name}",
+        "resource": f"file://{path}" if path else "",
+        "timestamp": _now(),
+        "tags": ["project"],
+        "path": path or "",
+    }
+    return _doc(meta, "\n".join(body))
+
+
+# ---------------------------------------------------------------------------
+# log.md — date-grouped fleet activity, newest first
+# ---------------------------------------------------------------------------
+
+def _log_md(runs: list[dict]) -> str:
+    """Build the reserved ``log.md``: ``## YYYY-MM-DD`` headings, newest first."""
+    events: list[tuple[str, str, str]] = []  # (iso_ts, day, line)
+    for r in runs:
+        ts = r.get("ended_at") or r.get("started_at")
+        if not ts:
+            continue
+        day = ts[:10]
+        verb = "finished" if r.get("ended_at") else "started"
+        title = r.get("title") or r.get("task_id") or "run"
+        link = f"runs/{_slug(r['task_id'])}.md"
+        events.append((ts, day, f"- {verb} **[{title}]({link})** — `{r.get('status') or '?'}`"))
+
+    events.sort(key=lambda e: e[0], reverse=True)
+    out = ["# Activity log\n", "Fleet activity, newest first.\n"]
+    current_day = None
+    for _ts, day, line in events:
+        if day != current_day:
+            out.append(f"\n## {day}\n")
+            current_day = day
+        out.append(line)
+    if not events:
+        out.append("_(no activity recorded)_")
+    return "\n".join(out).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+def export_bundle(out_dir: Path | None = None, since: str | None = None) -> dict:
+    """Export the full OKF bundle. Returns a summary dict of what was written.
+
+    ``since`` (ISO date/datetime) filters runs (and therefore the activity log)
+    to those started on/after it; agents/schedules/projects reflect current
+    state regardless.
+    """
+    out = Path(out_dir) if out_dir else DEFAULT_OUT
+    out = out.expanduser()
+
+    repo = _within_git_repo(out)
+    if repo:
+        log.warning(
+            "OKF export target %s is inside a git repo (%s) — the bundle is "
+            "PRIVATE fleet data and must not be committed (docs/OKF.md → Security).",
+            out, repo,
+        )
+
+    # --- gather state ---
+    runs = dispatcher.list_runs()
+    if since:
+        runs = [r for r in runs if (r.get("started_at") or "") >= since]
+    tasks = scheduler.list_tasks()
+    windows = discovery.get_all_windows()  # {name: wid}
+
+    runs_by_window: dict[str, list[dict]] = {}
+    for r in runs:
+        if r.get("window_name"):
+            runs_by_window.setdefault(r["window_name"], []).append(r)
+
+    # --- write concept files ---
+    written = {"runs": 0, "schedules": 0, "agents": 0, "projects": 0}
+    projects: dict[str, dict] = {}  # name -> {path, agents:set, runs:list}
+
+    def _project(name: str, path: str = "") -> dict:
+        p = projects.setdefault(name, {"path": "", "agents": set(), "runs": []})
+        if path and not p["path"]:
+            p["path"] = path
+        return p
+
+    (out / "runs").mkdir(parents=True, exist_ok=True)
+    run_entries = []
+    for r in runs:
+        fname = f"{_slug(r['task_id'])}.md"
+        (out / "runs" / fname).write_text(_run_doc(r), encoding="utf-8")
+        run_entries.append(_listing(
+            r.get("title") or r["task_id"], f"./{fname}", r.get("status") or "",
+        ))
+        written["runs"] += 1
+        # attribute the run to a project via its workflow path
+        wf = r.get("workflow_path")
+        if wf:
+            pname = Path(wf).parent.name or Path(wf).stem
+            _project(pname)["runs"].append(r)
+
+    (out / "schedules").mkdir(parents=True, exist_ok=True)
+    sched_entries = []
+    for t in tasks:
+        fname = f"{t.id}.md"
+        (out / "schedules" / fname).write_text(_schedule_doc(t), encoding="utf-8")
+        sched_entries.append(_listing(
+            f"{t.agent_name}: {t.schedule_value}", f"./{fname}",
+            "enabled" if t.enabled else "disabled",
+        ))
+        written["schedules"] += 1
+
+    (out / "agents").mkdir(parents=True, exist_ok=True)
+    agent_entries = []
+    for name, wid in sorted(windows.items()):
+        md, cwd = _agent_doc(name, wid, runs_by_window)
+        (out / "agents" / f"{_slug(name)}.md").write_text(md, encoding="utf-8")
+        agent_entries.append(_listing(name, f"./{_slug(name)}.md", f"window {wid}"))
+        written["agents"] += 1
+        if cwd:
+            _project(Path(cwd).name, cwd)["agents"].add(name)
+
+    (out / "projects").mkdir(parents=True, exist_ok=True)
+    proj_entries = []
+    for name, data in sorted(projects.items()):
+        md = _project_doc(name, data["path"], list(data["agents"]), data["runs"])
+        (out / "projects" / f"{_slug(name)}.md").write_text(md, encoding="utf-8")
+        proj_entries.append(_listing(name, f"./{_slug(name)}.md", data["path"]))
+        written["projects"] += 1
+
+    # --- reserved files ---
+    (out / "runs" / "index.md").write_text(
+        _index("Dispatch Runs", "Work-item dispatcher runs.", run_entries), encoding="utf-8")
+    (out / "schedules" / "index.md").write_text(
+        _index("Scheduled Tasks", "Time-based scheduled prompts.", sched_entries), encoding="utf-8")
+    (out / "agents" / "index.md").write_text(
+        _index("Agents", "Live agent windows.", agent_entries), encoding="utf-8")
+    (out / "projects" / "index.md").write_text(
+        _index("Projects", "Repos the fleet works in.", proj_entries), encoding="utf-8")
+
+    (out / "log.md").write_text(_log_md(runs), encoding="utf-8")
+
+    root_entries = [
+        _listing("Agents", "./agents/index.md", f"{written['agents']} live"),
+        _listing("Dispatch Runs", "./runs/index.md", f"{written['runs']} recorded"),
+        _listing("Scheduled Tasks", "./schedules/index.md", f"{written['schedules']} tasks"),
+        _listing("Projects", "./projects/index.md", f"{written['projects']} repos"),
+        _listing("Activity log", "./log.md", "date-grouped, newest first"),
+    ]
+    (out / "index.md").write_text(
+        _index(
+            "chela fleet knowledge",
+            "chela's accumulated fleet knowledge as an OKF v0.1 bundle.",
+            root_entries, root=True,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = {"out": str(out), "okf_version": OKF_VERSION, **written, "since": since or ""}
+    log.info("OKF export → %s (%s)", out, ", ".join(f"{k}={v}" for k, v in written.items()))
+    return summary

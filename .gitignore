@@ -11,6 +11,10 @@ build/
 .chela/
 *.db
 
+# OKF knowledge bundle — LOCAL fleet data, never committed (docs/OKF.md → Security)
+knowledge/
+*.okf/
+
 # Cloudflare Wrangler local cache (holds account_id; deploy-only, not source)
 .wrangler/
 
