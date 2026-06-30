@@ -146,6 +146,12 @@ manifest for `file://`) and provides the same browse/search/graph UI with
 shippable as a tarball" ethos: export a bundle, open `viewer.html` anywhere,
 see and search the knowledge. Strong portability + portfolio story.
 
+> ⚠️ **The portfolio piece is the format + viewer, not a real bundle.** A
+> bundle of the actual fleet's knowledge (runs, PR links, agent/project names)
+> is **local data and is never published.** Sharing a portable bundle is an
+> **opt-in, manual, scrubbed** export — not an exposed endpoint, not a
+> committed artifact. See [Security / exposure](#security--exposure).
+
 > Build order: do the parsing/index/search/graph logic as plain JS that runs
 > in both contexts, so A and B share code rather than diverging.
 
@@ -162,7 +168,11 @@ see and search the knowledge. Strong portability + portfolio story.
    cheapest to compute (invert the link graph).
 3. **Search** — full-text over frontmatter (`title` / `description` / `tags`
    / `type`) + body, filterable by type / tag / date. All local → SQLite FTS
-   (embedded) or a small in-memory index (portable).
+   (embedded) or a small in-memory index (portable). For semantic search in
+   the embedded viewer, **reuse the existing local retrieval layer rather than
+   reinvent it** (`mem_index.py`: `sqlite-vec` + `fastembed`/`bge-small`,
+   sha1-delta, no API, nothing leaves the box) — see
+   [Reuse the local retrieval layer](#reuse-the-local-retrieval-layer).
 4. **Graph** — concepts as nodes, markdown links as edges; click a node to
    open it. Where "graph-shaped, not just tree-shaped" becomes visible.
 
@@ -175,6 +185,48 @@ unknown frontmatter keys (show them in a raw-fields section).
 
 ---
 
+## Security / exposure
+
+**The OKF *code* is public (MIT); the OKF *bundle* is local data and never is.**
+This is the load-bearing boundary — the bundle holds real fleet knowledge
+(dispatch runs, PR links, agent/project names) that must not reach the outside
+world.
+
+- **Routes inherit the dashboard's loopback posture for free.** The
+  `/api/knowledge/*` routes are served by the existing dashboard, which binds
+  `127.0.0.1` by default and is auth-free *because* it's loopback (the app
+  refuses to start with terminals enabled on a non-loopback host without an
+  explicit `TERMINALS_EXPOSE` override). Remote access is **tailnet-only** via
+  Tailscale (Caddy listens on the `tailscale/chela` interface, not the public
+  internet), so OKF adds **no new exposure surface**. Do not add a separate
+  listener; if OKF ever needs its own host/port, it must reuse
+  `config.is_loopback_host()` and the same guard.
+- **The bundle is never committed.** `~/.chela/knowledge/` (and any sample
+  bundle carrying real data) must be git-ignored; an `--out` pointed inside the
+  repo is a mistake. The repo ships the serializer + viewer, never an export.
+- **The portable `viewer.html` is opt-in, manual, and scrubbed.** Shipping a
+  bundle is a deliberate human act, not an endpoint and not a CI artifact.
+
+## Reuse the local retrieval layer
+
+The home-root memory work (2026-06-30) already built a local semantic-retrieval
+layer — `mem_index.py` (`sqlite-vec` + `fastembed`/`bge-small`, 384-dim,
+sha1-delta updates, fully on-box, no API). **OKF's embedded-viewer search
+should ride on that primitive rather than reinvent it**, scoped to OKF's own
+content (a derived, git-ignored `.db` next to the bundle — exactly how OKF
+treats the markdown as source-of-truth).
+
+A complementary lesson from the same work: the per-prompt recall hook injects
+**file pointers, not vetted facts** (a tools-denied model confabulated numbers
+around them). That is precisely **why OKF earns its keep on top of raw
+embeddings** — typed frontmatter + backlinks give the model (and the human) a
+*verifiable* landing structure to open and check, instead of trusting a snippet.
+
+> **Boundary:** reuse the *pattern/primitive*, scoped to OKF content. Do **not**
+> wire chela to the home-root recall server or the orchestrator's private
+> corpus — cross-querying private memory from a (public-repo) viewer is exactly
+> the line the [Security / exposure](#security--exposure) section forbids.
+
 ## Beyond chela's own data (future)
 
 Because the viewer consumes *any* OKF bundle, it generalizes:
@@ -182,7 +234,9 @@ Because the viewer consumes *any* OKF bundle, it generalizes:
 - Point it at the orchestrator's `~/.claude/.../memory/` (already markdown +
   frontmatter + `[[wikilinks]]`) — a near-OKF source. A thin adapter
   (`[[name]]` → markdown link, `metadata.type` → `type`) would make the whole
-  personal memory system browsable/searchable in the same viewer.
+  personal memory system browsable/searchable in the same viewer. **Local-only**
+  per the boundary above — the adapter renders private memory in a *local*
+  viewer, never a published one.
 - Mount external OKF bundles (e.g. Google's `ga4` / `stackoverflow` samples)
   to validate the consumer against third-party producers.
 
@@ -208,7 +262,9 @@ This is the interop payoff: one viewer, any OKF source.
   each request? (Live = always fresh, no stale export; pre-exported = simpler,
   matches the portable path.)
 - Search backend: SQLite FTS (we already ship SQLite) vs. in-memory index
-  shared with the portable viewer.
+  shared with the portable viewer. For the *embedded* (semantic) path, prefer
+  reusing `mem_index.py` (`sqlite-vec` + `fastembed`) over a new index — see
+  [Reuse the local retrieval layer](#reuse-the-local-retrieval-layer).
 - Do we want typed edges eventually? OKF edges are untyped by spec; we could
   encode relationship hints in link prose and parse them, staying conformant.
 
@@ -218,3 +274,9 @@ This is the interop payoff: one viewer, any OKF source.
 Format bundle — vendor-neutral, self-viewing, mountable by any agent or
 tool." Standards-aligned, current, and it pre-positions the *agent personas*
 roadmap item (a persona is just another OKF `type`).
+
+The portfolio artifact is the **format + serializer + viewer** (all public,
+MIT) — demonstrated against scrubbed or synthetic sample bundles. A real export
+of the live fleet's knowledge stays **local** (see
+[Security / exposure](#security--exposure)); the story is "look what it can
+produce," not a published dump of the fleet's internals.
