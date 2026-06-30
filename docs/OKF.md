@@ -124,18 +124,23 @@ it twice.
 
 ### A. Embedded (live) viewer — in the chela dashboard
 
-Reads `~/.chela/knowledge/` (or regenerates on demand from the DB). Lives in
-the existing Flask + Lit/HTMX SPA (`chela/dashboard/`).
+Auto-exports `~/.chela/knowledge/` on first view (Refresh re-exports from current
+fleet state). Lives in the existing Flask + vanilla-JS SPA (`chela/dashboard/`).
 
 - **Flask routes** (read-only, loopback-guarded like the rest of the
-  dashboard):
+  dashboard) — thin `jsonify` wrappers over the `okf.read_*` reader half:
   - `GET /api/knowledge/tree` — directory + index structure for browse pane
+    (also carries counts-by-type + `log.md` for the glance overview)
   - `GET /api/knowledge/concept?path=...` — one concept: parsed frontmatter
-    + rendered body + computed backlinks
+    + raw body + outbound links + computed backlinks (path-traversal guarded)
   - `GET /api/knowledge/search?q=...&type=...&tag=...` — search results
   - `GET /api/knowledge/graph` — nodes (concepts) + edges (links)
-- **Lit components** in `index.html` — a new "Knowledge" view alongside the
-  agent wall / kanban.
+  - `POST /api/knowledge/export` — force a re-export (the Refresh button)
+- **A vanilla-JS view module** (`static/js/knowledge.js`, modeled on
+  `schedules.js`) — a new "Knowledge" view alongside the agent wall / kanban.
+  The dashboard SPA is plain classic-script modules + `render_template`, **not**
+  Lit/HTMX; the markdown-render + link-resolve helpers are kept self-contained so
+  the portable `viewer.html` can reuse them verbatim.
 
 ### B. Portable viewer — shipped inside the bundle
 

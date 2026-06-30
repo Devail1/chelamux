@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, notify, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -1139,6 +1139,80 @@ def api_schedules_toggle(task_id):
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# API: Knowledge (OKF viewer — read-only)
+#
+# Serves the embedded "Knowledge" view from an on-disk OKF bundle. The bundle is
+# PRIVATE fleet data (docs/OKF.md → Security): these routes inherit the
+# dashboard's loopback bind (tailnet-only remote) and add no new listener. The
+# producer (okf.export_bundle) and consumer (okf.read_*) live in chela.okf; this
+# layer is a thin jsonify wrapper plus an export-on-demand cache.
+# ---------------------------------------------------------------------------
+
+def _knowledge_dir() -> Path:
+    """The bundle the embedded viewer reads — the default export dir
+    (~/.chela/knowledge), shared with `chela knowledge export` (no --out)."""
+    return okf.DEFAULT_OUT
+
+
+def _ensure_bundle(force: bool = False) -> Path:
+    """Export the bundle if it's missing (or ``force``), then return its dir.
+
+    First view auto-exports so the page isn't empty; thereafter it's served from
+    disk and the UI's Refresh button forces a re-export. Export reads chela's own
+    state only (never home-root private memory)."""
+    root = _knowledge_dir()
+    if force or not (root / "index.md").exists():
+        okf.export_bundle(root)
+    return root
+
+
+@app.route("/api/knowledge/tree")
+@require_auth
+def api_knowledge_tree():
+    """Browse + glance payload: concepts by directory, counts by type, log."""
+    return jsonify(okf.read_tree(_ensure_bundle()))
+
+
+@app.route("/api/knowledge/concept")
+@require_auth
+def api_knowledge_concept():
+    """One concept: frontmatter + raw body + outbound links + computed backlinks."""
+    rel = request.args.get("path", "")
+    try:
+        return jsonify(okf.read_concept(_knowledge_dir(), rel))
+    except ValueError:
+        abort(400)
+    except (FileNotFoundError, OSError):
+        abort(404)
+
+
+@app.route("/api/knowledge/search")
+@require_auth
+def api_knowledge_search():
+    """Substring search over frontmatter + body, filterable by type / tag."""
+    return jsonify(okf.read_search(
+        _knowledge_dir(),
+        request.args.get("q", ""),
+        request.args.get("type", ""),
+        request.args.get("tag", ""),
+    ))
+
+
+@app.route("/api/knowledge/graph")
+@require_auth
+def api_knowledge_graph():
+    """Concepts as nodes, markdown links as edges."""
+    return jsonify(okf.read_graph(_ensure_bundle()))
+
+
+@app.route("/api/knowledge/export", methods=["POST"])
+@require_auth
+def api_knowledge_export():
+    """Force a re-export (the Knowledge view's Refresh), returning fresh tree."""
+    return jsonify(okf.read_tree(_ensure_bundle(force=True)))
 
 
 # ---------------------------------------------------------------------------

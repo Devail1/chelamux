@@ -45,6 +45,9 @@ function selectView(view) {
     else { stopKanbanTimer(); }
     if (TERMINALS_ON && view === 'terminals') startTermTimer();
     else if (TERMINALS_ON) stopTermTimer();
+    // Entering Knowledge from the nav lands on the glance overview, not whatever
+    // concept was last open.
+    if (view === 'knowledge' && typeof knBackToGlance === 'function' && _kn.tree) knBackToGlance();
 
     closeSidebar();   // navigating dismisses the mobile drawer (no-op on desktop)
     refresh();
@@ -589,7 +592,7 @@ function _paletteItems() {
     const items = [];
     const views = [];
     if (TERMINALS_ON) views.push(['terminals', 'Wall']);
-    views.push(['agents', 'Agents'], ['dispatcher', 'Dispatch'], ['kanban', 'Kanban'], ['schedules', 'Schedules']);
+    views.push(['agents', 'Agents'], ['dispatcher', 'Dispatch'], ['kanban', 'Kanban'], ['schedules', 'Schedules'], ['knowledge', 'Knowledge']);
     views.forEach(([v, label]) => items.push({ icon: '▦', title: label, sub: 'view', run: () => selectView(v) }));
 
     (_agentsCache || []).forEach(a => {

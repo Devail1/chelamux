@@ -422,3 +422,269 @@ def export_bundle(out_dir: Path | None = None, since: str | None = None) -> dict
     summary = {"out": str(out), "okf_version": OKF_VERSION, **written, "since": since or ""}
     log.info("OKF export → %s (%s)", out, ", ".join(f"{k}={v}" for k, v in written.items()))
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Reader — the consumer half: parse a bundle back for the viewer.
+#
+# Pure functions, root in → JSON-able dicts out (no Flask, no chela runtime
+# state), so they serve both the embedded dashboard routes and the portable
+# viewer's data model, and stay unit-testable against a hand-written bundle.
+#
+# Per the OKF spec a consumer MUST be liberal: tolerate missing/broken
+# frontmatter (treat as no metadata), unknown ``type`` (pass through), broken
+# links (render dangling, never raise), and preserve unknown keys.
+# ---------------------------------------------------------------------------
+
+RESERVED = {"index.md", "log.md"}
+
+_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)\Z", re.DOTALL)
+_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+
+
+def parse_doc(text: str) -> tuple[dict, str]:
+    """Split an OKF markdown file into ``(frontmatter, body)``.
+
+    A file with no / blank / unparseable frontmatter yields ``({}, text)`` — the
+    consumer treats it as an untyped concept rather than failing (spec: tolerate
+    missing optionals).
+    """
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}, text
+    try:
+        fm = yaml.safe_load(m.group(1))
+    except yaml.YAMLError:
+        return {}, text
+    if not isinstance(fm, dict):
+        return {}, text
+    return fm, m.group(2)
+
+
+def _title_from_path(rel: str) -> str:
+    """Derive a display title from a filename when frontmatter has no ``title``."""
+    return posixpath.splitext(posixpath.basename(rel))[0]
+
+
+def _is_bundle_md_link(href: str) -> bool:
+    """True for an in-bundle markdown link (skip http(s)/mailto/anchors/non-md)."""
+    if not href or href.startswith(("http://", "https://", "mailto:", "#", "//")):
+        return False
+    return href.split("#", 1)[0].endswith(".md")
+
+
+def _resolve_link(from_rel: str, href: str) -> str:
+    """Resolve a markdown link to a bundle-root-relative posix path.
+
+    Handles both relative (``../agents/x.md``) and absolute bundle links
+    (``/agents/x.md``); strips any ``#anchor``.
+    """
+    href = href.split("#", 1)[0]
+    if href.startswith("/"):
+        return href.lstrip("/")
+    return posixpath.normpath(posixpath.join(posixpath.dirname(from_rel), href))
+
+
+def _concept_rel_paths(root: Path):
+    """Yield ``(rel_posix, Path)`` for every non-reserved ``.md`` in the bundle."""
+    for p in sorted(root.rglob("*.md")):
+        rel = p.relative_to(root).as_posix()
+        if posixpath.basename(rel) in RESERVED:
+            continue
+        yield rel, p
+
+
+def _safe_concept_path(root: Path, rel: str) -> Path:
+    """Resolve ``rel`` under ``root`` for reading, refusing escapes / non-md.
+
+    Path-traversal guard: the dashboard routes pass an untrusted ``?path=``, so a
+    ``../../etc/passwd`` (or absolute) value must never read outside the bundle.
+    Raises ``ValueError`` on an unsafe / non-``.md`` path, ``FileNotFoundError``
+    when the (safe) target is missing.
+    """
+    rel = (rel or "").lstrip("/")
+    if not rel.endswith(".md") or "\x00" in rel:
+        raise ValueError("not a markdown concept path")
+    root = root.resolve()
+    target = (root / rel).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError("path escapes bundle")
+    if not target.is_file():
+        raise FileNotFoundError(rel)
+    return target
+
+
+def _summary(rel: str, fm: dict) -> dict:
+    """A lightweight concept card for tree/search listings (no body)."""
+    return {
+        "path": rel,
+        "title": fm.get("title") or _title_from_path(rel),
+        "type": fm.get("type") or "",
+        "description": fm.get("description") or "",
+        "timestamp": fm.get("timestamp") or "",
+        "tags": fm.get("tags") if isinstance(fm.get("tags"), list) else [],
+    }
+
+
+def read_tree(root: Path) -> dict:
+    """Browse + glance data: concepts grouped by directory, counts by type, log.
+
+    One call powers both the glance overview (counts / freshest by timestamp /
+    activity log) and the browse pane (``dirs``). Missing bundle → empty shape
+    with ``exported: False`` so the viewer can show an export CTA instead of an
+    error.
+    """
+    root = Path(root)
+    if not (root / "index.md").exists():
+        return {"exported": False, "okf_version": "", "total": 0,
+                "counts": {}, "dirs": {}, "log": ""}
+
+    root_fm, _ = parse_doc((root / "index.md").read_text(encoding="utf-8"))
+    dirs: dict[str, list] = {}
+    counts: dict[str, int] = {}
+    total = 0
+    for rel, p in _concept_rel_paths(root):
+        fm, _ = parse_doc(p.read_text(encoding="utf-8"))
+        card = _summary(rel, fm)
+        dirs.setdefault(posixpath.dirname(rel) or ".", []).append(card)
+        counts[card["type"] or "(untyped)"] = counts.get(card["type"] or "(untyped)", 0) + 1
+        total += 1
+
+    log_path = root / "log.md"
+    log_body = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    return {
+        "exported": True,
+        "okf_version": root_fm.get("okf_version") or OKF_VERSION,
+        "total": total,
+        "counts": counts,
+        "dirs": dirs,
+        "log": log_body,
+    }
+
+
+def read_concept(root: Path, rel: str) -> dict:
+    """One concept: frontmatter + raw body + outbound links + computed backlinks.
+
+    Backlinks (what links *to* this concept) are the headline feature — they
+    can't be seen by ``ls``-ing the bundle. Computed by inverting the link graph:
+    scan every other concept's body for a markdown link that resolves to ``rel``.
+    Bundle is small; a full scan per open is fine.
+    """
+    root = Path(root)
+    target = _safe_concept_path(root, rel)
+    rel = target.relative_to(root.resolve()).as_posix()
+    fm, body = parse_doc(target.read_text(encoding="utf-8"))
+
+    outbound = []
+    for title, href in _LINK_RE.findall(body):
+        if not _is_bundle_md_link(href):
+            continue
+        tgt = _resolve_link(rel, href)
+        outbound.append({
+            "title": title, "path": tgt,
+            "exists": (root / tgt).is_file(),
+        })
+
+    backlinks = []
+    for other_rel, p in _concept_rel_paths(root):
+        if other_rel == rel:
+            continue
+        _, obody = parse_doc(p.read_text(encoding="utf-8"))
+        ofm = None
+        for title, href in _LINK_RE.findall(obody):
+            if _is_bundle_md_link(href) and _resolve_link(other_rel, href) == rel:
+                if ofm is None:
+                    ofm, _ = parse_doc(p.read_text(encoding="utf-8"))
+                backlinks.append({
+                    "path": other_rel,
+                    "title": ofm.get("title") or _title_from_path(other_rel),
+                    "type": ofm.get("type") or "",
+                    "context": title,
+                })
+                break  # one backlink per source concept
+
+    return {
+        "path": rel,
+        "title": fm.get("title") or _title_from_path(rel),
+        "type": fm.get("type") or "",
+        "frontmatter": fm,
+        "body": body,
+        "outbound": outbound,
+        "backlinks": backlinks,
+    }
+
+
+def read_search(root: Path, q: str = "", type_: str = "", tag: str = "") -> list[dict]:
+    """Full-text-ish search over frontmatter + body, filterable by type / tag.
+
+    Substring match (case-insensitive) across title / description / tags / type /
+    body — local, no index needed for a bundle this size. Title/description hits
+    rank above body-only hits. Returns concept cards (+ a body snippet on a body
+    hit). The embedded viewer may later swap in semantic search via ``mem_index``;
+    this keeps a zero-dependency baseline shared with the portable viewer.
+    """
+    root = Path(root)
+    ql = (q or "").strip().lower()
+    type_l = (type_ or "").strip().lower()
+    tag_l = (tag or "").strip().lower()
+    results = []
+    for rel, p in _concept_rel_paths(root):
+        fm, body = parse_doc(p.read_text(encoding="utf-8"))
+        card = _summary(rel, fm)
+        if type_l and card["type"].lower() != type_l:
+            continue
+        if tag_l and tag_l not in [str(t).lower() for t in card["tags"]]:
+            continue
+        meta_blob = " ".join([
+            card["title"], card["description"], card["type"],
+            " ".join(str(t) for t in card["tags"]),
+        ]).lower()
+        snippet = ""
+        rank = -1
+        if not ql:
+            rank = 0
+        elif ql in meta_blob:
+            rank = 2
+        elif ql in body.lower():
+            rank = 1
+            idx = body.lower().index(ql)
+            start = max(0, idx - 40)
+            snippet = ("…" if start else "") + body[start:idx + len(ql) + 40].strip().replace("\n", " ")
+        if rank < 0:
+            continue
+        results.append({**card, "rank": rank, "snippet": snippet})
+    results.sort(key=lambda r: (-r["rank"], r["title"].lower()))
+    return results
+
+
+def read_graph(root: Path) -> dict:
+    """Concept nodes + link edges — the "graph-shaped, not just tree-shaped" view.
+
+    Nodes are concepts; a directed edge ``a → b`` exists when concept ``a``'s body
+    has a markdown link resolving to concept ``b`` (broken links are dropped —
+    only edges between two real concepts are emitted). Edges are deduped.
+    """
+    root = Path(root)
+    nodes = []
+    known = set()
+    for rel, p in _concept_rel_paths(root):
+        fm, _ = parse_doc(p.read_text(encoding="utf-8"))
+        nodes.append({
+            "id": rel,
+            "title": fm.get("title") or _title_from_path(rel),
+            "type": fm.get("type") or "",
+        })
+        known.add(rel)
+
+    edges = []
+    seen = set()
+    for rel, p in _concept_rel_paths(root):
+        _, body = parse_doc(p.read_text(encoding="utf-8"))
+        for _title, href in _LINK_RE.findall(body):
+            if not _is_bundle_md_link(href):
+                continue
+            tgt = _resolve_link(rel, href)
+            if tgt in known and tgt != rel and (rel, tgt) not in seen:
+                seen.add((rel, tgt))
+                edges.append({"source": rel, "target": tgt})
+    return {"nodes": nodes, "edges": edges}
