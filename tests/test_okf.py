@@ -47,6 +47,39 @@ def test_schedule_doc_field_mapping():
     assert "Scan arxiv for new papers" in md
 
 
+def test_agent_doc_description_is_recap_and_surfaces_pr(monkeypatch):
+    """An agent concept should read as *what it's doing* (recap) with its project +
+    latest PR as frontmatter, so a glance card is insight, not boilerplate."""
+    monkeypatch.setattr(discovery, "get_window_cwd", lambda name: "/home/x/nautilus")
+    monkeypatch.setattr(okf.transcripts, "_resolve_agent_transcript", lambda name: "/t.jsonl")
+    monkeypatch.setattr(okf.transcripts, "latest_recap",
+                        lambda p: "# heading\n\nRefactored the risk engine and opened a PR.\nmore detail")
+    monkeypatch.setattr(okf.transcripts, "latest_pr",
+                        lambda p: type("PR", (), {"url": "https://github.com/x/p/pull/9"})())
+    md, cwd = okf._agent_doc("nautilus", "@11", {})
+    m = _meta(md)
+    assert m["description"] == "Refactored the risk engine and opened a PR."   # recap, not "agent window …"
+    assert m["pr_url"] == "https://github.com/x/p/pull/9"
+    assert m["project"] == "nautilus"
+    assert cwd == "/home/x/nautilus"
+
+
+def test_agent_doc_description_falls_back_without_recap(monkeypatch):
+    monkeypatch.setattr(discovery, "get_window_cwd", lambda name: "/home/x/proj")
+    monkeypatch.setattr(okf.transcripts, "_resolve_agent_transcript", lambda name: None)
+    md, _ = okf._agent_doc("shell-1", "@2", {})
+    m = _meta(md)
+    assert m["description"] == "agent window shell-1 @ proj"
+    assert "pr_url" not in m           # empty optional keys are dropped (terse bundle)
+
+
+def test_project_doc_description_rolls_up_counts():
+    md = okf._project_doc("nautilus", "/home/x/nautilus", ["a", "b", "a"], [{"task_id": "t"}])
+    m = _meta(md)
+    assert m["description"] == "2 agents · 1 run"   # deduped agents, run count
+    assert m["agent_count"] == 2 and m["run_count"] == 1
+
+
 def test_log_md_is_date_grouped_newest_first():
     runs = [
         {"task_id": "a", "title": "A", "status": "done", "ended_at": "2026-06-28T09:00:00+00:00"},

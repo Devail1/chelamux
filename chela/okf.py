@@ -60,6 +60,24 @@ def _slug(value: str) -> str:
     return s or "unnamed"
 
 
+def _excerpt(text: str | None, limit: int = 160) -> str:
+    """First meaningful line of a prose blob, condensed to a one-line summary.
+
+    Used to turn an agent's latest recap into its ``description`` so a glance card
+    reads as *what the agent is doing* rather than boilerplate. Skips blank and
+    markdown-heading lines; collapses whitespace; truncates on a word boundary.
+    """
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):   # skip blanks + markdown headings → reach the prose
+            continue
+        line = re.sub(r"\s+", " ", line)
+        if len(line) <= limit:
+            return line
+        return line[:limit].rsplit(" ", 1)[0].rstrip(",.;:") + "…"
+    return ""
+
+
 def _frontmatter(meta: dict) -> str:
     """Render an OKF frontmatter block, dropping empty optional fields.
 
@@ -231,15 +249,25 @@ def _agent_doc(name: str, wid: str, runs_by_window: dict[str, list[dict]]) -> tu
             for r in my_runs
         )
 
+    project = Path(cwd).name if cwd else ""
+    # description = what the agent is actually doing (its latest recap), so a
+    # glance card reads as insight; fall back to a plain locator when there's no
+    # transcript (e.g. a bare shell window).
+    description = _excerpt(recap) or (
+        f"agent window {name}" + (f" @ {project}" if project else ""))
     meta = {
         "type": TYPE_AGENT,
         "title": name,
-        "description": f"agent window {name}" + (f" @ {Path(cwd).name}" if cwd else ""),
+        "description": description,
         "resource": f"file://{cwd}" if cwd else "",
         "timestamp": _now(),
         "tags": ["agent"],
         "window_id": wid,
         "cwd": cwd or "",
+        # extension keys (consumers preserve unknown keys) — let the viewer
+        # surface the agent's project + latest PR without parsing the body.
+        "project": project,
+        "pr_url": pr.url if pr else "",
     }
     citations = [f"`{tpath}`"] if tpath else None
     return _doc(meta, "\n".join(body), citations=citations), cwd
@@ -261,14 +289,22 @@ def _project_doc(name: str, path: str, agents: list[str], runs: list[dict]) -> s
             )
             for r in runs
         )
+    n_agents = len(set(agents))
+    n_runs = len(runs)
+    rollup = " · ".join(filter(None, [
+        f"{n_agents} agent{'s' if n_agents != 1 else ''}" if n_agents else "",
+        f"{n_runs} run{'s' if n_runs != 1 else ''}" if n_runs else "",
+    ])) or (f"project at {path}" if path else f"project {name}")
     meta = {
         "type": TYPE_PROJECT,
         "title": name,
-        "description": f"project at {path}" if path else f"project {name}",
+        "description": rollup,
         "resource": f"file://{path}" if path else "",
         "timestamp": _now(),
         "tags": ["project"],
         "path": path or "",
+        "agent_count": n_agents,
+        "run_count": n_runs,
     }
     return _doc(meta, "\n".join(body))
 
@@ -515,7 +551,12 @@ def _safe_concept_path(root: Path, rel: str) -> Path:
 
 
 def _summary(rel: str, fm: dict) -> dict:
-    """A lightweight concept card for tree/search listings (no body)."""
+    """A lightweight concept card for tree/search listings (no body).
+
+    Carries a few soft/extension fields (``resource``, ``project``, ``pr_url``)
+    so the glance feed can render *what an agent is doing* and group agents under
+    their project without a second per-concept fetch.
+    """
     return {
         "path": rel,
         "title": fm.get("title") or _title_from_path(rel),
@@ -523,6 +564,9 @@ def _summary(rel: str, fm: dict) -> dict:
         "description": fm.get("description") or "",
         "timestamp": fm.get("timestamp") or "",
         "tags": fm.get("tags") if isinstance(fm.get("tags"), list) else [],
+        "resource": fm.get("resource") or "",
+        "project": fm.get("project") or "",
+        "pr_url": fm.get("pr_url") or "",
     }
 
 

@@ -67,20 +67,50 @@ function knRenderGlance() {
         return;
     }
 
-    // counts-by-type chips (click → filter search to that type)
-    const counts = t.counts || {};
-    const chips = Object.keys(counts).sort().map(ty =>
-        `<button class="kn-chip" onclick="knFilterType('${attrEsc(ty)}')">
-           <span class="kn-chip-n">${counts[ty]}</span> ${escHtml(ty)}</button>`).join('');
-
-    // freshest concepts by timestamp across every directory
+    // Split concepts by role so the glance can lead with the live entities
+    // (agents → what they're doing) instead of repeating one flat list twice.
     const all = [].concat(...Object.values(t.dirs || {}));
-    const fresh = all.filter(c => c.timestamp)
-        .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || '')).slice(0, 6);
-    const freshHtml = fresh.length ? fresh.map(knCardRow).join('') :
-        '<div class="kn-dim">No timestamped concepts.</div>';
+    const agents = all.filter(c => knTypeClass(c.type) === 'agent')
+        .sort((a, b) => a.title.localeCompare(b.title));
+    const projects = all.filter(c => knTypeClass(c.type) === 'project')
+        .sort((a, b) => a.title.localeCompare(b.title));
+    const others = all.filter(c => !['agent', 'project'].includes(knTypeClass(c.type)));
+    const projByTitle = {};
+    projects.forEach(p => { projByTitle[p.title] = p.path; });
 
-    // browse: a section per directory
+    // Synthesized one-line digest — the "what's in here right now" answer.
+    const prCount = all.filter(c => c.pr_url).length;
+    const freshTs = all.map(c => c.timestamp).filter(Boolean).sort().slice(-1)[0];
+    const bits = [];
+    if (agents.length) bits.push(`${agents.length} agent${agents.length === 1 ? '' : 's'}`);
+    if (projects.length) bits.push(`${projects.length} project${projects.length === 1 ? '' : 's'}`);
+    if (prCount) bits.push(`${prCount} PR${prCount === 1 ? '' : 's'}`);
+    const otherCounts = {};
+    others.forEach(c => { otherCounts[c.type] = (otherCounts[c.type] || 0) + 1; });
+    Object.keys(otherCounts).sort().forEach(ty => bits.push(`${otherCounts[ty]} ${escHtml(ty.toLowerCase())}${otherCounts[ty] === 1 ? '' : 's'}`));
+    const digest = bits.join(' · ') + (freshTs ? ` · updated ${relativeTime(freshTs)}` : '');
+
+    // Sections that only render when they have content (graceful when sparse).
+    const sessions = agents.length ? `
+        <div class="kn-sub">Sessions <span class="kn-dim">· what the fleet is working on</span></div>
+        ${agents.map(a => knAgentRow(a, projByTitle)).join('')}` : '';
+
+    const projChips = projects.length ? `
+        <div class="kn-sub">Projects</div>
+        <div class="kn-pchips">${projects.map(knProjectChip).join('')}</div>` : '';
+
+    const otherSections = Object.keys(otherCounts).sort().map(ty => {
+        const items = others.filter(c => c.type === ty)
+            .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        return `<div class="kn-sub">${escHtml(ty)}s</div>${items.map(knCardRow).join('')}`;
+    }).join('');
+
+    const activity = (t.log && /\n-\s/.test(t.log)) ? `
+        <div class="kn-sub">Activity</div>
+        <div class="kn-log">${knMd(t.log, 'log.md')}</div>` : '';
+
+    // Full flat listing kept for completeness, but folded away — the sections
+    // above are the primary read.
     const dirs = Object.keys(t.dirs || {}).sort();
     const browse = dirs.map(d => `
         <div class="kn-dir">
@@ -92,23 +122,20 @@ function knRenderGlance() {
     el.innerHTML = `
       <div class="kn-glance">
         <div class="kn-section-title">Glance
-          <span class="kn-dim">· ${t.total} concepts · OKF v${escHtml(t.okf_version || '')}</span></div>
-        <div class="kn-chips">${chips || '<span class="kn-dim">empty bundle</span>'}</div>
-        <div class="kn-cols">
-          <div class="kn-col">
-            <div class="kn-sub">Freshest</div>
-            ${freshHtml}
-          </div>
-          <div class="kn-col">
-            <div class="kn-sub">Activity</div>
-            <div class="kn-log">${t.log ? knMd(t.log, 'log.md') : '<div class="kn-dim">No activity recorded.</div>'}</div>
-          </div>
-        </div>
-        <div class="kn-section-title">Browse</div>
-        ${browse || '<div class="kn-dim">No concepts.</div>'}
+          <span class="kn-dim">· OKF v${escHtml(t.okf_version || '')}</span></div>
+        <div class="kn-digest">${digest || '<span class="kn-dim">empty bundle</span>'}</div>
+        ${sessions}
+        ${projChips}
+        ${otherSections}
+        ${activity}
+        <details class="kn-browse">
+          <summary>Browse all ${t.total} concepts</summary>
+          ${browse || '<div class="kn-dim">No concepts.</div>'}
+        </details>
       </div>`;
 }
 
+// A standard compact card (search results, backlinks, the flat browse list).
 function knCardRow(c) {
     const ts = c.timestamp ? `<span class="kn-card-ts ts">${relativeTime(c.timestamp)}</span>` : '';
     return `
@@ -118,6 +145,42 @@ function knCardRow(c) {
         ${c.description ? `<span class="kn-card-desc">${escHtml(c.description)}</span>` : ''}
         ${ts}
       </div>`;
+}
+
+// A richer agent row for the glance feed: name → project, what it's doing
+// (recap-derived description), and its latest PR — the insight, not boilerplate.
+function knAgentRow(a, projByTitle) {
+    const projPath = a.project && projByTitle[a.project];
+    const proj = a.project
+        ? (projPath
+            ? `<a class="kn-feed-proj" onclick="event.stopPropagation();knOpen('${attrEsc(projPath)}')">${escHtml(a.project)}</a>`
+            : `<span class="kn-feed-proj">${escHtml(a.project)}</span>`)
+        : '';
+    const ts = a.timestamp ? `<span class="kn-card-ts ts">${relativeTime(a.timestamp)}</span>` : '';
+    const pr = a.pr_url
+        ? `<a class="kn-pr" href="${attrEsc(a.pr_url)}" target="_blank" rel="noopener"
+             onclick="event.stopPropagation()">PR ↗</a>` : '';
+    return `
+      <div class="kn-feed-row" onclick="knOpen('${attrEsc(a.path)}')">
+        <span class="kn-badge kn-badge-agent">Agent</span>
+        <div class="kn-feed-main">
+          <div class="kn-feed-top">
+            <span class="kn-card-title">${escHtml(a.title)}</span>
+            ${proj ? '<span class="kn-feed-arrow">→</span>' + proj : ''}
+            ${ts}
+          </div>
+          ${a.description ? `<div class="kn-feed-desc">${escHtml(a.description)}</div>` : ''}
+        </div>
+        ${pr}
+      </div>`;
+}
+
+function knProjectChip(p) {
+    return `
+      <button class="kn-pchip" onclick="knOpen('${attrEsc(p.path)}')">
+        <span class="kn-pchip-name">${escHtml(p.title)}</span>
+        ${p.description ? `<span class="kn-dim">${escHtml(p.description)}</span>` : ''}
+      </button>`;
 }
 
 // --- Concept detail (frontmatter card + body + backlinks) ------------------
