@@ -382,6 +382,16 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 }
 .min-dock-label { color: var(--text-dim); font-size: 11px; margin-right: 2px; }
 
+/* Pin the minimized dock to the bottom of the wall. The panel fills the canvas
+   as a flex column and #term-stage grows to take the slack, so the dock sits at
+   the bottom even when EVERY pane is minimized — without this the emptied grid
+   collapses to ~0 and the dock rides up under the toolbar. Desktop/wall only:
+   phones force single mode (no dock) with a fixed keybar, so leave them alone. */
+@media (min-width: 769px) {
+    #panel-terminals.active { display: flex; flex-direction: column; min-height: 100%; }
+    #panel-terminals.active #term-stage { flex: 1 1 auto; min-height: 0; }
+}
+
 /* Live session-activity dot on pane headers + dock chips. Driven by
    `claude agents --json` status: busy = green pulse, waiting = amber (needs
    input), idle/unknown = dim. */
