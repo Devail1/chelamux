@@ -392,6 +392,8 @@ function renderSettings(focus) {
     const body = document.getElementById('drawer-body');
     if (!body) return;
     const theme = localStorage.getItem('chela_theme') || 'dark';
+    const termFont = localStorage.getItem('chela_term_font') || 'miriam';
+    const termSize = localStorage.getItem('chela_term_fontsize') || '14';
     body.innerHTML = `
         <section class="settings-section">
             <h4>Projects folder</h4>
@@ -439,6 +441,30 @@ function renderSettings(focus) {
                 <select id="theme-select" class="s-select" onchange="setTheme(this.value)">
                     ${['dark','dim','midnight','nord','gruvbox','solarized','rose']
                         .map(t => `<option value="${t}"${theme === t ? ' selected' : ''}>${THEME_LABELS[t]}</option>`)
+                        .join('')}
+                </select>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <h4>Terminal font</h4>
+            <p class="s-desc">Applies live to every open terminal. English is always
+            <strong>JetBrains Mono</strong>; this picks the <strong>Hebrew</strong> face.
+            Only <strong>Miriam Mono</strong> is truly monospace (sits on the grid) —
+            Noto &amp; Heebo are proportional: nicer letters, slight drift in the fixed cells.</p>
+            <div class="s-row">
+                <span class="s-rowlabel">Hebrew font</span>
+                <select id="term-font-select" class="s-select" onchange="setTermFont(this.value)">
+                    ${Object.keys(TERM_FONT_LABELS)
+                        .map(k => `<option value="${k}"${termFont === k ? ' selected' : ''}>${TERM_FONT_LABELS[k]}</option>`)
+                        .join('')}
+                </select>
+            </div>
+            <div class="s-row">
+                <span class="s-rowlabel">Size</span>
+                <select id="term-size-select" class="s-select" onchange="setTermSize(this.value)">
+                    ${['12', '13', '14', '15', '16', '18']
+                        .map(s => `<option value="${s}"${termSize === s ? ' selected' : ''}>${s}px</option>`)
                         .join('')}
                 </select>
             </div>
@@ -498,6 +524,40 @@ const THEME_LABELS = {
 function setTheme(t) {
     localStorage.setItem('chela_theme', t);
     document.body.dataset.theme = t;
+}
+
+// Terminal Hebrew font options. Keys are stored in localStorage (chela_term_font)
+// and mapped to real family names by the shim injected into each ttyd page
+// (app.py _TERM_FONT_PREF_SHIM). Only Miriam is monospace; the others trade grid
+// alignment for more natural letterforms.
+const TERM_FONT_LABELS = {
+    miriam: 'Miriam Mono · aligned',
+    noto: 'Noto Sans Hebrew · modern',
+    heebo: 'Heebo · proportional',
+};
+
+// Terminal font + size are per-viewer prefs (like the theme), stored in
+// localStorage and applied live to every ttyd iframe. The iframes are
+// same-origin, so writing localStorage fires a `storage` event inside each of
+// them (the shim listens); we ALSO call into each iframe directly for instant
+// feedback in the frame that made the change.
+function setTermFont(v) {
+    localStorage.setItem('chela_term_font', v);
+    applyTermPrefsToIframes();
+}
+
+function setTermSize(v) {
+    localStorage.setItem('chela_term_fontsize', v);
+    applyTermPrefsToIframes();
+}
+
+function applyTermPrefsToIframes() {
+    document.querySelectorAll('iframe').forEach(f => {
+        try {
+            const w = f.contentWindow;
+            if (w && typeof w.chelaApplyTermPrefs === 'function') w.chelaApplyTermPrefs();
+        } catch (e) { /* not-yet-loaded — the storage event covers it */ }
+    });
 }
 
 // --- "+ new" popover -------------------------------------------------------

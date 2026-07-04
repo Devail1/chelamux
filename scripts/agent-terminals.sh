@@ -46,13 +46,26 @@ MAP_FILE="${CHELA_DIR:-${HOME}/.chela}/agent_terminals.json"
 # black wall tiles on first run).
 mkdir -p "$(dirname "${MAP_FILE}")"
 
-# xterm.js font stack: use whatever Nerd Font the viewer has installed
-# (powerline / dev glyphs for lazygit, yazi, starship, eza), else plain
-# monospace — safe fallback, no glyphs if no Nerd Font present.
+# xterm.js font stack. CSS font matching is PER-GLYPH, so the browser walks this
+# whole list for every character. Order matters:
+#   JetBrainsMono Nerd Font  - if the viewer has it installed: Latin + powerline/
+#                              dev icons (lazygit, yazi, starship, eza) in one font
+#   JetBrains Mono           - BUNDLED @font-face (see app.py _TERM_FONT_CSS): the
+#                              Latin monospace body, guaranteed on any device. This
+#                              MUST come before the Hebrew font, else on a viewer
+#                              without the Nerd Fonts, Latin letters fall through to
+#                              the Hebrew font, changing the English look (Miriam's
+#                              plainer Nimbus Mono Latin instead of JetBrains Mono).
+#   Symbols Nerd Font        - BUNDLED @font-face: icon-only PUA glyphs, for viewers
+#                              without a Nerd Font installed.
+#   Miriam Mono CLM          - BUNDLED @font-face: monospace Hebrew glyphs (no Nerd/
+#                              Latin font covers Hebrew). Only reached for Hebrew
+#                              codepoints; monospace so it aligns on the grid.
+#   monospace                - final safety net.
 # No inner quotes: ttyd JSON-parses a value that starts with `"`, which
 # would truncate the list. Unquoted multi-word family names are valid CSS
 # (a sequence of space-separated identifiers).
-FONT_FAMILY='JetBrainsMono Nerd Font, FiraCode Nerd Font, Hack Nerd Font, Symbols Nerd Font, monospace'
+FONT_FAMILY='JetBrainsMono Nerd Font, JetBrains Mono, Symbols Nerd Font, Miriam Mono CLM, monospace'
 FONT_FAMILY="${CHELA_TERM_FONT:-$FONT_FAMILY}"
 
 # xterm.js font size (px). Override with CHELA_TERM_FONTSIZE to fit more columns

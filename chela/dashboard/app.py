@@ -452,18 +452,60 @@ _TERM_SCROLL_SHIM = (
 # the dashboard's scrollbar (style.css :root --border #21262d, hover #30363d) so the
 # wall's scrollbars match the rest of the UI. Literal hex — the ttyd page has no
 # CSS vars.
-# Bundled icon-only Nerd Font, served from /static and injected as an @font-face
-# into the ttyd page so xterm.js can resolve the PUA glyphs (lazygit/yazi file &
-# git icons) on ANY viewer — no device-side font install needed. The ttyd
-# fontFamily stack (see scripts/agent-terminals.sh) already lists "Symbols Nerd
-# Font" as a fallback; this @font-face supplies it. font-display:block avoids an
-# icon-flash where glyphs briefly render as boxes before the font loads. The URL
-# is same-origin absolute (/static/...) so it resolves against the dashboard, not
-# the iframe's /term/<wid>/ base path.
+# Bundled fonts, served from /static and injected as @font-face rules into the
+# ttyd page so xterm.js can resolve glyphs the primary font lacks on ANY viewer —
+# no device-side font install needed. The URLs are same-origin absolute
+# (/static/...) so they resolve against the dashboard, not the iframe's
+# /term/<wid>/ base path. The ttyd fontFamily stack (see scripts/agent-terminals.sh)
+# lists these families as fallbacks; these @font-face rules supply them.
+#
+# WHY all three are bundled (and not just left to device-installed fonts): CSS
+# font matching is PER-GLYPH, so the browser walks the whole stack for every
+# character. On a viewer WITHOUT the Nerd Fonts installed, a Latin letter falls
+# past the (uninstalled) Nerd Fonts and the icon-only Symbols font and lands on
+# whatever comes next — so the Hebrew font would end up rendering the Latin too.
+# A proportional Hebrew font there breaks monospace alignment for ENGLISH, not
+# just Hebrew. Bundling JetBrains Mono pins Latin to a real monospace on every
+# device, leaving the Hebrew font to handle only Hebrew.
+#   1. JetBrains Mono (OFL — static/fonts/OFL-JetBrainsMono.txt) — the Latin/
+#      monospace body font, guaranteed present regardless of device install.
+#      Variable, so one @font-face (weight range) covers regular + bold.
+#   2. Symbols Nerd Font — icon-only PUA glyphs (lazygit/yazi file & git icons).
+#      font-display:block avoids an icon-flash where glyphs briefly render as
+#      boxes before the font loads.
+#   3. Hebrew fonts — the Nerd/Latin fonts carry no Hebrew, so without a Hebrew
+#      face the browser falls back per-device to bare `monospace` for Hebrew,
+#      giving a mismatched-height "ransom note" look. THREE are bundled so the
+#      Settings > Terminal font picker can switch between them live (the picker
+#      shim sets window.term's fontFamily). Only the SELECTED face is actually
+#      downloaded — an unused @font-face never fetches. Trade-off the picker
+#      exposes: Miriam Mono CLM (Culmus, GPL-2 — LICENSE-Miriam-Mono.md) is the
+#      only MONOSPACE Hebrew font, so it aligns uniformly on the fixed grid;
+#      Noto Sans Hebrew and Heebo (both OFL) are proportional — nicer letterforms
+#      but they clamp unevenly into Latin-width cells. Miriam ships Book + Bold;
+#      Noto/Heebo are variable (one face each).
+# font-display:swap (for the text fonts) shows text immediately, then swaps.
 _TERM_FONT_CSS = (
-    "<style>@font-face{font-family:'Symbols Nerd Font';"
+    "<style>"
+    "@font-face{font-family:'JetBrains Mono';font-weight:100 900;"
+    "src:url('/static/fonts/JetBrainsMono.ttf') format('truetype');"
+    "font-display:swap}"
+    "@font-face{font-family:'Symbols Nerd Font';"
     "src:url('/static/fonts/SymbolsNerdFontMono-Regular.ttf') format('truetype');"
-    "font-display:block}</style>"
+    "font-display:block}"
+    "@font-face{font-family:'Miriam Mono CLM';font-weight:normal;"
+    "src:url('/static/fonts/MiriamMonoCLM-Book.ttf') format('truetype');"
+    "font-display:swap}"
+    "@font-face{font-family:'Miriam Mono CLM';font-weight:bold;"
+    "src:url('/static/fonts/MiriamMonoCLM-Bold.ttf') format('truetype');"
+    "font-display:swap}"
+    "@font-face{font-family:'Noto Sans Hebrew';font-weight:100 900;"
+    "src:url('/static/fonts/NotoSansHebrew.ttf') format('truetype');"
+    "font-display:swap}"
+    "@font-face{font-family:'Heebo';font-weight:100 900;"
+    "src:url('/static/fonts/Heebo.ttf') format('truetype');"
+    "font-display:swap}"
+    "</style>"
 )
 
 _TERM_SCROLLBAR_CSS = (
@@ -477,6 +519,52 @@ _TERM_SCROLLBAR_CSS = (
     "::-webkit-scrollbar-thumb:hover{background:#30363d;background-clip:content-box}"
     "::-webkit-scrollbar-corner{background:transparent}"
     "</style>"
+)
+
+# Font-preference shim. Two jobs in one:
+#   (1) Apply the user's Settings > Terminal font choice (family + size) to this
+#       ttyd's xterm live. ttyd exposes the Terminal as `window.term`; we set its
+#       fontFamily/fontSize, then re-fit (fontSize changes the cell grid) and
+#       refresh. The choice lives in localStorage (chela_term_font /
+#       chela_term_fontsize), shared same-origin with the dashboard, so a
+#       `storage` event fires here whenever the settings panel changes it — live
+#       switching, no reload. `window.chelaApplyTermPrefs` is also exposed so the
+#       parent frame can poke it directly for instant feedback.
+#   (2) Fix the FOUT/atlas bug: xterm rasterises glyphs into a texture atlas ONCE
+#       at first paint, using whatever font was ready then. Our @font-faces load
+#       async (font-display:swap), so the first atlas uses the fallback and never
+#       rebuilds — the real font only appeared on cells xterm re-drew (a text
+#       selection/scroll), i.e. the font "changed" on select. apply() awaits the
+#       chosen faces via the CSS Font Loading API, then clears the atlas
+#       (clearTextureAtlas) so the next render rebuilds it correctly.
+# Polls for `window.term` because the terminal is created after page scripts run.
+_TERM_FONT_PREF_SHIM = (
+    "<script>(function(){"
+    "var HEB={miriam:\"Miriam Mono CLM\",noto:\"Noto Sans Hebrew\",heebo:\"Heebo\"};"
+    "function stack(k){return \"'JetBrainsMono Nerd Font','JetBrains Mono',\"+"
+    "\"'Symbols Nerd Font','\"+(HEB[k]||HEB.miriam)+\"',monospace\";}"
+    "function apply(){var t=window.term;if(!t)return;"
+    "var k=localStorage.getItem('chela_term_font')||'miriam';"
+    "var s=parseInt(localStorage.getItem('chela_term_fontsize'),10)||14;"
+    "var heb=HEB[k]||HEB.miriam,fam=stack(k);"
+    "var L=[s+\"px '\"+heb+\"'\",\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'JetBrains Mono'\","
+    "\"bold \"+s+\"px 'JetBrains Mono'\",s+\"px 'Symbols Nerd Font'\"];"
+    "var P=(document.fonts&&document.fonts.load)?"
+    "Promise.all(L.map(function(f){return document.fonts.load(f).catch(function(){});}))"
+    ":Promise.resolve();"
+    "P.then(function(){try{"
+    "if(t.options){t.options.fontFamily=fam;t.options.fontSize=s;}"
+    "else if(t.setOption){t.setOption('fontFamily',fam);t.setOption('fontSize',s);}"
+    "if(t.clearTextureAtlas)t.clearTextureAtlas();"
+    "if(t.fit)t.fit();"
+    "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
+    "}catch(e){}});}"
+    "window.chelaApplyTermPrefs=apply;"
+    "var n=0;(function poll(){if(window.term)apply();"
+    "else if(n++<150)setTimeout(poll,100);})();"
+    "window.addEventListener('storage',function(e){"
+    "if(!e.key||e.key==='chela_term_font'||e.key==='chela_term_fontsize')apply();});"
+    "})();</script>"
 )
 
 
@@ -518,8 +606,9 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        shims = (_TERM_FONT_CSS + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM
-                 + _TERM_PALETTE_KEY_SHIM + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
+        shims = (_TERM_FONT_CSS + _TERM_FONT_PREF_SHIM + _TERM_PASTE_SHIM
+                 + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
+                 + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
         body = html.encode("utf-8")
