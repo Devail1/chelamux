@@ -12,8 +12,9 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 
-from chela import agent_manager, discovery, dispatcher, messenger, notify, scheduler
+from chela import agent_manager, discovery, dispatcher, messenger, notify, okf, scheduler
 from chela.config import (
     TMUX_SESSION,
     SCHEDULER_POLL_INTERVAL,
@@ -191,6 +192,23 @@ def cmd_dispatch_runs(args) -> None:
         print(f"  {r['task_id']}  {r['status']:<16}  attempt={r['attempt']}  {r.get('window_name') or '-':<24}  {title}")
 
 
+def cmd_knowledge_export(args) -> None:
+    """Export the fleet's knowledge as an OKF v0.1 bundle.
+
+    The bundle is LOCAL fleet data — keep it out of version control (the default
+    output is ``~/.chela/knowledge``, outside any repo). See docs/OKF.md.
+    """
+    out = Path(args.out).expanduser() if args.out else None
+    summary = okf.export_bundle(out_dir=out, since=args.since)
+    print(f"OKF v{summary['okf_version']} bundle → {summary['out']}")
+    print(
+        f"  agents={summary['agents']}  runs={summary['runs']}  "
+        f"schedules={summary['schedules']}  projects={summary['projects']}"
+    )
+    if summary.get("since"):
+        print(f"  (runs filtered since {summary['since']})")
+
+
 def cmd_install_statusline(args) -> None:
     """Print (or write) the Claude Code statusLine hook that feeds the context bar.
 
@@ -200,7 +218,6 @@ def cmd_install_statusline(args) -> None:
     settings file and refuses to clobber an existing statusLine without ``--force``.
     """
     import json as _json
-    from pathlib import Path
 
     script = Path(__file__).resolve().parent.parent / "scripts" / "cache-statusline.sh"
     snippet = {"type": "command", "command": str(script)}
@@ -329,6 +346,13 @@ def main() -> None:
     # dispatch-runs (inspection)
     sub.add_parser("dispatch-runs", help="List dispatcher runs")
 
+    # knowledge — export the fleet's knowledge as an OKF bundle (local data; see docs/OKF.md)
+    p_know = sub.add_parser("knowledge", help="Export fleet knowledge as an OKF bundle")
+    know_sub = p_know.add_subparsers(dest="know_cmd")
+    p_kexp = know_sub.add_parser("export", help="Write an OKF v0.1 bundle of runs/schedules/agents/projects")
+    p_kexp.add_argument("--out", default=None, help="Output dir (default: ~/.chela/knowledge)")
+    p_kexp.add_argument("--since", default=None, help="Only include runs started on/after this ISO date")
+
     # install-statusline — wire the context-bar producer into Claude Code
     p_sl = sub.add_parser(
         "install-statusline",
@@ -373,6 +397,11 @@ def main() -> None:
         cmd_dispatch(args)
     elif args.command == "dispatch-runs":
         cmd_dispatch_runs(args)
+    elif args.command == "knowledge":
+        if args.know_cmd == "export":
+            cmd_knowledge_export(args)
+        else:
+            p_know.print_help()
     elif args.command == "install-statusline":
         cmd_install_statusline(args)
     elif args.command == "dashboard":

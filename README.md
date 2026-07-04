@@ -329,6 +329,20 @@ literal Escape.
 
 ---
 
+## Roadmap
+
+- **OKF knowledge layer + viewer** — export the fleet's accumulated knowledge
+  (dispatch runs, schedules, agent recaps, PR links) as a portable
+  [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+  bundle (vendor-neutral markdown + YAML), with a glance / browse / search /
+  graph viewer — embedded in the dashboard and shipped self-contained inside
+  each bundle. Full design: [docs/OKF.md](docs/OKF.md).
+- Agent personas (customizable behavior templates).
+- Custom functions / harnesses (per-project agent config).
+- Scheduling integration.
+
+---
+
 ## Credits
 
 The work-item dispatcher is an adaptation of OpenAI's **Symphony** pattern

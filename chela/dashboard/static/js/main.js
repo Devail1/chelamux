@@ -12,6 +12,7 @@ async function refresh() {
         if (typeof refreshLauncher === 'function') refreshLauncher();
         if (currentTab === 'agents') await refreshAgents();
         else if (currentTab === 'schedules') await refreshSchedules();
+        else if (currentTab === 'knowledge') await refreshKnowledge();
         else if (currentTab === 'agent-detail') renderAgentDetail();
         else if (currentTab === 'terminals') await renderTerminals();
         // Dispatcher and Kanban views own their own polling timers; the global

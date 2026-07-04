@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, notify, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -452,18 +452,64 @@ _TERM_SCROLL_SHIM = (
 # the dashboard's scrollbar (style.css :root --border #21262d, hover #30363d) so the
 # wall's scrollbars match the rest of the UI. Literal hex — the ttyd page has no
 # CSS vars.
-# Bundled icon-only Nerd Font, served from /static and injected as an @font-face
-# into the ttyd page so xterm.js can resolve the PUA glyphs (lazygit/yazi file &
-# git icons) on ANY viewer — no device-side font install needed. The ttyd
-# fontFamily stack (see scripts/agent-terminals.sh) already lists "Symbols Nerd
-# Font" as a fallback; this @font-face supplies it. font-display:block avoids an
-# icon-flash where glyphs briefly render as boxes before the font loads. The URL
-# is same-origin absolute (/static/...) so it resolves against the dashboard, not
-# the iframe's /term/<wid>/ base path.
+# Bundled fonts, served from /static and injected as @font-face rules into the
+# ttyd page so xterm.js resolves every glyph on ANY viewer — no device-side font
+# install needed. URLs are same-origin absolute (/static/...) so they resolve
+# against the dashboard, not the iframe's /term/<wid>/ base path.
+#
+# WHY bundle rather than rely on installed fonts: CSS font matching is PER-GLYPH,
+# so the browser walks the whole family stack for every character. On a viewer
+# without these fonts installed, a Latin letter would fall past everything and
+# land on the Hebrew font — and a proportional Hebrew font there breaks monospace
+# alignment for ENGLISH too. Bundling a real Latin monospace pins English on
+# every device, leaving the Hebrew face to handle only Hebrew.
+#
+# The Settings > Terminal font picker chooses one Latin face × one Hebrew face
+# (+ size); the injected _TERM_FONT_PREF_SHIM builds window.term's fontFamily
+# from the selection. Every option is declared here, but only the SELECTED faces
+# are actually downloaded — an unused @font-face never fetches. See
+# static/fonts/README.md for per-font licenses (all OFL-1.1 except Miriam Mono
+# CLM, GPL-2 — the only free MONOSPACE Hebrew font, hence its inclusion).
+#
+# Manifest: (family, filename, variable?, weight-if-static). Variable fonts get a
+# 100–900 weight range in one face; static fonts get one @font-face per weight.
+_TERM_FONTS = [
+    # Icons — font-display:block avoids a box-flash before the icon font loads.
+    ("Symbols Nerd Font", "SymbolsNerdFontMono-Regular.ttf", None, None),
+    # English / Latin monospace (picker: English face)
+    ("JetBrains Mono",  "JetBrainsMono.ttf",       True,  None),
+    ("Fira Code",       "FiraCode.ttf",            True,  None),
+    ("IBM Plex Mono",   "IBMPlexMono-Regular.ttf", False, "normal"),
+    ("IBM Plex Mono",   "IBMPlexMono-Bold.ttf",    False, "bold"),
+    ("Source Code Pro", "SourceCodePro.ttf",       True,  None),
+    ("Cascadia Code",   "CascadiaCode.ttf",        True,  None),
+    # Hebrew (picker: Hebrew face). Miriam is the only monospace one.
+    ("Miriam Mono CLM", "MiriamMonoCLM-Book.ttf",  False, "normal"),
+    ("Miriam Mono CLM", "MiriamMonoCLM-Bold.ttf",  False, "bold"),
+    ("Noto Sans Hebrew", "NotoSansHebrew.ttf",     True,  None),
+    ("Heebo",           "Heebo.ttf",               True,  None),
+    ("Assistant",       "Assistant.ttf",           True,  None),
+    ("Rubik",           "Rubik.ttf",               True,  None),
+    ("Frank Ruhl Libre", "FrankRuhlLibre.ttf",     True,  None),
+    ("David Libre",     "DavidLibre-Regular.ttf",  False, "normal"),
+    ("David Libre",     "DavidLibre-Bold.ttf",     False, "bold"),
+]
+
+
+def _term_font_face(family, filename, variable, weight):
+    if variable is None:  # Symbols icon font — block to avoid glyph-box flash
+        disp = "font-display:block"
+        wgt = ""
+    else:
+        disp = "font-display:swap"
+        wgt = "font-weight:100 900;" if variable else "font-weight:%s;" % weight
+    return ("@font-face{font-family:'%s';%s"
+            "src:url('/static/fonts/%s') format('truetype');%s}"
+            % (family, wgt, filename, disp))
+
+
 _TERM_FONT_CSS = (
-    "<style>@font-face{font-family:'Symbols Nerd Font';"
-    "src:url('/static/fonts/SymbolsNerdFontMono-Regular.ttf') format('truetype');"
-    "font-display:block}</style>"
+    "<style>" + "".join(_term_font_face(*f) for f in _TERM_FONTS) + "</style>"
 )
 
 _TERM_SCROLLBAR_CSS = (
@@ -477,6 +523,56 @@ _TERM_SCROLLBAR_CSS = (
     "::-webkit-scrollbar-thumb:hover{background:#30363d;background-clip:content-box}"
     "::-webkit-scrollbar-corner{background:transparent}"
     "</style>"
+)
+
+# Font-preference shim. Two jobs in one:
+#   (1) Apply the user's Settings > Terminal font choice (family + size) to this
+#       ttyd's xterm live. ttyd exposes the Terminal as `window.term`; we set its
+#       fontFamily/fontSize, then re-fit (fontSize changes the cell grid) and
+#       refresh. The choice lives in localStorage (chela_term_latin /
+#       chela_term_font / chela_term_fontsize), shared same-origin with the
+#       dashboard, so a `storage` event fires here whenever the settings panel
+#       changes it — live switching, no reload. `window.chelaApplyTermPrefs` is
+#       also exposed so the parent frame can poke it directly for instant feedback.
+#   (2) Fix the FOUT/atlas bug: xterm rasterises glyphs into a texture atlas ONCE
+#       at first paint, using whatever font was ready then. Our @font-faces load
+#       async (font-display:swap), so the first atlas uses the fallback and never
+#       rebuilds — the real font only appeared on cells xterm re-drew (a text
+#       selection/scroll), i.e. the font "changed" on select. apply() awaits the
+#       chosen faces via the CSS Font Loading API, then clears the atlas
+#       (clearTextureAtlas) so the next render rebuilds it correctly.
+# Polls for `window.term` because the terminal is created after page scripts run.
+_TERM_FONT_PREF_SHIM = (
+    "<script>(function(){"
+    "var LAT={jetbrains:\"JetBrains Mono\",firacode:\"Fira Code\","
+    "plex:\"IBM Plex Mono\",source:\"Source Code Pro\",cascadia:\"Cascadia Code\"};"
+    "var HEB={miriam:\"Miriam Mono CLM\",noto:\"Noto Sans Hebrew\",heebo:\"Heebo\","
+    "assistant:\"Assistant\",rubik:\"Rubik\",frankruhl:\"Frank Ruhl Libre\","
+    "david:\"David Libre\"};"
+    "function apply(){var t=window.term;if(!t)return;"
+    "var lat=LAT[localStorage.getItem('chela_term_latin')]||LAT.jetbrains;"
+    "var heb=HEB[localStorage.getItem('chela_term_font')]||HEB.miriam;"
+    "var s=parseInt(localStorage.getItem('chela_term_fontsize'),10)||14;"
+    "var fam=\"'\"+lat+\"','Symbols Nerd Font','\"+heb+\"',monospace\";"
+    "var L=[s+\"px '\"+lat+\"'\",\"bold \"+s+\"px '\"+lat+\"'\",s+\"px '\"+heb+\"'\","
+    "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\"];"
+    "var P=(document.fonts&&document.fonts.load)?"
+    "Promise.all(L.map(function(f){return document.fonts.load(f).catch(function(){});}))"
+    ":Promise.resolve();"
+    "P.then(function(){try{"
+    "if(t.options){t.options.fontFamily=fam;t.options.fontSize=s;}"
+    "else if(t.setOption){t.setOption('fontFamily',fam);t.setOption('fontSize',s);}"
+    "if(t.clearTextureAtlas)t.clearTextureAtlas();"
+    "if(t.fit)t.fit();"
+    "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
+    "}catch(e){}});}"
+    "window.chelaApplyTermPrefs=apply;"
+    "var n=0;(function poll(){if(window.term)apply();"
+    "else if(n++<150)setTimeout(poll,100);})();"
+    "window.addEventListener('storage',function(e){if(!e.key||"
+    "e.key==='chela_term_font'||e.key==='chela_term_latin'"
+    "||e.key==='chela_term_fontsize')apply();});"
+    "})();</script>"
 )
 
 
@@ -518,8 +614,9 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        shims = (_TERM_FONT_CSS + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM
-                 + _TERM_PALETTE_KEY_SHIM + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
+        shims = (_TERM_FONT_CSS + _TERM_FONT_PREF_SHIM + _TERM_PASTE_SHIM
+                 + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
+                 + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
         body = html.encode("utf-8")
@@ -1139,6 +1236,80 @@ def api_schedules_toggle(task_id):
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# API: Knowledge (OKF viewer — read-only)
+#
+# Serves the embedded "Knowledge" view from an on-disk OKF bundle. The bundle is
+# PRIVATE fleet data (docs/OKF.md → Security): these routes inherit the
+# dashboard's loopback bind (tailnet-only remote) and add no new listener. The
+# producer (okf.export_bundle) and consumer (okf.read_*) live in chela.okf; this
+# layer is a thin jsonify wrapper plus an export-on-demand cache.
+# ---------------------------------------------------------------------------
+
+def _knowledge_dir() -> Path:
+    """The bundle the embedded viewer reads — the default export dir
+    (~/.chela/knowledge), shared with `chela knowledge export` (no --out)."""
+    return okf.DEFAULT_OUT
+
+
+def _ensure_bundle(force: bool = False) -> Path:
+    """Export the bundle if it's missing (or ``force``), then return its dir.
+
+    First view auto-exports so the page isn't empty; thereafter it's served from
+    disk and the UI's Refresh button forces a re-export. Export reads chela's own
+    state only (never home-root private memory)."""
+    root = _knowledge_dir()
+    if force or not (root / "index.md").exists():
+        okf.export_bundle(root)
+    return root
+
+
+@app.route("/api/knowledge/tree")
+@require_auth
+def api_knowledge_tree():
+    """Browse + glance payload: concepts by directory, counts by type, log."""
+    return jsonify(okf.read_tree(_ensure_bundle()))
+
+
+@app.route("/api/knowledge/concept")
+@require_auth
+def api_knowledge_concept():
+    """One concept: frontmatter + raw body + outbound links + computed backlinks."""
+    rel = request.args.get("path", "")
+    try:
+        return jsonify(okf.read_concept(_knowledge_dir(), rel))
+    except ValueError:
+        abort(400)
+    except (FileNotFoundError, OSError):
+        abort(404)
+
+
+@app.route("/api/knowledge/search")
+@require_auth
+def api_knowledge_search():
+    """Substring search over frontmatter + body, filterable by type / tag."""
+    return jsonify(okf.read_search(
+        _knowledge_dir(),
+        request.args.get("q", ""),
+        request.args.get("type", ""),
+        request.args.get("tag", ""),
+    ))
+
+
+@app.route("/api/knowledge/graph")
+@require_auth
+def api_knowledge_graph():
+    """Concepts as nodes, markdown links as edges."""
+    return jsonify(okf.read_graph(_ensure_bundle()))
+
+
+@app.route("/api/knowledge/export", methods=["POST"])
+@require_auth
+def api_knowledge_export():
+    """Force a re-export (the Knowledge view's Refresh), returning fresh tree."""
+    return jsonify(okf.read_tree(_ensure_bundle(force=True)))
 
 
 # ---------------------------------------------------------------------------

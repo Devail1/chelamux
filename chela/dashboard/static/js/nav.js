@@ -45,6 +45,9 @@ function selectView(view) {
     else { stopKanbanTimer(); }
     if (TERMINALS_ON && view === 'terminals') startTermTimer();
     else if (TERMINALS_ON) stopTermTimer();
+    // Entering Knowledge from the nav lands on the glance overview, not whatever
+    // concept was last open.
+    if (view === 'knowledge' && typeof knBackToGlance === 'function' && _kn.tree) knBackToGlance();
 
     closeSidebar();   // navigating dismisses the mobile drawer (no-op on desktop)
     refresh();
@@ -389,6 +392,9 @@ function renderSettings(focus) {
     const body = document.getElementById('drawer-body');
     if (!body) return;
     const theme = localStorage.getItem('chela_theme') || 'dark';
+    const termLatin = localStorage.getItem('chela_term_latin') || 'jetbrains';
+    const termFont = localStorage.getItem('chela_term_font') || 'miriam';
+    const termSize = localStorage.getItem('chela_term_fontsize') || '14';
     body.innerHTML = `
         <section class="settings-section">
             <h4>Projects folder</h4>
@@ -436,6 +442,38 @@ function renderSettings(focus) {
                 <select id="theme-select" class="s-select" onchange="setTheme(this.value)">
                     ${['dark','dim','midnight','nord','gruvbox','solarized','rose']
                         .map(t => `<option value="${t}"${theme === t ? ' selected' : ''}>${THEME_LABELS[t]}</option>`)
+                        .join('')}
+                </select>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <h4>Terminal font</h4>
+            <p class="s-desc">Applies live to every open terminal, saved per browser.
+            Pick the <strong>English</strong> (monospace) and <strong>Hebrew</strong> faces
+            independently. Only <strong>Miriam Mono</strong> keeps Hebrew on the grid — the
+            other Hebrew faces are proportional: nicer letters, slight drift in the fixed cells.</p>
+            <div class="s-row">
+                <span class="s-rowlabel">English font</span>
+                <select id="term-latin-select" class="s-select" onchange="setTermLatin(this.value)">
+                    ${Object.keys(TERM_LATIN_LABELS)
+                        .map(k => `<option value="${k}"${termLatin === k ? ' selected' : ''}>${TERM_LATIN_LABELS[k]}</option>`)
+                        .join('')}
+                </select>
+            </div>
+            <div class="s-row">
+                <span class="s-rowlabel">Hebrew font</span>
+                <select id="term-font-select" class="s-select" onchange="setTermFont(this.value)">
+                    ${Object.keys(TERM_FONT_LABELS)
+                        .map(k => `<option value="${k}"${termFont === k ? ' selected' : ''}>${TERM_FONT_LABELS[k]}</option>`)
+                        .join('')}
+                </select>
+            </div>
+            <div class="s-row">
+                <span class="s-rowlabel">Size</span>
+                <select id="term-size-select" class="s-select" onchange="setTermSize(this.value)">
+                    ${['12', '13', '14', '15', '16', '18']
+                        .map(s => `<option value="${s}"${termSize === s ? ' selected' : ''}>${s}px</option>`)
                         .join('')}
                 </select>
             </div>
@@ -495,6 +533,58 @@ const THEME_LABELS = {
 function setTheme(t) {
     localStorage.setItem('chela_theme', t);
     document.body.dataset.theme = t;
+}
+
+// Terminal font options. Keys are stored in localStorage and mapped to real
+// family names by the shim injected into each ttyd page (app.py
+// _TERM_FONT_PREF_SHIM) — keep the keys here in sync with LAT/HEB there.
+// English (Latin) faces are all monospace; the Hebrew list has one monospace
+// (Miriam) and the rest proportional (trade grid alignment for nicer letters).
+const TERM_LATIN_LABELS = {
+    jetbrains: 'JetBrains Mono',
+    firacode: 'Fira Code · ligatures',
+    plex: 'IBM Plex Mono',
+    source: 'Source Code Pro',
+    cascadia: 'Cascadia Code · ligatures',
+};
+
+const TERM_FONT_LABELS = {
+    miriam: 'Miriam Mono · aligned',
+    noto: 'Noto Sans Hebrew · modern',
+    heebo: 'Heebo · rounded',
+    assistant: 'Assistant · humanist',
+    rubik: 'Rubik · rounded',
+    frankruhl: 'Frank Ruhl · serif',
+    david: 'David Libre · classic',
+};
+
+// Terminal font + size are per-viewer prefs (like the theme), stored in
+// localStorage and applied live to every ttyd iframe. The iframes are
+// same-origin, so writing localStorage fires a `storage` event inside each of
+// them (the shim listens); we ALSO call into each iframe directly for instant
+// feedback in the frame that made the change.
+function setTermLatin(v) {
+    localStorage.setItem('chela_term_latin', v);
+    applyTermPrefsToIframes();
+}
+
+function setTermFont(v) {
+    localStorage.setItem('chela_term_font', v);
+    applyTermPrefsToIframes();
+}
+
+function setTermSize(v) {
+    localStorage.setItem('chela_term_fontsize', v);
+    applyTermPrefsToIframes();
+}
+
+function applyTermPrefsToIframes() {
+    document.querySelectorAll('iframe').forEach(f => {
+        try {
+            const w = f.contentWindow;
+            if (w && typeof w.chelaApplyTermPrefs === 'function') w.chelaApplyTermPrefs();
+        } catch (e) { /* not-yet-loaded — the storage event covers it */ }
+    });
 }
 
 // --- "+ new" popover -------------------------------------------------------
@@ -589,7 +679,7 @@ function _paletteItems() {
     const items = [];
     const views = [];
     if (TERMINALS_ON) views.push(['terminals', 'Wall']);
-    views.push(['agents', 'Agents'], ['dispatcher', 'Dispatch'], ['kanban', 'Kanban'], ['schedules', 'Schedules']);
+    views.push(['agents', 'Agents'], ['dispatcher', 'Dispatch'], ['kanban', 'Kanban'], ['schedules', 'Schedules'], ['knowledge', 'Knowledge']);
     views.forEach(([v, label]) => items.push({ icon: '▦', title: label, sub: 'view', run: () => selectView(v) }));
 
     (_agentsCache || []).forEach(a => {

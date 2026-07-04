@@ -81,6 +81,9 @@
           <span class="side-item-icon">◷</span><span class="side-item-label">Schedules</span>
           <span class="side-badges"><span class="badge" id="hdr-schedules">-</span></span>
         </div>
+        <div class="side-item" data-view="knowledge" onclick="selectView('knowledge')">
+          <span class="side-item-icon">◆</span><span class="side-item-label">Knowledge</span>
+        </div>
       </div>
     </section>
 
@@ -181,6 +184,17 @@
         </div>
         <div id="cron-empty" style="padding:20px; text-align:center; color:var(--text-dim); display:none;">No cron jobs</div>
       </div>
+    </div>
+
+    <!-- Knowledge (OKF viewer) -->
+    <div class="panel" id="panel-knowledge">
+      <div class="canvas-toolbar">
+        <input type="text" id="kn-search" placeholder="Search knowledge…"
+               oninput="knOnSearch(this.value)">
+        <button onclick="knShowGraph()">Graph</button>
+        <button onclick="knRefresh(this)" title="Re-export the bundle from current fleet state">Refresh</button>
+      </div>
+      <div id="kn-content"></div>
     </div>
 
     <!-- Dispatcher -->
@@ -443,6 +457,7 @@
 <script src="static/js/header.js"></script>
 <script src="static/js/agents.js"></script>
 <script src="static/js/schedules.js"></script>
+<script src="static/js/knowledge.js"></script>
 <script src="static/js/dispatcher.js"></script>
 <script src="static/js/kanban.js"></script>
 {% if terminals_enabled %}<script src="static/js/terminals.js"></script>{% endif %}
