@@ -1931,6 +1931,10 @@ input[type="text"]:focus, textarea:focus, select:focus {
     position: fixed; z-index: 60; min-width: 152px;
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
     box-shadow: 0 6px 22px rgba(0,0,0,0.5); padding: 4px;
+    /* Cap the height and scroll internally so a long list (e.g. the "+" add
+       menu with many discovered repos) can't run off the bottom of the
+       viewport with unreachable items. Harmless for short popovers. */
+    max-height: 70vh; overflow-y: auto;
 }
 .popover-item { padding: 7px 10px; cursor: pointer; border-radius: 4px; font-size: 12px; }
 .popover-item:hover { background: var(--accent); color: #fff; }

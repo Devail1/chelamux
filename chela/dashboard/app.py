@@ -541,7 +541,12 @@ _TERM_SCROLLBAR_CSS = (
 #       selection/scroll), i.e. the font "changed" on select. apply() awaits the
 #       chosen faces via the CSS Font Loading API, then clears the atlas
 #       (clearTextureAtlas) so the next render rebuilds it correctly.
-# Polls for `window.term` because the terminal is created after page scripts run.
+# Reconciles on a bounded interval (not a one-shot) because ttyd re-applies its
+# launch client-options — including fontSize — when the WebSocket connects, which
+# can land AFTER a single apply() and revert a pane to the default size. apply()
+# early-returns once the terminal already matches, so the interval is a cheap
+# no-op after it converges; it also re-applies on tab refocus and on storage
+# changes. The interval also covers `window.term` not existing yet at first tick.
 _TERM_FONT_PREF_SHIM = (
     "<script>(function(){"
     "var LAT={jetbrains:\"JetBrains Mono\",firacode:\"Fira Code\","
@@ -554,6 +559,7 @@ _TERM_FONT_PREF_SHIM = (
     "var heb=HEB[localStorage.getItem('chela_term_font')]||HEB.miriam;"
     "var s=parseInt(localStorage.getItem('chela_term_fontsize'),10)||14;"
     "var fam=\"'\"+lat+\"','Symbols Nerd Font','\"+heb+\"',monospace\";"
+    "if(t.options&&t.options.fontSize===s&&t.options.fontFamily===fam)return;"
     "var L=[s+\"px '\"+lat+\"'\",\"bold \"+s+\"px '\"+lat+\"'\",s+\"px '\"+heb+\"'\","
     "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\"];"
     "var P=(document.fonts&&document.fonts.load)?"
@@ -567,8 +573,9 @@ _TERM_FONT_PREF_SHIM = (
     "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
     "}catch(e){}});}"
     "window.chelaApplyTermPrefs=apply;"
-    "var n=0;(function poll(){if(window.term)apply();"
-    "else if(n++<150)setTimeout(poll,100);})();"
+    "var n=0,iv=setInterval(function(){apply();if(++n>60)clearInterval(iv);},500);"
+    "document.addEventListener('visibilitychange',function(){"
+    "if(!document.hidden)apply();});"
     "window.addEventListener('storage',function(e){if(!e.key||"
     "e.key==='chela_term_font'||e.key==='chela_term_latin'"
     "||e.key==='chela_term_fontsize')apply();});"
