@@ -3,8 +3,8 @@
 P3 "agent-as-peer": make a running Claude agent show up in the collaborative
 terminal's presence overlay. For every tmux window that has a live ``claude``
 process, we publish a Yjs *awareness* frame — on the agent's behalf — into that
-window's relay room (room == window id), so a browser viewing
-``/term/<wid>/?collab=1`` sees a "claude" pill next to the human pills, coloured
+window's relay room (room == window id), so a browser viewing a *shared*
+``/term/<wid>/`` sees a "claude" pill next to the human pills, coloured
 by the agent's live busy / idle / waiting status.
 
 An agent isn't a browser, so there is deliberately no Yjs here. A y-protocols
@@ -27,7 +27,8 @@ Two details that make it stick on the receiver (see y-protocols/awareness):
     if we can't, the receiver's 30s timeout reaps it anyway.
 
 Spike quality: ephemeral connect-per-heartbeat (fine at this cadence/scale),
-best-effort, fully gated behind ``CHELA_COLLAB`` and the browser's own ``?collab``.
+best-effort, gated behind ``CHELA_COLLAB``; the frame only reaches a browser that
+has joined the room, i.e. one viewing a window the host has *shared*.
 """
 
 from __future__ import annotations

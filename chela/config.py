@@ -68,14 +68,15 @@ TERMINALS_EXPOSE = os.environ.get("CHELA_TERMINALS_EXPOSE", "false").strip().low
 
 # Collaborative-terminal presence (P3 agent-as-peer). When on, the dashboard
 # publishes a Yjs *awareness* frame per running-claude window into that window's
-# relay room, so a browser viewing /term/<wid>/?collab=1 sees a "claude" pill
+# relay room, so a browser viewing a *shared* /term/<wid>/ sees a "claude" pill
 # for the live agent. Purely additive and opaque: it only reaches browsers that
-# have opted in with ?collab. On by default with the wall; set CHELA_COLLAB=false
-# to stop the publisher. COLLAB_RELAY is the dumb fan-out relay (chela/collab-relay).
+# have joined the room, i.e. a window the host has shared. On by default with the
+# wall; set CHELA_COLLAB=false to stop the publisher. COLLAB_RELAY is the dumb
+# fan-out relay (chela/collab-relay).
 COLLAB_PRESENCE = os.environ.get("CHELA_COLLAB", "true").strip().lower() not in ("false", "0", "no", "off")
 COLLAB_RELAY = os.environ.get("CHELA_COLLAB_RELAY", "wss://chela-collab-relay.liav-acc.workers.dev").strip().rstrip("/")
 
-# Shared fixed grid (cols x rows) that a ?collab terminal snaps to when 2+ human
+# Shared fixed grid (cols x rows) that a shared terminal snaps to when 2+ human
 # peers are present (see the adaptive sizing in static/collab/presence.js): while
 # collaborating, every viewer sees an identical, complete grid (tmux window-size
 # manual) and letterbox-scales it to their viewport; solo, the pane fits the

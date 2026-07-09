@@ -584,15 +584,17 @@ _TERM_FONT_PREF_SHIM = (
 )
 
 
-# P2 collaborative-presence spike (chela module): a Yjs-awareness overlay served
-# as a static module and injected into the ttyd page. It SELF-GATES on ?collab
-# (see static/collab/presence.js) so normal wall panes are untouched — the demo
-# is opening `/term/<wid>/?collab=1` in two browsers. Presence/cursor frames ride
-# the dumb CF relay (chela/collab-relay); this only ships the client.
+# Collaborative-presence overlay (chela module): a Yjs-awareness layer served as
+# a static module and injected into the ttyd page. It SELF-GATES purely on this
+# window's server "shared" flag (see static/collab/presence.js) so normal wall
+# panes are untouched, AND so the host can truly revoke — un-sharing or a restart
+# (which clears _SHARED) kills the link, with no client-side ?collab bypass.
+# Presence/cursor frames ride the dumb CF relay (chela/collab-relay); this only
+# ships the client.
 def _term_presence_shim(wid: str) -> str:
     """Per-wid presence config + client. Carries the relay + per-instance room
-    prefix + grid size + this window's live "shared" flag; presence.js gates on
-    (shared || ?collab)."""
+    prefix + grid size + this window's live "shared" flag; presence.js gates
+    solely on that flag."""
     cols, rows = _dims_for(wid)
     cfg = json.dumps({
         "relay": config.COLLAB_RELAY,
@@ -2450,7 +2452,7 @@ def main():
 
     scheduler.init()  # open the WAL scheduler DB + init schema once, before serving
     _start_notifier()
-    collab.start()  # P3: publish running agents as presence peers (?collab viewers)
+    collab.start()  # P3: publish running agents as presence peers (to shared viewers)
     app.run(host=host, port=port, debug=False, threaded=True)
 
 

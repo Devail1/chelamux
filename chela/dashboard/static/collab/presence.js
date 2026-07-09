@@ -1,14 +1,16 @@
 // chela collaborative-terminal presence — a Yjs-awareness overlay over the dumb
-// CF relay. Injected into every ttyd page by app.py; SELF-GATES on the injected
-// "shared" flag (the host clicked Share) OR a manual ?collab query, so normal
-// wall panes are unaffected. Everything here is client-side; the relay only
-// forwards opaque frames. Config (relay, room prefix, grid, shared) arrives via
-// window.__CHELA_COLLAB__.
+// CF relay. Injected into every ttyd page by app.py; SELF-GATES purely on the
+// server "shared" flag (the host clicked Share; per-wid, in-memory), so normal
+// wall panes are unaffected. The server flag is the SOLE gate: un-sharing or a
+// dashboard restart (which clears the in-memory flag) truly revokes the link —
+// there is no client-side ?collab bypass the host can't revoke. Everything here
+// is client-side; the relay only forwards opaque frames. Config (relay, room
+// prefix, grid, shared) arrives via window.__CHELA_COLLAB__.
 
 import { computeFit } from './fit.js';
 
 const CFG = window.__CHELA_COLLAB__ || {};
-if (CFG.shared || new URLSearchParams(location.search).has('collab')) {
+if (CFG.shared) {
   const RELAY = CFG.relay || 'wss://chela-collab-relay.liav-acc.workers.dev';
   const wid = decodeURIComponent((location.pathname.match(/\/term\/([^/]+)/) || [, 'default'])[1]);
   // Instance-namespaced, relay-safe room id — MUST mirror chela/collab.py
