@@ -589,8 +589,9 @@ _TERM_FONT_PREF_SHIM = (
 # is opening `/term/<wid>/?collab=1` in two browsers. Presence/cursor frames ride
 # the dumb CF relay (chela/collab-relay); this only ships the client.
 _TERM_PRESENCE_SHIM = (
+    "<script>window.__CHELA_GRID__={cols:%d,rows:%d};</script>"
     '<script type="module" src="/static/collab/presence.js"></script>'
-)
+) % (config.TERM_COLS, config.TERM_ROWS)
 
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
@@ -751,6 +752,39 @@ def api_term_clients():
     except Exception:
         pass  # tmux hiccup → all-zero counts → wall skips teardown (safe)
     return jsonify(counts)
+
+
+@app.route("/api/term/<wid>/grid", methods=["POST"])
+@require_auth
+def api_term_grid(wid):
+    """Adaptive collab grid, keyed on the room's relay peer count (from
+    presence.js — NOT tmux's client count). 2+ human peers → pin this window to a
+    fixed shared grid (window-size manual, CHELA_TERM_COLS x ROWS) so every viewer
+    sees an identical, complete grid and letterbox-scales it client-side; back at
+    1 peer → restore dynamic viewport-fit (window-size largest). ?collab-driven."""
+    _require_terminals()
+    if wid not in _terminals_port_map():
+        abort(404)  # only real terminal windows; also blocks tmux target injection
+    data = request.get_json(force=True) or {}
+    try:
+        peers = int(data.get("peers", 1))
+    except (TypeError, ValueError):
+        peers = 1
+    cols, rows = config.TERM_COLS, config.TERM_ROWS
+    try:
+        if peers >= 2:
+            subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "manual"],
+                           check=True, timeout=5)
+            subprocess.run(["tmux", "resize-window", "-t", wid, "-x", str(cols), "-y", str(rows)],
+                           check=True, timeout=5)
+            return jsonify({"ok": True, "mode": "fixed", "cols": cols, "rows": rows})
+        subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "largest"],
+                       check=True, timeout=5)
+        subprocess.run(["tmux", "set-window-option", "-t", wid, "aggressive-resize", "on"],
+                       check=True, timeout=5)
+        return jsonify({"ok": True, "mode": "dynamic"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 _TERM_PASTE_MAX = 64 * 1024  # reject pastes larger than 64 KB

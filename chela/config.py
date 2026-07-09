@@ -75,6 +75,14 @@ TERMINALS_EXPOSE = os.environ.get("CHELA_TERMINALS_EXPOSE", "false").strip().low
 COLLAB_PRESENCE = os.environ.get("CHELA_COLLAB", "true").strip().lower() not in ("false", "0", "no", "off")
 COLLAB_RELAY = os.environ.get("CHELA_COLLAB_RELAY", "wss://chela-collab-relay.liav-acc.workers.dev").strip().rstrip("/")
 
+# Shared fixed grid (cols x rows) that a ?collab terminal snaps to when 2+ human
+# peers are present (see the adaptive sizing in static/collab/presence.js): while
+# collaborating, every viewer sees an identical, complete grid (tmux window-size
+# manual) and letterbox-scales it to their viewport; solo, the pane fits the
+# viewport dynamically as usual.
+TERM_COLS = int(os.environ.get("CHELA_TERM_COLS", "120"))
+TERM_ROWS = int(os.environ.get("CHELA_TERM_ROWS", "30"))
+
 
 def is_loopback_host(host: str) -> bool:
     """True when the dashboard bind host is the local loopback (the safe case

@@ -128,7 +128,72 @@ if (new URLSearchParams(location.search).has('collab')) {
       if (!live.has(id)) { el.remove(); cursors.delete(id); }
     }
   };
-  awareness.on('change', render);
+
+  // --- adaptive grid ---------------------------------------------------------
+  // Solo (1 human peer) → the pane fits the viewport dynamically, as usual.
+  // 2+ human peers → the server pins this window to a fixed shared grid
+  // (window-size manual, CHELA_TERM_COLS x ROWS) so everyone sees the identical,
+  // COMPLETE grid, and we letterbox-scale it to each viewer's viewport. Keyed on
+  // the room's peer count from the relay (awareness) — NOT tmux's client count,
+  // and excluding the agent (bot) peer which has no viewport.
+  const GRID = window.__CHELA_GRID__ || { cols: 120, rows: 30 };
+  let fixed = null; // null=unknown, true=fixed/collab, false=dynamic/solo
+
+  const humanPeers = () => {
+    let n = 0;
+    for (const [, st] of awareness.getStates()) if (st.user && !st.user.bot) n++;
+    return n;
+  };
+
+  // presence.js runs INSIDE the ttyd iframe, so innerWidth/innerHeight is the
+  // pane's viewport, and .xterm-screen is the rendered grid (cols*cell wide).
+  const gridEl = () => {
+    const t = window.term;
+    return t && t.element ? (t.element.querySelector('.xterm-screen') || t.element) : null;
+  };
+
+  const letterbox = () => {
+    const g = gridEl();
+    if (!g) return;
+    g.style.transformOrigin = 'top left';
+    g.style.transform = 'none';              // reset so we measure the natural size
+    const natW = g.offsetWidth, natH = g.offsetHeight;
+    const vw = innerWidth, vh = innerHeight;
+    if (!natW || !natH || !vw || !vh) return;
+    document.body.style.overflow = 'hidden';
+    const k = Math.min(vw / natW, vh / natH); // fit-to-min → whole grid visible
+    const tx = Math.max(0, (vw - natW * k) / 2), ty = Math.max(0, (vh - natH * k) / 2);
+    g.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + k + ')';
+  };
+
+  const clearLetterbox = () => {
+    const g = gridEl();
+    if (g) g.style.transform = 'none';
+    const t = window.term;
+    if (t && t.fit) { try { t.fit(); } catch (_) {} } // back to dynamic viewport-fit
+  };
+
+  const applyGrid = () => {
+    const multi = humanPeers() >= 2;
+    if (multi !== fixed) {
+      fixed = multi;
+      fetch('/api/term/' + encodeURIComponent(wid) + '/grid', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ peers: multi ? 2 : 1 }),
+      }).catch(() => {});
+      if (!multi) { clearLetterbox(); return; }
+    }
+    if (fixed) letterbox();
+  };
+
+  awareness.on('change', () => { render(); applyGrid(); });
+  addEventListener('resize', () => { if (fixed) letterbox(); });
+  // window.term may not exist yet, and ttyd/the font shim keep re-fitting for
+  // ~30s; a light interval keeps the letterbox applied while collaborating and
+  // reconciles the PTY-pin round-trip (POST → tmux resize → xterm resize).
+  setInterval(applyGrid, 800);
+
   render();
-  console.log('[chela-collab] presence active — room', room, 'as', me.name);
+  applyGrid();
+  console.log('[chela-collab] presence active — room', room, 'as', me.name, '| grid', GRID.cols + 'x' + GRID.rows);
 }
