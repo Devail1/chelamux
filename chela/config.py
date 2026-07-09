@@ -66,6 +66,15 @@ TERMINALS_ENABLED = os.environ.get("CHELA_TERMINALS_ENABLED", "true").strip().lo
 # by a tailnet or SSH tunnel (the recommended setup), never need this.
 TERMINALS_EXPOSE = os.environ.get("CHELA_TERMINALS_EXPOSE", "false").strip().lower() not in ("false", "0", "no", "off")
 
+# Collaborative-terminal presence (P3 agent-as-peer). When on, the dashboard
+# publishes a Yjs *awareness* frame per running-claude window into that window's
+# relay room, so a browser viewing /term/<wid>/?collab=1 sees a "claude" pill
+# for the live agent. Purely additive and opaque: it only reaches browsers that
+# have opted in with ?collab. On by default with the wall; set CHELA_COLLAB=false
+# to stop the publisher. COLLAB_RELAY is the dumb fan-out relay (chela/collab-relay).
+COLLAB_PRESENCE = os.environ.get("CHELA_COLLAB", "true").strip().lower() not in ("false", "0", "no", "off")
+COLLAB_RELAY = os.environ.get("CHELA_COLLAB_RELAY", "wss://chela-collab-relay.liav-acc.workers.dev").strip().rstrip("/")
+
 
 def is_loopback_host(host: str) -> bool:
     """True when the dashboard bind host is the local loopback (the safe case

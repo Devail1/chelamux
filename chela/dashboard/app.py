@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, context, discovery, dispatcher, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, collab, context, discovery, dispatcher, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -1243,13 +1243,8 @@ def api_schedules_delete(task_id):
 @require_auth
 def api_schedules_toggle(task_id):
     data = request.get_json(force=True)
-    enabled = 1 if data.get("enabled", True) else 0
-    db_path = CHELA_DIR / "scheduler.db"
     try:
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("UPDATE tasks SET enabled = ? WHERE id = ?", (enabled, task_id))
-        conn.commit()
-        conn.close()
+        scheduler.set_enabled(task_id, bool(data.get("enabled", True)))
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2336,7 +2331,9 @@ def main():
             "(remote-code-execution risk).", host,
         )
 
+    scheduler.init()  # open the WAL scheduler DB + init schema once, before serving
     _start_notifier()
+    collab.start()  # P3: publish running agents as presence peers (?collab viewers)
     app.run(host=host, port=port, debug=False, threaded=True)
 
 

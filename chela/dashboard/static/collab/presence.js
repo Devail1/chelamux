@@ -8,7 +8,11 @@
 
 if (new URLSearchParams(location.search).has('collab')) {
   const RELAY = 'wss://chela-collab-relay.liav-acc.workers.dev';
-  const wid = (location.pathname.match(/\/term\/([^/]+)/) || [, 'default'])[1];
+  const wid = decodeURIComponent((location.pathname.match(/\/term\/([^/]+)/) || [, 'default'])[1]);
+  // Relay-safe room id — MUST mirror chela/collab.py room_id(). The relay routes
+  // on the raw path segment ([\w@.\-]+), so percent-encoding '@' as %40 misses
+  // the route entirely; keep '@' and only replace genuinely-unsafe chars.
+  const room = wid.replace(/[^\w@.\-]/g, '_');
 
   // Same Yjs across the Doc and the awareness protocol (?deps pins it).
   const Y = await import('https://esm.sh/yjs@13.6.20');
@@ -19,6 +23,7 @@ if (new URLSearchParams(location.search).has('collab')) {
   const COLORS = ['#f97583', '#58a6ff', '#3fb950', '#d29922', '#bc8cff', '#39c5cf', '#ff9e64', '#e06c9f'];
   const pick = (a) => a[Math.floor(Math.random() * a.length)];
   const me = { name: pick(NAMES) + '-' + Math.floor(Math.random() * 90 + 10), color: pick(COLORS) };
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   const doc = new Y.Doc();
   const awareness = new Awareness(doc);
@@ -31,7 +36,7 @@ if (new URLSearchParams(location.search).has('collab')) {
     if (ws && ws.readyState === 1) ws.send(encodeAwarenessUpdate(awareness, [doc.clientID]));
   };
   const connect = () => {
-    ws = new WebSocket(RELAY + '/room/' + encodeURIComponent(wid));
+    ws = new WebSocket(RELAY + '/room/' + room);
     ws.binaryType = 'arraybuffer';
     ws.onopen = broadcast;
     ws.onmessage = (ev) => {
@@ -62,6 +67,11 @@ if (new URLSearchParams(location.search).has('collab')) {
   const layer = document.createElement('div');
   layer.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483000';
   document.body.appendChild(layer);
+  const style = document.createElement('style');
+  style.textContent = '.chela-pip{width:7px;height:7px;border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.35)}'
+    + '.chela-pip-live{animation:chelaPulse 1.2s ease-in-out infinite}'
+    + '@keyframes chelaPulse{0%,100%{opacity:1}50%{opacity:.3}}';
+  document.head.appendChild(style);
   const pills = document.createElement('div');
   pills.style.cssText = 'position:fixed;top:8px;right:10px;display:flex;gap:6px;flex-wrap:wrap;'
     + 'justify-content:flex-end;max-width:60vw;font:600 11px/1 system-ui,sans-serif';
@@ -73,10 +83,24 @@ if (new URLSearchParams(location.search).has('collab')) {
     pills.innerHTML = '';
     for (const [id, st] of states) {
       if (!st.user) continue;
+      const u = st.user;
       const pill = document.createElement('div');
-      pill.textContent = id === doc.clientID ? st.user.name + ' (you)' : st.user.name;
-      pill.style.cssText = 'padding:3px 9px;border-radius:999px;color:#fff;'
-        + 'box-shadow:0 1px 4px rgba(0,0,0,.45);background:' + st.user.color;
+      if (u.bot) {
+        // Agent-as-peer: a running Claude, published server-side. Gear glyph +
+        // a live status pip (green busy / amber waiting / grey idle), ringed so
+        // it reads as non-human at a glance.
+        const pip = u.status === 'waiting' ? '#d29922' : u.status === 'busy' ? '#3fb950' : '#8b949e';
+        pill.innerHTML = '<span style="opacity:.85">⚙</span>&nbsp;' + esc(u.name)
+          + '<span class="chela-pip' + (u.status === 'busy' ? ' chela-pip-live' : '')
+          + '" style="background:' + pip + '"></span>';
+        pill.style.cssText = 'display:inline-flex;align-items:center;gap:5px;padding:3px 9px;'
+          + 'border-radius:999px;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);'
+          + 'outline:1.5px solid rgba(255,255,255,.5);outline-offset:1px;background:' + u.color;
+      } else {
+        pill.textContent = id === doc.clientID ? u.name + ' (you)' : u.name;
+        pill.style.cssText = 'padding:3px 9px;border-radius:999px;color:#fff;'
+          + 'box-shadow:0 1px 4px rgba(0,0,0,.45);background:' + u.color;
+      }
       pills.appendChild(pill);
     }
     const live = new Set();
@@ -106,5 +130,5 @@ if (new URLSearchParams(location.search).has('collab')) {
   };
   awareness.on('change', render);
   render();
-  console.log('[chela-collab] presence active — room', wid, 'as', me.name);
+  console.log('[chela-collab] presence active — room', room, 'as', me.name);
 }
