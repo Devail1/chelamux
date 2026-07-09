@@ -175,6 +175,7 @@ def api_agents():
             "name": name,
             "online": True,
             "window_id": window_id,
+            "shared": window_id in _SHARED_WIDS,
             "window_type": win_type,
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
@@ -588,15 +589,19 @@ _TERM_FONT_PREF_SHIM = (
 # (see static/collab/presence.js) so normal wall panes are untouched — the demo
 # is opening `/term/<wid>/?collab=1` in two browsers. Presence/cursor frames ride
 # the dumb CF relay (chela/collab-relay); this only ships the client.
-_TERM_PRESENCE_SHIM = (
-    "<script>window.__CHELA_COLLAB__=%s;</script>"
-    '<script type="module" src="/static/collab/presence.js"></script>'
-) % json.dumps({
-    "relay": config.COLLAB_RELAY,
-    "prefix": collab.instance_id(),
-    "cols": config.TERM_COLS,
-    "rows": config.TERM_ROWS,
-})
+def _term_presence_shim(wid: str) -> str:
+    """Per-wid presence config + client. Carries the relay + per-instance room
+    prefix + grid size + this window's live "shared" flag; presence.js gates on
+    (shared || ?collab)."""
+    cfg = json.dumps({
+        "relay": config.COLLAB_RELAY,
+        "prefix": collab.instance_id(),
+        "cols": config.TERM_COLS,
+        "rows": config.TERM_ROWS,
+        "shared": wid in _SHARED_WIDS,
+    })
+    return ("<script>window.__CHELA_COLLAB__=" + cfg + ";</script>"
+            '<script type="module" src="/static/collab/presence.js"></script>')
 
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
@@ -637,7 +642,7 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        shims = (_TERM_FONT_CSS + _TERM_FONT_PREF_SHIM + _TERM_PRESENCE_SHIM
+        shims = (_TERM_FONT_CSS + _TERM_FONT_PREF_SHIM + _term_presence_shim(wid)
                  + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
                  + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
@@ -759,6 +764,29 @@ def api_term_clients():
     return jsonify(counts)
 
 
+# Per-wid "shared" flag (in-memory; presence-only, no auth). When set, term_http
+# injects "shared":true into __CHELA_COLLAB__ so presence.js activates on a clean
+# /term/<wid>/ link — no ?collab magic — and the host can actually revoke by
+# clearing it. set.add/discard are atomic under CPython's GIL, so no lock needed.
+_SHARED_WIDS: set[str] = set()
+
+
+def _apply_grid(wid: str, fixed: bool) -> None:
+    """Pin a window to the fixed shared grid (window-size manual, COLS x ROWS) or
+    restore dynamic viewport-fit (window-size largest). Shared by the adaptive
+    grid endpoint and the un-share grid-restore."""
+    if fixed:
+        subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "manual"],
+                       check=True, timeout=5)
+        subprocess.run(["tmux", "resize-window", "-t", wid, "-x", str(config.TERM_COLS),
+                        "-y", str(config.TERM_ROWS)], check=True, timeout=5)
+    else:
+        subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "largest"],
+                       check=True, timeout=5)
+        subprocess.run(["tmux", "set-window-option", "-t", wid, "aggressive-resize", "on"],
+                       check=True, timeout=5)
+
+
 @app.route("/api/term/<wid>/grid", methods=["POST"])
 @require_auth
 def api_term_grid(wid):
@@ -766,7 +794,7 @@ def api_term_grid(wid):
     presence.js — NOT tmux's client count). 2+ human peers → pin this window to a
     fixed shared grid (window-size manual, CHELA_TERM_COLS x ROWS) so every viewer
     sees an identical, complete grid and letterbox-scales it client-side; back at
-    1 peer → restore dynamic viewport-fit (window-size largest). ?collab-driven."""
+    1 peer → restore dynamic viewport-fit (window-size largest)."""
     _require_terminals()
     if wid not in _terminals_port_map():
         abort(404)  # only real terminal windows; also blocks tmux target injection
@@ -775,21 +803,45 @@ def api_term_grid(wid):
         peers = int(data.get("peers", 1))
     except (TypeError, ValueError):
         peers = 1
-    cols, rows = config.TERM_COLS, config.TERM_ROWS
     try:
-        if peers >= 2:
-            subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "manual"],
-                           check=True, timeout=5)
-            subprocess.run(["tmux", "resize-window", "-t", wid, "-x", str(cols), "-y", str(rows)],
-                           check=True, timeout=5)
-            return jsonify({"ok": True, "mode": "fixed", "cols": cols, "rows": rows})
-        subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "largest"],
-                       check=True, timeout=5)
-        subprocess.run(["tmux", "set-window-option", "-t", wid, "aggressive-resize", "on"],
-                       check=True, timeout=5)
-        return jsonify({"ok": True, "mode": "dynamic"})
+        _apply_grid(wid, peers >= 2)
+        return (jsonify({"ok": True, "mode": "fixed", "cols": config.TERM_COLS, "rows": config.TERM_ROWS})
+                if peers >= 2 else jsonify({"ok": True, "mode": "dynamic"}))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/term/<wid>/share", methods=["POST"])
+@require_auth
+def api_term_share(wid):
+    """Flip the server-side "shared" flag for a window. Presence-only: turning it
+    on makes a clean /term/<wid>/ link activate presence (no ?collab); turning it
+    off truly revokes (presence.js gates on the injected flag) and restores the
+    window to dynamic grid. The pane's iframe is reloaded client-side to re-serve
+    the page with the new flag."""
+    _require_terminals()
+    if wid not in _terminals_port_map():
+        abort(404)
+    data = request.get_json(force=True) or {}
+    on = bool(data.get("on", True))
+    if on:
+        _SHARED_WIDS.add(wid)
+    else:
+        _SHARED_WIDS.discard(wid)
+        try:
+            _apply_grid(wid, False)  # explicit grid restore on un-share
+        except Exception:
+            log.debug("share: grid restore failed for %s", wid, exc_info=True)
+    return jsonify({"ok": True, "shared": on})
+
+
+@app.route("/api/term/shared")
+@require_auth
+def api_term_shared():
+    """The set of currently-shared window ids (authoritative server flag, so the
+    wall can restore share-button state on load / across reloads)."""
+    _require_terminals()
+    return jsonify(sorted(_SHARED_WIDS))
 
 
 _TERM_PASTE_MAX = 64 * 1024  # reject pastes larger than 64 KB
@@ -1105,6 +1157,7 @@ def api_config():
     return jsonify({
         "projects_dir": userconfig.get("projects_dir", ""),
         "projects_dir_effective": str(launcher._projects_dir()),
+        "collab_relay": config.COLLAB_RELAY,
     })
 
 
