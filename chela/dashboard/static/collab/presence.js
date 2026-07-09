@@ -5,6 +5,8 @@
 // forwards opaque frames. Config (relay, room prefix, grid, shared) arrives via
 // window.__CHELA_COLLAB__.
 
+import { computeFit } from './fit.js';
+
 const CFG = window.__CHELA_COLLAB__ || {};
 if (CFG.shared || new URLSearchParams(location.search).has('collab')) {
   const RELAY = CFG.relay || 'wss://chela-collab-relay.liav-acc.workers.dev';
@@ -93,8 +95,13 @@ if (CFG.shared || new URLSearchParams(location.search).has('collab')) {
     // Shared-view backdrop + framed grid (§5.1). Centering is interaction-safe:
     // flex only repositions .xterm within its own rect, so xterm's mouse→cell
     // math (relative to its bounding rect) still holds.
-    + 'body.chela-shared{display:flex;align-items:center;justify-content:center;'
-    + 'background:radial-gradient(1200px 620px at 50% 32%,#151a23,#0a0c11)}'
+    // Pin the backdrop to the full viewport (position:fixed;inset:0 + explicit
+    // 100vw/100vh) so making it a flex container can NOT shrink-wrap it to its
+    // content — that collapse is what fed the shrink spiral. overflow:hidden
+    // keeps a stray scrollbar from perturbing innerWidth mid-fit.
+    + 'body.chela-shared{position:fixed;inset:0;width:100vw;height:100vh;margin:0;'
+    + 'box-sizing:border-box;overflow:hidden;display:flex;align-items:center;'
+    + 'justify-content:center;background:radial-gradient(1200px 620px at 50% 32%,#151a23,#0a0c11)}'
     + '.chela-framed{box-shadow:0 0 0 1px rgba(255,255,255,.07),0 12px 48px rgba(0,0,0,.55);'
     + 'border-radius:6px}';
   document.head.appendChild(style);
@@ -214,17 +221,32 @@ if (CFG.shared || new URLSearchParams(location.search).has('collab')) {
   const fitFont = () => {
     const t = window.term;
     const g = gridEl();
-    if (!t || !g || !t.options) return;
-    const natW = g.offsetWidth, natH = g.offsetHeight;
-    if (!natW || !natH || !innerWidth || !innerHeight) return;
+    if (!t || !g || !t.options || !t.cols || !t.rows) return;
     const cur = t.options.fontSize || 14;
-    const k = Math.min(innerWidth / natW, innerHeight / natH);
-    const next = Math.max(6, Math.floor(cur * k));
+    const natW = g.offsetWidth, natH = g.offsetHeight;
+    if (!natW || !natH) return;
+    // Measure the font's cell size PER 1px of fontSize (a font constant), then
+    // fit the FIXED shared grid (GRID.cols×rows) to the INVARIANT window viewport
+    // via the pure computeFit. Crucially we never measure the element we center
+    // (that caused the shrink spiral) — only window.innerWidth/innerHeight and
+    // ratios that don't depend on the current font. See fit.js / fit.test.mjs.
+    const cellWPerPx = natW / (t.cols * cur);
+    const cellHPerPx = natH / (t.rows * cur);
+    const next = computeFit(innerWidth, innerHeight, GRID.cols, GRID.rows, cellWPerPx, cellHPerPx);
+    if (!next) return;
     window.__CHELA_GRID_FONT__ = next;
     if (next !== cur) {
       t.options.fontSize = next;
       if (t.clearTextureAtlas) t.clearTextureAtlas();
       if (t.refresh && t.rows) t.refresh(0, t.rows - 1);
+    }
+    // Force xterm to the shared grid. ttyd's own FitAddon otherwise leaves the
+    // terminal at a viewport-derived size (observed cols=59 instead of the pinned
+    // 120), so the letterbox had nothing fixed to frame. tmux is window-size
+    // manual at these exact dims, so pushing the size client-side stays
+    // consistent server-side.
+    if (t.cols !== GRID.cols || t.rows !== GRID.rows) {
+      try { t.resize(GRID.cols, GRID.rows); } catch (_) { /* xterm not ready */ }
     }
     // Shared-view framing (§5.1): center the fitted grid on a styled backdrop so
     // the letterbox margins read as intentional framing rather than "content
