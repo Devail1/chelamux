@@ -395,6 +395,8 @@ function renderSettings(focus) {
     const termLatin = localStorage.getItem('chela_term_latin') || 'jetbrains';
     const termFont = localStorage.getItem('chela_term_font') || 'miriam';
     const termSize = localStorage.getItem('chela_term_fontsize') || '14';
+    const collabName = localStorage.getItem('chela_collab_name') || '';
+    const collabAuto = localStorage.getItem('chela_collab_autoname') || 'auto-assigned';
     body.innerHTML = `
         <section class="settings-section">
             <h4>Projects folder</h4>
@@ -480,6 +482,25 @@ function renderSettings(focus) {
         </section>
 
         <section class="settings-section">
+            <h4>Collaboration</h4>
+            <p class="s-desc">Your display name in shared terminals (presence pills +
+            the pane facepile). Leave blank for a stable auto-name. Saved per browser,
+            applies live.</p>
+            <div class="s-row">
+                <span class="s-rowlabel">Display name</span>
+                <input id="collab-name" class="s-input" type="text" maxlength="24"
+                       autocomplete="off" placeholder="${escHtml(collabAuto)}"
+                       value="${attrEsc(collabName)}" oninput="setCollabName(this.value)">
+            </div>
+            <div class="s-row">
+                <span class="s-rowlabel">Relay</span>
+                <code id="collab-relay" style="word-break:break-all;font-size:11px">…</code>
+            </div>
+            <p class="s-desc">Presence rides a dumb relay (<code>CHELA_COLLAB_RELAY</code>).
+            Namespacing, not encryption — run your own for anything private.</p>
+        </section>
+
+        <section class="settings-section">
             <h4>Terminal wall</h4>
             <div class="s-row">
                 <span class="s-rowlabel">Embedded ttyd wall</span>
@@ -489,6 +510,25 @@ function renderSettings(focus) {
         </section>`;
     if (focus === 'notify') body.scrollTop = 0;
     _loadProjectsSetting();
+    _loadCollabSetting();
+}
+
+// Persistent collab display name (per browser). Empty → clear → presence.js falls
+// back to the persisted auto-name. The same-origin `storage` event delivers the
+// change to each ttyd iframe's presence.js (which re-broadcasts) — no direct call.
+function setCollabName(v) {
+    v = (v || '').trim();
+    if (v) localStorage.setItem('chela_collab_name', v);
+    else localStorage.removeItem('chela_collab_name');
+}
+
+async function _loadCollabSetting() {
+    const el = document.getElementById('collab-relay');
+    if (!el) return;
+    try {
+        const cfg = await api('/api/config');
+        el.textContent = (cfg && cfg.collab_relay) || '(default)';
+    } catch (e) { el.textContent = '(unavailable)'; }
 }
 
 // Fill the projects-dir input from /api/config: the stored value goes in the
@@ -687,6 +727,18 @@ function _paletteItems() {
         items.push({ dot: _SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle', title: _agentLabel(a),
                      sub: 'session · ' + word, run: () => selectAgent(a.name) });
     });
+
+    // Share / Stop sharing per live session (same server flag as the pane button).
+    if (TERMINALS_ON) {
+        (_agentsCache || []).forEach(a => {
+            if (!a.window_id) return;
+            const shared = typeof _sharedWids !== 'undefined' && _sharedWids.has(a.window_id);
+            items.push({ icon: shared ? '◉' : '⤴',
+                         title: (shared ? 'Stop sharing ' : 'Share ') + _agentLabel(a),
+                         sub: shared ? 'shared session' : 'session',
+                         run: () => toggleShare(null, a.window_id) });
+        });
+    }
 
     if (TERMINALS_ON && typeof _launcherData !== 'undefined' && _launcherData) {
         const seen = new Set();

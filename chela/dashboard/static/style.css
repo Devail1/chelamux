@@ -188,7 +188,7 @@ body {
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 .gs-head {
-    flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+    flex: 0 0 auto; position: relative; display: flex; align-items: center; gap: 6px;
     padding: 4px 9px; font-size: 12px; color: var(--text-dim);
     background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 82%, var(--bg)));
     border-bottom: 1px solid var(--border);
@@ -288,6 +288,46 @@ body {
 .gs-keys button.gs-kill-btn { font-size: 12px; padding: 4px 7px; }
 .gs-keys button.gs-kill-btn:hover {
     color: var(--red); border-color: var(--red); background: rgba(248, 81, 73, 0.1);
+}
+
+/* --- collab: share button + presence facepile ------------------------------ */
+/* Share toggle: neutral like the other window controls; accent + link glyph
+   when live. The count badge (human viewers) rides the top-right corner. */
+.gs-share-btn { position: relative; font-size: 12px; }
+.gs-share-btn.on {
+    color: #0d1117; background: var(--accent); border-color: var(--accent);
+}
+.gs-share-count {
+    position: absolute; top: -6px; right: -6px; min-width: 14px; height: 14px;
+    padding: 0 3px; border-radius: 999px; box-sizing: border-box;
+    background: var(--accent); color: #0d1117; border: 1px solid var(--surface);
+    font-size: 9px; font-weight: 700; line-height: 12px; text-align: center;
+}
+/* Facepile: sits between the title and the window controls (title flexes, so it
+   rides to the right). Compact initial-dots + overflow + agent gear pip. */
+.gs-presence { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; }
+.gs-presence:empty { display: none; }
+.gs-presence .pf-dot {
+    width: 17px; height: 17px; border-radius: 50%; color: #fff;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700; box-shadow: 0 0 0 1.5px var(--surface);
+}
+.gs-presence .pf-more { font-size: 10px; color: var(--text-dim); font-weight: 600; }
+.gs-presence .pf-agent {
+    position: relative; display: inline-flex; align-items: center;
+    font-size: 12px; color: var(--text-dim); margin-left: 1px;
+}
+.gs-presence .pf-agent .pf-pip {
+    position: absolute; bottom: -1px; right: -3px; width: 6px; height: 6px;
+    border-radius: 50%; box-shadow: 0 0 0 1.5px var(--surface);
+}
+/* Share toast — throwaway bubble anchored under the pane header. */
+.term-share-toast {
+    position: absolute; top: 100%; right: 8px; margin-top: 4px; z-index: 20;
+    max-width: min(80%, 360px); padding: 5px 10px; border-radius: 6px;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--accent); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* Kill-confirm popup, centered over the pane (reuses .kanban-confirm styling).

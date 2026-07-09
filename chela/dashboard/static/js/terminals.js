@@ -100,7 +100,7 @@ function _swapToFrame(wid) {
     // Ctrl+V shim can read the clipboard (the paste event path works without it,
     // but clipboard.read()/readText() is blocked in a subframe lacking this).
     ifr.setAttribute('allow', 'clipboard-read; clipboard-write');
-    ifr.src = '/term/' + encodeURIComponent(wid) + '/';
+    ifr.src = _termSrc(wid);
     ifr.title = _paneTitle(wid);
     ph.replaceWith(ifr);
 }
@@ -327,6 +327,120 @@ function renamePane(ev, span, wid) {
     input.addEventListener('mousedown', e2 => e2.stopPropagation());  // don't start a grid drag
 }
 
+// --- collab sharing (presence-only) ----------------------------------------
+// The shared "link" is just the clean /term/<wid>/ URL — NO ?collab magic;
+// sharing is a server-side per-wid flag (POST /api/term/<wid>/share) so the host
+// can actually revoke. One src helper keeps frame()/_wallTileHTML/_swapToFrame
+// in agreement.
+function _termSrc(wid) { return '/term/' + encodeURIComponent(wid) + '/'; }
+function _termLink(wid) { return location.origin + BASE_PATH + _termSrc(wid); }
+
+// Per-wid shared flag (seeded from /api/agents .shared, flipped by toggleShare)
+// and the latest header-facepile presence (from the in-iframe chelaPresence hook).
+const _sharedWids = new Set();
+const _presenceByWid = new Map();
+
+function _seedSharedFromAgents(agents) {
+    (agents || []).forEach(a => {
+        if (!a.window_id) return;
+        if (a.shared) _sharedWids.add(a.window_id); else _sharedWids.delete(a.window_id);
+    });
+}
+
+function _reloadPaneFrame(wid) {
+    document.querySelectorAll('#term-stage iframe.term-frame').forEach(ifr => {
+        if (_widOfFrame(ifr) !== wid) return;
+        // Re-serve the ttyd page so term_http injects the new "shared" flag.
+        try { ifr.contentWindow.location.reload(); }
+        catch (_) { ifr.src = ifr.getAttribute('src'); }  // cross-frame guard
+    });
+}
+
+async function toggleShare(btn, wid) {
+    const on = !_sharedWids.has(wid);
+    let resp;
+    try {
+        resp = await api('/api/term/' + encodeURIComponent(wid) + '/share', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ on }),
+        });
+    } catch (e) { _termShareToast(btn, 'Share failed'); return; }
+    if (!resp || !resp.ok) { _termShareToast(btn, (resp && resp.error) || 'Share failed'); return; }
+    if (on) _sharedWids.add(wid); else { _sharedWids.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid); }
+    _reloadPaneFrame(wid);
+    _updateShareBtns(wid);
+    if (on) {
+        const link = _termLink(wid);
+        try { await navigator.clipboard.writeText(link); _termShareToast(btn, 'Link copied'); }
+        catch (_) { _termShareToast(btn, link); }   // clipboard blocked → show the link
+    } else {
+        _termShareToast(btn, 'Sharing stopped');
+    }
+}
+
+// Throwaway toast bubble anchored to the pane header — same plain-DOM affordance
+// as kanban's _kanbanMergeToast.
+function _termShareToast(anchor, msg) {
+    const host = (anchor && anchor.closest('.gs-head')) || (anchor && anchor.parentElement);
+    if (!host) { console.log('[chela-share]', msg); return; }
+    host.querySelectorAll('.term-share-toast').forEach(t => t.remove());
+    const t = document.createElement('div');
+    t.className = 'term-share-toast';
+    t.textContent = msg;
+    host.appendChild(t);
+    setTimeout(() => t.remove(), 4000);
+}
+
+// Called by presence.js in the iframe (window.parent.chelaPresence) on every
+// awareness change: render a compact facepile into this pane's header + badge.
+function chelaPresence(wid, data) {
+    _presenceByWid.set(wid, data || { humans: [], agent: null, count: 0 });
+    _renderFacepile(wid);
+    _updateShareBtns(wid);
+}
+
+function _renderFacepile(wid) {
+    const slots = document.querySelectorAll('.gs-presence[data-presence-for="' + _cssEsc(wid) + '"]');
+    if (!slots.length) return;
+    const d = _presenceByWid.get(wid) || { humans: [], agent: null };
+    const dots = [];
+    (d.humans || []).slice(0, 3).forEach(h => {
+        const initial = escHtml((h.name || '?').charAt(0).toUpperCase());
+        dots.push('<span class="pf-dot" title="' + attrEsc(h.name + (h.you ? ' (you)' : '')) +
+            '" style="background:' + attrEsc(h.color) + '">' + initial + '</span>');
+    });
+    if ((d.humans || []).length > 3) dots.push('<span class="pf-more">+' + (d.humans.length - 3) + '</span>');
+    if (d.agent) {
+        // Same status→colour mapping as the pane status dot, so agent presence
+        // and pane status never disagree.
+        const pip = d.agent.status === 'waiting' ? '#d29922' : d.agent.status === 'busy' ? '#3fb950' : '#8b949e';
+        dots.push('<span class="pf-agent" title="' + attrEsc(d.agent.name) + '">&#9881;<i class="pf-pip" style="background:' + pip + '"></i></span>');
+    }
+    slots.forEach(s => { s.innerHTML = dots.join(''); });
+}
+
+function _updateShareBtns(wid) {
+    const shared = _sharedWids.has(wid);
+    const d = _presenceByWid.get(wid);
+    const count = (d && d.count) || 0;
+    document.querySelectorAll('.gs-share-btn[data-wid="' + _cssEsc(wid) + '"]').forEach(btn => {
+        btn.classList.toggle('on', shared);
+        btn.setAttribute('aria-pressed', shared ? 'true' : 'false');
+        const badge = btn.querySelector('.gs-share-count');
+        if (badge) {
+            if (shared && count > 0) { badge.textContent = String(count); badge.hidden = false; }
+            else { badge.hidden = true; }
+        }
+    });
+}
+
+function _shareBtnHTML(wid) {
+    const on = _sharedWids.has(wid);
+    return `<button class="gs-share-btn${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
+      onclick="toggleShare(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
+      title="Share this session">&#128279;<span class="gs-share-count" hidden></span></button>`;
+}
+
 function paneHead(wid, draggable) {
     const j = _jsStr(wid);
     const title = `<span class="pane-title" title="double-click to rename" ondblclick="renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
@@ -350,8 +464,10 @@ function paneHead(wid, draggable) {
       ${label}
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
+      <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
       <span class="gs-keys">
         <span class="gs-win-ctl">
+          ${_shareBtnHTML(wid)}
           ${min}
           <button class="gs-max-btn" onclick="termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
           ${kill}
@@ -568,6 +684,8 @@ function _colorTermDots(agents) {
 // and — if the new activity changed the chip order — re-render the taskbar.
 function _applyTermStatus(agents) {
     if (!agents) return;
+    _seedSharedFromAgents(agents);            // keep share-button state authoritative
+    _renderedWids.forEach(_updateShareBtns);  // refresh accent/badge after each poll
     const now = Date.now();
     agents.forEach(a => {
         if (!a.window_id) return;
@@ -782,7 +900,7 @@ async function renderTerminals() {
     // Ready -> real iframe; not ready -> spinner placeholder (polled into an
     // iframe by _startPlaceholderPolls once the ttyd port lands).
     const frame = w => _termReady.has(w)
-        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="/term/${encodeURIComponent(w)}/" title="${escHtml(_paneTitle(w))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termSrc(w)}" title="${escHtml(_paneTitle(w))}"></iframe>`
         : _termPlaceholder(w);
     const stage = $('#term-stage');
     if (!wids.length) {
@@ -1101,7 +1219,7 @@ function destroyGrid() {
 // gs-id is the stable wid so a rename never re-keys the tile.
 function _wallTileHTML(wid, x, y, w, h) {
     const body = _termReady.has(wid)
-        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="/term/${encodeURIComponent(wid)}/" title="${escHtml(_paneTitle(wid))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termSrc(wid)}" title="${escHtml(_paneTitle(wid))}"></iframe>`
         : _termPlaceholder(wid);
     return `<div class="grid-stack-item" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
