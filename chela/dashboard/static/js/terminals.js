@@ -356,13 +356,32 @@ function _reloadPaneFrame(wid) {
     });
 }
 
+// This pane's live terminal dims (cols x rows) — the presenter grid captured at
+// share time so joiners pin to the host's pane, not a fixed 120x30.
+function _paneTermDims(wid) {
+    let dims = null;
+    document.querySelectorAll('#term-stage iframe.term-frame').forEach(ifr => {
+        if (_widOfFrame(ifr) !== wid) return;
+        try {
+            const t = ifr.contentWindow.term;
+            if (t && t.cols) dims = { cols: t.cols, rows: t.rows };
+        } catch (_) { /* cross-frame / not ready → server falls back to default */ }
+    });
+    return dims;
+}
+
 async function toggleShare(btn, wid) {
     const on = !_sharedWids.has(wid);
+    const body = { on };
+    if (on) {
+        const d = _paneTermDims(wid);
+        if (d) { body.cols = d.cols; body.rows = d.rows; }
+    }
     let resp;
     try {
         resp = await api('/api/term/' + encodeURIComponent(wid) + '/share', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ on }),
+            body: JSON.stringify(body),
         });
     } catch (e) { _termShareToast(btn, 'Share failed'); return; }
     if (!resp || !resp.ok) { _termShareToast(btn, (resp && resp.error) || 'Share failed'); return; }

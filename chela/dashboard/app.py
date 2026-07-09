@@ -175,7 +175,7 @@ def api_agents():
             "name": name,
             "online": True,
             "window_id": window_id,
-            "shared": window_id in _SHARED_WIDS,
+            "shared": window_id in _SHARED,
             "window_type": win_type,
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
@@ -593,12 +593,13 @@ def _term_presence_shim(wid: str) -> str:
     """Per-wid presence config + client. Carries the relay + per-instance room
     prefix + grid size + this window's live "shared" flag; presence.js gates on
     (shared || ?collab)."""
+    cols, rows = _dims_for(wid)
     cfg = json.dumps({
         "relay": config.COLLAB_RELAY,
         "prefix": collab.instance_id(),
-        "cols": config.TERM_COLS,
-        "rows": config.TERM_ROWS,
-        "shared": wid in _SHARED_WIDS,
+        "cols": cols,
+        "rows": rows,
+        "shared": wid in _SHARED,
     })
     return ("<script>window.__CHELA_COLLAB__=" + cfg + ";</script>"
             '<script type="module" src="/static/collab/presence.js"></script>')
@@ -764,49 +765,70 @@ def api_term_clients():
     return jsonify(counts)
 
 
-# Per-wid "shared" flag (in-memory; presence-only, no auth). When set, term_http
-# injects "shared":true into __CHELA_COLLAB__ so presence.js activates on a clean
-# /term/<wid>/ link — no ?collab magic — and the host can actually revoke by
-# clearing it. set.add/discard are atomic under CPython's GIL, so no lock needed.
-_SHARED_WIDS: set[str] = set()
+# Per-wid share state (in-memory; presence-only, no auth): wid -> {"cols","rows"},
+# the PRESENTER (master/host) pane dims. When set, term_http injects
+# "shared":true + these dims into __CHELA_COLLAB__ so presence.js activates on a
+# clean /term/<wid>/ link (no ?collab) and every client pins to the master's grid
+# — the master fills their pane, joiners letterbox to it. Dict writes are atomic
+# under CPython's GIL, so no lock needed.
+_SHARED: dict[str, dict] = {}
 
 
-def _apply_grid(wid: str, fixed: bool) -> None:
-    """Pin a window to the fixed shared grid (window-size manual, COLS x ROWS) or
-    restore dynamic viewport-fit (window-size largest). Shared by the adaptive
-    grid endpoint and the un-share grid-restore."""
-    if fixed:
-        subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "manual"],
-                       check=True, timeout=5)
-        subprocess.run(["tmux", "resize-window", "-t", wid, "-x", str(config.TERM_COLS),
-                        "-y", str(config.TERM_ROWS)], check=True, timeout=5)
-    else:
-        subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "largest"],
-                       check=True, timeout=5)
-        subprocess.run(["tmux", "set-window-option", "-t", wid, "aggressive-resize", "on"],
-                       check=True, timeout=5)
+def _clamp_dim(v, lo, hi, default):
+    try:
+        return max(lo, min(hi, int(v)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _dims_for(wid: str):
+    d = _SHARED.get(wid)
+    return (d["cols"], d["rows"]) if d else (config.TERM_COLS, config.TERM_ROWS)
+
+
+def _pin_grid(wid: str, cols: int, rows: int) -> None:
+    """Pin a window to exact cols x rows (window-size manual). The presenter's
+    dims — so all viewers share one PTY size; each letterboxes it client-side."""
+    subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "manual"],
+                   check=True, timeout=5)
+    subprocess.run(["tmux", "resize-window", "-t", wid, "-x", str(cols), "-y", str(rows)],
+                   check=True, timeout=5)
+
+
+def _unpin_grid(wid: str) -> None:
+    """Restore dynamic viewport-fit (window-size largest)."""
+    subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "largest"],
+                   check=True, timeout=5)
+    subprocess.run(["tmux", "set-window-option", "-t", wid, "aggressive-resize", "on"],
+                   check=True, timeout=5)
 
 
 @app.route("/api/term/<wid>/grid", methods=["POST"])
 @require_auth
 def api_term_grid(wid):
-    """Adaptive collab grid, keyed on the room's relay peer count (from
-    presence.js — NOT tmux's client count). 2+ human peers → pin this window to a
-    fixed shared grid (window-size manual, CHELA_TERM_COLS x ROWS) so every viewer
-    sees an identical, complete grid and letterbox-scales it client-side; back at
-    1 peer → restore dynamic viewport-fit (window-size largest)."""
+    """Set the shared grid for a window. The PRESENTER posts its live pane dims
+    ({cols,rows}) once 2+ peers are present → pin the window there so joiners
+    adopt them; posting {peers:1} (solo) restores dynamic viewport-fit. Only the
+    presenter posts; joiners read the dims via awareness / the injected config."""
     _require_terminals()
     if wid not in _terminals_port_map():
         abort(404)  # only real terminal windows; also blocks tmux target injection
     data = request.get_json(force=True) or {}
     try:
+        if "cols" in data and "rows" in data:
+            cols = _clamp_dim(data.get("cols"), 20, 500, config.TERM_COLS)
+            rows = _clamp_dim(data.get("rows"), 6, 300, config.TERM_ROWS)
+            if wid in _SHARED:
+                _SHARED[wid] = {"cols": cols, "rows": rows}  # remember the latest master dims
+            _pin_grid(wid, cols, rows)
+            return jsonify({"ok": True, "mode": "fixed", "cols": cols, "rows": rows})
         peers = int(data.get("peers", 1))
-    except (TypeError, ValueError):
-        peers = 1
-    try:
-        _apply_grid(wid, peers >= 2)
-        return (jsonify({"ok": True, "mode": "fixed", "cols": config.TERM_COLS, "rows": config.TERM_ROWS})
-                if peers >= 2 else jsonify({"ok": True, "mode": "dynamic"}))
+        if peers >= 2:
+            cols, rows = _dims_for(wid)
+            _pin_grid(wid, cols, rows)
+            return jsonify({"ok": True, "mode": "fixed", "cols": cols, "rows": rows})
+        _unpin_grid(wid)
+        return jsonify({"ok": True, "mode": "dynamic"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -814,22 +836,25 @@ def api_term_grid(wid):
 @app.route("/api/term/<wid>/share", methods=["POST"])
 @require_auth
 def api_term_share(wid):
-    """Flip the server-side "shared" flag for a window. Presence-only: turning it
-    on makes a clean /term/<wid>/ link activate presence (no ?collab); turning it
-    off truly revokes (presence.js gates on the injected flag) and restores the
-    window to dynamic grid. The pane's iframe is reloaded client-side to re-serve
-    the page with the new flag."""
+    """Turn sharing on/off. On: remember the presenter's pane dims ({cols,rows},
+    captured client-side at share time) so joiners pin to the master's grid, and
+    activate presence on a clean /term/<wid>/ link. Off: truly revoke (presence.js
+    gates on the injected flag) and restore dynamic grid. The pane's iframe is
+    reloaded client-side to re-serve the page with the new flag."""
     _require_terminals()
     if wid not in _terminals_port_map():
         abort(404)
     data = request.get_json(force=True) or {}
     on = bool(data.get("on", True))
     if on:
-        _SHARED_WIDS.add(wid)
+        _SHARED[wid] = {
+            "cols": _clamp_dim(data.get("cols"), 20, 500, config.TERM_COLS),
+            "rows": _clamp_dim(data.get("rows"), 6, 300, config.TERM_ROWS),
+        }
     else:
-        _SHARED_WIDS.discard(wid)
+        _SHARED.pop(wid, None)
         try:
-            _apply_grid(wid, False)  # explicit grid restore on un-share
+            _unpin_grid(wid)  # explicit grid restore on un-share
         except Exception:
             log.debug("share: grid restore failed for %s", wid, exc_info=True)
     return jsonify({"ok": True, "shared": on})
@@ -838,10 +863,10 @@ def api_term_share(wid):
 @app.route("/api/term/shared")
 @require_auth
 def api_term_shared():
-    """The set of currently-shared window ids (authoritative server flag, so the
-    wall can restore share-button state on load / across reloads)."""
+    """Currently-shared window ids → their master dims, so the wall restores
+    share-button state on load / across reloads."""
     _require_terminals()
-    return jsonify(sorted(_SHARED_WIDS))
+    return jsonify(_SHARED)
 
 
 _TERM_PASTE_MAX = 64 * 1024  # reject pastes larger than 64 KB

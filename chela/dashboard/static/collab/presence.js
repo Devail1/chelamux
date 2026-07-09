@@ -185,15 +185,22 @@ if (CFG.shared || new URLSearchParams(location.search).has('collab')) {
     }
   };
 
-  // --- adaptive grid ---------------------------------------------------------
-  // Solo (1 human peer) → the pane fits the viewport dynamically, as usual.
-  // 2+ human peers → the server pins this window to a fixed shared grid
-  // (window-size manual, CHELA_TERM_COLS x ROWS) so everyone sees the identical,
-  // COMPLETE grid, and we letterbox-scale it to each viewer's viewport. Keyed on
-  // the room's peer count from the relay (awareness) — NOT tmux's client count,
-  // and excluding the agent (bot) peer which has no viewport.
-  const GRID = { cols: CFG.cols || 120, rows: CFG.rows || 30 };
-  let fixed = null; // null=unknown, true=fixed/collab, false=dynamic/solo
+  // --- presenter grid --------------------------------------------------------
+  // "Presenter" model (§5 item 2): the MASTER — the host, i.e. the embedded
+  // (hooked) peer that shared the pane — defines the grid = its own live pane
+  // dims. So the terminal FILLS the master's pane (no letterbox → no window-in-
+  // window), while joiners (raw-link peers) pin to the master's dims and letterbox
+  // to fit. The master publishes its dims via Yjs awareness; joiners adopt them
+  // live and on master resize. The tmux window is pinned to the master's dims so
+  // the one shared PTY is master-sized; each client sizes the FONT to fit.
+  // Fallback if the master leaves: last-seen awareness dims → injected config →
+  // 120x30. Peer count is from the relay (awareness), excluding the agent bot.
+  // Presenter = the host, i.e. the embedded (hooked) peer. Evaluated per tick
+  // (hooked()) since the parent's chelaPresence hook may attach just after init.
+  const GRID = { cols: CFG.cols || 120, rows: CFG.rows || 30 };  // injected fallback
+  let lastPin = null;         // master: last dims we POSTed (avoid re-POST spam)
+  let lastPub = null;         // master: last dims we published to awareness
+  let lastSeenDims = null;    // joiner: last master dims seen in awareness
 
   const humanPeers = () => {
     let n = 0;
@@ -208,31 +215,47 @@ if (CFG.shared || new URLSearchParams(location.search).has('collab')) {
     return t && t.element ? (t.element.querySelector('.xterm-screen') || t.element) : null;
   };
 
-  // Fill the fixed grid to the viewport by RE-RENDERING glyphs at a fitted font
-  // size — the terminal draws at native resolution (honouring devicePixelRatio),
-  // so text stays sharp. We do NOT CSS-scale any element: transform: scale()
-  // resamples the xterm canvas bitmap → blur, worst off DPR=1. Font px is an
-  // integer, so we accept a thin letterbox margin over an exact-fill blur.
-  //
-  // The size is published in window.__CHELA_GRID_FONT__ so the font-pref shim
-  // targets the SAME size (instead of resetting it) and skips its own t.fit()
-  // while we own sizing. Fitting is stable: measuring at the current size and
-  // setting floor(cur * min(vw/natW, vh/natH)) converges in one step.
-  const fitFont = () => {
-    const t = window.term;
-    const g = gridEl();
-    if (!t || !g || !t.options || !t.cols || !t.rows) return;
+  // The presenter's natural grid: how many cols/rows of the CURRENT cell size fit
+  // its viewport. Derived from the measured cell width (invariant of the pinned
+  // cols), so it's correct even while pinned and tracks the master's resizes.
+  const masterDims = () => {
+    const t = window.term, g = gridEl();
+    if (!t || !g || !t.cols || !t.rows) return null;
+    const cellW = g.offsetWidth / t.cols, cellH = g.offsetHeight / t.rows;
+    if (!(cellW > 0 && cellH > 0)) return null;
+    return { cols: Math.max(20, Math.floor(innerWidth / cellW)),
+             rows: Math.max(6, Math.floor(innerHeight / cellH)) };
+  };
+
+  // Joiner's target: the master's dims published in awareness; else last-seen,
+  // else the injected config, else a sane default.
+  const sharedDims = () => {
+    for (const [, st] of awareness.getStates()) {
+      if (st.grid && st.grid.cols > 0 && st.grid.rows > 0) { lastSeenDims = st.grid; return st.grid; }
+    }
+    return lastSeenDims || GRID;
+  };
+
+  const postGrid = (body) => fetch('/api/term/' + encodeURIComponent(wid) + '/grid', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).catch(() => {});
+
+  // Letterbox-fit a TARGET grid (the master's dims) into the viewport by
+  // re-rendering glyphs at a fitted fontSize — native res → sharp; no CSS scale →
+  // no blur. Font px is an integer (a thin, intentional letterbox margin). The
+  // size is published in window.__CHELA_GRID_FONT__ so the font-pref shim targets
+  // the SAME size and skips its own t.fit(). Fit is the pure, idempotent
+  // computeFit over INVARIANTS (window viewport + font cell-ratios), never the
+  // element we center — that coupling caused the shrink spiral. See fit.js.
+  const fitToDims = (dims) => {
+    const t = window.term, g = gridEl();
+    if (!t || !g || !t.options || !t.cols || !t.rows || !dims) return;
     const cur = t.options.fontSize || 14;
     const natW = g.offsetWidth, natH = g.offsetHeight;
     if (!natW || !natH) return;
-    // Measure the font's cell size PER 1px of fontSize (a font constant), then
-    // fit the FIXED shared grid (GRID.cols×rows) to the INVARIANT window viewport
-    // via the pure computeFit. Crucially we never measure the element we center
-    // (that caused the shrink spiral) — only window.innerWidth/innerHeight and
-    // ratios that don't depend on the current font. See fit.js / fit.test.mjs.
     const cellWPerPx = natW / (t.cols * cur);
     const cellHPerPx = natH / (t.rows * cur);
-    const next = computeFit(innerWidth, innerHeight, GRID.cols, GRID.rows, cellWPerPx, cellHPerPx);
+    const next = computeFit(innerWidth, innerHeight, dims.cols, dims.rows, cellWPerPx, cellHPerPx);
     if (!next) return;
     window.__CHELA_GRID_FONT__ = next;
     if (next !== cur) {
@@ -240,19 +263,14 @@ if (CFG.shared || new URLSearchParams(location.search).has('collab')) {
       if (t.clearTextureAtlas) t.clearTextureAtlas();
       if (t.refresh && t.rows) t.refresh(0, t.rows - 1);
     }
-    // Force xterm to the shared grid. ttyd's own FitAddon otherwise leaves the
-    // terminal at a viewport-derived size (observed cols=59 instead of the pinned
-    // 120), so the letterbox had nothing fixed to frame. tmux is window-size
-    // manual at these exact dims, so pushing the size client-side stays
-    // consistent server-side.
-    if (t.cols !== GRID.cols || t.rows !== GRID.rows) {
-      try { t.resize(GRID.cols, GRID.rows); } catch (_) { /* xterm not ready */ }
+    // Force xterm to the shared grid — ttyd's own FitAddon would otherwise leave
+    // it viewport-sized (cols=59) so the pin never showed. tmux is window-size
+    // manual at these dims, so pushing the size client-side stays consistent.
+    if (t.cols !== dims.cols || t.rows !== dims.rows) {
+      try { t.resize(dims.cols, dims.rows); } catch (_) { /* xterm not ready */ }
     }
-    // Shared-view framing (§5.1): center the fitted grid on a styled backdrop so
-    // the letterbox margins read as intentional framing rather than "content
-    // hugs left, empty right". Done with a body class + a ring on the grid — NOT
-    // a transform on the interactive grid, which would desync xterm's mouse→cell
-    // mapping. Centering itself is CSS flex on the ttyd body.
+    // §5.1 framing: centered on a styled backdrop (classes, not a transform on
+    // the interactive grid, which would desync xterm's mouse→cell mapping).
     document.body.classList.add('chela-shared');
     g.classList.add('chela-framed');
   };
@@ -269,19 +287,41 @@ if (CFG.shared || new URLSearchParams(location.search).has('collab')) {
 
   const applyGrid = () => {
     const multi = humanPeers() >= 2;
-    if (multi !== fixed) {
-      fixed = multi;
-      fetch('/api/term/' + encodeURIComponent(wid) + '/grid', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ peers: multi ? 2 : 1 }),
-      }).catch(() => {});
-      if (!multi) { clearFit(); return; }
+    if (hooked()) {
+      // Presenter: our pane IS the grid. Publish dims for joiners; when others are
+      // present, pin the window to our dims and keep our own font (fills our pane,
+      // no letterbox). Alone → dynamic.
+      const dims = masterDims();
+      if (dims && (!lastPub || lastPub.cols !== dims.cols || lastPub.rows !== dims.rows)) {
+        lastPub = dims;                              // only on change; the 4s
+        awareness.setLocalStateField('grid', dims);  // heartbeat covers late joiners
+      }
+      if (multi && dims) {
+        if (!lastPin || lastPin.cols !== dims.cols || lastPin.rows !== dims.rows) {
+          lastPin = dims;
+          postGrid({ cols: dims.cols, rows: dims.rows });
+        }
+        const t = window.term;
+        if (t && (t.cols !== dims.cols || t.rows !== dims.rows)) {
+          try { t.resize(dims.cols, dims.rows); } catch (_) { /* not ready */ }
+        }
+        window.__CHELA_GRID_FONT__ = null;               // keep our preferred font
+        document.body.classList.remove('chela-shared');  // fills → no backdrop
+        const g = gridEl(); if (g) g.classList.remove('chela-framed');
+      } else if (lastPin) {
+        lastPin = null;
+        postGrid({ peers: 1 });                          // unpin → dynamic
+        clearFit();
+      }
+      return;
     }
-    if (fixed) fitFont();
+    // Joiner: letterbox-fit to the master's dims (always — a joiner is in a shared
+    // session even if momentarily the only peer while the master reconnects).
+    fitToDims(sharedDims());
   };
 
   awareness.on('change', () => { render(); applyGrid(); });
-  addEventListener('resize', () => { if (fixed) fitFont(); });
+  addEventListener('resize', applyGrid);   // master re-derives dims; joiner refits
   // Live display-name updates (Settings → Collaboration writes chela_collab_name;
   // same-origin storage event, like the font-pref shim). Re-broadcast our state.
   addEventListener('storage', (e) => {
