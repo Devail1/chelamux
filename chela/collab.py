@@ -47,11 +47,12 @@ log = logging.getLogger(__name__)
 # the same ~4s cadence for late joiners.
 HEARTBEAT_SECONDS = 4.0
 
-# Connect-send-close drops the frame if we close before it drains through the
-# TLS / CF edge, so we hold the socket briefly after send. (Verified live: 0.4s
-# was flaky, 0.7s reliable.) Spike shortcut — a persistent per-room socket would
-# avoid both the flush wait and repeated handshakes, and is the productionization.
-FLUSH_SECONDS = 0.7
+# We keep ONE socket open per room (see below) instead of connect-send-close per
+# beat: that removes the flush race (no close to lose the frame to) and the
+# per-agent handshake latency, so every room publishes within one fast pass and
+# presence converges at the true 4s cadence with no pill flicker.
+PING_INTERVAL = 20.0    # client-side keepalive so dead sockets are detected
+DRAIN_TIMEOUT = 0.02    # non-blocking-ish poll when emptying the inbound queue
 
 # Pill colour by live session status. Green = actively working, amber = blocked
 # on input (needs attention), grey = idle at the prompt. Kept in sync with the
@@ -145,29 +146,57 @@ def _agent_state(name: str, status: str | None) -> dict:
 # --- publishing ------------------------------------------------------------
 
 _clocks: dict[str, int] = {}
+# wid -> live simple_websocket.Client. Only the single publisher thread touches
+# this map, so no lock is needed.
+_sockets: dict[str, object] = {}
+
+
+def _socket_for(wid: str):
+    """Return a live publish socket for a room, opening one on first use."""
+    client = _sockets.get(wid)
+    if client is not None:
+        return client
+    from simple_websocket import Client
+    url = f"{config.COLLAB_RELAY}/room/{room_id(wid)}"
+    client = Client.connect(url, ping_interval=PING_INTERVAL)
+    _sockets[wid] = client
+    return client
+
+
+def _drop_socket(wid: str) -> None:
+    client = _sockets.pop(wid, None)
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _drain(client) -> None:
+    """Discard queued inbound frames. The relay echoes every browser's awareness
+    and (25fps) cursor updates back to our socket; simple_websocket's reader
+    thread queues them, so we empty that queue each beat to keep memory bounded.
+    We only publish — inbound frames are not needed."""
+    try:
+        while client.receive(timeout=DRAIN_TIMEOUT) is not None:
+            pass
+    except Exception:
+        pass  # socket trouble surfaces on the next send(), which drops it
 
 
 def _send(wid: str, state: dict | None) -> None:
-    """Open → send one awareness frame → close, for one room. Best-effort."""
-    from simple_websocket import Client
-
+    """Publish one awareness frame over the room's persistent socket. On any
+    socket error, drop it so the next beat transparently reconnects."""
     clock = _clocks.get(wid, 0) + 1
     _clocks[wid] = clock
     frame = encode_awareness_update(_client_id(wid), clock, state)
-    url = f"{config.COLLAB_RELAY}/room/{room_id(wid)}"
-    client = None
     try:
-        client = Client.connect(url)
+        client = _socket_for(wid)
+        _drain(client)
         client.send(frame)
-        time.sleep(FLUSH_SECONDS)  # let the frame drain before we close
     except Exception:
-        log.debug("collab: publish failed for room %s", wid, exc_info=True)
-    finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
+        log.debug("collab: publish failed for room %s (will reconnect)", wid, exc_info=True)
+        _drop_socket(wid)
 
 
 def publish_once(prev_wids: set[str]) -> set[str]:
@@ -176,7 +205,8 @@ def publish_once(prev_wids: set[str]) -> set[str]:
     rooms = _agent_rooms()
     current = set(rooms)
     for wid in prev_wids - current:  # agents that went away
-        _send(wid, None)
+        _send(wid, None)             # removal frame over the still-open socket
+        _drop_socket(wid)            # then close it
         _clocks.pop(wid, None)
     for wid, info in rooms.items():
         _send(wid, _agent_state(info["name"], info["status"]))
