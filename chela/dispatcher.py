@@ -5,6 +5,7 @@ import re
 import sqlite3
 import subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,10 +60,21 @@ def _task_file_relative(task_file: str, repo_path: Path) -> str:
         return ""
 
 
-def _db() -> sqlite3.Connection:
+@contextmanager
+def _db():
+    """Open a WAL-mode connection, ensure schema, and ALWAYS close it.
+
+    Used as ``with _db() as conn:`` — commits on clean exit, closes in every
+    case. The previous version returned a bare Connection; a plain
+    ``with conn:`` only manages the transaction (commit/rollback) and never
+    closes it, so every call (``list_runs`` runs on each SSE poll) leaked a
+    file descriptor and left short-lived writers on scheduler.db.
+    """
     CHELA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS runs (
             task_id TEXT PRIMARY KEY,
@@ -93,7 +105,11 @@ def _db() -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass  # column already exists
     conn.commit()
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _now() -> str:

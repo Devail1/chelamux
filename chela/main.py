@@ -47,6 +47,7 @@ def cmd_status(args) -> None:
 def cmd_run(args) -> None:
     """Run the daemon loop: scheduler tick every pass, dispatcher on its own cadence."""
     log.info("chela daemon starting (session=%s, poll=%ds)", TMUX_SESSION, SCHEDULER_POLL_INTERVAL)
+    scheduler.init()  # open the WAL scheduler DB + init schema once, before ticking
     if DISPATCH_WORKFLOWS:
         log.info("Dispatcher enabled for %d workflow(s): %s",
                  len(DISPATCH_WORKFLOWS), ", ".join(str(p) for p in DISPATCH_WORKFLOWS))

@@ -13,6 +13,7 @@ import logging
 import os
 import sqlite3
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,9 +35,14 @@ CONTEXT_CHECK_INTERVAL = 60
 
 
 def _get_db() -> sqlite3.Connection:
+    # Shared file with scheduler/dispatcher — WAL there and here. Callers MUST
+    # close the returned connection (use `with closing(_get_db()) as conn:`) so
+    # we never leak fds on scheduler.db.
     CHELA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS context_snapshots (
             id INTEGER PRIMARY KEY,
@@ -150,53 +156,51 @@ def capture_all() -> list[dict]:
 
     now_ts = time.time()
     results = []
-    conn = _get_db()
+    with closing(_get_db()) as conn:
+        # Latest stored ts per agent — lets us skip re-inserting unchanged files.
+        latest_ts = {
+            row["agent"]: row["max_ts"]
+            for row in conn.execute(
+                "SELECT agent, MAX(ts) AS max_ts FROM context_snapshots GROUP BY agent"
+            )
+        }
 
-    # Latest stored ts per agent — lets us skip re-inserting unchanged files.
-    latest_ts = {
-        row["agent"]: row["max_ts"]
-        for row in conn.execute(
-            "SELECT agent, MAX(ts) AS max_ts FROM context_snapshots GROUP BY agent"
-        )
-    }
+        for cache_file in CONTEXT_CACHE_DIR.glob("*.json"):
+            # Agent name = filename without .json
+            agent_name = cache_file.stem
 
-    for cache_file in CONTEXT_CACHE_DIR.glob("*.json"):
-        # Agent name = filename without .json
-        agent_name = cache_file.stem
+            # Skip stale files (agent likely dead or restarted)
+            mtime = cache_file.stat().st_mtime
+            if now_ts - mtime > CACHE_STALE_SECONDS:
+                continue
 
-        # Skip stale files (agent likely dead or restarted)
-        mtime = cache_file.stat().st_mtime
-        if now_ts - mtime > CACHE_STALE_SECONDS:
-            continue
+            # Stamp ts from the file's mtime (when the agent actually wrote it),
+            # not capture time — so "freshest sample" selection in the dashboard
+            # reflects real activity instead of every row looking current.
+            mtime_iso = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
 
-        # Stamp ts from the file's mtime (when the agent actually wrote it),
-        # not capture time — so "freshest sample" selection in the dashboard
-        # reflects real activity instead of every row looking current.
-        mtime_iso = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+            # Unchanged file → same mtime → nothing new to record.
+            if latest_ts.get(agent_name) == mtime_iso:
+                continue
 
-        # Unchanged file → same mtime → nothing new to record.
-        if latest_ts.get(agent_name) == mtime_iso:
-            continue
+            snap = _parse_cache_file(cache_file)
+            if not snap:
+                continue
 
-        snap = _parse_cache_file(cache_file)
-        if not snap:
-            continue
+            snap["name"] = agent_name
+            snap["ts"] = mtime_iso
 
-        snap["name"] = agent_name
-        snap["ts"] = mtime_iso
+            conn.execute(
+                "INSERT INTO context_snapshots (agent, ts, used_k, total_k, used_pct, messages_k, messages_pct, free_k, free_pct, model, cost_usd, rate_limit_pct, rate_limit_resets_at, weekly_rl_pct, weekly_rl_resets_at, session_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (agent_name, mtime_iso, snap.get("used_k"), snap.get("total_k"), snap.get("used_pct"),
+                 snap.get("messages_k"), snap.get("messages_pct"), snap.get("free_k"), snap.get("free_pct"),
+                 snap.get("model"), snap.get("cost_usd"), snap.get("rate_limit_pct"), snap.get("rate_limit_resets_at"),
+                 snap.get("weekly_rl_pct"), snap.get("weekly_rl_resets_at"), snap.get("session_name")),
+            )
+            results.append(snap)
 
-        conn.execute(
-            "INSERT INTO context_snapshots (agent, ts, used_k, total_k, used_pct, messages_k, messages_pct, free_k, free_pct, model, cost_usd, rate_limit_pct, rate_limit_resets_at, weekly_rl_pct, weekly_rl_resets_at, session_name) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (agent_name, mtime_iso, snap.get("used_k"), snap.get("total_k"), snap.get("used_pct"),
-             snap.get("messages_k"), snap.get("messages_pct"), snap.get("free_k"), snap.get("free_pct"),
-             snap.get("model"), snap.get("cost_usd"), snap.get("rate_limit_pct"), snap.get("rate_limit_resets_at"),
-             snap.get("weekly_rl_pct"), snap.get("weekly_rl_resets_at"), snap.get("session_name")),
-        )
-        results.append(snap)
-
-    conn.commit()
-    conn.close()
+        conn.commit()
 
     if results:
         log.info("Context snapshots captured for %d agents", len(results))
@@ -211,14 +215,13 @@ def get_latest() -> list[dict]:
     live snapshots via ``live_snapshot`` instead, so the bar never depends on
     the DB being populated.
     """
-    conn = _get_db()
-    rows = conn.execute("""
-        SELECT c.* FROM context_snapshots c
-        INNER JOIN (
-            SELECT agent, MAX(ts) as max_ts FROM context_snapshots GROUP BY agent
-        ) latest ON c.agent = latest.agent AND c.ts = latest.max_ts
-    """).fetchall()
-    conn.close()
+    with closing(_get_db()) as conn:
+        rows = conn.execute("""
+            SELECT c.* FROM context_snapshots c
+            INNER JOIN (
+                SELECT agent, MAX(ts) as max_ts FROM context_snapshots GROUP BY agent
+            ) latest ON c.agent = latest.agent AND c.ts = latest.max_ts
+        """).fetchall()
     return [dict(r) for r in rows]
 
 
