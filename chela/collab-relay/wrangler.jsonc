@@ -1,0 +1,17 @@
+{
+  // chela collab relay — a DUMB opaque WebSocket forwarder (P2 presence spike).
+  // One Durable Object per "room"; it broadcasts every frame it receives to the
+  // other sockets in that room and NEVER parses/merges the payload. All CRDT /
+  // Yjs-awareness logic lives in the browser clients (app.py _TERM_PRESENCE_SHIM).
+  "name": "chela-collab-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2025-01-01",
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM", "class_name": "Room" }]
+  },
+  // SQLite-backed DO class → available on the free plan.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Room"] }
+  ],
+  "observability": { "enabled": true }
+}

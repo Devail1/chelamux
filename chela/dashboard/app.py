@@ -583,6 +583,16 @@ _TERM_FONT_PREF_SHIM = (
 )
 
 
+# P2 collaborative-presence spike (chela module): a Yjs-awareness overlay served
+# as a static module and injected into the ttyd page. It SELF-GATES on ?collab
+# (see static/collab/presence.js) so normal wall panes are untouched — the demo
+# is opening `/term/<wid>/?collab=1` in two browsers. Presence/cursor frames ride
+# the dumb CF relay (chela/collab-relay); this only ships the client.
+_TERM_PRESENCE_SHIM = (
+    '<script type="module" src="/static/collab/presence.js"></script>'
+)
+
+
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
 @app.route("/term/<wid>/<path:rest>", methods=["GET", "POST"])
 @require_auth
@@ -621,8 +631,8 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        shims = (_TERM_FONT_CSS + _TERM_FONT_PREF_SHIM + _TERM_PASTE_SHIM
-                 + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
+        shims = (_TERM_FONT_CSS + _TERM_FONT_PREF_SHIM + _TERM_PRESENCE_SHIM
+                 + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
                  + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)

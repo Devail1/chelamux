@@ -1,0 +1,4 @@
+# Wrangler build/cache + local dev state
+.wrangler/
+# In case deps are ever installed for local dev of the Worker
+node_modules/
