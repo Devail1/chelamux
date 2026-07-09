@@ -251,8 +251,12 @@ def publish_once(prev_wids: set[str]) -> set[str]:
 
 
 def start() -> None:
-    """Launch the presence publisher in a daemon thread (no-op when disabled)."""
-    if not (config.COLLAB_PRESENCE and config.TERMINALS_ENABLED):
+    """Launch the presence publisher in a daemon thread (no-op when disabled).
+
+    Requires a relay: COLLAB_RELAY defaults to empty (no phone-home to anyone's
+    personal infrastructure), so with no CHELA_COLLAB_RELAY set this no-ops and
+    nothing connects."""
+    if not (config.COLLAB_PRESENCE and config.TERMINALS_ENABLED and config.COLLAB_RELAY):
         return
 
     def _loop() -> None:

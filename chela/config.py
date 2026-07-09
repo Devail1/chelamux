@@ -70,11 +70,16 @@ TERMINALS_EXPOSE = os.environ.get("CHELA_TERMINALS_EXPOSE", "false").strip().low
 # publishes a Yjs *awareness* frame per running-claude window into that window's
 # relay room, so a browser viewing a *shared* /term/<wid>/ sees a "claude" pill
 # for the live agent. Purely additive and opaque: it only reaches browsers that
-# have joined the room, i.e. a window the host has shared. On by default with the
-# wall; set CHELA_COLLAB=false to stop the publisher. COLLAB_RELAY is the dumb
-# fan-out relay (chela/collab-relay).
+# have joined the room, i.e. a window the host has shared.
+#
+# COLLAB_RELAY is the dumb fan-out relay (chela/collab-relay). It defaults to
+# EMPTY: presence is OFF until you point CHELA_COLLAB_RELAY at a relay you own, so
+# the repo ships no phone-home to anyone's personal infrastructure. Self-hosting
+# is a one-liner: `wrangler deploy` in chela/collab-relay/ (free plan), then export
+# the printed wss:// URL. With no relay, collab.start() no-ops and the injected
+# shim disables presence.js. CHELA_COLLAB=false also stops it.
 COLLAB_PRESENCE = os.environ.get("CHELA_COLLAB", "true").strip().lower() not in ("false", "0", "no", "off")
-COLLAB_RELAY = os.environ.get("CHELA_COLLAB_RELAY", "wss://chela-collab-relay.liav-acc.workers.dev").strip().rstrip("/")
+COLLAB_RELAY = os.environ.get("CHELA_COLLAB_RELAY", "").strip().rstrip("/")
 
 # Shared fixed grid (cols x rows) that a shared terminal snaps to when 2+ human
 # peers are present (see the adaptive sizing in static/collab/presence.js): while

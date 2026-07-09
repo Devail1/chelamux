@@ -10,8 +10,12 @@
 import { computeFit } from './fit.js';
 
 const CFG = window.__CHELA_COLLAB__ || {};
-if (CFG.shared) {
-  const RELAY = CFG.relay || 'wss://chela-collab-relay.liav-acc.workers.dev';
+// Gate on the server shared flag AND a configured relay. CFG.relay comes from
+// CHELA_COLLAB_RELAY, which defaults to empty (no phone-home to anyone's personal
+// infrastructure), so with no relay presence stays off. There is deliberately NO
+// hardcoded fallback: a stale page can't resurrect a URL.
+if (CFG.shared && CFG.relay) {
+  const RELAY = CFG.relay;
   const wid = decodeURIComponent((location.pathname.match(/\/term\/([^/]+)/) || [, 'default'])[1]);
   // Instance-namespaced, relay-safe room id — MUST mirror chela/collab.py
   // room_id(): sanitize("<prefix>-<wid>"). The prefix stops instances on a shared
