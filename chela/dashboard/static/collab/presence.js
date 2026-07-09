@@ -152,25 +152,40 @@ if (new URLSearchParams(location.search).has('collab')) {
     return t && t.element ? (t.element.querySelector('.xterm-screen') || t.element) : null;
   };
 
-  const letterbox = () => {
+  // Fill the fixed grid to the viewport by RE-RENDERING glyphs at a fitted font
+  // size — the terminal draws at native resolution (honouring devicePixelRatio),
+  // so text stays sharp. We do NOT CSS-scale any element: transform: scale()
+  // resamples the xterm canvas bitmap → blur, worst off DPR=1. Font px is an
+  // integer, so we accept a thin letterbox margin over an exact-fill blur.
+  //
+  // The size is published in window.__CHELA_GRID_FONT__ so the font-pref shim
+  // targets the SAME size (instead of resetting it) and skips its own t.fit()
+  // while we own sizing. Fitting is stable: measuring at the current size and
+  // setting floor(cur * min(vw/natW, vh/natH)) converges in one step.
+  const fitFont = () => {
+    const t = window.term;
     const g = gridEl();
-    if (!g) return;
-    g.style.transformOrigin = 'top left';
-    g.style.transform = 'none';              // reset so we measure the natural size
+    if (!t || !g || !t.options) return;
     const natW = g.offsetWidth, natH = g.offsetHeight;
-    const vw = innerWidth, vh = innerHeight;
-    if (!natW || !natH || !vw || !vh) return;
-    document.body.style.overflow = 'hidden';
-    const k = Math.min(vw / natW, vh / natH); // fit-to-min → whole grid visible
-    const tx = Math.max(0, (vw - natW * k) / 2), ty = Math.max(0, (vh - natH * k) / 2);
-    g.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + k + ')';
+    if (!natW || !natH || !innerWidth || !innerHeight) return;
+    const cur = t.options.fontSize || 14;
+    const k = Math.min(innerWidth / natW, innerHeight / natH);
+    const next = Math.max(6, Math.floor(cur * k));
+    window.__CHELA_GRID_FONT__ = next;
+    if (next !== cur) {
+      t.options.fontSize = next;
+      if (t.clearTextureAtlas) t.clearTextureAtlas();
+      if (t.refresh && t.rows) t.refresh(0, t.rows - 1);
+    }
   };
 
-  const clearLetterbox = () => {
+  const clearFit = () => {
+    window.__CHELA_GRID_FONT__ = null;
     const g = gridEl();
-    if (g) g.style.transform = 'none';
-    const t = window.term;
-    if (t && t.fit) { try { t.fit(); } catch (_) {} } // back to dynamic viewport-fit
+    if (g) g.style.transform = 'none';   // clear any stale transform from older builds
+    // hand sizing back to the font-pref shim: restores the user's px + re-fits.
+    if (window.chelaApplyTermPrefs) window.chelaApplyTermPrefs();
+    else { const t = window.term; if (t && t.fit) { try { t.fit(); } catch (_) {} } }
   };
 
   const applyGrid = () => {
@@ -181,13 +196,13 @@ if (new URLSearchParams(location.search).has('collab')) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ peers: multi ? 2 : 1 }),
       }).catch(() => {});
-      if (!multi) { clearLetterbox(); return; }
+      if (!multi) { clearFit(); return; }
     }
-    if (fixed) letterbox();
+    if (fixed) fitFont();
   };
 
   awareness.on('change', () => { render(); applyGrid(); });
-  addEventListener('resize', () => { if (fixed) letterbox(); });
+  addEventListener('resize', () => { if (fixed) fitFont(); });
   // window.term may not exist yet, and ttyd/the font shim keep re-fitting for
   // ~30s; a light interval keeps the letterbox applied while collaborating and
   // reconciles the PTY-pin round-trip (POST → tmux resize → xterm resize).
