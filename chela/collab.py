@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
 import threading
 import time
 import zlib
@@ -65,10 +66,45 @@ _DEFAULT_COLOR = "#7d8590"
 # transform (see roomId() there) so both sides land in the same room.
 _UNSAFE_ROOM_CHARS = re.compile(r"[^\w@.\-]")
 
+# Per-instance room-namespace prefix, persisted so it's stable across restarts.
+_INSTANCE_FILE = config.CHELA_DIR / "collab_id"
+_instance_cache: str | None = None
+
+
+def instance_id() -> str:
+    """Stable, unguessable per-instance room-namespace prefix.
+
+    Rooms would otherwise be keyed by the guessable tmux wid (``@9``), so on a
+    shared default relay every chelamux instance would collide on the same rooms
+    — and anyone could guess them. Prefixing with a random per-instance secret
+    (persisted in ``~/.chela/collab_id``) namespaces them. This is namespacing,
+    NOT a security boundary: presence frames are still unencrypted on the relay.
+    Real end-to-end / capability tokens are a deliberate later step.
+    """
+    global _instance_cache
+    if _instance_cache:
+        return _instance_cache
+    try:
+        sid = _INSTANCE_FILE.read_text().strip()
+    except (FileNotFoundError, OSError):
+        sid = ""
+    if not sid:
+        config.CHELA_DIR.mkdir(parents=True, exist_ok=True)
+        sid = secrets.token_hex(8)  # 16 hex chars — all relay-safe (\w)
+        try:
+            _INSTANCE_FILE.write_text(sid)
+        except OSError:
+            log.warning("collab: could not persist instance id to %s", _INSTANCE_FILE)
+    _instance_cache = sid
+    return sid
+
 
 def room_id(wid: str) -> str:
-    """Relay-safe room id for a tmux window id (e.g. ``@11`` stays ``@11``)."""
-    return _UNSAFE_ROOM_CHARS.sub("_", wid or "default")
+    """Relay-safe, instance-namespaced room id for a tmux window id, e.g.
+    ``a1b2c3d4e5f6a7b8-@11``. MUST match presence.js, which builds the identical
+    string from the injected prefix — both sanitize ``<prefix>-<wid>`` to the
+    relay's allowed charset ``[\\w@.\\-]``."""
+    return _UNSAFE_ROOM_CHARS.sub("_", f"{instance_id()}-{wid or 'default'}")
 
 
 # --- Yjs awareness wire encoding (LEB128 + JSON) ---------------------------

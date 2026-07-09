@@ -589,9 +589,14 @@ _TERM_FONT_PREF_SHIM = (
 # is opening `/term/<wid>/?collab=1` in two browsers. Presence/cursor frames ride
 # the dumb CF relay (chela/collab-relay); this only ships the client.
 _TERM_PRESENCE_SHIM = (
-    "<script>window.__CHELA_GRID__={cols:%d,rows:%d};</script>"
+    "<script>window.__CHELA_COLLAB__=%s;</script>"
     '<script type="module" src="/static/collab/presence.js"></script>'
-) % (config.TERM_COLS, config.TERM_ROWS)
+) % json.dumps({
+    "relay": config.COLLAB_RELAY,
+    "prefix": collab.instance_id(),
+    "cols": config.TERM_COLS,
+    "rows": config.TERM_ROWS,
+})
 
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])

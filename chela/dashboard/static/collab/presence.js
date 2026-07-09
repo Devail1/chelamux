@@ -7,12 +7,18 @@
 // URL, esm.sh imports, naive reconnect — deliberately not productionized.
 
 if (new URLSearchParams(location.search).has('collab')) {
-  const RELAY = 'wss://chela-collab-relay.liav-acc.workers.dev';
+  // Config is injected by app.py (_TERM_PRESENCE_SHIM) from CHELA_COLLAB_RELAY +
+  // the per-instance room prefix + the grid size. Fallbacks keep the file usable
+  // standalone.
+  const CFG = window.__CHELA_COLLAB__ || {};
+  const RELAY = CFG.relay || 'wss://chela-collab-relay.liav-acc.workers.dev';
   const wid = decodeURIComponent((location.pathname.match(/\/term\/([^/]+)/) || [, 'default'])[1]);
-  // Relay-safe room id — MUST mirror chela/collab.py room_id(). The relay routes
-  // on the raw path segment ([\w@.\-]+), so percent-encoding '@' as %40 misses
-  // the route entirely; keep '@' and only replace genuinely-unsafe chars.
-  const room = wid.replace(/[^\w@.\-]/g, '_');
+  // Instance-namespaced, relay-safe room id — MUST mirror chela/collab.py
+  // room_id(): sanitize("<prefix>-<wid>"). The prefix stops instances on a shared
+  // relay from colliding on (and guessing) the same wid-keyed rooms. The relay
+  // routes on the raw path segment ([\w@.\-]+), so we keep '@'/'-' and only
+  // replace genuinely-unsafe chars — never percent-encode (%40 misses the route).
+  const room = ((CFG.prefix || 'default') + '-' + wid).replace(/[^\w@.\-]/g, '_');
 
   // Same Yjs across the Doc and the awareness protocol (?deps pins it).
   const Y = await import('https://esm.sh/yjs@13.6.20');
@@ -136,7 +142,7 @@ if (new URLSearchParams(location.search).has('collab')) {
   // COMPLETE grid, and we letterbox-scale it to each viewer's viewport. Keyed on
   // the room's peer count from the relay (awareness) — NOT tmux's client count,
   // and excluding the agent (bot) peer which has no viewport.
-  const GRID = window.__CHELA_GRID__ || { cols: 120, rows: 30 };
+  const GRID = { cols: CFG.cols || 120, rows: CFG.rows || 30 };
   let fixed = null; // null=unknown, true=fixed/collab, false=dynamic/solo
 
   const humanPeers = () => {
