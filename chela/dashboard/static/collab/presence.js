@@ -1,16 +1,12 @@
-// chela P2 presence spike — Yjs-awareness overlay over the dumb CF relay.
-//
-// Injected into every ttyd page (app.py _TERM_PRESENCE_SHIM) but SELF-GATES on
-// ?collab, so the normal wall panes are unaffected — open `/term/<wid>/?collab=1`
-// in two browsers to see live presence. Everything here is client-side; the relay
-// (chela/collab-relay) only forwards opaque frames. SPIKE quality: hardcoded relay
-// URL, esm.sh imports, naive reconnect — deliberately not productionized.
+// chela collaborative-terminal presence — a Yjs-awareness overlay over the dumb
+// CF relay. Injected into every ttyd page by app.py; SELF-GATES on the injected
+// "shared" flag (the host clicked Share) OR a manual ?collab query, so normal
+// wall panes are unaffected. Everything here is client-side; the relay only
+// forwards opaque frames. Config (relay, room prefix, grid, shared) arrives via
+// window.__CHELA_COLLAB__.
 
-if (new URLSearchParams(location.search).has('collab')) {
-  // Config is injected by app.py (_TERM_PRESENCE_SHIM) from CHELA_COLLAB_RELAY +
-  // the per-instance room prefix + the grid size. Fallbacks keep the file usable
-  // standalone.
-  const CFG = window.__CHELA_COLLAB__ || {};
+const CFG = window.__CHELA_COLLAB__ || {};
+if (CFG.shared || new URLSearchParams(location.search).has('collab')) {
   const RELAY = CFG.relay || 'wss://chela-collab-relay.liav-acc.workers.dev';
   const wid = decodeURIComponent((location.pathname.match(/\/term\/([^/]+)/) || [, 'default'])[1]);
   // Instance-namespaced, relay-safe room id — MUST mirror chela/collab.py
@@ -27,9 +23,26 @@ if (new URLSearchParams(location.search).has('collab')) {
 
   const NAMES = ['Fox', 'Owl', 'Wolf', 'Bear', 'Hawk', 'Lynx', 'Otter', 'Crane'];
   const COLORS = ['#f97583', '#58a6ff', '#3fb950', '#d29922', '#bc8cff', '#39c5cf', '#ff9e64', '#e06c9f'];
-  const pick = (a) => a[Math.floor(Math.random() * a.length)];
-  const me = { name: pick(NAMES) + '-' + Math.floor(Math.random() * 90 + 10), color: pick(COLORS) };
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const lsGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) { /* private mode */ } };
+  // Stable colour derived from the name (hash) — a given name always looks the
+  // same and never rerolls; the initial + hue give a non-hue-only cue.
+  const colorFor = (s) => {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return COLORS[Math.abs(h) % COLORS.length];
+  };
+  // Auto-name is generated ONCE and persisted (it used to reroll every page load,
+  // breaking presence continuity); a user-set name (Settings → Collaboration)
+  // overrides it, live via the storage listener below.
+  let autoName = lsGet('chela_collab_autoname');
+  if (!autoName) {
+    autoName = NAMES[Math.floor(Math.random() * NAMES.length)] + '-' + Math.floor(Math.random() * 90 + 10);
+    lsSet('chela_collab_autoname', autoName);
+  }
+  const myName = () => (lsGet('chela_collab_name') || autoName);
+  const me = { name: myName(), color: colorFor(myName()) };
 
   const doc = new Y.Doc();
   const awareness = new Awareness(doc);
@@ -76,7 +89,14 @@ if (new URLSearchParams(location.search).has('collab')) {
   const style = document.createElement('style');
   style.textContent = '.chela-pip{width:7px;height:7px;border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.35)}'
     + '.chela-pip-live{animation:chelaPulse 1.2s ease-in-out infinite}'
-    + '@keyframes chelaPulse{0%,100%{opacity:1}50%{opacity:.3}}';
+    + '@keyframes chelaPulse{0%,100%{opacity:1}50%{opacity:.3}}'
+    // Shared-view backdrop + framed grid (§5.1). Centering is interaction-safe:
+    // flex only repositions .xterm within its own rect, so xterm's mouse→cell
+    // math (relative to its bounding rect) still holds.
+    + 'body.chela-shared{display:flex;align-items:center;justify-content:center;'
+    + 'background:radial-gradient(1200px 620px at 50% 32%,#151a23,#0a0c11)}'
+    + '.chela-framed{box-shadow:0 0 0 1px rgba(255,255,255,.07),0 12px 48px rgba(0,0,0,.55);'
+    + 'border-radius:6px}';
   document.head.appendChild(style);
   const pills = document.createElement('div');
   pills.style.cssText = 'position:fixed;top:8px;right:10px;display:flex;gap:6px;flex-wrap:wrap;'
@@ -84,8 +104,30 @@ if (new URLSearchParams(location.search).has('collab')) {
   layer.appendChild(pills);
   const cursors = new Map();
 
+  // Embedded in the dashboard iframe → the parent exposes chelaPresence, so we
+  // surface presence in the pane HEADER (a facepile) instead of in-iframe pills
+  // that would overlap terminal content. Standalone joiner → keep the pills.
+  const hooked = () => {
+    try { return window.parent && window.parent !== window && typeof window.parent.chelaPresence === 'function'; }
+    catch (_) { return false; }
+  };
+  const presenceData = () => {
+    const humans = []; let agent = null;
+    for (const [id, st] of awareness.getStates()) {
+      if (!st.user) continue;
+      if (st.user.bot) agent = { name: st.user.name, color: st.user.color, status: st.user.status };
+      else humans.push({ name: st.user.name, color: st.user.color, you: id === doc.clientID });
+    }
+    return { humans, agent, count: humans.length };
+  };
+
   const render = () => {
     const states = awareness.getStates(); // clientID -> {user, cursor}
+    if (hooked()) {
+      pills.style.display = 'none';
+      try { window.parent.chelaPresence(wid, presenceData()); } catch (_) { /* cross-frame */ }
+    } else {
+    pills.style.display = '';
     pills.innerHTML = '';
     for (const [id, st] of states) {
       if (!st.user) continue;
@@ -108,6 +150,7 @@ if (new URLSearchParams(location.search).has('collab')) {
           + 'box-shadow:0 1px 4px rgba(0,0,0,.45);background:' + u.color;
       }
       pills.appendChild(pill);
+    }
     }
     const live = new Set();
     for (const [id, st] of states) {
@@ -183,12 +226,20 @@ if (new URLSearchParams(location.search).has('collab')) {
       if (t.clearTextureAtlas) t.clearTextureAtlas();
       if (t.refresh && t.rows) t.refresh(0, t.rows - 1);
     }
+    // Shared-view framing (§5.1): center the fitted grid on a styled backdrop so
+    // the letterbox margins read as intentional framing rather than "content
+    // hugs left, empty right". Done with a body class + a ring on the grid — NOT
+    // a transform on the interactive grid, which would desync xterm's mouse→cell
+    // mapping. Centering itself is CSS flex on the ttyd body.
+    document.body.classList.add('chela-shared');
+    g.classList.add('chela-framed');
   };
 
   const clearFit = () => {
     window.__CHELA_GRID_FONT__ = null;
     const g = gridEl();
-    if (g) g.style.transform = 'none';   // clear any stale transform from older builds
+    if (g) { g.style.transform = 'none'; g.classList.remove('chela-framed'); }
+    document.body.classList.remove('chela-shared');
     // hand sizing back to the font-pref shim: restores the user's px + re-fits.
     if (window.chelaApplyTermPrefs) window.chelaApplyTermPrefs();
     else { const t = window.term; if (t && t.fit) { try { t.fit(); } catch (_) {} } }
@@ -209,6 +260,13 @@ if (new URLSearchParams(location.search).has('collab')) {
 
   awareness.on('change', () => { render(); applyGrid(); });
   addEventListener('resize', () => { if (fixed) fitFont(); });
+  // Live display-name updates (Settings → Collaboration writes chela_collab_name;
+  // same-origin storage event, like the font-pref shim). Re-broadcast our state.
+  addEventListener('storage', (e) => {
+    if (e.key && e.key !== 'chela_collab_name' && e.key !== 'chela_collab_autoname') return;
+    me.name = myName(); me.color = colorFor(me.name);
+    awareness.setLocalStateField('user', { name: me.name, color: me.color });
+  });
   // window.term may not exist yet, and ttyd/the font shim keep re-fitting for
   // ~30s; a light interval keeps the letterbox applied while collaborating and
   // reconciles the PTY-pin round-trip (POST → tmux resize → xterm resize).
