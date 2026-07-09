@@ -1,0 +1,5 @@
+{
+  "//": "Lets Node treat the browser ES modules in this dir (fit.js) as ESM so fit.test.mjs can import them. Not an npm package; the dashboard serves these as static files regardless. Run: node --test chela/dashboard/static/collab/",
+  "type": "module",
+  "private": true
+}
