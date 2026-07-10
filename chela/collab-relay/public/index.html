@@ -26,6 +26,15 @@
     background:radial-gradient(1200px 620px at 50% 32%,#151a23,#0a0c11); overflow:hidden; }
   #term { box-shadow:0 0 0 1px rgba(255,255,255,.06), 0 12px 48px rgba(0,0,0,.55); border-radius:6px; }
   .xterm { padding:6px; }
+  /* Match the chela dashboard scrollbar: thin, track-less, subtle thumb that
+     brightens on hover (the xterm viewport + the mobile pan-fallback stage). */
+  .xterm-viewport, #stage { scrollbar-width:thin; scrollbar-color:var(--border) transparent; }
+  .xterm-viewport::-webkit-scrollbar, #stage::-webkit-scrollbar { width:8px; height:8px; }
+  .xterm-viewport::-webkit-scrollbar-track, #stage::-webkit-scrollbar-track { background:transparent; }
+  .xterm-viewport::-webkit-scrollbar-thumb, #stage::-webkit-scrollbar-thumb {
+    background:var(--border); border-radius:8px; border:2px solid transparent; background-clip:content-box; }
+  .xterm-viewport::-webkit-scrollbar-thumb:hover, #stage::-webkit-scrollbar-thumb:hover {
+    background:#30363d; background-clip:content-box; }
   /* Pairing-code entry gate — shown until keys are derived and the first frame
      decrypts. The terminal never renders a byte before the code is proven. */
   #gate { position:fixed; inset:0; z-index:20; display:flex; align-items:center; justify-content:center;

@@ -897,14 +897,14 @@ def api_term_share(wid):
     if not on:
         _revoke_share(wid)
         return jsonify({"ok": True, "shared": False})
-    # Record the presenter's pane dims as share metadata only (wall share-state +
-    # tailnet presence). Sharing NEVER resizes the owner's live window: the joiner's
-    # grid FOLLOWS the real source size via the bridge's T_META resend-on-resize
-    # (collab_stream._maybe_resize) — a live workflow must stream undisturbed.
-    _SHARED[wid] = {
-        "cols": _clamp_dim(data.get("cols"), 20, 500, config.TERM_COLS),
-        "rows": _clamp_dim(data.get("rows"), 6, 300, config.TERM_ROWS),
-    }
+    # Single grid authority for the E2E path: the LIVE tmux window size — the exact
+    # dims the bridge streams (collab_stream._window_dims). Seed _SHARED with THAT,
+    # not the posted pane dims or the 120x30 default, so the advertised grid matches
+    # the stream instead of drifting (e.g. advertising 120x30 while streaming 110-
+    # wide). The joiner then follows the live size via T_META. Sharing NEVER resizes
+    # the owner's window — a live workflow must stream undisturbed.
+    cols, rows = collab_stream._window_dims(wid)
+    _SHARED[wid] = {"cols": cols, "rows": rows}
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
     code = collab_stream.start_bridge(wid, on_revoke=_revoke_share)
