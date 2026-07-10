@@ -19,26 +19,11 @@
     </button>
     <div class="brand"><img src="static/img/claw-mark.svg" class="brand-mark" alt=""><span>chela</span></div>
 
-    <div class="topbar-pills">
-      <div class="stat-pill" id="hdr-ratelimit-pill" style="display:none">
-        <span class="label">5h</span>
-        <span class="value" id="hdr-ratelimit">-</span>
-      </div>
-      <div class="stat-pill" id="hdr-weekly-rl-pill" style="display:none">
-        <span class="label">7d</span>
-        <span class="value" id="hdr-weekly-rl">-</span>
-      </div>
-    </div>
-
     <div class="topbar-actions">
-      <span class="stat-pill" id="hdr-next-pill" title="Soonest scheduled run">
-        <span class="label">Next</span>
-        <span class="value ts" id="hdr-next">-</span>
-      </span>
-      <span class="topbar-updated">upd <span class="ts" id="hdr-updated">-</span></span>
       <!-- Global active-shares indicator (safety kill-switch): shown on EVERY tab +
            mobile whenever any session is shared, so a forgotten live share (= an
-           exposed terminal via a public link) is always one tap from Stop. -->
+           exposed terminal via a public link) is always one tap from Stop. NOT in
+           the overflow — it must stay visible whenever a share is live. -->
       <button class="shares-indicator" id="btn-shares" hidden onclick="openSharesSheet()"
               title="Active shares — tap to manage or stop" aria-label="Active shares">
         <span class="si-dot" aria-hidden="true"></span>
@@ -51,11 +36,10 @@
       <button class="icon-btn" id="btn-new" title="New…" aria-label="New" onclick="openNewMenu(event)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
       </button>
-      <button class="icon-btn" id="btn-bell" title="Needs-input notifications" aria-label="Needs-input notifications" onclick="toggleSettings('notify')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>
-      </button>
-      <button class="icon-btn" id="btn-gear" title="Settings" aria-label="Settings" onclick="toggleSettings()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+      <!-- Overflow: secondary actions (Share current · Notifications · Settings) +
+           the usage/updated readouts, consolidated off the bar on desktop + mobile. -->
+      <button class="icon-btn" id="btn-overflow" title="More" aria-label="More actions" aria-haspopup="true" onclick="openOverflowMenu(event)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>
       </button>
     </div>
   </header>
@@ -398,6 +382,39 @@
   <div class="popover-item" onclick="hideNewMenu(); openInitRepo()">Init a repo</div>
   <div class="popover-item" onclick="hideNewMenu(); showAddSchedule()">Scheduled task</div>
   <div class="popover-item" id="new-shell-item" onclick="hideNewMenu(); newShellWindow()">Shell window</div>
+</div>
+
+<!-- Topbar overflow menu: secondary actions + usage readouts. The rate-limit /
+     Next / Updated elements keep their #hdr-* ids so the existing updaters
+     (agents.js _updateRlPill, header.js) drive them here, visibility-agnostic. -->
+<div class="popover overflow-menu" id="overflow-menu" style="display:none;">
+  {% if terminals_enabled %}
+  <div class="popover-item ov-item" onclick="hideOverflowMenu(); shareCurrentAgent()">
+    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg></span>
+    <span>Share current session</span>
+  </div>
+  {% endif %}
+  <div class="popover-item ov-item" onclick="hideOverflowMenu(); toggleSettings('notify')">
+    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
+    <span>Notifications</span>
+  </div>
+  <div class="popover-item ov-item" onclick="hideOverflowMenu(); toggleSettings()">
+    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>
+    <span>Settings</span>
+  </div>
+  <div class="popover-sep"></div>
+  <div class="ov-stat" id="hdr-ratelimit-pill" style="display:none" title="5-hour usage">
+    <span class="ov-lbl">5h usage</span><span class="value" id="hdr-ratelimit">-</span>
+  </div>
+  <div class="ov-stat" id="hdr-weekly-rl-pill" style="display:none" title="7-day usage">
+    <span class="ov-lbl">7d usage</span><span class="value" id="hdr-weekly-rl">-</span>
+  </div>
+  <div class="ov-stat" id="hdr-next-pill" title="Soonest scheduled run">
+    <span class="ov-lbl">Next run</span><span class="value ts" id="hdr-next">-</span>
+  </div>
+  <div class="ov-stat">
+    <span class="ov-lbl">Updated</span><span class="value ts" id="hdr-updated">-</span>
+  </div>
 </div>
 
 <!-- Launcher: "add a project to Favorites" picker (filled from /api/launcher/suggest) -->

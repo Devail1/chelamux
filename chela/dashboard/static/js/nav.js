@@ -646,6 +646,29 @@ function hideNewMenu() {
     if (m) m.style.display = 'none';
 }
 
+// Topbar overflow menu (Lucide more-vertical): consolidates the secondary actions
+// — Share current, Notifications, Settings — plus the usage/updated readouts, so
+// the bar stays to its primaries (jump · New · overflow) on both desktop and
+// mobile. The safety kill-switch (#btn-shares) is deliberately NOT in here — it
+// stays visible whenever a share is live. Anchored + light-dismiss like #new-menu.
+function openOverflowMenu(ev) {
+    if (ev) ev.stopPropagation();
+    const m = document.getElementById('overflow-menu');
+    if (!m) return;
+    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-overflow');
+    m.style.display = 'block';
+    const r = anchor.getBoundingClientRect();
+    m.style.top = (r.bottom + 6) + 'px';
+    // Right-align to the button; clamp so it never runs off the left edge.
+    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
+    setTimeout(() => document.addEventListener('click', hideOverflowMenu, { once: true }), 0);
+}
+
+function hideOverflowMenu() {
+    const m = document.getElementById('overflow-menu');
+    if (m) m.style.display = 'none';
+}
+
 // Spawn a plain shell window. The backend spawn endpoint is currently behind
 // the terminals feature flag (it was the wall's spawner); until a non-gated
 // endpoint lands this surfaces the API's response rather than failing silently.
@@ -720,7 +743,7 @@ function _paletteItems() {
     const views = [];
     if (TERMINALS_ON) views.push(['terminals', 'Wall']);
     views.push(['agents', 'Agents'], ['dispatcher', 'Dispatch'], ['kanban', 'Kanban'], ['schedules', 'Schedules'], ['knowledge', 'Knowledge']);
-    views.forEach(([v, label]) => items.push({ icon: '▦', title: label, sub: 'view', run: () => selectView(v) }));
+    views.forEach(([v, label]) => items.push({ icon: lucideIcon('layout-grid'), title: label, sub: 'view', run: () => selectView(v) }));
 
     (_agentsCache || []).forEach(a => {
         const word = _AGENT_STATUS_WORD[agentDotColor(a)] || 'idle';
@@ -733,7 +756,7 @@ function _paletteItems() {
         (_agentsCache || []).forEach(a => {
             if (!a.window_id) return;
             const shared = typeof _sharedWids !== 'undefined' && _sharedWids.has(a.window_id);
-            items.push({ icon: shared ? '◉' : '⤴',
+            items.push({ icon: shared ? lucideIcon('x') : lucideIcon('share-2'),
                          title: (shared ? 'Stop sharing ' : 'Share ') + _agentLabel(a),
                          sub: shared ? 'shared session' : 'session',
                          run: () => {
@@ -749,13 +772,13 @@ function _paletteItems() {
         [...(_launcherData.favorites || []), ...(_launcherData.recent || [])].forEach(e => {
             if (!e || seen.has(e.path)) return;
             seen.add(e.path);
-            items.push({ icon: '▸', title: 'Launch ' + (e.label || e.path), sub: 'project',
+            items.push({ icon: lucideIcon('play'), title: 'Launch ' + (e.label || e.path), sub: 'project',
                          run: () => launchProject(e.path) });
         });
     }
 
-    items.push({ icon: '+', title: 'New shell window', sub: 'action', run: () => newShellWindow() });
-    items.push({ icon: '◷', title: 'Add scheduled task', sub: 'action',
+    items.push({ icon: lucideIcon('terminal'), title: 'New shell window', sub: 'action', run: () => newShellWindow() });
+    items.push({ icon: lucideIcon('clock'), title: 'Add scheduled task', sub: 'action',
                  run: () => { if (typeof showAddSchedule === 'function') showAddSchedule(); } });
     return items;
 }

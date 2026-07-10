@@ -1774,9 +1774,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .topbar .brand { font-size: 16px; font-weight: 700; color: var(--accent); display: inline-flex; align-items: center; gap: 7px; }
 .topbar .brand .brand-mark { height: 22px; width: auto; display: block; }
-.topbar-pills { display: flex; gap: 8px; }
 .topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-.topbar-updated { color: var(--text-dim); font-size: 11px; }
 
 .icon-btn {
     background: transparent; border: 1px solid var(--border); color: var(--text);
@@ -2108,6 +2106,28 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .popover-hint { opacity: 0.7; }
 .popover-hint code, .popover-note .popover-hint { font-size: 11px; }
 
+/* Topbar overflow menu — Lucide icon rows + a usage/updated readout block. */
+.overflow-menu { min-width: 210px; }
+.overflow-menu .ov-item { display: flex; align-items: center; gap: 10px; }
+.overflow-menu .ov-ic { flex: 0 0 16px; display: inline-flex; align-items: center; color: var(--text-dim); }
+.overflow-menu .ov-ic svg { display: block; }
+.overflow-menu .ov-item:hover .ov-ic { color: #fff; }
+.popover-sep { height: 1px; margin: 4px 6px; background: var(--border); }
+.overflow-menu .ov-stat {
+    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    padding: 5px 10px; font-size: 11.5px;
+}
+.overflow-menu .ov-stat .ov-lbl { color: var(--text-dim); }
+.overflow-menu .ov-stat .value { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.overflow-menu .ov-stat .value.red { color: var(--red); }
+.overflow-menu .ov-stat .value.yellow { color: var(--yellow); }
+.overflow-menu .ov-stat .value.green { color: var(--green); }
+
+/* Inline Lucide glyphs in the command palette + shares-sheet header, aligned. */
+.pi-glyph svg { display: block; }
+.ss-hd .ss-hd-ic { display: inline-flex; align-items: center; color: var(--accent); }
+.ss-hd .ss-hd-ic svg { display: block; }
+
 /* --- Launcher (Recent + Favorites click-to-launch) --- */
 .launch-group-label {
     padding: 6px 10px 3px; font-size: 10px; text-transform: uppercase;
@@ -2196,18 +2216,14 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .icon-btn { width: 38px; height: 38px; font-size: 18px; }
     .icon-btn svg { width: 20px; height: 20px; }
     .topbar .brand .brand-mark { height: 26px; }
-    /* The phone topbar can't hold the wordmark + every pill + the action icons
-       (it overflowed by ~100px). Trim to essentials: logo mark only (drop the
-       "chela" wordmark — the hamburger already anchors the left), hide the
-       secondary "upd" stamp and "Next" pill (the latter lives in Schedules),
-       and shrink the rate-limit pills. The action icons (+/bell/gear) stay. */
+    /* Phone topbar: logo mark only (drop the "chela" wordmark — the hamburger
+       anchors the left). Secondary readouts (usage / Next / upd) + Notifications
+       / Settings now live in the overflow menu, so the bar is just the primaries
+       (jump · New · overflow), plus the safety shares indicator when active. */
     .topbar .brand span { display: none; }
-    .topbar-updated { display: none; }
-    #hdr-next-pill { display: none !important; }
     .palette-trigger .pt-kbd { display: none; }   /* icon-only on phones */
     .palette-trigger { padding: 7px 8px; }
-    .topbar-pills, .topbar-actions { gap: 6px; }
-    .stat-pill { padding: 3px 7px; font-size: 10px; gap: 3px; }
+    .topbar-actions { gap: 6px; }
 
     /* Off-canvas drawer: slides in over the canvas, above the scrim (z 40),
        below the settings drawer (z 50). Full height incl. under the topbar. */
@@ -2242,39 +2258,18 @@ input[type="text"]:focus, textarea:focus, select:focus {
        right under the header. */
     #panel-terminals > div:first-child { display: none; }
 
-    /* Row = a scrollable pill strip + a pinned share trigger (the pane header's
-       🔗 is hidden on phones, so this is the reachable place to start a share). */
+    /* Scrollable agent-pill strip. (Starting a share moved to the topbar overflow
+       menu, so the row no longer carries its own 🔗 trigger.) */
     .term-switcher {
         display: flex;
         gap: 6px;
-        align-items: center;
-        margin-bottom: 8px;
-        padding-bottom: 2px;
-    }
-    .tsw-pills {
-        display: flex;
-        gap: 6px;
-        flex: 1 1 auto;
-        min-width: 0;
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
         scrollbar-width: none;
+        margin-bottom: 8px;
+        padding-bottom: 2px;
     }
-    .tsw-pills::-webkit-scrollbar { display: none; }
-    .tsw-share {
-        flex: 0 0 auto;
-        display: inline-flex; align-items: center; justify-content: center;
-        min-width: 44px; height: 34px; padding: 0 12px;
-        background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
-        border-radius: 16px; font-size: 15px; line-height: 1; cursor: pointer;
-    }
-    /* Shared = amber (matches the global indicator; colorblind-safe = icon+colour,
-       never hue-alone since it also surfaces in the topbar "N sharing" pill). */
-    .tsw-share.on {
-        border-color: var(--warn, #d29922); color: var(--warn, #d29922);
-        background: color-mix(in srgb, var(--warn, #d29922) 12%, transparent);
-    }
-    .tsw-share .gs-share-count { display: none; }   /* count lives in the global pill */
+    .term-switcher::-webkit-scrollbar { display: none; }
 
     .term-pill {
         flex: 0 0 auto;
