@@ -9,6 +9,16 @@
   "durable_objects": {
     "bindings": [{ "name": "ROOM", "class_name": "Room" }]
   },
+  // Static Assets: serve the read-only joiner SPA (public/) with SPA fallback so
+  // /j/<room> resolves to index.html. run_worker_first scopes the Worker to the
+  // relay routes ONLY, so /room/* still reaches the Room DO (unchanged) while all
+  // other paths are served from assets. Assets are self-contained (vendored
+  // xterm.js) — no external fetches.
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/room/*"]
+  },
   // SQLite-backed DO class → available on the free plan.
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Room"] }

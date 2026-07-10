@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>chela · shared terminal</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+  :root { --bg:#0a0c11; --panel:#0d1117; --border:#1f2632; --fg:#c9d1d9; --dim:#7d8590; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; overflow:hidden; }
+  #bar { position:fixed; top:0; left:0; right:0; height:34px; display:flex; align-items:center; gap:10px;
+    padding:0 12px; background:var(--panel); border-bottom:1px solid var(--border); z-index:10; }
+  #bar .mark { font-weight:700; letter-spacing:.02em; }
+  #bar .mark b { color:var(--accent); }
+  #bar .title { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #bar .spacer { flex:1; }
+  #bar .tag { font-size:11px; color:var(--dim); border:1px solid var(--border); border-radius:999px; padding:2px 8px; }
+  #bar .lock { font-size:11px; color:var(--ok); }
+  #dot { width:8px; height:8px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 3px rgba(210,153,34,.15); }
+  #dot.up { background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,80,.15); }
+  #dot.down { background:var(--err); box-shadow:0 0 0 3px rgba(248,81,73,.15); }
+  #stage { position:fixed; inset:34px 0 0 0; display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(1200px 620px at 50% 32%,#151a23,#0a0c11); overflow:hidden; }
+  #term { box-shadow:0 0 0 1px rgba(255,255,255,.06), 0 12px 48px rgba(0,0,0,.55); border-radius:6px; }
+  .xterm { padding:6px; }
+  /* Pairing-code entry gate — shown until keys are derived and the first frame
+     decrypts. The terminal never renders a byte before the code is proven. */
+  #gate { position:fixed; inset:0; z-index:20; display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(1200px 620px at 50% 30%,#141922,#0a0c11); }
+  #gate.hide { display:none; }
+  #card { width:min(420px,92vw); background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:26px 24px; box-shadow:0 18px 60px rgba(0,0,0,.6); }
+  #card h1 { margin:0 0 4px; font-size:17px; }
+  #card h1 b { color:var(--accent); }
+  #card p { margin:0 0 18px; color:var(--dim); font-size:12.5px; }
+  #code { width:100%; padding:11px 12px; font:600 15px/1 ui-monospace,Menlo,Consolas,monospace;
+    letter-spacing:.12em; text-transform:uppercase; color:var(--fg); background:#0a0c11;
+    border:1px solid var(--border); border-radius:8px; outline:none; }
+  #code:focus { border-color:var(--accent); }
+  #join { margin-top:14px; width:100%; padding:11px; font:600 14px system-ui; color:#04101f;
+    background:var(--accent); border:0; border-radius:8px; cursor:pointer; }
+  #join:disabled { opacity:.5; cursor:default; }
+  #err { margin-top:12px; min-height:16px; color:var(--err); font-size:12.5px; }
+  .lockrow { display:flex; align-items:center; gap:7px; margin-bottom:14px; color:var(--dim); font-size:12px; }
+  .lockrow b { color:var(--ok); }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <span class="mark">chela<b>·</b></span>
+    <span class="title" id="title">shared terminal</span>
+    <span class="spacer"></span>
+    <span class="lock">🔒 end-to-end</span>
+    <span class="tag">read-only</span>
+    <span id="dot" title="enter code"></span>
+  </div>
+  <div id="stage"><div id="term"></div></div>
+
+  <div id="gate">
+    <div id="card">
+      <h1>Join <b>chela</b> terminal</h1>
+      <p>End-to-end encrypted. Paste the pairing code the host gave you — the relay never sees the stream.</p>
+      <div class="lockrow">🔒 <span>AES-256-GCM · <b>keys derived in your browser</b></span></div>
+      <input id="code" autocomplete="off" autocapitalize="characters" spellcheck="false"
+             placeholder="PAIRING CODE" aria-label="pairing code">
+      <button id="join" disabled>Join</button>
+      <div id="err"></div>
+    </div>
+  </div>
+
+  <script src="/vendor/xterm.js"></script>
+  <script type="module">
+    import { Session, secretFromCode, T_OUTPUT, T_META, T_CTL, AuthError, BadFrame } from '/e2e.js';
+
+    const room = decodeURIComponent((location.pathname.match(/\/j\/([^/]+)/) || [, ''])[1]);
+    const WS = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/room/' + room;
+    const BAR = 34;
+    const dot = document.getElementById('dot');
+    const gate = document.getElementById('gate');
+    const errEl = document.getElementById('err');
+    const codeEl = document.getElementById('code');
+    const joinBtn = document.getElementById('join');
+    const titleEl = document.getElementById('title');
+    const setDot = (cls, t) => { dot.className = cls; dot.title = t; };
+
+    const term = new Terminal({
+      disableStdin: true, cursorBlink: false, convertEol: false,
+      fontFamily: 'JetBrains Mono, Menlo, Consolas, monospace', fontSize: 14,
+      theme: { background:'#0d1117', foreground:'#c9d1d9', cursor:'#58a6ff', cursorAccent:'#0d1117',
+        selectionBackground:'#264f78', black:'#484f58', red:'#ff7b72', green:'#3fb950', yellow:'#d29922',
+        blue:'#58a6ff', magenta:'#bc8cff', cyan:'#39c5cf', white:'#b1bac4', brightBlack:'#6e7681',
+        brightRed:'#ffa198', brightGreen:'#56d364', brightYellow:'#e3b341', brightBlue:'#79c0ff',
+        brightMagenta:'#d2a8ff', brightCyan:'#56d4dd', brightWhite:'#f0f6fc' },
+    });
+    term.open(document.getElementById('term'));
+
+    // Letterbox the FIXED master grid by scaling fontSize (never CSS transform).
+    let grid = { cols: 80, rows: 24 };
+    const fitFont = () => {
+      const screen = term.element && term.element.querySelector('.xterm-screen');
+      if (!screen) return;
+      const cur = term.options.fontSize || 14, sw = screen.offsetWidth, sh = screen.offsetHeight;
+      if (!sw || !sh) return;
+      const next = Math.max(6, Math.min(40, Math.floor(cur * Math.min(innerWidth / sw, (innerHeight - BAR) / sh))));
+      if (next !== cur) term.options.fontSize = next;
+    };
+    const refit = () => requestAnimationFrame(() => { fitFont(); requestAnimationFrame(fitFont); });
+    const applyGrid = (cols, rows) => {
+      if (!cols || !rows) return;
+      grid = { cols, rows };
+      if (term.cols !== cols || term.rows !== rows) { try { term.resize(cols, rows); } catch (_) {} }
+      refit();
+    };
+    addEventListener('resize', refit);
+
+    // --- crypto + transport ---------------------------------------------------
+    let session = null, ws = null, paired = false, backoff = 500;
+    const enc = new TextEncoder(), dec = new TextDecoder();
+
+    const hello = async () => {
+      if (ws && ws.readyState === 1 && session) {
+        // COLD-JOIN: on connect AND reconnect, ask the host for a keyframe (the
+        // relay holds no history). Encrypted like everything else (T_CTL).
+        ws.send(await session.seal(T_CTL,
+          enc.encode(JSON.stringify({ t: 'hello', cols: grid.cols, rows: grid.rows }))));
+      }
+    };
+    // WebCrypto is async and frames must be opened in seq order, so serialise
+    // decryption through a promise chain (concurrent open() would race _recvLast).
+    let chain = Promise.resolve();
+    const onFrame = (buf) => { chain = chain.then(() => handleFrame(new Uint8Array(buf))).catch(() => {}); };
+    const handleFrame = async (env) => {
+      let typ, pt;
+      try {
+        [typ, pt] = await session.open(env);
+      } catch (e) {
+        if (e instanceof AuthError && !paired) return failWrongCode();
+        return; // paired tamper / replay / reorder → drop
+      }
+      if (!paired) { paired = true; gate.classList.add('hide'); setDot('up', 'live · encrypted'); }
+      if (typ === T_OUTPUT) term.write(pt);
+      else if (typ === T_META) {
+        try { const m = JSON.parse(dec.decode(pt)); applyGrid(m.cols, m.rows); if (m.title) titleEl.textContent = m.title; } catch (_) {}
+      }
+    };
+    const connect = () => {
+      setDot('', 'connecting…');
+      ws = new WebSocket(WS);
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = () => { backoff = 500; if (paired) setDot('up', 'live · encrypted'); hello(); };
+      ws.onmessage = (ev) => onFrame(ev.data);
+      ws.onclose = () => { if (paired) { setDot('down', 'reconnecting…'); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 8000); } };
+      ws.onerror = () => { try { ws.close(); } catch (_) {} };
+    };
+
+    const failWrongCode = () => {
+      paired = false;
+      try { ws && ws.close(); } catch (_) {}
+      session = null;
+      gate.classList.remove('hide');
+      errEl.textContent = 'Wrong pairing code — that key can’t decrypt this stream.';
+      joinBtn.disabled = false; joinBtn.textContent = 'Join';
+      codeEl.focus(); codeEl.select();
+    };
+
+    // --- gate: derive keys from the pasted code, then connect -----------------
+    const submit = async () => {
+      errEl.textContent = '';
+      let secret;
+      try { secret = secretFromCode(codeEl.value); }
+      catch (e) { errEl.textContent = (e instanceof BadFrame) ? 'That doesn’t look like a valid code.' : String(e.message || e); return; }
+      joinBtn.disabled = true; joinBtn.textContent = 'Deriving keys…';
+      try { session = await Session.create(secret, room, 'joiner'); }
+      catch (e) { errEl.textContent = 'Key derivation failed: ' + (e.message || e); joinBtn.disabled = false; joinBtn.textContent = 'Join'; return; }
+      connect();
+    };
+    codeEl.addEventListener('input', () => { joinBtn.disabled = codeEl.value.trim().length < 10; errEl.textContent = ''; });
+    codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !joinBtn.disabled) submit(); });
+    joinBtn.addEventListener('click', submit);
+    codeEl.focus();
+  </script>
+</body>
+</html>

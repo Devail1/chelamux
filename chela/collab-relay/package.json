@@ -2,6 +2,7 @@
   "name": "chela-collab-relay",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Dumb opaque WebSocket fan-out relay for chela collaborative terminals (Cloudflare Worker + Durable Object).",
   "scripts": {
     "deploy": "wrangler deploy",

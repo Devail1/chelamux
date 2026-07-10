@@ -19,6 +19,7 @@ dependencies = [
 dashboard = [
     "flask>=3.0",        # dashboard web app (agent wall + dispatch Kanban)
     "flask-sock>=0.7",   # same-origin /term/<wid> ttyd reverse proxy (WebSocket)
+    "cryptography>=42",  # E2E terminal-share crypto (HKDF-SHA256 + AES-256-GCM); interops with browser WebCrypto
 ]
 dev = [
     "pytest>=8.0",
