@@ -25,6 +25,15 @@ ROOM = "test-instance-@1-tty"
 SECRET = bytes.fromhex("000102030405060708090a0b0c0d0e0f")  # fixed → reproducible vectors
 WRONG_SECRET = bytes.fromhex("0f0e0d0c0b0a09080706050403020100")
 
+# P1.5 multi-joiner: two distinct (fixed, reproducible) joiner stream ids, each
+# sending T_INPUT from seq 0 — the collision case v1 could not represent.
+STREAM_A = bytes.fromhex("aa0000a1")
+STREAM_B = bytes.fromhex("bb0000b2")
+INPUT_PLAINTEXTS = [
+    [b"ls -la\r", b"\x03"],        # stream A: a command, then Ctrl-C
+    [b"echo hi\r", b"q"],          # stream B
+]
+
 # Representative plaintexts across frame types and sizes, including empty, binary,
 # UTF-8 (box-drawing / emoji), and a large payload (multi-block GCM).
 PLAINTEXTS = [
@@ -91,6 +100,49 @@ def test_cross_room_aad_isolation():
         other.open(env)
 
 
+def test_joiner_default_stream_id_is_random_and_host_is_zero():
+    host = e2e.Session(SECRET, ROOM, role="host")
+    a = e2e.Session(SECRET, ROOM, role="joiner")
+    b = e2e.Session(SECRET, ROOM, role="joiner")
+    assert host.stream_id == e2e.HOST_STREAM_ID
+    assert a.stream_id != e2e.HOST_STREAM_ID
+    assert a.stream_id != b.stream_id            # random → practically never equal
+
+
+def test_multi_joiner_streams_gated_independently():
+    """Two joiners on distinct stream ids each seal from seq 0; the host opens all
+    (per-stream seq gating). In v1 the 2nd joiner's seq 0 was a fatal replay/nonce
+    collision — this is the exact P1.5 concurrency fix."""
+    host = e2e.Session(SECRET, ROOM, role="host")
+    jA = e2e.Session(SECRET, ROOM, role="joiner", stream_id=STREAM_A)
+    jB = e2e.Session(SECRET, ROOM, role="joiner", stream_id=STREAM_B)
+    a0, a1 = jA.seal(e2e.T_INPUT, b"a0"), jA.seal(e2e.T_INPUT, b"a1")
+    b0, b1 = jB.seal(e2e.T_INPUT, b"b0"), jB.seal(e2e.T_INPUT, b"b1")
+    # Interleaved; both streams' seq 0 accepted, both advance independently.
+    assert host.open(a0) == (e2e.T_INPUT, b"a0")
+    assert host.open(b0) == (e2e.T_INPUT, b"b0")
+    assert host.open(a1) == (e2e.T_INPUT, b"a1")
+    assert host.open(b1) == (e2e.T_INPUT, b"b1")
+    with pytest.raises(e2e.ReplayError):         # per-stream replay still rejected
+        host.open(a0)
+
+
+def test_stream_id_is_authenticated():
+    """The stream id rides in the header (GCM AAD) — flipping it fails the tag, so
+    an attacker can't dodge a stream's seq gate by forging a fresh id."""
+    env = bytearray(e2e.Session(SECRET, ROOM, role="joiner", stream_id=STREAM_A).seal(e2e.T_INPUT, b"x"))
+    env[2] ^= 0xff                               # corrupt a stream_id byte
+    with pytest.raises(e2e.AuthError):
+        e2e.Session(SECRET, ROOM, role="host").open(bytes(env))
+
+
+def test_input_roundtrip_joiner_to_host():
+    joiner = e2e.Session(SECRET, ROOM, role="joiner", stream_id=STREAM_A)
+    host = e2e.Session(SECRET, ROOM, role="host")
+    env = joiner.seal(e2e.T_INPUT, b"whoami\r")
+    assert host.open(env) == (e2e.T_INPUT, b"whoami\r")
+
+
 def test_base32_pairing_code_roundtrip():
     code = e2e.pairing_code(SECRET)
     assert len(code) == 26  # 16 bytes → 26 base32 chars, padding stripped
@@ -122,6 +174,10 @@ def interop() -> dict:
         "room": ROOM,
         "py_frames": [{"envelope_hex": f["envelope"].hex()} for f in frames],
         "js_plaintexts": [{"type": typ, "hex": pt.hex()} for typ, pt in PLAINTEXTS],
+        "input_streams": [
+            {"stream_id_hex": STREAM_A.hex(), "plaintexts": [p.hex() for p in INPUT_PLAINTEXTS[0]]},
+            {"stream_id_hex": STREAM_B.hex(), "plaintexts": [p.hex() for p in INPUT_PLAINTEXTS[1]]},
+        ],
     }
     return {"frames": frames, "result": _run_node(job)}
 
@@ -162,3 +218,18 @@ def test_js_reports_wrong_code_not_garbage(interop):
 
 def test_js_rejects_replay(interop):
     assert interop["result"]["replay"] == "ReplayError"
+
+
+def test_js_input_streams_open_on_host(interop):
+    """JS→Python write path: two browser joiners on distinct stream ids each seal
+    T_INPUT from seq 0; the Python host opens ALL of them, interleaved, no
+    cross-rejection — the concurrent-writer case proven across the language seam."""
+    js = interop["result"]["js_input"]
+    assert [s["stream_id_hex"] for s in js] == [STREAM_A.hex(), STREAM_B.hex()]
+    host = e2e.Session(SECRET, ROOM, role="host")   # opens j2h (joiner→host input)
+    # Interleave the two streams (stream0#0, stream1#0, stream0#1, stream1#1).
+    for fi in range(len(INPUT_PLAINTEXTS[0])):
+        for si in range(len(js)):
+            typ, pt = host.open(bytes.fromhex(js[si]["envelopes"][fi]))
+            assert typ == e2e.T_INPUT
+            assert pt == INPUT_PLAINTEXTS[si][fi]

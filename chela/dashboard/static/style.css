@@ -359,6 +359,12 @@ body {
 .term-share-pop .tsp-copy:hover { border-color: var(--accent); }
 .term-share-pop .tsp-stop { width: 100%; margin-top: 12px; color: var(--red, #f85149); border-color: rgba(248, 81, 73, 0.4); }
 .term-share-pop .tsp-stop:hover { background: rgba(248, 81, 73, 0.12); }
+.term-share-pop .tsp-ro.rw { color: var(--ok, #3fb950); border-color: rgba(63, 185, 80, 0.5); }
+.term-share-pop .tsp-grant { cursor: pointer; width: 100%; margin-top: 10px; border-radius: 6px;
+    border: 1px solid rgba(63, 185, 80, 0.4); background: var(--surface); color: var(--ok, #3fb950);
+    font-size: 11.5px; padding: 6px 10px; }
+.term-share-pop .tsp-grant:hover { background: rgba(63, 185, 80, 0.12); }
+.term-share-pop .tsp-grant:disabled { opacity: 0.5; cursor: default; }
 .term-share-pop .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
 /* Kill-confirm popup, centered over the pane (reuses .kanban-confirm styling).

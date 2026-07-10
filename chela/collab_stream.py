@@ -72,6 +72,12 @@ _CLEAR = b"\x1b[2J\x1b[3J\x1b[H"
 SNAPSHOT_MIN_INTERVAL = 0.5   # s — floor between capture-pane calls (rate limit)
 RESIZE_POLL_INTERVAL = 0.5    # s — floor between source-window size polls (resize watch)
 RECONNECT_DELAY = 1.5         # s — naive reconnect backoff (spike)
+# Input token bucket (P1.5): a granted joiner may burst up to INPUT_BURST_BYTES,
+# refilling at INPUT_RATE_BPS bytes/s — enough for fast typing and reasonable
+# pastes, a ceiling against a flood. Oversized single frames are dropped outright.
+INPUT_RATE_BPS = 4096
+INPUT_BURST_BYTES = 8192
+INPUT_MAX_FRAME = 4096
 # Fail-closed invariant "no share outlives its session": if the wid vanishes from
 # the ttyd port map (window died / supervisor reaped ttyd) for longer than this,
 # the bridge STOPS and revokes rather than reconnect-looping into a zombie that
@@ -151,6 +157,16 @@ class Bridge:
         # Called once when the bridge fails closed on session death, so the caller
         # can revoke the share (app.py: pop _SHARED[wid]). None in standalone use.
         self._on_revoke = on_revoke
+        # P1.5 writable: the live ttyd socket (owned by the output-pump thread, read
+        # by the control thread to forward INPUT), and the owner's write grant. The
+        # grant defaults OFF — read-only by construction until an owner-only Flask
+        # call flips it (set_write). A token bucket caps forwarded input bytes/sec so
+        # a paired joiner can't flood the pty.
+        self._ttyd = None
+        self._ttyd_lock = threading.Lock()
+        self._write = threading.Event()
+        self._input_tokens = float(INPUT_BURST_BYTES)
+        self._input_tokens_ts = time.monotonic()
 
     # --- relay send helpers ------------------------------------------------
     def _seal_send(self, typ: int, plaintext: bytes) -> None:
@@ -163,6 +179,54 @@ class Bridge:
                 self._relay.send(self._session.seal(typ, plaintext))
             except Exception:
                 pass
+
+    # --- P1.5 write grant --------------------------------------------------
+    def _send_grant_state(self) -> None:
+        """Tell joiners the current write state (h2j T_CTL). Sent on every grant
+        flip AND after a hello, so a joiner that connects mid-share learns whether
+        it may type without waiting for the next toggle."""
+        self._seal_send(e2e.T_CTL, json.dumps({"t": "grant", "write": self._write.is_set()}).encode("utf-8"))
+
+    def set_write(self, granted: bool) -> bool:
+        """Owner grant/revoke of write access (per-share, tailnet-side). Flips the
+        gate that _handle_relay checks before forwarding any INPUT to the pty, and
+        broadcasts the new state to joiners. Returns the effective state."""
+        if granted:
+            self._write.set()
+        else:
+            self._write.clear()
+        log.info("collab_stream: %s write %s", self.wid, "GRANTED" if granted else "revoked")
+        self._send_grant_state()
+        return self._write.is_set()
+
+    def _allow_input(self, n: int) -> bool:
+        """Token-bucket admission for n input bytes (called under no lock; only the
+        control thread touches the bucket)."""
+        now = time.monotonic()
+        self._input_tokens = min(
+            float(INPUT_BURST_BYTES),
+            self._input_tokens + (now - self._input_tokens_ts) * INPUT_RATE_BPS,
+        )
+        self._input_tokens_ts = now
+        if n > self._input_tokens:
+            return False
+        self._input_tokens -= n
+        return True
+
+    def _forward_input(self, data: bytes) -> None:
+        """Forward joiner keystrokes to the local ttyd as a client INPUT frame
+        (b'0' + bytes) — ONLY reached while write is granted. Drops oversized or
+        rate-exceeding frames; never blocks the control loop."""
+        if not data or len(data) > INPUT_MAX_FRAME or not self._allow_input(len(data)):
+            return
+        with self._ttyd_lock:
+            ttyd = self._ttyd
+        if ttyd is None:
+            return
+        try:
+            ttyd.send(b"0" + data)   # ttyd client→server INPUT
+        except Exception:
+            pass
 
     def _send_keyframe(self, force: bool = False) -> None:
         """A T_META frame (grid dims) + a T_OUTPUT capture-pane snapshot, both
@@ -228,6 +292,8 @@ class Bridge:
             except Exception:
                 time.sleep(RECONNECT_DELAY)
                 continue
+            with self._ttyd_lock:
+                self._ttyd = up   # publish for the control thread's INPUT forwarding
             next_resize_check = time.monotonic()
             try:
                 while not self._stop.is_set():
@@ -240,7 +306,8 @@ class Bridge:
                         next_resize_check = now + RESIZE_POLL_INTERVAL
                         self._maybe_resize()
                     if msg is None:
-                        break
+                        continue   # idle receive timeout, NOT a close — stay connected
+                                   # (a real ttyd close raises → caught below → reconnect)
                     if isinstance(msg, str):
                         msg = msg.encode("utf-8", "replace")
                     if not msg:
@@ -251,6 +318,8 @@ class Bridge:
             except Exception:
                 pass
             finally:
+                with self._ttyd_lock:
+                    self._ttyd = None   # no INPUT forwarding while disconnected
                 try:
                     up.close()
                 except Exception:
@@ -277,13 +346,16 @@ class Bridge:
             except Exception:
                 time.sleep(RECONNECT_DELAY)
                 continue
-            # Publish an initial meta so an already-open joiner learns the grid.
+            # On (re)connect, resync any already-open joiner: current grid + write
+            # grant. (Genuine reconnects only now — idle no longer drops the socket.)
             self._send_keyframe()
+            self._send_grant_state()
             try:
                 while not self._stop.is_set():
                     msg = self._relay.receive(timeout=1.0)
                     if msg is None:
-                        break
+                        continue   # idle receive timeout, NOT a close — stay connected
+                                   # (a real relay close raises → caught below → reconnect)
                     self._handle_relay(msg)
             except Exception:
                 pass
@@ -317,6 +389,13 @@ class Bridge:
             return
         except e2e.E2EError:
             return
+        if typ == e2e.T_INPUT:
+            # Read-only by construction: forward to the pty ONLY while the owner has
+            # granted write. Ungranted input is silently dropped at this choke point
+            # (never reaches ttyd/tmux) — the single server-side enforcement point.
+            if self._write.is_set():
+                self._forward_input(bytes(pt))
+            return
         if typ == e2e.T_CTL:
             try:
                 obj = json.loads(pt.decode("utf-8", "replace"))
@@ -324,6 +403,7 @@ class Bridge:
                 return
             if obj.get("t") == "hello":
                 self._send_keyframe()
+                self._send_grant_state()   # late joiner learns the current write state
 
     # --- lifecycle ---------------------------------------------------------
     def start(self) -> "Bridge":
@@ -384,6 +464,14 @@ def stop_bridge(wid: str) -> None:
         b = _bridges.pop(wid, None)
     if b:
         b.stop()
+
+
+def set_write(wid: str, granted: bool) -> bool | None:
+    """Owner grant/revoke of write for a shared wid (P1.5). Returns the effective
+    state, or None if no bridge is running for the wid (nothing to grant)."""
+    with _bridges_lock:
+        b = _bridges.get(wid)
+    return b.set_write(granted) if b else None
 
 
 def join_url(wid: str) -> str:

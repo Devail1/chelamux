@@ -915,9 +915,32 @@ def api_term_share(wid):
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
     code = collab_stream.start_bridge(wid, on_revoke=_revoke_share)
-    info = {"pairing_code": code, "join_url": collab_stream.join_url(wid)} if code else {}
+    # write defaults False — a new share is read-only until the owner grants (P1.5).
+    info = {"pairing_code": code, "join_url": collab_stream.join_url(wid), "write": False} if code else {}
     _share_info[wid] = info
     return jsonify({"ok": True, "shared": True, **info})
+
+
+@app.route("/api/term/<wid>/grant", methods=["POST"])
+@require_auth
+def api_term_grant(wid):
+    """Owner-only write grant/revoke for a live share (P1.5). Flips the bridge's
+    write gate — the single server-side point where a joiner's INPUT can reach the
+    pty — and records it in the owner-only share info. Per-share (one grant covers
+    everyone paired) and revocable; a share starts read-only and revoke/stop resets
+    it. Tailnet-side, so require_auth's no-op is fine."""
+    _require_terminals()
+    if wid not in _terminals_port_map():
+        abort(404)
+    if wid not in _SHARED:
+        return jsonify({"error": "not shared"}), 409
+    write = bool((request.get_json(force=True) or {}).get("write", False))
+    state = collab_stream.set_write(wid, write)
+    if state is None:
+        return jsonify({"error": "no active bridge"}), 409
+    if wid in _share_info:
+        _share_info[wid]["write"] = state
+    return jsonify({"ok": True, "write": state})
 
 
 @app.route("/api/term/<wid>/share-info")

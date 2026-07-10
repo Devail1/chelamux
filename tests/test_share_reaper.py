@@ -135,3 +135,26 @@ def test_bridge_resend_on_source_resize(monkeypatch):
     b._maybe_resize()
     assert sent == [cs.e2e.T_META, cs.e2e.T_OUTPUT]   # one fresh keyframe
     assert b._last_dims == (120, 40)           # watch advanced, won't re-fire
+
+
+def test_grant_toggles_write_on_shared_wid(monkeypatch, _isolate):
+    """POST /grant flips the bridge write gate and records it in the owner info."""
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    calls = []
+    monkeypatch.setattr(dash.collab_stream, "set_write", lambda wid, on: calls.append((wid, on)) or on)
+    dash._SHARED["@9"] = {"cols": 100, "rows": 30}
+    dash._share_info["@9"] = {"pairing_code": "X", "join_url": "u", "write": False}
+
+    r = dash.app.test_client().post("/api/term/@9/grant", json={"write": True})
+
+    assert r.status_code == 200 and r.get_json()["write"] is True
+    assert calls == [("@9", True)]                 # bridge grant called
+    assert dash._share_info["@9"]["write"] is True  # mirrored for the popover
+
+
+def test_grant_rejected_when_not_shared(monkeypatch, _isolate):
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    r = dash.app.test_client().post("/api/term/@9/grant", json={"write": True})
+    assert r.status_code == 409                    # no share → nothing to grant

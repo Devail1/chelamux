@@ -6,7 +6,7 @@
 //             js_plaintexts:[{type, hex}]}
 //   stdout : {base32, keys:{h2j,j2h}, py_to_js:[hex|error],
 //             js_to_py:[{type,seq,envelope_hex}], wrong_code, replay}
-import { Session, keyHex, b32encode, AuthError, ReplayError } from '../chela/collab-relay/public/e2e.js';
+import { Session, keyHex, b32encode, T_INPUT, AuthError, ReplayError } from '../chela/collab-relay/public/e2e.js';
 
 const hex = (u8) => [...u8].map((b) => b.toString(16).padStart(2, '0')).join('');
 const unhex = (s) => new Uint8Array((s.match(/../g) || []).map((h) => parseInt(h, 16)));
@@ -49,6 +49,17 @@ const read = () => new Promise((res) => { let d = ''; process.stdin.on('data', (
     await j2.open(unhex(job.py_frames[0].envelope_hex));
     out.replay = 'NO_ERROR';
   } catch (e) { out.replay = e.constructor.name; }
+
+  // P1.5 write path: JS joiners on DISTINCT stream ids each seal T_INPUT from
+  // seq 0. Python opens them all — proves the browser input path + per-joiner
+  // nonce/stream-id interoperate (and two concurrent joiners don't collide).
+  out.js_input = [];
+  for (const st of (job.input_streams || [])) {
+    const j = await Session.create(secret, room, 'joiner', unhex(st.stream_id_hex));
+    const envelopes = [];
+    for (const p of st.plaintexts) envelopes.push(hex(await j.seal(T_INPUT, unhex(p))));
+    out.js_input.push({ stream_id_hex: st.stream_id_hex, envelopes });
+  }
 
   process.stdout.write(JSON.stringify(out));
 })().catch((e) => { process.stderr.write('HARNESS ERROR: ' + e.stack); process.exit(1); });

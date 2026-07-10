@@ -7,15 +7,18 @@
 //
 // Contract (see e2e.py for the authoritative prose):
 //   HKDF-SHA256(secret, salt=SALT, info="chela-v1|<room>|{h2j,j2h}") → two AES-256 keys
-//   nonce  = 4 reserved zero bytes ∥ 8-byte little-endian seq
-//   envelope = ver(1) ∥ type(1) ∥ seq(8 LE) ∥ ciphertext(with 128-bit GCM tag)
-//   AAD    = ver(1) ∥ type(1) ∥ seq(8 LE) ∥ utf8(room)
-//   strictly-increasing seq per direction; a wrong code fails the first GCM tag.
+//   stream_id = 4-byte per-sender id (host all-zero; joiner random) — nonce prefix + seq key
+//   nonce  = stream_id(4) ∥ 8-byte little-endian seq  (= header bytes 2..14)
+//   envelope = ver(1) ∥ type(1) ∥ stream_id(4) ∥ seq(8 LE) ∥ ciphertext(with 128-bit GCM tag)
+//   AAD    = the full 14-byte header ∥ utf8(room)
+//   strictly-increasing seq PER (direction, stream_id); a wrong code fails the first GCM tag.
+//   wire version 2 (P1.5) — a v1 frame fails cleanly on the version byte.
 
-export const VER = 1;
+export const VER = 2;
 export const T_OUTPUT = 1, T_INPUT = 2, T_META = 3, T_PRESENCE = 4, T_CTL = 5;
 const SALT = new TextEncoder().encode('chela-collab-e2e-v1');
-const KEY_LEN = 32, HEADER_LEN = 10, SECRET_LEN = 16;
+const KEY_LEN = 32, HEADER_LEN = 14, SECRET_LEN = 16, STREAM_ID_LEN = 4, MAX_RECV_STREAMS = 64;
+export const HOST_STREAM_ID = new Uint8Array(STREAM_ID_LEN);  // all-zero: the single host sender
 const te = new TextEncoder();
 
 export class E2EError extends Error {}
@@ -82,12 +85,12 @@ function seqBytes(seq) {
   for (let i = 0; i < 8; i++) { b[i] = Number(v & 0xffn); v >>= 8n; } // little-endian
   return b;
 }
-function readSeq(bytes) { // bytes[2..10] LE → BigInt
+function readSeq(bytes) { // bytes[6..14] LE → BigInt
   let v = 0n;
-  for (let i = 7; i >= 0; i--) v = (v << 8n) | BigInt(bytes[2 + i]);
+  for (let i = 7; i >= 0; i--) v = (v << 8n) | BigInt(bytes[2 + STREAM_ID_LEN + i]);
   return v;
 }
-function nonce(seq) { const n = new Uint8Array(12); n.set(seqBytes(seq), 4); return n; } // 4 reserved zeros ∥ seq
+const hexOf = (u8) => [...u8].map((b) => b.toString(16).padStart(2, '0')).join('');
 function concat(...arrs) {
   const len = arrs.reduce((a, x) => a + x.length, 0);
   const out = new Uint8Array(len); let o = 0;
@@ -98,25 +101,33 @@ function concat(...arrs) {
 // --- session ------------------------------------------------------------------
 export class Session {
   // async because WebCrypto key import is async: `await Session.create(...)`.
-  static async create(secret, room, role) {
+  // streamId: this sender's 4-byte nonce prefix (host all-zero; joiner random by
+  // default so concurrent joiners never collide on a k_j2h nonce).
+  static async create(secret, room, role, streamId) {
     if (role !== 'host' && role !== 'joiner') throw new Error("role must be 'host' or 'joiner'");
+    if (streamId == null) {
+      streamId = role === 'host' ? HOST_STREAM_ID : crypto.getRandomValues(new Uint8Array(STREAM_ID_LEN));
+    }
+    if (streamId.length !== STREAM_ID_LEN) throw new Error(`streamId must be ${STREAM_ID_LEN} bytes`);
     const keys = await deriveKeys(secret, room);
     const s = new Session();
     s.room = room;
+    s.streamId = streamId;
     s._roomAad = te.encode(room);
     s._sendKey = role === 'host' ? keys.h2j : keys.j2h;
     s._recvKey = role === 'host' ? keys.j2h : keys.h2j;
     s._sendSeq = 0n;
-    s._recvLast = -1n;
+    s._recvLast = new Map();   // stream_id hex -> last seq (BigInt), bounded
     return s;
   }
 
   async seal(typ, plaintext) {
     const seq = this._sendSeq; this._sendSeq += 1n;
-    const header = concat(new Uint8Array([VER, typ]), seqBytes(seq));
+    const header = concat(new Uint8Array([VER, typ]), this.streamId, seqBytes(seq));
     const aad = concat(header, this._roomAad);
+    const iv = header.subarray(2, HEADER_LEN);   // stream_id ∥ seq
     const ct = new Uint8Array(await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: nonce(seq), additionalData: aad, tagLength: 128 }, this._sendKey, plaintext));
+      { name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, this._sendKey, plaintext));
     return concat(header, ct);
   }
 
@@ -124,19 +135,24 @@ export class Session {
     if (envelope.length < HEADER_LEN) throw new BadFrame('envelope shorter than header');
     if (envelope[0] !== VER) throw new BadFrame(`unknown version ${envelope[0]}`);
     const typ = envelope[1];
+    const sid = hexOf(envelope.subarray(2, 2 + STREAM_ID_LEN));
     const seq = readSeq(envelope);
-    if (seq <= this._recvLast) throw new ReplayError(`seq ${seq} <= last ${this._recvLast}`);
+    if (seq <= (this._recvLast.get(sid) ?? -1n)) throw new ReplayError(`seq ${seq} <= last for stream ${sid}`);
     const header = envelope.subarray(0, HEADER_LEN);
     const aad = concat(header, this._roomAad);
+    const iv = header.subarray(2, HEADER_LEN);   // stream_id ∥ seq
     let pt;
     try {
       pt = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: nonce(seq), additionalData: aad, tagLength: 128 },
+        { name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 },
         this._recvKey, envelope.subarray(HEADER_LEN));
     } catch (_) {
       throw new AuthError('GCM tag failed — wrong pairing code or tampered frame');
     }
-    this._recvLast = seq;
+    if (!this._recvLast.has(sid) && this._recvLast.size >= MAX_RECV_STREAMS) {
+      this._recvLast.delete(this._recvLast.keys().next().value);  // evict oldest-inserted
+    }
+    this._recvLast.set(sid, seq);
     return [typ, new Uint8Array(pt)];
   }
 }

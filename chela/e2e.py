@@ -22,19 +22,35 @@ Key derivation: HKDF-SHA256 with a fixed salt and a room-bound info string yield
       k_h2j = HKDF(secret, salt=SALT, info="chela-v1|<room>|h2j", L=32)   host→joiner
       k_j2h = HKDF(secret, salt=SALT, info="chela-v1|<room>|j2h", L=32)   joiner→host
 
-Nonce (96-bit, deterministic — never random, never reused for a key): 4 reserved
-  zero bytes ∥ 8-byte little-endian per-key monotonic `seq`. A new share = new
-  secret = new keys, so the counters reset safely.
+Stream id (P1.5 multi-joiner): a 4-byte per-sender id. The host uses all-zero
+  (HOST_STREAM_ID); each joiner picks a random 4 bytes at session start. It rides
+  in the envelope header AND is the top of the nonce (see below), so two joiners
+  that both start their counters at 0 can never collide on a k_j2h nonce, and the
+  host tracks seq PER stream id (a 2nd joiner's low seqs aren't rejected as the
+  first's replays). It is NOT an identity/auth token — everyone paired shares the
+  same keys (per-joiner keys are a parked P2/P3 item); it only makes concurrent
+  senders on one direction key nonce-safe and independently seq-tracked.
 
-Envelope (binary, little-endian): ver(1) ∥ type(1) ∥ seq(8) ∥ ciphertext, where
-  ciphertext is AES-256-GCM output with the 128-bit tag appended (the library
-  default). GCM AAD = ver(1) ∥ type(1) ∥ seq(8) ∥ utf8(room) — so header
-  tampering, cross-room replay, and type confusion ALL fail the tag.
+Nonce (96-bit, deterministic — never random, never reused for a key): 4-byte
+  stream id ∥ 8-byte little-endian per-(key,stream) monotonic `seq`. Equivalently
+  the 12 bytes of the header AFTER ver+type. Unique per (key,stream,seq); a new
+  share = new secret = new keys, so counters reset safely.
 
-Receiver enforces strictly-increasing `seq` per direction: replays and reorders
-  are dropped (gaps are allowed — a late joiner just starts from the current seq).
-  A wrong pairing code derives wrong keys → the first frame fails the GCM tag →
-  we raise AuthError ("wrong code"), never emit garbage.
+Envelope (binary, little-endian): ver(1) ∥ type(1) ∥ stream_id(4) ∥ seq(8) ∥
+  ciphertext, where ciphertext is AES-256-GCM output with the 128-bit tag appended
+  (the library default). GCM AAD = the full 14-byte header ∥ utf8(room) — so header
+  tampering (including stream-id swaps), cross-room replay, and type confusion ALL
+  fail the tag.
+
+Receiver enforces strictly-increasing `seq` PER (direction key, stream id):
+  replays and reorders are dropped (gaps are allowed — a late joiner just starts
+  from the current seq; a fresh stream id starts from 0). A wrong pairing code
+  derives wrong keys → the first frame fails the GCM tag → we raise AuthError
+  ("wrong code"), never emit garbage.
+
+Wire version 2 (P1.5). v1 had a 10-byte header (4 reserved zero nonce bytes, no
+  stream id) and single-sender seq; it is not interoperable — a v1 frame hitting a
+  v2 parser fails cleanly on the version byte. Both sides deploy together.
 """
 
 from __future__ import annotations
@@ -49,20 +65,22 @@ from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 # --- wire constants (mirrored byte-for-byte in the SPA) -----------------------
-VER = 1
+VER = 2
 # Frame types. Non-zero so a zero-initialised buffer never looks like a valid type.
 T_OUTPUT = 1     # terminal output bytes  (host→joiner)
 T_INPUT = 2      # terminal input bytes   (joiner→host; P1.5 write-grant)
 T_META = 3       # JSON grid/title        (host→joiner)
 T_PRESENCE = 4   # JSON presence          (either; P2)
-T_CTL = 5        # JSON control, e.g. hello (joiner→host)
+T_CTL = 5        # JSON control: hello (j→h), grant (h→j)
 
 SALT = b"chela-collab-e2e-v1"   # fixed HKDF salt, identical both sides
 KEY_LEN = 32                    # AES-256
-NONCE_LEN = 12                  # 96-bit GCM nonce
-_RESERVED = b"\x00\x00\x00\x00"  # 4 reserved nonce bytes
-HEADER_LEN = 10                 # ver(1)+type(1)+seq(8)
+NONCE_LEN = 12                  # 96-bit GCM nonce = stream_id(4) + seq(8)
+STREAM_ID_LEN = 4               # per-sender nonce-prefix / seq-tracking id
+HOST_STREAM_ID = b"\x00\x00\x00\x00"  # the single host sender; joiners are random
+HEADER_LEN = 14                 # ver(1)+type(1)+stream_id(4)+seq(8)
 SECRET_LEN = 16                 # pairing secret bytes
+MAX_RECV_STREAMS = 64           # cap on tracked (stream_id → last_seq) entries
 
 
 class E2EError(Exception):
@@ -121,8 +139,8 @@ def derive_keys(secret: bytes, room: str) -> tuple[bytes, bytes]:
     )
 
 
-def _nonce(seq: int) -> bytes:
-    return _RESERVED + seq.to_bytes(8, "little")
+def _nonce(stream_id: bytes, seq: int) -> bytes:
+    return stream_id + seq.to_bytes(8, "little")
 
 
 # --- session (one per peer): send on one key, receive on the other ------------
@@ -131,27 +149,39 @@ class Session:
     used for sending vs receiving:
         host   → send h2j, recv j2h
         joiner → send j2h, recv h2j
-    Not thread-safe for concurrent seal() (the send seq is mutable state); the
-    caller serialises seal+send so wire order matches seq order (the receiver
-    rejects out-of-order seqs)."""
+    `stream_id` is this sender's 4-byte nonce-prefix (host = all-zero; a joiner
+    defaults to a random 4 bytes so concurrent joiners never collide on a k_j2h
+    nonce). recv seq is tracked PER stream id, so multiple senders on the recv key
+    (many joiners → the host) are each gated independently.
 
-    def __init__(self, secret: bytes, room: str, *, role: str) -> None:
+    Not thread-safe for concurrent seal() (the send seq is mutable state); the
+    caller serialises seal+send so wire order matches seq order for THIS stream."""
+
+    def __init__(self, secret: bytes, room: str, *, role: str,
+                 stream_id: bytes | None = None) -> None:
         if role not in ("host", "joiner"):
             raise ValueError("role must be 'host' or 'joiner'")
+        if stream_id is None:
+            stream_id = HOST_STREAM_ID if role == "host" else secrets.token_bytes(STREAM_ID_LEN)
+        if len(stream_id) != STREAM_ID_LEN:
+            raise ValueError(f"stream_id must be {STREAM_ID_LEN} bytes")
         k_h2j, k_j2h = derive_keys(secret, room)
         send_key, recv_key = (k_h2j, k_j2h) if role == "host" else (k_j2h, k_h2j)
         self.room = room
+        self.stream_id = stream_id
         self._room_aad = room.encode("utf-8")
         self._send = AESGCM(send_key)
         self._recv = AESGCM(recv_key)
         self._send_seq = 0
-        self._recv_last = -1   # strictly-increasing gate; first accepted seq is >= 0
+        # stream_id -> last accepted seq. First accepted seq for a stream is >= 0;
+        # bounded so a churn of reconnecting joiners can't grow it without limit.
+        self._recv_last: dict[bytes, int] = {}
 
     def seal(self, typ: int, plaintext: bytes) -> bytes:
         seq = self._send_seq
         self._send_seq += 1
-        header = bytes([VER, typ]) + seq.to_bytes(8, "little")
-        ct = self._send.encrypt(_nonce(seq), plaintext, header + self._room_aad)
+        header = bytes([VER, typ]) + self.stream_id + seq.to_bytes(8, "little")
+        ct = self._send.encrypt(header[2:HEADER_LEN], plaintext, header + self._room_aad)
         return header + ct
 
     def open(self, envelope: bytes) -> tuple[int, bytes]:
@@ -160,17 +190,20 @@ class Session:
         if envelope[0] != VER:
             raise BadFrame(f"unknown version {envelope[0]}")
         typ = envelope[1]
-        seq = int.from_bytes(envelope[2:HEADER_LEN], "little")
-        # Reject replays/reorders BEFORE the (costly) AEAD open. seq is not yet
-        # authenticated, but a forged seq can't advance our window: if the tag
-        # fails we raise without touching _recv_last, and a genuine replay (seq
-        # <= last) is dropped here cheaply.
-        if seq <= self._recv_last:
-            raise ReplayError(f"seq {seq} <= last {self._recv_last}")
+        sid = bytes(envelope[2:2 + STREAM_ID_LEN])
+        seq = int.from_bytes(envelope[2 + STREAM_ID_LEN:HEADER_LEN], "little")
+        # Reject replays/reorders per stream BEFORE the (costly) AEAD open. seq/sid
+        # aren't yet authenticated, but a forged pair can't advance our window: if
+        # the tag fails we raise without touching _recv_last, and a genuine replay
+        # (seq <= last for that stream) is dropped here cheaply.
+        if seq <= self._recv_last.get(sid, -1):
+            raise ReplayError(f"seq {seq} <= last for stream {sid.hex()}")
         header = envelope[:HEADER_LEN]
         try:
-            pt = self._recv.decrypt(_nonce(seq), envelope[HEADER_LEN:], header + self._room_aad)
+            pt = self._recv.decrypt(header[2:HEADER_LEN], envelope[HEADER_LEN:], header + self._room_aad)
         except InvalidTag as e:
             raise AuthError("GCM tag failed — wrong pairing code or tampered frame") from e
-        self._recv_last = seq
+        if sid not in self._recv_last and len(self._recv_last) >= MAX_RECV_STREAMS:
+            self._recv_last.pop(next(iter(self._recv_last)))  # evict oldest-inserted
+        self._recv_last[sid] = seq
         return typ, pt

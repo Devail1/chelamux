@@ -17,6 +17,7 @@
   #bar .title { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #bar .spacer { flex:1; }
   #bar .tag { font-size:11px; color:var(--dim); border:1px solid var(--border); border-radius:999px; padding:2px 8px; }
+  #bar .tag.rw { color:var(--ok); border-color:var(--ok); }
   #bar .lock { font-size:11px; color:var(--ok); }
   #dot { width:8px; height:8px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 3px rgba(210,153,34,.15); }
   #dot.up { background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,80,.15); }
@@ -55,7 +56,7 @@
     <span class="title" id="title">shared terminal</span>
     <span class="spacer"></span>
     <span class="lock">🔒 end-to-end</span>
-    <span class="tag">read-only</span>
+    <span class="tag" id="mode">read-only</span>
     <span id="dot" title="enter code"></span>
   </div>
   <div id="stage"><div id="term"></div></div>
@@ -74,7 +75,7 @@
 
   <script src="/vendor/xterm.js"></script>
   <script type="module">
-    import { Session, secretFromCode, T_OUTPUT, T_META, T_CTL, AuthError, BadFrame } from '/e2e.js';
+    import { Session, secretFromCode, T_OUTPUT, T_INPUT, T_META, T_CTL, AuthError, BadFrame } from '/e2e.js';
 
     const room = decodeURIComponent((location.pathname.match(/\/j\/([^/]+)/) || [, ''])[1]);
     const WS = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/room/' + room;
@@ -159,16 +160,36 @@
     if (window.visualViewport) window.visualViewport.addEventListener('resize', refit);
 
     // --- crypto + transport ---------------------------------------------------
-    let session = null, ws = null, paired = false, backoff = 500;
+    let session = null, ws = null, paired = false, canWrite = false, backoff = 500;
     const enc = new TextEncoder(), dec = new TextDecoder();
+    const modeEl = document.getElementById('mode');
 
-    const hello = async () => {
-      if (ws && ws.readyState === 1 && session) {
-        // COLD-JOIN: on connect AND reconnect, ask the host for a keyframe (the
-        // relay holds no history). Encrypted like everything else (T_CTL).
-        ws.send(await session.seal(T_CTL,
-          enc.encode(JSON.stringify({ t: 'hello', cols: grid.cols, rows: grid.rows }))));
-      }
+    // Joiner send path: serialise seal+send so THIS joiner's per-stream seq stays
+    // strictly increasing on the wire (the host drops out-of-order seqs). Both the
+    // hello and typed input funnel through here.
+    let sendChain = Promise.resolve();
+    const sealSend = (typ, bytes) => {
+      sendChain = sendChain.then(async () => {
+        if (!session || !ws || ws.readyState !== 1) return;
+        ws.send(await session.seal(typ, bytes));
+      }).catch(() => {});
+    };
+
+    // Write mode is owner-granted (a T_CTL grant frame flips it). xterm won't fire
+    // onData while disableStdin is true; canWrite is the belt to that suspenders.
+    const setWrite = (on) => {
+      canWrite = on;
+      term.options.disableStdin = !on;
+      modeEl.textContent = on ? 'write' : 'read-only';
+      modeEl.classList.toggle('rw', on);
+      if (on) term.focus();
+    };
+    term.onData((d) => { if (canWrite) sealSend(T_INPUT, enc.encode(d)); });
+
+    const hello = () => {
+      // COLD-JOIN: on connect AND reconnect, ask the host for a keyframe (the relay
+      // holds no history) — the host replies with a keyframe + current grant state.
+      sealSend(T_CTL, enc.encode(JSON.stringify({ t: 'hello', cols: grid.cols, rows: grid.rows })));
     };
     // WebCrypto is async and frames must be opened in seq order, so serialise
     // decryption through a promise chain (concurrent open() would race _recvLast).
@@ -189,6 +210,8 @@
       if (typ === T_OUTPUT) term.write(pt);
       else if (typ === T_META) {
         try { const m = JSON.parse(dec.decode(pt)); applyGrid(m.cols, m.rows); if (m.title) titleEl.textContent = m.title; } catch (_) {}
+      } else if (typ === T_CTL) {
+        try { const m = JSON.parse(dec.decode(pt)); if (m.t === 'grant') setWrite(!!m.write); } catch (_) {}
       }
     };
     const connect = () => {
@@ -197,12 +220,12 @@
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => { backoff = 500; if (paired) setDot('up', 'live · encrypted'); hello(); };
       ws.onmessage = (ev) => onFrame(ev.data);
-      ws.onclose = () => { if (paired) { setDot('down', 'reconnecting…'); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 8000); } };
+      ws.onclose = () => { setWrite(false); if (paired) { setDot('down', 'reconnecting…'); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 8000); } };  // host re-sends grant after reconnect hello
       ws.onerror = () => { try { ws.close(); } catch (_) {} };
     };
 
     const failWrongCode = () => {
-      paired = false;
+      paired = false; setWrite(false);
       try { ws && ws.close(); } catch (_) {}
       try { sessionStorage.removeItem(PAIR_KEY); } catch (_) {}  // stale/rotated code — don't re-prefill it
       session = null;
