@@ -356,11 +356,106 @@ function _ownerPresence() {
 // Wire the router immediately so a shared pane's shim 'ready' is caught on load.
 _ownerPresence();
 
+// On load, reflect any already-active shares in the global safety indicator —
+// covers landing straight on a non-terminals tab with a forgotten live share.
+if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) {
+    api('/api/term/shared').then(shared => {
+        Object.keys(shared || {}).forEach(w => _sharedWids.add(w));
+        _renderSharesIndicator();
+    }).catch(() => {});
+}
+
 function _seedSharedFromAgents(agents) {
     (agents || []).forEach(a => {
         if (!a.window_id) return;
         if (a.shared) _sharedWids.add(a.window_id); else _sharedWids.delete(a.window_id);
     });
+    _renderSharesIndicator();
+}
+
+// --- global active-shares indicator + kill-switch --------------------------
+// A persistent topbar pill (#btn-shares) shown on EVERY tab + mobile whenever any
+// session is shared — because a forgotten share is an exposed live terminal behind
+// a public link (SAFETY). Tapping opens a sheet listing each active share with a
+// prominent Stop + a Stop-All, wired to the existing _stopShare(). The topbar
+// button is best-effort (driven by _sharedWids, so once shown it persists across
+// tabs); opening the sheet reconciles against the server truth (/api/term/shared)
+// so the kill list is always accurate at the moment it matters.
+function _renderSharesIndicator() {
+    const btn = document.getElementById('btn-shares');
+    if (!btn) return;
+    const n = _sharedWids.size;
+    btn.hidden = n === 0;
+    if (n > 0) {
+        const txt = btn.querySelector('.si-text');
+        if (txt) txt.textContent = n + ' sharing';
+        btn.setAttribute('aria-label', n + ' active share' + (n === 1 ? '' : 's') + ' — tap to manage or stop');
+    }
+    // Keep an open sheet in sync with the live set (e.g. the reaper stopped one).
+    if (document.getElementById('shares-sheet-backdrop')) _buildSharesSheet();
+}
+
+async function openSharesSheet() {
+    // Reconcile against the server truth first, so the kill list is accurate no
+    // matter which tab we're on or how stale the best-effort set is.
+    try {
+        const shared = await api('/api/term/shared');
+        _sharedWids.clear();
+        Object.keys(shared || {}).forEach(w => _sharedWids.add(w));
+        _renderedWids.forEach(_updateShareBtns);
+    } catch (_) { /* offline / transient → fall back to the best-effort set */ }
+    _buildSharesSheet();
+    _renderSharesIndicator();
+}
+
+function closeSharesSheet() {
+    const bd = document.getElementById('shares-sheet-backdrop');
+    if (bd) bd.remove();
+    document.removeEventListener('keydown', _sharesSheetKey, true);
+}
+function _sharesSheetKey(e) { if (e.key === 'Escape') closeSharesSheet(); }
+
+function _buildSharesSheet() {
+    const existing = document.getElementById('shares-sheet-backdrop');
+    if (existing) existing.remove();
+    const wids = [..._sharedWids];
+    const backdrop = document.createElement('div');
+    backdrop.id = 'shares-sheet-backdrop';
+    backdrop.className = 'shares-backdrop';
+    backdrop.onclick = (e) => { if (e.target === backdrop) closeSharesSheet(); };
+    const sheet = document.createElement('div');
+    sheet.className = 'shares-sheet';
+    const rows = wids.map(wid => `
+        <div class="ss-row" data-wid="${attrEsc(wid)}">
+          <span class="ss-label">${escHtml(_paneTitle(wid))} <span class="ss-wid">${escHtml(wid)}</span></span>
+          <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
+        </div>`).join('');
+    sheet.innerHTML =
+        `<div class="ss-hd">&#128279; Active shares
+           <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
+         <div class="ss-sub">Anyone with the link + code can watch and type. Stop a share to revoke it — the link dies and the code rotates.</div>
+         <div class="ss-list">${rows || '<div class="ss-empty">No active shares.</div>'}</div>
+         ${wids.length ? `<button class="ss-stopall" type="button">Stop all sharing (${wids.length})</button>` : ''}`;
+    backdrop.appendChild(sheet);
+    document.body.appendChild(backdrop);
+    sheet.querySelector('.ss-close').onclick = closeSharesSheet;
+    sheet.querySelectorAll('.ss-stop').forEach(b => b.onclick = async () => {
+        b.disabled = true; b.textContent = 'Stopping…';
+        await _stopShare(b.dataset.wid);
+        if (_sharedWids.size) _buildSharesSheet(); else closeSharesSheet();
+    });
+    const all = sheet.querySelector('.ss-stopall');
+    if (all) all.onclick = async () => {
+        all.disabled = true; all.textContent = 'Stopping…';
+        await _stopAllShares();
+        closeSharesSheet();
+    };
+    document.addEventListener('keydown', _sharesSheetKey, true);
+}
+
+async function _stopAllShares() {
+    // Snapshot first: _stopShare mutates _sharedWids as each resolves.
+    await Promise.all([..._sharedWids].map(w => _stopShare(w)));
 }
 
 function _reloadPaneFrame(wid) {
@@ -398,7 +493,7 @@ async function shareBtnClick(btn, wid) {
     let info = {};
     try { info = (await api('/api/term/' + encodeURIComponent(wid) + '/share-info')) || {}; } catch (_) {}
     if (info && info.pairing_code) {
-        _sharedWids.add(wid); _updateShareBtns(wid);
+        _sharedWids.add(wid); _updateShareBtns(wid); _renderSharesIndicator();
         _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code));
         _sharePopover(btn, wid, info);
         return;
@@ -418,6 +513,7 @@ async function shareBtnClick(btn, wid) {
     _ownerPresence().then(m => m && m.startOwnerPresence(wid, resp.join_url, resp.pairing_code));
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
+    _renderSharesIndicator();
     _sharePopover(btn, wid, resp);   // resp carries join_url + pairing_code
 }
 
@@ -430,7 +526,7 @@ async function _stopShare(wid) {
     } catch (_) {}
     _sharedWids.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
     _ownerPresence().then(m => m && m.stopOwnerPresence(wid));
-    _reloadPaneFrame(wid); _updateShareBtns(wid); _closeSharePopover();
+    _reloadPaneFrame(wid); _updateShareBtns(wid); _renderSharesIndicator(); _closeSharePopover();
 }
 
 function _closeSharePopover() {

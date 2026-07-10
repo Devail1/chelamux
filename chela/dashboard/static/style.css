@@ -368,6 +368,77 @@ body {
 .term-share-pop .tsp-stop:hover { background: rgba(248, 81, 73, 0.12); }
 .term-share-pop .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
+/* Global active-shares indicator (safety kill-switch) — a persistent topbar pill
+   shown whenever ANY session is shared, on every tab + mobile (where the pane
+   header 🔗 is hidden). AMBER, not red: the primary user is red-weak and red is
+   reserved for the Stop actions; icon + pulsing dot + text+count so it never
+   relies on hue alone. */
+.shares-indicator {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 38px; padding: 0 13px; cursor: pointer; white-space: nowrap;
+    background: color-mix(in srgb, var(--warn, #d29922) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warn, #d29922) 55%, var(--border));
+    color: var(--warn, #d29922); border-radius: 999px;
+    font-size: 12.5px; font-weight: 600; line-height: 1;
+}
+.shares-indicator[hidden] { display: none; }
+.shares-indicator:hover {
+    border-color: var(--warn, #d29922);
+    background: color-mix(in srgb, var(--warn, #d29922) 20%, transparent);
+}
+.shares-indicator .si-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--warn, #d29922);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn, #d29922) 22%, transparent);
+    animation: sharesPulse 1.6s ease-in-out infinite;
+}
+@keyframes sharesPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .shares-indicator .si-dot { animation: none; } }
+
+/* Shares sheet — ONE component: an anchored panel on desktop, a bottom-sheet on
+   mobile. Lists every active share with a prominent Stop each + a Stop-All. */
+.shares-backdrop { position: fixed; inset: 0; z-index: 100001; background: rgba(0, 0, 0, 0.45); }
+.shares-sheet {
+    position: fixed; z-index: 100002; background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+    top: 58px; right: 14px; width: 360px; max-width: 94vw; border-radius: 12px; padding: 14px 15px;
+}
+.shares-sheet .ss-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-weight: 700; font-size: 13px; }
+.shares-sheet .ss-close { margin-left: auto; background: none; border: 0; color: var(--muted, #7d8590);
+    font-size: 20px; cursor: pointer; line-height: 1; padding: 0 4px; }
+.shares-sheet .ss-sub { color: var(--muted, #7d8590); font-size: 11.5px; margin-bottom: 11px; }
+.shares-sheet .ss-list { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
+.shares-sheet .ss-row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+.shares-sheet .ss-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.shares-sheet .ss-wid { color: var(--muted, #7d8590); font-size: 10.5px; }
+.shares-sheet .ss-stop {
+    flex: 0 0 auto; cursor: pointer; border-radius: 6px; padding: 7px 13px; font-size: 12px; font-weight: 600;
+    color: var(--red, #f85149); background: transparent; border: 1px solid rgba(248, 81, 73, 0.45);
+}
+.shares-sheet .ss-stop:hover { background: rgba(248, 81, 73, 0.12); }
+.shares-sheet .ss-stop:disabled { opacity: 0.5; cursor: default; }
+.shares-sheet .ss-stopall {
+    width: 100%; margin-top: 12px; cursor: pointer; border-radius: 8px; padding: 11px; font-size: 13px; font-weight: 700;
+    color: #fff; background: var(--red, #f85149); border: 0;
+}
+.shares-sheet .ss-stopall:disabled { opacity: 0.6; cursor: default; }
+.shares-sheet .ss-empty { color: var(--muted, #7d8590); font-size: 12.5px; padding: 8px 2px; }
+
+@media (max-width: 768px) {
+    .shares-sheet {
+        top: auto; bottom: 0; left: 0; right: 0; width: 100%; max-width: 100%;
+        border-radius: 16px 16px 0 0; border-bottom: 0;
+        padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    }
+    .shares-sheet .ss-list { max-height: 60vh; }
+    .shares-sheet .ss-stop { padding: 11px 16px; min-height: 44px; }
+    .shares-sheet .ss-stopall { min-height: 48px; }
+    /* Keep the amber pill readable but compact next to the other topbar icons. */
+    .shares-indicator { height: 38px; padding: 0 11px; }
+}
+
 /* Kill-confirm popup, centered over the pane (reuses .kanban-confirm styling).
    Absolute so it never reflows / reloads the iframe underneath. The compound
    selector outranks the later `.kanban-confirm` rule (whose translucent red bg

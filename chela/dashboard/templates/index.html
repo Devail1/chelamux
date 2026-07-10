@@ -36,6 +36,14 @@
         <span class="value ts" id="hdr-next">-</span>
       </span>
       <span class="topbar-updated">upd <span class="ts" id="hdr-updated">-</span></span>
+      <!-- Global active-shares indicator (safety kill-switch): shown on EVERY tab +
+           mobile whenever any session is shared, so a forgotten live share (= an
+           exposed terminal via a public link) is always one tap from Stop. -->
+      <button class="shares-indicator" id="btn-shares" hidden onclick="openSharesSheet()"
+              title="Active shares — tap to manage or stop" aria-label="Active shares">
+        <span class="si-dot" aria-hidden="true"></span>
+        <span class="si-text">0 sharing</span>
+      </button>
       <button class="palette-trigger" id="btn-palette" title="Jump to… (⌘K / Ctrl-K)" aria-label="Open command palette" onclick="openPalette()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
         <span class="pt-kbd">⌘K</span>
