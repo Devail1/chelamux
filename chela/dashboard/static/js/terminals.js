@@ -561,7 +561,10 @@ function _sharePopover(btn, wid, info) {
             ? `<div class="tsp-warn">Relay not configured — set <code>CHELA_COLLAB_RELAY</code> to stream.</div>` : '') +
         `<button class="tsp-stop">Stop sharing</button>`;
     document.body.appendChild(pop);
-    if (btn) {
+    if (_isMobileTerm()) {
+        // Mobile: CSS pins it as a bottom-sheet (safe-area padding, 44px targets);
+        // skip the desktop top/right anchor so the inline styles don't fight it.
+    } else if (btn) {
         const r = btn.getBoundingClientRect();
         pop.style.top = (r.bottom + 6) + 'px';
         pop.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
@@ -1884,17 +1887,27 @@ function renderMobileSwitcher() {
     if (!show) { host.style.display = 'none'; host.innerHTML = ''; return; }
     host.style.display = 'flex';
     const active = sel.value || wids[0];
-    host.innerHTML = wids.map(w => {
+    const pills = wids.map(w => {
         const cls = 'term-pill' + (w === active ? ' active' : '');
         return `<button class="${cls}" data-wid="${attrEsc(w)}" onclick="switchAgentMobile('${_jsStr(w)}')">
           ${_statusDot(w)}<span class="term-pill-label">${escHtml(_paneTitle(w))}</span>
         </button>`;
     }).join('');
+    // The pane header (with its 🔗) is hidden on phones, so the switcher row is the
+    // reachable place to START a share for the active agent. Reuse shareBtnClick +
+    // the gs-share-btn contract so _updateShareBtns keeps its shared (amber .on)
+    // state in sync; on mobile the popover it opens is the bottom-sheet.
+    const shared = _sharedWids.has(active);
+    const shareBtn = `<button class="gs-share-btn tsw-share${shared ? ' on' : ''}" data-wid="${attrEsc(active)}"
+        onclick="shareBtnClick(this,'${_jsStr(active)}')" aria-pressed="${shared ? 'true' : 'false'}"
+        title="Share this session" aria-label="Share this session">&#128279;</button>`;
+    host.innerHTML = `<div class="tsw-pills">${pills}</div>${shareBtn}`;
     _colorTermDots(_agentsCache);   // tint the just-built pill dots
     // Centre the active pill without scrolling the page (no scrollIntoView).
-    const activeEl = host.querySelector('.term-pill.active');
-    if (activeEl) {
-        host.scrollLeft = activeEl.offsetLeft - (host.clientWidth - activeEl.clientWidth) / 2;
+    const scroller = host.querySelector('.tsw-pills');
+    const activeEl = scroller && scroller.querySelector('.term-pill.active');
+    if (scroller && activeEl) {
+        scroller.scrollLeft = activeEl.offsetLeft - (scroller.clientWidth - activeEl.clientWidth) / 2;
     }
 }
 

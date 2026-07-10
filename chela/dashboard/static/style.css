@@ -368,6 +368,22 @@ body {
 .term-share-pop .tsp-stop:hover { background: rgba(248, 81, 73, 0.12); }
 .term-share-pop .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
+/* Mobile: the share popover becomes a bottom-sheet — full-width, pinned to the
+   bottom edge with safe-area padding and 44px+ tap targets. The pane header 🔗 is
+   hidden on phones; this sheet is opened from the switcher-row share trigger (or
+   the palette), and the JS skips the desktop top/right anchor on mobile. */
+@media (max-width: 768px) {
+    .term-share-pop {
+        top: auto; bottom: 0; left: 0; right: 0;
+        width: 100%; max-width: 100%; border-radius: 16px 16px 0 0; border-bottom: 0;
+        padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+        font-size: 13px;
+    }
+    .term-share-pop .tsp-in { padding: 11px 12px; font-size: 14px; }
+    .term-share-pop .tsp-copy { min-height: 44px; padding: 0 16px; }
+    .term-share-pop .tsp-stop { min-height: 48px; margin-top: 14px; }
+}
+
 /* Global active-shares indicator (safety kill-switch) — a persistent topbar pill
    shown whenever ANY session is shared, on every tab + mobile (where the pane
    header 🔗 is hidden). AMBER, not red: the primary user is red-weak and red is
@@ -2226,16 +2242,39 @@ input[type="text"]:focus, textarea:focus, select:focus {
        right under the header. */
     #panel-terminals > div:first-child { display: none; }
 
+    /* Row = a scrollable pill strip + a pinned share trigger (the pane header's
+       🔗 is hidden on phones, so this is the reachable place to start a share). */
     .term-switcher {
         display: flex;
         gap: 6px;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
+        align-items: center;
         margin-bottom: 8px;
         padding-bottom: 2px;
     }
-    .term-switcher::-webkit-scrollbar { display: none; }
+    .tsw-pills {
+        display: flex;
+        gap: 6px;
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    .tsw-pills::-webkit-scrollbar { display: none; }
+    .tsw-share {
+        flex: 0 0 auto;
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 44px; height: 34px; padding: 0 12px;
+        background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
+        border-radius: 16px; font-size: 15px; line-height: 1; cursor: pointer;
+    }
+    /* Shared = amber (matches the global indicator; colorblind-safe = icon+colour,
+       never hue-alone since it also surfaces in the topbar "N sharing" pill). */
+    .tsw-share.on {
+        border-color: var(--warn, #d29922); color: var(--warn, #d29922);
+        background: color-mix(in srgb, var(--warn, #d29922) 12%, transparent);
+    }
+    .tsw-share .gs-share-count { display: none; }   /* count lives in the global pill */
 
     .term-pill {
         flex: 0 0 auto;
