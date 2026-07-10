@@ -139,42 +139,37 @@ def derive_keys(secret: bytes, room: str) -> tuple[bytes, bytes]:
     )
 
 
+def presence_key(secret: bytes, room: str) -> bytes:
+    """k_pres — a SYMMETRIC group key for T_PRESENCE (cursors/facepile). Unlike the
+    directional terminal keys, every peer both seals AND opens presence with this one
+    key, so joiners see each other's pointers, not just the host↔joiner axis. Nonce
+    uniqueness across peers comes from the per-peer stream_id (as with joiners)."""
+    return _hkdf(secret, f"chela-v1|{room}|pres".encode())
+
+
 def _nonce(stream_id: bytes, seq: int) -> bytes:
     return stream_id + seq.to_bytes(8, "little")
 
 
-# --- session (one per peer): send on one key, receive on the other ------------
-class Session:
-    """Seals/opens envelopes for one endpoint. `role` picks which direction key is
-    used for sending vs receiving:
-        host   → send h2j, recv j2h
-        joiner → send j2h, recv h2j
-    `stream_id` is this sender's 4-byte nonce-prefix (host = all-zero; a joiner
-    defaults to a random 4 bytes so concurrent joiners never collide on a k_j2h
-    nonce). recv seq is tracked PER stream id, so multiple senders on the recv key
-    (many joiners → the host) are each gated independently.
+# --- channel: envelope seal/open with per-stream seq gating -------------------
+class _Channel:
+    """Seals/opens envelopes. Subclasses set self._send / self._recv (AESGCM) — a
+    directional pair for Session, one symmetric key for PresenceSession — and call
+    _init_state. recv seq is tracked PER stream id, so multiple concurrent senders
+    on the recv key are each gated independently.
 
     Not thread-safe for concurrent seal() (the send seq is mutable state); the
     caller serialises seal+send so wire order matches seq order for THIS stream."""
 
-    def __init__(self, secret: bytes, room: str, *, role: str,
-                 stream_id: bytes | None = None) -> None:
-        if role not in ("host", "joiner"):
-            raise ValueError("role must be 'host' or 'joiner'")
-        if stream_id is None:
-            stream_id = HOST_STREAM_ID if role == "host" else secrets.token_bytes(STREAM_ID_LEN)
+    def _init_state(self, room: str, stream_id: bytes) -> None:
         if len(stream_id) != STREAM_ID_LEN:
             raise ValueError(f"stream_id must be {STREAM_ID_LEN} bytes")
-        k_h2j, k_j2h = derive_keys(secret, room)
-        send_key, recv_key = (k_h2j, k_j2h) if role == "host" else (k_j2h, k_h2j)
         self.room = room
         self.stream_id = stream_id
         self._room_aad = room.encode("utf-8")
-        self._send = AESGCM(send_key)
-        self._recv = AESGCM(recv_key)
         self._send_seq = 0
         # stream_id -> last accepted seq. First accepted seq for a stream is >= 0;
-        # bounded so a churn of reconnecting joiners can't grow it without limit.
+        # bounded so a churn of reconnecting peers can't grow it without limit.
         self._recv_last: dict[bytes, int] = {}
 
     def seal(self, typ: int, plaintext: bytes) -> bytes:
@@ -207,3 +202,34 @@ class Session:
             self._recv_last.pop(next(iter(self._recv_last)))  # evict oldest-inserted
         self._recv_last[sid] = seq
         return typ, pt
+
+
+# --- session (terminal data): send on one direction key, receive on the other -
+class Session(_Channel):
+    """`role` picks the directional keys: host → send h2j, recv j2h; joiner → send
+    j2h, recv h2j. `stream_id` is this sender's 4-byte nonce-prefix (host = all-zero;
+    a joiner defaults to a random 4 bytes so concurrent joiners never collide)."""
+
+    def __init__(self, secret: bytes, room: str, *, role: str,
+                 stream_id: bytes | None = None) -> None:
+        if role not in ("host", "joiner"):
+            raise ValueError("role must be 'host' or 'joiner'")
+        if stream_id is None:
+            stream_id = HOST_STREAM_ID if role == "host" else secrets.token_bytes(STREAM_ID_LEN)
+        k_h2j, k_j2h = derive_keys(secret, room)
+        send_key, recv_key = (k_h2j, k_j2h) if role == "host" else (k_j2h, k_h2j)
+        self._send = AESGCM(send_key)
+        self._recv = AESGCM(recv_key)
+        self._init_state(room, stream_id)
+
+
+# --- presence (cursors/facepile): one symmetric group key for all peers --------
+class PresenceSession(_Channel):
+    """Every peer seals AND opens T_PRESENCE with the same k_pres, so all peers see
+    each other. stream_id defaults to a random 4 bytes per peer (nonce-unique)."""
+
+    def __init__(self, secret: bytes, room: str, *, stream_id: bytes | None = None) -> None:
+        if stream_id is None:
+            stream_id = secrets.token_bytes(STREAM_ID_LEN)
+        self._send = self._recv = AESGCM(presence_key(secret, room))
+        self._init_state(room, stream_id)

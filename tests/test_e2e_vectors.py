@@ -34,6 +34,13 @@ INPUT_PLAINTEXTS = [
     [b"echo hi\r", b"q"],          # stream B
 ]
 
+# P2 presence: symmetric k_pres channel, one peer's stream, cursor + off-grid null.
+PRES_STREAM = bytes.fromhex("cc0000c3")
+PRESENCE_PLAINTEXTS = [
+    json.dumps({"id": "ab12", "name": "Fox", "x": 0.5, "y": 0.25}).encode(),
+    json.dumps({"id": "ab12", "name": "Fox", "x": None, "y": None}).encode(),   # off-grid
+]
+
 # Representative plaintexts across frame types and sizes, including empty, binary,
 # UTF-8 (box-drawing / emoji), and a large payload (multi-block GCM).
 PLAINTEXTS = [
@@ -57,6 +64,12 @@ def _host_frames() -> list[dict]:
         env = host.seal(typ, pt)
         frames.append({"type": typ, "plaintext": pt, "envelope": env})
     return frames
+
+
+def _pres_frames() -> list[bytes]:
+    """One presence peer (PRES_STREAM) seals its cursor updates on k_pres."""
+    peer = e2e.PresenceSession(SECRET, ROOM, stream_id=PRES_STREAM)
+    return [peer.seal(e2e.T_PRESENCE, pt) for pt in PRESENCE_PLAINTEXTS]
 
 
 # --- pure-Python correctness --------------------------------------------------
@@ -143,6 +156,35 @@ def test_input_roundtrip_joiner_to_host():
     assert host.open(env) == (e2e.T_INPUT, b"whoami\r")
 
 
+def test_presence_symmetric_group_channel():
+    """k_pres is symmetric: two peers on distinct stream ids each seal from seq 0,
+    and any third peer opens BOTH — everyone sees everyone (Figma-style presence)."""
+    p1 = e2e.PresenceSession(SECRET, ROOM, stream_id=bytes.fromhex("11111111"))
+    p2 = e2e.PresenceSession(SECRET, ROOM, stream_id=bytes.fromhex("22222222"))
+    rx = e2e.PresenceSession(SECRET, ROOM)                 # a third peer receiving
+    assert rx.open(p1.seal(e2e.T_PRESENCE, b"a0")) == (e2e.T_PRESENCE, b"a0")
+    assert rx.open(p2.seal(e2e.T_PRESENCE, b"b0")) == (e2e.T_PRESENCE, b"b0")  # seq 0, not a replay
+    # A terminal-key session must NOT open a presence frame (different key).
+    with pytest.raises(e2e.AuthError):
+        e2e.Session(SECRET, ROOM, role="host").open(p1.seal(e2e.T_PRESENCE, b"x"))
+
+
+def test_presence_key_identical_both_sides(interop):
+    assert interop["result"]["presence_key"] == e2e.presence_key(SECRET, ROOM).hex()
+
+
+def test_presence_python_encrypted_js_decrypted(interop):
+    got = interop["result"]["pres_py_to_js"]
+    assert [bytes.fromhex(h) for h in got] == PRESENCE_PLAINTEXTS
+
+
+def test_presence_js_encrypted_python_decrypted(interop):
+    rx = e2e.PresenceSession(SECRET, ROOM)
+    for sealed, pt in zip(interop["result"]["pres_js_to_py"], PRESENCE_PLAINTEXTS):
+        typ, gpt = rx.open(bytes.fromhex(sealed))
+        assert typ == e2e.T_PRESENCE and gpt == pt
+
+
 def test_base32_pairing_code_roundtrip():
     code = e2e.pairing_code(SECRET)
     assert len(code) == 26  # 16 bytes → 26 base32 chars, padding stripped
@@ -178,6 +220,9 @@ def interop() -> dict:
             {"stream_id_hex": STREAM_A.hex(), "plaintexts": [p.hex() for p in INPUT_PLAINTEXTS[0]]},
             {"stream_id_hex": STREAM_B.hex(), "plaintexts": [p.hex() for p in INPUT_PLAINTEXTS[1]]},
         ],
+        "pres_frames": [{"envelope_hex": env.hex()} for env in _pres_frames()],
+        "pres_js_plaintexts": [pt.hex() for pt in PRESENCE_PLAINTEXTS],
+        "pres_stream_id_hex": PRES_STREAM.hex(),
     }
     return {"frames": frames, "result": _run_node(job)}
 

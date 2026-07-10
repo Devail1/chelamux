@@ -64,6 +64,11 @@ export async function deriveKeys(secret, room) {
     j2h: await hkdfKey(secret, `chela-v1|${room}|j2h`),
   };
 }
+// k_pres — one SYMMETRIC group key for T_PRESENCE (every peer seals AND opens with
+// it, so joiners see each other). Mirrors e2e.py presence_key.
+export async function presenceKey(secret, room) {
+  return hkdfKey(secret, `chela-v1|${room}|pres`);
+}
 
 // Diagnostic: the raw HKDF output as hex, for the interop vector suite to assert
 // byte-identical key derivation against Python. Not used by the SPA (its keys are
@@ -76,6 +81,13 @@ export async function keyHex(secret, room) {
     return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, '0')).join('');
   };
   return { h2j: await hex(`chela-v1|${room}|h2j`), j2h: await hex(`chela-v1|${room}|j2h`) };
+}
+// Diagnostic: raw k_pres bytes as hex, for the interop suite to assert Py↔JS parity.
+export async function presenceKeyHex(secret, room) {
+  const base = await crypto.subtle.importKey('raw', secret, 'HKDF', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: SALT, info: te.encode(`chela-v1|${room}|pres`) }, base, KEY_LEN * 8);
+  return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 // seq is a BigInt so the 64-bit counter is exact regardless of magnitude.
@@ -98,27 +110,16 @@ function concat(...arrs) {
   return out;
 }
 
-// --- session ------------------------------------------------------------------
-export class Session {
-  // async because WebCrypto key import is async: `await Session.create(...)`.
-  // streamId: this sender's 4-byte nonce prefix (host all-zero; joiner random by
-  // default so concurrent joiners never collide on a k_j2h nonce).
-  static async create(secret, room, role, streamId) {
-    if (role !== 'host' && role !== 'joiner') throw new Error("role must be 'host' or 'joiner'");
-    if (streamId == null) {
-      streamId = role === 'host' ? HOST_STREAM_ID : crypto.getRandomValues(new Uint8Array(STREAM_ID_LEN));
-    }
+// --- channel: envelope seal/open with per-stream seq gating -------------------
+class Channel {
+  // Subclasses set _sendKey / _recvKey (AES-GCM CryptoKeys) then call _initState.
+  _initState(room, streamId) {
     if (streamId.length !== STREAM_ID_LEN) throw new Error(`streamId must be ${STREAM_ID_LEN} bytes`);
-    const keys = await deriveKeys(secret, room);
-    const s = new Session();
-    s.room = room;
-    s.streamId = streamId;
-    s._roomAad = te.encode(room);
-    s._sendKey = role === 'host' ? keys.h2j : keys.j2h;
-    s._recvKey = role === 'host' ? keys.j2h : keys.h2j;
-    s._sendSeq = 0n;
-    s._recvLast = new Map();   // stream_id hex -> last seq (BigInt), bounded
-    return s;
+    this.room = room;
+    this.streamId = streamId;
+    this._roomAad = te.encode(room);
+    this._sendSeq = 0n;
+    this._recvLast = new Map();   // stream_id hex -> last seq (BigInt), bounded
   }
 
   async seal(typ, plaintext) {
@@ -154,5 +155,37 @@ export class Session {
     }
     this._recvLast.set(sid, seq);
     return [typ, new Uint8Array(pt)];
+  }
+}
+
+// --- session (terminal data): directional keys picked by role -----------------
+export class Session extends Channel {
+  // async because WebCrypto key import is async: `await Session.create(...)`.
+  // streamId: this sender's 4-byte nonce prefix (host all-zero; joiner random).
+  static async create(secret, room, role, streamId) {
+    if (role !== 'host' && role !== 'joiner') throw new Error("role must be 'host' or 'joiner'");
+    if (streamId == null) {
+      streamId = role === 'host' ? HOST_STREAM_ID : crypto.getRandomValues(new Uint8Array(STREAM_ID_LEN));
+    }
+    const keys = await deriveKeys(secret, room);
+    const s = new Session();
+    s._sendKey = role === 'host' ? keys.h2j : keys.j2h;
+    s._recvKey = role === 'host' ? keys.j2h : keys.h2j;
+    s._initState(room, streamId);
+    return s;
+  }
+}
+
+// --- presence: one symmetric group key for all peers --------------------------
+export class PresenceSession extends Channel {
+  // Every peer seals AND opens with k_pres, so all peers see each other. streamId
+  // defaults to a random 4 bytes per peer (nonce-unique). Mirrors e2e.py.
+  static async create(secret, room, streamId) {
+    if (streamId == null) streamId = crypto.getRandomValues(new Uint8Array(STREAM_ID_LEN));
+    const k = await presenceKey(secret, room);
+    const s = new PresenceSession();
+    s._sendKey = s._recvKey = k;
+    s._initState(room, streamId);
+    return s;
   }
 }

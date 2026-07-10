@@ -351,6 +351,12 @@ class Bridge:
             msg = msg.encode("utf-8", "replace")
         if not msg:
             return
+        # Presence rides the SAME room but a different (symmetric k_pres) key, so the
+        # bridge can't decrypt it — skip by the cleartext type byte BEFORE attempting
+        # a decrypt, or every peer cursor would look like a GCM-tag failure and spam
+        # the auth-warn log. Presence is strictly peer-to-peer; the bridge ignores it.
+        if len(msg) >= 2 and msg[1] == e2e.T_PRESENCE:
+            return
         try:
             typ, pt = self._session.open(bytes(msg))
         except e2e.ReplayError:

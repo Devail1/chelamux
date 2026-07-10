@@ -6,7 +6,7 @@
 //             js_plaintexts:[{type, hex}]}
 //   stdout : {base32, keys:{h2j,j2h}, py_to_js:[hex|error],
 //             js_to_py:[{type,seq,envelope_hex}], wrong_code, replay}
-import { Session, keyHex, b32encode, T_INPUT, AuthError, ReplayError } from '../chela/collab-relay/public/e2e.js';
+import { Session, PresenceSession, keyHex, presenceKeyHex, b32encode, T_INPUT, T_PRESENCE, AuthError, ReplayError } from '../chela/collab-relay/public/e2e.js';
 
 const hex = (u8) => [...u8].map((b) => b.toString(16).padStart(2, '0')).join('');
 const unhex = (s) => new Uint8Array((s.match(/../g) || []).map((h) => parseInt(h, 16)));
@@ -59,6 +59,21 @@ const read = () => new Promise((res) => { let d = ''; process.stdin.on('data', (
     const envelopes = [];
     for (const p of st.plaintexts) envelopes.push(hex(await j.seal(T_INPUT, unhex(p))));
     out.js_input.push({ stream_id_hex: st.stream_id_hex, envelopes });
+  }
+
+  // P2 presence: symmetric k_pres. Assert the key matches Python, open Python-sealed
+  // T_PRESENCE, and seal some for Python to open (the browser presence path).
+  out.presence_key = await presenceKeyHex(secret, room);
+  out.pres_py_to_js = [];
+  const presRx = await PresenceSession.create(secret, room);   // any stream id; open reads the sender's
+  for (const f of (job.pres_frames || [])) {
+    try { const [, pt] = await presRx.open(unhex(f.envelope_hex)); out.pres_py_to_js.push(hex(pt)); }
+    catch (e) { out.pres_py_to_js.push('ERR:' + e.constructor.name); }
+  }
+  out.pres_js_to_py = [];
+  if (job.pres_js_plaintexts) {
+    const ph = await PresenceSession.create(secret, room, unhex(job.pres_stream_id_hex));
+    for (const p of job.pres_js_plaintexts) out.pres_js_to_py.push(hex(await ph.seal(T_PRESENCE, unhex(p))));
   }
 
   process.stdout.write(JSON.stringify(out));
