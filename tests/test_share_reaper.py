@@ -93,22 +93,25 @@ def test_revoke_share_is_idempotent(monkeypatch, _isolate):
     assert _isolate == ["@9", "@9"]            # stop_bridge is safe to call twice
 
 
-def test_share_pins_grid(monkeypatch, _isolate):
-    """Turning a share ON must PIN the source window to the presenter's dims, so the
-    tmux window can't float underneath the stream and desync the joiner's grid."""
+def test_share_does_not_resize_owner_window(monkeypatch, _isolate):
+    """Sharing must NEVER touch the owner's live window — no pin on share, no unpin
+    on revoke. A live workflow streams undisturbed; the joiner's grid follows the
+    real source size via the bridge's T_META resend-on-resize instead."""
     monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
     monkeypatch.setattr(dash, "_require_terminals", lambda: None)
-    pins = []
-    monkeypatch.setattr(dash, "_pin_grid", lambda wid, c, r: pins.append((wid, c, r)))
+    touched = []
+    monkeypatch.setattr(dash, "_pin_grid", lambda *a: touched.append(("pin",) + a))
+    monkeypatch.setattr(dash, "_unpin_grid", lambda *a: touched.append(("unpin",) + a))
     monkeypatch.setattr(dash.collab_stream, "start_bridge", lambda wid, on_revoke=None: "CODE")
     monkeypatch.setattr(dash.collab_stream, "join_url", lambda wid: "https://relay/j/room")
 
-    client = dash.app.test_client()
-    resp = client.post("/api/term/@9/share", json={"on": True, "cols": 111, "rows": 22})
-
+    resp = dash.app.test_client().post("/api/term/@9/share", json={"on": True, "cols": 111, "rows": 22})
     assert resp.status_code == 200
-    assert dash._SHARED["@9"] == {"cols": 111, "rows": 22}
-    assert pins == [("@9", 111, 22)]           # pinned to the posted presenter dims
+    assert dash._SHARED["@9"] == {"cols": 111, "rows": 22}   # dims kept as metadata only
+    assert touched == []                                     # window size untouched on share
+
+    dash._revoke_share("@9")
+    assert touched == []                                     # ...and untouched on revoke
 
 
 def test_bridge_resend_on_source_resize(monkeypatch):

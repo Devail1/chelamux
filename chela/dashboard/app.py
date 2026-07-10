@@ -870,16 +870,14 @@ _share_info: dict[str, dict] = {}
 
 
 def _revoke_share(wid: str) -> None:
-    """Fully revoke a share: drop the flag + owner info, restore the dynamic grid,
-    and stop the E2E bridge (abandoning its relay room). Called on manual un-share,
-    the reaper, and the bridge's own fail-closed hook — all idempotent."""
+    """Fully revoke a share: drop the flag + owner info and stop the E2E bridge
+    (abandoning its relay room). Called on manual un-share, the reaper, and the
+    bridge's own fail-closed hook — all idempotent. Touches NO tmux window state:
+    the share never resized the owner's window, so there is nothing to restore (the
+    tailnet presenter-grid path owns its own pin/unpin via /api/term/<wid>/grid)."""
     _SHARED.pop(wid, None)
     _share_info.pop(wid, None)
     _share_dead_since.pop(wid, None)
-    try:
-        _unpin_grid(wid)
-    except Exception:
-        log.debug("share: grid restore failed for %s", wid, exc_info=True)
     collab_stream.stop_bridge(wid)
 
 
@@ -899,19 +897,14 @@ def api_term_share(wid):
     if not on:
         _revoke_share(wid)
         return jsonify({"ok": True, "shared": False})
+    # Record the presenter's pane dims as share metadata only (wall share-state +
+    # tailnet presence). Sharing NEVER resizes the owner's live window: the joiner's
+    # grid FOLLOWS the real source size via the bridge's T_META resend-on-resize
+    # (collab_stream._maybe_resize) — a live workflow must stream undisturbed.
     _SHARED[wid] = {
         "cols": _clamp_dim(data.get("cols"), 20, 500, config.TERM_COLS),
         "rows": _clamp_dim(data.get("rows"), 6, 300, config.TERM_ROWS),
     }
-    # Pin the source window to the presenter's dims for the share's lifetime, so the
-    # tmux window size can't float underneath the stream. A tmux window's size is
-    # shared by all its clients and dynamic (window-size largest): the dashboard's
-    # own view attaching/detaching or an owner browser resize would otherwise reflow
-    # the PTY, desyncing the joiner's grid from the byte stream. _revoke_share unpins.
-    try:
-        _pin_grid(wid, _SHARED[wid]["cols"], _SHARED[wid]["rows"])
-    except Exception:
-        log.debug("share: grid pin failed for %s", wid, exc_info=True)
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
     code = collab_stream.start_bridge(wid, on_revoke=_revoke_share)
