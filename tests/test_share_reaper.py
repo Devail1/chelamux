@@ -117,16 +117,15 @@ def test_share_does_not_resize_owner_window(monkeypatch, _isolate):
     assert touched == []                                     # ...and untouched on revoke
 
 
-def test_bridge_resend_on_source_resize(monkeypatch):
-    """The bridge watches the source window size and resends a fresh keyframe
-    (T_META + full snapshot) ONLY when it changes — so a mid-session resize keeps
-    the joiner's xterm grid in lockstep with the reflowed OUTPUT stream."""
+def test_bridge_resend_meta_on_source_resize(monkeypatch):
+    """The bridge watches the source window size and resends T_META ONLY when it
+    changes — the sole grid-lockstep mechanism (no window pin). The visual repaint
+    rides the live OUTPUT stream; the joiner just needs the new dims."""
     from chela import collab_stream as cs
 
     sent = []
     dims = {"v": (100, 30)}
     monkeypatch.setattr(cs, "_window_dims", lambda wid: dims["v"])
-    monkeypatch.setattr(cs, "_snapshot", lambda wid: b"SNAP")
     b = cs.Bridge("@9")
     monkeypatch.setattr(b, "_seal_send", lambda typ, pt: sent.append(typ))
 
@@ -139,8 +138,38 @@ def test_bridge_resend_on_source_resize(monkeypatch):
 
     dims["v"] = (120, 40)                       # source window resized
     b._maybe_resize()
-    assert sent == [cs.e2e.T_META, cs.e2e.T_OUTPUT]   # one fresh keyframe
+    assert sent == [cs.e2e.T_META]             # one T_META, no capture-pane snapshot
     assert b._last_dims == (120, 40)           # watch advanced, won't re-fire
+
+
+def test_hello_sizes_joiner_and_requests_reattach(monkeypatch):
+    """A cold-join hello sends T_META (size) + the grant state, and asks the ttyd
+    pump to re-attach so tmux paints the joiner a correct full-state keyframe."""
+    from chela import collab_stream as cs
+
+    monkeypatch.setattr(cs, "_window_dims", lambda wid: (100, 30))
+    b = cs.Bridge("@9")
+    sent = []
+    monkeypatch.setattr(b, "_seal_send", lambda typ, pt: sent.append(typ))
+
+    hello = cs.e2e.Session(b.secret, b.room, role="joiner").seal(cs.e2e.T_CTL, b'{"t":"hello"}')
+    b._handle_relay(hello)
+
+    assert b._reattach_req.is_set()            # cold-join asked for a fresh repaint
+    assert cs.e2e.T_META in sent               # joiner sized
+    assert cs.e2e.T_CTL in sent                # grant state pushed
+
+
+def test_stop_broadcasts_ended_frame(monkeypatch):
+    """Stopping a share broadcasts an encrypted T_CTL{ended} so connected joiners
+    show a clean 'ended' state instead of hanging."""
+    from chela import collab_stream as cs
+
+    b = cs.Bridge("@9")
+    sent = []
+    monkeypatch.setattr(b, "_seal_send", lambda typ, pt: sent.append((typ, pt)))
+    b.stop()
+    assert any(t == cs.e2e.T_CTL and b'"ended"' in pt for t, pt in sent)
 
 
 def test_grant_toggles_write_on_shared_wid(monkeypatch, _isolate):

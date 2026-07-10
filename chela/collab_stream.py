@@ -5,12 +5,12 @@ upstream hop app.py ``term_ws`` opens), but — unlike term_ws, which pumps raw
 bytes because the *browser* owns the protocol — this bridge PARSES ttyd frames
 itself and pumps only terminal OUTPUT into a per-share relay room, so a browser
 at ``/j/<room>`` (served by the relay Worker) can watch the live session
-read-only. On a joiner's CTL *hello* it replies with a ``capture-pane`` keyframe,
-so a late or reconnecting join sees the current screen even though the relay
-holds NO history.
-
-NO crypto yet — frames are plaintext. AES-GCM + Python/JS interop vectors are
-CHUNK 2, added once this pipe is proven.
+read-only. On a joiner's CTL *hello* it CYCLES its ttyd connection so tmux
+re-emits its own full-state attach repaint (the keyframe), so a late or
+reconnecting join sees a correctly-initialised screen even though the relay holds
+NO history. (A ``tmux capture-pane`` snapshot was tried first but captures cell
+content only — no alt-screen/scroll-region/cursor state — so an alt-screen TUI's
+absolute-cursor updates smeared onto it; the real attach repaint carries the state.)
 
 ttyd 1.7.7 wire protocol — verified empirically against ~/bin/ttyd's served JS
 and a live handshake probe (see the spike report), NOT assumed:
@@ -25,8 +25,9 @@ and a live handshake probe (see the spike report), NOT assumed:
     OUTPUT '0'+bytes · SET_WINDOW_TITLE '1'+str · SET_PREFERENCES '2'+JSON
 
   A fresh client connection triggers a FULL tmux repaint: the first OUTPUT frame
-  begins ``\\x1b[?1049h\\x1b[2J`` (alt-screen enter + clear + full redraw). We rely
-  on that for the bridge's own first paint; joiners get a capture-pane keyframe.
+  begins ``\\x1b[?1049h\\x1b[2J`` (alt-screen enter + clear + full redraw). This IS
+  the keyframe — on a cold join we re-attach ttyd to make tmux emit it again, and
+  relay it. The owner's separate ttyd client and the window size are untouched.
 
 Relay frames are END-TO-END ENCRYPTED (CHUNK 2). The relay is a dumb opaque
 forwarder that rebroadcasts each frame to the OTHER sockets in the room — it
@@ -34,14 +35,15 @@ never sees plaintext. Every frame is an e2e envelope (see chela/e2e.py):
 ``ver ∥ type ∥ seq ∥ AES-256-GCM ciphertext``. The owner mints a 16-byte pairing
 secret (shown as base32); the joiner pastes it; both HKDF to two per-direction
 keys. The bridge is the HOST peer:
-    host→joiner (key h2j): T_OUTPUT = terminal bytes; T_META = {"cols","rows"} JSON
-    joiner→host (key j2h): T_CTL   = {"t":"hello","cols","rows"} (request a keyframe)
-  A keyframe = a T_META frame + a T_OUTPUT frame of
-  ``\\x1b[2J\\x1b[3J\\x1b[H`` + ``tmux capture-pane -ep`` output. A wrong pairing
+    host→joiner (key h2j): T_OUTPUT = terminal bytes; T_META = {"cols","rows"} JSON;
+                           T_CTL = {"t":"grant","write"} and {"t":"ended"}
+    joiner→host (key j2h): T_CTL = {"t":"hello",…} (cold-join); T_INPUT (write-grant)
+  On a hello we send T_META (dims) + the grant state, then cycle ttyd so its attach
+  repaint (the keyframe) reaches the joiner via the OUTPUT pump. A wrong pairing
   code fails the first GCM tag → we log and drop, never emit garbage.
 
-Read-only: the bridge NEVER sends INPUT to the pty. It DOES decrypt inbound CTL,
-rate-limited so a flood of hellos can't spam capture-pane.
+The bridge decrypts inbound CTL; a flood of hellos can't spam ttyd reattaches
+(rate-limited by REATTACH_DEBOUNCE). INPUT reaches the pty only under a write grant.
 
 Runs standalone for the spike::  python -m chela.collab_stream <wid>
 and exposes start_bridge(wid) / stop_bridge(wid) for app.py to call from the
@@ -65,13 +67,16 @@ OUTPUT = 0x30            # '0'  server→client: terminal output
 SET_WINDOW_TITLE = 0x31  # '1'
 SET_PREFERENCES = 0x32   # '2'
 
-# capture-pane keyframe: clear screen + clear scrollback + cursor home, so the
-# joiner's xterm starts from a known blank state before we paint the snapshot.
-_CLEAR = b"\x1b[2J\x1b[3J\x1b[H"
-
-SNAPSHOT_MIN_INTERVAL = 0.5   # s — floor between capture-pane calls (rate limit)
 RESIZE_POLL_INTERVAL = 0.5    # s — floor between source-window size polls (resize watch)
-RECONNECT_DELAY = 1.5         # s — naive reconnect backoff (spike)
+RECONNECT_DELAY = 1.5         # s — reconnect backoff on a ttyd/relay error
+TTYD_RECV_TIMEOUT = 0.4       # s — ttyd read poll; also bounds cold-join reattach latency
+# Cold-join keyframe = tmux's OWN full-state attach repaint. A joiner hello asks the
+# ttyd pump to cycle its connection so tmux re-emits `\x1b[?1049h…` (alt-screen enter +
+# scroll-region + cursor + content) — the correct frame for an alt-screen TUI, which a
+# capture-pane snapshot (cell content only, no terminal state) cannot reconstruct and
+# which smeared Claude Code's absolute-cursor updates. Honored at most once per
+# REATTACH_DEBOUNCE, so a burst of joins coalesces into a single repaint.
+REATTACH_DEBOUNCE = 1.5       # s
 # Input token bucket (P1.5): a granted joiner may burst up to INPUT_BURST_BYTES,
 # refilling at INPUT_RATE_BPS bytes/s — enough for fast typing and reasonable
 # pastes, a ceiling against a flood. Oversized single frames are dropped outright.
@@ -111,22 +116,6 @@ def _window_dims(wid: str) -> tuple[int, int]:
         return config.TERM_COLS, config.TERM_ROWS
 
 
-def _snapshot(wid: str) -> bytes:
-    """A current-screen keyframe: `tmux capture-pane -e` (SGR colours preserved,
-    UTF-8 intact) of the visible pane — works on the alternate screen too (TUIs
-    like Claude Code), which is exactly the cold-join case. Prefixed with a clear
-    so it overwrites whatever the joiner had. Live frames heal any residual
-    alt-screen/cursor drift on the next repaint."""
-    try:
-        out = subprocess.run(
-            ["tmux", "capture-pane", "-ep", "-t", wid],
-            capture_output=True, timeout=5,
-        )
-        return _CLEAR + out.stdout
-    except Exception:
-        return _CLEAR
-
-
 class Bridge:
     """One ttyd↔relay pump for a single wid. Two sockets: the local ttyd (we read
     its OUTPUT) and the relay room (we publish DATA, and read CTL hellos). Sends
@@ -144,13 +133,14 @@ class Bridge:
         self._stop = threading.Event()
         self._relay = None
         self._relay_lock = threading.Lock()
-        self._last_snapshot = 0.0
-        # Cache the PLAINTEXT snapshot (the expensive capture-pane result), never
-        # the sealed bytes — each send must re-seal with a fresh monotonic seq or
-        # the joiner would reject the resend as a replay.
-        self._cached_snapshot: tuple[int, int, bytes] | None = None  # (cols, rows, bytes)
+        # Cold-join keyframe: a hello sets _reattach_req; the ttyd pump cycles its
+        # connection (rate-limited by REATTACH_DEBOUNCE via _last_reattach) so tmux
+        # re-emits a full-state attach repaint. _last_reattach=0 lets the first join
+        # reattach immediately; a burst then coalesces into one repaint.
+        self._reattach_req = threading.Event()
+        self._last_reattach = 0.0
         # Last source grid we told joiners about, for the resize watch (below). None
-        # until the first keyframe; _maybe_resize resends on any change so the SPA's
+        # until the first T_META; _maybe_resize resends on any change so the SPA's
         # xterm grid stays in lockstep with the live, reflowed OUTPUT stream.
         self._last_dims: tuple[int, int] | None = None
         self._threads: list[threading.Thread] = []
@@ -228,37 +218,34 @@ class Bridge:
         except Exception:
             pass
 
-    def _send_keyframe(self, force: bool = False) -> None:
-        """A T_META frame (grid dims) + a T_OUTPUT capture-pane snapshot, both
-        freshly sealed. Rate-limited: capture-pane runs at most every
-        SNAPSHOT_MIN_INTERVAL; within that window we re-seal the cached plaintext.
-        `force` bypasses the cache — used on a source resize, where the cached
-        snapshot is at the OLD grid and would paint garbled into the new one."""
-        now = time.monotonic()
-        if force or self._cached_snapshot is None or (now - self._last_snapshot) >= SNAPSHOT_MIN_INTERVAL:
-            cols, rows = _window_dims(self.wid)
-            self._cached_snapshot = (cols, rows, _snapshot(self.wid))
-            self._last_snapshot = now
-            self._last_dims = (cols, rows)   # keep the resize watch in lockstep
-        cols, rows, snap = self._cached_snapshot
+    def _send_meta(self) -> None:
+        """Send the current grid dims (T_META) so the joiner sizes its xterm. The
+        visual keyframe rides the OUTPUT stream — either the live app output or, on a
+        cold join, a fresh tmux attach repaint (_request_reattach)."""
+        cols, rows = _window_dims(self.wid)
+        self._last_dims = (cols, rows)   # keep the resize watch in lockstep
         self._seal_send(e2e.T_META, json.dumps({"cols": cols, "rows": rows}).encode("utf-8"))
-        self._seal_send(e2e.T_OUTPUT, snap)
+
+    def _request_reattach(self) -> None:
+        """Ask the ttyd pump to cycle its connection so tmux re-emits a full-state
+        attach repaint — the cold-join keyframe. The pump enforces REATTACH_DEBOUNCE
+        (coalescing a burst of joins), so this setter is a cheap idempotent signal."""
+        self._reattach_req.set()
 
     def _maybe_resize(self) -> None:
-        """Poll the source window size; if it changed, push a fresh keyframe so the
-        joiner's xterm grid follows the reflowed OUTPUT stream. ttyd reflows output
-        to the live PTY on resize but sends no structured size, and the joiner learns
-        the grid ONLY from T_META — so on any change we resend T_META + a full
-        repaint. The share also pins the window (app.py), so in practice this catches
-        the pin's own initial resize and any transient before the grid settles."""
+        """Poll the source window size; on a change, resend T_META so the joiner's
+        xterm grid follows the live, reflowed OUTPUT stream (the app repaints itself
+        on SIGWINCH; the joiner just needs the new dims). ttyd reflows output to the
+        live PTY but sends no structured size, and the joiner learns the grid ONLY
+        from T_META — so this is the sole grid-lockstep mechanism (no window pin)."""
         dims = _window_dims(self.wid)
         if self._last_dims is None:
             self._last_dims = dims
             return
         if dims != self._last_dims:
-            log.info("collab_stream: %s source grid %s -> %s — resending keyframe",
+            log.info("collab_stream: %s source grid %s -> %s — resending T_META",
                      self.wid, self._last_dims, dims)
-            self._send_keyframe(force=True)   # sets _last_dims
+            self._send_meta()   # sets _last_dims
 
     # --- the two pumps -----------------------------------------------------
     def _pump_ttyd_to_relay(self) -> None:
@@ -294,14 +281,26 @@ class Bridge:
                 continue
             with self._ttyd_lock:
                 self._ttyd = up   # publish for the control thread's INPUT forwarding
+            # This fresh attach makes tmux emit a full-state repaint (the cold-join
+            # keyframe); re-sync the write grant to whoever is watching it (P1.5).
+            self._send_grant_state()
             next_resize_check = time.monotonic()
+            reattach = False   # was this disconnect an intentional cold-join reattach?
             try:
                 while not self._stop.is_set():
-                    msg = up.receive(timeout=1.0)
+                    msg = up.receive(timeout=TTYD_RECV_TIMEOUT)
+                    now = time.monotonic()
+                    # Cold-join keyframe: a hello asked us to cycle the connection so
+                    # tmux re-emits its attach repaint. Rate-limited so a burst of
+                    # joins coalesces into one repaint.
+                    if self._reattach_req.is_set() and (now - self._last_reattach) >= REATTACH_DEBOUNCE:
+                        self._reattach_req.clear()
+                        self._last_reattach = now
+                        reattach = True
+                        break   # → finally closes up → reconnect → fresh attach repaint
                     # Watch for a source-window resize (cheap tmux size poll, floored
                     # at RESIZE_POLL_INTERVAL) even mid-output, so a joiner mid-session
                     # isn't left rendering new-size bytes into a stale grid.
-                    now = time.monotonic()
                     if now >= next_resize_check:
                         next_resize_check = now + RESIZE_POLL_INTERVAL
                         self._maybe_resize()
@@ -324,7 +323,8 @@ class Bridge:
                     up.close()
                 except Exception:
                     pass
-            time.sleep(RECONNECT_DELAY)
+            if not reattach:
+                time.sleep(RECONNECT_DELAY)   # error backoff; skip it for a wanted reattach
 
     def _pump_relay_control(self) -> None:
         """Own the relay socket: (re)connect, read CTL hellos, answer with a
@@ -348,7 +348,7 @@ class Bridge:
                 continue
             # On (re)connect, resync any already-open joiner: current grid + write
             # grant. (Genuine reconnects only now — idle no longer drops the socket.)
-            self._send_keyframe()
+            self._send_meta()
             self._send_grant_state()
             try:
                 while not self._stop.is_set():
@@ -402,8 +402,11 @@ class Bridge:
             except Exception:
                 return
             if obj.get("t") == "hello":
-                self._send_keyframe()
-                self._send_grant_state()   # late joiner learns the current write state
+                # Cold join: size the joiner (T_META) + tell it the write state now,
+                # then cycle ttyd so tmux paints it a correct full-state repaint.
+                self._send_meta()
+                self._send_grant_state()
+                self._request_reattach()
 
     # --- lifecycle ---------------------------------------------------------
     def start(self) -> "Bridge":
@@ -427,6 +430,16 @@ class Bridge:
                 log.exception("collab_stream: on_revoke hook failed for %s", self.wid)
 
     def stop(self) -> None:
+        # Proactively tell connected joiners the share is over (encrypted, so only
+        # paired joiners read it) BEFORE tearing the socket down — they show a clean
+        # "ended" state instead of hanging. Best-effort: a joiner that misses it
+        # (relay mid-reconnect) falls back to the SPA's pairing timeout. The relay
+        # holds no history, so nothing lingers for a later joiner to decrypt.
+        try:
+            self._seal_send(e2e.T_CTL, json.dumps({"t": "ended"}).encode("utf-8"))
+            time.sleep(0.15)   # let the frame flush to the relay before we tear the socket down
+        except Exception:
+            pass
         self._stop.set()
         with self._relay_lock:
             try:

@@ -169,7 +169,12 @@
     if (window.visualViewport) window.visualViewport.addEventListener('resize', refit);
 
     // --- crypto + transport ---------------------------------------------------
-    let session = null, ws = null, paired = false, canWrite = false, backoff = 500;
+    let session = null, ws = null, paired = false, canWrite = false, ended = false, backoff = 500;
+    let pairTimer = null;
+    // If no frame decrypts within this window the room is empty/dead (a stopped
+    // share or a bad link) — show 'not found' instead of hanging on 'Deriving keys…'.
+    // Overridable for tests via window.__CHELA_PAIR_MS__.
+    const PAIR_TIMEOUT = Number(window.__CHELA_PAIR_MS__) || 9000;
     const enc = new TextEncoder(), dec = new TextDecoder();
     const modeEl = document.getElementById('mode');
 
@@ -213,14 +218,18 @@
         return; // paired tamper / replay / reorder → drop
       }
       if (!paired) {
-        paired = true; gate.classList.add('hide'); setDot('up', 'live · encrypted');
+        paired = true; clearTimeout(pairTimer); gate.classList.add('hide'); setDot('up', 'live · encrypted');
         try { sessionStorage.setItem(PAIR_KEY, pendingCode); } catch (_) {}
       }
       if (typ === T_OUTPUT) term.write(pt);
       else if (typ === T_META) {
         try { const m = JSON.parse(dec.decode(pt)); applyGrid(m.cols, m.rows); if (m.title) titleEl.textContent = m.title; } catch (_) {}
       } else if (typ === T_CTL) {
-        try { const m = JSON.parse(dec.decode(pt)); if (m.t === 'grant') setWrite(!!m.write); } catch (_) {}
+        try {
+          const m = JSON.parse(dec.decode(pt));
+          if (m.t === 'grant') setWrite(!!m.write);
+          else if (m.t === 'ended') showEnded('This share has ended.');
+        } catch (_) {}
       }
     };
     const connect = () => {
@@ -229,12 +238,12 @@
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => { backoff = 500; if (paired) setDot('up', 'live · encrypted'); hello(); };
       ws.onmessage = (ev) => onFrame(ev.data);
-      ws.onclose = () => { setWrite(false); if (paired) { setDot('down', 'reconnecting…'); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 8000); } };  // host re-sends grant after reconnect hello
+      ws.onclose = () => { setWrite(false); if (ended) return; if (paired) { setDot('down', 'reconnecting…'); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 8000); } };  // host re-sends grant after reconnect hello
       ws.onerror = () => { try { ws.close(); } catch (_) {} };
     };
 
     const failWrongCode = () => {
-      paired = false; setWrite(false);
+      paired = false; setWrite(false); clearTimeout(pairTimer);
       try { ws && ws.close(); } catch (_) {}
       try { sessionStorage.removeItem(PAIR_KEY); } catch (_) {}  // stale/rotated code — don't re-prefill it
       session = null;
@@ -244,9 +253,23 @@
       codeEl.focus(); codeEl.select();
     };
 
+    // The share is over (host broadcast 'ended') OR nothing ever answered (empty/
+    // dead room → pairing timeout). Distinct from wrong-code: the key was fine,
+    // there's just no live share. No reconnect; a fresh code can still retry.
+    const showEnded = (msg) => {
+      ended = true; paired = false; setWrite(false); clearTimeout(pairTimer);
+      try { ws && ws.close(); } catch (_) {}
+      try { sessionStorage.removeItem(PAIR_KEY); } catch (_) {}
+      session = null;
+      gate.classList.remove('hide');
+      setDot('down', 'share ended');
+      errEl.textContent = msg;
+      joinBtn.disabled = false; joinBtn.textContent = 'Join';
+    };
+
     // --- gate: derive keys from the pasted code, then connect -----------------
     const submit = async () => {
-      errEl.textContent = '';
+      errEl.textContent = ''; ended = false;
       pendingCode = codeEl.value.trim();
       let secret;
       try { secret = secretFromCode(codeEl.value); }
@@ -255,6 +278,9 @@
       try { session = await Session.create(secret, room, 'joiner'); }
       catch (e) { errEl.textContent = 'Key derivation failed: ' + (e.message || e); joinBtn.disabled = false; joinBtn.textContent = 'Join'; return; }
       connect();
+      // Arm the dead-room timeout: no decrypted frame within PAIR_TIMEOUT → 'ended'.
+      clearTimeout(pairTimer);
+      pairTimer = setTimeout(() => { if (!paired) showEnded('Share not found — it may have ended, or the link is wrong.'); }, PAIR_TIMEOUT);
     };
     codeEl.addEventListener('input', () => { joinBtn.disabled = codeEl.value.trim().length < 10; errEl.textContent = ''; });
     codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !joinBtn.disabled) submit(); });
