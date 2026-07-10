@@ -17,7 +17,6 @@
   #bar .title { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #bar .spacer { flex:1; }
   #bar .tag { font-size:11px; color:var(--dim); border:1px solid var(--border); border-radius:999px; padding:2px 8px; }
-  #bar .tag.rw { color:var(--ok); border-color:var(--ok); }
   #bar .lock { font-size:11px; color:var(--ok); }
   #dot { width:8px; height:8px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 3px rgba(210,153,34,.15); }
   #dot.up { background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,80,.15); }
@@ -65,7 +64,7 @@
     <span class="title" id="title">shared terminal</span>
     <span class="spacer"></span>
     <span class="lock">🔒 end-to-end</span>
-    <span class="tag" id="mode">read-only</span>
+    <span class="tag">live</span>
     <span id="dot" title="enter code"></span>
   </div>
   <div id="stage"><div id="term"></div></div>
@@ -103,7 +102,7 @@
     const setDot = (cls, t) => { dot.className = cls; dot.title = t; };
 
     const term = new Terminal({
-      disableStdin: true, cursorBlink: false, convertEol: false,
+      cursorBlink: false, convertEol: false,
       fontFamily: 'JetBrains Mono, Menlo, Consolas, monospace', fontSize: 14,
       theme: { background:'#0d1117', foreground:'#c9d1d9', cursor:'#58a6ff', cursorAccent:'#0d1117',
         selectionBackground:'#264f78', black:'#484f58', red:'#ff7b72', green:'#3fb950', yellow:'#d29922',
@@ -169,14 +168,13 @@
     if (window.visualViewport) window.visualViewport.addEventListener('resize', refit);
 
     // --- crypto + transport ---------------------------------------------------
-    let session = null, ws = null, paired = false, canWrite = false, ended = false, backoff = 500;
+    let session = null, ws = null, paired = false, ended = false, backoff = 500;
     let pairTimer = null;
     // If no frame decrypts within this window the room is empty/dead (a stopped
     // share or a bad link) — show 'not found' instead of hanging on 'Deriving keys…'.
     // Overridable for tests via window.__CHELA_PAIR_MS__.
     const PAIR_TIMEOUT = Number(window.__CHELA_PAIR_MS__) || 9000;
     const enc = new TextEncoder(), dec = new TextDecoder();
-    const modeEl = document.getElementById('mode');
 
     // Joiner send path: serialise seal+send so THIS joiner's per-stream seq stays
     // strictly increasing on the wire (the host drops out-of-order seqs). Both the
@@ -189,16 +187,10 @@
       }).catch(() => {});
     };
 
-    // Write mode is owner-granted (a T_CTL grant frame flips it). xterm won't fire
-    // onData while disableStdin is true; canWrite is the belt to that suspenders.
-    const setWrite = (on) => {
-      canWrite = on;
-      term.options.disableStdin = !on;
-      modeEl.textContent = on ? 'write' : 'read-only';
-      modeEl.classList.toggle('rw', on);
-      if (on) term.focus();
-    };
-    term.onData((d) => { if (canWrite) sealSend(T_INPUT, enc.encode(d)); });
+    // Full access: a paired joiner can type. Keystrokes → T_INPUT. Before pair,
+    // session is null so sealSend no-ops; after pair the gate hides and the terminal
+    // is focused, so typing (and scrolling, which the app reads as input) just works.
+    term.onData((d) => sealSend(T_INPUT, enc.encode(d)));
 
     const hello = () => {
       // COLD-JOIN: on connect AND reconnect, ask the host for a keyframe (the relay
@@ -219,17 +211,14 @@
       }
       if (!paired) {
         paired = true; clearTimeout(pairTimer); gate.classList.add('hide'); setDot('up', 'live · encrypted');
+        term.focus();   // full-access: ready to type immediately
         try { sessionStorage.setItem(PAIR_KEY, pendingCode); } catch (_) {}
       }
       if (typ === T_OUTPUT) term.write(pt);
       else if (typ === T_META) {
         try { const m = JSON.parse(dec.decode(pt)); applyGrid(m.cols, m.rows); if (m.title) titleEl.textContent = m.title; } catch (_) {}
       } else if (typ === T_CTL) {
-        try {
-          const m = JSON.parse(dec.decode(pt));
-          if (m.t === 'grant') setWrite(!!m.write);
-          else if (m.t === 'ended') showEnded('This share has ended.');
-        } catch (_) {}
+        try { const m = JSON.parse(dec.decode(pt)); if (m.t === 'ended') showEnded('This share has ended.'); } catch (_) {}
       }
     };
     const connect = () => {
@@ -238,12 +227,12 @@
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => { backoff = 500; if (paired) setDot('up', 'live · encrypted'); hello(); };
       ws.onmessage = (ev) => onFrame(ev.data);
-      ws.onclose = () => { setWrite(false); if (ended) return; if (paired) { setDot('down', 'reconnecting…'); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 8000); } };  // host re-sends grant after reconnect hello
+      ws.onclose = () => { if (ended) return; if (paired) { setDot('down', 'reconnecting…'); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 8000); } };
       ws.onerror = () => { try { ws.close(); } catch (_) {} };
     };
 
     const failWrongCode = () => {
-      paired = false; setWrite(false); clearTimeout(pairTimer);
+      paired = false; clearTimeout(pairTimer);
       try { ws && ws.close(); } catch (_) {}
       try { sessionStorage.removeItem(PAIR_KEY); } catch (_) {}  // stale/rotated code — don't re-prefill it
       session = null;
@@ -257,7 +246,7 @@
     // dead room → pairing timeout). Distinct from wrong-code: the key was fine,
     // there's just no live share. No reconnect; a fresh code can still retry.
     const showEnded = (msg) => {
-      ended = true; paired = false; setWrite(false); clearTimeout(pairTimer);
+      ended = true; paired = false; clearTimeout(pairTimer);
       try { ws && ws.close(); } catch (_) {}
       try { sessionStorage.removeItem(PAIR_KEY); } catch (_) {}
       session = null;

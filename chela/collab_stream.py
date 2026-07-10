@@ -36,14 +36,15 @@ never sees plaintext. Every frame is an e2e envelope (see chela/e2e.py):
 secret (shown as base32); the joiner pastes it; both HKDF to two per-direction
 keys. The bridge is the HOST peer:
     host→joiner (key h2j): T_OUTPUT = terminal bytes; T_META = {"cols","rows"} JSON;
-                           T_CTL = {"t":"grant","write"} and {"t":"ended"}
-    joiner→host (key j2h): T_CTL = {"t":"hello",…} (cold-join); T_INPUT (write-grant)
-  On a hello we send T_META (dims) + the grant state, then cycle ttyd so its attach
-  repaint (the keyframe) reaches the joiner via the OUTPUT pump. A wrong pairing
-  code fails the first GCM tag → we log and drop, never emit garbage.
+                           T_CTL = {"t":"ended"} (share stopped)
+    joiner→host (key j2h): T_CTL = {"t":"hello",…} (cold-join); T_INPUT = keystrokes
+  On a hello we send T_META (dims), then cycle ttyd so its attach repaint (the
+  keyframe) reaches the joiner via the OUTPUT pump. A wrong pairing code fails the
+  first GCM tag → we log and drop, never emit garbage.
 
-The bridge decrypts inbound CTL; a flood of hellos can't spam ttyd reattaches
-(rate-limited by REATTACH_DEBOUNCE). INPUT reaches the pty only under a write grant.
+Full-access: any paired joiner (they hold the code) may type — decrypted T_INPUT is
+forwarded to the pty, capped by a token bucket. A flood of hellos can't spam ttyd
+reattaches (rate-limited by REATTACH_DEBOUNCE).
 
 Runs standalone for the spike::  python -m chela.collab_stream <wid>
 and exposes start_bridge(wid) / stop_bridge(wid) for app.py to call from the
@@ -77,9 +78,9 @@ TTYD_RECV_TIMEOUT = 0.4       # s — ttyd read poll; also bounds cold-join reat
 # which smeared Claude Code's absolute-cursor updates. Honored at most once per
 # REATTACH_DEBOUNCE, so a burst of joins coalesces into a single repaint.
 REATTACH_DEBOUNCE = 1.5       # s
-# Input token bucket (P1.5): a granted joiner may burst up to INPUT_BURST_BYTES,
-# refilling at INPUT_RATE_BPS bytes/s — enough for fast typing and reasonable
-# pastes, a ceiling against a flood. Oversized single frames are dropped outright.
+# Input token bucket: a joiner may burst up to INPUT_BURST_BYTES, refilling at
+# INPUT_RATE_BPS bytes/s — enough for fast typing and reasonable pastes, a ceiling
+# against a flood. Oversized single frames are dropped outright.
 INPUT_RATE_BPS = 4096
 INPUT_BURST_BYTES = 8192
 INPUT_MAX_FRAME = 4096
@@ -147,14 +148,12 @@ class Bridge:
         # Called once when the bridge fails closed on session death, so the caller
         # can revoke the share (app.py: pop _SHARED[wid]). None in standalone use.
         self._on_revoke = on_revoke
-        # P1.5 writable: the live ttyd socket (owned by the output-pump thread, read
-        # by the control thread to forward INPUT), and the owner's write grant. The
-        # grant defaults OFF — read-only by construction until an owner-only Flask
-        # call flips it (set_write). A token bucket caps forwarded input bytes/sec so
-        # a paired joiner can't flood the pty.
+        # Full-access: the live ttyd socket (owned by the output-pump thread, read by
+        # the control thread to forward INPUT). Any paired joiner holds the pairing
+        # code, so any paired joiner may type — a token bucket caps forwarded input
+        # bytes/sec so no joiner can flood the pty.
         self._ttyd = None
         self._ttyd_lock = threading.Lock()
-        self._write = threading.Event()
         self._input_tokens = float(INPUT_BURST_BYTES)
         self._input_tokens_ts = time.monotonic()
 
@@ -170,25 +169,7 @@ class Bridge:
             except Exception:
                 pass
 
-    # --- P1.5 write grant --------------------------------------------------
-    def _send_grant_state(self) -> None:
-        """Tell joiners the current write state (h2j T_CTL). Sent on every grant
-        flip AND after a hello, so a joiner that connects mid-share learns whether
-        it may type without waiting for the next toggle."""
-        self._seal_send(e2e.T_CTL, json.dumps({"t": "grant", "write": self._write.is_set()}).encode("utf-8"))
-
-    def set_write(self, granted: bool) -> bool:
-        """Owner grant/revoke of write access (per-share, tailnet-side). Flips the
-        gate that _handle_relay checks before forwarding any INPUT to the pty, and
-        broadcasts the new state to joiners. Returns the effective state."""
-        if granted:
-            self._write.set()
-        else:
-            self._write.clear()
-        log.info("collab_stream: %s write %s", self.wid, "GRANTED" if granted else "revoked")
-        self._send_grant_state()
-        return self._write.is_set()
-
+    # --- input forwarding (full-access) ------------------------------------
     def _allow_input(self, n: int) -> bool:
         """Token-bucket admission for n input bytes (called under no lock; only the
         control thread touches the bucket)."""
@@ -205,8 +186,8 @@ class Bridge:
 
     def _forward_input(self, data: bytes) -> None:
         """Forward joiner keystrokes to the local ttyd as a client INPUT frame
-        (b'0' + bytes) — ONLY reached while write is granted. Drops oversized or
-        rate-exceeding frames; never blocks the control loop."""
+        (b'0' + bytes). Drops oversized or rate-exceeding frames; never blocks the
+        control loop."""
         if not data or len(data) > INPUT_MAX_FRAME or not self._allow_input(len(data)):
             return
         with self._ttyd_lock:
@@ -281,9 +262,6 @@ class Bridge:
                 continue
             with self._ttyd_lock:
                 self._ttyd = up   # publish for the control thread's INPUT forwarding
-            # This fresh attach makes tmux emit a full-state repaint (the cold-join
-            # keyframe); re-sync the write grant to whoever is watching it (P1.5).
-            self._send_grant_state()
             next_resize_check = time.monotonic()
             reattach = False   # was this disconnect an intentional cold-join reattach?
             try:
@@ -346,10 +324,9 @@ class Bridge:
             except Exception:
                 time.sleep(RECONNECT_DELAY)
                 continue
-            # On (re)connect, resync any already-open joiner: current grid + write
-            # grant. (Genuine reconnects only now — idle no longer drops the socket.)
+            # On (re)connect, resync any already-open joiner with the current grid.
+            # (Genuine reconnects only now — idle no longer drops the socket.)
             self._send_meta()
-            self._send_grant_state()
             try:
                 while not self._stop.is_set():
                     msg = self._relay.receive(timeout=1.0)
@@ -390,11 +367,9 @@ class Bridge:
         except e2e.E2EError:
             return
         if typ == e2e.T_INPUT:
-            # Read-only by construction: forward to the pty ONLY while the owner has
-            # granted write. Ungranted input is silently dropped at this choke point
-            # (never reaches ttyd/tmux) — the single server-side enforcement point.
-            if self._write.is_set():
-                self._forward_input(bytes(pt))
+            # Full-access: any paired joiner may type (they hold the code). The token
+            # bucket in _forward_input is the only limiter.
+            self._forward_input(bytes(pt))
             return
         if typ == e2e.T_CTL:
             try:
@@ -402,10 +377,9 @@ class Bridge:
             except Exception:
                 return
             if obj.get("t") == "hello":
-                # Cold join: size the joiner (T_META) + tell it the write state now,
-                # then cycle ttyd so tmux paints it a correct full-state repaint.
+                # Cold join: size the joiner (T_META), then cycle ttyd so tmux paints
+                # it a correct full-state repaint.
                 self._send_meta()
-                self._send_grant_state()
                 self._request_reattach()
 
     # --- lifecycle ---------------------------------------------------------
@@ -477,14 +451,6 @@ def stop_bridge(wid: str) -> None:
         b = _bridges.pop(wid, None)
     if b:
         b.stop()
-
-
-def set_write(wid: str, granted: bool) -> bool | None:
-    """Owner grant/revoke of write for a shared wid (P1.5). Returns the effective
-    state, or None if no bridge is running for the wid (nothing to grant)."""
-    with _bridges_lock:
-        b = _bridges.get(wid)
-    return b.set_write(granted) if b else None
 
 
 def join_url(wid: str) -> str:

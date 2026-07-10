@@ -374,9 +374,15 @@ function _paneTermDims(wid) {
 // then show the popover; if already shared, just (re)open the popover — never
 // silently stop on a stray click (Stop lives inside the popover).
 async function shareBtnClick(btn, wid) {
-    if (_sharedWids.has(wid)) {
-        let info = {};
-        try { info = (await api('/api/term/' + encodeURIComponent(wid) + '/share-info')) || {}; } catch (_) {}
+    // ADOPT-FIRST: the share lives on the SERVER and survives page refreshes, so
+    // always ask the server before minting. If a share already exists, reopen its
+    // popover (same code) — never re-mint. This makes _sharedWids a mere hint: even
+    // if it is stale (e.g. right after a reload, before /api/agents has seeded it),
+    // a click can't rotate the code or orphan the running bridge.
+    let info = {};
+    try { info = (await api('/api/term/' + encodeURIComponent(wid) + '/share-info')) || {}; } catch (_) {}
+    if (info && info.pairing_code) {
+        _sharedWids.add(wid); _updateShareBtns(wid);
         _sharePopover(btn, wid, info);
         return;
     }
@@ -418,13 +424,13 @@ function _sharePopOutside(e) {
 }
 
 // Popover anchored under the share button: join URL + pairing code (each with a
-// copy button) + read-only badge + Stop sharing. The pairing code is what the
-// joiner pastes to derive the E2E keys — the relay never sees plaintext.
+// copy button) + a full-access badge + Stop sharing. The pairing code is what the
+// joiner pastes to derive the E2E keys — the relay never sees plaintext. A paired
+// joiner has full access (type + scroll); there is no separate grant.
 function _sharePopover(btn, wid, info) {
     _closeSharePopover();
     const url = info && info.join_url ? info.join_url : '';
     const code = info && info.pairing_code ? info.pairing_code : '';
-    let write = !!(info && info.write);
     const row = (label, val, extra) => `
       <label class="tsp-lbl">${label}${extra || ''}</label>
       <div class="tsp-row"><input class="tsp-in" readonly value="${attrEsc(val)}">
@@ -433,12 +439,11 @@ function _sharePopover(btn, wid, info) {
     pop.className = 'term-share-pop';
     pop.innerHTML =
         `<div class="tsp-hd"><span class="tsp-lock">&#128274; end-to-end</span>` +
-        `<span class="tsp-ro${write ? ' rw' : ''}">${write ? 'writable' : 'read-only'}</span></div>` +
+        `<span class="tsp-ro">read + write</span></div>` +
         (url ? row('Join link', url) : '') +
         (code ? row('Pairing code', code, ' <span class="tsp-hint">— needed to decrypt</span>') : '') +
         (!url && !code
             ? `<div class="tsp-warn">Relay not configured — set <code>CHELA_COLLAB_RELAY</code> to stream.</div>` : '') +
-        ((url || code) ? `<button class="tsp-grant">${write ? 'Revoke typing' : 'Allow joiners to type'}</button>` : '') +
         `<button class="tsp-stop">Stop sharing</button>`;
     document.body.appendChild(pop);
     if (btn) {
@@ -455,23 +460,6 @@ function _sharePopover(btn, wid, info) {
             .catch(() => {});
     });
     pop.querySelector('.tsp-stop').onclick = () => _stopShare(wid);
-    // Write-grant toggle (P1.5): flip the owner grant that lets paired joiners type.
-    // Per-share (one grant covers everyone paired); the badge + label mirror state.
-    const grantBtn = pop.querySelector('.tsp-grant');
-    if (grantBtn) grantBtn.onclick = async () => {
-        grantBtn.disabled = true;
-        try {
-            const r = await api('/api/term/' + encodeURIComponent(wid) + '/grant', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ write: !write }),
-            });
-            write = !!(r && r.write);
-        } catch (_) {}
-        grantBtn.disabled = false;
-        grantBtn.textContent = write ? 'Revoke typing' : 'Allow joiners to type';
-        const badge = pop.querySelector('.tsp-ro');
-        if (badge) { badge.textContent = write ? 'writable' : 'read-only'; badge.classList.toggle('rw', write); }
-    };
     setTimeout(() => document.addEventListener('mousedown', _sharePopOutside, true), 0);
 }
 

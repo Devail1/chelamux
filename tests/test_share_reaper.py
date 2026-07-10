@@ -143,8 +143,8 @@ def test_bridge_resend_meta_on_source_resize(monkeypatch):
 
 
 def test_hello_sizes_joiner_and_requests_reattach(monkeypatch):
-    """A cold-join hello sends T_META (size) + the grant state, and asks the ttyd
-    pump to re-attach so tmux paints the joiner a correct full-state keyframe."""
+    """A cold-join hello sends T_META (size) and asks the ttyd pump to re-attach so
+    tmux paints the joiner a correct full-state keyframe."""
     from chela import collab_stream as cs
 
     monkeypatch.setattr(cs, "_window_dims", lambda wid: (100, 30))
@@ -156,8 +156,22 @@ def test_hello_sizes_joiner_and_requests_reattach(monkeypatch):
     b._handle_relay(hello)
 
     assert b._reattach_req.is_set()            # cold-join asked for a fresh repaint
-    assert cs.e2e.T_META in sent               # joiner sized
-    assert cs.e2e.T_CTL in sent                # grant state pushed
+    assert sent == [cs.e2e.T_META]             # joiner sized; no grant frame anymore
+
+
+def test_input_forwarded_without_grant(monkeypatch):
+    """Full-access: a decrypted T_INPUT frame from any paired joiner is forwarded to
+    the pty — no grant plane. (The token bucket is the only limiter.)"""
+    from chela import collab_stream as cs
+
+    b = cs.Bridge("@9")
+    forwarded = []
+    monkeypatch.setattr(b, "_forward_input", lambda data: forwarded.append(data))
+
+    frame = cs.e2e.Session(b.secret, b.room, role="joiner").seal(cs.e2e.T_INPUT, b"ls -la\r")
+    b._handle_relay(frame)
+
+    assert forwarded == [b"ls -la\r"]          # typed straight through, un-gated
 
 
 def test_stop_broadcasts_ended_frame(monkeypatch):
@@ -172,24 +186,10 @@ def test_stop_broadcasts_ended_frame(monkeypatch):
     assert any(t == cs.e2e.T_CTL and b'"ended"' in pt for t, pt in sent)
 
 
-def test_grant_toggles_write_on_shared_wid(monkeypatch, _isolate):
-    """POST /grant flips the bridge write gate and records it in the owner info."""
-    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
-    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
-    calls = []
-    monkeypatch.setattr(dash.collab_stream, "set_write", lambda wid, on: calls.append((wid, on)) or on)
-    dash._SHARED["@9"] = {"cols": 100, "rows": 30}
-    dash._share_info["@9"] = {"pairing_code": "X", "join_url": "u", "write": False}
-
-    r = dash.app.test_client().post("/api/term/@9/grant", json={"write": True})
-
-    assert r.status_code == 200 and r.get_json()["write"] is True
-    assert calls == [("@9", True)]                 # bridge grant called
-    assert dash._share_info["@9"]["write"] is True  # mirrored for the popover
-
-
-def test_grant_rejected_when_not_shared(monkeypatch, _isolate):
+def test_grant_endpoint_is_gone(monkeypatch, _isolate):
+    """The write-grant plane was removed (full-access) — /grant must 404/405."""
     monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
     monkeypatch.setattr(dash, "_require_terminals", lambda: None)
     r = dash.app.test_client().post("/api/term/@9/grant", json={"write": True})
-    assert r.status_code == 409                    # no share → nothing to grant
+    assert r.status_code in (404, 405)
+    assert not hasattr(dash.collab_stream, "set_write")   # helper deleted too
