@@ -330,6 +330,37 @@ body {
     font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* Share popover — fixed, anchored under the share button (or top-right when
+   invoked from the command palette). Shows the E2E join link + pairing code. */
+.term-share-pop {
+    position: fixed; z-index: 100000; width: 320px; max-width: 92vw;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6); padding: 12px 13px;
+    font-size: 12px;
+}
+.term-share-pop .tsp-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.term-share-pop .tsp-lock { font-weight: 600; color: var(--green, #3fb950); }
+.term-share-pop .tsp-ro { margin-left: auto; font-size: 10.5px; color: var(--muted, #7d8590);
+    border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+.term-share-pop .tsp-lbl { display: block; margin: 8px 0 4px; font-size: 10.5px; color: var(--muted, #7d8590); }
+.term-share-pop .tsp-hint { opacity: 0.8; }
+.term-share-pop .tsp-row { display: flex; gap: 6px; }
+.term-share-pop .tsp-in {
+    flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px;
+    background: var(--bg, #0a0c11); color: var(--text); border: 1px solid var(--border);
+    font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace;
+}
+.term-share-pop .tsp-code { letter-spacing: 0.06em; }
+.term-share-pop .tsp-copy, .term-share-pop .tsp-stop {
+    cursor: pointer; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 11.5px; padding: 6px 10px;
+}
+.term-share-pop .tsp-copy:hover { border-color: var(--accent); }
+.term-share-pop .tsp-stop { width: 100%; margin-top: 12px; color: var(--red, #f85149); border-color: rgba(248, 81, 73, 0.4); }
+.term-share-pop .tsp-stop:hover { background: rgba(248, 81, 73, 0.12); }
+.term-share-pop .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
+
 /* Kill-confirm popup, centered over the pane (reuses .kanban-confirm styling).
    Absolute so it never reflows / reloads the iframe underneath. The compound
    selector outranks the later `.kanban-confirm` rule (whose translucent red bg

@@ -736,7 +736,11 @@ function _paletteItems() {
             items.push({ icon: shared ? '◉' : '⤴',
                          title: (shared ? 'Stop sharing ' : 'Share ') + _agentLabel(a),
                          sub: shared ? 'shared session' : 'session',
-                         run: () => toggleShare(null, a.window_id) });
+                         run: () => {
+                             const sel = '.gs-share-btn[data-wid="' + (window.CSS && CSS.escape ? CSS.escape(a.window_id) : a.window_id) + '"]';
+                             const btn = document.querySelector(sel);
+                             if (shared) _stopShare(a.window_id); else shareBtnClick(btn, a.window_id);
+                         } });
         });
     }
 

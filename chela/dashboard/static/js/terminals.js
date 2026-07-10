@@ -370,13 +370,19 @@ function _paneTermDims(wid) {
     return dims;
 }
 
-async function toggleShare(btn, wid) {
-    const on = !_sharedWids.has(wid);
-    const body = { on };
-    if (on) {
-        const d = _paneTermDims(wid);
-        if (d) { body.cols = d.cols; body.rows = d.rows; }
+// Share button: turn sharing ON (mint the E2E bridge, get join URL + pairing code)
+// then show the popover; if already shared, just (re)open the popover — never
+// silently stop on a stray click (Stop lives inside the popover).
+async function shareBtnClick(btn, wid) {
+    if (_sharedWids.has(wid)) {
+        let info = {};
+        try { info = (await api('/api/term/' + encodeURIComponent(wid) + '/share-info')) || {}; } catch (_) {}
+        _sharePopover(btn, wid, info);
+        return;
     }
+    const body = { on: true };
+    const d = _paneTermDims(wid);
+    if (d) { body.cols = d.cols; body.rows = d.rows; }
     let resp;
     try {
         resp = await api('/api/term/' + encodeURIComponent(wid) + '/share', {
@@ -385,16 +391,69 @@ async function toggleShare(btn, wid) {
         });
     } catch (e) { _termShareToast(btn, 'Share failed'); return; }
     if (!resp || !resp.ok) { _termShareToast(btn, (resp && resp.error) || 'Share failed'); return; }
-    if (on) _sharedWids.add(wid); else { _sharedWids.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid); }
+    _sharedWids.add(wid);
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
-    if (on) {
-        const link = _termLink(wid);
-        try { await navigator.clipboard.writeText(link); _termShareToast(btn, 'Link copied'); }
-        catch (_) { _termShareToast(btn, link); }   // clipboard blocked → show the link
-    } else {
-        _termShareToast(btn, 'Sharing stopped');
+    _sharePopover(btn, wid, resp);   // resp carries join_url + pairing_code
+}
+
+async function _stopShare(wid) {
+    try {
+        await api('/api/term/' + encodeURIComponent(wid) + '/share', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ on: false }),
+        });
+    } catch (_) {}
+    _sharedWids.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
+    _reloadPaneFrame(wid); _updateShareBtns(wid); _closeSharePopover();
+}
+
+function _closeSharePopover() {
+    document.querySelectorAll('.term-share-pop').forEach(p => p.remove());
+    document.removeEventListener('mousedown', _sharePopOutside, true);
+}
+function _sharePopOutside(e) {
+    const p = document.querySelector('.term-share-pop');
+    if (p && !p.contains(e.target) && !e.target.closest('.gs-share-btn')) _closeSharePopover();
+}
+
+// Popover anchored under the share button: join URL + pairing code (each with a
+// copy button) + read-only badge + Stop sharing. The pairing code is what the
+// joiner pastes to derive the E2E keys — the relay never sees plaintext.
+function _sharePopover(btn, wid, info) {
+    _closeSharePopover();
+    const url = info && info.join_url ? info.join_url : '';
+    const code = info && info.pairing_code ? info.pairing_code : '';
+    const row = (label, val, extra) => `
+      <label class="tsp-lbl">${label}${extra || ''}</label>
+      <div class="tsp-row"><input class="tsp-in" readonly value="${attrEsc(val)}">
+        <button class="tsp-copy" data-copy="${attrEsc(val)}">Copy</button></div>`;
+    const pop = document.createElement('div');
+    pop.className = 'term-share-pop';
+    pop.innerHTML =
+        `<div class="tsp-hd"><span class="tsp-lock">&#128274; end-to-end</span>` +
+        `<span class="tsp-ro">read-only</span></div>` +
+        (url ? row('Join link', url) : '') +
+        (code ? row('Pairing code', code, ' <span class="tsp-hint">— needed to decrypt</span>') : '') +
+        (!url && !code
+            ? `<div class="tsp-warn">Relay not configured — set <code>CHELA_COLLAB_RELAY</code> to stream.</div>` : '') +
+        `<button class="tsp-stop">Stop sharing</button>`;
+    document.body.appendChild(pop);
+    if (btn) {
+        const r = btn.getBoundingClientRect();
+        pop.style.top = (r.bottom + 6) + 'px';
+        pop.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+    } else {                       // palette-invoked (no anchor button) → top-right
+        pop.style.top = '52px';
+        pop.style.right = '16px';
     }
+    pop.querySelectorAll('.tsp-copy').forEach(b => b.onclick = () => {
+        navigator.clipboard.writeText(b.dataset.copy)
+            .then(() => { b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1500); })
+            .catch(() => {});
+    });
+    pop.querySelector('.tsp-stop').onclick = () => _stopShare(wid);
+    setTimeout(() => document.addEventListener('mousedown', _sharePopOutside, true), 0);
 }
 
 // Throwaway toast bubble anchored to the pane header — same plain-DOM affordance
@@ -456,7 +515,7 @@ function _updateShareBtns(wid) {
 function _shareBtnHTML(wid) {
     const on = _sharedWids.has(wid);
     return `<button class="gs-share-btn${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
-      onclick="toggleShare(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
+      onclick="shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
       title="Share this session">&#128279;<span class="gs-share-count" hidden></span></button>`;
 }
 

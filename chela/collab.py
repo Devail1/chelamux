@@ -101,11 +101,13 @@ def instance_id() -> str:
 
 
 def room_id(wid: str) -> str:
-    """Relay-safe, instance-namespaced room id for a tmux window id, e.g.
-    ``a1b2c3d4e5f6a7b8-@11``. MUST match presence.js, which builds the identical
-    string from the injected prefix — both sanitize ``<prefix>-<wid>`` to the
-    relay's allowed charset ``[\\w@.\\-]``."""
-    return _UNSAFE_ROOM_CHARS.sub("_", f"{instance_id()}-{wid or 'default'}")
+    """Relay-safe room id for a tmux window id, e.g. ``ccbot-@11``. Namespaced by
+    the NON-SECRET tmux session name (not the instance secret): with E2E in place
+    (chela/e2e.py) room secrecy buys nothing — the pairing key is the boundary, so
+    a guessed room only yields ciphertext — and injecting the old secret into every
+    ttyd page was a needless leak. MUST match presence.js, which builds the
+    identical string from the injected prefix, both sanitized to ``[\\w@.\\-]``."""
+    return _UNSAFE_ROOM_CHARS.sub("_", f"{config.TMUX_SESSION}-{wid or 'default'}")
 
 
 # --- Yjs awareness wire encoding (LEB128 + JSON) ---------------------------

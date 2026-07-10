@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, collab, context, discovery, dispatcher, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, collab, collab_stream, context, discovery, dispatcher, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -191,6 +191,9 @@ def api_agents():
             "recap_ts": transcript["recap_ts"],
             "pr": transcript["pr"],
         })
+
+    # Belt-and-braces share revocation on session end (see _reap_shares).
+    _reap_shares({a["window_id"]: a["claude_running"] for a in agents})
 
     return jsonify(agents)
 
@@ -592,13 +595,14 @@ _TERM_FONT_PREF_SHIM = (
 # Presence/cursor frames ride the dumb CF relay (chela/collab-relay); this only
 # ships the client.
 def _term_presence_shim(wid: str) -> str:
-    """Per-wid presence config + client. Carries the relay + per-instance room
-    prefix + grid size + this window's live "shared" flag; presence.js gates
-    solely on that flag."""
+    """Per-wid presence config + client. Carries the relay + NON-SECRET room prefix
+    (the tmux session name, mirroring collab.room_id — the old instance secret is no
+    longer injected into ttyd pages, closing that leak) + grid size + this window's
+    live "shared" flag; presence.js gates solely on that flag."""
     cols, rows = _dims_for(wid)
     cfg = json.dumps({
         "relay": config.COLLAB_RELAY,
-        "prefix": collab.instance_id(),
+        "prefix": config.TMUX_SESSION,
         "cols": cols,
         "rows": rows,
         "shared": wid in _SHARED,
@@ -775,6 +779,30 @@ def api_term_clients():
 # under CPython's GIL, so no lock needed.
 _SHARED: dict[str, dict] = {}
 
+# Reaper bookkeeping: wid -> monotonic time first seen dead, so a brief blip
+# (agent restart, pid-detection race) doesn't revoke a live share.
+_share_dead_since: dict[str, float] = {}
+_SHARE_REAP_GRACE = 8.0  # s a shared wid may be gone/agentless before revoke
+
+
+def _reap_shares(claude_running_by_wid: dict[str, bool]) -> None:
+    """Deferred half of "no share outlives its session": each /api/agents tick,
+    reconcile _SHARED against reality and auto-revoke any shared wid whose window
+    is gone or whose agent has ended (claude process exited). A short grace rides
+    out restart blips. Complements the bridge's own fail-closed (which catches the
+    ttyd-reaped case even when nobody is polling)."""
+    port_map = _terminals_port_map()
+    now = time.monotonic()
+    for wid in list(_SHARED):
+        alive = wid in port_map and claude_running_by_wid.get(wid, False)
+        if alive:
+            _share_dead_since.pop(wid, None)
+            continue
+        first = _share_dead_since.setdefault(wid, now)
+        if now - first >= _SHARE_REAP_GRACE:
+            log.info("share reaper: revoking %s (window gone or agent ended)", wid)
+            _revoke_share(wid)
+
 
 def _clamp_dim(v, lo, hi, default):
     try:
@@ -835,38 +863,69 @@ def api_term_grid(wid):
         return jsonify({"error": str(e)}), 500
 
 
+# Owner-only share info (join URL + base32 pairing code), kept OUT of _SHARED and
+# every broadcast report (/api/agents, /api/term/shared) — the pairing code is the
+# capability, so only the authed owner sees it, via api_term_share_info.
+_share_info: dict[str, dict] = {}
+
+
+def _revoke_share(wid: str) -> None:
+    """Fully revoke a share: drop the flag + owner info, restore the dynamic grid,
+    and stop the E2E bridge (abandoning its relay room). Called on manual un-share,
+    the reaper, and the bridge's own fail-closed hook — all idempotent."""
+    _SHARED.pop(wid, None)
+    _share_info.pop(wid, None)
+    _share_dead_since.pop(wid, None)
+    try:
+        _unpin_grid(wid)
+    except Exception:
+        log.debug("share: grid restore failed for %s", wid, exc_info=True)
+    collab_stream.stop_bridge(wid)
+
+
 @app.route("/api/term/<wid>/share", methods=["POST"])
 @require_auth
 def api_term_share(wid):
-    """Turn sharing on/off. On: remember the presenter's pane dims ({cols,rows},
-    captured client-side at share time) so joiners pin to the master's grid, and
-    activate presence on a clean /term/<wid>/ link. Off: truly revoke (presence.js
-    gates on the injected flag) and restore dynamic grid. The pane's iframe is
-    reloaded client-side to re-serve the page with the new flag."""
+    """Turn sharing on/off. On: remember the presenter's pane dims, mint an E2E
+    bridge (pumps the terminal, encrypted, into a per-share relay room) and return
+    its join URL + base32 pairing code — the joiner pastes the code to derive keys.
+    Off: fully revoke — stop the bridge, abandon the room, restore the grid. The
+    pane's iframe is reloaded client-side to re-serve the page with the new flag."""
     _require_terminals()
     if wid not in _terminals_port_map():
         abort(404)
     data = request.get_json(force=True) or {}
     on = bool(data.get("on", True))
-    if on:
-        _SHARED[wid] = {
-            "cols": _clamp_dim(data.get("cols"), 20, 500, config.TERM_COLS),
-            "rows": _clamp_dim(data.get("rows"), 6, 300, config.TERM_ROWS),
-        }
-    else:
-        _SHARED.pop(wid, None)
-        try:
-            _unpin_grid(wid)  # explicit grid restore on un-share
-        except Exception:
-            log.debug("share: grid restore failed for %s", wid, exc_info=True)
-    return jsonify({"ok": True, "shared": on})
+    if not on:
+        _revoke_share(wid)
+        return jsonify({"ok": True, "shared": False})
+    _SHARED[wid] = {
+        "cols": _clamp_dim(data.get("cols"), 20, 500, config.TERM_COLS),
+        "rows": _clamp_dim(data.get("rows"), 6, 300, config.TERM_ROWS),
+    }
+    # Start the E2E stream bridge; on_revoke fires if it fails closed on session
+    # death, so a share can never outlive its terminal (see collab_stream).
+    code = collab_stream.start_bridge(wid, on_revoke=_revoke_share)
+    info = {"pairing_code": code, "join_url": collab_stream.join_url(wid)} if code else {}
+    _share_info[wid] = info
+    return jsonify({"ok": True, "shared": True, **info})
+
+
+@app.route("/api/term/<wid>/share-info")
+@require_auth
+def api_term_share_info(wid):
+    """Owner-only: the join URL + pairing code for a currently-shared wid, so the
+    share popover can reopen without re-sharing (which would rotate the code)."""
+    _require_terminals()
+    return jsonify(_share_info.get(wid, {}))
 
 
 @app.route("/api/term/shared")
 @require_auth
 def api_term_shared():
     """Currently-shared window ids → their master dims, so the wall restores
-    share-button state on load / across reloads."""
+    share-button state on load / across reloads. Pairing codes are deliberately
+    NOT here — they live only in _share_info (owner-only)."""
     _require_terminals()
     return jsonify(_SHARED)
 
