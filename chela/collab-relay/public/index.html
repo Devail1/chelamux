@@ -35,7 +35,9 @@
   #card h1 { margin:0 0 4px; font-size:17px; }
   #card h1 b { color:var(--accent); }
   #card p { margin:0 0 18px; color:var(--dim); font-size:12.5px; }
-  #code { width:100%; padding:11px 12px; font:600 15px/1 ui-monospace,Menlo,Consolas,monospace;
+  /* font-size MUST be >=16px: iOS Safari auto-zooms the viewport when focusing an
+     input smaller than 16px, and that zoom persists after the gate closes. */
+  #code { width:100%; padding:11px 12px; font:600 16px/1 ui-monospace,Menlo,Consolas,monospace;
     letter-spacing:.12em; text-transform:uppercase; color:var(--fg); background:#0a0c11;
     border:1px solid var(--border); border-radius:8px; outline:none; }
   #code:focus { border-color:var(--accent); }
@@ -77,6 +79,11 @@
     const room = decodeURIComponent((location.pathname.match(/\/j\/([^/]+)/) || [, ''])[1]);
     const WS = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/room/' + room;
     const BAR = 34;
+    // A proven pairing code is stashed per-room so a page refresh doesn't force
+    // re-entry. sessionStorage (tab-scoped, cleared on tab close), NOT the URL
+    // fragment — a #code would leak the key into the shareable link.
+    const PAIR_KEY = 'chela_pair_' + room;
+    let pendingCode = '';
     const dot = document.getElementById('dot');
     const gate = document.getElementById('gate');
     const errEl = document.getElementById('err');
@@ -97,16 +104,50 @@
     term.open(document.getElementById('term'));
 
     // Letterbox the FIXED master grid by scaling fontSize (never CSS transform).
+    // KEEP one shared master grid — TUIs can't reflow client-side and writable
+    // mode (P1.5) needs a single grid so cursor/selection stay aligned.
     let grid = { cols: 80, rows: 24 };
+    const MINF = 6, MAXF = 40;
+    const stage = document.getElementById('stage');
     const fitFont = () => {
       const screen = term.element && term.element.querySelector('.xterm-screen');
       if (!screen) return;
       const cur = term.options.fontSize || 14, sw = screen.offsetWidth, sh = screen.offsetHeight;
       if (!sw || !sh) return;
-      const next = Math.max(6, Math.min(40, Math.floor(cur * Math.min(innerWidth / sw, (innerHeight - BAR) / sh))));
-      if (next !== cur) term.options.fontSize = next;
+      // Fit to the LAYOUT viewport, made ZOOM-INVARIANT. visualViewport.{width,height}
+      // shrink under a pinch OR an iOS input auto-zoom, but width*scale (≈ height*scale)
+      // recovers the unzoomed layout size. So a stuck input-zoom no longer starves the
+      // fit (the old `scale > 1` guard bailed every frame and the font never shrank),
+      // and a deliberate user pinch isn't fought — the computed font is identical either
+      // way, so the pinch just magnifies pixels. offsetWidth/Height are layout px too, so
+      // both sides of the ratio share units.
+      const vv = window.visualViewport;
+      const availW = vv ? vv.width * vv.scale : innerWidth;
+      const availH = (vv ? vv.height * vv.scale : innerHeight) - BAR;
+      if (availW <= 0 || availH <= 0) return;
+      const next = Math.max(MINF, Math.min(MAXF, Math.floor(cur * Math.min(availW / sw, availH / sh))));
+      if (next !== cur) { term.options.fontSize = next; return; }  // re-measured next frame
+      // Converged. Pan fallback: if the grid still overflows at MINF (wide grid on a
+      // narrow phone), scroll from the top-left of the OVERFLOWING axis — a centred flex
+      // item can't be scrolled to reveal edges clipped centre-out. Centre the other axis.
+      const tw = term.element.offsetWidth, th = term.element.offsetHeight;
+      const overX = tw > availW + 1, overY = th > availH + 1;
+      stage.style.overflowX = overX ? 'auto' : 'hidden';
+      stage.style.overflowY = overY ? 'auto' : 'hidden';
+      stage.style.justifyContent = overX ? 'flex-start' : 'center';
+      stage.style.alignItems = overY ? 'flex-start' : 'center';
     };
-    const refit = () => requestAnimationFrame(() => { fitFont(); requestAnimationFrame(fitFont); });
+    // fontSize changes reflow the grid, so re-measure until the font settles, then
+    // the final pass lands on the converged branch above and sets the pan/overflow.
+    const refit = () => {
+      let tries = 0;
+      const step = () => {
+        const before = term.options.fontSize;
+        fitFont();
+        if (term.options.fontSize !== before && ++tries < 8) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    };
     const applyGrid = (cols, rows) => {
       if (!cols || !rows) return;
       grid = { cols, rows };
@@ -114,6 +155,8 @@
       refit();
     };
     addEventListener('resize', refit);
+    addEventListener('orientationchange', refit);
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', refit);
 
     // --- crypto + transport ---------------------------------------------------
     let session = null, ws = null, paired = false, backoff = 500;
@@ -139,7 +182,10 @@
         if (e instanceof AuthError && !paired) return failWrongCode();
         return; // paired tamper / replay / reorder → drop
       }
-      if (!paired) { paired = true; gate.classList.add('hide'); setDot('up', 'live · encrypted'); }
+      if (!paired) {
+        paired = true; gate.classList.add('hide'); setDot('up', 'live · encrypted');
+        try { sessionStorage.setItem(PAIR_KEY, pendingCode); } catch (_) {}
+      }
       if (typ === T_OUTPUT) term.write(pt);
       else if (typ === T_META) {
         try { const m = JSON.parse(dec.decode(pt)); applyGrid(m.cols, m.rows); if (m.title) titleEl.textContent = m.title; } catch (_) {}
@@ -158,6 +204,7 @@
     const failWrongCode = () => {
       paired = false;
       try { ws && ws.close(); } catch (_) {}
+      try { sessionStorage.removeItem(PAIR_KEY); } catch (_) {}  // stale/rotated code — don't re-prefill it
       session = null;
       gate.classList.remove('hide');
       errEl.textContent = 'Wrong pairing code — that key can’t decrypt this stream.';
@@ -168,6 +215,7 @@
     // --- gate: derive keys from the pasted code, then connect -----------------
     const submit = async () => {
       errEl.textContent = '';
+      pendingCode = codeEl.value.trim();
       let secret;
       try { secret = secretFromCode(codeEl.value); }
       catch (e) { errEl.textContent = (e instanceof BadFrame) ? 'That doesn’t look like a valid code.' : String(e.message || e); return; }
@@ -179,7 +227,19 @@
     codeEl.addEventListener('input', () => { joinBtn.disabled = codeEl.value.trim().length < 10; errEl.textContent = ''; });
     codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !joinBtn.disabled) submit(); });
     joinBtn.addEventListener('click', submit);
-    codeEl.focus();
+
+    // Refresh continuity: if this tab already proved a code for this room, prefill
+    // and auto-join. A stale code (host rotated the share) just fails the first GCM
+    // tag → failWrongCode clears the store and shows the gate. Self-correcting.
+    let stored = '';
+    try { stored = sessionStorage.getItem(PAIR_KEY) || ''; } catch (_) {}
+    if (stored) {
+      codeEl.value = stored;
+      joinBtn.disabled = stored.length < 10;
+      submit();
+    } else {
+      codeEl.focus();
+    }
   </script>
 </body>
 </html>
