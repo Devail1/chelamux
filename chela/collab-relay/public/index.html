@@ -17,6 +17,7 @@
   #bar .title { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #bar .spacer { flex:1; }
   #bar .tag { font-size:11px; color:var(--dim); border:1px solid var(--border); border-radius:999px; padding:2px 8px; }
+  #bar .facepile { display:inline-flex; align-items:center; height:22px; }
   #bar .lock { font-size:11px; color:var(--ok); }
   #dot { width:8px; height:8px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 3px rgba(210,153,34,.15); }
   #dot.up { background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,80,.15); }
@@ -50,6 +51,9 @@
     letter-spacing:.12em; text-transform:uppercase; color:var(--fg); background:#0a0c11;
     border:1px solid var(--border); border-radius:8px; outline:none; }
   #code:focus { border-color:var(--accent); }
+  #name { width:100%; padding:10px 12px; margin-bottom:10px; font:500 16px system-ui;
+    color:var(--fg); background:#0a0c11; border:1px solid var(--border); border-radius:8px; outline:none; }
+  #name:focus { border-color:var(--accent); }
   #join { margin-top:14px; width:100%; padding:11px; font:600 14px system-ui; color:#04101f;
     background:var(--accent); border:0; border-radius:8px; cursor:pointer; }
   #join:disabled { opacity:.5; cursor:default; }
@@ -65,6 +69,7 @@
     <span class="spacer"></span>
     <span class="lock">🔒 end-to-end</span>
     <span class="tag">live</span>
+    <span class="facepile" id="facepile"></span>
     <span id="dot" title="enter code"></span>
   </div>
   <div id="stage"><div id="term"></div></div>
@@ -74,6 +79,8 @@
       <h1>Join <b>chela</b> terminal</h1>
       <p>End-to-end encrypted. Paste the pairing code the host gave you — the relay never sees the stream.</p>
       <div class="lockrow">🔒 <span>AES-256-GCM · <b>keys derived in your browser</b></span></div>
+      <input id="name" autocomplete="off" maxlength="24" spellcheck="false"
+             placeholder="Your name (optional)" aria-label="your name">
       <input id="code" autocomplete="off" autocapitalize="characters" spellcheck="false"
              placeholder="PAIRING CODE" aria-label="pairing code">
       <button id="join" disabled>Join</button>
@@ -83,7 +90,9 @@
 
   <script src="/vendor/xterm.js"></script>
   <script type="module">
-    import { Session, secretFromCode, T_OUTPUT, T_INPUT, T_META, T_CTL, AuthError, BadFrame } from '/e2e.js';
+    import { Session, PresenceSession, secretFromCode, T_OUTPUT, T_INPUT, T_META, T_PRESENCE, T_CTL, AuthError, BadFrame } from '/e2e.js';
+    import { identity, saveName, autoName, colorForId, PeerStore, throttle, toNorm, fromNorm,
+             makePointer, renderFacepile, PRESENCE_TIMEOUT_MS, HEARTBEAT_MS } from '/presence-core.js';
 
     const room = decodeURIComponent((location.pathname.match(/\/j\/([^/]+)/) || [, ''])[1]);
     const WS = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/room/' + room;
@@ -97,6 +106,7 @@
     const gate = document.getElementById('gate');
     const errEl = document.getElementById('err');
     const codeEl = document.getElementById('code');
+    const nameEl = document.getElementById('name');
     const joinBtn = document.getElementById('join');
     const titleEl = document.getElementById('title');
     const setDot = (cls, t) => { dot.className = cls; dot.title = t; };
@@ -168,7 +178,7 @@
     if (window.visualViewport) window.visualViewport.addEventListener('resize', refit);
 
     // --- crypto + transport ---------------------------------------------------
-    let session = null, ws = null, paired = false, ended = false, backoff = 500;
+    let session = null, presence = null, secret = null, ws = null, paired = false, ended = false, backoff = 500;
     let pairTimer = null;
     // If no frame decrypts within this window the room is empty/dead (a stopped
     // share or a bad link) — show 'not found' instead of hanging on 'Deriving keys…'.
@@ -176,21 +186,72 @@
     const PAIR_TIMEOUT = Number(window.__CHELA_PAIR_MS__) || 9000;
     const enc = new TextEncoder(), dec = new TextDecoder();
 
-    // Joiner send path: serialise seal+send so THIS joiner's per-stream seq stays
-    // strictly increasing on the wire (the host drops out-of-order seqs). Both the
-    // hello and typed input funnel through here.
+    // Send path: serialise seal+send so each channel's per-stream seq stays strictly
+    // increasing on the wire. `sess` is the terminal Session OR the PresenceSession
+    // (separate keys/seqs, same socket). Hello, typed input and presence funnel here.
     let sendChain = Promise.resolve();
-    const sealSend = (typ, bytes) => {
+    const chainSend = (sess, typ, bytes) => {
       sendChain = sendChain.then(async () => {
-        if (!session || !ws || ws.readyState !== 1) return;
-        ws.send(await session.seal(typ, bytes));
+        if (!sess || !ws || ws.readyState !== 1) return;
+        ws.send(await sess.seal(typ, bytes));
       }).catch(() => {});
     };
+    const sealSend = (typ, bytes) => chainSend(session, typ, bytes);
 
     // Full access: a paired joiner can type. Keystrokes → T_INPUT. Before pair,
     // session is null so sealSend no-ops; after pair the gate hides and the terminal
     // is focused, so typing (and scrolling, which the app reads as input) just works.
     term.onData((d) => sealSend(T_INPUT, enc.encode(d)));
+
+    // --- presence (cursors + facepile) ---------------------------------------
+    const me = identity(room);                  // { peerId (persisted), name (may be '') }
+    const peers = new PeerStore();
+    const pointers = new Map();                 // peerId -> makePointer() handle
+    const facepileEl = document.getElementById('facepile');
+    let lastCursor = null, heartbeat = 0, pruneTimer = 0;
+    const myName = () => me.name || autoName(me.peerId);
+    const screenRect = () => {
+      const s = term.element && term.element.querySelector('.xterm-screen');
+      return s ? s.getBoundingClientRect() : null;
+    };
+    // Send my cursor as grid-normalized (null when off-grid → peers hide the pointer).
+    const sendPresence = (x, y) => {
+      lastCursor = (x == null ? null : { x, y });
+      chainSend(presence, T_PRESENCE, enc.encode(JSON.stringify(
+        { id: me.peerId, name: myName(), host: false, x, y })));
+    };
+    const onMove = throttle((cx, cy) => { const n = toNorm(cx, cy, screenRect()); sendPresence(n ? n.x : null, n ? n.y : null); }, 45);
+    const renderPresence = () => {
+      const rect = screenRect(), live = peers.list();
+      renderFacepile(facepileEl, [{ id: me.peerId, name: myName(), color: colorForId(me.peerId), host: false }, ...live]);
+      for (const p of live) {
+        let ptr = pointers.get(p.id);
+        if (!ptr) { ptr = makePointer(); document.body.appendChild(ptr.el); pointers.set(p.id, ptr); }
+        ptr.color(p.color); ptr.label(p.name);
+        if (rect && p.x != null && p.y != null) { const q = fromNorm(p.x, p.y, rect); ptr.at(q.x, q.y); } else ptr.off();
+      }
+      for (const [id, ptr] of pointers) if (!peers.peers.has(id)) { ptr.el.remove(); pointers.delete(id); }
+    };
+    let presChain = Promise.resolve();
+    const handlePresence = async (env) => {
+      let pt; try { [, pt] = await presence.open(env); } catch (_) { return; }   // wrong key / replay → drop
+      try { const m = JSON.parse(dec.decode(pt)); if (m.id !== me.peerId) { peers.update(m, performance.now()); renderPresence(); } } catch (_) {}
+    };
+    const startPresence = async () => {
+      if (presence || !secret) return;
+      presence = await PresenceSession.create(secret, room);
+      stage.addEventListener('pointermove', (e) => onMove(e.clientX, e.clientY));
+      stage.addEventListener('pointerleave', () => sendPresence(null, null));
+      heartbeat = setInterval(() => { const c = lastCursor; sendPresence(c ? c.x : null, c ? c.y : null); }, HEARTBEAT_MS);
+      pruneTimer = setInterval(() => { if (peers.prune(performance.now(), PRESENCE_TIMEOUT_MS)) renderPresence(); }, 1000);
+      renderPresence();                          // show my own avatar right away
+    };
+    const stopPresence = () => {
+      clearInterval(heartbeat); clearInterval(pruneTimer); heartbeat = pruneTimer = 0;
+      for (const [, ptr] of pointers) ptr.el.remove();
+      pointers.clear(); peers.peers.clear(); presence = null; lastCursor = null;
+      if (facepileEl) facepileEl.textContent = '';
+    };
 
     const hello = () => {
       // COLD-JOIN: on connect AND reconnect, ask the host for a keyframe (the relay
@@ -200,7 +261,13 @@
     // WebCrypto is async and frames must be opened in seq order, so serialise
     // decryption through a promise chain (concurrent open() would race _recvLast).
     let chain = Promise.resolve();
-    const onFrame = (buf) => { chain = chain.then(() => handleFrame(new Uint8Array(buf))).catch(() => {}); };
+    const onFrame = (buf) => {
+      const env = new Uint8Array(buf);
+      // Route by the cleartext type byte: presence rides the same socket on its own
+      // key/seq, serialised through its own chain so concurrent open()s don't race.
+      if (env.length >= 2 && env[1] === T_PRESENCE) { presChain = presChain.then(() => handlePresence(env)).catch(() => {}); return; }
+      chain = chain.then(() => handleFrame(env)).catch(() => {});
+    };
     const handleFrame = async (env) => {
       let typ, pt;
       try {
@@ -212,6 +279,7 @@
       if (!paired) {
         paired = true; clearTimeout(pairTimer); gate.classList.add('hide'); setDot('up', 'live · encrypted');
         term.focus();   // full-access: ready to type immediately
+        startPresence();
         try { sessionStorage.setItem(PAIR_KEY, pendingCode); } catch (_) {}
       }
       if (typ === T_OUTPUT) term.write(pt);
@@ -246,7 +314,7 @@
     // dead room → pairing timeout). Distinct from wrong-code: the key was fine,
     // there's just no live share. No reconnect; a fresh code can still retry.
     const showEnded = (msg) => {
-      ended = true; paired = false; clearTimeout(pairTimer);
+      ended = true; paired = false; clearTimeout(pairTimer); stopPresence();
       try { ws && ws.close(); } catch (_) {}
       try { sessionStorage.removeItem(PAIR_KEY); } catch (_) {}
       session = null;
@@ -260,7 +328,7 @@
     const submit = async () => {
       errEl.textContent = ''; ended = false;
       pendingCode = codeEl.value.trim();
-      let secret;
+      me.name = nameEl.value.trim(); saveName(room, me.name);   // '' → auto (adjective-animal)
       try { secret = secretFromCode(codeEl.value); }
       catch (e) { errEl.textContent = (e instanceof BadFrame) ? 'That doesn’t look like a valid code.' : String(e.message || e); return; }
       joinBtn.disabled = true; joinBtn.textContent = 'Deriving keys…';
@@ -274,6 +342,8 @@
     codeEl.addEventListener('input', () => { joinBtn.disabled = codeEl.value.trim().length < 10; errEl.textContent = ''; });
     codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !joinBtn.disabled) submit(); });
     joinBtn.addEventListener('click', submit);
+
+    nameEl.value = me.name;   // prefill the stored name (blank → auto on join)
 
     // Refresh continuity: if this tab already proved a code for this room, prefill
     // and auto-join. A stale code (host rotated the share) just fails the first GCM
