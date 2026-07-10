@@ -307,6 +307,13 @@ body {
    rides to the right). Compact initial-dots + overflow + agent gear pip. */
 .gs-presence { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; }
 .gs-presence:empty { display: none; }
+/* Owner-presence facepile (presence-core makeAvatar = 22px discs + host ★).
+   Scaled to sit at the header's ~17px pip scale without growing the header row;
+   the fixed height clips the pre-transform box so it reserves no extra height. */
+.gs-presence .gs-owner-fp {
+    display: inline-flex; align-items: center; height: 18px;
+    transform: scale(0.78); transform-origin: right center;
+}
 .gs-presence .pf-dot {
     width: 17px; height: 17px; border-radius: 50%; color: #fff;
     display: inline-flex; align-items: center; justify-content: center;

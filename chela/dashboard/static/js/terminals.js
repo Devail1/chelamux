@@ -340,6 +340,22 @@ function _termLink(wid) { return location.origin + BASE_PATH + _termSrc(wid); }
 const _sharedWids = new Set();
 const _presenceByWid = new Map();
 
+// Owner-presence parent client (ES module: holds the pairing secret + crypto — the
+// iframe shim never does; see static/collab/presence-owner.js). Loaded lazily and
+// wired once via initOwnerPresence(), which routes the shim<->parent postMessage
+// bridge and auto-resumes presence for already-shared panes on the shim's 'ready'.
+let _ownerPresenceP = null;
+function _ownerPresence() {
+    if (!_ownerPresenceP) {
+        _ownerPresenceP = import(BASE_PATH + '/static/collab/presence-owner.js')
+            .then(m => { try { m.initOwnerPresence(); } catch (_) {} return m; })
+            .catch(e => { console.warn('[chela] owner-presence load failed', e); _ownerPresenceP = null; return null; });
+    }
+    return _ownerPresenceP;
+}
+// Wire the router immediately so a shared pane's shim 'ready' is caught on load.
+_ownerPresence();
+
 function _seedSharedFromAgents(agents) {
     (agents || []).forEach(a => {
         if (!a.window_id) return;
@@ -383,6 +399,7 @@ async function shareBtnClick(btn, wid) {
     try { info = (await api('/api/term/' + encodeURIComponent(wid) + '/share-info')) || {}; } catch (_) {}
     if (info && info.pairing_code) {
         _sharedWids.add(wid); _updateShareBtns(wid);
+        _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code));
         _sharePopover(btn, wid, info);
         return;
     }
@@ -398,6 +415,7 @@ async function shareBtnClick(btn, wid) {
     } catch (e) { _termShareToast(btn, 'Share failed'); return; }
     if (!resp || !resp.ok) { _termShareToast(btn, (resp && resp.error) || 'Share failed'); return; }
     _sharedWids.add(wid);
+    _ownerPresence().then(m => m && m.startOwnerPresence(wid, resp.join_url, resp.pairing_code));
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
     _sharePopover(btn, wid, resp);   // resp carries join_url + pairing_code
@@ -411,6 +429,7 @@ async function _stopShare(wid) {
         });
     } catch (_) {}
     _sharedWids.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
+    _ownerPresence().then(m => m && m.stopOwnerPresence(wid));
     _reloadPaneFrame(wid); _updateShareBtns(wid); _closeSharePopover();
 }
 
@@ -506,16 +525,12 @@ function _renderFacepile(wid) {
 
 function _updateShareBtns(wid) {
     const shared = _sharedWids.has(wid);
-    const d = _presenceByWid.get(wid);
-    const count = (d && d.count) || 0;
     document.querySelectorAll('.gs-share-btn[data-wid="' + _cssEsc(wid) + '"]').forEach(btn => {
         btn.classList.toggle('on', shared);
         btn.setAttribute('aria-pressed', shared ? 'true' : 'false');
-        const badge = btn.querySelector('.gs-share-count');
-        if (badge) {
-            if (shared && count > 0) { badge.textContent = String(count); badge.hidden = false; }
-            else { badge.hidden = true; }
-        }
+        // The peer-count badge is owned by the owner-presence client (setBadge in
+        // presence-owner.js), which alone knows the live joiner count; clearing the
+        // share flag hides it there on stopOwnerPresence.
     });
 }
 
@@ -1262,6 +1277,7 @@ function _syncTermSig() {
 function dropTerminalPane(wid) {
     _stopReadyPoll(wid);   // pane is going away — kill any in-flight readiness poll
     _termReady.delete(wid);  // a re-spawn under the same wid must re-probe its port
+    _ownerPresence().then(m => m && m.stopOwnerPresence(wid));  // tear down its presence session
     const stage = $('#term-stage');
     if (_termMode === 'wall' && _grid) {
         const el = Array.from(stage.querySelectorAll('.grid-stack-item'))

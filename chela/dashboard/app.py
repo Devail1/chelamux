@@ -587,28 +587,28 @@ _TERM_FONT_PREF_SHIM = (
 )
 
 
-# Collaborative-presence overlay (chela module): a Yjs-awareness layer served as
-# a static module and injected into the ttyd page. It SELF-GATES purely on this
-# window's server "shared" flag (see static/collab/presence.js) so normal wall
+# Owner-presence iframe shim (chela module): the IN-IFRAME half of the dashboard
+# owner's presence surface, served as a static module and injected into the ttyd
+# page. It SELF-GATES purely on this window's server "shared" flag so normal wall
 # panes are untouched, AND so the host can truly revoke — un-sharing or a restart
 # (which clears _SHARED) kills the link, with no client-side ?collab bypass.
-# Presence/cursor frames ride the dumb CF relay (chela/collab-relay); this only
-# ships the client.
+#
+# SECURITY BOUNDARY: the shim holds NO secret and NO relay socket — the pairing key
+# and crypto live only in the parent dashboard client (static/collab/presence-owner
+# .js). The shim just maps the owner's pointer over the grid → normalized coords →
+# postMessage to the parent, and draws the peers the parent sends back. So only the
+# non-secret {shared, wid} is injected here (the old relay/prefix/grid injection is
+# gone — the parent derives all of that from the owner-only /share-info).
 def _term_presence_shim(wid: str) -> str:
-    """Per-wid presence config + client. Carries the relay + NON-SECRET room prefix
-    (the tmux session name, mirroring collab.room_id — the old instance secret is no
-    longer injected into ttyd pages, closing that leak) + grid size + this window's
-    live "shared" flag; presence.js gates solely on that flag."""
-    cols, rows = _dims_for(wid)
+    """Per-wid shim config + client. Carries only this window's live "shared" flag
+    and its wid; the shim gates solely on the flag and talks coordinates (never the
+    secret) to the parent over postMessage."""
     cfg = json.dumps({
-        "relay": config.COLLAB_RELAY,
-        "prefix": config.TMUX_SESSION,
-        "cols": cols,
-        "rows": rows,
+        "wid": wid,
         "shared": wid in _SHARED,
     })
     return ("<script>window.__CHELA_COLLAB__=" + cfg + ";</script>"
-            '<script type="module" src="/static/collab/presence.js"></script>')
+            '<script type="module" src="/static/collab/presence-shim.js"></script>')
 
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
