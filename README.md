@@ -59,6 +59,12 @@ already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
   implement it, and let it open a PR.
 - **Live terminal wall** — a web dashboard that streams every agent's pane (ttyd)
   into one grid, so you can watch the whole fleet work in real time.
+- **Collaborative terminals (end-to-end encrypted)** — share any agent's live
+  terminal over the internet with a link + a pairing code. It's **E2E-encrypted**
+  (AES-256-GCM, keys derived in the browser from the code — the relay only ever
+  sees ciphertext), **full-access** (watch, type, and scroll), and multi-user with
+  live Figma-style cursors + a presence facepile. Mobile-friendly; revocable, with
+  a one-tap Stop / Stop-All kill-switch.
 - **Per-agent monitoring** — context-window usage, session cost, liveness
   (alive / working / waiting), latest recap, and next scheduled run, per agent.
 - **Account-wide rate-limit pills** — the fleet shares one Claude account; the
@@ -263,6 +269,41 @@ panes. A QR of the connect string makes this one tap.
 > images, and file attachments flow both ways). (chela's
 > built-in needs-input notifications just ping you; ccbot is a full two-way bridge.)
 > Independent project, not required by chela.
+
+### Collaborative terminals (end-to-end encrypted)
+
+The remote access above is for watching *your own* fleet. chela can also **share a
+live terminal with someone else** — a teammate, a pairing partner, another of your
+own devices — over the public internet, without exposing your machine. Click
+**Share** on any pane (or "Share current session" from the dashboard's ⋮ menu on
+mobile) and you get a **join link** + a short **pairing code**; whoever has both
+opens the link in a browser and is in the same session — **full access: watch,
+type, and scroll** — and everyone sees each other as live, labeled cursors plus a
+presence facepile.
+
+It's **end-to-end encrypted**, and the relay in the middle is **zero-knowledge**:
+
+- **The pairing code is the key — and it never leaves the browsers.** The code is
+  16 random bytes (shown as base32). Both ends derive AES-256-GCM keys from it with
+  HKDF-SHA256 — directional keys for the terminal stream and a symmetric group key
+  (`k_pres`) for presence — entirely in-browser. A wrong code simply fails to
+  decrypt (you get "wrong code", not garbage).
+- **The relay only ever sees ciphertext.** It's a dumb, opaque WebSocket fan-out
+  (one room per share) that broadcasts frames it cannot read — it never holds a
+  key. It sees **metadata only**: the room name (derived from your tmux session +
+  window id — *not* a secret) and message timing/size. The pairing code is the sole
+  security boundary, so a *guessed* room just yields undecryptable frames.
+- **Run your own relay for metadata privacy.** Point `CHELA_COLLAB_RELAY` at your
+  own Cloudflare Worker — the relay source ships in
+  [`chela/collab-relay/`](chela/collab-relay) — so even that metadata stays yours.
+  It defaults to **empty**: sharing is **off until you set it**, and chela never
+  phones home.
+- **Revocable.** Stopping a share kills the room and rotates the code. A global
+  active-shares indicator in the topbar gives you one-tap **Stop** / **Stop-All**.
+
+**Full access is the model:** a paired joiner holds the code, so they can both
+watch and drive (scroll is input on a full-screen TUI). Share only with people
+you'd hand the keyboard to.
 
 ---
 

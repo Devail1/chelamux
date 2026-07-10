@@ -58,7 +58,7 @@
   .toc h4{margin:0 0 12px; font-size:11px; text-transform:uppercase; letter-spacing:0.11em; color:var(--text-dim)}
   .toc ol{
     list-style:none; margin:0; padding:0; counter-reset:toc;
-    display:grid; grid-template-rows:repeat(4,auto); grid-auto-flow:column; gap:2px 24px;
+    display:grid; grid-template-rows:repeat(5,auto); grid-auto-flow:column; gap:2px 24px;
   }
   .toc li{counter-increment:toc}
   .toc a{
@@ -155,6 +155,7 @@
       <li><a href="#scheduling">Scheduling agents</a></li>
       <li><a href="#dispatch">Dispatching work</a></li>
       <li><a href="#dashboard">Dashboard &amp; the wall</a></li>
+      <li><a href="#collab">Collaborative terminals</a></li>
       <li><a href="#cli">Command reference</a></li>
       <li><a href="#config">Configuration</a></li>
       <li><a href="#security">Remote access &amp; security</a></li>
@@ -355,6 +356,66 @@ chela install-statusline --write   <span class="c"># writes it (won't clobber an
     (or <code>Ctrl+[</code>) sends a literal Escape.</p></div>
   </section>
 
+  <!-- ───────── Collaboration ───────── -->
+  <section class="doc-section" id="collab">
+    <h2>Collaborative terminals (end-to-end encrypted)</h2>
+    <p class="lede">Share a live terminal over the internet — encrypted end to end, through a relay
+    that only ever sees ciphertext.</p>
+
+    <h3>Share a session</h3>
+    <p>In the dashboard, click <strong>Share</strong> (the link icon) on any pane's header — or
+    <strong>Share current session</strong> from the <code>⋮</code> overflow menu on mobile. chela
+    mints a share and shows a <strong>join link</strong> plus a short <strong>pairing code</strong>.
+    Send both to whoever's joining; they open the link, paste the code, and they're in the same
+    live terminal with <strong>full access — watch, type, and scroll</strong>. Everyone sees each
+    other as live, labeled cursors and a facepile of who's watching.</p>
+    <div class="note"><p><strong>Sharing is off until you set <code>CHELA_COLLAB_RELAY</code></strong>
+    (see below) — chela never phones home. Once a relay is configured, the Share control appears on
+    every pane.</p></div>
+
+    <h3>How the encryption works</h3>
+    <ul>
+      <li><strong>The pairing code is the key.</strong> It's 16 random bytes shown as base32. Both
+      browsers derive AES-256-GCM keys from it with HKDF-SHA256 — directional keys for the terminal
+      stream and a symmetric group key (<code>k_pres</code>) for presence — entirely in the browser.
+      The keys are never sent anywhere; a wrong code just fails to decrypt (you get "wrong code", not
+      garbage).</li>
+      <li><strong>The relay is zero-knowledge.</strong> It's a dumb WebSocket fan-out (one room per
+      share) that broadcasts opaque frames it cannot read — it never holds a key. It sees
+      <strong>metadata only</strong>: the room name (derived from your tmux session + window id — not
+      a secret) and message timing/size. The code is the sole security boundary, so a guessed room
+      just yields undecryptable frames.</li>
+      <li><strong>Revocable.</strong> Stop a share and the room dies and the code rotates. The
+      topbar's active-shares indicator gives one-tap <strong>Stop</strong> / <strong>Stop-All</strong>.</li>
+    </ul>
+
+    <h3>Presence</h3>
+    <p>Everyone in a shared session is a live, labeled cursor mapped to the terminal grid, plus a
+    facepile of who's watching (the host gets a ★). Cursors and names ride the same encrypted channel
+    (<code>k_pres</code>), so the relay can't see who's present or where they're pointing. It's
+    colorblind-safe — every cursor carries a name label, not just a color.</p>
+
+    <h3>On a phone</h3>
+    <p>Joiners on mobile get the full experience: the terminal letterboxes to fit, an on-screen
+    keys-line (Esc / Tab / arrows / a sticky Ctrl / …) sits above the keyboard, swipe scrolls the
+    session, and your touch shows to everyone else as a cursor.</p>
+
+    <h3>Run your own relay</h3>
+    <p>The relay is a small <a href="https://workers.cloudflare.com/">Cloudflare Worker</a> (source
+    in <code>chela/collab-relay/</code>) — a dumb, opaque fan-out with one Durable Object per room.
+    Deploy your own and point chela at its <code>wss://</code> URL so even the room-name/timing
+    metadata stays yours:</p>
+    <pre><span class="c"># deploy the relay (Cloudflare Workers)</span>
+cd chela/collab-relay && npx wrangler deploy
+
+<span class="c"># point chela at it, then start the dashboard</span>
+<span class="k">CHELA_COLLAB_RELAY</span>=wss://your-relay.workers.dev uv run chela dashboard</pre>
+
+    <div class="note"><p><strong>Full access is the model.</strong> A paired joiner holds the code,
+    so they can both watch and drive (scroll is input on a full-screen TUI). Share only with people
+    you'd hand the keyboard to.</p></div>
+  </section>
+
   <!-- ───────── CLI ───────── -->
   <section class="doc-section" id="cli">
     <h2>Command reference</h2>
@@ -410,6 +471,7 @@ chela install-statusline --write   <span class="c"># writes it (won't clobber an
         <tr><td>CHELA_DASH_HOST / CHELA_DASHBOARD_PORT</td><td>127.0.0.1 / 5001</td><td>Dashboard bind address</td></tr>
         <tr><td>CHELA_TERMINALS_ENABLED</td><td>true</td><td>Embedded ttyd terminal wall (streams live; loopback-guarded)</td></tr>
         <tr><td>CHELA_TERMINALS_EXPOSE</td><td>false</td><td>Serve the writable wall on a non-loopback bind too (RCE risk — opt-in)</td></tr>
+        <tr><td>CHELA_COLLAB_RELAY</td><td>— (off)</td><td>Relay <code>wss://</code> URL for collaborative terminal sharing (end-to-end encrypted). Empty = sharing off; chela never phones home. <a href="#collab">Details</a>.</td></tr>
         <tr><td>CHELA_DEFAULT_CONTEXT_WINDOW</td><td>200000</td><td>Window size assumed by the transcript-based context estimate (fallback)</td></tr>
       </tbody>
     </table>
@@ -445,6 +507,9 @@ chela install-statusline --write   <span class="c"># writes it (won't clobber an
     agent from a Telegram topic (text, images, and file attachments flow both ways). Distinct from chela's
     built-in needs-input notifications, which only ping
     you; ccbot is a full two-way bridge. Independent project, not required by chela.</p>
+    <p>To share a session <em>with someone else</em> over the internet — rather than exposing your
+    whole dashboard — use <a href="#collab">collaborative terminals</a>: end-to-end encrypted, through
+    a relay that only ever sees ciphertext.</p>
   </section>
 
 </main>

@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>chela — put a fleet of Claude Code agents to work</title>
-<meta name="description" content="A tiny control plane that schedules Claude Code agents, dispatches a TODO list into pull requests, and streams the whole fleet on one live terminal wall — over a single tmux session.">
+<meta name="description" content="A tiny control plane that schedules Claude Code agents, dispatches a TODO list into pull requests, and streams the whole fleet on one live terminal wall — and lets you share any session end-to-end encrypted, over a single tmux session.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <meta property="og:title" content="chela — put a fleet of Claude Code agents to work">
-<meta property="og:description" content="Schedule agents, dispatch TODOs into PRs, and watch the fleet on a live terminal wall. Unattended.">
+<meta property="og:description" content="Schedule agents, dispatch TODOs into PRs, watch the fleet on a live terminal wall — and share any session end-to-end encrypted. Unattended.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://chela.pages.dev/">
 <meta property="og:site_name" content="chela">
@@ -17,7 +17,7 @@
 <meta property="og:image:alt" content="chela — schedule Claude Code agents, dispatch TODOs to PRs, and watch the fleet on a live terminal wall.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="chela — put a fleet of Claude Code agents to work">
-<meta name="twitter:description" content="Schedule agents, dispatch TODOs into PRs, and watch the fleet on a live terminal wall. Unattended.">
+<meta name="twitter:description" content="Schedule agents, dispatch TODOs into PRs, watch the fleet on a live terminal wall — and share any session end-to-end encrypted. Unattended.">
 <meta name="twitter:image" content="https://chela.pages.dev/img/og.png">
 <style>
   :root{
@@ -100,6 +100,36 @@
   .how-item h4 .step{color:var(--accent); font-family:var(--mono); margin-right:8px}
   .how-item p{margin:0; color:var(--text-dim); font-size:14.5px}
 
+  /* wide "differentiator" card — spans the feature grid, accent-tinted */
+  .card-wide{
+    grid-column:1 / -1; display:flex; gap:22px; align-items:flex-start;
+    border-color:rgba(88,166,255,0.40);
+    background:linear-gradient(180deg, rgba(88,166,255,0.06), var(--surface));
+  }
+  .card-wide .ic{margin-bottom:0; flex:0 0 auto}
+  .card-wide .card-body{flex:1; min-width:0}
+  .card .badge{
+    font:700 10px/1 var(--mono); letter-spacing:0.06em; color:var(--accent);
+    border:1px solid var(--accent); border-radius:999px; padding:3px 7px; margin-left:9px; vertical-align:middle;
+  }
+  .card h3 svg{vertical-align:-2px}
+  .more{display:inline-block; margin-top:10px; font-size:14px; font-weight:600}
+
+  /* E2E channel diagram — You →🔒→ Relay(blind) →🔒→ Joiner */
+  .e2e{display:flex; align-items:stretch; justify-content:center; flex-wrap:wrap; gap:0; margin:0 auto 34px; max-width:720px}
+  .e2e-node{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:15px 20px; text-align:center; min-width:118px;
+  }
+  .e2e-node b{display:block; font-size:15px; color:var(--text)}
+  .e2e-node span{display:block; margin-top:3px; font:12px/1.3 var(--mono); color:var(--text-dim)}
+  .e2e-relay{border-style:dashed; border-color:var(--text-dim)}
+  .e2e-relay b{color:var(--text-dim)}
+  .e2e-wire{position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:108px; padding:0 6px}
+  .e2e-wire::before{content:""; position:absolute; left:6px; right:6px; top:50%; height:1px; background:linear-gradient(90deg,transparent,var(--accent) 25%,var(--accent) 75%,transparent)}
+  .e2e-wire .lock{position:relative; background:var(--bg); padding:2px 6px; color:var(--accent); display:flex}
+  .e2e-wire em{position:relative; background:var(--bg); padding:2px 6px; margin-top:4px; font:11px/1 var(--mono); color:var(--accent); font-style:normal; letter-spacing:0.02em}
+
   footer{text-align:center; padding:40px 24px; color:var(--text-dim); font-size:13.5px}
   footer a{color:var(--text-dim); text-decoration:underline}
 
@@ -124,6 +154,12 @@
   @media (max-width:760px){
     .features{grid-template-columns:1fr}
     .how-grid{grid-template-columns:1fr}
+    .card-wide{flex-direction:column; gap:14px}
+    /* stack the E2E diagram vertically; the wire connector turns vertical */
+    .e2e{flex-direction:column}
+    .e2e-node{width:100%; max-width:280px}
+    .e2e-wire{flex-direction:row; gap:8px; min-width:0; padding:8px 0}
+    .e2e-wire::before{left:50%; right:auto; top:6px; bottom:6px; width:1px; height:auto; background:linear-gradient(180deg,transparent,var(--accent) 25%,var(--accent) 75%,transparent)}
     /* Stacked, centered header: logo on top, links wrap evenly below. */
     nav{flex-wrap:wrap; justify-content:center; gap:4px; padding:16px}
     nav .spacer{display:none}
@@ -140,6 +176,7 @@
   <span class="spacer"></span>
   <span class="links">
     <a href="#features">Features</a>
+    <a href="#collab">Collaborate</a>
     <a href="#screenshots">Screenshots</a>
     <a href="#how">How it works</a>
     <a href="#install">Install</a>
@@ -154,7 +191,8 @@
   <p class="sub">
     chela is a tiny control plane over a single tmux session. It <strong>schedules</strong>
     agents, <strong>dispatches</strong> a TODO list into pull requests, and streams the whole
-    fleet on one <strong>live terminal wall</strong>. You walk away; the agents keep working.
+    fleet on one <strong>live terminal wall</strong> — which you can <strong>share, end-to-end
+    encrypted</strong>. You walk away; the agents keep working.
   </p>
   <div class="cta">
     <a class="btn btn-primary" href="#install">Get started</a>
@@ -203,6 +241,63 @@ uv run chela run</pre>
       <h3>The wall</h3>
       <p>A live grid of every agent's terminal — drag, lock, maximize — with a context-window
       bar on each tile and 5h / weekly rate-limit pills up top.</p>
+    </div>
+    <div class="card card-wide">
+      <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg></span>
+      <div class="card-body">
+        <h3>Collaborative terminals <span class="badge">END-TO-END ENCRYPTED</span></h3>
+        <p>Share any agent's live terminal over the internet with a link + a pairing code —
+        <strong>full-access</strong> (watch, type, scroll), multi-user with live Figma-style
+        cursors and a presence facepile, and mobile-friendly. The relay in the middle only ever
+        sees ciphertext; the keys never leave the browsers.</p>
+        <a class="more" href="#collab">See how it works →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="collab" class="wrap">
+  <div class="section-head">
+    <h2>Share a live terminal — end-to-end encrypted</h2>
+    <p>Hand someone a link and a pairing code. They watch, type, and scroll the same session
+    in their browser — everyone sees everyone as live cursors — and the relay in the middle
+    only ever sees ciphertext. chela is web-first collaboration, over the public internet.</p>
+  </div>
+
+  <div class="e2e">
+    <div class="e2e-node"><b>You</b><span>host</span></div>
+    <div class="e2e-wire" aria-hidden="true">
+      <span class="lock"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+      <em>ciphertext</em>
+    </div>
+    <div class="e2e-node e2e-relay"><b>Relay</b><span>sees only ciphertext</span></div>
+    <div class="e2e-wire" aria-hidden="true">
+      <span class="lock"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+      <em>ciphertext</em>
+    </div>
+    <div class="e2e-node"><b>Joiner</b><span>link + code</span></div>
+  </div>
+
+  <div class="how-grid">
+    <div class="how-item">
+      <h4>Link + pairing code</h4>
+      <p>Click Share on any pane. The <strong>code is the key</strong> — 16 random bytes both
+      browsers turn into AES-256-GCM keys with HKDF, in-browser. A wrong code simply can't decrypt.</p>
+    </div>
+    <div class="how-item">
+      <h4>Zero-knowledge relay</h4>
+      <p>A dumb WebSocket fan-out that broadcasts opaque frames — it never holds a key, and sees
+      metadata only. Run your own (a small Cloudflare Worker) so even that stays yours.</p>
+    </div>
+    <div class="how-item">
+      <h4>Everyone's present</h4>
+      <p>Live labeled cursors mapped to the grid, plus a facepile of who's watching (the host gets
+      a ★). Presence rides the same encryption — colorblind-safe, names not just colors.</p>
+    </div>
+    <div class="how-item">
+      <h4>Mobile &amp; revocable</h4>
+      <p>Phone joiners get an on-screen keys-line, swipe-to-scroll, and touch cursors. Stop a share
+      and the room dies + the code rotates; a topbar kill-switch stops everything at once.</p>
     </div>
   </div>
 </section>
