@@ -496,8 +496,10 @@ function renderSettings(focus) {
                 <span class="s-rowlabel">Relay</span>
                 <code id="collab-relay" style="word-break:break-all;font-size:11px">…</code>
             </div>
-            <p class="s-desc">Presence rides a dumb relay (<code>CHELA_COLLAB_RELAY</code>).
-            Namespacing, not encryption — run your own for anything private.</p>
+            <p class="s-desc">End-to-end encrypted — the relay (<code>CHELA_COLLAB_RELAY</code>)
+            is a zero-knowledge fan-out that only ever sees ciphertext (keys are derived in your
+            browser from the pairing code). It does see room names + traffic timing (metadata) —
+            run your own relay for full metadata privacy.</p>
         </section>
 
         <section class="settings-section">
