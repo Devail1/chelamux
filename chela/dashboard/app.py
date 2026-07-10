@@ -903,6 +903,15 @@ def api_term_share(wid):
         "cols": _clamp_dim(data.get("cols"), 20, 500, config.TERM_COLS),
         "rows": _clamp_dim(data.get("rows"), 6, 300, config.TERM_ROWS),
     }
+    # Pin the source window to the presenter's dims for the share's lifetime, so the
+    # tmux window size can't float underneath the stream. A tmux window's size is
+    # shared by all its clients and dynamic (window-size largest): the dashboard's
+    # own view attaching/detaching or an owner browser resize would otherwise reflow
+    # the PTY, desyncing the joiner's grid from the byte stream. _revoke_share unpins.
+    try:
+        _pin_grid(wid, _SHARED[wid]["cols"], _SHARED[wid]["rows"])
+    except Exception:
+        log.debug("share: grid pin failed for %s", wid, exc_info=True)
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
     code = collab_stream.start_bridge(wid, on_revoke=_revoke_share)

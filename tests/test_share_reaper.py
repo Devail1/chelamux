@@ -91,3 +91,47 @@ def test_revoke_share_is_idempotent(monkeypatch, _isolate):
     dash._revoke_share("@9")                    # second call must not raise
     assert "@9" not in dash._SHARED
     assert _isolate == ["@9", "@9"]            # stop_bridge is safe to call twice
+
+
+def test_share_pins_grid(monkeypatch, _isolate):
+    """Turning a share ON must PIN the source window to the presenter's dims, so the
+    tmux window can't float underneath the stream and desync the joiner's grid."""
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    pins = []
+    monkeypatch.setattr(dash, "_pin_grid", lambda wid, c, r: pins.append((wid, c, r)))
+    monkeypatch.setattr(dash.collab_stream, "start_bridge", lambda wid, on_revoke=None: "CODE")
+    monkeypatch.setattr(dash.collab_stream, "join_url", lambda wid: "https://relay/j/room")
+
+    client = dash.app.test_client()
+    resp = client.post("/api/term/@9/share", json={"on": True, "cols": 111, "rows": 22})
+
+    assert resp.status_code == 200
+    assert dash._SHARED["@9"] == {"cols": 111, "rows": 22}
+    assert pins == [("@9", 111, 22)]           # pinned to the posted presenter dims
+
+
+def test_bridge_resend_on_source_resize(monkeypatch):
+    """The bridge watches the source window size and resends a fresh keyframe
+    (T_META + full snapshot) ONLY when it changes — so a mid-session resize keeps
+    the joiner's xterm grid in lockstep with the reflowed OUTPUT stream."""
+    from chela import collab_stream as cs
+
+    sent = []
+    dims = {"v": (100, 30)}
+    monkeypatch.setattr(cs, "_window_dims", lambda wid: dims["v"])
+    monkeypatch.setattr(cs, "_snapshot", lambda wid: b"SNAP")
+    b = cs.Bridge("@9")
+    monkeypatch.setattr(b, "_seal_send", lambda typ, pt: sent.append(typ))
+
+    b._maybe_resize()                          # first poll: seed _last_dims, send nothing
+    assert b._last_dims == (100, 30)
+    assert sent == []
+
+    b._maybe_resize()                          # unchanged → still nothing
+    assert sent == []
+
+    dims["v"] = (120, 40)                       # source window resized
+    b._maybe_resize()
+    assert sent == [cs.e2e.T_META, cs.e2e.T_OUTPUT]   # one fresh keyframe
+    assert b._last_dims == (120, 40)           # watch advanced, won't re-fire

@@ -70,6 +70,7 @@ SET_PREFERENCES = 0x32   # '2'
 _CLEAR = b"\x1b[2J\x1b[3J\x1b[H"
 
 SNAPSHOT_MIN_INTERVAL = 0.5   # s — floor between capture-pane calls (rate limit)
+RESIZE_POLL_INTERVAL = 0.5    # s — floor between source-window size polls (resize watch)
 RECONNECT_DELAY = 1.5         # s — naive reconnect backoff (spike)
 # Fail-closed invariant "no share outlives its session": if the wid vanishes from
 # the ttyd port map (window died / supervisor reaped ttyd) for longer than this,
@@ -142,6 +143,10 @@ class Bridge:
         # the sealed bytes — each send must re-seal with a fresh monotonic seq or
         # the joiner would reject the resend as a replay.
         self._cached_snapshot: tuple[int, int, bytes] | None = None  # (cols, rows, bytes)
+        # Last source grid we told joiners about, for the resize watch (below). None
+        # until the first keyframe; _maybe_resize resends on any change so the SPA's
+        # xterm grid stays in lockstep with the live, reflowed OUTPUT stream.
+        self._last_dims: tuple[int, int] | None = None
         self._threads: list[threading.Thread] = []
         # Called once when the bridge fails closed on session death, so the caller
         # can revoke the share (app.py: pop _SHARED[wid]). None in standalone use.
@@ -159,18 +164,37 @@ class Bridge:
             except Exception:
                 pass
 
-    def _send_keyframe(self) -> None:
+    def _send_keyframe(self, force: bool = False) -> None:
         """A T_META frame (grid dims) + a T_OUTPUT capture-pane snapshot, both
         freshly sealed. Rate-limited: capture-pane runs at most every
-        SNAPSHOT_MIN_INTERVAL; within that window we re-seal the cached plaintext."""
+        SNAPSHOT_MIN_INTERVAL; within that window we re-seal the cached plaintext.
+        `force` bypasses the cache — used on a source resize, where the cached
+        snapshot is at the OLD grid and would paint garbled into the new one."""
         now = time.monotonic()
-        if self._cached_snapshot is None or (now - self._last_snapshot) >= SNAPSHOT_MIN_INTERVAL:
+        if force or self._cached_snapshot is None or (now - self._last_snapshot) >= SNAPSHOT_MIN_INTERVAL:
             cols, rows = _window_dims(self.wid)
             self._cached_snapshot = (cols, rows, _snapshot(self.wid))
             self._last_snapshot = now
+            self._last_dims = (cols, rows)   # keep the resize watch in lockstep
         cols, rows, snap = self._cached_snapshot
         self._seal_send(e2e.T_META, json.dumps({"cols": cols, "rows": rows}).encode("utf-8"))
         self._seal_send(e2e.T_OUTPUT, snap)
+
+    def _maybe_resize(self) -> None:
+        """Poll the source window size; if it changed, push a fresh keyframe so the
+        joiner's xterm grid follows the reflowed OUTPUT stream. ttyd reflows output
+        to the live PTY on resize but sends no structured size, and the joiner learns
+        the grid ONLY from T_META — so on any change we resend T_META + a full
+        repaint. The share also pins the window (app.py), so in practice this catches
+        the pin's own initial resize and any transient before the grid settles."""
+        dims = _window_dims(self.wid)
+        if self._last_dims is None:
+            self._last_dims = dims
+            return
+        if dims != self._last_dims:
+            log.info("collab_stream: %s source grid %s -> %s — resending keyframe",
+                     self.wid, self._last_dims, dims)
+            self._send_keyframe(force=True)   # sets _last_dims
 
     # --- the two pumps -----------------------------------------------------
     def _pump_ttyd_to_relay(self) -> None:
@@ -204,9 +228,17 @@ class Bridge:
             except Exception:
                 time.sleep(RECONNECT_DELAY)
                 continue
+            next_resize_check = time.monotonic()
             try:
                 while not self._stop.is_set():
                     msg = up.receive(timeout=1.0)
+                    # Watch for a source-window resize (cheap tmux size poll, floored
+                    # at RESIZE_POLL_INTERVAL) even mid-output, so a joiner mid-session
+                    # isn't left rendering new-size bytes into a stale grid.
+                    now = time.monotonic()
+                    if now >= next_resize_check:
+                        next_resize_check = now + RESIZE_POLL_INTERVAL
+                        self._maybe_resize()
                     if msg is None:
                         break
                     if isinstance(msg, str):
