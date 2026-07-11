@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from chela.config import TMUX_SESSION
+from chela import config
 from chela.discovery import get_window_id, get_window_cwd, get_all_windows
 from chela.messenger import send_tmux
 
@@ -63,7 +63,7 @@ def is_claude_running(window_id: str) -> bool:
     """Check if a claude process is running in the given tmux window."""
     try:
         result = subprocess.run(
-            ["tmux", "display-message", "-t", f"{TMUX_SESSION}:{window_id}", "-p", "#{pane_pid}"],
+            ["tmux", "display-message", "-t", f"{config.current_session()}:{window_id}", "-p", "#{pane_pid}"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -122,7 +122,7 @@ def claude_pid(window_id: str) -> int | None:
     """PID of the claude process in a tmux window (matches `agents --json` pid)."""
     try:
         result = subprocess.run(
-            ["tmux", "display-message", "-t", f"{TMUX_SESSION}:{window_id}", "-p", "#{pane_pid}"],
+            ["tmux", "display-message", "-t", f"{config.current_session()}:{window_id}", "-p", "#{pane_pid}"],
             capture_output=True, text=True, timeout=5,
         )
         pane_pid = result.stdout.strip()
@@ -156,7 +156,7 @@ def pane_command(window_id: str) -> str:
     """tmux #{pane_current_command} for a window (foreground process), or ""."""
     try:
         out = subprocess.run(
-            ["tmux", "display-message", "-p", "-t", f"{TMUX_SESSION}:{window_id}",
+            ["tmux", "display-message", "-p", "-t", f"{config.current_session()}:{window_id}",
              "#{pane_current_command}"],
             capture_output=True, text=True, timeout=5,
         )
@@ -224,7 +224,7 @@ def _name_window_to_cwd(window_id: str, start_dir: str) -> str | None:
     name, counter = base, 2
     while name in taken:
         name, counter = f"{base}-{counter}", counter + 1
-    target = f"{TMUX_SESSION}:{window_id}"
+    target = f"{config.current_session()}:{window_id}"
     try:
         subprocess.run(
             ["tmux", "rename-window", "-t", target, name],
@@ -286,7 +286,7 @@ def reconcile_window_names() -> list[str]:
     actions: list[str] = []
     try:
         out = subprocess.run(
-            ["tmux", "list-windows", "-t", TMUX_SESSION, "-F",
+            ["tmux", "list-windows", "-t", config.current_session(), "-F",
              "#{window_id}\t#{window_name}\t#{pane_current_command}\t#{pane_current_path}"],
             capture_output=True, text=True, timeout=5,
         ).stdout
@@ -308,7 +308,7 @@ def reconcile_window_names() -> list[str]:
             target_name, counter = f"{base}-{counter}", counter + 1
         if name == target_name:
             continue
-        target = f"{TMUX_SESSION}:{wid}"
+        target = f"{config.current_session()}:{wid}"
         try:
             subprocess.run(["tmux", "rename-window", "-t", target, target_name],
                            capture_output=True, text=True, timeout=5)

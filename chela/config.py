@@ -4,6 +4,7 @@ Everything chela needs is discoverable from plain tmux; there is no external
 service to point at. State lives under ``~/.chela`` (override with ``CHELA_DIR``).
 """
 import os
+import subprocess
 from pathlib import Path
 
 # Where chela keeps its own state (scheduler.db, dispatcher runs, context cache).
@@ -12,7 +13,45 @@ CHELA_DIR = Path(os.environ.get("CHELA_DIR", Path.home() / ".chela"))
 # The tmux session chela orchestrates. Each agent lives in its own window of
 # this session, and the window name IS the agent's display name. Override with
 # CHELA_TMUX_SESSION; defaults to "chela".
+#
+# TMUX_SESSION is the import-time value (env override, else "chela") — kept as an
+# importable shim for callers that always run with CHELA_TMUX_SESSION set (the
+# pm2 daemon/dashboard). New code should prefer current_session() below, which
+# also makes a bare `chela peek/read` zero-config for an orchestrator agent.
 TMUX_SESSION = os.environ.get("CHELA_TMUX_SESSION", "chela")
+
+
+def current_session() -> str:
+    """The tmux session chela operates on, resolved LAZILY at call time.
+
+    Precedence:
+      1. explicit ``$CHELA_TMUX_SESSION`` — an override always wins;
+      2. else the caller's OWN pane's session, via ``$TMUX_PANE`` (tmux sets it
+         in every pane) — so an orchestrator agent living in whatever session the
+         fleet actually uses (e.g. ``ccbot``) gets zero-config discovery, mirroring
+         how ``orchestrator.self_wid()`` derives the window from the same pane;
+      3. else ``"chela"``.
+
+    Resolved per-call (never at import) so it can't cache a stale value, and so a
+    process with no tmux pane still imports cleanly. Grouped sessions share one
+    window list, so deriving a mirror (``webterm_ccbot__*``) lists the same real
+    windows as its parent.
+    """
+    env = os.environ.get("CHELA_TMUX_SESSION")
+    if env:
+        return env
+    pane = os.environ.get("TMUX_PANE")
+    if pane:
+        try:
+            r = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", pane, "#{session_name}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+    return "chela"
 
 # Window names to hide from discovery everywhere (dashboard, status, the ttyd
 # supervisor). For placeholder / keep-alive windows that aren't agents — e.g. a

@@ -11,7 +11,7 @@ import logging
 import subprocess
 import time
 
-from chela.config import TMUX_SESSION
+from chela import config
 from chela.discovery import get_window_id, get_all_windows
 
 log = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ def send_tmux(window_id: str, text: str) -> bool:
     Uses load-buffer + paste-buffer for multi-line text to avoid
     newlines being interpreted as premature Enter presses.
     """
-    target = f"{TMUX_SESSION}:{window_id}"
+    target = f"{config.current_session()}:{window_id}"
     try:
         if text.startswith("/"):
             # Slash commands: send Escape first to interrupt any in-progress

@@ -4,10 +4,53 @@ Exercised against synthetic tmux/transcript state via monkeypatch, so no live
 tmux, dashboard server, or claude process is needed.
 """
 import json
+import subprocess
+import types
 
 import pytest
 
-from chela import agent_manager, discovery, orchestrator, transcripts
+from chela import agent_manager, config, discovery, orchestrator, transcripts
+
+
+# --- zero-config session scope (config.current_session precedence) -------------
+
+def _fake_run(session_name):
+    def run(cmd, **kw):
+        # emulate `tmux display-message -p -t <pane> '#{session_name}'`
+        return types.SimpleNamespace(returncode=0, stdout=session_name + "\n", stderr="")
+    return run
+
+
+def test_current_session_env_override_wins(monkeypatch):
+    # explicit override beats a pane that would derive something else
+    monkeypatch.setenv("CHELA_TMUX_SESSION", "explicit")
+    monkeypatch.setenv("TMUX_PANE", "%9")
+    monkeypatch.setattr(subprocess, "run", _fake_run("ccbot"))
+    assert config.current_session() == "explicit"
+
+
+def test_current_session_derives_from_pane(monkeypatch):
+    # no override → derive the caller's own pane session (e.g. ccbot)
+    monkeypatch.delenv("CHELA_TMUX_SESSION", raising=False)
+    monkeypatch.setenv("TMUX_PANE", "%9")
+    monkeypatch.setattr(subprocess, "run", _fake_run("ccbot"))
+    assert config.current_session() == "ccbot"
+
+
+def test_current_session_defaults_without_env_or_pane(monkeypatch):
+    monkeypatch.delenv("CHELA_TMUX_SESSION", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    assert config.current_session() == "chela"
+
+
+def test_current_session_falls_back_when_tmux_fails(monkeypatch):
+    monkeypatch.delenv("CHELA_TMUX_SESSION", raising=False)
+    monkeypatch.setenv("TMUX_PANE", "%9")
+
+    def failing(cmd, **kw):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="no server")
+    monkeypatch.setattr(subprocess, "run", failing)
+    assert config.current_session() == "chela"
 
 
 # --- CHELA_WID self-identity ---------------------------------------------------

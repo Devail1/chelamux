@@ -16,6 +16,7 @@ from pathlib import Path
 
 from chela import (
     agent_manager,
+    config,
     discovery,
     dispatcher,
     messenger,
@@ -25,7 +26,6 @@ from chela import (
     scheduler,
 )
 from chela.config import (
-    TMUX_SESSION,
     SCHEDULER_POLL_INTERVAL,
     DISPATCH_TICK_INTERVAL,
     DISPATCH_WORKFLOWS,
@@ -42,12 +42,13 @@ log = logging.getLogger("chela")
 
 def cmd_status(args) -> None:
     """List the agent windows chela can see in the tmux session."""
+    session = config.current_session()
     windows = discovery.get_all_windows()
     if not windows:
-        print(f"No windows found in tmux session '{TMUX_SESSION}'.")
+        print(f"No windows found in tmux session '{session}'.")
         print("Is the session running? Override the session with CHELA_TMUX_SESSION.")
         return
-    print(f"Agents in tmux session '{TMUX_SESSION}':\n")
+    print(f"Agents in tmux session '{session}':\n")
     for name, wid in sorted(windows.items()):
         cwd = discovery.get_window_cwd(name) or "?"
         print(f"  {name:<24} {wid:<6} {cwd}")
@@ -55,7 +56,8 @@ def cmd_status(args) -> None:
 
 def cmd_run(args) -> None:
     """Run the daemon loop: scheduler tick every pass, dispatcher on its own cadence."""
-    log.info("chela daemon starting (session=%s, poll=%ds)", TMUX_SESSION, SCHEDULER_POLL_INTERVAL)
+    log.info("chela daemon starting (session=%s, poll=%ds)",
+             config.current_session(), SCHEDULER_POLL_INTERVAL)
     scheduler.init()  # open the WAL scheduler DB + init schema once, before ticking
     if DISPATCH_WORKFLOWS:
         log.info("Dispatcher enabled for %d workflow(s): %s",

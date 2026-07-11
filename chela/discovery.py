@@ -8,16 +8,18 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from chela.config import IGNORE_WINDOWS, TMUX_SESSION
+from chela import config
+from chela.config import IGNORE_WINDOWS
 
 log = logging.getLogger(__name__)
 
 
 def _get_live_windows() -> dict[str, str]:
     """Live windows of the chela session as ``{window_id: window_name}``."""
+    session = config.current_session()
     try:
         result = subprocess.run(
-            ["tmux", "list-windows", "-t", TMUX_SESSION,
+            ["tmux", "list-windows", "-t", session,
              "-F", "#{window_id}\t#{window_name}"],
             capture_output=True, text=True, timeout=5,
         )
@@ -30,7 +32,7 @@ def _get_live_windows() -> dict[str, str]:
                     out[wid] = name
             return out
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        log.warning("Failed to query tmux for live windows (session=%s)", TMUX_SESSION)
+        log.warning("Failed to query tmux for live windows (session=%s)", session)
     return {}
 
 
