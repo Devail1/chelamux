@@ -21,6 +21,7 @@ Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
 | Skill | What it does |
 |-------|--------------|
 | **chela-setup** | Install chela and wire its work-item dispatcher into a git repo — scaffold a starter `WORKFLOW.md` + `TODO.md` so each `- [ ] task` becomes an agent → PR. Use to onboard a repo to chela. |
+| **telegram-setup** | Wire Telegram for chela — get a bot token from @BotFather, find the chat id (via `getUpdates`) and forum topic id, and set `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_TOPIC_ID`. The one-time config behind `telegram-send`. |
 
 ## Orchestration
 
@@ -47,4 +48,4 @@ Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
 
 `blindspot-pass`, `implementation-plan`, and `interview-me` are derived from Thariq Shihipar's **"A Field Guide to Fable: Finding Your Unknowns."** Full credit to the original work; these are adaptations packaged as Claude Code skills.
 
-`handoff`, `chela-setup`, `orchestrate`, and `telegram-send` are original to this project.
+`handoff`, `chela-setup`, `telegram-setup`, `orchestrate`, and `telegram-send` are original to this project.
