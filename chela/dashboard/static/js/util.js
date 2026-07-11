@@ -211,3 +211,15 @@ function humanSchedule(type, value) {
     return 'cron ' + value;
 }
 
+
+// --- Stage 0: setters for cross-module mutable state (imported bindings are read-only) ---
+function setCurrentTab(v) { currentTab = v; }
+function setMsgTarget(v) { msgTargetAgent = v; }
+function setAgentsCache(v) { _agentsCache = v; }
+
+// --- Stage 0: ES-module exports ---
+export { $, $$, BASE_PATH, REFRESH_MS, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, lucideIcon, msgTargetAgent, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, updateTabSignal };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { closeModal, toggleMenu });

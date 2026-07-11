@@ -1,3 +1,6 @@
+// --- Stage 0: ES-module imports ---
+import { $, _agentsCache, api, attrEsc, closeModal, escHtml, humanSchedule, relativeTime, shortTime, showModal } from './util.js';
+
 // ---------------------------------------------------------------------------
 // Render: Schedules
 // ---------------------------------------------------------------------------
@@ -23,8 +26,8 @@ async function refreshSchedules() {
             <td class="ts">${t.next_run ? relativeTime(t.next_run) : '-'}</td>
             <td><span class="badge ${t.enabled ? 'badge-on' : 'badge-off'}">${t.enabled ? 'ON' : 'OFF'}</span></td>
             <td>
-                <button onclick="toggleSchedule(${t.id}, ${!t.enabled})">${t.enabled ? 'Disable' : 'Enable'}</button>
-                <button class="btn-danger" onclick="deleteSchedule(${t.id})">Del</button>
+                <button onclick="chela.toggleSchedule(${t.id}, ${!t.enabled})">${t.enabled ? 'Disable' : 'Enable'}</button>
+                <button class="btn-danger" onclick="chela.deleteSchedule(${t.id})">Del</button>
             </td>
         </tr>
     `).join('');
@@ -103,3 +106,10 @@ async function deleteSchedule(id) {
     refreshSchedules();
 }
 
+
+// --- Stage 0: ES-module exports ---
+export { refreshSchedules, showAddSchedule };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { deleteSchedule, doAddSchedule, showAddSchedule, toggleSchedule });

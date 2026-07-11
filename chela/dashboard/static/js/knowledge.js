@@ -1,3 +1,6 @@
+// --- Stage 0: ES-module imports ---
+import { $, api, attrEsc, escHtml, relativeTime } from './util.js';
+
 // ---------------------------------------------------------------------------
 // Render: Knowledge (OKF viewer)
 //
@@ -62,7 +65,7 @@ function knRenderGlance() {
               target="_blank" rel="noopener">Open Knowledge Format</a> bundle: typed markdown you can
               glance at, browse, and follow by backlink.
             </div>
-            <span class="work-empty-cta" onclick="knRefresh()">Export the bundle →</span>
+            <span class="work-empty-cta" onclick="chela.knRefresh()">Export the bundle →</span>
           </div>`;
         return;
     }
@@ -139,7 +142,7 @@ function knRenderGlance() {
 function knCardRow(c) {
     const ts = c.timestamp ? `<span class="kn-card-ts ts">${relativeTime(c.timestamp)}</span>` : '';
     return `
-      <div class="kn-card" onclick="knOpen('${attrEsc(c.path)}')">
+      <div class="kn-card" onclick="chela.knOpen('${attrEsc(c.path)}')">
         <span class="kn-badge kn-badge-${knTypeClass(c.type)}">${escHtml(c.type || 'concept')}</span>
         <span class="kn-card-title">${escHtml(c.title)}</span>
         ${c.description ? `<span class="kn-card-desc">${escHtml(c.description)}</span>` : ''}
@@ -153,7 +156,7 @@ function knAgentRow(a, projByTitle) {
     const projPath = a.project && projByTitle[a.project];
     const proj = a.project
         ? (projPath
-            ? `<a class="kn-feed-proj" onclick="event.stopPropagation();knOpen('${attrEsc(projPath)}')">${escHtml(a.project)}</a>`
+            ? `<a class="kn-feed-proj" onclick="event.stopPropagation();chela.knOpen('${attrEsc(projPath)}')">${escHtml(a.project)}</a>`
             : `<span class="kn-feed-proj">${escHtml(a.project)}</span>`)
         : '';
     const ts = a.timestamp ? `<span class="kn-card-ts ts">${relativeTime(a.timestamp)}</span>` : '';
@@ -161,7 +164,7 @@ function knAgentRow(a, projByTitle) {
         ? `<a class="kn-pr" href="${attrEsc(a.pr_url)}" target="_blank" rel="noopener"
              onclick="event.stopPropagation()">PR ↗</a>` : '';
     return `
-      <div class="kn-feed-row" onclick="knOpen('${attrEsc(a.path)}')">
+      <div class="kn-feed-row" onclick="chela.knOpen('${attrEsc(a.path)}')">
         <span class="kn-badge kn-badge-agent">Agent</span>
         <div class="kn-feed-main">
           <div class="kn-feed-top">
@@ -177,7 +180,7 @@ function knAgentRow(a, projByTitle) {
 
 function knProjectChip(p) {
     return `
-      <button class="kn-pchip" onclick="knOpen('${attrEsc(p.path)}')">
+      <button class="kn-pchip" onclick="chela.knOpen('${attrEsc(p.path)}')">
         <span class="kn-pchip-name">${escHtml(p.title)}</span>
         ${p.description ? `<span class="kn-dim">${escHtml(p.description)}</span>` : ''}
       </button>`;
@@ -199,7 +202,7 @@ async function knOpen(path) {
     }
     if (!el) return;
     if (c.error || !c.path) {
-        el.innerHTML = `<div class="kn-detail"><a class="kn-back" onclick="knBackToGlance()">← Knowledge</a>
+        el.innerHTML = `<div class="kn-detail"><a class="kn-back" onclick="chela.knBackToGlance()">← Knowledge</a>
             <div class="kn-dim">Concept not found.</div></div>`;
         return;
     }
@@ -215,7 +218,7 @@ async function knOpen(path) {
     // Backlinks — the headline feature: what links TO this concept.
     const back = (c.backlinks || []).length
         ? c.backlinks.map(b => `
-            <div class="kn-card" onclick="knOpen('${attrEsc(b.path)}')">
+            <div class="kn-card" onclick="chela.knOpen('${attrEsc(b.path)}')">
               <span class="kn-badge kn-badge-${knTypeClass(b.type)}">${escHtml(b.type || 'concept')}</span>
               <span class="kn-card-title">${escHtml(b.title)}</span>
             </div>`).join('')
@@ -227,7 +230,7 @@ async function knOpen(path) {
 
     el.innerHTML = `
       <div class="kn-detail">
-        <a class="kn-back" onclick="knBackToGlance()">← Knowledge</a>
+        <a class="kn-back" onclick="chela.knBackToGlance()">← Knowledge</a>
         <div class="kn-head-card">
           <div class="kn-head-top">
             <span class="kn-badge kn-badge-${knTypeClass(c.type)}">${escHtml(c.type || 'concept')}</span>
@@ -276,9 +279,9 @@ async function knRunSearch(q, type) {
     if (!el) return;
     const head = `<div class="kn-section-title">Search
         <span class="kn-dim">· ${rows.length} result${rows.length === 1 ? '' : 's'}${type ? ' · type ' + escHtml(type) : ''}</span>
-        <a class="kn-back" style="float:right" onclick="knBackToGlance()">← Knowledge</a></div>`;
+        <a class="kn-back" style="float:right" onclick="chela.knBackToGlance()">← Knowledge</a></div>`;
     const body = rows.length ? rows.map(r => `
-        <div class="kn-card" onclick="knOpen('${attrEsc(r.path)}')">
+        <div class="kn-card" onclick="chela.knOpen('${attrEsc(r.path)}')">
           <span class="kn-badge kn-badge-${knTypeClass(r.type)}">${escHtml(r.type || 'concept')}</span>
           <span class="kn-card-title">${escHtml(r.title)}</span>
           ${r.description ? `<span class="kn-card-desc">${escHtml(r.description)}</span>` : ''}
@@ -297,7 +300,7 @@ async function knShowGraph() {
     if (!el) return;
     const nodes = g.nodes || [], edges = g.edges || [];
     if (!nodes.length) {
-        el.innerHTML = '<div class="kn-glance"><a class="kn-back" onclick="knBackToGlance()">← Knowledge</a>'
+        el.innerHTML = '<div class="kn-glance"><a class="kn-back" onclick="chela.knBackToGlance()">← Knowledge</a>'
             + '<div class="kn-dim">No concepts to graph.</div></div>';
         return;
     }
@@ -318,7 +321,7 @@ async function knShowGraph() {
         const p = pos[n.id];
         const anchor = p.x < cx - 20 ? 'end' : (p.x > cx + 20 ? 'start' : 'middle');
         const dx = p.x < cx - 20 ? -8 : (p.x > cx + 20 ? 8 : 0);
-        return `<g class="kn-node kn-node-${knTypeClass(n.type)}" onclick="knOpen('${attrEsc(n.id)}')">
+        return `<g class="kn-node kn-node-${knTypeClass(n.type)}" onclick="chela.knOpen('${attrEsc(n.id)}')">
             <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="6"/>
             <text x="${(p.x + dx).toFixed(1)}" y="${(p.y + 4).toFixed(1)}" text-anchor="${anchor}">${escHtml(n.title)}</text>
           </g>`;
@@ -327,7 +330,7 @@ async function knShowGraph() {
       <div class="kn-glance">
         <div class="kn-section-title">Graph
           <span class="kn-dim">· ${nodes.length} concepts · ${edges.length} links</span>
-          <a class="kn-back" style="float:right" onclick="knBackToGlance()">← Knowledge</a></div>
+          <a class="kn-back" style="float:right" onclick="chela.knBackToGlance()">← Knowledge</a></div>
         <div class="kn-graph-wrap">
           <svg viewBox="0 0 ${W} ${H}" class="kn-graph" preserveAspectRatio="xMidYMid meet">
             <g class="kn-edges">${lines}</g>${dots}
@@ -376,7 +379,7 @@ function knLink(text, href, base) {
     }
     if (href.startsWith('#')) return text;
     if (href.split('#')[0].endsWith('.md')) {
-        return `<a class="kn-link" onclick="knOpen('${attrEsc(knResolve(base, href))}')">${text}</a>`;
+        return `<a class="kn-link" onclick="chela.knOpen('${attrEsc(knResolve(base, href))}')">${text}</a>`;
     }
     return `<a href="${attrEsc(href)}" target="_blank" rel="noopener">${text}</a>`;
 }
@@ -418,3 +421,10 @@ function knMd(src, base) {
     if (inCode) html += '</code></pre>';
     return html;
 }
+
+// --- Stage 0: ES-module exports ---
+export { _kn, knBackToGlance, refreshKnowledge };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { knBackToGlance, knOnSearch, knOpen, knRefresh, knShowGraph });

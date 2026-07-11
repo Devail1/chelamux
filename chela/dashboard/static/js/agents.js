@@ -1,3 +1,8 @@
+// --- Stage 0: ES-module imports ---
+import { $, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, escHtml, msgTargetAgent, relativeTime, setAgentsCache, setMsgTarget, shortTime, showModal } from './util.js';
+import { _displayLabel } from './terminals.js';
+import { refresh } from './main.js';
+
 // ---------------------------------------------------------------------------
 // Render: Agents
 // ---------------------------------------------------------------------------
@@ -19,27 +24,27 @@ function _renderCard(a) {
     // the fallback send-channel when terminals are off.
     const _termsOn = typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON;
     let menuItems = _termsOn ? '' : `
-        <div class="menu-item" onclick="openSendMsg('${name}')">Message</div>`;
+        <div class="menu-item" onclick="chela.openSendMsg('${name}')">Message</div>`;
     if (a.has_schedules) {
         menuItems += `
-        <div class="menu-item" onclick="triggerSchedule('${name}')">Trigger Schedule</div>`;
+        <div class="menu-item" onclick="chela.triggerSchedule('${name}')">Trigger Schedule</div>`;
     }
     menuItems += `
         <div class="menu-sep"></div>
         <details class="menu-group">
             <summary class="menu-item">Context ▸</summary>
-            <div class="menu-item" onclick="checkAgentContext('${name}')">Check</div>
-            <div class="menu-item" onclick="compactAgent('${name}')">Compact</div>
-            <div class="menu-item" onclick="clearContext('${name}')">Clear</div>
+            <div class="menu-item" onclick="chela.checkAgentContext('${name}')">Check</div>
+            <div class="menu-item" onclick="chela.compactAgent('${name}')">Compact</div>
+            <div class="menu-item" onclick="chela.clearContext('${name}')">Clear</div>
         </details>
         <div class="menu-sep"></div>`;
     if (a.claude_running) {
         menuItems += `
-        <div class="menu-item" onclick="restartAgent('${name}')">Restart</div>
-        <div class="menu-item menu-danger" onclick="stopAgent('${name}')">Stop</div>`;
+        <div class="menu-item" onclick="chela.restartAgent('${name}')">Restart</div>
+        <div class="menu-item menu-danger" onclick="chela.stopAgent('${name}')">Stop</div>`;
     } else {
         menuItems += `
-        <div class="menu-item" onclick="startAgent('${name}')">Start</div>`;
+        <div class="menu-item" onclick="chela.startAgent('${name}')">Start</div>`;
     }
 
     // Liveness line: native session status (busy/idle/waiting) when claude is
@@ -93,12 +98,12 @@ function _renderCard(a) {
         <div class="agent-header">
             <div class="agent-name">
                 <span class="health-dot ${dotColor}"></span>
-                <span class="agent-name-link" data-agent="${attrEsc(a.name)}" onclick="selectAgent(this.dataset.agent)" title="Open this agent's pane">${escHtml(_displayLabel(a.window_id || a.name))}</span>
+                <span class="agent-name-link" data-agent="${attrEsc(a.name)}" onclick="chela.selectAgent(this.dataset.agent)" title="Open this agent's pane">${escHtml(_displayLabel(a.window_id || a.name))}</span>
                 <span class="claude-badge ${a.claude_running ? 'claude-on' : 'claude-off'}">${a.claude_running ? 'running' : 'stopped'}</span>
                 ${prBadge}
             </div>
             <div class="kebab-wrap">
-                <button class="kebab-btn" onclick="toggleMenu(this)">&#8942;</button>
+                <button class="kebab-btn" onclick="chela.toggleMenu(this)">&#8942;</button>
                 <div class="kebab-menu">${menuItems}</div>
             </div>
         </div>
@@ -117,7 +122,7 @@ function _renderCard(a) {
 
 async function refreshAgents() {
     const agents = await api('/api/agents');
-    _agentsCache = agents;
+    setAgentsCache(agents);
     const sorted = _sortAgents(agents);
 
     const grid = $('#agent-grid');
@@ -131,7 +136,7 @@ async function refreshAgents() {
 }
 
 function openSendMsg(agent) {
-    msgTargetAgent = agent;
+    setMsgTarget(agent);
     $('#modal-msg-agent').textContent = agent;
     $('#modal-msg-text').value = '';
     showModal('modal-msg');
@@ -345,3 +350,10 @@ async function doBroadcast() {
     $('#broadcast-input').value = '';
 }
 
+
+// --- Stage 0: ES-module exports ---
+export { checkContext, refreshAgents };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { checkAgentContext, clearContext, compactAgent, doBroadcast, doRediscover, doSendMsg, openSendMsg, restartAgent, startAgent, stopAgent, triggerSchedule });

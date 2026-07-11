@@ -1,3 +1,7 @@
+// --- Stage 0: ES-module imports ---
+import { $, BASE_PATH, api, attrEsc, escHtml, shortTime, showModal } from './util.js';
+import { _launcherData } from './launcher.js';
+
 // ---------------------------------------------------------------------------
 // Render: Dispatcher (work-item dispatcher per-workflow view)
 //
@@ -98,7 +102,7 @@ function _runDeleteBtn(r) {
     return `<button class="dispatcher-delete-btn" type="button"
                    data-del-kind="run"
                    data-task-id="${attrEsc(r.task_id)}"
-                   onclick="dispatcherDeleteClick(this)"
+                   onclick="chela.dispatcherDeleteClick(this)"
                    title="Delete this row" aria-label="Delete">&times;</button>`;
 }
 
@@ -108,7 +112,7 @@ function _openDeleteBtn(t) {
                    data-del-kind="source-line"
                    data-file="${attrEsc(t.file)}"
                    data-text="${attrEsc(t.title)}"
-                   onclick="dispatcherDeleteClick(this)"
+                   onclick="chela.dispatcherDeleteClick(this)"
                    title="Delete this row" aria-label="Delete">&times;</button>`;
 }
 
@@ -169,8 +173,8 @@ function dispatcherDeleteClick(btn) {
     td.innerHTML = `
       <div class="kanban-confirm">
         <span class="kanban-confirm-msg">Delete this row?</span>
-        <button class="btn-confirm" type="button" onclick="dispatcherDeleteConfirm(this, true)">Delete</button>
-        <button type="button" onclick="dispatcherDeleteConfirm(this, false)">Cancel</button>
+        <button class="btn-confirm" type="button" onclick="chela.dispatcherDeleteConfirm(this, true)">Delete</button>
+        <button type="button" onclick="chela.dispatcherDeleteConfirm(this, false)">Cancel</button>
       </div>`;
     row.appendChild(td);
 }
@@ -214,7 +218,7 @@ async function dispatcherDeleteConfirm(actionBtn, ok) {
 function _dispatcherDeleteShowError(td, msg) {
     td.querySelector('.kanban-confirm').innerHTML = `
         <span class="kanban-confirm-msg" style="color:var(--red);">${escHtml(msg)}</span>
-        <button type="button" onclick="dispatcherDeleteConfirm(this, false)">Close</button>`;
+        <button type="button" onclick="chela.dispatcherDeleteConfirm(this, false)">Close</button>`;
 }
 
 function _renderWorkflowCard(wf) {
@@ -275,3 +279,10 @@ function stopDispatcherTimer() {
     if (_dispatcherTimer) { clearInterval(_dispatcherTimer); _dispatcherTimer = null; }
 }
 
+
+// --- Stage 0: ES-module exports ---
+export { _runDisplayId, _runPrCell, refreshDispatcher, startDispatcherTimer, stopDispatcherTimer };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { dispatcherDeleteClick, dispatcherDeleteConfirm, doInitRepo, openInitRepo });

@@ -408,7 +408,8 @@ _TERM_PALETTE_KEY_SHIM = (
     "if(e.key!=='k'&&e.key!=='K')return;"
     "if(!window.parent||window.parent===window)return;"
     "e.preventDefault();e.stopImmediatePropagation();"
-    "try{if(typeof window.parent.openPalette==='function')window.parent.openPalette();}"
+    # Stage 0: dashboard fns moved to the window.chela namespace under ES modules.
+    "try{var c=window.parent.chela;if(c&&typeof c.openPalette==='function')c.openPalette();}"
     "catch(err){}}"
     "document.addEventListener('keydown',onKey,true);"
     "})();</script>"

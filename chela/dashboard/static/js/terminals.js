@@ -1,3 +1,7 @@
+// --- Stage 0: ES-module imports ---
+import { $, BASE_PATH, TERMINALS_ON, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal } from './util.js';
+import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
+
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
 // ---------------------------------------------------------------------------
@@ -138,7 +142,7 @@ function _showReadyRetry(wid) {
     const ph = stage.querySelector('.term-pending[data-pending="' + _cssEsc(wid) + '"]');
     if (!ph) return;
     ph.innerHTML = `<div class="term-pending-inner">still starting —
-      <a href="#" class="term-retry" onclick="retryReady('${_jsStr(wid)}');return false;">click to retry</a></div>`;
+      <a href="#" class="term-retry" onclick="chela.retryReady('${_jsStr(wid)}');return false;">click to retry</a></div>`;
 }
 
 function retryReady(wid) {
@@ -182,7 +186,7 @@ async function spawnShell(btn) {
             alert('Spawn failed: ' + ((res && res.error) || 'unknown error'));
             return;
         }
-        _agentsCache = [];   // force /api/agents refetch so the new window shows
+        setAgentsCache([]);   // force /api/agents refetch so the new window shows
         _termSig = '';       // invalidate render cache so the stage rebuilds
         await renderTerminals();
     } catch (e) {
@@ -354,7 +358,7 @@ function _ownerPresence() {
     return _ownerPresenceP;
 }
 // Wire the router immediately so a shared pane's shim 'ready' is caught on load.
-_ownerPresence();
+if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) _ownerPresence();
 
 // On load, reflect any already-active shares in the global safety indicator —
 // covers landing straight on a non-terminals tab with a forgotten live share.
@@ -636,7 +640,7 @@ function _updateShareBtns(wid) {
 function _shareBtnHTML(wid) {
     const on = _sharedWids.has(wid);
     return `<button class="gs-share-btn${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
-      onclick="shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
+      onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
       title="Share this session">${lucideIcon('share-2', 15)}<span class="gs-share-count" hidden></span></button>`;
 }
 
@@ -650,11 +654,11 @@ function paneHead(wid, draggable) {
     // sessions). Managed personas (anything in agents.yaml) get no × so they
     // can't be torn down from the wall by accident; the backend also refuses.
     const kill = _isManaged(wid) ? '' :
-        `<button class="gs-kill-btn" onclick="termKillClick(this,'${j}')" title="Kill this session">&#10005;</button>`;
+        `<button class="gs-kill-btn" onclick="chela.termKillClick(this,'${j}')" title="Kill this session">&#10005;</button>`;
     // Minimize-to-dock is a wall-only concept (single view shows one pane, with
     // nothing to dock it beside) — only render it for draggable wall tiles.
     const min = draggable
-        ? `<button class="gs-min-btn" onclick="termMinFor(this)" title="Minimize to dock">&#128469;</button>` : '';
+        ? `<button class="gs-min-btn" onclick="chela.termMinFor(this)" title="Minimize to dock">&#128469;</button>` : '';
     // No PgUp/PgDn/scroll/Esc/^C here: with focus in the pane those keys reach the
     // terminal natively (wheel/keys scroll, Esc and Ctrl-C pass through), so the
     // header carries only the window controls (minimize / maximize / kill).
@@ -668,7 +672,7 @@ function paneHead(wid, draggable) {
         <span class="gs-win-ctl">
           ${_shareBtnHTML(wid)}
           ${min}
-          <button class="gs-max-btn" onclick="termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
+          <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
           ${kill}
         </span>
       </span>
@@ -687,8 +691,8 @@ function termKillClick(btn, wid) {
     confirmEl.dataset.agent = wid;
     confirmEl.innerHTML = `
         <span class="kanban-confirm-msg">Kill ${escHtml(_paneTitle(wid))}?</span>
-        <button class="btn-confirm" type="button" onclick="termKillConfirm(this, true)">Kill</button>
-        <button type="button" onclick="termKillConfirm(this, false)">Cancel</button>`;
+        <button class="btn-confirm" type="button" onclick="chela.termKillConfirm(this, true)">Kill</button>
+        <button type="button" onclick="chela.termKillConfirm(this, false)">Cancel</button>`;
     pane.appendChild(confirmEl);
     btn.style.visibility = 'hidden';
 }
@@ -729,7 +733,7 @@ async function termKillConfirm(actionBtn, ok) {
 function _termKillShowError(confirmEl, killBtn, msg) {
     confirmEl.innerHTML = `
         <span class="kanban-confirm-msg" style="color:var(--red);">${escHtml(msg)}</span>
-        <button type="button" onclick="termKillConfirm(this, false)">Close</button>`;
+        <button type="button" onclick="chela.termKillConfirm(this, false)">Close</button>`;
     if (killBtn) killBtn.style.visibility = '';
 }
 
@@ -1014,7 +1018,7 @@ function renderMinDock() {
             const cls = min ? 'min-chip min-chip-minimized' : 'min-chip min-chip-active';
             const icon = min ? '&#128471;' : '&#128469;';   // restore vs minimize glyph
             return `<button class="${cls}" data-wid="${attrEsc(wid)}"
-              onclick="toggleDockChip('${j}')" title="Click to ${min ? 'restore' : 'minimize'} ${attrEsc(_paneTitle(wid))}">
+              onclick="chela.toggleDockChip('${j}')" title="Click to ${min ? 'restore' : 'minimize'} ${attrEsc(_paneTitle(wid))}">
               ${_statusDot(wid)}
               <span class="min-chip-title">${escHtml(_paneTitle(wid))}</span>
               <span class="min-chip-icon" aria-hidden="true">${icon}</span>
@@ -1045,7 +1049,7 @@ function kbToggle() {
 async function renderTerminals() {
     if (!TERMINALS_ON) return;   // terminals disabled — DOM (#term-stage etc.) absent
     let agents = _agentsCache;
-    if (!agents || !agents.length) { agents = await api('/api/agents'); _agentsCache = agents; }
+    if (!agents || !agents.length) { agents = await api('/api/agents'); setAgentsCache(agents); }
     const wids = (agents || []).filter(a => a.online !== false && a.window_id).map(a => a.window_id);
 
     // Wall mode tiles 5+ terminals across a 12-col grid — useless at 375px.
@@ -1291,7 +1295,7 @@ async function termTick() {
     if (_termSuspended) return;   // tab hidden: don't add/reconnect iframes we just released
     let agents;
     try { agents = await api('/api/agents'); } catch (e) { return; }   // transient — try again next tick
-    _agentsCache = agents;
+    setAgentsCache(agents);
     const live = (agents || []).filter(a => a.online !== false && a.window_id).map(a => a.window_id);
     const liveSet = new Set(live);
 
@@ -1657,7 +1661,7 @@ function _buildGridPicker() {
     if (!host.dataset.built) {
         host.innerHTML = WALL_PRESETS.map((p, i) =>
             `<button class="gl-btn" data-preset="${i}" title="${escHtml(p.label)}" aria-label="${escHtml(p.label)}"
-                     onclick="applyGridLayout(${p.cols}, ${p.rows}, this)">${_gridGlyph(p.cols, p.rows)}</button>`
+                     onclick="chela.applyGridLayout(${p.cols}, ${p.rows}, this)">${_gridGlyph(p.cols, p.rows)}</button>`
         ).join('');
         host.dataset.built = '1';
     }
@@ -1891,7 +1895,7 @@ function renderMobileSwitcher() {
     // session" → shareCurrentAgent), so the row no longer carries its own 🔗 button.
     host.innerHTML = wids.map(w => {
         const cls = 'term-pill' + (w === active ? ' active' : '');
-        return `<button class="${cls}" data-wid="${attrEsc(w)}" onclick="switchAgentMobile('${_jsStr(w)}')">
+        return `<button class="${cls}" data-wid="${attrEsc(w)}" onclick="chela.switchAgentMobile('${_jsStr(w)}')">
           ${_statusDot(w)}<span class="term-pill-label">${escHtml(_paneTitle(w))}</span>
         </button>`;
     }).join('');
@@ -2015,3 +2019,10 @@ if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', _kbPin);
     window.visualViewport.addEventListener('scroll', _kbPin);
 }
+
+// --- Stage 0: ES-module exports ---
+export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, renderTerminals, shareBtnClick, startTermTimer, stopTermTimer };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termScrollToggle, toggleDockChip, toggleWallLock });

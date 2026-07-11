@@ -1,3 +1,15 @@
+// --- Stage 0: ES-module imports ---
+import { $, $$, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal } from './util.js';
+import { refreshSummary } from './header.js';
+import { checkContext } from './agents.js';
+import { showAddSchedule } from './schedules.js';
+import { _kn, knBackToGlance } from './knowledge.js';
+import { refreshDispatcher, startDispatcherTimer, stopDispatcherTimer } from './dispatcher.js';
+import { refreshKanban, startKanbanTimer, stopKanbanTimer } from './kanban.js';
+import { _displayLabel, _sharedWids, _stopShare, focusPaneByWid, shareBtnClick, startTermTimer, stopTermTimer } from './terminals.js';
+import { _isFav, _launcherData, launchProject, refreshLauncher } from './launcher.js';
+import { refresh } from './main.js';
+
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
 //
@@ -29,7 +41,7 @@ function closeSidebar() { toggleSidebar(false); }
 // --- View switching --------------------------------------------------------
 
 function selectView(view) {
-    currentTab = view;
+    setCurrentTab(view);
     _detailAgent = null;
 
     $$('.panel').forEach(p => p.classList.remove('active'));
@@ -67,7 +79,7 @@ function selectAgent(name) {
 
 // Focus a single agent in the canvas (metadata detail / transcript).
 function showAgentDetail(name) {
-    currentTab = 'agent-detail';
+    setCurrentTab('agent-detail');
     _detailAgent = name;
     $$('.panel').forEach(p => p.classList.remove('active'));
     const panel = document.getElementById('panel-agent-detail');
@@ -177,10 +189,10 @@ function _agentRowHtml(a) {
     const pin = canPin
         ? `<button class="agent-pin${faved ? ' pinned' : ''}" data-cwd="${attrEsc(a.cwd)}"
              title="${faved ? 'Unpin from Launch favorites' : 'Pin this directory to Launch favorites'}"
-             onclick="event.stopPropagation(); toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
+             onclick="event.stopPropagation(); chela.toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
         : '';
 
-    return `<div class="agent-row rich${active}" data-agent="${attrEsc(a.name)}" onclick="selectAgent(this.dataset.agent)">
+    return `<div class="agent-row rich${active}" data-agent="${attrEsc(a.name)}" onclick="chela.selectAgent(this.dataset.agent)">
         <span class="term-status-dot ${stCls}" title="${attrEsc(_agentType(a))} · ${stWord}"></span>
         <div class="ar-main">
             <div class="ar-top">
@@ -250,7 +262,7 @@ function renderSidebarAgents(agents) {
         const isColl = collapsed.has(e.key);
         const working = e.list.filter(a => agentDotColor(a) === 'green').length;
         html += `<div class="side-group${isColl ? ' collapsed' : ''}">
-            <div class="group-head" data-g="${attrEsc(e.key)}" onclick="toggleGroup(this.dataset.g)">
+            <div class="group-head" data-g="${attrEsc(e.key)}" onclick="chela.toggleGroup(this.dataset.g)">
                 <span class="group-caret">▾</span>
                 <span class="group-name" title="${attrEsc(e.key)}">${escHtml(e.key)}</span>
                 ${working ? `<span class="group-dot working" title="${working} working"></span>` : ''}
@@ -280,7 +292,7 @@ async function refreshSidebar() {
             api('/api/agents'),
             TERMINALS_ON ? api('/api/agents/context').catch(() => null) : Promise.resolve(null),
         ]);
-        _agentsCache = agents || [];
+        setAgentsCache(agents || []);
         if (ctx) updateCtxCache(ctx);
         renderSidebarAgents(_agentsCache);
     } catch (e) {
@@ -314,7 +326,7 @@ function renderAgentDetail() {
     const a = (_agentsCache || []).find(x => x.name === _detailAgent);
     if (!a) {
         host.innerHTML = `<div class="detail-head">
-            <span class="detail-back" onclick="selectView('agents')">← Agents</span>
+            <span class="detail-back" onclick="chela.selectView('agents')">← Agents</span>
             <span class="detail-title">${escHtml(_detailAgent || '')}</span>
         </div>
         <div class="side-empty">This agent's window is no longer present.</div>`;
@@ -326,14 +338,14 @@ function renderAgentDetail() {
     // "Message" only when there's no wall to type into directly (terminals off).
     const actions = [];
     if (!(typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON)) {
-        actions.push(`<button onclick="openSendMsg('${attrEsc(a.name)}')">Message</button>`);
+        actions.push(`<button onclick="chela.openSendMsg('${attrEsc(a.name)}')">Message</button>`);
     }
-    if (a.has_schedules) actions.push(`<button onclick="triggerSchedule('${attrEsc(a.name)}')">Trigger</button>`);
+    if (a.has_schedules) actions.push(`<button onclick="chela.triggerSchedule('${attrEsc(a.name)}')">Trigger</button>`);
     if (a.claude_running) {
-        actions.push(`<button onclick="restartAgent('${attrEsc(a.name)}')">Restart</button>`);
-        actions.push(`<button class="btn-danger" onclick="stopAgent('${attrEsc(a.name)}')">Stop</button>`);
+        actions.push(`<button onclick="chela.restartAgent('${attrEsc(a.name)}')">Restart</button>`);
+        actions.push(`<button class="btn-danger" onclick="chela.stopAgent('${attrEsc(a.name)}')">Stop</button>`);
     } else {
-        actions.push(`<button class="btn-accent" onclick="startAgent('${attrEsc(a.name)}')">Start</button>`);
+        actions.push(`<button class="btn-accent" onclick="chela.startAgent('${attrEsc(a.name)}')">Start</button>`);
     }
 
     const rows = [
@@ -361,7 +373,7 @@ function renderAgentDetail() {
 
     host.innerHTML = `
         <div class="detail-head">
-            <span class="detail-back" onclick="selectView('agents')">← Agents</span>
+            <span class="detail-back" onclick="chela.selectView('agents')">← Agents</span>
             <span class="health-dot ${dot}"></span>
             <span class="detail-title">${escHtml(a.name)}</span>${pr}
         </div>
@@ -406,8 +418,8 @@ function renderSettings(focus) {
             <div class="s-row">
                 <input id="cfg-projects-dir" class="s-input" type="text"
                        placeholder="~/projects" autocomplete="off"
-                       onkeydown="if(event.key==='Enter')saveProjectsDir()">
-                <button class="btn-accent" onclick="saveProjectsDir()">Save</button>
+                       onkeydown="if(event.key==='Enter')chela.saveProjectsDir()">
+                <button class="btn-accent" onclick="chela.saveProjectsDir()">Save</button>
             </div>
             <div id="cfg-projects-msg" class="s-savemsg"></div>
         </section>
@@ -441,7 +453,7 @@ function renderSettings(focus) {
             <h4>Theme</h4>
             <div class="s-row">
                 <span class="s-rowlabel">Appearance</span>
-                <select id="theme-select" class="s-select" onchange="setTheme(this.value)">
+                <select id="theme-select" class="s-select" onchange="chela.setTheme(this.value)">
                     ${['dark','dim','midnight','nord','gruvbox','solarized','rose']
                         .map(t => `<option value="${t}"${theme === t ? ' selected' : ''}>${THEME_LABELS[t]}</option>`)
                         .join('')}
@@ -457,7 +469,7 @@ function renderSettings(focus) {
             other Hebrew faces are proportional: nicer letters, slight drift in the fixed cells.</p>
             <div class="s-row">
                 <span class="s-rowlabel">English font</span>
-                <select id="term-latin-select" class="s-select" onchange="setTermLatin(this.value)">
+                <select id="term-latin-select" class="s-select" onchange="chela.setTermLatin(this.value)">
                     ${Object.keys(TERM_LATIN_LABELS)
                         .map(k => `<option value="${k}"${termLatin === k ? ' selected' : ''}>${TERM_LATIN_LABELS[k]}</option>`)
                         .join('')}
@@ -465,7 +477,7 @@ function renderSettings(focus) {
             </div>
             <div class="s-row">
                 <span class="s-rowlabel">Hebrew font</span>
-                <select id="term-font-select" class="s-select" onchange="setTermFont(this.value)">
+                <select id="term-font-select" class="s-select" onchange="chela.setTermFont(this.value)">
                     ${Object.keys(TERM_FONT_LABELS)
                         .map(k => `<option value="${k}"${termFont === k ? ' selected' : ''}>${TERM_FONT_LABELS[k]}</option>`)
                         .join('')}
@@ -473,7 +485,7 @@ function renderSettings(focus) {
             </div>
             <div class="s-row">
                 <span class="s-rowlabel">Size</span>
-                <select id="term-size-select" class="s-select" onchange="setTermSize(this.value)">
+                <select id="term-size-select" class="s-select" onchange="chela.setTermSize(this.value)">
                     ${['12', '13', '14', '15', '16', '18']
                         .map(s => `<option value="${s}"${termSize === s ? ' selected' : ''}>${s}px</option>`)
                         .join('')}
@@ -490,7 +502,7 @@ function renderSettings(focus) {
                 <span class="s-rowlabel">Display name</span>
                 <input id="collab-name" class="s-input" type="text" maxlength="24"
                        autocomplete="off" placeholder="${escHtml(collabAuto)}"
-                       value="${attrEsc(collabName)}" oninput="setCollabName(this.value)">
+                       value="${attrEsc(collabName)}" oninput="chela.setCollabName(this.value)">
             </div>
             <div class="s-row">
                 <span class="s-rowlabel">Relay</span>
@@ -677,7 +689,7 @@ function hideOverflowMenu() {
 async function newShellWindow() {
     try {
         const res = await api('/api/agents/spawn', { method: 'POST' });
-        if (res && res.ok) { _agentsCache = []; refreshSidebar(); }
+        if (res && res.ok) { setAgentsCache([]); refreshSidebar(); }
         else alert((res && res.error) || 'Could not spawn a window (enable terminals, or use tmux directly).');
     } catch (e) {
         alert('Could not spawn a window (enable terminals, or use tmux directly).');
@@ -819,7 +831,7 @@ function _renderPalette(q) {
             ? `<span class="term-status-dot ${it.dot}"></span>`
             : `<span class="pi-glyph">${it.icon || ''}</span>`;
         return `<div class="palette-item${i === _palSel ? ' sel' : ''}" data-i="${i}"
-                  onmouseenter="_palHover(${i})" onclick="_palRun(${i})">
+                  onmouseenter="_palHover(${i})" onclick="chela._palRun(${i})">
             <span class="pi-icon">${icon}</span>
             <span class="pi-title">${escHtml(it.title)}</span>
             <span class="pi-sub">${escHtml(it.sub)}</span>
@@ -868,3 +880,10 @@ document.addEventListener('keydown', e => {
 
 // Apply the saved theme immediately on load.
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
+
+// --- Stage 0: ES-module exports ---
+export { openPalette, refreshSidebar, renderAgentDetail, renderSidebarAgents, selectView, updateCtxCache, updateWorkBadges };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentFilter, setCollabName, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });

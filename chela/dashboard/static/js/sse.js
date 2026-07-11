@@ -1,3 +1,10 @@
+// --- Stage 0: ES-module imports ---
+import { $, BASE_PATH, TERMINALS_ON, _agentsCache, api, currentTab, setAgentsCache } from './util.js';
+import { refreshAgents } from './agents.js';
+import { refreshDispatcher } from './dispatcher.js';
+import { refreshKanban } from './kanban.js';
+import { _absorbFreshTerminals, _cssEsc, _refreshPaneLabels, _renderedWids, _stopReadyPoll, _swapToFrame, _termReady, dropTerminalPane } from './terminals.js';
+
 // ---------------------------------------------------------------------------
 // Reactive updates via Server-Sent Events (accelerator over the poll timers)
 //
@@ -17,7 +24,7 @@ let _sse = null;
 function _sseWindows(d) {
     // Window set changed (agent window appeared / vanished). Invalidate the
     // agent cache so any render refetches the fresh shape.
-    _agentsCache = [];
+    setAgentsCache([]);
     if (currentTab === 'agents') {
         refreshAgents();
     } else if (TERMINALS_ON && currentTab === 'terminals') {
@@ -28,7 +35,7 @@ function _sseWindows(d) {
         // SSE `windows` event still fires on spawn/kill elsewhere even with the
         // terminals tab inactive — the guard above skips it then.
         api('/api/agents').then(agents => {
-            _agentsCache = agents;
+            setAgentsCache(agents);
             const live = (agents || []).filter(a => a.online !== false && a.window_id)
                 .map(a => a.window_id);
             const liveSet = new Set(live);
@@ -88,3 +95,6 @@ function initSSE() {
     _sse.onerror = () => { /* auto-reconnect; polling is the fallback */ };
 }
 
+
+// --- Stage 0: ES-module exports ---
+export { initSSE };

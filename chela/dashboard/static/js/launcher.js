@@ -1,3 +1,8 @@
+// --- Stage 0: ES-module imports ---
+import { $, TERMINALS_ON, _agentsCache, api, attrEsc, escHtml, setAgentsCache } from './util.js';
+import { _jsStr, focusPaneByWid } from './terminals.js';
+import { refreshSidebar, renderSidebarAgents, selectView } from './nav.js';
+
 // ---------------------------------------------------------------------------
 // Launcher: Recent + Favorites click-to-launch (sidebar)
 // ---------------------------------------------------------------------------
@@ -31,22 +36,22 @@ function _launchRow(e, pinned) {
     const j = _jsStr(e.path);
     const star = pinned
         ? `<button class="lr-star pinned" title="Unpin from Favorites"
-             onclick="event.stopPropagation(); unpinFav('${j}')">&#9733;</button>`
+             onclick="event.stopPropagation(); chela.unpinFav('${j}')">&#9733;</button>`
         : `<button class="lr-star" title="Pin to Favorites"
-             onclick="event.stopPropagation(); pinFav('${j}')">&#9734;</button>`;
+             onclick="event.stopPropagation(); chela.pinFav('${j}')">&#9734;</button>`;
     // Recent rows carry a × to forget them; favorites are removed via the star.
     const forget = pinned ? '' :
         `<button class="lr-forget" title="Remove from Recent"
-           onclick="event.stopPropagation(); forgetRecent('${j}')">&#10005;</button>`;
+           onclick="event.stopPropagation(); chela.forgetRecent('${j}')">&#10005;</button>`;
     const gone = e.exists ? '' : ' lr-gone';
     return `<div class="side-item launch-row${gone}" data-path="${attrEsc(e.path)}"
         title="${attrEsc(e.path)}${e.exists ? '' : ' (missing)'}"
-        onclick="launchProject(this.dataset.path)">
+        onclick="chela.launchProject(this.dataset.path)">
         <span class="lr-icon">${e.exists ? '&#9656;' : '&#9888;'}</span>
         <span class="lr-label">${escHtml(e.label)}</span>
         <span class="lr-actions">
           <button class="lr-shell" title="Open a plain shell here"
-            onclick="event.stopPropagation(); launchProject(this.closest('.launch-row').dataset.path, {shell:true})">&#9003;</button>
+            onclick="event.stopPropagation(); chela.launchProject(this.closest('.launch-row').dataset.path, {shell:true})">&#9003;</button>
           ${star}${forget}
         </span>
       </div>`;
@@ -104,7 +109,7 @@ async function launchProject(path, opts) {
             body: JSON.stringify(body),
         });
         if (!res || !res.ok) { alert('Launch failed: ' + ((res && res.error) || 'unknown error')); return; }
-        _agentsCache = [];          // force /api/agents refetch so the new window shows
+        setAgentsCache([]);          // force /api/agents refetch so the new window shows
         selectView('terminals');    // surface the wall — the new pane spins up there
         refreshSidebar();
         refreshLauncher();          // the launch just bumped Recent
@@ -169,7 +174,7 @@ async function openFavAdd(ev) {
     }
     m.innerHTML = avail.map(s =>
         `<div class="popover-item" title="${attrEsc(s.path)}"
-           onclick="pinFav('${_jsStr(s.path)}'); hideFavAdd()">${escHtml(s.label)}</div>`
+           onclick="chela.pinFav('${_jsStr(s.path)}'); chela.hideFavAdd()">${escHtml(s.label)}</div>`
     ).join('');
 }
 
@@ -177,3 +182,10 @@ function hideFavAdd() {
     const m = document.getElementById('fav-add-menu');
     if (m) m.style.display = 'none';
 }
+
+// --- Stage 0: ES-module exports ---
+export { _isFav, _launcherData, launchProject, refreshLauncher };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { forgetRecent, hideFavAdd, launchProject, openFavAdd, pinFav, toggleFavCwd, unpinFav });

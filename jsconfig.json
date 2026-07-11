@@ -1,0 +1,15 @@
+{
+  "//": "Stage 0: editor + local type-checking for the dashboard JS via JSDoc. No build step — the browser loads the ES modules directly. Run locally with: npx -y typescript tsc -p jsconfig.json --noEmit",
+  "compilerOptions": {
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "module": "esnext",
+    "target": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "strict": false
+  },
+  "include": ["chela/dashboard/static/js/**/*.js"],
+  "exclude": ["chela/dashboard/static/vendor/**", "chela/dashboard/static/js/collab/**", "collab/**", "node_modules"]
+}

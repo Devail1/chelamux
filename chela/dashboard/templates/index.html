@@ -14,7 +14,7 @@
 
   <!-- Top bar: brand · usage pills · actions -->
   <header class="topbar">
-    <button class="icon-btn sidebar-toggle" id="btn-menu" title="Menu" aria-label="Open menu" onclick="toggleSidebar()">
+    <button class="icon-btn sidebar-toggle" id="btn-menu" title="Menu" aria-label="Open menu" onclick="chela.toggleSidebar()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <div class="brand"><img src="static/img/claw-mark.svg" class="brand-mark" alt=""><span>chela</span></div>
@@ -24,21 +24,21 @@
            mobile whenever any session is shared, so a forgotten live share (= an
            exposed terminal via a public link) is always one tap from Stop. NOT in
            the overflow — it must stay visible whenever a share is live. -->
-      <button class="shares-indicator" id="btn-shares" hidden onclick="openSharesSheet()"
+      <button class="shares-indicator" id="btn-shares" hidden onclick="chela.openSharesSheet()"
               title="Active shares — tap to manage or stop" aria-label="Active shares">
         <span class="si-dot" aria-hidden="true"></span>
         <span class="si-text">0 sharing</span>
       </button>
-      <button class="palette-trigger" id="btn-palette" title="Jump to… (⌘K / Ctrl-K)" aria-label="Open command palette" onclick="openPalette()">
+      <button class="palette-trigger" id="btn-palette" title="Jump to… (⌘K / Ctrl-K)" aria-label="Open command palette" onclick="chela.openPalette()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
         <span class="pt-kbd">⌘K</span>
       </button>
-      <button class="icon-btn" id="btn-new" title="New…" aria-label="New" onclick="openNewMenu(event)">
+      <button class="icon-btn" id="btn-new" title="New…" aria-label="New" onclick="chela.openNewMenu(event)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
       </button>
       <!-- Overflow: secondary actions (Share current · Notifications · Settings) +
            the usage/updated readouts, consolidated off the bar on desktop + mobile. -->
-      <button class="icon-btn" id="btn-overflow" title="More" aria-label="More actions" aria-haspopup="true" onclick="openOverflowMenu(event)">
+      <button class="icon-btn" id="btn-overflow" title="More" aria-label="More actions" aria-haspopup="true" onclick="chela.openOverflowMenu(event)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>
       </button>
     </div>
@@ -52,28 +52,28 @@
       <div class="side-head"><span class="side-title">Navigate</span></div>
       <div class="side-list">
         {% if terminals_enabled %}
-        <div class="side-item" data-view="terminals" onclick="selectView('terminals')">
+        <div class="side-item" data-view="terminals" onclick="chela.selectView('terminals')">
           <span class="side-item-icon">▦</span><span class="side-item-label">Wall</span>
         </div>
         {% endif %}
-        <div class="side-item" data-view="agents" onclick="selectView('agents')">
+        <div class="side-item" data-view="agents" onclick="chela.selectView('agents')">
           <span class="side-item-icon">▢</span><span class="side-item-label">Agents</span>
         </div>
-        <div class="side-item" data-view="dispatcher" onclick="selectView('dispatcher')">
+        <div class="side-item" data-view="dispatcher" onclick="chela.selectView('dispatcher')">
           <span class="side-item-icon">▤</span><span class="side-item-label">Dispatch</span>
           <span class="side-badges">
             <span class="badge" id="side-runs-count" title="Active runs">0</span>
             <span class="badge badge-pr" id="side-pr-count" title="Open PRs">0 PR</span>
           </span>
         </div>
-        <div class="side-item" data-view="kanban" onclick="selectView('kanban')">
+        <div class="side-item" data-view="kanban" onclick="chela.selectView('kanban')">
           <span class="side-item-icon">▥</span><span class="side-item-label">Kanban</span>
         </div>
-        <div class="side-item" data-view="schedules" onclick="selectView('schedules')">
+        <div class="side-item" data-view="schedules" onclick="chela.selectView('schedules')">
           <span class="side-item-icon">◷</span><span class="side-item-label">Schedules</span>
           <span class="side-badges"><span class="badge" id="hdr-schedules">-</span></span>
         </div>
-        <div class="side-item" data-view="knowledge" onclick="selectView('knowledge')">
+        <div class="side-item" data-view="knowledge" onclick="chela.selectView('knowledge')">
           <span class="side-item-icon">◆</span><span class="side-item-label">Knowledge</span>
         </div>
       </div>
@@ -84,7 +84,7 @@
       <div class="side-head" title="Launch a Claude agent in a project directory">
         <span class="side-title">Launch</span>
         <button class="side-add" title="Add a project to Favorites"
-                onclick="event.stopPropagation(); openFavAdd(event)">+</button>
+                onclick="event.stopPropagation(); chela.openFavAdd(event)">+</button>
       </div>
       <div class="side-list" id="launcher-list">
         <div class="side-empty">No projects yet</div>
@@ -98,13 +98,13 @@
       <div class="side-head">
         <span class="side-title">Sessions</span>
         <span class="side-count" id="hdr-agents">-/-</span>
-        <button class="side-add" title="New window" onclick="event.stopPropagation(); openNewMenu(event)">+</button>
+        <button class="side-add" title="New window" onclick="event.stopPropagation(); chela.openNewMenu(event)">+</button>
       </div>
       <div class="agent-filter" id="agent-filter">
-        <button data-filter="all" class="active" onclick="setAgentFilter('all')">All</button>
-        <button data-filter="claude" onclick="setAgentFilter('claude')">Claude</button>
-        <button data-filter="shell" onclick="setAgentFilter('shell')">Shell</button>
-        <button data-filter="server" onclick="setAgentFilter('server')">Server</button>
+        <button data-filter="all" class="active" onclick="chela.setAgentFilter('all')">All</button>
+        <button data-filter="claude" onclick="chela.setAgentFilter('claude')">Claude</button>
+        <button data-filter="shell" onclick="chela.setAgentFilter('shell')">Shell</button>
+        <button data-filter="server" onclick="chela.setAgentFilter('server')">Server</button>
       </div>
       <div class="side-list" id="sidebar-agents">
         <div class="side-empty">No agents</div>
@@ -120,9 +120,9 @@
     <div class="panel active" id="panel-agents">
       <div class="canvas-toolbar">
         <input type="text" id="broadcast-input" placeholder="Broadcast to all agents…"
-               onkeydown="if(event.key==='Enter')doBroadcast()">
-        <button class="btn-accent" onclick="doBroadcast()">Broadcast</button>
-        <button onclick="doRediscover()">Rediscover</button>
+               onkeydown="if(event.key==='Enter')chela.doBroadcast()">
+        <button class="btn-accent" onclick="chela.doBroadcast()">Broadcast</button>
+        <button onclick="chela.doRediscover()">Rediscover</button>
       </div>
       <div class="agent-grid" id="agent-grid"></div>
     </div>
@@ -135,7 +135,7 @@
     <!-- Schedules -->
     <div class="panel" id="panel-schedules">
       <div class="canvas-toolbar">
-        <button class="btn-accent" onclick="showAddSchedule()">+ Add Task</button>
+        <button class="btn-accent" onclick="chela.showAddSchedule()">+ Add Task</button>
       </div>
       <div class="card">
         <div class="table-wrap">
@@ -158,7 +158,7 @@
             chela types your prompt into that agent's tmux window. Use it to let a researcher
             refresh itself hourly, or run a risk check every 20&nbsp;minutes — no human in the loop.
           </div>
-          <span class="work-empty-cta" onclick="showAddSchedule()">Schedule an agent →</span>
+          <span class="work-empty-cta" onclick="chela.showAddSchedule()">Schedule an agent →</span>
         </div>
       </div>
 
@@ -182,9 +182,9 @@
     <div class="panel" id="panel-knowledge">
       <div class="canvas-toolbar">
         <input type="text" id="kn-search" placeholder="Search knowledge…"
-               oninput="knOnSearch(this.value)">
-        <button onclick="knShowGraph()">Graph</button>
-        <button onclick="knRefresh(this)" title="Re-export the bundle from current fleet state">Refresh</button>
+               oninput="chela.knOnSearch(this.value)">
+        <button onclick="chela.knShowGraph()">Graph</button>
+        <button onclick="chela.knRefresh(this)" title="Re-export the bundle from current fleet state">Refresh</button>
       </div>
       <div id="kn-content"></div>
     </div>
@@ -192,7 +192,7 @@
     <!-- Dispatcher -->
     <div class="panel" id="panel-dispatcher">
       <div class="work-toolbar">
-        <button class="btn-accent" onclick="openInitRepo()">+ Init a repo</button>
+        <button class="btn-accent" onclick="chela.openInitRepo()">+ Init a repo</button>
         <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
       </div>
       <div id="dispatcher-empty" class="work-empty" style="display:none;">
@@ -217,13 +217,13 @@
     <!-- Kanban -->
     <div class="panel" id="panel-kanban">
       <div class="work-toolbar">
-        <button class="btn-accent" onclick="openInitRepo()">+ Init a repo</button>
+        <button class="btn-accent" onclick="chela.openInitRepo()">+ Init a repo</button>
         <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
       </div>
       <div class="kanban-filters" id="kanban-filters"></div>
       <!-- Mobile-only column selector (one column fits on phone widths). -->
       <select class="kanban-col-select" id="kanban-col-select"
-              onchange="setKanbanCol(this.value)" aria-label="Kanban column"></select>
+              onchange="chela.setKanbanCol(this.value)" aria-label="Kanban column"></select>
       <div class="kanban-board" id="kanban-board"></div>
       <div id="kanban-empty" class="work-empty" style="display:none;">
         <div class="work-empty-icon">▤</div>
@@ -245,17 +245,17 @@
     <div class="panel" id="panel-terminals">
         <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
             <!-- mode toggle + single-agent picker kept (terminals.js refs them) but hidden: wall-only -->
-            <button id="term-mode-single" onclick="setTermMode('single')" style="display:none;">Single</button>
-            <button id="term-mode-wall" onclick="setTermMode('wall')" style="display:none;">Wall</button>
-            <select id="term-agent" onchange="renderTerminals()" style="display:none;"></select>
+            <button id="term-mode-single" onclick="chela.setTermMode('single')" style="display:none;">Single</button>
+            <button id="term-mode-wall" onclick="chela.setTermMode('wall')" style="display:none;">Wall</button>
+            <select id="term-agent" onchange="chela.renderTerminals()" style="display:none;"></select>
             <span id="term-wall-grid" style="display:none; gap:6px; align-items:center;">
                 <span style="color:var(--text-dim); font-size:11px;">Grid:</span>
                 <span id="term-grid-presets" style="display:inline-flex; gap:4px; align-items:center;"></span>
-                <button id="term-lock-btn" class="gl-btn" onclick="toggleWallLock(this)"
+                <button id="term-lock-btn" class="gl-btn" onclick="chela.toggleWallLock(this)"
                         title="Lock layout — drag swaps panes, resize off" aria-label="Lock layout"
                         style="margin-left:6px;"></button>
             </span>
-            <button id="term-new-shell" onclick="spawnShell(this)" title="Spawn a new plain-shell window" style="margin-left:auto;">+ New shell</button>
+            <button id="term-new-shell" onclick="chela.spawnShell(this)" title="Spawn a new plain-shell window" style="margin-left:auto;">+ New shell</button>
         </div>
         <!-- Mobile-only agent switcher: a scrollable pill strip that replaces the
              dropdown on phones (single mode). Populated by renderMobileSwitcher(). -->
@@ -263,7 +263,7 @@
         <div id="term-stage"></div>
         <div id="term-min-dock" style="display:none;"></div>
         <div id="term-bar" class="kb-collapsed" style="display:none;">
-            <button class="kb-toggle" id="kb-toggle" onclick="kbToggle()"
+            <button class="kb-toggle" id="kb-toggle" onclick="chela.kbToggle()"
                     aria-expanded="false" aria-controls="kb-body" title="Show/hide on-screen keys">
                 <span>&#9000; Keys</span>
                 <span class="kb-chevron" aria-hidden="true">&#9650;</span>
@@ -271,32 +271,32 @@
             <div class="kb-body" id="kb-body">
                 <div class="kb-row">
                     <div class="kb-group" aria-label="Special keys">
-                        <button onclick="termKey('Escape')" title="Escape">Esc</button>
-                        <button onclick="termKey('Tab')" title="Tab">Tab</button>
-                        <button onclick="termKey('Enter')" title="Enter" aria-label="Enter">&#9166;</button>
+                        <button onclick="chela.termKey('Escape')" title="Escape">Esc</button>
+                        <button onclick="chela.termKey('Tab')" title="Tab">Tab</button>
+                        <button onclick="chela.termKey('Enter')" title="Enter" aria-label="Enter">&#9166;</button>
                     </div>
                     <div class="kb-group" aria-label="Control keys">
-                        <button onclick="termKey('C-c')" title="Ctrl-C (interrupt)">^C</button>
-                        <button onclick="termKey('C-d')" title="Ctrl-D (EOF)">^D</button>
-                        <button onclick="termKey('C-l')" title="Ctrl-L (clear)">^L</button>
-                        <button onclick="termKey('C-b')" title="Ctrl-B (tmux prefix)">^B</button>
+                        <button onclick="chela.termKey('C-c')" title="Ctrl-C (interrupt)">^C</button>
+                        <button onclick="chela.termKey('C-d')" title="Ctrl-D (EOF)">^D</button>
+                        <button onclick="chela.termKey('C-l')" title="Ctrl-L (clear)">^L</button>
+                        <button onclick="chela.termKey('C-b')" title="Ctrl-B (tmux prefix)">^B</button>
                     </div>
                     <div class="kb-group" aria-label="Scrollback">
-                        <button id="term-scroll-btn" onclick="termScrollToggle()">&#10514; Scroll</button>
+                        <button id="term-scroll-btn" onclick="chela.termScrollToggle()">&#10514; Scroll</button>
                     </div>
                 </div>
                 <div class="kb-row">
                     <div class="kb-dpad" aria-label="Arrow keys">
-                        <button class="kb-up" onclick="termKey('Up')" title="Up" aria-label="Up">&#8593;</button>
-                        <button class="kb-left" onclick="termKey('Left')" title="Left" aria-label="Left">&#8592;</button>
-                        <button class="kb-down" onclick="termKey('Down')" title="Down" aria-label="Down">&#8595;</button>
-                        <button class="kb-right" onclick="termKey('Right')" title="Right" aria-label="Right">&#8594;</button>
+                        <button class="kb-up" onclick="chela.termKey('Up')" title="Up" aria-label="Up">&#8593;</button>
+                        <button class="kb-left" onclick="chela.termKey('Left')" title="Left" aria-label="Left">&#8592;</button>
+                        <button class="kb-down" onclick="chela.termKey('Down')" title="Down" aria-label="Down">&#8595;</button>
+                        <button class="kb-right" onclick="chela.termKey('Right')" title="Right" aria-label="Right">&#8594;</button>
                     </div>
                     <div class="kb-nav" aria-label="Navigation keys">
-                        <button onclick="termKey('Home')" title="Home">Home</button>
-                        <button onclick="termKey('PageUp')" title="Page Up">PgUp</button>
-                        <button onclick="termKey('End')" title="End">End</button>
-                        <button onclick="termKey('PageDown')" title="Page Down">PgDn</button>
+                        <button onclick="chela.termKey('Home')" title="Home">Home</button>
+                        <button onclick="chela.termKey('PageUp')" title="Page Up">PgUp</button>
+                        <button onclick="chela.termKey('End')" title="End">End</button>
+                        <button onclick="chela.termKey('PageDown')" title="Page Down">PgDn</button>
                     </div>
                 </div>
             </div>
@@ -306,43 +306,43 @@
              chars one tap away, Ctrl as a sticky/lock modifier that reveals a
              Ctrl-letter layer. Keys go through termKey()/api/term/key. -->
         <div id="term-keybar" class="term-keybar" data-ctrl="off">
-          <button class="kb2-key" onclick="termKey('Escape')">Esc</button>
-          <button class="kb2-key" onclick="termKey('Tab')">Tab</button>
-          <button class="kb2-key" onclick="termKey('BTab')" title="Shift-Tab (back-tab · toggle agent mode)" aria-label="Shift Tab">&#8679;Tab</button>
-          <button class="kb2-key kb2-go" onclick="termKey('Enter')" aria-label="Enter">&#9166;</button>
-          <button class="kb2-key" onclick="termPaste(this)" title="Paste from clipboard">Paste</button>
+          <button class="kb2-key" onclick="chela.termKey('Escape')">Esc</button>
+          <button class="kb2-key" onclick="chela.termKey('Tab')">Tab</button>
+          <button class="kb2-key" onclick="chela.termKey('BTab')" title="Shift-Tab (back-tab · toggle agent mode)" aria-label="Shift Tab">&#8679;Tab</button>
+          <button class="kb2-key kb2-go" onclick="chela.termKey('Enter')" aria-label="Enter">&#9166;</button>
+          <button class="kb2-key" onclick="chela.termPaste(this)" title="Paste from clipboard">Paste</button>
           <span class="kb2-sep" aria-hidden="true"></span>
-          <button class="kb2-key kb2-strong" onclick="termKey('C-c')" title="Ctrl-C (interrupt)">^C</button>
-          <button id="kb2-ctrl" class="kb2-key kb2-mod" onclick="kbCtrlTap()"
+          <button class="kb2-key kb2-strong" onclick="chela.termKey('C-c')" title="Ctrl-C (interrupt)">^C</button>
+          <button id="kb2-ctrl" class="kb2-key kb2-mod" onclick="chela.kbCtrlTap()"
                   title="Ctrl — tap: arm for next key · tap again: lock · again: off">Ctrl</button>
           <span class="kb2-ctrl-letters" id="kb2-ctrl-letters">
-            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('a')" title="Ctrl-A">A</button>
-            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('d')" title="Ctrl-D (EOF)">D</button>
-            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('e')" title="Ctrl-E">E</button>
-            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('k')" title="Ctrl-K">K</button>
-            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('l')" title="Ctrl-L (clear)">L</button>
-            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('r')" title="Ctrl-R (search)">R</button>
-            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('u')" title="Ctrl-U">U</button>
-            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('w')" title="Ctrl-W">W</button>
-            <button class="kb2-key kb2-cl" onclick="kbCtrlKey('z')" title="Ctrl-Z (suspend)">Z</button>
+            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('a')" title="Ctrl-A">A</button>
+            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('d')" title="Ctrl-D (EOF)">D</button>
+            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('e')" title="Ctrl-E">E</button>
+            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('k')" title="Ctrl-K">K</button>
+            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('l')" title="Ctrl-L (clear)">L</button>
+            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('r')" title="Ctrl-R (search)">R</button>
+            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('u')" title="Ctrl-U">U</button>
+            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('w')" title="Ctrl-W">W</button>
+            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('z')" title="Ctrl-Z (suspend)">Z</button>
           </span>
           <span class="kb2-sep" aria-hidden="true"></span>
-          <button class="kb2-key" onclick="termKey('Left')" aria-label="Left">&#8592;</button>
-          <button class="kb2-key" onclick="termKey('Up')" aria-label="Up">&#8593;</button>
-          <button class="kb2-key" onclick="termKey('Down')" aria-label="Down">&#8595;</button>
-          <button class="kb2-key" onclick="termKey('Right')" aria-label="Right">&#8594;</button>
+          <button class="kb2-key" onclick="chela.termKey('Left')" aria-label="Left">&#8592;</button>
+          <button class="kb2-key" onclick="chela.termKey('Up')" aria-label="Up">&#8593;</button>
+          <button class="kb2-key" onclick="chela.termKey('Down')" aria-label="Down">&#8595;</button>
+          <button class="kb2-key" onclick="chela.termKey('Right')" aria-label="Right">&#8594;</button>
           <span class="kb2-sep" aria-hidden="true"></span>
-          <button class="kb2-key" onclick="termKey('|')">|</button>
-          <button class="kb2-key" onclick="termKey('/')">/</button>
-          <button class="kb2-key" onclick="termKey('\\')">\</button>
-          <button class="kb2-key" onclick="termKey('~')">~</button>
-          <button class="kb2-key" onclick="termKey('-')">-</button>
-          <button class="kb2-key" onclick="termKey('_')">_</button>
+          <button class="kb2-key" onclick="chela.termKey('|')">|</button>
+          <button class="kb2-key" onclick="chela.termKey('/')">/</button>
+          <button class="kb2-key" onclick="chela.termKey('\\')">\</button>
+          <button class="kb2-key" onclick="chela.termKey('~')">~</button>
+          <button class="kb2-key" onclick="chela.termKey('-')">-</button>
+          <button class="kb2-key" onclick="chela.termKey('_')">_</button>
           <span class="kb2-sep" aria-hidden="true"></span>
-          <button class="kb2-key" onclick="termKey('Home')">Home</button>
-          <button class="kb2-key" onclick="termKey('End')">End</button>
-          <button class="kb2-key" onclick="termKey('PageUp')">PgUp</button>
-          <button class="kb2-key" onclick="termKey('PageDown')">PgDn</button>
+          <button class="kb2-key" onclick="chela.termKey('Home')">Home</button>
+          <button class="kb2-key" onclick="chela.termKey('End')">End</button>
+          <button class="kb2-key" onclick="chela.termKey('PageUp')">PgUp</button>
+          <button class="kb2-key" onclick="chela.termKey('PageDown')">PgDn</button>
         </div>
     </div>
     {% endif %}
@@ -352,25 +352,25 @@
 </div>
 
 <!-- Command palette (⌘K / Ctrl-K): fuzzy jump to any agent, view, or project -->
-<div class="palette-overlay" id="palette" onclick="if(event.target===this)closePalette()">
+<div class="palette-overlay" id="palette" onclick="if(event.target===this)chela.closePalette()">
   <div class="palette">
     <input id="palette-input" class="palette-input" type="text" autocomplete="off" spellcheck="false"
            placeholder="Jump to an agent, view, or project…"
-           oninput="_palSel=0;_renderPalette(this.value)">
+           oninput="_palSel=0;chela._renderPalette(this.value)">
     <div class="palette-list" id="palette-list"></div>
     <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></div>
   </div>
 </div>
 
 <!-- Mobile sidebar scrim (off-canvas drawer backdrop) -->
-<div class="drawer-scrim" id="sidebar-scrim" onclick="closeSidebar()"></div>
+<div class="drawer-scrim" id="sidebar-scrim" onclick="chela.closeSidebar()"></div>
 
 <!-- Settings drawer (gear / bell) -->
-<div class="drawer-scrim" id="drawer-scrim" onclick="toggleSettings()"></div>
+<div class="drawer-scrim" id="drawer-scrim" onclick="chela.toggleSettings()"></div>
 <aside class="drawer" id="settings-drawer">
   <div class="drawer-head">
     <span>Settings</span>
-    <button class="icon-btn" onclick="toggleSettings()">✕</button>
+    <button class="icon-btn" onclick="chela.toggleSettings()">✕</button>
   </div>
   <div class="drawer-body" id="drawer-body">
     <!-- populated by nav.js renderSettings() -->
@@ -379,9 +379,9 @@
 
 <!-- "+ new" popover -->
 <div class="popover" id="new-menu" style="display:none;">
-  <div class="popover-item" onclick="hideNewMenu(); openInitRepo()">Init a repo</div>
-  <div class="popover-item" onclick="hideNewMenu(); showAddSchedule()">Scheduled task</div>
-  <div class="popover-item" id="new-shell-item" onclick="hideNewMenu(); newShellWindow()">Shell window</div>
+  <div class="popover-item" onclick="chela.hideNewMenu(); chela.openInitRepo()">Init a repo</div>
+  <div class="popover-item" onclick="chela.hideNewMenu(); chela.showAddSchedule()">Scheduled task</div>
+  <div class="popover-item" id="new-shell-item" onclick="chela.hideNewMenu(); chela.newShellWindow()">Shell window</div>
 </div>
 
 <!-- Topbar overflow menu: secondary actions + usage readouts. The rate-limit /
@@ -389,16 +389,16 @@
      (agents.js _updateRlPill, header.js) drive them here, visibility-agnostic. -->
 <div class="popover overflow-menu" id="overflow-menu" style="display:none;">
   {% if terminals_enabled %}
-  <div class="popover-item ov-item" onclick="hideOverflowMenu(); shareCurrentAgent()">
+  <div class="popover-item ov-item" onclick="chela.hideOverflowMenu(); chela.shareCurrentAgent()">
     <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg></span>
     <span>Share current session</span>
   </div>
   {% endif %}
-  <div class="popover-item ov-item" onclick="hideOverflowMenu(); toggleSettings('notify')">
+  <div class="popover-item ov-item" onclick="chela.hideOverflowMenu(); chela.toggleSettings('notify')">
     <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
     <span>Notifications</span>
   </div>
-  <div class="popover-item ov-item" onclick="hideOverflowMenu(); toggleSettings()">
+  <div class="popover-item ov-item" onclick="chela.hideOverflowMenu(); chela.toggleSettings()">
     <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>
     <span>Settings</span>
   </div>
@@ -437,8 +437,8 @@
     <label>Prompt</label>
     <textarea id="sched-prompt" rows="3"></textarea>
     <div class="modal-actions">
-      <button onclick="closeModal('modal-sched')">Cancel</button>
-      <button class="btn-accent" onclick="doAddSchedule()">Add</button>
+      <button onclick="chela.closeModal('modal-sched')">Cancel</button>
+      <button class="btn-accent" onclick="chela.doAddSchedule()">Add</button>
     </div>
   </div>
 </div>
@@ -449,8 +449,8 @@
     <h3>Send Message to <span id="modal-msg-agent"></span></h3>
     <textarea id="modal-msg-text" rows="4" placeholder="Message…"></textarea>
     <div class="modal-actions">
-      <button onclick="closeModal('modal-msg')">Cancel</button>
-      <button class="btn-accent" onclick="doSendMsg()">Send</button>
+      <button onclick="chela.closeModal('modal-msg')">Cancel</button>
+      <button class="btn-accent" onclick="chela.doSendMsg()">Send</button>
     </div>
   </div>
 </div>
@@ -467,28 +467,18 @@
     <datalist id="init-suggestions"></datalist>
     <div id="init-result" class="init-result"></div>
     <div class="modal-actions">
-      <button onclick="closeModal('modal-init')">Cancel</button>
-      <button class="btn-accent" onclick="doInitRepo()">Seed files</button>
+      <button onclick="chela.closeModal('modal-init')">Cancel</button>
+      <button class="btn-accent" onclick="chela.doInitRepo()">Seed files</button>
     </div>
   </div>
 </div>
 
 {% if terminals_enabled %}<script>window.TERMINALS_ENABLED = true;</script>{% endif %}
 <script src="static/vendor/gridstack-all.js"></script>
-<!-- Ordered modules (classic scripts → shared global scope; no build step).
-     util first (globals), feature renderers, nav (sidebar+canvas controller),
-     sse, then main (bootstrap) last. -->
-<script src="static/js/util.js"></script>
-<script src="static/js/header.js"></script>
-<script src="static/js/agents.js"></script>
-<script src="static/js/schedules.js"></script>
-<script src="static/js/knowledge.js"></script>
-<script src="static/js/dispatcher.js"></script>
-<script src="static/js/kanban.js"></script>
-{% if terminals_enabled %}<script src="static/js/terminals.js"></script>{% endif %}
-<script src="static/js/nav.js"></script>
-{% if terminals_enabled %}<script src="static/js/launcher.js"></script>{% endif %}
-<script src="static/js/sse.js"></script>
-<script src="static/js/main.js"></script>
+<!-- Stage 0: one ES-module entry. main.js imports the rest through the module
+     graph (util → feature renderers → nav → sse → main bootstrap). No build step.
+     terminals.js/launcher.js load via the graph and stay inert when terminals
+     are off (TERMINALS_ON-guarded). -->
+<script type="module" src="static/js/main.js"></script>
 </body>
 </html>

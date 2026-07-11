@@ -1,3 +1,7 @@
+// --- Stage 0: ES-module imports ---
+import { $, BASE_PATH, api, attrEsc, escHtml } from './util.js';
+import { _runDisplayId, _runPrCell } from './dispatcher.js';
+
 // ---------------------------------------------------------------------------
 // Render: Kanban (global cross-workflow board)
 //
@@ -48,14 +52,14 @@ function _kCardDeleteBtn(card) {
                        data-del-kind="source-line"
                        data-file="${attrEsc(card.file)}"
                        data-text="${attrEsc(card.title)}"
-                       onclick="kanbanDeleteClick(this)"
+                       onclick="chela.kanbanDeleteClick(this)"
                        title="Delete this card" aria-label="Delete">&times;</button>`;
     }
     if (!card.task_id) return '';
     return `<button class="kanban-delete-btn" type="button"
                    data-del-kind="run"
                    data-task-id="${attrEsc(card.task_id)}"
-                   onclick="kanbanDeleteClick(this)"
+                   onclick="chela.kanbanDeleteClick(this)"
                    title="Delete this card" aria-label="Delete">&times;</button>`;
 }
 
@@ -75,7 +79,7 @@ function _kCard(card) {
             ? `<button class="kanban-promote-btn" type="button"
                        data-wf="${attrEsc(card.workflow_path)}"
                        data-text="${attrEsc(card.title)}"
-                       onclick="kanbanPromoteBacklog(this)">Promote</button>`
+                       onclick="chela.kanbanPromoteBacklog(this)">Promote</button>`
             : '';
         return `
     <div class="kanban-card kanban-card-backlog">
@@ -123,7 +127,7 @@ function _kCard(card) {
             merge = `<button class="kanban-merge-btn" type="button"
                    data-task-id="${tid}"
                    data-pr-url="${attrEsc(card.pr_url)}"
-                   onclick="kanbanMergePR(this)">Merge</button>`;
+                   onclick="chela.kanbanMergePR(this)">Merge</button>`;
         }
     }
     return `
@@ -156,8 +160,8 @@ function kanbanDeleteClick(btn) {
     confirmEl.dataset.text = btn.dataset.text || '';
     confirmEl.innerHTML = `
         <span class="kanban-confirm-msg">Delete this?</span>
-        <button class="btn-confirm" type="button" onclick="kanbanDeleteConfirm(this, true)">Delete</button>
-        <button type="button" onclick="kanbanDeleteConfirm(this, false)">Cancel</button>`;
+        <button class="btn-confirm" type="button" onclick="chela.kanbanDeleteConfirm(this, true)">Delete</button>
+        <button type="button" onclick="chela.kanbanDeleteConfirm(this, false)">Cancel</button>`;
     card.appendChild(confirmEl);
     btn.style.visibility = 'hidden';
 }
@@ -204,7 +208,7 @@ async function kanbanDeleteConfirm(actionBtn, ok) {
 function _kanbanDeleteShowError(confirmEl, xBtn, msg) {
     confirmEl.innerHTML = `
         <span class="kanban-confirm-msg" style="color:var(--red);">${escHtml(msg)}</span>
-        <button type="button" onclick="kanbanDeleteConfirm(this, false)">Close</button>`;
+        <button type="button" onclick="chela.kanbanDeleteConfirm(this, false)">Close</button>`;
     // Leave the × hidden — Close button drives dismissal.
     if (xBtn) xBtn.style.visibility = 'hidden';
 }
@@ -440,7 +444,7 @@ function _renderKanbanFilters(workflows, mergeableCount = 0) {
     const chip = (val, label) => {
         const active = _kanbanFilter === val ? ' active' : '';
         return `<button class="kanban-filter-chip${active}" data-wf="${escHtml(val)}"
-                       onclick="setKanbanFilter('${escHtml(val).replace(/'/g, "\\'")}')">${escHtml(label)}</button>`;
+                       onclick="chela.setKanbanFilter('${escHtml(val).replace(/'/g, "\\'")}')">${escHtml(label)}</button>`;
     };
     let html = chip('all', `All (${workflows.length})`);
     for (const wf of workflows) {
@@ -452,7 +456,7 @@ function _renderKanbanFilters(workflows, mergeableCount = 0) {
     if (mergeableCount > 0) {
         html += `<button class="kanban-merge-btn kanban-merge-all-btn" type="button"
                        data-count="${mergeableCount}"
-                       onclick="kanbanMergeAll(this)">Merge all mergeable (${mergeableCount})</button>`;
+                       onclick="chela.kanbanMergeAll(this)">Merge all mergeable (${mergeableCount})</button>`;
     }
     wrap.innerHTML = html;
 }
@@ -540,3 +544,10 @@ function stopKanbanTimer() {
     if (_kanbanTimer) { clearInterval(_kanbanTimer); _kanbanTimer = null; }
 }
 
+
+// --- Stage 0: ES-module exports ---
+export { refreshKanban, startKanbanTimer, stopKanbanTimer };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { kanbanDeleteClick, kanbanDeleteConfirm, kanbanMergeAll, kanbanMergePR, kanbanPromoteBacklog, setKanbanCol, setKanbanFilter });

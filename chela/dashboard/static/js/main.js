@@ -1,3 +1,14 @@
+// --- Stage 0: ES-module imports ---
+import { REFRESH_MS, TERMINALS_ON, currentTab } from './util.js';
+import { refreshSummary } from './header.js';
+import { checkContext, refreshAgents } from './agents.js';
+import { refreshSchedules } from './schedules.js';
+import { refreshKnowledge } from './knowledge.js';
+import { renderTerminals } from './terminals.js';
+import { refreshSidebar, renderAgentDetail, selectView, updateWorkBadges } from './nav.js';
+import { refreshLauncher } from './launcher.js';
+import { initSSE } from './sse.js';
+
 // ---------------------------------------------------------------------------
 // Refresh loop
 // ---------------------------------------------------------------------------
@@ -33,3 +44,6 @@ refresh().then(() => {
 });
 setInterval(refresh, REFRESH_MS);
 initSSE();
+
+// --- Stage 0: ES-module exports ---
+export { refresh };
