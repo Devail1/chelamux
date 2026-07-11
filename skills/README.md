@@ -37,8 +37,14 @@ Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
 | **implementation-plan** | Produce an implementation plan ordered by likelihood-of-change / blast-radius, not chronology — load-bearing decisions first. |
 | **interview-me** | Elicit requirements one question at a time, highest-impact first, then emit a paste-ready decision record. |
 
+## Communication
+
+| Skill | What it does |
+|-------|--------------|
+| **telegram-send** | Send a message or file to Telegram from any agent (Bot API, stdlib-only, env-configured) — push a result, chart, log, or a surfaced decision to your phone. Composes with `orchestrate` so the fleet can reach you proactively. |
+
 ## Credits
 
 `blindspot-pass`, `implementation-plan`, and `interview-me` are derived from Thariq Shihipar's **"A Field Guide to Fable: Finding Your Unknowns."** Full credit to the original work; these are adaptations packaged as Claude Code skills.
 
-`handoff`, `chela-setup`, and `orchestrate` are original to this project.
+`handoff`, `chela-setup`, `orchestrate`, and `telegram-send` are original to this project.
