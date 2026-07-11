@@ -25,16 +25,16 @@ def test_current_session_env_override_wins(monkeypatch):
     # explicit override beats a pane that would derive something else
     monkeypatch.setenv("CHELA_TMUX_SESSION", "explicit")
     monkeypatch.setenv("TMUX_PANE", "%9")
-    monkeypatch.setattr(subprocess, "run", _fake_run("ccbot"))
+    monkeypatch.setattr(subprocess, "run", _fake_run("myteam"))
     assert config.current_session() == "explicit"
 
 
 def test_current_session_derives_from_pane(monkeypatch):
-    # no override → derive the caller's own pane session (e.g. ccbot)
+    # no override → derive the caller's own pane session (e.g. myteam)
     monkeypatch.delenv("CHELA_TMUX_SESSION", raising=False)
     monkeypatch.setenv("TMUX_PANE", "%9")
-    monkeypatch.setattr(subprocess, "run", _fake_run("ccbot"))
-    assert config.current_session() == "ccbot"
+    monkeypatch.setattr(subprocess, "run", _fake_run("myteam"))
+    assert config.current_session() == "myteam"
 
 
 def test_current_session_defaults_without_env_or_pane(monkeypatch):

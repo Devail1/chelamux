@@ -101,7 +101,7 @@ def instance_id() -> str:
 
 
 def room_id(wid: str) -> str:
-    """Relay-safe room id for a tmux window id, e.g. ``ccbot-@11``. Namespaced by
+    """Relay-safe room id for a tmux window id, e.g. ``myteam-@11``. Namespaced by
     the NON-SECRET tmux session name (not the instance secret): with E2E in place
     (chela/e2e.py) room secrecy buys nothing — the pairing key is the boundary, so
     a guessed room only yields ciphertext — and injecting the old secret into every

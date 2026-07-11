@@ -28,13 +28,13 @@ def current_session() -> str:
       1. explicit ``$CHELA_TMUX_SESSION`` — an override always wins;
       2. else the caller's OWN pane's session, via ``$TMUX_PANE`` (tmux sets it
          in every pane) — so an orchestrator agent living in whatever session the
-         fleet actually uses (e.g. ``ccbot``) gets zero-config discovery, mirroring
+         fleet actually uses (e.g. ``myteam``) gets zero-config discovery, mirroring
          how ``orchestrator.self_wid()`` derives the window from the same pane;
       3. else ``"chela"``.
 
     Resolved per-call (never at import) so it can't cache a stale value, and so a
     process with no tmux pane still imports cleanly. Grouped sessions share one
-    window list, so deriving a mirror (``webterm_ccbot__*``) lists the same real
+    window list, so deriving a mirror (``webterm_myteam__*``) lists the same real
     windows as its parent.
     """
     env = os.environ.get("CHELA_TMUX_SESSION")
