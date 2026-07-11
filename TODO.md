@@ -10,3 +10,4 @@
 - [x] Scaffold the `chela/telegram/` package + `[telegram]` extra (PR #15).
 - [x] Dashboard auto-discovers dispatcher workflows (PR #16).
 - [x] Port the incremental transcript monitor to `chela/telegram/` (PR #17).
+- [x] Fold cutover step 1 — fix `chela drive` unsubmitted input: `messenger.send_tmux` now re-captures the pane after the paste + Enter and sends a second Enter only when the collapsed `[Pasted text #N +K lines]` chip still sits on the `❯` prompt (single-line path untouched, so no empty double-submit) (CMX-6).

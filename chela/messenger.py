@@ -16,6 +16,34 @@ from chela.discovery import get_window_id, get_all_windows
 
 log = logging.getLogger(__name__)
 
+_PROMPT_CHAR = "❯"  # marks Claude Code's input line
+_PASTE_PLACEHOLDER = "Pasted text"  # e.g. "[Pasted text #1 +5 lines]"
+
+
+def _capture_pane(target: str) -> str:
+    """Return the visible text of a tmux pane (empty string on error)."""
+    out = subprocess.run(
+        ["tmux", "capture-pane", "-p", "-t", target],
+        capture_output=True, text=True,
+    )
+    return out.stdout if out.returncode == 0 else ""
+
+
+def _pane_has_unsubmitted_paste(pane: str) -> bool:
+    """True when a collapsed paste placeholder still sits on the prompt line.
+
+    Claude Code turns a pasted multi-line block into a
+    ``[Pasted text #N +K lines]`` chip; the first Enter expands/acknowledges
+    it rather than submitting, so the chip lingers on the ``❯`` input line and
+    a second Enter is needed. Gating on the placeholder *after* the prompt glyph
+    (not a bare empty prompt) is what keeps this from ever re-submitting an
+    already-empty prompt.
+    """
+    for line in pane.splitlines():
+        if _PROMPT_CHAR in line and _PASTE_PLACEHOLDER in line.split(_PROMPT_CHAR, 1)[1]:
+            return True
+    return False
+
 
 def send_tmux(window_id: str, text: str) -> bool:
     """Send text to a tmux window. Returns True on success.
@@ -49,6 +77,18 @@ def send_tmux(window_id: str, text: str) -> bool:
                 ["tmux", "send-keys", "-t", target, "Enter"],
                 check=True, capture_output=True,
             )
+            # A pasted block collapses into a "[Pasted text #N +K lines]" chip
+            # that the first Enter only acknowledges; it strands on the prompt
+            # until a second Enter submits it. Re-capture and, ONLY if the chip
+            # is still on the input line, press Enter again. The placeholder
+            # guard means a prompt that already submitted (now empty) is never
+            # re-submitted, so this can't fire a stray empty prompt.
+            time.sleep(0.3)
+            if _pane_has_unsubmitted_paste(_capture_pane(target)):
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", target, "Enter"],
+                    check=True, capture_output=True,
+                )
         else:
             subprocess.run(
                 ["tmux", "send-keys", "-t", target, text, "Enter"],
