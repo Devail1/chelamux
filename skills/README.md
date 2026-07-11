@@ -22,6 +22,12 @@ Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
 |-------|--------------|
 | **chela-setup** | Install chela and wire its work-item dispatcher into a git repo — scaffold a starter `WORKFLOW.md` + `TODO.md` so each `- [ ] task` becomes an agent → PR. Use to onboard a repo to chela. |
 
+## Orchestration
+
+| Skill | What it does |
+|-------|--------------|
+| **orchestrate** | Act as the orchestrator over a fleet of sibling agents — discover who's live, observe status/work (`peek`/`read`), dispatch scoped tasks (`drive`), review results, and surface decisions to the human. The operating manual for chela's agent-facing toolkit. |
+
 ## Agent workflow
 
 | Skill | What it does |
@@ -35,4 +41,4 @@ Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
 
 `blindspot-pass`, `implementation-plan`, and `interview-me` are derived from Thariq Shihipar's **"A Field Guide to Fable: Finding Your Unknowns."** Full credit to the original work; these are adaptations packaged as Claude Code skills.
 
-`handoff` and `chela-setup` are original to this project.
+`handoff`, `chela-setup`, and `orchestrate` are original to this project.
