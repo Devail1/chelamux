@@ -83,27 +83,9 @@ def require_auth(f):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _liveness(claude_running: bool, session_status: str | None) -> tuple[str, str]:
-    """Derive (liveness, health_color) from native session state — no heartbeat.
-
-    discovery only ever lists LIVE windows (tmux list-windows), so a listed
-    window is never "dead" — the dot reflects what KIND of live it is, not
-    presence. A plain shell or dev-server window is genuinely live; showing it
-    red/"offline" reads as broken when it isn't.
-
-      - "waiting" → claude blocked on input (needs attention) — yellow
-      - "alive"   → claude running / busy / idle — green
-      - "live"    → no claude in the pane (a shell or dev server), but present
-                    and streaming — grey (neutral; the window-type icon says
-                    which). Red is reserved for a genuinely unreachable window.
-
-    health_color is the agent-row dot: green / yellow / grey.
-    """
-    if session_status == "waiting":
-        return "waiting", "yellow"
-    if claude_running or session_status in ("busy", "idle"):
-        return "alive", "green"
-    return "live", "grey"
+# Shared status derivation lives in agent_manager so the agent-facing `chela
+# peek` reads identical liveness/health off the same data layer as this endpoint.
+_liveness = agent_manager.liveness
 
 
 def _require_terminals() -> None:
@@ -1180,7 +1162,8 @@ def api_agents_spawn():
         # window opened in a dir whose basename == the session name); tmux then
         # targets that window's index and fails with "index N in use".
         proc = subprocess.run(
-            ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd],
+            ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd,
+             "-P", "-F", "#{window_id}"],
             capture_output=True, text=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
@@ -1189,12 +1172,25 @@ def api_agents_spawn():
         err = (proc.stderr or proc.stdout or "tmux new-window failed").strip()
         return jsonify({"ok": False, "error": err}), 500
 
+    # Export CHELA_WID into the fresh shell so the agent knows its own window id
+    # (self-identity for peek/read/drive), whether or not a command follows.
+    new_wid = (proc.stdout or "").strip()
+    target = f"{TMUX_SESSION}:{name}"
+    if re.fullmatch(r"@\d+", new_wid):
+        try:
+            subprocess.run(["tmux", "send-keys", "-t", target, "-l",
+                            f"export CHELA_WID={new_wid}"],
+                           capture_output=True, text=True, timeout=10)
+            subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
+                           capture_output=True, text=True, timeout=10)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log.warning("spawned %s but could not export CHELA_WID: %s", name, e)
+
     if command:
         # Send the command literally (-l, no key-name lookup) then Enter. tmux
         # buffers send-keys into the pty, so this lands even before the shell has
         # finished drawing its prompt. We start a shell and *send* `claude` rather
         # than running it as the window command so the pane survives claude exiting.
-        target = f"{TMUX_SESSION}:{name}"
         try:
             subprocess.run(["tmux", "send-keys", "-t", target, "-l", command],
                            capture_output=True, text=True, timeout=10)

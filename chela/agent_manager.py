@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -23,6 +24,39 @@ DEFAULT_LAUNCH_CMD = os.environ.get("CHELA_AGENT_CMD", "claude")
 # reconcile_window_names() has a single honored exclusion point if a deployment
 # ever needs to pin a window's name.
 NEVER_MANAGE: set[str] = set()
+
+
+def liveness(claude_running: bool, session_status: str | None) -> tuple[str, str]:
+    """Derive (liveness, health_color) from native session state — no heartbeat.
+
+    discovery only ever lists LIVE windows, so a listed window is never "dead" —
+    the label reflects what KIND of live it is:
+      - "waiting" → claude blocked on input (needs attention) — yellow
+      - "alive"   → claude running / busy / idle — green
+      - "live"    → no claude in the pane (a shell / dev server), present — grey
+
+    Shared by the dashboard /api/agents and the agent-facing `chela peek` so both
+    read identical status off one data layer.
+    """
+    if session_status == "waiting":
+        return "waiting", "yellow"
+    if claude_running or session_status in ("busy", "idle"):
+        return "alive", "green"
+    return "live", "grey"
+
+
+def wid_env_prefix(window_id: str) -> str:
+    """Shell prefix that exports the agent's own tmux window id as CHELA_WID.
+
+    Injected at every chela-controlled spawn so a running agent knows its own
+    identity (``echo $CHELA_WID`` → ``@N``) and can peek/read/drive siblings
+    relative to itself — the cmux ``CMUX_SURFACE_ID`` model. Returns a trailing
+    ``&&`` so it chains cleanly ahead of the launch command; empty string for a
+    falsy id (never emit a broken ``export``).
+    """
+    if not window_id:
+        return ""
+    return f"export CHELA_WID={shlex.quote(window_id)} && "
 
 
 def is_claude_running(window_id: str) -> bool:
@@ -221,7 +255,9 @@ def start_agent(agent_name: str, cmd: str | None = None) -> dict:
         return {"ok": False, "agent": agent_name, "detail": f"directory {start_dir} not found"}
 
     launch = cmd or DEFAULT_LAUNCH_CMD
-    send_tmux(window_id, f"cd {start_dir} && {launch}")
+    # Export CHELA_WID ahead of the launch so both the shell and the claude
+    # process it spawns know this window's identity (self-peek / drive siblings).
+    send_tmux(window_id, f"cd {start_dir} && {wid_env_prefix(window_id)}{launch}")
 
     # Name the window after its cwd when we spawn claude in it, so it stops
     # showing a stale/persisted name.

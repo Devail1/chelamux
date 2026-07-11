@@ -14,7 +14,16 @@ import sys
 import time
 from pathlib import Path
 
-from chela import agent_manager, discovery, dispatcher, messenger, notify, okf, scheduler
+from chela import (
+    agent_manager,
+    discovery,
+    dispatcher,
+    messenger,
+    notify,
+    okf,
+    orchestrator,
+    scheduler,
+)
 from chela.config import (
     TMUX_SESSION,
     SCHEDULER_POLL_INTERVAL,
@@ -147,6 +156,86 @@ def cmd_broadcast(args) -> None:
         return
     for agent, delivered in sorted(results.items()):
         print(f"  {agent:<24} {'sent' if delivered else 'offline'}")
+
+
+def _resolve_wid(token: str | None) -> str | None:
+    """Accept a window id (``@28`` or ``28``) or ``self``; None → self."""
+    if token is None or token == "self":
+        return orchestrator.self_wid()
+    token = token.strip()
+    if token.isdigit():
+        return "@" + token
+    return token
+
+
+def cmd_whoami(args) -> None:
+    """Print this agent's own window id (CHELA_WID / derived from tmux)."""
+    wid = orchestrator.self_wid()
+    if wid:
+        print(wid)
+    else:
+        print("unknown — not in a tmux pane and $CHELA_WID unset", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_peek(args) -> None:
+    """Filtered status view for one window (status + recap + cwd + health)."""
+    wid = _resolve_wid(args.wid)
+    if not wid:
+        print("no window id (pass @N, or set $CHELA_WID)", file=sys.stderr)
+        sys.exit(1)
+    result = orchestrator.peek(wid)
+    if result is None:
+        print(f"{wid} is not a live window", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        import json
+        print(json.dumps(result, indent=2))
+    else:
+        print(orchestrator.format_peek(result))
+
+
+def cmd_read(args) -> None:
+    """Distilled read of a sibling's Claude Code transcript."""
+    wid = _resolve_wid(args.wid)
+    if not wid:
+        print("no window id (pass @N, or set $CHELA_WID)", file=sys.stderr)
+        sys.exit(1)
+    result = orchestrator.read(
+        wid, tail=args.tail, query=args.query, all_turns=args.all,
+    )
+    if not result["ok"]:
+        print(result["error"], file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        import json
+        print(json.dumps(result, indent=2))
+        return
+    header = f"{result['wid']} {result['name']} — {result['mode']} ({result['count']} turns)"
+    print(header)
+    print("─" * min(len(header), 72))
+    if not result["turns"]:
+        print("(no matching turns)" if args.query else "(no turns yet)")
+    for t in result["turns"]:
+        print(t)
+        print()
+
+
+def cmd_drive(args) -> None:
+    """Message a sibling window (wid-keyed). Thin alias over the tmux send path."""
+    wid = _resolve_wid(args.wid)
+    if not wid:
+        print("no target window id (pass @N)", file=sys.stderr)
+        sys.exit(1)
+    if wid not in discovery.get_windows_by_id():
+        print(f"{wid} is not a live window", file=sys.stderr)
+        sys.exit(1)
+    sender = orchestrator.self_wid() or "orchestrator"
+    if messenger.send_tmux(wid, f"[{sender}] {args.message}"):
+        print(f"Sent to {wid}")
+    else:
+        print(f"{wid} — send failed", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_dispatch(args) -> None:
@@ -334,6 +423,28 @@ def main() -> None:
     p_bc.add_argument("--from", dest="from_agent", default="chela-cli", help="Sender label")
     p_bc.add_argument("--priority", default="normal", help="critical|high|normal|low")
 
+    # --- orchestrator toolkit (agent-facing: observe + drive siblings) ---
+    sub.add_parser("whoami", help="Print this agent's own window id ($CHELA_WID)")
+
+    p_peek = sub.add_parser(
+        "peek", help="Filtered status view of a window (status + recap + cwd + health)")
+    p_peek.add_argument("wid", nargs="?", help="Target window id (@N, N, or 'self'); default self")
+    p_peek.add_argument("--json", action="store_true", help="Emit the raw peek dict as JSON")
+
+    p_read = sub.add_parser(
+        "read", help="Distilled read of a sibling's Claude Code transcript")
+    p_read.add_argument("wid", nargs="?", help="Target window id (@N, N, or 'self'); default self")
+    grp = p_read.add_mutually_exclusive_group()
+    grp.add_argument("--tail", type=int, metavar="N",
+                     help="Last N conversation turns (default: tail 10)")
+    grp.add_argument("--query", metavar="Q", help="Turns whose text contains every term in Q")
+    grp.add_argument("--all", action="store_true", help="The whole conversation, uncapped")
+    p_read.add_argument("--json", action="store_true", help="Emit the result as JSON")
+
+    p_drive = sub.add_parser("drive", help="Message a sibling window (wid-keyed send)")
+    p_drive.add_argument("wid", help="Target window id (@N or N)")
+    p_drive.add_argument("message", help="Message text")
+
     # dispatch
     p_disp = sub.add_parser("dispatch", help="Run the work-item dispatcher")
     p_disp.add_argument("workflow", help="Path to WORKFLOW.md")
@@ -394,6 +505,14 @@ def main() -> None:
         cmd_msg(args)
     elif args.command == "broadcast":
         cmd_broadcast(args)
+    elif args.command == "whoami":
+        cmd_whoami(args)
+    elif args.command == "peek":
+        cmd_peek(args)
+    elif args.command == "read":
+        cmd_read(args)
+    elif args.command == "drive":
+        cmd_drive(args)
     elif args.command == "dispatch":
         cmd_dispatch(args)
     elif args.command == "dispatch-runs":

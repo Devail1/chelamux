@@ -732,6 +732,15 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # (ignored from .claude/settings.json) and needs Opus/Sonnet 4.6+ on the
     # Anthropic API.
     agent_cmd = wf.get("agent", "cmd", default="claude --permission-mode auto")
+    # Export CHELA_WID first so the worktree agent knows its own window id
+    # (self-identity for peek/read/drive), then launch. Only when we captured a
+    # real @id — _new_window falls back to the bare name under a mock.
+    if re.fullmatch(r"@\d+", target_id):
+        subprocess.run(
+            ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}",
+             f"export CHELA_WID={target_id}", "Enter"],
+            check=True, capture_output=True,
+        )
     subprocess.run(
         ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}", agent_cmd, "Enter"],
         check=True, capture_output=True,

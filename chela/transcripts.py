@@ -169,28 +169,100 @@ def latest_pr(path: Path) -> PRLink | None:
 # Dashboard-facing helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_agent_transcript(agent_name: str) -> Path | None:
-    """Resolve agent_name → transcript path, tmux-natively.
+def transcript_for_cwd(cwd: str | None, base: Path | None = None) -> Path | None:
+    """Resolve a working directory → its active transcript path, tmux-natively.
 
     Claude Code does not surface its session id over tmux, so rather than rely
     on any external session-id map we derive the transcript directory from the
-    window's live cwd (``~/.claude/projects/<encoded-cwd>/``) and pick the
-    most-recently-modified ``<session-id>.jsonl`` in it — that is the session
-    actively writing for this agent. Returns None if the window has no cwd, the
-    project dir is absent, or it holds no transcripts yet.
+    cwd (``~/.claude/projects/<encoded-cwd>/``) and pick the most-recently-
+    modified ``<session-id>.jsonl`` in it — that is the session actively writing
+    from that directory. Returns None if cwd is empty, the project dir is
+    absent, or it holds no transcripts yet.
+
+    Keyed by cwd (not window name) so a caller holding a window *id* can resolve
+    collision-free: ``discovery.get_window_cwd_by_id(wid)`` → here.
     """
-    cwd = discovery.get_window_cwd(agent_name)
     if not cwd:
         return None
-    proj_dir = CLAUDE_PROJECTS_DIR / encode_cwd(cwd)
+    proj_dir = (base or CLAUDE_PROJECTS_DIR) / encode_cwd(cwd)
     if not proj_dir.is_dir():
         return None
-    transcripts = sorted(
+    found = sorted(
         proj_dir.glob("*.jsonl"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    return transcripts[0] if transcripts else None
+    return found[0] if found else None
+
+
+def _resolve_agent_transcript(agent_name: str) -> Path | None:
+    """Resolve agent_name → transcript path via its window's live cwd."""
+    return transcript_for_cwd(discovery.get_window_cwd(agent_name))
+
+
+def summary_for_path(path: Path | None) -> dict:
+    """`{"recap", "recap_ts", "pr"}` for a resolved transcript path (or all None)."""
+    if path is None:
+        return {"recap": None, "recap_ts": None, "pr": None}
+    rec = _latest_recap_record(path)
+    pr = latest_pr(path)
+    return {
+        "recap": rec.get("content") if rec else None,
+        "recap_ts": rec.get("timestamp") if rec else None,
+        "pr": pr.to_dict() if pr else None,
+    }
+
+
+def iter_turns(path: Path, include_sidechain: bool = False) -> Iterator[dict]:
+    """Distil a transcript JSONL into readable conversation turns (forward order).
+
+    Yields ``{"ts", "role", "text", "tools"}`` for each user/assistant turn:
+      - user   → the human/orchestrator prompt (string-content records only;
+                 tool-result carrier records, whose content is a list, are skipped).
+      - assistant → joined ``text`` blocks; ``tools`` lists any tool_use names on
+                    that turn (so a tool-only turn still shows as activity).
+    Meta records (``isMeta``) and, by default, sub-agent sidechains
+    (``isSidechain``) are skipped so the digest reads as the main conversation,
+    not raw JSON.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if o.get("type") not in ("user", "assistant"):
+                    continue
+                if o.get("isMeta") or (o.get("isSidechain") and not include_sidechain):
+                    continue
+                msg = o.get("message") or {}
+                content = msg.get("content")
+                ts = o.get("timestamp")
+                if o["type"] == "user":
+                    if isinstance(content, str) and content.strip():
+                        yield {"ts": ts, "role": "user", "text": content.strip(), "tools": []}
+                    continue
+                # assistant: join text blocks, collect tool_use names
+                texts, tools = [], []
+                if isinstance(content, list):
+                    for b in content:
+                        if not isinstance(b, dict):
+                            continue
+                        if b.get("type") == "text" and b.get("text"):
+                            texts.append(b["text"])
+                        elif b.get("type") == "tool_use" and b.get("name"):
+                            tools.append(b["name"])
+                elif isinstance(content, str):
+                    texts.append(content)
+                text = "\n".join(t.strip() for t in texts if t.strip()).strip()
+                if text or tools:
+                    yield {"ts": ts, "role": "assistant", "text": text, "tools": tools}
+    except OSError:
+        return
 
 
 def latest_context_usage(path: Path) -> dict | None:
@@ -236,13 +308,4 @@ def agent_transcript_summary(agent_name: str) -> dict:
     occasionally, so a displayed recap can legitimately lag by hours).
     All fields are None if the transcript can't be found.
     """
-    path = _resolve_agent_transcript(agent_name)
-    if path is None:
-        return {"recap": None, "recap_ts": None, "pr": None}
-    rec = _latest_recap_record(path)
-    pr = latest_pr(path)
-    return {
-        "recap": rec.get("content") if rec else None,
-        "recap_ts": rec.get("timestamp") if rec else None,
-        "pr": pr.to_dict() if pr else None,
-    }
+    return summary_for_path(_resolve_agent_transcript(agent_name))
