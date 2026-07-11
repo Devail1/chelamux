@@ -2,8 +2,9 @@
 
 ## Open
 
-- [x] Scaffold the `chela/telegram/` package and a `chelamux[telegram]` optional extra (fold step 1, structure only — NO bridge logic yet): create `chela/telegram/__init__.py` with a module docstring noting the Telegram bridge is adapted from six-ddc/ccbot (MIT), add a top-level `NOTICE` file carrying the six-ddc MIT copyright/attribution, and add a `[telegram]` optional-dependency group to `pyproject.toml` pinning `python-telegram-bot`. Keep `uv run ruff check chela tests` green.
+- [ ] Dashboard: auto-discover dispatcher workflows so dogfood dispatch runs appear in the Dispatcher/Kanban views WITHOUT manually setting `CHELA_DISPATCH_WORKFLOWS`. Today `chela/dashboard/app.py`'s `/api/dispatcher` iterates only the env-configured `DISPATCH_WORKFLOWS` (returns `{configured:false, workflows:[]}` otherwise), even though runs exist in the dispatch runs DB. Change the Dispatcher + Kanban data so it ALSO surfaces every workflow that has runs recorded in the runs DB (grouped by `project_key`) and/or auto-discovers a `WORKFLOW.md` at the repo root — so runs show regardless of which tmux session the agents ran in (runs are session-independent). Keep the existing `CHELA_DISPATCH_WORKFLOWS` explicit config working (union, don't replace it). Add/adjust tests; keep `uv run ruff check chela tests` green.
 
 ## Done
 
-- [x] Add a `telegram-setup` skill (shipped as PR #14).
+- [x] Add a `telegram-setup` skill (PR #14).
+- [x] Scaffold the `chela/telegram/` package + `[telegram]` extra (PR #15).
