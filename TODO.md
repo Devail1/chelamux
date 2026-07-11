@@ -2,4 +2,8 @@
 
 ## Open
 
-- [x] Add a `telegram-setup` skill (`skills/telegram-setup/SKILL.md`) that walks a user through wiring Telegram for chela: get a bot token from @BotFather, find the chat id (via getUpdates) and the forum topic id, and set `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_TOPIC_ID`. Mirror the style of `skills/chela-setup` and `skills/telegram-send`; keep it generic and public-safe (no real tokens/ids); add a row for it to `skills/README.md`.
+- [ ] Scaffold the `chela/telegram/` package and a `chelamux[telegram]` optional extra (fold step 1, structure only — NO bridge logic yet): create `chela/telegram/__init__.py` with a module docstring noting the Telegram bridge is adapted from six-ddc/ccbot (MIT), add a top-level `NOTICE` file carrying the six-ddc MIT copyright/attribution, and add a `[telegram]` optional-dependency group to `pyproject.toml` pinning `python-telegram-bot`. Keep `uv run ruff check chela tests` green.
+
+## Done
+
+- [x] Add a `telegram-setup` skill (shipped as PR #14).
