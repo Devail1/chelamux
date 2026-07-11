@@ -28,9 +28,33 @@ const KANBAN_COL_LABELS = {
     failed: 'Failed',
     done: 'Done',
 };
+// Columns that start collapsed in the mobile "Rows" accordion — low-traffic
+// buckets the user rarely needs open at a glance. Overridden + persisted per
+// user once they tap a caret.
+const KANBAN_DEFAULT_COLLAPSED = ['backlog', 'failed', 'done'];
+
 let _kanbanTimer = null;
 let _kanbanFilter = 'all';    // workflow path or 'all'
-let _kanbanCol = 'open';      // mobile-only: which column is visible
+
+// Mobile-only layout: 'swipe' (default, scroll-snap carousel) or 'rows'
+// (collapsible accordion). Persisted so it survives the 30s self-poll and
+// return visits. Desktop ignores it entirely (the 7-col grid is unchanged).
+function _loadKanbanLayout() {
+    try { return localStorage.getItem('chela_kanban_mlayout') === 'rows' ? 'rows' : 'swipe'; }
+    catch (e) { return 'swipe'; }
+}
+let _kanbanLayout = _loadKanbanLayout();
+
+// Per-user collapsed-column set for the Rows accordion. Missing key → the
+// KANBAN_DEFAULT_COLLAPSED defaults (backlog / failed / done).
+function _loadKanbanCollapsed() {
+    try {
+        const raw = localStorage.getItem('chela_kanban_collapsed');
+        if (raw === null) return new Set(KANBAN_DEFAULT_COLLAPSED);
+        return new Set(JSON.parse(raw));
+    } catch (e) { return new Set(KANBAN_DEFAULT_COLLAPSED); }
+}
+let _kanbanCollapsed = _loadKanbanCollapsed();
 
 function _wfName(path) {
     if (!path) return '?';
@@ -367,13 +391,21 @@ function _kCol(key, label, cards) {
     const body = cards.length
         ? cards.map(_kCard).join('')
         : `<div class="kanban-empty-col">—</div>`;
-    // kanban-col-mobile-active flips the column on at phone widths; ignored
-    // by the desktop grid layout, which shows all six.
-    const mobileActive = _kanbanCol === key ? ' kanban-col-mobile-active' : '';
+    // kanban-col-collapsed drives the mobile "Rows" accordion (CSS hides
+    // .kanban-cards when set, scoped to ≤768px + rows layout). Desktop and the
+    // swipe carousel ignore it, so the class is harmless everywhere else.
+    const collapsed = _kanbanCollapsed.has(key) ? ' kanban-col-collapsed' : '';
+    // The head is a tap toggle in the Rows accordion; toggleKanbanCol no-ops
+    // above 768px so desktop/swipe clicks do nothing. aria-expanded reflects
+    // collapsed state for the accordion; the caret is a pure CSS ▸/▾ marker.
     return `
-    <div class="kanban-col kanban-col-${key}${mobileActive}" data-col="${key}">
-        <div class="kanban-col-head">
-            <span>${label}</span>
+    <div class="kanban-col kanban-col-${key}${collapsed}" data-col="${key}">
+        <div class="kanban-col-head" role="button" tabindex="0"
+             aria-expanded="${_kanbanCollapsed.has(key) ? 'false' : 'true'}"
+             onclick="chela.toggleKanbanCol('${key}')"
+             onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();chela.toggleKanbanCol('${key}');}">
+            <span class="kanban-col-caret" aria-hidden="true"></span>
+            <span class="kanban-col-label">${label}</span>
             <span class="col-count">${cards.length}</span>
         </div>
         <div class="kanban-cards">${body}</div>
@@ -468,29 +500,83 @@ function setKanbanFilter(wf) {
     refreshKanban();
 }
 
-// Mobile column selector: pick which of the five status columns the phone
-// view shows. No-op on desktop, where all columns are visible by default.
-function setKanbanCol(col) {
-    if (!KANBAN_COLS.includes(col)) col = 'open';
-    _kanbanCol = col;
-    document.querySelectorAll('.kanban-col').forEach(el => {
-        el.classList.toggle('kanban-col-mobile-active', el.dataset.col === col);
+// --- Mobile layout: Swipe carousel vs. Rows accordion ---
+//
+// The mobile board offers two layouts, gated entirely behind the ≤768px media
+// query; desktop (≥769px) keeps its 7-column grid untouched. The active layout
+// is a class on #panel-kanban so both the board and the nav strip react to it.
+
+function _applyKanbanLayout() {
+    const panel = $('#panel-kanban');
+    if (panel) {
+        panel.classList.toggle('kanban-mobile-swipe', _kanbanLayout === 'swipe');
+        panel.classList.toggle('kanban-mobile-rows', _kanbanLayout === 'rows');
+    }
+    // Reflect the active toggle button (colorblind-safe: aria + a fill/weight
+    // style class, never hue alone).
+    document.querySelectorAll('.kanban-layout-btn').forEach(btn => {
+        const on = btn.dataset.layout === _kanbanLayout;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
 }
 
-function _renderKanbanColSelect(buckets) {
-    // Rebuild the mobile <select> with counts in the labels so the user knows
-    // which buckets have anything before picking. Driven off the *filtered*
-    // buckets so workflow filter + column selector compose correctly. Includes
-    // the Backlog column so phones get to it via the same single-col selector.
-    const sel = $('#kanban-col-select');
-    if (!sel) return;
+// Swipe ⇄ Rows toggle. Persists the choice so it survives the 30s self-poll
+// and return visits. No board re-fetch needed — both layouts render from the
+// same DOM, so we just re-apply the class + refresh the nav strip.
+function setKanbanLayout(layout) {
+    _kanbanLayout = layout === 'rows' ? 'rows' : 'swipe';
+    try { localStorage.setItem('chela_kanban_mlayout', _kanbanLayout); } catch (e) { /* ignore */ }
+    _applyKanbanLayout();
+}
+
+// Rows accordion: collapse/expand a column's cards. No-ops above 768px so a
+// stray desktop/swipe click on a head does nothing. Persists per user.
+function toggleKanbanCol(col) {
+    if (typeof window.matchMedia === 'function'
+        && !window.matchMedia('(max-width: 768px)').matches) return;
+    if (_kanbanCollapsed.has(col)) _kanbanCollapsed.delete(col);
+    else _kanbanCollapsed.add(col);
+    try { localStorage.setItem('chela_kanban_collapsed', JSON.stringify([..._kanbanCollapsed])); }
+    catch (e) { /* ignore */ }
+    const el = document.querySelector(`.kanban-col[data-col="${col}"]`);
+    if (el) {
+        const collapsed = _kanbanCollapsed.has(col);
+        el.classList.toggle('kanban-col-collapsed', collapsed);
+        const head = el.querySelector('.kanban-col-head');
+        if (head) head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    }
+}
+
+// Quick-nav strip (swipe layout only): one chip per column with its live
+// count; tapping snap-scrolls the carousel to that column.
+function _renderKanbanNav(buckets) {
+    const strip = $('#kanban-nav-strip');
+    if (!strip) return;
     const apply = arr => _kanbanFilter === 'all' ? arr : arr.filter(c => c.workflow_path === _kanbanFilter);
-    sel.innerHTML = KANBAN_COLS.map(k => {
+    strip.innerHTML = KANBAN_COLS.map(k => {
         const n = apply(buckets[k] || []).length;
-        const sel = k === _kanbanCol ? ' selected' : '';
-        return `<option value="${k}"${sel}>${KANBAN_COL_LABELS[k]} (${n})</option>`;
+        return `<button class="kanban-nav-chip" type="button" data-col="${k}"
+                       onclick="chela.kanbanNavTo('${k}')">
+                    <span class="kanban-nav-label">${KANBAN_COL_LABELS[k]}</span>
+                    <span class="kanban-nav-count">${n}</span>
+                </button>`;
     }).join('');
+}
+
+// Snap the carousel to a column and mark its nav chip active (colorblind-safe:
+// active chip gets fill + weight + border, not hue alone).
+function kanbanNavTo(col) {
+    const board = $('#kanban-board');
+    const el = board && board.querySelector(`.kanban-col[data-col="${col}"]`);
+    if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' });
+    }
+    document.querySelectorAll('.kanban-nav-chip').forEach(chip => {
+        const on = chip.dataset.col === col;
+        chip.classList.toggle('active', on);
+        chip.setAttribute('aria-current', on ? 'true' : 'false');
+    });
 }
 
 async function refreshKanban() {
@@ -522,7 +608,8 @@ async function refreshKanban() {
     const mergeableCount = apply(buckets.awaiting_review)
         .filter(c => c.pr_mergeable === 'MERGEABLE').length;
     _renderKanbanFilters(workflows, mergeableCount);
-    _renderKanbanColSelect(buckets);
+    _renderKanbanNav(buckets);
+    _applyKanbanLayout();
 
     board.innerHTML = [
         _kCol('backlog',         'Backlog',         apply(buckets.backlog)),
@@ -550,4 +637,4 @@ export { refreshKanban, startKanbanTimer, stopKanbanTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { kanbanDeleteClick, kanbanDeleteConfirm, kanbanMergeAll, kanbanMergePR, kanbanPromoteBacklog, setKanbanCol, setKanbanFilter });
+Object.assign(window.chela, { kanbanDeleteClick, kanbanDeleteConfirm, kanbanMergeAll, kanbanMergePR, kanbanNavTo, kanbanPromoteBacklog, setKanbanFilter, setKanbanLayout, toggleKanbanCol });

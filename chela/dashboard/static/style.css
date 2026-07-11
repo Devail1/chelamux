@@ -1326,6 +1326,12 @@ input[type="text"]:focus, textarea:focus, select:focus {
     align-items: center;
 }
 
+.kanban-col-head .kanban-col-label { flex: 1 1 auto; min-width: 0; }
+
+/* Accordion caret — hidden by default (desktop grid + swipe carousel have no
+   collapse). The mobile Rows layout flips it on. */
+.kanban-col-caret { display: none; }
+
 .kanban-col-head .col-count {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -1333,6 +1339,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     padding: 1px 7px;
     font-size: 10px;
     color: var(--text);
+    flex: 0 0 auto;
 }
 
 .kanban-col-backlog .kanban-col-head { color: var(--text-dim); }
@@ -1620,14 +1627,10 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .dispatcher-table tr.row-confirming .row-confirm-cell { display: block; padding: 4px 0; }
 }
 
-/* ---- Mobile column selector (Kanban) ---- */
-/* Hidden on desktop; the @media block below flips it on at phone widths so
-   the user can pick which of the six columns is visible. */
-.kanban-col-select {
-    display: none;
-    width: 100%;
-    margin-bottom: 10px;
-}
+/* ---- Mobile layout controls (Kanban) ---- */
+/* The Swipe/Rows toggle + swipe quick-nav strip. Hidden on desktop (the 7-col
+   grid needs no controls); the ≤768px block below flips them on. */
+.kanban-mobile-controls { display: none; }
 
 /* ---- Responsive ---- */
 
@@ -1666,16 +1669,135 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .tab { flex: 0 0 auto; white-space: nowrap; padding: 8px 12px; }
     .tab[data-tab="terminals"] { margin-left: 0 !important; }
 
-    /* Kanban: single-column board, one column shown at a time via the
-       dropdown selector (.kanban-col-select). The selector flips on here. */
-    .kanban-col-select { display: block; }
-    .kanban-board {
-        display: block;
-        grid-template-columns: none;
+    /* ---- Kanban mobile layouts (Swipe / Rows) ---- */
+    /* Controls (toggle + nav strip) are mobile-only. */
+    .kanban-mobile-controls { display: block; }
+
+    .kanban-layout-toggle {
+        display: inline-flex;
+        gap: 0;
+        margin-bottom: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
     }
-    .kanban-col { display: none; margin-bottom: 0; }
-    .kanban-col.kanban-col-mobile-active { display: flex; }
+    .kanban-layout-btn {
+        background: var(--bg);
+        color: var(--text-dim);
+        border: none;
+        padding: 6px 16px;
+        font-size: 12px;
+        font-family: var(--font);
+        cursor: pointer;
+    }
+    .kanban-layout-btn + .kanban-layout-btn { border-left: 1px solid var(--border); }
+    /* Active state is colorblind-safe: solid fill + bold weight + inset ring,
+       not hue alone. */
+    .kanban-layout-btn.active {
+        background: var(--accent);
+        color: #0d1117;
+        font-weight: 700;
+        box-shadow: inset 0 0 0 2px var(--accent);
+    }
+
+    /* Quick-nav strip — swipe layout only (hidden in rows below). */
+    .kanban-nav-strip {
+        display: flex;
+        flex-wrap: nowrap;
+        gap: 6px;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        margin-bottom: 10px;
+        padding-bottom: 2px;
+    }
+    .kanban-nav-strip::-webkit-scrollbar { display: none; }
+    .kanban-nav-chip {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        border-radius: 12px;
+        padding: 3px 10px;
+        font-size: 11px;
+        font-family: var(--font);
+        cursor: pointer;
+        white-space: nowrap;
+    }
+    .kanban-nav-chip .kanban-nav-count {
+        background: var(--surface);
+        border-radius: 8px;
+        padding: 0 6px;
+        font-size: 10px;
+        color: var(--text);
+    }
+    /* Active chip is colorblind-safe: fill + bold + ring, plus the count pill
+       stays legible — never hue as the only cue. */
+    .kanban-nav-chip.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #0d1117;
+        font-weight: 700;
+        box-shadow: inset 0 0 0 2px var(--accent);
+    }
+    .kanban-nav-chip.active .kanban-nav-count { background: rgba(13, 17, 23, 0.18); color: #0d1117; }
+
+    /* Default (swipe carousel): horizontal scroll-snap; all 7 columns swipe
+       with a peek of the next. */
+    .kanban-board {
+        display: flex;
+        flex-wrap: nowrap;
+        grid-template-columns: none;
+        overflow-x: auto;
+        scroll-snap-type: x mandatory;
+        -webkit-overflow-scrolling: touch;
+        gap: 10px;
+    }
+    .kanban-col {
+        flex: 0 0 86%;
+        scroll-snap-align: start;
+        margin-bottom: 0;
+    }
     .kanban-cards { max-height: none; }
+
+    /* Rows accordion — full-width stacked columns; each head is a tap toggle
+       that collapses/expands its cards. Every header + count stays visible. */
+    #panel-kanban.kanban-mobile-rows .kanban-nav-strip { display: none; }
+    #panel-kanban.kanban-mobile-rows .kanban-board {
+        display: block;
+        overflow-x: visible;
+        scroll-snap-type: none;
+    }
+    #panel-kanban.kanban-mobile-rows .kanban-col {
+        flex: none;
+        width: 100%;
+        min-height: 0;
+        margin-bottom: 8px;
+    }
+    #panel-kanban.kanban-mobile-rows .kanban-col-head {
+        margin-bottom: 0;
+        border-bottom: none;
+        cursor: pointer;
+        padding-bottom: 4px;
+    }
+    #panel-kanban.kanban-mobile-rows .kanban-col-caret {
+        display: inline-block;
+        flex: 0 0 auto;
+        width: 12px;
+        color: var(--text-dim);
+        transition: transform 0.15s;
+    }
+    #panel-kanban.kanban-mobile-rows .kanban-col-caret::before { content: '▾'; }
+    #panel-kanban.kanban-mobile-rows .kanban-col-collapsed .kanban-col-caret::before { content: '▸'; }
+    #panel-kanban.kanban-mobile-rows .kanban-col:not(.kanban-col-collapsed) .kanban-col-head {
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 8px;
+        padding-bottom: 8px;
+    }
+    #panel-kanban.kanban-mobile-rows .kanban-col-collapsed .kanban-cards { display: none; }
 
     /* Dispatcher tables: re-flow as stacked label/value rows. Cells carry a
        data-label attribute set by app.js so the column header survives the
