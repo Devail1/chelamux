@@ -29,7 +29,7 @@ from chela import agent_manager, collab, collab_stream, context, discovery, disp
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
-from chela.workflow import load_workflow
+from chela.workflow import load_workflow, PROJECT_KEY_RE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1607,6 +1607,81 @@ def _runs_for_workflow(
     return active, awaiting, recent
 
 
+def _repo_root_workflow() -> Path | None:
+    """Auto-discover a ``WORKFLOW.md`` at the repo root, if present.
+
+    The dashboard package lives at ``<root>/chela/dashboard/app.py``, so the
+    repo root is two parents up. Dogfooding chelamux seeds a ``WORKFLOW.md``
+    there, so this surfaces the project's own dispatcher with zero env config.
+    Returns ``None`` when the file is absent (e.g. an installed wheel with no
+    repo checkout, or a repo that never seeded a workflow).
+    """
+    try:
+        candidate = Path(__file__).resolve().parents[2] / "WORKFLOW.md"
+    except IndexError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _discover_dispatch_workflows(all_runs: list[dict]) -> list[Path]:
+    """Ordered, de-duplicated workflow paths to surface in the Dispatcher view.
+
+    Union of three session-independent sources, config first:
+      1. explicit ``CHELA_DISPATCH_WORKFLOWS`` config (kept, never replaced);
+      2. an auto-discovered repo-root ``WORKFLOW.md``;
+      3. every distinct ``workflow_path`` recorded in the runs DB — so dogfood
+         dispatch runs appear regardless of which tmux session ran them (runs
+         are session-independent; the daemon on this host need never have been
+         pointed at that workflow).
+
+    De-dup is by resolved-path string, matching how ``dispatcher.tick()`` stores
+    ``workflow_path`` and how ``_runs_for_workflow()`` matches it.
+    """
+    ordered: list[Path] = []
+    seen: set[str] = set()
+
+    def add(p: Path) -> None:
+        try:
+            resolved = p.expanduser().resolve()
+        except OSError:
+            resolved = p
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(resolved)
+
+    for wf in DISPATCH_WORKFLOWS:
+        add(wf)
+    repo_wf = _repo_root_workflow()
+    if repo_wf is not None:
+        add(repo_wf)
+    for run in all_runs:
+        wf_path = run.get("workflow_path")
+        if wf_path:
+            add(Path(wf_path))
+    return ordered
+
+
+def _project_key_from_runs(*run_groups: list[dict]) -> str | None:
+    """Best-effort ``project_key`` derived from a run's branch name.
+
+    Dispatched branches are ``{project_key.lower()}-{task_number}`` (see
+    ``dispatcher._spawn``), so the prefix recovers the key when the workflow
+    file itself is unavailable (a run-discovered workflow whose file no longer
+    exists in this checkout). Pre-migration ``dogfood/<sha>`` branches don't
+    match and yield ``None``, which the frontend already handles.
+    """
+    for group in run_groups:
+        for r in group:
+            branch = (r.get("branch_name") or "").strip()
+            if "-" not in branch:
+                continue
+            prefix = branch.rsplit("-", 1)[0].upper()
+            if PROJECT_KEY_RE.match(prefix):
+                return prefix
+    return None
+
+
 @app.route("/api/dispatcher/init", methods=["POST"])
 @require_auth
 def api_dispatcher_init():
@@ -1627,14 +1702,23 @@ def api_dispatcher_init():
 @app.route("/api/dispatcher")
 @require_auth
 def api_dispatcher():
-    """Per-workflow view: open tasks + active runs + recent completed runs."""
+    """Per-workflow view: open tasks + active runs + recent completed runs.
+
+    Workflows come from three unioned, session-independent sources (see
+    ``_discover_dispatch_workflows``): the explicit ``CHELA_DISPATCH_WORKFLOWS``
+    config, an auto-discovered repo-root ``WORKFLOW.md``, and every workflow
+    that has runs recorded in the runs DB. That last source is why dogfood
+    dispatch runs surface here even when this dashboard's daemon was never
+    pointed at the workflow — runs are keyed by file path, not tmux session.
+    """
     workflows_payload = []
     all_runs = dispatcher.list_runs()
 
-    for wf_path in DISPATCH_WORKFLOWS:
+    for wf_path in _discover_dispatch_workflows(all_runs):
+        exists = wf_path.exists()
         entry: dict = {
             "path": str(wf_path),
-            "exists": wf_path.exists(),
+            "exists": exists,
             "project_key": None,
             "open_tasks": [],
             "backlog_items": [],
@@ -1643,10 +1727,6 @@ def api_dispatcher():
             "recent_runs": [],
             "error": None,
         }
-        if not wf_path.exists():
-            entry["error"] = "workflow file not found"
-            workflows_payload.append(entry)
-            continue
 
         active, awaiting, recent = _runs_for_workflow(all_runs, str(wf_path))
         # Hide tasks from Open if they already have an in-flight run, so a
@@ -1661,29 +1741,40 @@ def api_dispatcher():
         )
         project_key: str | None = None
 
-        try:
-            wf = load_workflow(wf_path)
-            project_key = wf.project_key
-            entry["project_key"] = project_key
-            source = get_source(wf)
-            open_tasks = source.list_open_tasks()
-            entry["open_tasks"] = [
-                {
-                    "id": t.id,
-                    "title": t.title,
-                    "file": t.file,
-                    "line_number": t.line_number,
-                }
-                for t in open_tasks
-                if t.id not in in_flight_ids
-            ]
-            backlog_path = (wf.path.parent / "BACKLOG.md").resolve()
-            entry["backlog_items"] = [
-                {"section": item.section, "text": item.text, "file": str(backlog_path)}
-                for item in parse_backlog(backlog_path)
-            ]
-        except Exception as e:
-            entry["error"] = f"{type(e).__name__}: {e}"
+        if exists:
+            try:
+                wf = load_workflow(wf_path)
+                project_key = wf.project_key
+                source = get_source(wf)
+                open_tasks = source.list_open_tasks()
+                entry["open_tasks"] = [
+                    {
+                        "id": t.id,
+                        "title": t.title,
+                        "file": t.file,
+                        "line_number": t.line_number,
+                    }
+                    for t in open_tasks
+                    if t.id not in in_flight_ids
+                ]
+                backlog_path = (wf.path.parent / "BACKLOG.md").resolve()
+                entry["backlog_items"] = [
+                    {"section": item.section, "text": item.text, "file": str(backlog_path)}
+                    for item in parse_backlog(backlog_path)
+                ]
+            except Exception as e:
+                entry["error"] = f"{type(e).__name__}: {e}"
+        else:
+            # Run-discovered (or configured-but-missing) workflow whose file is
+            # absent in this checkout. We still surface its runs; only the
+            # open-task / backlog columns are unavailable.
+            entry["error"] = "workflow file not found"
+
+        # When the file couldn't supply a project_key, recover it from a run
+        # branch so run-discovered workflows still group + label correctly.
+        if project_key is None:
+            project_key = _project_key_from_runs(active, awaiting, recent)
+        entry["project_key"] = project_key
 
         # Stamp project_key onto each run dict — task_number already comes from
         # the row (column added via idempotent migration); pre-migration rows
@@ -1700,7 +1791,10 @@ def api_dispatcher():
         workflows_payload.append(entry)
 
     return jsonify({
-        "configured": bool(DISPATCH_WORKFLOWS),
+        # True whenever there's anything to show — explicit config, a discovered
+        # repo-root workflow, or workflows with recorded runs. The frontend
+        # gates its empty state on this, so run-only discovery must flip it on.
+        "configured": bool(workflows_payload),
         "workflows": workflows_payload,
     })
 
