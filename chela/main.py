@@ -4,6 +4,7 @@
 (scheduler tick + work-item dispatcher). `chela schedule ...` manages scheduled
 tasks; `chela dispatch ...` runs the markdown-TODO → worktree → PR dispatcher;
 `chela msg`/`broadcast` route messages between live agents over tmux.
+`chela telegram` relays one window's Claude Code output to a Telegram topic.
 `chela dashboard` launches the optional web UI (requires the `dashboard` extra).
 """
 from __future__ import annotations
@@ -347,6 +348,40 @@ def cmd_install_statusline(args) -> None:
     print(f"Installed chela statusLine into {settings_path}. Restart agents to apply.")
 
 
+def cmd_telegram(args) -> None:
+    """Relay one window's new Claude Code output to a Telegram topic (outbound).
+
+    Reads TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / TELEGRAM_TOPIC_ID from the
+    environment, binds a single window (--wid @N) to the topic, and polls its
+    transcript, posting each new message via the direct Bot API. Inbound
+    (Telegram -> tmux) is a later slice; this is outbound only.
+    """
+    from chela.telegram import BotSender, TelegramRelay, TranscriptMonitor
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat = os.environ.get("TELEGRAM_CHAT_ID")
+    topic = os.environ.get("TELEGRAM_TOPIC_ID")
+    if not token or not chat:
+        print("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment.", file=sys.stderr)
+        sys.exit(1)
+
+    wid = _resolve_wid(args.wid)
+    if not wid:
+        print("no window id (pass --wid @N)", file=sys.stderr)
+        sys.exit(1)
+
+    interval = max(1, int(args.interval))
+    relay = TelegramRelay(BotSender(token, chat, topic).send)
+    monitor = TranscriptMonitor(on_message=relay.on_message)
+    log.info("Relaying %s -> Telegram topic %s every %ds", wid, topic or "(none)", interval)
+    while True:
+        try:
+            monitor.poll([wid])
+        except Exception:
+            log.exception("Telegram relay poll failed")
+        time.sleep(interval)
+
+
 def cmd_dashboard(args) -> None:
     """Launch the optional web dashboard (requires the 'dashboard' extra).
 
@@ -476,6 +511,14 @@ def main() -> None:
     p_sl.add_argument("--force", action="store_true", help="Overwrite an existing statusLine (with --write)")
     p_sl.add_argument("--settings", default=None, help="settings.json path (default: ~/.claude/settings.json)")
 
+    # telegram — outbound relay of one window's output to a Telegram topic
+    p_tg = sub.add_parser(
+        "telegram",
+        help="Relay one window's Claude Code output to a Telegram topic (outbound)",
+    )
+    p_tg.add_argument("--wid", required=True, help="Window id to relay (@N or N)")
+    p_tg.add_argument("--interval", type=int, default=2, help="Poll interval in seconds (default 2)")
+
     # dashboard (optional component)
     p_dash = sub.add_parser("dashboard", help="Launch the optional web dashboard (needs the 'dashboard' extra)")
     p_dash.add_argument("--host", default=None, help="Bind host (default 127.0.0.1)")
@@ -526,6 +569,8 @@ def main() -> None:
             p_know.print_help()
     elif args.command == "install-statusline":
         cmd_install_statusline(args)
+    elif args.command == "telegram":
+        cmd_telegram(args)
     elif args.command == "dashboard":
         cmd_dashboard(args)
     elif args.command == "task-finished":
