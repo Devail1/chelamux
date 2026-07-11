@@ -641,7 +641,7 @@ function _shareBtnHTML(wid) {
     const on = _sharedWids.has(wid);
     return `<button class="gs-share-btn${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
       onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
-      title="Share this session">${lucideIcon('share-2', 15)}<span class="gs-share-count" hidden></span></button>`;
+      title="Share this session">${lucideIcon('share-2', 13)}<span class="gs-share-count" hidden></span></button>`;
 }
 
 function paneHead(wid, draggable) {

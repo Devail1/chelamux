@@ -293,7 +293,15 @@ body {
 /* --- collab: share button + presence facepile ------------------------------ */
 /* Share toggle: neutral like the other window controls; accent + link glyph
    when live. The count badge (human viewers) rides the top-right corner. */
-.gs-share-btn { position: relative; font-size: 12px; }
+/* Match the sibling window controls (−/□/×): the share glyph is an SVG whose
+   fixed width/height ignore font-size, so centre it as a block to drop the
+   inline-SVG descender that otherwise makes this button taller than the rest. */
+.gs-share-btn { position: relative; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
+/* Needs button-level specificity to beat `.gs-keys button { padding: 4px 7px }`
+   (same pattern as .gs-keys button.gs-kill-btn) — tighter horizontal padding
+   compensates for the squarer icon so the box matches the −/□/× controls. */
+.gs-keys button.gs-share-btn { padding: 4px 5px; }
+.gs-share-btn > svg { display: block; }
 .gs-share-btn.on {
     color: #0d1117; background: var(--accent); border-color: var(--accent);
 }
