@@ -127,7 +127,7 @@ class RegistryRouter:
         return self._sender(window_id, text)
 
 
-def build_application(token: str, router):
+def build_application(token: str, router, *, on_topic_closed=None):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
     ``router`` is any object with a ``route(chat_id, thread_id, text)`` method —
@@ -138,6 +138,12 @@ def build_application(token: str, router):
     window's Claude Code prompt via ``send_tmux``'s slash-command path. PTB is
     imported here (not at module load) so this module — and the pure router — do
     not require the optional ``[telegram]`` extra.
+
+    ``on_topic_closed`` (optional) is a callable ``(thread_id) -> None`` invoked on
+    a ``StatusUpdate.FORUM_TOPIC_CLOSED`` service message — Slice B's auto-topics
+    wires :meth:`chela.telegram.reconcile.TopicClosedHandler.handle` here to
+    unbind (never kill) a window when its topic is closed from Telegram. Left
+    ``None`` (single-topic / manual bindings), no such handler is registered.
     """
     try:
         from telegram.ext import Application, ContextTypes, MessageHandler, filters
@@ -163,4 +169,21 @@ def build_application(token: str, router):
 
     application = Application.builder().token(token).build()
     application.add_handler(MessageHandler(filters.TEXT, _on_message))
+
+    if on_topic_closed is not None:
+        async def _on_topic_closed(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+            msg = update.message
+            if msg is None:
+                return
+            # The closed topic's own thread id rides on the service message.
+            thread_id = getattr(msg, "message_thread_id", None)
+            try:
+                on_topic_closed(thread_id)
+            except Exception:  # never let a bad unbind wedge the update queue
+                log.exception("topic-closed handling failed")
+
+        application.add_handler(
+            MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CLOSED, _on_topic_closed)
+        )
+
     return application

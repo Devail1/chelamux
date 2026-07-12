@@ -30,6 +30,12 @@ from chela.telegram.format import escape_markdown_v2, to_markdown_v2, to_plain_t
 from chela.telegram.inbound import RegistryRouter, TopicRouter, build_application
 from chela.telegram.monitor import TranscriptMonitor
 from chela.telegram.parser import Message, parse_entries, parse_line
+from chela.telegram.reconcile import (
+    TopicClosedHandler,
+    TopicManager,
+    live_agent_windows,
+    reconcile_bindings,
+)
 from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay
 
 __all__ = [
@@ -48,4 +54,8 @@ __all__ = [
     "escape_markdown_v2",
     "to_markdown_v2",
     "to_plain_text",
+    "TopicManager",
+    "TopicClosedHandler",
+    "reconcile_bindings",
+    "live_agent_windows",
 ]

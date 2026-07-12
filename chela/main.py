@@ -364,6 +364,30 @@ def _outbound_loop(monitor, registry, interval: int, stop) -> None:
         stop.wait(interval)
 
 
+def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
+    """Auto-topics: reconcile the registry against the live fleet, until stopped.
+
+    Each tick diffs live agent windows against the persisted bindings
+    (:func:`chela.telegram.reconcile.reconcile_bindings`) — provisioning a topic for a new
+    agent window and reaping a dead window's topic — and ``save``s only when
+    something actually changed. Runs on its own interval alongside the outbound
+    monitor and the inbound PTB app; the first tick fires immediately so a restart
+    reconciles before we advertise. Idempotent, so a missed/duplicated tick is
+    harmless.
+    """
+    from chela.telegram import live_agent_windows, reconcile_bindings
+
+    while not stop.is_set():
+        try:
+            live, agents = live_agent_windows()
+            if reconcile_bindings(registry, live, agents, topic_api):
+                registry.save()
+                log.info("auto-topics: now bridging %s", ", ".join(registry.windows()) or "(none)")
+        except Exception:
+            log.exception("Telegram auto-topics reconcile failed")
+        stop.wait(interval)
+
+
 def _build_bindings_registry(args, chat: str):
     """Assemble the thread↔window registry the telegram daemon routes on.
 
@@ -413,6 +437,13 @@ def cmd_telegram(args) -> None:
     messenger.send_tmux (the reliable-submit path). Unbound topics/windows are
     dropped/skipped; the bound chat_id is the inbound security boundary.
 
+    With **auto-topics** (the default when neither --wid nor --bind is given, or
+    forced with --auto-topics) a reconcile loop populates the registry from the
+    live tmux fleet: every agent window gets a Telegram forum topic created for it
+    (createForumTopic), a dead window's topic is archived (closeForumTopic), and
+    closing a topic from Telegram unbinds its window without killing the agent.
+    --wid/--bind stay the manual back-compat path (auto-topics off unless forced).
+
     Inbound needs the `[telegram]` extra (python-telegram-bot); pass
     --no-inbound to run outbound-only with no PTB dependency.
     """
@@ -431,11 +462,21 @@ def cmd_telegram(args) -> None:
         print("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment.", file=sys.stderr)
         sys.exit(1)
 
+    # httpx logs each Bot API request at INFO with the full URL — which carries
+    # the bot token — so it would leak the token into pm2 logs. Clamp the PTB/
+    # httpx loggers to WARNING before any request goes out.
+    for noisy in ("httpx", "telegram"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    # Auto-topics defaults ON unless the manual seed flags (--wid/--bind) are
+    # used; --auto-topics forces it back on even alongside a manual seed.
+    auto_topics = bool(args.auto_topics) or not (args.wid or args.bind)
+
     registry = _build_bindings_registry(args, chat)
-    if not registry.windows():
+    if not registry.windows() and not auto_topics:
         print(
             "no bindings — pass --wid @N with TELEGRAM_TOPIC_ID set, --bind @N:<thread_id>, "
-            f"or persist bindings to {default_bindings_path()}",
+            f"persist bindings to {default_bindings_path()}, or use --auto-topics",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -445,30 +486,62 @@ def cmd_telegram(args) -> None:
     # per-window message_thread_id looked up from the registry.
     relay = RegistryRelay(BotSender(token, chat).send, registry)
     monitor = TranscriptMonitor(on_message=relay.on_message)
-    windows = ", ".join(registry.windows())
+
+    topic_api = None
+    reconcile_interval = max(1, int(args.reconcile_interval))
+    if auto_topics:
+        from chela.telegram import TopicManager
+        topic_api = TopicManager(token, chat)
+
+    def _describe() -> str:
+        return ", ".join(registry.windows()) or "(auto-topics: awaiting agent windows)"
 
     if args.no_inbound:
-        # Outbound-only (no PTB dependency): poll in the foreground forever.
-        log.info("Relaying %s -> Telegram topics every %ds", windows, interval)
-        _outbound_loop(monitor, registry, interval, threading.Event())
+        # Outbound-only (no PTB dependency): reconcile (if on) in a daemon thread,
+        # then poll transcripts in the foreground forever.
+        stop = threading.Event()
+        if topic_api is not None:
+            threading.Thread(
+                target=_reconcile_loop,
+                args=(registry, topic_api, reconcile_interval, stop),
+                daemon=True,
+            ).start()
+            log.info("auto-topics reconcile every %ds", reconcile_interval)
+        log.info("Relaying %s -> Telegram topics every %ds", _describe(), interval)
+        try:
+            _outbound_loop(monitor, registry, interval, stop)
+        finally:
+            stop.set()
         return
 
     try:
-        from chela.telegram import RegistryRouter, build_application
+        from chela.telegram import RegistryRouter, TopicClosedHandler, build_application
         router = RegistryRouter(registry)
-        application = build_application(token, router)
+        # Topic-closed → unbind only (never kill the agent), and persist the drop.
+        on_topic_closed = (
+            TopicClosedHandler(registry, on_change=registry.save).handle
+            if auto_topics
+            else None
+        )
+        application = build_application(token, router, on_topic_closed=on_topic_closed)
     except ImportError as e:
         print(f"{e}\n(or run outbound-only:  chela telegram --no-inbound)", file=sys.stderr)
         sys.exit(1)
 
-    # Outbound polling runs in a daemon thread; PTB owns the main thread (it
-    # installs signal handlers, so it must run there) for inbound routing.
+    # Outbound polling (and auto-topics reconcile) run in daemon threads; PTB owns
+    # the main thread (it installs signal handlers, so it must run there).
     stop = threading.Event()
-    outbound = threading.Thread(
+    threading.Thread(
         target=_outbound_loop, args=(monitor, registry, interval, stop), daemon=True,
-    )
-    outbound.start()
-    log.info("Bridging %s <-> Telegram topics (outbound %ds + inbound)", windows, interval)
+    ).start()
+    if topic_api is not None:
+        threading.Thread(
+            target=_reconcile_loop,
+            args=(registry, topic_api, reconcile_interval, stop),
+            daemon=True,
+        ).start()
+        log.info("auto-topics reconcile every %ds", reconcile_interval)
+    log.info("Bridging %s <-> Telegram topics (outbound %ds + inbound)", _describe(), interval)
     try:
         application.run_polling()
     finally:
@@ -618,6 +691,14 @@ def main() -> None:
         help="Bind a window to a topic thread id (repeatable), e.g. --bind @3:42",
     )
     p_tg.add_argument("--interval", type=int, default=2, help="Outbound poll interval in seconds (default 2)")
+    p_tg.add_argument(
+        "--auto-topics", action="store_true",
+        help="Auto-create/close a Telegram topic per agent window (default on when no --wid/--bind)",
+    )
+    p_tg.add_argument(
+        "--reconcile-interval", type=int, default=15,
+        help="Auto-topics reconcile interval in seconds (default 15)",
+    )
     p_tg.add_argument(
         "--no-inbound", action="store_true",
         help="Outbound relay only; skip inbound routing (no python-telegram-bot dependency)",
