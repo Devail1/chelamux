@@ -324,3 +324,104 @@ def test_format_askuq_message_is_the_question():
     assert format_askuq_message(uq) == "❓ Which fruit?"
     blank = AskUQ(question="", options=(), cursor=-1, multi=True)
     assert format_askuq_message(blank).startswith("❓ ")
+
+
+# ── AskUserQuestion edit-in-place (no double-relay across mid-render) ─────────
+
+# The selector as it looks part-way through its first render: only option 1 has
+# been drawn (a different content signature than the settled ASKUQ_SINGLE_PANE).
+ASKUQ_PARTIAL_PANE = """\
+ ☐ Fruit
+
+Which fruit do you prefer?
+
+❯ 1. Apple
+     A crisp red fruit
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
+
+class _Bot:
+    """A fake BotSender recording post/edit calls and handing out message ids."""
+
+    def __init__(self):
+        self.posts = []
+        self.edits = []
+        self._next_id = 100
+
+    def post(self, text, parse_mode=None, thread=None, reply_markup=None):
+        self._next_id += 1
+        self.posts.append((self._next_id, text, thread, reply_markup))
+        return self._next_id
+
+    def edit(self, message_id, text, parse_mode=None, reply_markup=None):
+        self.edits.append((message_id, text, reply_markup))
+        return True
+
+
+def _editing_watcher(bot, registry, panes):
+    return PermissionGateWatcher(
+        bot.post,  # sender is unused on the askuq edit path but must be callable
+        registry,
+        capture=_capture(panes),
+        post=bot.post,
+        edit=bot.edit,
+    )
+
+
+def test_changed_scrape_edits_in_place_instead_of_double_posting():
+    bot = _Bot()
+    panes = {"@1": ASKUQ_PARTIAL_PANE}
+    w = _editing_watcher(bot, _Registry({"@1": "100"}), panes)
+    # First scrape (mid-render, only option 1) → ONE post.
+    w.poll(["@1"])
+    assert len(bot.posts) == 1
+    assert bot.posts[0][1] == "❓ Which fruit do you prefer?"
+    # Selector finishes rendering (all three options) → a DIFFERENT signature.
+    panes["@1"] = ASKUQ_SINGLE_PANE
+    w.poll(["@1"])
+    # No second post — the existing message is edited in place with the full list.
+    assert len(bot.posts) == 1
+    assert len(bot.edits) == 1
+    edited_id, _text, markup = bot.edits[0]
+    assert edited_id == bot.posts[0][0]
+    callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert [c for c in callbacks if not c.startswith("qa:nav:")] == ["qa:0", "qa:1", "qa:2"]
+
+
+def test_unchanged_scrape_neither_edits_nor_reposts():
+    bot = _Bot()
+    w = _editing_watcher(bot, _Registry({"@1": "100"}), {"@1": ASKUQ_SINGLE_PANE})
+    w.poll(["@1"])
+    w.poll(["@1"])  # identical selector — edge-triggered
+    assert len(bot.posts) == 1
+    assert bot.edits == []
+
+
+def test_answered_selector_posts_fresh_never_edits_the_old_message():
+    bot = _Bot()
+    panes = {"@1": ASKUQ_SINGLE_PANE}
+    w = _editing_watcher(bot, _Registry({"@1": "100"}), panes)
+    w.poll(["@1"])
+    assert len(bot.posts) == 1
+    # Answered → selector leaves the pane → tracked message id is dropped.
+    panes["@1"] = WORKING_PANE
+    w.poll(["@1"])
+    # A genuinely new question posts fresh (never edits the answered message).
+    panes["@1"] = ASKUQ_SINGLE_PANE
+    w.poll(["@1"])
+    assert len(bot.posts) == 2
+    assert bot.edits == []
+
+
+def test_edit_failure_falls_back_to_a_fresh_post():
+    bot = _Bot()
+    bot.edit = lambda *a, **k: False  # simulate the tracked message being deleted
+    panes = {"@1": ASKUQ_PARTIAL_PANE}
+    w = _editing_watcher(bot, _Registry({"@1": "100"}), panes)
+    w.poll(["@1"])
+    assert len(bot.posts) == 1
+    panes["@1"] = ASKUQ_SINGLE_PANE
+    w.poll(["@1"])  # edit returns False → post a fresh message
+    assert len(bot.posts) == 2

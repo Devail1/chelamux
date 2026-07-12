@@ -60,11 +60,14 @@ _BTN_TEXT_MAX = 48
 # selector by hand if a semantic pick misfires (or in the non-MVP shapes above).
 # ``(label, key_id, tmux_key)``; ``ref`` is special (screenshot refresh), so it
 # carries no tmux key and is handled on its own in :func:`decode_callback`.
+# Labels are **glyph-only** (no "Esc"/"Enter" words): five buttons share one row,
+# and on a narrow phone Telegram truncates a worded caption ("⏎ Enter" → "⏎ E…").
+# The glyphs (⎋ = Escape, ⏎ = Enter) render in full at any width.
 NAV_KEYS: list[tuple[str, str, str | None]] = [
     ("↑", "up", "Up"),
     ("↓", "dn", "Down"),
-    ("⎋ Esc", "esc", "Escape"),
-    ("⏎ Enter", "ent", "Enter"),
+    ("⎋", "esc", "Escape"),
+    ("⏎", "ent", "Enter"),
     ("🔄", "ref", None),
 ]
 

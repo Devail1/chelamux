@@ -217,6 +217,60 @@ def test_bot_sender_per_message_thread_overrides_instance_topic():
 
 
 # --------------------------------------------------------------------------
+# BotSender.post / .edit — edit-in-place for the interactive prompts
+# --------------------------------------------------------------------------
+
+def test_bot_sender_post_returns_message_id_and_single_send():
+    tr = _Transport()
+    sender = BotSender("tok", "chat42", None, transport=tr)
+    markup = {"inline_keyboard": [[{"text": "main", "callback_data": "qa:0"}]]}
+    mid = sender.post("Which fruit?", None, "99", reply_markup=markup)
+    assert mid == 1  # the transport's scripted message_id
+    assert len(tr.calls) == 1
+    method, fields = tr.calls[0]
+    assert method == "sendMessage"
+    assert fields["chat_id"] == "chat42"
+    assert fields["message_thread_id"] == "99"
+    import json as _json
+    assert _json.loads(fields["reply_markup"]) == markup
+
+
+def test_bot_sender_post_returns_none_on_failure():
+    tr = _Transport(ok=False)
+    sender = BotSender("tok", "c", None, transport=tr)
+    assert sender.post("boom") is None
+
+
+def test_bot_sender_edit_calls_edit_message_text():
+    tr = _Transport()
+    sender = BotSender("tok", "chat42", None, transport=tr)
+    markup = {"inline_keyboard": [[{"text": "b", "callback_data": "qa:1"}]]}
+    assert sender.edit(7, "new text", None, reply_markup=markup) is True
+    method, fields = tr.calls[0]
+    assert method == "editMessageText"
+    assert fields["chat_id"] == "chat42"
+    assert fields["message_id"] == 7
+    assert fields["text"] == "new text"
+    import json as _json
+    assert _json.loads(fields["reply_markup"]) == markup
+
+
+def test_bot_sender_edit_tolerates_not_modified():
+    class _NotModified:
+        def __call__(self, method, fields):
+            return {"ok": False, "description": "Bad Request: message is not modified"}
+
+    sender = BotSender("tok", "c", None, transport=_NotModified())
+    assert sender.edit(7, "same") is True  # not-modified counts as success
+
+
+def test_bot_sender_edit_reports_other_failures():
+    tr = _Transport(ok=False)  # generic parse-error failure
+    sender = BotSender("tok", "c", None, transport=tr)
+    assert sender.edit(7, "x") is False
+
+
+# --------------------------------------------------------------------------
 # TelegramRelay — MarkdownV2 first, plain-text fallback on rejection
 # --------------------------------------------------------------------------
 
