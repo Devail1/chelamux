@@ -37,7 +37,8 @@ import io
 import logging
 from typing import Callable
 
-from chela import messenger
+from chela import config, messenger
+from chela.telegram import media
 from chela.telegram.format import to_code_block
 from chela.telegram.interactive import (
     decode_callback,
@@ -223,7 +224,12 @@ def build_application(
     ``/screenshot`` and ``/esc`` are handled here and never reach Claude Code. A
     catch-all text handler then forwards everything else — including every OTHER
     ``/command`` (``filters.TEXT`` matches them) — to the window's Claude Code
-    prompt via ``router.route`` → ``send_tmux``. On start-up the same command set
+    prompt via ``router.route`` → ``send_tmux``. Photo (``filters.PHOTO``) and
+    document (``filters.Document.ALL``) handlers are registered just before that
+    text catch-all: a media message pasted into a bound topic is downloaded to
+    ``CHELA_DIR/documents/`` and its saved path forwarded to the window (so Claude
+    Code can ``Read`` it), rather than being silently dropped — see
+    :mod:`chela.telegram.media`. On start-up the same command set
     is published via ``set_my_commands`` so it autocompletes in Telegram's "/"
     menu. PTB is imported here (not at module load) so this module — and the pure
     router — do not require the optional ``[telegram]`` extra.
@@ -321,6 +327,53 @@ def build_application(
             router.route(chat_id, thread_id, msg.text)
         except Exception:  # a stuck tmux send must not wedge the update queue
             log.exception("inbound routing failed")
+
+    async def _on_photo(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Download a pasted photo and forward its path to the topic's window.
+
+        The window is resolved from the message's OWN topic through
+        ``router.resolve`` (the same chat/topic gate as a text message); the file
+        is delivered via :func:`chela.messenger.send_tmux` so Claude Code can
+        ``Read`` the image by path. See :func:`chela.telegram.media.receive_photo`.
+        """
+        msg = update.message
+        if msg is None or not getattr(msg, "photo", None):
+            return
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        thread_id = getattr(msg, "message_thread_id", None)
+        try:
+            await media.receive_photo(
+                msg, chat_id, thread_id,
+                resolve=router.resolve,
+                deliver=messenger.send_tmux,
+                docs_dir=config.CHELA_DIR / "documents",
+            )
+        except Exception:  # a media hiccup must not wedge the update queue
+            log.exception("inbound photo handling failed")
+
+    async def _on_document(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Download a pasted file and forward its path to the topic's window.
+
+        Same gate/deliver contract as :func:`_on_photo`; rejects a file over
+        Telegram's 20 MB bot download cap before fetching. See
+        :func:`chela.telegram.media.receive_document`.
+        """
+        msg = update.message
+        if msg is None or not getattr(msg, "document", None):
+            return
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        thread_id = getattr(msg, "message_thread_id", None)
+        try:
+            await media.receive_document(
+                msg, chat_id, thread_id,
+                resolve=router.resolve,
+                deliver=messenger.send_tmux,
+                docs_dir=config.CHELA_DIR / "documents",
+            )
+        except Exception:  # a media hiccup must not wedge the update queue
+            log.exception("inbound document handling failed")
 
     async def _reply_text_snapshot(msg, pane: str) -> None:
         """Fallback when the PNG renderer is unavailable: a monospaced text block.
@@ -538,6 +591,11 @@ def build_application(
     # below picks up the /screenshot ``k:`` taps (and ignores anything else).
     application.add_handler(CallbackQueryHandler(_on_qa, pattern=r"^qa:"))
     application.add_handler(CallbackQueryHandler(_on_key))
+    # Media handlers BEFORE the text catch-all (PTB runs one handler per group):
+    # a photo/document pasted into a bound topic is downloaded and its path
+    # forwarded to the window, instead of being silently dropped.
+    application.add_handler(MessageHandler(filters.PHOTO, _on_photo))
+    application.add_handler(MessageHandler(filters.Document.ALL, _on_document))
     application.add_handler(MessageHandler(filters.TEXT, _on_message))
 
     if on_topic_closed is not None:
