@@ -90,6 +90,16 @@ NOTIFY_KIND = os.environ.get("CHELA_NOTIFY_KIND", "").strip().lower()  # "", ntf
 NOTIFY_TITLE = os.environ.get("CHELA_NOTIFY_TITLE", "chela: agent needs input")
 NOTIFY_INTERVAL = int(os.environ.get("CHELA_NOTIFY_INTERVAL", "20"))
 
+# Outbound Telegram relay: post every tool_use/tool_result event as its own
+# message (🔧 Bash / ✅ Bash result). That's a firehose on a phone, so it is OFF
+# by default — the relay then sends only text/thinking/user turns plus the
+# interactive prompts that need a human (AskUserQuestion / ExitPlanMode). Set
+# CHELA_SHOW_TOOL_CALLS=true for the full stream. Ported from ccbot's
+# CCBOT_SHOW_TOOL_CALLS (which defaulted ON).
+SHOW_TOOL_CALLS = os.environ.get("CHELA_SHOW_TOOL_CALLS", "false").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+
 # Embedded ttyd terminal wall on/off (read by the dashboard and the ttyd
 # supervisor in scripts/agent-terminals.sh). The wall — the flagship feature —
 # is ON by default, but it serves writable shells, so the dashboard gates it on
