@@ -2,7 +2,7 @@
 
 ## Open — migration critical path (retire ccbot; ordered, concurrency 1)
 
-- [ ] **Fold: multi-topic routing SLICE B — auto-create a topic per agent + lifecycle (the "magic"; builds on Slice A's `BindingRegistry`).** Slice A gave us N↔N routing over a persisted registry; Slice B POPULATES that registry automatically. Add a window-watch reconcile loop to the `chela telegram` daemon:
+- [x] **Fold: multi-topic routing SLICE B — auto-create a topic per agent + lifecycle (the "magic"; builds on Slice A's `BindingRegistry`).** Slice A gave us N↔N routing over a persisted registry; Slice B POPULATES that registry automatically. Add a window-watch reconcile loop to the `chela telegram` daemon:
   1. **Provision**: enumerate windows via `chela.discovery`; for each **AGENT (Claude) window** (use discovery's type classification — NOT shells/servers) that has no binding in the registry, call the Telegram **`createForumTopic(chat_id, name=<agent/window display name>)`** Bot API (direct urllib, mirror `relay.py`'s transport — do NOT pull new deps), take the returned `message_thread_id`, `registry.bind(window_id, thread_id)`, and `registry.save()`.
   2. **Window death** → `closeForumTopic(chat_id, message_thread_id)` (archive, don't delete) + `registry.unbind(window_id)` + save.
   3. **Telegram topic-closed event** (PTB `StatusUpdate.FORUM_TOPIC_CLOSED`) → `registry.unbind` ONLY. **Do NOT kill the agent** (Liav default — differs from ccbot deliberately).
