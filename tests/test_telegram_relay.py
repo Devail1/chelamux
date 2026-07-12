@@ -180,6 +180,27 @@ def test_bot_sender_reports_failure_on_rejected_send():
     assert sender.send("boom", "MarkdownV2") is False
 
 
+def test_bot_sender_json_encodes_reply_markup_on_first_chunk_only():
+    tr = _Transport()
+    sender = BotSender("tok", "c", None, transport=tr)
+    markup = {"inline_keyboard": [[{"text": "main", "callback_data": "qa:0"}]]}
+
+    long_text = "y" * (4096 + 5)  # forces two chunks
+    assert sender.send(long_text, "MarkdownV2", reply_markup=markup) is True
+    assert len(tr.calls) == 2
+    # The keyboard is JSON-encoded and rides on the FIRST message only.
+    import json as _json
+    assert _json.loads(tr.calls[0][1]["reply_markup"]) == markup
+    assert "reply_markup" not in tr.calls[1][1]
+
+
+def test_bot_sender_omits_reply_markup_when_absent():
+    tr = _Transport()
+    sender = BotSender("tok", "c", None, transport=tr)
+    assert sender.send("plain") is True
+    assert "reply_markup" not in tr.calls[0][1]
+
+
 def test_bot_sender_per_message_thread_overrides_instance_topic():
     tr = _Transport()
     # No fixed instance topic; the relay supplies message_thread_id per message.
@@ -369,6 +390,55 @@ def test_registry_relay_hidden_drops_tool_calls_but_keeps_prompts():
 
     assert len(stub.calls) == 2  # prompt + text only, both to @1's topic
     assert all(thread == "42" for _, _, thread in stub.calls)
+
+
+# --------------------------------------------------------------------------
+# AskUserQuestion inline keyboard — attached through the relay's send path
+# --------------------------------------------------------------------------
+
+class _MarkupStubSender:
+    """A registry-shaped sink that also records the ``reply_markup`` kwarg."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def __call__(self, text, parse_mode, message_thread_id=None, reply_markup=None):
+        self.calls.append(
+            {"text": text, "parse_mode": parse_mode, "thread": message_thread_id,
+             "reply_markup": reply_markup}
+        )
+        return True
+
+
+def _ask_message():
+    return Message(
+        "assistant", "tool_use", "AskUserQuestion", tool_name="AskUserQuestion",
+        tool_input={"questions": [{
+            "multiSelect": False,
+            "options": [{"label": "main"}, {"label": "dev"}],
+        }]},
+    )
+
+
+def test_registry_relay_attaches_ask_keyboard():
+    stub = _MarkupStubSender()
+    relay = RegistryRelay(stub, _registry(("@1", "42")))
+    relay.on_message("@1", _ask_message())
+
+    assert len(stub.calls) == 1
+    markup = stub.calls[0]["reply_markup"]
+    assert markup is not None
+    callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert "qa:0" in callbacks and "qa:1" in callbacks
+
+
+def test_registry_relay_ordinary_text_has_no_keyboard_kwarg():
+    # A plain message must not pass reply_markup at all — the 2-/3-arg senders
+    # (and their stubs) keep working unchanged.
+    stub = _ThreadStubSender()  # __call__ has no reply_markup param
+    relay = RegistryRelay(stub, _registry(("@1", "42")))
+    relay.on_message("@1", Message("assistant", "text", "hello"))
+    assert len(stub.calls) == 1  # would TypeError if reply_markup were passed
 
 
 def test_registry_relay_shown_keeps_all_tool_calls():

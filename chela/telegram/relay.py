@@ -23,6 +23,7 @@ import urllib.request
 from typing import Callable
 
 from chela.telegram.format import to_markdown_v2, to_plain_text
+from chela.telegram.interactive import ask_reply_markup
 from chela.telegram.parser import Message
 
 log = logging.getLogger(__name__)
@@ -31,9 +32,10 @@ _API = "https://api.telegram.org/bot{token}/{method}"
 MAX_LEN = 4096
 
 # A sender posts one message body to Telegram and reports whether it was
-# accepted: ``send(text, parse_mode) -> ok``. ``parse_mode`` is "MarkdownV2" for
-# the formatted attempt or None for the plain-text fallback.
-Sender = Callable[[str, "str | None"], bool]
+# accepted: ``send(text, parse_mode, ...) -> ok``. ``parse_mode`` is "MarkdownV2"
+# for the formatted attempt or None for the plain-text fallback; the multi-topic
+# relay also passes ``message_thread_id`` and an optional ``reply_markup``.
+Sender = Callable[..., bool]
 
 # A transport performs the raw Bot API call: ``transport(method, fields) -> resp``
 # (the decoded Telegram JSON, ``{"ok": bool, ...}``). Injectable for tests.
@@ -114,16 +116,23 @@ class BotSender:
         text: str,
         parse_mode: str | None = None,
         message_thread_id: str | int | None = None,
+        reply_markup: dict | None = None,
     ) -> bool:
         # A per-message thread (multi-topic relay) overrides the instance default
         # topic; without one we fall back to the fixed ``topic_id`` (single-topic).
         thread = message_thread_id if message_thread_id is not None else self._topic_id
-        for chunk in split_message(text):
+        # An inline keyboard (e.g. AskUserQuestion answers) rides on the FIRST
+        # chunk only — Telegram attaches it to that one message. The Bot API wants
+        # it JSON-encoded in the form field.
+        markup_json = json.dumps(reply_markup) if reply_markup else None
+        for i, chunk in enumerate(split_message(text)):
             fields = {"chat_id": self._chat_id, "text": chunk}
             if thread:
                 fields["message_thread_id"] = thread
             if parse_mode:
                 fields["parse_mode"] = parse_mode
+            if markup_json and i == 0:
+                fields["reply_markup"] = markup_json
             resp = self._transport("sendMessage", fields)
             if not resp.get("ok"):
                 log.warning("telegram sendMessage failed: %s", resp.get("description", resp))
@@ -148,12 +157,17 @@ class TelegramRelay:
         """Relay one parsed message (monitor callback signature)."""
         if _hide_tool_event(msg, self._show_tool_calls):
             return
-        if self._sender(to_markdown_v2(msg), "MarkdownV2"):
+        # An AskUserQuestion prompt gets an inline keyboard so the human can tap
+        # an answer; every other message has no markup. Pass the kwarg only when
+        # present so plain senders (and the test stubs) keep their 2-arg shape.
+        markup = ask_reply_markup(msg)
+        kw = {"reply_markup": markup} if markup else {}
+        if self._sender(to_markdown_v2(msg), "MarkdownV2", **kw):
             return
         # MarkdownV2 was rejected — retry the same content as plain text so a
-        # formatting edge case never silently drops a message.
+        # formatting edge case never silently drops a message (keyboard kept).
         log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
-        self._sender(to_plain_text(msg), None)
+        self._sender(to_plain_text(msg), None, **kw)
 
 
 class RegistryRelay:
@@ -187,7 +201,11 @@ class RegistryRelay:
         if thread is None:
             log.debug("no topic bound for %s; skipping outbound", window_id)
             return
-        if self._sender(to_markdown_v2(msg), "MarkdownV2", thread):
+        # AskUserQuestion prompts carry an inline answer keyboard; see the
+        # single-topic relay above for why the kwarg is passed only when present.
+        markup = ask_reply_markup(msg)
+        kw = {"reply_markup": markup} if markup else {}
+        if self._sender(to_markdown_v2(msg), "MarkdownV2", thread, **kw):
             return
         log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
-        self._sender(to_plain_text(msg), None, thread)
+        self._sender(to_plain_text(msg), None, thread, **kw)
