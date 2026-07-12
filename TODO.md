@@ -1,20 +1,20 @@
 # TODO
 
-## Open — chela telegram bridge commands
+## Open — chela telegram formatting
 
-- [x] **`/screenshot` control-key keyboard (port ccbot's "with control keys").** CMX-16 shipped `/screenshot` as a bare PNG, but ccbot's screenshot came WITH an inline keyboard of control keys so you can drive the terminal from your phone. Attach an `InlineKeyboardMarkup` to the `/screenshot` `reply_photo` + add a `CallbackQueryHandler` that sends the tapped key to the bound window:
-  1. **Key map** (port ccbot's `_KEYS_SEND_MAP` + `_KEY_LABELS`, `src/ccbot/bot.py:361-386`): `up→Up, dn→Down, lt→Left, rt→Right, esc→Escape, ent→Enter, spc→Space, tab→Tab, cc→C-c` (all `send-keys`, no trailing Enter, not literal). Labels: `↑ ↓ ← →, ⎋ Esc, ⏎ Enter, ␣ Space, ⇥ Tab, ^C`.
-  2. **Keyboard layout** (4 rows): `[␣ Space, ↑, ⇥ Tab]` / `[←, ↓, →]` / `[⎋ Esc, ^C, ⏎ Enter]` / `[🔄 Refresh]`. `callback_data = f"{KEYS_PREFIX}{key_id}:{window_id}"` and `f"{REFRESH_PREFIX}{window_id}"`, each **truncated to ≤64 bytes** (Telegram limit; `@N` window ids are short so fine).
-  3. **`messenger.send_key(window_id, key)`** — generalize the existing `send_escape` into a helper that `tmux send-keys -t <session>:<wid> <key>` (named keys `Up`/`Escape`/`C-c`/…, no Enter). Keep `send_escape` as a thin alias if referenced elsewhere.
-  4. **`CallbackQueryHandler`** (registered in `build_application`, matched to the keys/refresh `callback_data` prefix): parse `key_id` + `window_id`; **gate on the bound `chat_id`** (reuse the `resolve`/gate discipline — `callback_query.message.chat.id`) AND verify `window_id` is a currently-bound window in the `BindingRegistry` (don't send keys to an arbitrary id from crafted callback_data); then `messenger.send_key(...)` + `query.answer(label)` toast. For **Refresh**: re-`capture` the pane → re-render PNG → `query.edit_message_media(InputMediaPhoto(png), reply_markup=<same keyboard>)`.
-  **Don't touch** the `/screenshot`/`/esc` capture+render path, routing, registry, or lifecycle — this ADDS the keyboard + callback only. **Landmines:** callback_data ≤64 bytes; the callback must chat-gate + registry-verify the window (a button is a user-supplied string); `edit_message_media` needs the fresh PNG wrapped in `InputMediaPhoto`; keys are sent with `enter=False`. **Verify:** unit-test the keyboard builder (correct rows/labels/callback_data) + the callback dispatch (a keys callback → `send_key` with the mapped tmux key on the right window; a wrong-chat callback → dropped; an unbound window_id → dropped) against stubs, NO live Telegram. Keep `uv run ruff check chela tests` green + `uv run pytest -q`. Report back. Reference: ccbot `src/ccbot/bot.py:360-410` (`_KEYS_SEND_MAP`, `_KEY_LABELS`, `_build_screenshot_keyboard`) + its keys `CallbackQueryHandler`, `chela/telegram/inbound.py` (`_on_screenshot`, `build_application`), `chela/messenger.py` (`send_escape` → `send_key`), `chela/telegram/bindings.py`.
+- [ ] **Render assistant markdown properly in Telegram (add `telegramify-markdown`).** `chela/telegram/format.py::to_markdown_v2` currently **blind-escapes** the body via `escape_markdown_v2` (every MarkdownV2 special char backslashed), so Claude's markdown renders LITERALLY on Telegram — ` ``` code blocks ``` ` show as escaped backticks, `*bold*` shows the asterisks, tables show raw pipes. Port ccbot's approach (it deliberately was NOT ported to stay dep-free — now we want the fidelity):
+  1. Add **`telegramify-markdown`** to the `[telegram]` extra in `pyproject.toml` (what ccbot used; pulls `mistletoe`).
+  2. In `to_markdown_v2`, render the **assistant/text body** through `telegramify-markdown` → valid MarkdownV2 (real code-block + bold + inline-code entities), replacing the blind `escape_markdown_v2` for that body. Optionally port ccbot's `convert_markdown_tables` (tables → card-style key/value, since Telegram has no tables) — `src/ccbot/markdown_v2.py`.
+  3. **Keep the fallback:** import `telegramify-markdown` **lazily**; if it's absent (import fails) or raises on a message, fall back to the current `escape_markdown_v2` blind-escape so the core still works without the extra. The relay's existing MarkdownV2→plain-text-on-reject path stays as the outer safety net.
+  4. The emoji **header** (`🔧`/`✅`/`🤖` + tool/role) must remain valid MarkdownV2 — escape it or keep it outside the converted body; don't double-escape. **Leave `to_code_block`** (used by `/screenshot`'s text fallback) untouched.
+  **Don't touch** routing / registry / lifecycle / the relay's send+fallback contract. **Landmines:** don't double-escape the header; a telegramify failure on ONE message must degrade to escaped-plain for that message, never crash the relay; keep it lazy so pure format tests don't need the extra. **Verify:** unit-test that an assistant message with a fenced code block + `*bold*` renders MarkdownV2 with a real code entity (backticks NOT backslash-escaped) when telegramify is available, and that the fallback path (telegramify absent/raising) still produces safe escaped output. Keep `uv run ruff check chela tests` green + `uv run pytest -q`. Report back. Reference: ccbot `src/ccbot/markdown_v2.py` (telegramify usage + `convert_markdown_tables`), `chela/telegram/format.py`, `chela/telegram/relay.py` (send + plain fallback), `pyproject.toml` `[telegram]` extra.
 
 ## Backlog (not yet dispatchable)
 
 - **Settings view — editable toggles (follow-up)**: in-UI write-back + daemon restart.
 - **Retire ccbot** ~07-19 after warm standby: `pm2 delete ccbot` + `pm2 save` + archive repo (ops).
 - Interactive UI: AskUserQuestion / ExitPlanMode / Permission phone **approvals (buttons)** + message merging.
-- `/kill` (explicit agent-kill + close topic) — optional, higher-stakes; skipped `/unbind` `/history` `/usage` (don't fit auto-topics).
+- `/kill` (explicit agent-kill + close topic) — optional, higher-stakes; `/unbind` `/history` `/usage` skipped (don't fit auto-topics).
 - Privacy scrub (forum IDs, `CCBOT_PANE_FALLBACK`, abs paths → env) before public `main`.
 - **Cost view** (cockpit): transcript tokens × price → $ per agent / run / fleet.
 - **Unified graph viewer** (cockpit): memory `[[wikilinks]]` + fleet; renderer = **Sigma.js + Graphology (MIT, WebGL)**, clean-room (not a GitNexus fork — PolyForm-NC). Colorblind-safe.
@@ -28,5 +28,5 @@
 - [x] Topic naming by project cwd (#25, CMX-12).
 - [x] `CHELA_SHOW_TOOL_CALLS` toggle — hide tool spam (#26, CMX-13).
 - [x] Settings view — Connections & Status (#27) + Telegram-bridge row (#28) + Work-dispatcher-badge fix [CMX-14/15].
-- [x] Bridge commands `/screenshot` (PNG) + `/esc` + `set_my_commands` "/" menu (#29, CMX-16).
+- [x] Bridge commands `/screenshot` (PNG) + `/esc` + `/` menu (#29, CMX-16) + `/screenshot` control-key keyboard + Refresh (#30, CMX-17).
 - [x] **CUTOVER LIVE 2026-07-12** — `chela-telegram` (pm2 id 12) on @chelamuxbot / test forum ↔ 4 agents; tool-spam hidden.
