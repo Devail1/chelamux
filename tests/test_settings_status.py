@@ -32,7 +32,8 @@ def test_settings_shape(client, monkeypatch):
 
     items = _items(data)
     # Every documented row is present...
-    for label in ("tmux session", "Collaboration relay", "Needs-input notifications",
+    for label in ("tmux session", "Telegram bridge", "Collaboration relay",
+                  "Needs-input notifications",
                   "Terminal wall", "Work dispatcher", "Scheduler", "Tool-call relay"):
         assert label in items, label
     # ...and every item carries the colorblind-safe badge fields.
@@ -56,6 +57,27 @@ def test_session_probe_degrades_gracefully(client, monkeypatch):
     sess = _items(resp.get_json())["tmux session"]
     assert sess["on"] is False
     assert sess["state"] == "Unknown"
+
+
+def test_telegram_bridge_off_when_daemon_not_running(client, monkeypatch):
+    # Detection is by process, not env — the dashboard has no bridge creds.
+    monkeypatch.setattr(dash, "_telegram_bridge_running", lambda: False)
+    tg = _items(client.get("/api/settings").get_json())["Telegram bridge"]
+    assert tg["on"] is False
+    assert tg["state"] == "Off"
+
+
+def test_telegram_bridge_connected_hides_secrets(client, monkeypatch):
+    monkeypatch.setattr(dash, "_telegram_bridge_running", lambda: True)
+    # Even if the bridge's secrets happen to be in the env, they must NEVER ride
+    # along in the status detail (it reports only a bound count).
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:SECRET-TOKEN")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    tg = _items(client.get("/api/settings").get_json())["Telegram bridge"]
+    assert tg["on"] is True
+    assert tg["state"] == "Connected"
+    assert "SECRET-TOKEN" not in tg["detail"]
+    assert "api.telegram.org" not in tg["detail"]
 
 
 def test_notify_host_redacts_telegram_token():

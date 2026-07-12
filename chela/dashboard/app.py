@@ -1255,6 +1255,21 @@ def _notify_host(url: str) -> str:
         return "configured"
 
 
+def _telegram_bridge_running() -> bool:
+    """True if a ``chela telegram`` bridge daemon is running.
+
+    Detected by process (``pgrep``), NOT env vars — the dashboard process does
+    not carry the bridge's credentials (they live in ``~/.chela/telegram.env``,
+    sourced only by the telegram wrapper), so an env check would false-negative.
+    """
+    try:
+        return subprocess.run(
+            ["pgrep", "-f", "chela telegram"], capture_output=True, timeout=3
+        ).returncode == 0
+    except Exception:
+        return False
+
+
 def _settings_status() -> dict:
     """READ-ONLY aggregation for the Settings drawer's "Connections & Status"
     surface. Every probe is best-effort and independently guarded: one failing
@@ -1292,8 +1307,26 @@ def _settings_status() -> dict:
     else:
         notify_state, notify_detail = "Off", "set CHELA_NOTIFY_URL to enable"
 
+    # Telegram bridge — remote control of the fleet over Telegram forum topics.
+    # Detected by the RUNNING daemon (pgrep), NOT env vars: the dashboard process
+    # does not carry the bridge's credentials (they live in ~/.chela/telegram.env,
+    # sourced only by the telegram wrapper), so an env check would read "Off" while
+    # it runs. The token/chat_id are secrets and never ride along in the detail.
+    tg_on = _telegram_bridge_running()
+    if tg_on:
+        tg_state = "Connected"
+        try:
+            from chela.telegram.bindings import BindingRegistry
+            n_bind = len(BindingRegistry.load())
+            tg_detail = f"{n_bind} agent{'' if n_bind == 1 else 's'} bound" if n_bind else "no agents bound yet"
+        except Exception:
+            tg_detail = "running"
+    else:
+        tg_state, tg_detail = "Off", "start `chela telegram` to enable"
+
     connections = [
         {"label": "tmux session", "on": session_on, "state": session_state, "detail": session_detail},
+        {"label": "Telegram bridge", "on": tg_on, "state": tg_state, "detail": tg_detail},
         {"label": "Collaboration relay", "on": collab_on, "state": collab_state, "detail": collab_detail},
         {"label": "Needs-input notifications", "on": notify_on, "state": notify_state, "detail": notify_detail},
     ]
