@@ -16,6 +16,9 @@ from chela.telegram.bindings import BindingRegistry
 from chela.telegram.inbound import (
     _KEY_ACTIONS,
     _KEY_CB_PREFIX,
+    BRIDGE_COMMANDS,
+    MENU_COMMANDS,
+    PASSTHROUGH_COMMANDS,
     SCREENSHOT_KEYS,
     RegistryRouter,
     TopicRouter,
@@ -111,6 +114,22 @@ def test_slash_command_is_forwarded_verbatim():
     router = TopicRouter("777", "@3", "4", sender=stub)
     assert router.route(777, 4, "/clear") is True
     assert stub.calls == [("@3", "/clear")]
+
+
+# --------------------------------------------------------------------------
+# "/" command menu — what gets published to Telegram's autocomplete
+# --------------------------------------------------------------------------
+
+def test_clear_is_published_to_menu_but_not_bridge_intercepted():
+    # /clear autocompletes (it's in the published MENU_COMMANDS) yet is a
+    # passthrough — never a bridge command, so no CommandHandler owns it and it
+    # falls through to Claude Code (see test_slash_command_is_forwarded_verbatim).
+    names = {name for name, _desc in PASSTHROUGH_COMMANDS}
+    assert "clear" in names
+    bridge_names = {name for name, _desc in BRIDGE_COMMANDS}
+    assert "clear" not in bridge_names
+    assert MENU_COMMANDS == BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS
+    assert ("clear", PASSTHROUGH_COMMANDS[0][1]) in MENU_COMMANDS
 
 
 # --------------------------------------------------------------------------

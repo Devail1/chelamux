@@ -62,6 +62,18 @@ BRIDGE_COMMANDS: list[tuple[str, str]] = [
     ("esc", "Send Escape to interrupt the agent"),
 ]
 
+# Claude Code slash commands worth surfacing in Telegram's "/" autocomplete menu
+# but NOT intercepted by the bridge: no CommandHandler is registered for these, so
+# they fall through the catch-all text handler to the window's Claude Code prompt
+# (send_tmux) exactly like any other ``/command``. Published alongside
+# BRIDGE_COMMANDS so the operator gets autocomplete without the bridge owning them.
+PASSTHROUGH_COMMANDS: list[tuple[str, str]] = [
+    ("clear", "Clear the agent's conversation (forwarded to Claude Code)"),
+]
+
+# Everything published to Telegram's "/" menu: bridge-intercepted + passthrough.
+MENU_COMMANDS: list[tuple[str, str]] = BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS
+
 # A terminal snapshot is trimmed to its most recent characters so a single
 # ``/screenshot`` reply stays under Telegram's 4096-char per-message limit
 # (with headroom for the code-fence markup).
@@ -223,15 +235,16 @@ def build_application(
     bridge-level commands in :data:`BRIDGE_COMMANDS` are registered FIRST, so
     ``/screenshot`` and ``/esc`` are handled here and never reach Claude Code. A
     catch-all text handler then forwards everything else — including every OTHER
-    ``/command`` (``filters.TEXT`` matches them) — to the window's Claude Code
+    ``/command`` (``filters.TEXT`` matches them), such as the passthrough
+    ``/clear`` in :data:`PASSTHROUGH_COMMANDS` — to the window's Claude Code
     prompt via ``router.route`` → ``send_tmux``. Photo (``filters.PHOTO``) and
     document (``filters.Document.ALL``) handlers are registered just before that
     text catch-all: a media message pasted into a bound topic is downloaded to
     ``CHELA_DIR/documents/`` and its saved path forwarded to the window (so Claude
     Code can ``Read`` it), rather than being silently dropped — see
-    :mod:`chela.telegram.media`. On start-up the same command set
-    is published via ``set_my_commands`` so it autocompletes in Telegram's "/"
-    menu. PTB is imported here (not at module load) so this module — and the pure
+    :mod:`chela.telegram.media`. On start-up :data:`MENU_COMMANDS` (the bridge
+    commands plus the passthrough ones) is published via ``set_my_commands`` so it
+    autocompletes in Telegram's "/" menu. PTB is imported here (not at module load) so this module — and the pure
     router — do not require the optional ``[telegram]`` extra.
 
     ``capture`` / ``send_escape`` / ``send_key`` back the commands: ``/screenshot``
@@ -573,10 +586,15 @@ def build_application(
         await query.answer(f"✓ {label}"[:200] if ok else "❌ send failed")
 
     async def _post_init(app) -> None:
-        """Publish the bridge commands to Telegram's "/" autocomplete menu."""
+        """Publish the menu commands to Telegram's "/" autocomplete menu.
+
+        Both bridge-intercepted commands and passthrough Claude Code commands
+        (:data:`MENU_COMMANDS`) are published so they autocomplete; only the
+        bridge ones have handlers, the rest fall through to send_tmux.
+        """
         try:
             await app.bot.set_my_commands(
-                [BotCommand(name, desc) for name, desc in BRIDGE_COMMANDS]
+                [BotCommand(name, desc) for name, desc in MENU_COMMANDS]
             )
         except Exception:  # a menu-registration failure must not stop the bridge
             log.warning("could not set Telegram command menu", exc_info=True)

@@ -34,6 +34,8 @@ from chela.telegram.format import (
 )
 from chela.telegram.inbound import (
     BRIDGE_COMMANDS,
+    MENU_COMMANDS,
+    PASSTHROUGH_COMMANDS,
     RegistryRouter,
     TopicRouter,
     build_application,
@@ -75,6 +77,8 @@ __all__ = [
     "default_bindings_path",
     "build_application",
     "BRIDGE_COMMANDS",
+    "MENU_COMMANDS",
+    "PASSTHROUGH_COMMANDS",
     "escape_markdown_v2",
     "to_code_block",
     "to_markdown_v2",
