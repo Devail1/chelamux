@@ -10,7 +10,12 @@ No live Telegram: :class:`BotSender` is driven through an injected transport and
 from __future__ import annotations
 
 from chela.telegram.bindings import BindingRegistry
-from chela.telegram.format import escape_markdown_v2, to_markdown_v2, to_plain_text
+from chela.telegram.format import (
+    escape_markdown_v2,
+    to_code_block,
+    to_markdown_v2,
+    to_plain_text,
+)
 from chela.telegram.parser import Message
 from chela.telegram.relay import (
     INTERACTIVE_TOOL_NAMES,
@@ -35,6 +40,13 @@ def test_to_markdown_v2_renders_bold_header_and_escaped_body():
     md = to_markdown_v2(Message("assistant", "text", "done: 1.5 files"))
     # header is bold (unescaped emoji), body escapes the '.' and ':'
     assert md == "*🤖*\ndone: 1\\.5 files"
+
+
+def test_to_code_block_wraps_and_escapes_only_fence_specials():
+    # Inside a code entity only backslash and backtick are special — a '.' or '*'
+    # that escape_markdown_v2 would touch must survive verbatim in the snapshot.
+    assert to_code_block("plain.text*") == "```\nplain.text*\n```"
+    assert to_code_block("a\\b`c") == "```\na\\\\b\\`c\n```"
 
 
 def test_to_markdown_v2_tool_use_is_header_only():

@@ -26,8 +26,18 @@ which is MIT-licensed. See the top-level NOTICE file for the upstream
 copyright and attribution.
 """
 from chela.telegram.bindings import BindingRegistry, default_bindings_path
-from chela.telegram.format import escape_markdown_v2, to_markdown_v2, to_plain_text
-from chela.telegram.inbound import RegistryRouter, TopicRouter, build_application
+from chela.telegram.format import (
+    escape_markdown_v2,
+    to_code_block,
+    to_markdown_v2,
+    to_plain_text,
+)
+from chela.telegram.inbound import (
+    BRIDGE_COMMANDS,
+    RegistryRouter,
+    TopicRouter,
+    build_application,
+)
 from chela.telegram.monitor import TranscriptMonitor
 from chela.telegram.parser import Message, parse_entries, parse_line
 from chela.telegram.reconcile import (
@@ -52,7 +62,9 @@ __all__ = [
     "BindingRegistry",
     "default_bindings_path",
     "build_application",
+    "BRIDGE_COMMANDS",
     "escape_markdown_v2",
+    "to_code_block",
     "to_markdown_v2",
     "to_plain_text",
     "TopicManager",

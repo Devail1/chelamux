@@ -96,3 +96,52 @@ def test_pane_has_unsubmitted_paste_guards_empty_prompt():
     assert not messenger._pane_has_unsubmitted_paste(_PANE_SUBMITTED)
     # A response body that merely mentions the phrase (no prompt glyph) is safe.
     assert not messenger._pane_has_unsubmitted_paste("I copied the Pasted text earlier\n")
+
+
+# --- capture_pane / send_escape — the tmux primitives the bridge commands use ---
+
+def test_capture_pane_targets_session_window_and_returns_text():
+    def fake_run(cmd, *a, **kw):
+        assert cmd == ["tmux", "capture-pane", "-p", "-t", "chela:@2"]
+        return _FakeResult(stdout="pane contents\n")
+
+    with patch.object(messenger.subprocess, "run", side_effect=fake_run), \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.capture_pane("@2") == "pane contents\n"
+
+
+def test_capture_pane_ansi_adds_dash_e():
+    def fake_run(cmd, *a, **kw):
+        assert cmd == ["tmux", "capture-pane", "-e", "-p", "-t", "chela:@2"]
+        return _FakeResult(stdout="\x1b[31mred\x1b[0m\n")
+
+    with patch.object(messenger.subprocess, "run", side_effect=fake_run), \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.capture_pane("@2", ansi=True) == "\x1b[31mred\x1b[0m\n"
+
+
+def test_capture_pane_returns_empty_on_error():
+    with patch.object(
+        messenger.subprocess, "run", return_value=_FakeResult(returncode=1)
+    ), patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.capture_pane("@2") == ""
+
+
+def test_send_escape_sends_escape_without_enter():
+    with patch.object(messenger.subprocess, "run", return_value=_FakeResult()) as m, \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.send_escape("@1") is True
+    assert _cmds(m.call_args_list) == [
+        ["tmux", "send-keys", "-t", "chela:@1", "Escape"]
+    ]
+
+
+def test_send_escape_returns_false_on_tmux_error():
+    import subprocess
+
+    def boom(cmd, *a, **kw):
+        raise subprocess.CalledProcessError(1, cmd, stderr=b"no server")
+
+    with patch.object(messenger.subprocess, "run", side_effect=boom), \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.send_escape("@1") is False

@@ -100,6 +100,44 @@ def send_tmux(window_id: str, text: str) -> bool:
         return False
 
 
+def capture_pane(window_id: str, *, ansi: bool = False) -> str:
+    """Return the visible text of ``window_id``'s tmux pane (empty on error).
+
+    The public wrapper the Telegram bridge's ``/screenshot`` command uses to
+    snapshot an agent's terminal; resolves the window against the current
+    session the same way :func:`send_tmux` does. ``ansi=True`` adds tmux's
+    ``-e`` so SGR colour escapes ride along in the capture (what the PNG
+    renderer parses); the default (no ``-e``) returns plain text. Read-only —
+    ``capture-pane`` never mutates the pane.
+    """
+    target = f"{config.current_session()}:{window_id}"
+    cmd = ["tmux", "capture-pane", "-p", "-t", target]
+    if ansi:
+        cmd.insert(2, "-e")  # -> tmux capture-pane -e -p -t <target>
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    return out.stdout if out.returncode == 0 else ""
+
+
+def send_escape(window_id: str) -> bool:
+    """Send a single Escape keypress to ``window_id`` (no Enter). True on success.
+
+    Mirrors the Escape :func:`send_tmux` fires before a slash command, exposed
+    on its own for the bridge's ``/esc`` command: it interrupts an in-progress
+    Claude Code response and returns the window to its prompt without submitting
+    anything.
+    """
+    target = f"{config.current_session()}:{window_id}"
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "Escape"],
+            check=True, capture_output=True,
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        log.error("tmux Escape failed for %s: %s", window_id, e.stderr.decode())
+        return False
+
+
 def send_message(from_agent: str, to_agent: str, message: str, priority: str = "normal") -> bool:
     """Send a message to an agent via tmux. Live-only — no fallback queue.
 
