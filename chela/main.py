@@ -4,8 +4,9 @@
 (scheduler tick + work-item dispatcher). `chela schedule ...` manages scheduled
 tasks; `chela dispatch ...` runs the markdown-TODO → worktree → PR dispatcher;
 `chela msg`/`broadcast` route messages between live agents over tmux.
-`chela telegram` bridges one window and a Telegram topic (outbound relay of the
-window's Claude Code output + inbound routing of topic messages back to it).
+`chela telegram` bridges N agent windows and their Telegram topics (outbound
+relay of each window's Claude Code output + inbound routing of each topic's
+messages back to its window), routed via a persisted thread↔window registry.
 `chela dashboard` launches the optional web UI (requires the `dashboard` extra).
 """
 from __future__ import annotations
@@ -349,73 +350,125 @@ def cmd_install_statusline(args) -> None:
     print(f"Installed chela statusLine into {settings_path}. Restart agents to apply.")
 
 
-def _outbound_loop(monitor, wid: str, interval: int, stop) -> None:
-    """Poll one window's transcript and relay new output, until ``stop`` is set."""
+def _outbound_loop(monitor, registry, interval: int, stop) -> None:
+    """Poll every bound window's transcript and relay new output, until stopped.
+
+    ``registry.windows()`` is re-read each tick so the polled set follows the
+    live bindings (Slice B mutates them without restarting this loop).
+    """
     while not stop.is_set():
         try:
-            monitor.poll([wid])
+            monitor.poll(registry.windows())
         except Exception:
             log.exception("Telegram relay poll failed")
         stop.wait(interval)
 
 
-def cmd_telegram(args) -> None:
-    """Bridge one window and a Telegram topic — outbound AND inbound.
+def _build_bindings_registry(args, chat: str):
+    """Assemble the thread↔window registry the telegram daemon routes on.
 
-    Reads TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / TELEGRAM_TOPIC_ID from the
-    environment and binds a single window (--wid @N) to the topic. One process
-    then does both halves: OUTBOUND polls the window's transcript and posts each
-    new message to the topic via the direct Bot API (a background thread), while
-    INBOUND runs a python-telegram-bot Application that routes topic messages
-    back to the window via messenger.send_tmux (the reliable-submit path).
+    Sources, applied in order (later wins): the persisted bindings file (default
+    ``~/.chela/telegram-bindings.json``), the single-window back-compat seed
+    (``--wid @N`` + ``TELEGRAM_TOPIC_ID``), then any ``--bind @N:<thread_id>``
+    flags. ``chat`` (from ``TELEGRAM_CHAT_ID``) always overrides any persisted
+    chat id so env stays the inbound security boundary.
+    """
+    from chela.telegram import BindingRegistry
+
+    registry = BindingRegistry.load(chat_id=chat)
+
+    # Back-compat: --wid @N + TELEGRAM_TOPIC_ID seeds a one-entry registry.
+    topic = os.environ.get("TELEGRAM_TOPIC_ID")
+    if args.wid and topic:
+        wid = _resolve_wid(args.wid)
+        if wid:
+            registry.bind(wid, topic)
+
+    # --bind @N:<thread_id> (repeatable) — manual seeding for testing Slice A
+    # before Slice B auto-creates topics.
+    for spec in args.bind or []:
+        window, sep, thread = spec.partition(":")
+        if not sep or not window.strip() or not thread.strip():
+            print(f"--bind expects @N:<thread_id>, got {spec!r}", file=sys.stderr)
+            sys.exit(1)
+        wid = _resolve_wid(window.strip())
+        if not wid:
+            print(f"--bind: could not resolve window {window!r}", file=sys.stderr)
+            sys.exit(1)
+        registry.bind(wid, thread.strip())
+
+    return registry
+
+
+def cmd_telegram(args) -> None:
+    """Bridge N agent windows and their Telegram topics — outbound AND inbound.
+
+    Reads TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID from the environment and builds a
+    thread↔window BindingRegistry (persisted file + --wid/TELEGRAM_TOPIC_ID
+    back-compat seed + --bind flags; see _build_bindings_registry). One process
+    then does both halves for every bound window: OUTBOUND polls each window's
+    transcript and posts new messages to THAT window's topic via the direct Bot
+    API (a background thread), while INBOUND runs a python-telegram-bot
+    Application that routes each topic's messages back to its window via
+    messenger.send_tmux (the reliable-submit path). Unbound topics/windows are
+    dropped/skipped; the bound chat_id is the inbound security boundary.
 
     Inbound needs the `[telegram]` extra (python-telegram-bot); pass
     --no-inbound to run outbound-only with no PTB dependency.
     """
     import threading
 
-    from chela.telegram import BotSender, TelegramRelay, TranscriptMonitor
+    from chela.telegram import (
+        BotSender,
+        RegistryRelay,
+        TranscriptMonitor,
+        default_bindings_path,
+    )
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
-    topic = os.environ.get("TELEGRAM_TOPIC_ID")
     if not token or not chat:
         print("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment.", file=sys.stderr)
         sys.exit(1)
 
-    wid = _resolve_wid(args.wid)
-    if not wid:
-        print("no window id (pass --wid @N)", file=sys.stderr)
+    registry = _build_bindings_registry(args, chat)
+    if not registry.windows():
+        print(
+            "no bindings — pass --wid @N with TELEGRAM_TOPIC_ID set, --bind @N:<thread_id>, "
+            f"or persist bindings to {default_bindings_path()}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     interval = max(1, int(args.interval))
-    relay = TelegramRelay(BotSender(token, chat, topic).send)
+    # One BotSender (fixed chat, no fixed topic); RegistryRelay supplies the
+    # per-window message_thread_id looked up from the registry.
+    relay = RegistryRelay(BotSender(token, chat).send, registry)
     monitor = TranscriptMonitor(on_message=relay.on_message)
+    windows = ", ".join(registry.windows())
 
     if args.no_inbound:
         # Outbound-only (no PTB dependency): poll in the foreground forever.
-        log.info("Relaying %s -> Telegram topic %s every %ds", wid, topic or "(none)", interval)
-        _outbound_loop(monitor, wid, interval, threading.Event())
+        log.info("Relaying %s -> Telegram topics every %ds", windows, interval)
+        _outbound_loop(monitor, registry, interval, threading.Event())
         return
 
     try:
-        from chela.telegram import TopicRouter, build_application
-        router = TopicRouter(chat, wid, topic)
+        from chela.telegram import RegistryRouter, build_application
+        router = RegistryRouter(registry)
         application = build_application(token, router)
     except ImportError as e:
-        print(f"{e}\n(or run outbound-only:  chela telegram --wid {wid} --no-inbound)",
-              file=sys.stderr)
+        print(f"{e}\n(or run outbound-only:  chela telegram --no-inbound)", file=sys.stderr)
         sys.exit(1)
 
     # Outbound polling runs in a daemon thread; PTB owns the main thread (it
     # installs signal handlers, so it must run there) for inbound routing.
     stop = threading.Event()
     outbound = threading.Thread(
-        target=_outbound_loop, args=(monitor, wid, interval, stop), daemon=True,
+        target=_outbound_loop, args=(monitor, registry, interval, stop), daemon=True,
     )
     outbound.start()
-    log.info("Bridging %s <-> Telegram topic %s (outbound %ds + inbound)",
-             wid, topic or "(none)", interval)
+    log.info("Bridging %s <-> Telegram topics (outbound %ds + inbound)", windows, interval)
     try:
         application.run_polling()
     finally:
@@ -551,12 +604,19 @@ def main() -> None:
     p_sl.add_argument("--force", action="store_true", help="Overwrite an existing statusLine (with --write)")
     p_sl.add_argument("--settings", default=None, help="settings.json path (default: ~/.claude/settings.json)")
 
-    # telegram — bridge one window and a Telegram topic (outbound + inbound)
+    # telegram — bridge N agent windows and their topics (outbound + inbound)
     p_tg = sub.add_parser(
         "telegram",
-        help="Bridge one window and a Telegram topic (outbound relay + inbound routing)",
+        help="Bridge agent windows and their Telegram topics (outbound relay + inbound routing)",
     )
-    p_tg.add_argument("--wid", required=True, help="Window id to bridge (@N or N)")
+    p_tg.add_argument(
+        "--wid",
+        help="Single-window back-compat: bind this window (@N or N) to TELEGRAM_TOPIC_ID",
+    )
+    p_tg.add_argument(
+        "--bind", action="append", metavar="@N:THREAD_ID",
+        help="Bind a window to a topic thread id (repeatable), e.g. --bind @3:42",
+    )
     p_tg.add_argument("--interval", type=int, default=2, help="Outbound poll interval in seconds (default 2)")
     p_tg.add_argument(
         "--no-inbound", action="store_true",

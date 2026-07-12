@@ -12,7 +12,8 @@ delivery, so these lock in the routing decision:
 """
 from __future__ import annotations
 
-from chela.telegram.inbound import TopicRouter
+from chela.telegram.bindings import BindingRegistry
+from chela.telegram.inbound import RegistryRouter, TopicRouter
 
 
 class _StubSender:
@@ -104,3 +105,70 @@ def test_slash_command_is_forwarded_verbatim():
     router = TopicRouter("777", "@3", "4", sender=stub)
     assert router.route(777, 4, "/clear") is True
     assert stub.calls == [("@3", "/clear")]
+
+
+# --------------------------------------------------------------------------
+# RegistryRouter — the multi-topic generalisation, routing via a registry
+# --------------------------------------------------------------------------
+
+def _registry(chat="777", *bindings):
+    reg = BindingRegistry(chat)
+    for window, thread in bindings:
+        reg.bind(window, thread)
+    return reg
+
+
+def test_registry_router_routes_each_topic_to_its_window():
+    stub = _StubSender()
+    reg = _registry("777", ("@3", "42"), ("@7", "88"))
+    router = RegistryRouter(reg, sender=stub)
+    # Wire ids arrive as ints; the registry compares them as str.
+    assert router.route(777, 42, "for three") is True
+    assert router.route(777, 88, "for seven") is True
+    assert stub.calls == [("@3", "for three"), ("@7", "for seven")]
+
+
+def test_registry_router_drops_unbound_topic():
+    stub = _StubSender()
+    router = RegistryRouter(_registry("777", ("@3", "42")), sender=stub)
+    assert router.route(777, 999, "no such topic") is False
+    assert stub.calls == []
+
+
+def test_registry_router_drops_general_topic():
+    stub = _StubSender()
+    router = RegistryRouter(_registry("777", ("@3", "42")), sender=stub)
+    # General reports thread id None (or 1); neither is bound.
+    assert router.route(777, None, "in general") is False
+    assert router.route(777, 1, "in general") is False
+    assert stub.calls == []
+
+
+def test_registry_router_drops_wrong_chat():
+    stub = _StubSender()
+    router = RegistryRouter(_registry("777", ("@3", "42")), sender=stub)
+    assert router.route(999, 42, "wrong chat") is False
+    assert stub.calls == []
+
+
+def test_registry_router_drops_empty_text():
+    stub = _StubSender()
+    router = RegistryRouter(_registry("777", ("@3", "42")), sender=stub)
+    assert router.route(777, 42, "   \n ") is False
+    assert stub.calls == []
+
+
+def test_registry_router_with_no_chat_bound_routes_nothing():
+    # Fail-closed: a registry with no chat id must not accept every chat.
+    stub = _StubSender()
+    router = RegistryRouter(_registry(None, ("@3", "42")), sender=stub)
+    assert router.route(None, 42, "no chat bound") is False
+    assert router.route(777, 42, "some chat") is False
+    assert stub.calls == []
+
+
+def test_registry_router_propagates_send_failure():
+    stub = _StubSender(ok=False)
+    router = RegistryRouter(_registry("777", ("@3", "42")), sender=stub)
+    assert router.route(777, 42, "will fail") is False
+    assert stub.calls == [("@3", "will fail")]

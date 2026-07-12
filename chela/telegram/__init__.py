@@ -14,15 +14,23 @@ back to the mapped tmux window via :func:`chela.messenger.send_tmux`, driven by 
 build_application`). Only ``build_application`` imports PTB, so the pure router
 stays free of the optional ``[telegram]`` extra.
 
+For the N-agents ↔ N-topics bridge both halves route through a
+:class:`~chela.telegram.bindings.BindingRegistry` (a persisted, bidirectional
+``thread_id ↔ window_id`` map): :class:`~chela.telegram.inbound.RegistryRouter`
+resolves the window per inbound message and :class:`~chela.telegram.relay.
+RegistryRelay` posts each window's output to its bound topic. The single-window
+:class:`TopicRouter`/:class:`TelegramRelay` remain as the one-binding primitives.
+
 The bridge is adapted from six-ddc/ccbot (https://github.com/six-ddc/ccbot),
 which is MIT-licensed. See the top-level NOTICE file for the upstream
 copyright and attribution.
 """
+from chela.telegram.bindings import BindingRegistry, default_bindings_path
 from chela.telegram.format import escape_markdown_v2, to_markdown_v2, to_plain_text
-from chela.telegram.inbound import TopicRouter, build_application
+from chela.telegram.inbound import RegistryRouter, TopicRouter, build_application
 from chela.telegram.monitor import TranscriptMonitor
 from chela.telegram.parser import Message, parse_entries, parse_line
-from chela.telegram.relay import BotSender, TelegramRelay
+from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay
 
 __all__ = [
     "TranscriptMonitor",
@@ -31,7 +39,11 @@ __all__ = [
     "parse_line",
     "BotSender",
     "TelegramRelay",
+    "RegistryRelay",
     "TopicRouter",
+    "RegistryRouter",
+    "BindingRegistry",
+    "default_bindings_path",
     "build_application",
     "escape_markdown_v2",
     "to_markdown_v2",

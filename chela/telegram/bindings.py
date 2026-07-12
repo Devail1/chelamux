@@ -1,0 +1,159 @@
+"""Thread↔window bindings — the registry the multi-topic bridge routes on.
+
+One :class:`BindingRegistry` holds a supergroup ``chat_id`` plus a bidirectional
+map between Telegram forum ``thread_id``s and tmux ``window_id``s (``@N``). The
+inbound half looks up ``window_for_thread`` (topic → which window) and the
+outbound half looks up ``thread_for_window`` (window → which topic), so a single
+``chela telegram`` process can bridge N agents ↔ N topics instead of one.
+
+The registry is **pure** — no Telegram calls — and persists to JSON
+(default ``~/.chela/telegram-bindings.json``, override with
+``CHELA_TELEGRAM_BINDINGS``) so bindings survive a daemon restart. Slice B will
+*populate* it at topic-create time; Slice A only consumes and persists it (seed
+manually, via ``--wid``/``TELEGRAM_TOPIC_ID`` back-compat, or ``--bind``).
+
+**Normalisation (landmine):** ``thread_id`` is an int on the wire but keys are
+compared as ``str`` (same as CMX-8's ``TopicRouter``), so ids round-trip through
+JSON and match regardless of int/str origin. A forum's General topic reports no
+thread id (``None``/``""``) — that never binds and always looks up as unbound.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from pathlib import Path
+
+from chela import config
+
+log = logging.getLogger(__name__)
+
+
+def _norm(value: object) -> str | None:
+    """Normalise an id to ``str``, or ``None`` for an absent/General-topic id."""
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def default_bindings_path() -> Path:
+    """Where bindings persist: ``$CHELA_TELEGRAM_BINDINGS`` or ``$CHELA_DIR``."""
+    override = os.environ.get("CHELA_TELEGRAM_BINDINGS")
+    if override:
+        return Path(override).expanduser()
+    return config.CHELA_DIR / "telegram-bindings.json"
+
+
+class BindingRegistry:
+    """A bidirectional ``thread_id ↔ window_id`` map scoped to one chat.
+
+    The map is kept 1:1 in both directions: :meth:`bind` drops any stale binding
+    on either side before inserting, so a window can bridge at most one topic and
+    a topic at most one window. All ids are stored as ``str`` (see module docs).
+    """
+
+    def __init__(self, chat_id: str | int | None = None):
+        self._chat_id = _norm(chat_id)
+        self._window_to_thread: dict[str, str] = {}
+        self._thread_to_window: dict[str, str] = {}
+
+    @property
+    def chat_id(self) -> str | None:
+        """The bound supergroup chat id (the inbound security boundary)."""
+        return self._chat_id
+
+    def bind(self, window_id: str, thread_id: str | int) -> None:
+        """Bind ``window_id`` ↔ ``thread_id``, replacing any existing binding.
+
+        Raises :class:`ValueError` if either id is empty/None (a General-topic
+        thread, or a missing window, can never form a binding).
+        """
+        w = _norm(window_id)
+        t = _norm(thread_id)
+        if w is None or t is None:
+            raise ValueError(f"bind needs a window id and a thread id, got {window_id!r}/{thread_id!r}")
+        # Drop any prior binding on either side so both maps stay 1:1.
+        old_thread = self._window_to_thread.pop(w, None)
+        if old_thread is not None:
+            self._thread_to_window.pop(old_thread, None)
+        old_window = self._thread_to_window.pop(t, None)
+        if old_window is not None:
+            self._window_to_thread.pop(old_window, None)
+        self._window_to_thread[w] = t
+        self._thread_to_window[t] = w
+
+    def unbind(self, window_id: str) -> bool:
+        """Remove the binding for ``window_id``. Returns True if one was removed."""
+        w = _norm(window_id)
+        if w is None:
+            return False
+        thread = self._window_to_thread.pop(w, None)
+        if thread is None:
+            return False
+        self._thread_to_window.pop(thread, None)
+        return True
+
+    def window_for_thread(self, thread_id: str | int | None) -> str | None:
+        """The window bound to ``thread_id`` (None → unbound / General topic)."""
+        t = _norm(thread_id)
+        if t is None:
+            return None
+        return self._thread_to_window.get(t)
+
+    def thread_for_window(self, window_id: str | int | None) -> str | None:
+        """The thread bound to ``window_id`` (None → the window has no topic)."""
+        w = _norm(window_id)
+        if w is None:
+            return None
+        return self._window_to_thread.get(w)
+
+    def windows(self) -> list[str]:
+        """All bound window ids — what the outbound monitor polls."""
+        return list(self._window_to_thread)
+
+    def __len__(self) -> int:
+        return len(self._window_to_thread)
+
+    # -- persistence -------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-ready ``{chat_id, bindings: {window: thread}}``."""
+        return {"chat_id": self._chat_id, "bindings": dict(self._window_to_thread)}
+
+    @classmethod
+    def from_dict(cls, data: dict, *, chat_id: str | int | None = None) -> "BindingRegistry":
+        """Rebuild a registry from :meth:`to_dict` output.
+
+        ``chat_id`` overrides the persisted value when given — the daemon feeds
+        the live ``TELEGRAM_CHAT_ID`` here so env stays the security boundary.
+        """
+        reg = cls(chat_id if chat_id is not None else data.get("chat_id"))
+        for window, thread in (data.get("bindings") or {}).items():
+            reg.bind(window, thread)
+        return reg
+
+    def save(self, path: str | Path | None = None) -> None:
+        """Persist to ``path`` (default :func:`default_bindings_path`)."""
+        dest = Path(path).expanduser() if path else default_bindings_path()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(self.to_dict(), indent=2) + "\n")
+
+    @classmethod
+    def load(
+        cls, path: str | Path | None = None, *, chat_id: str | int | None = None
+    ) -> "BindingRegistry":
+        """Load from ``path`` (default :func:`default_bindings_path`).
+
+        A missing or unreadable file yields an empty registry (bound to
+        ``chat_id`` if given) rather than raising, so a first run just starts
+        empty. ``chat_id`` overrides any persisted chat id.
+        """
+        src = Path(path).expanduser() if path else default_bindings_path()
+        if not src.exists():
+            return cls(chat_id)
+        try:
+            data = json.loads(src.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("could not read bindings from %s: %s; starting empty", src, e)
+            return cls(chat_id)
+        return cls.from_dict(data, chat_id=chat_id)
