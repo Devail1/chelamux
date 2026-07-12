@@ -110,6 +110,72 @@ def test_render_markdown_falls_back_when_telegramify_raises(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# markdown table → card-style list (convert_markdown_tables)
+# --------------------------------------------------------------------------
+
+_TABLE = (
+    "| Name | Age |\n"
+    "| --- | --- |\n"
+    "| Ann | 30 |\n"
+    "| Bob | 25 |"
+)
+
+
+def test_convert_markdown_tables_makes_card_style_pairs():
+    out = fmt.convert_markdown_tables(_TABLE)
+    # Each row becomes **Header**: value pairs — no raw pipes survive.
+    assert "**Name**: Ann" in out
+    assert "**Age**: 30" in out
+    assert "**Name**: Bob" in out
+    assert "|" not in out
+    # Rows are separated by a horizontal rule.
+    assert "────────────" in out
+
+
+def test_convert_markdown_tables_fills_missing_cells_with_dash():
+    table = "| A | B |\n| --- | --- |\n| x |  |"
+    out = fmt.convert_markdown_tables(table)
+    assert "**A**: x" in out
+    assert "**B**: —" in out
+
+
+def test_convert_markdown_tables_leaves_table_inside_code_fence_untouched():
+    fenced = f"```\n{_TABLE}\n```"
+    # A table inside a code block is data, not a table to reformat.
+    assert fmt.convert_markdown_tables(fenced) == fenced
+
+
+def test_convert_markdown_tables_passes_normal_paragraph_through():
+    para = "Just a sentence with a | pipe but no table."
+    assert fmt.convert_markdown_tables(para) == para
+
+
+def test_convert_markdown_tables_ignores_pipe_row_without_separator():
+    # A pipe row not followed by a --- separator is not a table.
+    text = "| not | a | table |\nplain next line"
+    assert fmt.convert_markdown_tables(text) == text
+
+
+def test_render_markdown_renders_table_as_cards_not_pipes():
+    # End-to-end through the body renderer: a table becomes bold card labels,
+    # never raw pipes, and telegramify turns **Header** into MarkdownV2 *bold*.
+    out = render_markdown(_TABLE)
+    assert "|" not in out
+    assert "Name" in out and "Ann" in out
+    assert "*Name*" in out  # ** → * once telegramify renders the bold
+
+
+def test_render_markdown_table_survives_without_telegramify(monkeypatch):
+    # Fallback path: no telegramify still applies the card conversion, then the
+    # blind escape — the raw table pipes must NOT survive as an escaped table.
+    monkeypatch.setattr(fmt, "_telegramify", None)
+    out = render_markdown(_TABLE)
+    assert "Name" in out and "Ann" in out
+    # The card labels are present (escaped ``\*\*``); no unescaped table pipe row.
+    assert "| Name | Age |" not in out
+
+
+# --------------------------------------------------------------------------
 # splitting
 # --------------------------------------------------------------------------
 

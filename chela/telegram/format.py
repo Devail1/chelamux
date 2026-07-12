@@ -38,10 +38,92 @@ log = logging.getLogger(__name__)
 # Ported verbatim from six-ddc/ccbot's markdown_v2.py (MIT); see NOTICE.
 _MDV2_SPECIAL = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
 
+# A markdown table's separator row: only pipes, colons, dashes and whitespace.
+# Ported from six-ddc/ccbot's markdown_v2.py (MIT); see NOTICE.
+_TABLE_SEP = re.compile(r"^[\s|:\-]+$")
+
 
 def escape_markdown_v2(text: str) -> str:
     """Backslash-escape every MarkdownV2 special character in ``text``."""
     return _MDV2_SPECIAL.sub(r"\\\1", text)
+
+
+def _split_table_row(line: str) -> list[str]:
+    """Split a markdown table row into its cells, respecting escaped ``\\|``."""
+    content = line.strip().strip("|")
+    cells = re.split(r"(?<!\\)\|", content)
+    return [cell.strip().replace("\\|", "|") for cell in cells]
+
+
+def convert_markdown_tables(text: str) -> str:
+    """Rewrite markdown tables as card-style ``**Header**: value`` lists.
+
+    Telegram has no table rendering, and ``telegramify-markdown`` passes a table
+    through as raw pipes. This turns each table row into a card of
+    ``**Header**: value`` pairs separated by a horizontal rule — the same shape
+    Claude Code renders tables as in a narrow terminal. Non-table text is
+    returned verbatim, and tables inside fenced code blocks are left untouched.
+
+    Ported from six-ddc/ccbot's ``markdown_v2.py`` (MIT); see NOTICE.
+    """
+    lines = text.split("\n")
+    result: list[str] = []
+    i = 0
+    in_code_block = False
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Track fenced code blocks — never convert a table inside one.
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            result.append(line)
+            i += 1
+            continue
+
+        if in_code_block:
+            result.append(line)
+            i += 1
+            continue
+
+        # A header row looks like ``| a | b |`` with an inner pipe.
+        if (
+            stripped.startswith("|")
+            and stripped.endswith("|")
+            and "|" in stripped[1:-1]
+        ):
+            # The next line must be a separator (``|---|---|``) for it to count.
+            if i + 1 < len(lines):
+                sep_line = lines[i + 1].strip()
+                if sep_line.startswith("|") and _TABLE_SEP.match(sep_line):
+                    headers = _split_table_row(stripped)
+                    i += 2  # consume header + separator
+                    rows: list[list[str]] = []
+                    while i < len(lines):
+                        data_line = lines[i].strip()
+                        if data_line.startswith("|") and data_line.endswith("|"):
+                            rows.append(_split_table_row(data_line))
+                            i += 1
+                        else:
+                            break
+
+                    separator = "────────────"
+                    cards: list[str] = []
+                    for row in rows:
+                        card_lines = [
+                            f"**{header}**: {row[j] if j < len(row) and row[j] else '—'}"
+                            for j, header in enumerate(headers)
+                        ]
+                        cards.append("\n".join(card_lines))
+
+                    result.append(f"\n{separator}\n".join(cards))
+                    continue
+
+        result.append(line)
+        i += 1
+
+    return "\n".join(result)
 
 
 def render_markdown(text: str) -> str:
@@ -49,11 +131,15 @@ def render_markdown(text: str) -> str:
 
     Uses ``telegramify-markdown`` so fenced code blocks, bold/italic, lists and
     tables become real Telegram entities rather than the literal, blind-escaped
-    characters :func:`escape_markdown_v2` would produce. Falls back to that blind
-    escape when ``telegramify-markdown`` isn't installed (core install without
-    the ``[telegram]`` extra) or if it raises on malformed input — so a body is
-    always rendered to *some* valid MarkdownV2 and never crashes the relay.
+    characters :func:`escape_markdown_v2` would produce. Markdown tables are
+    first rewritten as card-style lists via :func:`convert_markdown_tables`
+    (Telegram can't render tables — telegramify would leave raw pipes). Falls
+    back to the blind escape when ``telegramify-markdown`` isn't installed (core
+    install without the ``[telegram]`` extra) or if it raises on malformed input
+    — so a body is always rendered to *some* valid MarkdownV2 and never crashes
+    the relay.
     """
+    text = convert_markdown_tables(text)
     if _telegramify is None:
         return escape_markdown_v2(text)
     try:
