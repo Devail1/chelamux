@@ -1292,8 +1292,24 @@ def _settings_status() -> dict:
     else:
         notify_state, notify_detail = "Off", "set CHELA_NOTIFY_URL to enable"
 
+    # Telegram bridge — remote control of the fleet over Telegram forum topics.
+    # Configured when both credentials are present; the token/chat_id are secrets
+    # and never ride along in the detail. Binding count is best-effort.
+    tg_on = bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
+    if tg_on:
+        tg_state = "Configured"
+        try:
+            from chela.telegram.bindings import BindingRegistry
+            n_bind = len(BindingRegistry.load())
+            tg_detail = f"{n_bind} window{'' if n_bind == 1 else 's'} bound" if n_bind else "no windows bound yet"
+        except Exception:
+            tg_detail = "credentials set"
+    else:
+        tg_state, tg_detail = "Off", "set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable"
+
     connections = [
         {"label": "tmux session", "on": session_on, "state": session_state, "detail": session_detail},
+        {"label": "Telegram bridge", "on": tg_on, "state": tg_state, "detail": tg_detail},
         {"label": "Collaboration relay", "on": collab_on, "state": collab_state, "detail": collab_detail},
         {"label": "Needs-input notifications", "on": notify_on, "state": notify_state, "detail": notify_detail},
     ]

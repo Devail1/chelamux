@@ -2,7 +2,7 @@
 
 ## Open — chela dashboard/telegram
 
-- [ ] **Settings view — add the missing Telegram BRIDGE row.** CMX-14 shipped the "Connections & Status" surface (`/api/settings` in `chela/dashboard/app.py::_settings_status`) but it surfaces tmux/collab/notify/wall/dispatcher/scheduler/tool-call-relay and is **MISSING the actual Telegram bridge** — the core thing. Add a **"Telegram bridge"** item to the **Connections** section, matching the existing item shape (`{label, state, detail, on}`):
+- [x] **Settings view — add the missing Telegram BRIDGE row.** CMX-14 shipped the "Connections & Status" surface (`/api/settings` in `chela/dashboard/app.py::_settings_status`) but it surfaces tmux/collab/notify/wall/dispatcher/scheduler/tool-call-relay and is **MISSING the actual Telegram bridge** — the core thing. Add a **"Telegram bridge"** item to the **Connections** section, matching the existing item shape (`{label, state, detail, on}`):
   - **Running?** detect the `chela telegram` daemon (e.g. `pgrep -f "chela telegram"` — pick a reliable signal, document it) → `on: true` "Connected" vs `on: false` "Off".
   - **Bindings** — read `~/.chela/telegram-bindings.json`: the forum `chat_id` + **N agents bound**; put the count in `state`/`detail` and, if easy, list each **agent(window-name) → topic** (resolve window→name via `chela.discovery`). Degrade gracefully (missing/empty file → "Off"/"0 agents", never error).
   - ⚠️ **NEVER surface the bot token** — `bindings.json` has none; do NOT read `~/.chela/telegram.env`'s token into the response. (Reuse CMX-14's masking discipline + its no-token-leak test pattern — add a bindings-based row without regressing it.)
