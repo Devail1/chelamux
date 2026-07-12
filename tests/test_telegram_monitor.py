@@ -192,27 +192,89 @@ def test_tool_pairing_survives_across_polls(tmp_path, collected):
     assert not mon._tracked["@1"].pending  # cleared once matched
 
 
-def test_rotation_to_new_transcript_starts_fresh(tmp_path, collected):
-    """When the resolver points at a new file, tracking restarts at its EOF."""
+def test_rotation_to_new_transcript_reads_from_zero(tmp_path, collected):
+    """A file that rotates under a running window is all-new — read from 0.
+
+    (A ``/clear`` starts a fresh session file whose first turn belongs to this
+    session; skipping it to EOF was the bug — a blocked agent showed nothing.)
+    """
     first = tmp_path / "a.jsonl"
     second = tmp_path / "b.jsonl"
     first.write_text(_assistant_text("session A"))
-    second.write_text(_assistant_text("session B backlog"))
+    second.write_text(_assistant_text("session B first turn"))
 
     target = {"path": first}
     mon = TranscriptMonitor(
         on_message=lambda wid, msg: collected.append((wid, msg)),
         resolver=lambda wid: target["path"],
     )
-    mon.poll(["@1"])                       # tracks A at EOF
-
-    target["path"] = second               # rotation
-    mon.poll(["@1"])                       # re-anchors at B's EOF, no backlog
+    mon.poll(["@1"])                       # cold-start on A → tracks A at EOF
     assert collected == []
+
+    target["path"] = second               # rotation to a fresh session file
+    mon.poll(["@1"])                       # its content is new → read from 0
+    assert [m.text for _, m in collected] == ["session B first turn"]
 
     _append(second, _assistant_text("session B live"))
     mon.poll(["@1"])
-    assert [m.text for _, m in collected] == ["session B live"]
+    assert [m.text for _, m in collected] == ["session B first turn", "session B live"]
+
+
+def test_appeared_transcript_emits_from_zero(tmp_path, collected):
+    """Core fix: a window polled while it has NO transcript, then one appears
+    WITH content already in it, relays that content (was skipped to EOF)."""
+    transcript = tmp_path / "s.jsonl"
+    target = {"path": None}
+    mon = TranscriptMonitor(
+        on_message=lambda wid, msg: collected.append((wid, msg)),
+        resolver=lambda wid: target["path"],
+    )
+    mon.poll(["@1"])                       # no transcript yet — remembered empty
+    assert collected == []
+    assert "@1" not in mon._tracked
+
+    # The agent's first turn lands (question included) before the next poll.
+    transcript.write_text(_assistant_text("first turn question"))
+    target["path"] = transcript
+    mon.poll(["@1"])
+    assert [m.text for _, m in collected] == ["first turn question"]
+
+
+def test_cold_start_over_existing_history_skips_to_eof(tmp_path, collected):
+    """A window whose transcript ALREADY exists on the first poll (binding an
+    agent with prior history) must NOT replay that backlog."""
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text(_assistant_text("prior history"))
+
+    mon = _monitor(transcript, collected)
+    mon.poll(["@1"])                       # transcript pre-existed → EOF
+    assert collected == []
+    assert mon._tracked["@1"].offset == transcript.stat().st_size
+
+
+def test_appeared_large_backlog_falls_back_to_eof(tmp_path, collected):
+    """A freshly-appeared file already larger than the fresh threshold (e.g. a
+    --resume that repopulated history) falls back to EOF instead of replaying."""
+    from chela.telegram import monitor as monitor_mod
+
+    transcript = tmp_path / "s.jsonl"
+    target = {"path": None}
+    mon = TranscriptMonitor(
+        on_message=lambda wid, msg: collected.append((wid, msg)),
+        resolver=lambda wid: target["path"],
+    )
+    mon.poll(["@1"])                       # seen empty
+
+    big = _assistant_text("x" * (monitor_mod._FRESH_MAX_BYTES + 1))
+    transcript.write_text(big)
+    target["path"] = transcript
+    mon.poll(["@1"])                       # over threshold → EOF, no replay
+    assert collected == []
+    assert mon._tracked["@1"].offset == transcript.stat().st_size
+
+    _append(transcript, _assistant_text("live after attach"))
+    mon.poll(["@1"])
+    assert [m.text for _, m in collected] == ["live after attach"]
 
 
 # --------------------------------------------------------------------------
