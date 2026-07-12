@@ -48,8 +48,11 @@ def _pane_has_unsubmitted_paste(pane: str) -> bool:
 def send_tmux(window_id: str, text: str) -> bool:
     """Send text to a tmux window. Returns True on success.
 
-    Uses load-buffer + paste-buffer for multi-line text to avoid
-    newlines being interpreted as premature Enter presses.
+    Uses load-buffer + paste-buffer for multi-line text to avoid newlines being
+    interpreted as premature Enter presses. Single-line text is sent literally
+    (``-l``) with the Enter as a SEPARATE call after a short gap, so a long blob
+    isn't read as paste input and the trailing Enter isn't absorbed as a newline
+    (which strands the message on the ``❯`` input line unsubmitted).
     """
     target = f"{config.current_session()}:{window_id}"
     try:
@@ -90,8 +93,22 @@ def send_tmux(window_id: str, text: str) -> bool:
                     check=True, capture_output=True,
                 )
         else:
+            # Single-line: send the text and Enter as SEPARATE calls with a
+            # ~0.5s gap. A long blob injected in one shot reads to Claude Code's
+            # TUI as fast/paste input and the immediately-trailing Enter is
+            # absorbed as a newline, so the message strands wrapped on the ❯
+            # input line instead of submitting. The gap lets the TUI settle the
+            # text before the Enter lands — mirroring the multi-line paste path
+            # above. ``-l`` sends the text literally, so a message that happens
+            # to contain a tmux key name (e.g. "Up", "Enter", "C-c") is typed
+            # verbatim rather than interpreted as a keypress.
             subprocess.run(
-                ["tmux", "send-keys", "-t", target, text, "Enter"],
+                ["tmux", "send-keys", "-t", target, "-l", text],
+                check=True, capture_output=True,
+            )
+            time.sleep(0.5)
+            subprocess.run(
+                ["tmux", "send-keys", "-t", target, "Enter"],
                 check=True, capture_output=True,
             )
         return True
