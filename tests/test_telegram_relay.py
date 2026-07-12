@@ -9,9 +9,10 @@ No live Telegram: :class:`BotSender` is driven through an injected transport and
 """
 from __future__ import annotations
 
+from chela.telegram.bindings import BindingRegistry
 from chela.telegram.format import escape_markdown_v2, to_markdown_v2, to_plain_text
 from chela.telegram.parser import Message
-from chela.telegram.relay import BotSender, TelegramRelay, split_message
+from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay, split_message
 
 
 # --------------------------------------------------------------------------
@@ -118,6 +119,21 @@ def test_bot_sender_reports_failure_on_rejected_send():
     assert sender.send("boom", "MarkdownV2") is False
 
 
+def test_bot_sender_per_message_thread_overrides_instance_topic():
+    tr = _Transport()
+    # No fixed instance topic; the relay supplies message_thread_id per message.
+    sender = BotSender("tok", "chat42", None, transport=tr)
+    assert sender.send("hi", "MarkdownV2", message_thread_id="99") is True
+    _, fields = tr.calls[0]
+    assert fields["message_thread_id"] == "99"
+
+    # A per-message thread wins over a configured instance default too.
+    tr2 = _Transport()
+    sender2 = BotSender("tok", "chat42", "default7", transport=tr2)
+    sender2.send("hi", None, message_thread_id="99")
+    assert tr2.calls[0][1]["message_thread_id"] == "99"
+
+
 # --------------------------------------------------------------------------
 # TelegramRelay — MarkdownV2 first, plain-text fallback on rejection
 # --------------------------------------------------------------------------
@@ -163,3 +179,57 @@ def test_relay_is_a_valid_monitor_on_message_sink():
     mon = TranscriptMonitor(on_message=TelegramRelay(stub).on_message, resolver=lambda w: None)
     mon.poll(["@1"])  # no transcript -> no sends, but the wiring type-checks
     assert stub.calls == []
+
+
+# --------------------------------------------------------------------------
+# RegistryRelay — per-window topic via a BindingRegistry, same fallback
+# --------------------------------------------------------------------------
+
+class _ThreadStubSender:
+    """A ``send(text, parse_mode, message_thread_id)`` sink for the registry relay."""
+
+    def __init__(self, fail_markdown=False):
+        self.fail_markdown = fail_markdown
+        self.calls: list[tuple[str, str | None, str | int | None]] = []
+
+    def __call__(self, text, parse_mode, message_thread_id=None) -> bool:
+        self.calls.append((text, parse_mode, message_thread_id))
+        if parse_mode == "MarkdownV2" and self.fail_markdown:
+            return False
+        return True
+
+
+def _registry(*bindings):
+    reg = BindingRegistry("777")
+    for window, thread in bindings:
+        reg.bind(window, thread)
+    return reg
+
+
+def test_registry_relay_posts_to_the_windows_bound_topic():
+    stub = _ThreadStubSender()
+    reg = _registry(("@1", "42"), ("@2", "88"))
+    relay = RegistryRelay(stub, reg)
+    relay.on_message("@2", Message("assistant", "text", "hello"))
+
+    assert len(stub.calls) == 1
+    text, parse_mode, thread = stub.calls[0]
+    assert parse_mode == "MarkdownV2"
+    assert thread == "88"  # @2's topic, not @1's
+
+
+def test_registry_relay_skips_unbound_window():
+    stub = _ThreadStubSender()
+    relay = RegistryRelay(stub, _registry(("@1", "42")))
+    relay.on_message("@9", Message("assistant", "text", "orphan"))
+    assert stub.calls == []
+
+
+def test_registry_relay_falls_back_to_plain_text_with_thread_preserved():
+    stub = _ThreadStubSender(fail_markdown=True)
+    relay = RegistryRelay(stub, _registry(("@1", "42")))
+    relay.on_message("@1", Message("assistant", "text", "ok. go"))
+
+    assert len(stub.calls) == 2
+    assert stub.calls[0] == ("*🤖*\nok\\. go", "MarkdownV2", "42")
+    assert stub.calls[1] == ("🤖\nok. go", None, "42")  # thread kept on retry

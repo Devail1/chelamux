@@ -9,14 +9,22 @@ paste + stranded-chip guard). We never reimplement tmux sending here.
 
 Topic↔window resolution goes through chela's own registry (tmux is the source of
 truth via :mod:`chela.discovery`), NOT ccbot's ``session_map.json`` (Decision 1).
-For the single-window ``chela telegram`` daemon the binding is fixed: the
-configured ``TELEGRAM_TOPIC_ID`` delivers to the one bound window id.
 
-:class:`TopicRouter` holds the pure routing decision and takes an injectable
-``sender`` so ``topic → window`` routing can be unit-tested against a stub with
-no live Telegram. :func:`build_application` is the thin ``python-telegram-bot``
-glue; PTB is imported lazily inside it so the pure router (and the test suite)
-never depend on the ``[telegram]`` extra.
+Two pure routers share the same ``route(chat_id, thread_id, text)`` contract and
+injectable ``sender`` so routing is unit-testable with no live Telegram:
+
+* :class:`TopicRouter` — a single fixed ``(chat_id, topic_id) → window_id``
+  binding (the original single-window bridge).
+* :class:`RegistryRouter` — the multi-topic generalisation: it resolves the
+  window per message from a :class:`~chela.telegram.bindings.BindingRegistry`
+  (``window_for_thread``), so one process routes N topics ↔ N windows. This is
+  what the ``chela telegram`` daemon uses.
+
+Both still gate on the bound ``chat_id`` (the CMX-8 security boundary) before
+delivering via :func:`chela.messenger.send_tmux`. :func:`build_application` is the
+thin ``python-telegram-bot`` glue and accepts either router; PTB is imported
+lazily inside it so the pure routers (and the test suite) never depend on the
+``[telegram]`` extra.
 
 Adapted from six-ddc/ccbot (https://github.com/six-ddc/ccbot), which is
 MIT-licensed. See the top-level NOTICE file for the upstream copyright and
@@ -82,11 +90,50 @@ class TopicRouter:
         return self._sender(self._window_id, text)
 
 
-def build_application(token: str, router: TopicRouter):
+class RegistryRouter:
+    """Routes inbound messages to N windows via a :class:`BindingRegistry`.
+
+    The multi-topic generalisation of :class:`TopicRouter`: instead of one fixed
+    binding, each message's ``thread_id`` is resolved to a window through the
+    registry (``window_for_thread``). Messages from the wrong chat, from an
+    unbound topic (including a forum's General topic, which has no thread id), or
+    with empty text are dropped. The registry stays the single source of truth,
+    so Slice B can mutate bindings live and this router follows without changes.
+    """
+
+    def __init__(self, registry, *, sender: Sender | None = None):
+        self._registry = registry
+        # The chat gate is the CMX-8 security boundary; a registry with no chat
+        # bound routes nothing (fail-closed) rather than accepting every chat.
+        self._chat_id = str(registry.chat_id) if registry.chat_id is not None else None
+        self._sender = sender or messenger.send_tmux
+
+    def route(self, chat_id: str | int | None, topic_id: str | int | None, text: str) -> bool:
+        """Deliver ``text`` to the window bound to ``topic_id``, else drop it.
+
+        Returns True only if the message was delivered; False if it was dropped
+        (no chat bound, wrong chat, unbound topic, empty text) or the send failed.
+        """
+        if not text or not text.strip():
+            return False
+        if self._chat_id is None or chat_id is None or str(chat_id) != self._chat_id:
+            log.debug("dropping inbound from chat %s (bound=%s)", chat_id, self._chat_id)
+            return False
+        window_id = self._registry.window_for_thread(topic_id)
+        if window_id is None:
+            log.debug("dropping inbound from unbound topic %s", topic_id)
+            return False
+        log.info("Telegram → %s: %s", window_id, text.splitlines()[0][:80])
+        return self._sender(window_id, text)
+
+
+def build_application(token: str, router):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
-    Registers a single text handler that pulls ``(chat_id, thread_id, text)`` off
-    each update and hands it to :meth:`TopicRouter.route`. Slash commands are
+    ``router`` is any object with a ``route(chat_id, thread_id, text)`` method —
+    :class:`TopicRouter` or :class:`RegistryRouter`. Registers a single text
+    handler that pulls ``(chat_id, thread_id, text)`` off each update and hands it
+    to ``router.route``. Slash commands are
     forwarded too (``filters.TEXT`` includes them) so ``/`` commands reach the
     window's Claude Code prompt via ``send_tmux``'s slash-command path. PTB is
     imported here (not at module load) so this module — and the pure router — do

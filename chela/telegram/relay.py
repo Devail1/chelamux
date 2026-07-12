@@ -88,11 +88,19 @@ class BotSender:
         self._topic_id = topic_id
         self._transport = transport or _urllib_transport(token)
 
-    def send(self, text: str, parse_mode: str | None = None) -> bool:
+    def send(
+        self,
+        text: str,
+        parse_mode: str | None = None,
+        message_thread_id: str | int | None = None,
+    ) -> bool:
+        # A per-message thread (multi-topic relay) overrides the instance default
+        # topic; without one we fall back to the fixed ``topic_id`` (single-topic).
+        thread = message_thread_id if message_thread_id is not None else self._topic_id
         for chunk in split_message(text):
             fields = {"chat_id": self._chat_id, "text": chunk}
-            if self._topic_id:
-                fields["message_thread_id"] = self._topic_id
+            if thread:
+                fields["message_thread_id"] = thread
             if parse_mode:
                 fields["parse_mode"] = parse_mode
             resp = self._transport("sendMessage", fields)
@@ -122,3 +130,37 @@ class TelegramRelay:
         # formatting edge case never silently drops a message.
         log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
         self._sender(to_plain_text(msg), None)
+
+
+class RegistryRelay:
+    """Posts each window's messages to ITS bound topic via a registry.
+
+    The multi-topic generalisation of :class:`TelegramRelay`: the monitor emits
+    ``(window_id, msg)`` for any of the N polled windows, and this relay resolves
+    the target topic per message from a
+    :class:`~chela.telegram.bindings.BindingRegistry`
+    (``thread_for_window``), posting with that ``message_thread_id``. A window
+    with no binding is skipped (never posted). The MarkdownV2→plain-text fallback
+    is preserved. Wire as the monitor's ``on_message`` sink::
+
+        relay = RegistryRelay(bot_sender.send, registry)
+        mon = TranscriptMonitor(on_message=relay.on_message)
+
+    ``sender`` is ``send(text, parse_mode, message_thread_id) -> ok`` —
+    :meth:`BotSender.send` in production, a stub in tests.
+    """
+
+    def __init__(self, sender: Sender, registry):
+        self._sender = sender
+        self._registry = registry
+
+    def on_message(self, window_id: str, msg: Message) -> None:
+        """Relay one parsed message to the window's bound topic (monitor callback)."""
+        thread = self._registry.thread_for_window(window_id)
+        if thread is None:
+            log.debug("no topic bound for %s; skipping outbound", window_id)
+            return
+        if self._sender(to_markdown_v2(msg), "MarkdownV2", thread):
+            return
+        log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
+        self._sender(to_plain_text(msg), None, thread)
