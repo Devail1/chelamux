@@ -367,6 +367,28 @@ literal Escape.
   `claude --permission-mode auto` (a classifier auto-approves safe ops and gates
   dangerous ones); set `agent.cmd: claude --permission-mode bypassPermissions`
   in `WORKFLOW.md` for zero-hang autonomy on a repo you trust.
+- **Agent state is read on two channels — correlated, not screen-scraped.** chela
+  reads each agent's **transcript** (`~/.claude/projects/…jsonl`) as the
+  *structured* channel — tool calls, questions, plans and results arrive as typed
+  JSON records, not characters to parse off a screen — and the **tmux pane** as the
+  *liveness* channel: whether an agent is working, idle, or **waiting** on a prompt
+  right now. Neither is sufficient alone, so chela pairs them: the transcript says
+  *what* (which tool, which options, which pending call), the pane says *that it's
+  live and awaiting you*. Where the pane must be read at all, it's matched on
+  **shape, not wording** — a cursor glyph among sibling option lines — so a Claude
+  Code UI reword doesn't silently break detection.
+
+### Why not a structured agent protocol (e.g. ACP)?
+
+A protocol like the Agent Client Protocol would hand chela typed events directly,
+with no pane-reading at all — and in the abstract that's the cleaner interface.
+chela deliberately doesn't depend on one, because its whole value is that **an
+agent is a real `claude` process in a real terminal a human can also watch and
+grab** — the live wall, the collaborative terminals, `tmux attach`. A headless
+protocol session trades that away. So chela keeps the human-drivable PTY and
+recovers the *structure* a protocol would give from the channel that already has
+it — the transcript — reserving the pane for the one thing only it knows: that an
+agent is waiting for you right now.
 
 ---
 
