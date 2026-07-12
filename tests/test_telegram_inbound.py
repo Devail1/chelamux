@@ -13,7 +13,13 @@ delivery, so these lock in the routing decision:
 from __future__ import annotations
 
 from chela.telegram.bindings import BindingRegistry
-from chela.telegram.inbound import RegistryRouter, TopicRouter
+from chela.telegram.inbound import (
+    _KEY_ACTIONS,
+    _KEY_CB_PREFIX,
+    SCREENSHOT_KEYS,
+    RegistryRouter,
+    TopicRouter,
+)
 
 
 class _StubSender:
@@ -216,3 +222,35 @@ def test_registry_router_resolve_fails_closed_with_no_chat_bound():
     router = RegistryRouter(_registry(None, ("@3", "42")))
     assert router.resolve(777, 42) is None
     assert router.resolve(None, 42) is None
+
+
+# --------------------------------------------------------------------------
+# /screenshot control-key keyboard — the pure data behind the inline keyboard
+# and its callback handler (the PTB glue itself needs the [telegram] extra).
+# --------------------------------------------------------------------------
+
+def test_key_actions_flatten_every_button_in_the_keyboard():
+    # Every (label, key_id, tmux_key) button maps to its (tmux_key, label) action
+    # so a button and the key it fires can never drift apart.
+    buttons = [b for row in SCREENSHOT_KEYS for b in row]
+    assert _KEY_ACTIONS == {
+        key_id: (tmux_key, label) for (label, key_id, tmux_key) in buttons
+    }
+    # key_ids are unique across the whole keyboard (no button shadows another).
+    assert len({key_id for (_l, key_id, _k) in buttons}) == len(buttons)
+
+
+def test_key_actions_map_to_valid_tmux_key_names():
+    # The essentials for driving a terminal: arrows, interrupt, and submit.
+    assert _KEY_ACTIONS["cc"][0] == "C-c"
+    assert _KEY_ACTIONS["ent"][0] == "Enter"
+    assert {_KEY_ACTIONS[k][0] for k in ("up", "dn", "lt", "rt")} == {
+        "Up", "Down", "Left", "Right"
+    }
+
+
+def test_callback_data_stays_within_telegram_64_byte_limit():
+    # callback_data the keyboard packs is ``k:<key_id>`` — must fit Telegram's cap.
+    for row in SCREENSHOT_KEYS:
+        for (_label, key_id, _tmux) in row:
+            assert len(f"{_KEY_CB_PREFIX}{key_id}".encode()) <= 64

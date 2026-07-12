@@ -2,7 +2,7 @@
 
 ## Open — chela telegram bridge commands
 
-- [ ] **`/screenshot` control-key keyboard (port ccbot's "with control keys").** CMX-16 shipped `/screenshot` as a bare PNG, but ccbot's screenshot came WITH an inline keyboard of control keys so you can drive the terminal from your phone. Attach an `InlineKeyboardMarkup` to the `/screenshot` `reply_photo` + add a `CallbackQueryHandler` that sends the tapped key to the bound window:
+- [x] **`/screenshot` control-key keyboard (port ccbot's "with control keys").** CMX-16 shipped `/screenshot` as a bare PNG, but ccbot's screenshot came WITH an inline keyboard of control keys so you can drive the terminal from your phone. Attach an `InlineKeyboardMarkup` to the `/screenshot` `reply_photo` + add a `CallbackQueryHandler` that sends the tapped key to the bound window:
   1. **Key map** (port ccbot's `_KEYS_SEND_MAP` + `_KEY_LABELS`, `src/ccbot/bot.py:361-386`): `up→Up, dn→Down, lt→Left, rt→Right, esc→Escape, ent→Enter, spc→Space, tab→Tab, cc→C-c` (all `send-keys`, no trailing Enter, not literal). Labels: `↑ ↓ ← →, ⎋ Esc, ⏎ Enter, ␣ Space, ⇥ Tab, ^C`.
   2. **Keyboard layout** (4 rows): `[␣ Space, ↑, ⇥ Tab]` / `[←, ↓, →]` / `[⎋ Esc, ^C, ⏎ Enter]` / `[🔄 Refresh]`. `callback_data = f"{KEYS_PREFIX}{key_id}:{window_id}"` and `f"{REFRESH_PREFIX}{window_id}"`, each **truncated to ≤64 bytes** (Telegram limit; `@N` window ids are short so fine).
   3. **`messenger.send_key(window_id, key)`** — generalize the existing `send_escape` into a helper that `tmux send-keys -t <session>:<wid> <key>` (named keys `Up`/`Escape`/`C-c`/…, no Enter). Keep `send_escape` as a thin alias if referenced elsewhere.
