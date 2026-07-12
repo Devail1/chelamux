@@ -39,11 +39,35 @@ discovery layer and Liav's unbind-not-kill default. See NOTICE for attribution.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Callable
 
 from chela.telegram.relay import Transport, _urllib_transport
 
 log = logging.getLogger(__name__)
+
+
+def topic_name_for(cwd: str | None, window_name: str) -> str:
+    """Name a topic after the agent's *project* (its cwd basename), else the window.
+
+    Returns ``basename(cwd)`` — e.g. ``/home/liav/projects/chelamux`` → ``chelamux``
+    — so an auto-created topic reads as the project the agent is working in rather
+    than a generic ``shell-1`` tmux window name. Falls back to ``window_name`` when
+    the cwd carries no project signal: empty/``None``, the filesystem root ``/``, or
+    the user's home directory (a ``~``-rooted session would otherwise collapse to the
+    useless login-name basename, e.g. ``liavedunix``).
+
+    Pure — cwd is passed in (in production resolved via
+    :func:`chela.discovery.get_window_cwd_by_id`), so it unit-tests with no live
+    tmux/Telegram.
+    """
+    if not cwd:
+        return window_name
+    normalized = os.path.normpath(cwd)
+    home = os.path.normpath(os.path.expanduser("~"))
+    if normalized == home or normalized == os.sep:
+        return window_name
+    return os.path.basename(normalized) or window_name
 
 
 class TopicManager:
@@ -95,7 +119,13 @@ class TopicManager:
         return True
 
 
-def reconcile_bindings(registry, live_windows: dict[str, str], agent_ids, topic_api) -> bool:
+def reconcile_bindings(
+    registry,
+    live_windows: dict[str, str],
+    agent_ids,
+    topic_api,
+    cwd_for: Callable[[str], str | None] | None = None,
+) -> bool:
     """Diff the registry against the live fleet; provision + reap. Return changed.
 
     Pure (no live tmux/Telegram of its own) so it unit-tests against stubs:
@@ -106,14 +136,19 @@ def reconcile_bindings(registry, live_windows: dict[str, str], agent_ids, topic_
       windows; only these get topics (shells/servers are skipped).
     * ``topic_api``   — a :class:`TopicManager` (or stub) exposing
       ``create_topic(name) -> thread_id | None`` and ``close_topic(thread_id)``.
+    * ``cwd_for``     — optional ``window_id -> cwd`` resolver (in production
+      :func:`chela.discovery.get_window_cwd_by_id`); injected so this stays pure.
+      When given, a provisioned topic is named after the agent's *project* (its cwd
+      basename) via :func:`topic_name_for` instead of the raw tmux window name.
 
     **Provision** every agent window with no binding: create a topic named after
-    the window and ``bind`` the returned thread id. Skipping already-bound windows
-    (matched by id) is what makes this idempotent — a restart or a window rename
-    never double-creates. A ``create_topic`` that returns ``None`` leaves the
-    window unbound to retry next tick. **Reap** every *bound* window that is no
-    longer live: ``close_topic`` its thread, then ``unbind``. Returns ``True`` if
-    any binding changed, so the caller knows to ``registry.save()``.
+    the agent's project (:func:`topic_name_for`, falling back to the window name)
+    and ``bind`` the returned thread id. Skipping already-bound windows (matched by
+    id) is what makes this idempotent — a restart or a window rename never
+    double-creates. A ``create_topic`` that returns ``None`` leaves the window
+    unbound to retry next tick. **Reap** every *bound* window that is no longer
+    live: ``close_topic`` its thread, then ``unbind``. Returns ``True`` if any
+    binding changed, so the caller knows to ``registry.save()``.
     """
     changed = False
 
@@ -122,7 +157,9 @@ def reconcile_bindings(registry, live_windows: dict[str, str], agent_ids, topic_
     for wid in agent_ids:
         if registry.thread_for_window(wid) is not None:
             continue
-        name = live_windows.get(wid, wid)
+        window_name = live_windows.get(wid, wid)
+        cwd = cwd_for(wid) if cwd_for is not None else None
+        name = topic_name_for(cwd, window_name)
         thread = topic_api.create_topic(name)
         if thread is None:
             continue  # create failed (perms?); leave unbound and retry next tick

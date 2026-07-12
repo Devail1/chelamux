@@ -35,6 +35,7 @@ from chela.telegram.reconcile import (
     TopicManager,
     live_agent_windows,
     reconcile_bindings,
+    topic_name_for,
 )
 from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay
 
@@ -58,4 +59,5 @@ __all__ = [
     "TopicClosedHandler",
     "reconcile_bindings",
     "live_agent_windows",
+    "topic_name_for",
 ]
