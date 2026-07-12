@@ -1246,6 +1246,100 @@ def api_config():
     })
 
 
+def _notify_host(url: str) -> str:
+    """Host of the notify URL for display — never the path/query, which for a
+    Telegram sendMessage URL carries the bot token. Status surface, not secrets."""
+    try:
+        return urllib.parse.urlparse(url).netloc or "configured"
+    except Exception:
+        return "configured"
+
+
+def _settings_status() -> dict:
+    """READ-ONLY aggregation for the Settings drawer's "Connections & Status"
+    surface. Every probe is best-effort and independently guarded: one failing
+    source (e.g. tmux not running) degrades that single row to "Unknown" rather
+    than blanking the whole panel. Nothing here mutates state.
+
+    Each item is ``{label, on, state, detail}`` — ``on`` drives a colorblind-safe
+    ●/○ SHAPE badge in the drawer (never colour alone) and ``state`` is its text
+    label (e.g. "Connected" / "Off"). Grouped into sections the drawer renders
+    in order."""
+    session = config.current_session()
+
+    # Connections — live/external things the dashboard depends on.
+    try:
+        windows = discovery.get_windows_by_id()
+        session_on = True
+        session_state = "Connected"
+        n = len(windows)
+        session_detail = f"{session} · {n} window{'' if n == 1 else 's'}"
+    except Exception:
+        session_on, session_state, session_detail = False, "Unknown", session
+
+    collab_on = bool(config.COLLAB_RELAY) and config.COLLAB_PRESENCE
+    if not config.COLLAB_PRESENCE:
+        collab_state, collab_detail = "Off", "presence disabled (CHELA_COLLAB=false)"
+    elif config.COLLAB_RELAY:
+        collab_state, collab_detail = "Configured", config.COLLAB_RELAY
+    else:
+        collab_state, collab_detail = "Off", "set CHELA_COLLAB_RELAY to enable"
+
+    notify_on = notify.enabled()
+    if notify_on:
+        notify_state = notify._detect_kind(config.NOTIFY_URL)
+        notify_detail = _notify_host(config.NOTIFY_URL)
+    else:
+        notify_state, notify_detail = "Off", "set CHELA_NOTIFY_URL to enable"
+
+    connections = [
+        {"label": "tmux session", "on": session_on, "state": session_state, "detail": session_detail},
+        {"label": "Collaboration relay", "on": collab_on, "state": collab_state, "detail": collab_detail},
+        {"label": "Needs-input notifications", "on": notify_on, "state": notify_state, "detail": notify_detail},
+    ]
+
+    # Features — feature toggles / scheduled work inside the daemon.
+    wall_detail = "loopback-served" if config.TERMINALS_ENABLED else "CHELA_TERMINALS_ENABLED=false"
+    if config.TERMINALS_ENABLED and config.TERMINALS_EXPOSE:
+        wall_detail = "exposed on non-loopback binds (CHELA_TERMINALS_EXPOSE)"
+
+    n_wf = len(config.DISPATCH_WORKFLOWS)
+    dispatch_on = n_wf > 0
+    dispatch_state = f"{n_wf} workflow{'' if n_wf == 1 else 's'}" if dispatch_on else "Off"
+    dispatch_detail = (f"every {config.DISPATCH_TICK_INTERVAL}s" if dispatch_on
+                       else "set CHELA_DISPATCH_WORKFLOWS to enable")
+
+    try:
+        n_tasks = len(scheduler.list_tasks())
+        sched_detail = f"every {config.SCHEDULER_POLL_INTERVAL}s · {n_tasks} task{'' if n_tasks == 1 else 's'}"
+    except Exception:
+        sched_detail = f"every {config.SCHEDULER_POLL_INTERVAL}s"
+
+    features = [
+        {"label": "Terminal wall", "on": config.TERMINALS_ENABLED,
+         "state": "Enabled" if config.TERMINALS_ENABLED else "Off", "detail": wall_detail},
+        {"label": "Work dispatcher", "on": dispatch_on, "state": dispatch_state, "detail": dispatch_detail},
+        {"label": "Scheduler", "on": True, "state": "Polling", "detail": sched_detail},
+        {"label": "Tool-call relay", "on": config.SHOW_TOOL_CALLS,
+         "state": "On" if config.SHOW_TOOL_CALLS else "Hidden",
+         "detail": "every tool_use/tool_result relayed" if config.SHOW_TOOL_CALLS
+                   else "text + interactive prompts only (CHELA_SHOW_TOOL_CALLS)"},
+    ]
+
+    return {"sections": [
+        {"title": "Connections", "items": connections},
+        {"title": "Features", "items": features},
+    ]}
+
+
+@app.route("/api/settings")
+@require_auth
+def api_settings():
+    """READ-ONLY status aggregation for the Settings drawer. Reports live
+    connection + feature status (see ``_settings_status``); mutates nothing."""
+    return jsonify(_settings_status())
+
+
 @app.route("/api/launcher/pin", methods=["POST"])
 @require_auth
 def api_launcher_pin():

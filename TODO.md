@@ -2,7 +2,7 @@
 
 ## Open — chela dashboard/telegram
 
-- [ ] **Settings view → live "Connections & Status" (READ-ONLY this slice).** Upgrade the dashboard Settings drawer (`chela/dashboard/static/js/nav.js::renderSettings`) from static docs into a LIVE status surface. Add a backend `GET /api/settings` (in `chela/dashboard/app.py`) that aggregates READ-ONLY status; the drawer renders it as sections with **colorblind-safe status badges** (Liav is red-weak — use `●`/`○` shape + a text label like "Connected"/"Off", NEVER color alone):
+- [x] **Settings view → live "Connections & Status" (READ-ONLY this slice).** Upgrade the dashboard Settings drawer (`chela/dashboard/static/js/nav.js::renderSettings`) from static docs into a LIVE status surface. Add a backend `GET /api/settings` (in `chela/dashboard/app.py`) that aggregates READ-ONLY status; the drawer renders it as sections with **colorblind-safe status badges** (Liav is red-weak — use `●`/`○` shape + a text label like "Connected"/"Off", NEVER color alone):
   - **Telegram** — is the bridge running (detect via `pgrep -f "chela telegram"`, or a written heartbeat/status file — pick one, document it) + read `~/.chela/telegram-bindings.json` for `chat_id`/forum + **N agents bound** (list agent→topic). Show config: `CHELA_SHOW_TOOL_CALLS`, poll interval. ⚠️ **NEVER surface the bot token** — show a bot label or just "configured", masked.
   - **Notifications** — read `chela/config.py` `CHELA_NOTIFY_URL`/`CHELA_NOTIFY_KIND`: enabled? kind (ntfy/telegram/webhook) + target **with any embedded token stripped** (Telegram notify URLs contain the token).
   - **Collab** — relay URL + active shares count + default display name (from `chela/collab.py` / the collab config).
