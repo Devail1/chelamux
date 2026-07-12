@@ -1,14 +1,17 @@
-"""AskUserQuestion inline keyboard — the pure data behind phone answering.
+"""Interactive-prompt inline keyboards — the pure data behind phone answering.
 
-No live Telegram and no PTB import: the keyboard the outbound relay attaches
-(:func:`ask_reply_markup`), the callback the inbound handler decodes
-(:func:`decode_callback`), and the answer-injection sequence
-(:func:`select_keystrokes`) are all plain data, so these lock in
+No live Telegram and no PTB import: the ExitPlanMode keyboard the outbound relay
+attaches (:func:`ask_reply_markup`), the pane-triggered AskUserQuestion keyboards
+(:func:`scraped_reply_markup` / :func:`nav_only_markup`), the callback the inbound
+handler decodes (:func:`decode_callback`), and the answer-injection sequences
+(:func:`select_keystrokes_relative` / :func:`select_keystrokes`) are all plain
+data, so these lock in
 
-  * the MVP boundary — semantic option buttons ONLY for a single single-select
-    question with well-formed options; nav-fallback only otherwise;
-  * index-only callback_data within Telegram's 64-byte cap;
-  * ``Down``×i + Enter as the select-and-submit keystroke sequence;
+  * AskUserQuestion is now pane-triggered — ``ask_reply_markup`` no longer builds
+    its keyboard (Slice A2 suppression; its transcript record is post-answer);
+  * one semantic ``qa:<i>`` button per scraped option, index-only within
+    Telegram's 64-byte cap, then the nav row; nav-only for the fallback shape;
+  * cursor-relative select-and-submit keystrokes (never a blind Down×i);
   * decode round-trips (select / nav-key / refresh) and rejects junk payloads.
 """
 from __future__ import annotations
@@ -19,7 +22,10 @@ from chela.telegram.interactive import (
     QA_CB_PREFIX,
     ask_reply_markup,
     decode_callback,
+    nav_only_markup,
+    scraped_reply_markup,
     select_keystrokes,
+    select_keystrokes_relative,
 )
 from chela.telegram.parser import Message
 
@@ -39,52 +45,48 @@ def _callbacks(markup):
     return [b["callback_data"] for b in _buttons(markup)]
 
 
+def _has_semantic(markup):
+    return any(not c.startswith("qa:nav:") for c in _callbacks(markup))
+
+
 # --------------------------------------------------------------------------
-# select_keystrokes — the answer-injection contract
+# select_keystrokes / select_keystrokes_relative — the answer-injection contract
 # --------------------------------------------------------------------------
 
-def test_select_keystrokes_is_downs_then_enter():
+def test_blind_select_keystrokes_is_downs_then_enter():
+    # The fallback used only when the live cursor can't be read from the pane.
     assert select_keystrokes(0) == ["Enter"]
     assert select_keystrokes(1) == ["Down", "Enter"]
     assert select_keystrokes(3) == ["Down", "Down", "Down", "Enter"]
 
 
+def test_cursor_relative_keystrokes_move_down_up_or_stay():
+    # Cursor already on the target → just submit.
+    assert select_keystrokes_relative(2, 2) == ["Enter"]
+    # Target below the cursor → Down×delta.
+    assert select_keystrokes_relative(3, 1) == ["Down", "Down", "Enter"]
+    # Target above the cursor (the operator arrowed down first) → Up×delta.
+    # Verify case from the TODO: current=1, target=0 → one Up.
+    assert select_keystrokes_relative(0, 1) == ["Up", "Enter"]
+    assert select_keystrokes_relative(0, 3) == ["Up", "Up", "Up", "Enter"]
+
+
 # --------------------------------------------------------------------------
-# ask_reply_markup — MVP happy path: single question, single-select
+# scraped_reply_markup / nav_only_markup — the pane-triggered keyboards
 # --------------------------------------------------------------------------
 
-def test_single_select_gets_one_semantic_button_per_option():
-    markup = ask_reply_markup(_ask({
-        "questions": [{
-            "question": "Pick a base branch",
-            "header": "Base",
-            "multiSelect": False,
-            "options": [
-                {"label": "main", "description": "stable"},
-                {"label": "dev", "description": "next"},
-            ],
-        }],
-    }))
-    assert markup is not None
-    # One semantic row per option (index-only callback), then the nav row.
+def test_scraped_markup_one_semantic_button_per_option_then_nav():
+    markup = scraped_reply_markup(["main", "dev"])
+    # One index-only semantic row per scraped option, then the nav row.
     assert markup["inline_keyboard"][0] == [{"text": "main", "callback_data": "qa:0"}]
     assert markup["inline_keyboard"][1] == [{"text": "dev", "callback_data": "qa:1"}]
-    # Nav-fallback row is always present as the last row.
     assert _callbacks({"inline_keyboard": [markup["inline_keyboard"][-1]]}) == [
         f"qa:nav:{key_id}" for (_l, key_id, _t) in NAV_KEYS
     ]
 
 
-def test_semantic_callback_data_is_index_only_within_64_bytes():
-    markup = ask_reply_markup(_ask({
-        "questions": [{
-            "multiSelect": False,
-            "options": [
-                {"label": "x" * 400},  # a huge label must never reach callback_data
-                {"label": "short"},
-            ],
-        }],
-    }))
+def test_scraped_markup_callback_data_is_index_only_within_64_bytes():
+    markup = scraped_reply_markup(["x" * 400, "short"])
     semantic = [c for c in _callbacks(markup) if not c.startswith("qa:nav:")]
     assert semantic == ["qa:0", "qa:1"]
     for cb in _callbacks(markup):
@@ -93,70 +95,34 @@ def test_semantic_callback_data_is_index_only_within_64_bytes():
     assert len(_buttons(markup)[0]["text"]) < 400
 
 
-# --------------------------------------------------------------------------
-# ask_reply_markup — MVP boundary: nav-fallback ONLY (no semantic buttons)
-# --------------------------------------------------------------------------
-
-def _has_semantic(markup):
-    return any(not c.startswith("qa:nav:") for c in _callbacks(markup))
-
-
-def test_multiselect_gets_nav_only():
-    markup = ask_reply_markup(_ask({
-        "questions": [{
-            "multiSelect": True,
-            "options": [{"label": "a"}, {"label": "b"}],
-        }],
-    }))
-    assert markup is not None
+def test_nav_only_markup_is_just_the_nav_row():
+    markup = nav_only_markup()
     assert not _has_semantic(markup)  # nav-fallback row only
+    assert _callbacks(markup) == [f"qa:nav:{key_id}" for (_l, key_id, _t) in NAV_KEYS]
 
 
-def test_multiple_questions_get_nav_only():
-    markup = ask_reply_markup(_ask({
-        "questions": [
-            {"multiSelect": False, "options": [{"label": "a"}]},
-            {"multiSelect": False, "options": [{"label": "b"}]},
-        ],
-    }))
-    assert markup is not None
-    assert not _has_semantic(markup)
+# --------------------------------------------------------------------------
+# ask_reply_markup — AskUserQuestion is now pane-triggered: no transcript keyboard
+# --------------------------------------------------------------------------
 
-
-def test_blank_or_freetext_option_label_gets_nav_only():
-    # A blank/missing label is how a free-text-style option surfaces — bail to
-    # nav-only rather than emit a button that would answer the wrong option.
-    markup = ask_reply_markup(_ask({
+def test_askuserquestion_transcript_tool_use_gets_no_keyboard():
+    # Slice A2: the AskUserQuestion tool_use lands post-answer, so no keyboard is
+    # attached from the transcript — the pane watcher builds it live instead.
+    assert ask_reply_markup(_ask({
         "questions": [{
             "multiSelect": False,
-            "options": [{"label": "real"}, {"label": "   "}],
+            "options": [{"label": "main"}, {"label": "dev"}],
         }],
-    }))
-    assert markup is not None
-    assert not _has_semantic(markup)
+    })) is None
 
-
-def test_no_options_gets_nav_only():
-    markup = ask_reply_markup(_ask({
-        "questions": [{"multiSelect": False, "options": []}],
-    }))
-    assert markup is not None
-    assert not _has_semantic(markup)
-
-
-# --------------------------------------------------------------------------
-# ask_reply_markup — not an AskUserQuestion prompt: no keyboard at all
-# --------------------------------------------------------------------------
 
 def test_no_keyboard_for_other_tools_or_missing_payload():
     assert ask_reply_markup(Message("assistant", "text", "hi")) is None
     assert ask_reply_markup(
         Message("assistant", "tool_use", "Bash", tool_name="Bash")
     ) is None
-    # AskUserQuestion but no structured payload (nothing to build from).
     assert ask_reply_markup(_ask(None)) is None
     assert ask_reply_markup(_ask({})) is None
-    assert ask_reply_markup(_ask({"questions": []})) is None
 
 
 # --------------------------------------------------------------------------

@@ -331,9 +331,11 @@ def test_interactive_tool_names_covers_the_prompt_tools():
     assert "ExitPlanMode" in INTERACTIVE_TOOL_NAMES
 
 
-def test_relay_hidden_drops_tool_calls_but_keeps_prompts_and_text():
-    # Flag OFF (default): a Bash tool_use + tool_result are dropped, while an
-    # AskUserQuestion tool_use and a plain text turn are relayed.
+def test_relay_hidden_drops_tool_calls_and_askuserquestion_tool_use():
+    # Flag OFF (default): Bash tool_use/tool_result are dropped. The
+    # AskUserQuestion *tool_use* is dropped too (Slice A2 — it lands post-answer
+    # and the pane watcher already relayed the prompt live); its tool_result stays
+    # as the "answered" confirmation. A plain text turn always relays.
     stub = _StubSender()
     relay = TelegramRelay(stub, show_tool_calls=False)
 
@@ -342,12 +344,25 @@ def test_relay_hidden_drops_tool_calls_but_keeps_prompts_and_text():
     relay.on_message(
         "@1", Message("assistant", "tool_use", "AskUserQuestion", tool_name="AskUserQuestion")
     )
+    relay.on_message(
+        "@1", Message("assistant", "tool_result", "Apple", tool_name="AskUserQuestion")
+    )
     relay.on_message("@1", Message("assistant", "text", "done"))
 
-    # Only the AskUserQuestion prompt and the text turn made it through.
+    # The AskUserQuestion tool_result (confirmation) and the text turn made it.
     assert len(stub.calls) == 2
-    assert stub.calls[0][0] == "*🔧 AskUserQuestion*"
     assert stub.calls[1][0] == "*🤖*\ndone"
+
+
+def test_relay_drops_askuserquestion_tool_use_even_when_shown():
+    # The double-post guard fires regardless of show_tool_calls: even with the
+    # firehose on, the pane watcher owns the AskUserQuestion prompt.
+    stub = _StubSender()
+    relay = TelegramRelay(stub, show_tool_calls=True)
+    relay.on_message(
+        "@1", Message("assistant", "tool_use", "AskUserQuestion", tool_name="AskUserQuestion")
+    )
+    assert stub.calls == []
 
 
 def test_relay_hidden_keeps_exit_plan_mode_prompt():
@@ -380,7 +395,7 @@ def test_relay_default_shows_tool_calls_for_back_compat():
     assert len(stub.calls) == 1
 
 
-def test_registry_relay_hidden_drops_tool_calls_but_keeps_prompts():
+def test_registry_relay_hidden_drops_tool_calls_and_askuserquestion_tool_use():
     stub = _ThreadStubSender()
     reg = _registry(("@1", "42"))
     relay = RegistryRelay(stub, reg, show_tool_calls=False)
@@ -390,9 +405,13 @@ def test_registry_relay_hidden_drops_tool_calls_but_keeps_prompts():
     relay.on_message(
         "@1", Message("assistant", "tool_use", "AskUserQuestion", tool_name="AskUserQuestion")
     )
+    relay.on_message(
+        "@1", Message("assistant", "tool_result", "Apple", tool_name="AskUserQuestion")
+    )
     relay.on_message("@1", Message("assistant", "text", "done"))
 
-    assert len(stub.calls) == 2  # prompt + text only, both to @1's topic
+    # AskUserQuestion tool_result (confirmation) + text only, both to @1's topic.
+    assert len(stub.calls) == 2
     assert all(thread == "42" for _, _, thread in stub.calls)
 
 
@@ -414,26 +433,20 @@ class _MarkupStubSender:
         return True
 
 
-def _ask_message():
-    return Message(
+def test_registry_relay_drops_askuserquestion_tool_use_entirely():
+    # Slice A2: the AskUserQuestion prompt is surfaced live from the pane (with its
+    # answer keyboard) — the post-answer transcript tool_use is dropped here, so
+    # the relay neither re-posts the question nor attaches a keyboard.
+    stub = _MarkupStubSender()
+    relay = RegistryRelay(stub, _registry(("@1", "42")))
+    relay.on_message("@1", Message(
         "assistant", "tool_use", "AskUserQuestion", tool_name="AskUserQuestion",
         tool_input={"questions": [{
             "multiSelect": False,
             "options": [{"label": "main"}, {"label": "dev"}],
         }]},
-    )
-
-
-def test_registry_relay_attaches_ask_keyboard():
-    stub = _MarkupStubSender()
-    relay = RegistryRelay(stub, _registry(("@1", "42")))
-    relay.on_message("@1", _ask_message())
-
-    assert len(stub.calls) == 1
-    markup = stub.calls[0]["reply_markup"]
-    assert markup is not None
-    callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
-    assert "qa:0" in callbacks and "qa:1" in callbacks
+    ))
+    assert stub.calls == []
 
 
 def test_registry_relay_attaches_exit_plan_mode_keyboard():

@@ -39,7 +39,12 @@ from typing import Callable
 
 from chela import messenger
 from chela.telegram.format import to_code_block
-from chela.telegram.interactive import decode_callback, select_keystrokes
+from chela.telegram.interactive import (
+    decode_callback,
+    select_keystrokes,
+    select_keystrokes_relative,
+)
+from chela.telegram.panescan import detect_askuserquestion
 
 log = logging.getLogger(__name__)
 
@@ -239,15 +244,16 @@ def build_application(
     exact same chat/topic gate as a routed message, stay silent outside it, and
     reply into the SAME forum topic. Injectable for testing.
 
-    Taps on an **AskUserQuestion** answer keyboard (the ``qa:`` callbacks the
-    outbound relay attaches — see :mod:`chela.telegram.interactive`) route to a
-    second :class:`~telegram.ext.CallbackQueryHandler`, matched first by a
-    ``^qa:`` pattern so it never shadows the ``k:`` screenshot keys. A semantic
-    ``qa:<i>`` tap injects ``Down``×i + Enter via ``send_key`` to select and
-    submit option ``i`` (empirically validated against Claude Code's single-select
-    selector); the nav-fallback keys drive the selector by hand. Like the
-    control-key handler, it re-resolves the window from the message's own topic
-    through ``router.resolve`` and never trusts a window id off the wire.
+    Taps on an **AskUserQuestion** answer keyboard (the ``qa:`` callbacks the pane
+    watcher attaches — see :mod:`chela.telegram.gatewatch`) route to a second
+    :class:`~telegram.ext.CallbackQueryHandler`, matched first by a ``^qa:``
+    pattern so it never shadows the ``k:`` screenshot keys. A semantic ``qa:<i>``
+    tap re-reads the live ``❯`` cursor from the pane and injects the cursor-relative
+    Down/Up presses + Enter via ``send_key`` to select and submit option ``i``
+    (never a blind ``Down``×i, since the operator may have arrowed the selector);
+    the nav-fallback keys drive the selector by hand. Like the control-key handler,
+    it re-resolves the window from the message's own topic through ``router.resolve``
+    and never trusts a window id off the wire.
 
     ``on_topic_closed`` (optional) is a callable ``(thread_id) -> None`` invoked on
     a ``StatusUpdate.FORUM_TOPIC_CLOSED`` service message — Slice B's auto-topics
@@ -450,14 +456,32 @@ def build_application(
                     return button.text
         return None
 
+    def _select_keys_for(window_id: str, target: int) -> "list[str]":
+        """Cursor-relative keystrokes to pick option ``target``, re-reading the pane.
+
+        The selector may have been arrowed since the buttons were posted, so the
+        live ``❯`` cursor is re-read (:func:`detect_askuserquestion`) and the move
+        is computed relative to it — never a blind ``Down``×i from an assumed
+        option 0. Falls back to the blind sequence only when the pane can't be read
+        as a single-select selector (so a tap still does something best-effort).
+        """
+        try:
+            uq = detect_askuserquestion(capture(window_id))
+        except Exception:  # a capture hiccup must not wedge the tap
+            uq = None
+        if uq is not None and not uq.multi and uq.cursor >= 0 and target < len(uq.options):
+            return select_keystrokes_relative(target, uq.cursor)
+        return select_keystrokes(target)
+
     async def _on_qa(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
         """Answer an AskUserQuestion tap (semantic option or navigation key).
 
         Mirrors :func:`_on_key`: the target window is re-resolved from the
         callback message's OWN topic via ``router.resolve`` (never trusted from
         the payload, CMX-8), so a tap honours the same chat/topic gate as the
-        prompt it rides on. A semantic ``qa:<i>`` tap injects ``Down``×i + Enter
-        (:func:`select_keystrokes`) to select and submit option ``i``; a
+        prompt it rides on. A semantic ``qa:<i>`` tap re-reads the live ``❯``
+        cursor and injects the cursor-relative Down/Up presses + Enter
+        (:func:`_select_keys_for`) to select and submit option ``i``; a
         ``qa:nav:<key>`` tap sends one key so the human can drive the selector by
         hand; ``qa:nav:ref`` re-screenshots. Every tap is answered so Telegram
         stops the button's spinner, even when gated out or unrecognised.
@@ -487,9 +511,10 @@ def build_application(
             ok = send_key(window_id, tmux_key)
             await query.answer(label if ok else "❌ send failed")
             return
-        # kind == "select": inject the keystrokes that pick + submit option i.
+        # kind == "select": re-read the live cursor, then inject the keystrokes
+        # that move to + submit option i (never a blind Down×i from option 0).
         ok = True
-        for key in select_keystrokes(payload):
+        for key in _select_keys_for(window_id, payload):
             ok = send_key(window_id, key) and ok
         label = _tapped_label(query, query.data or "") or f"Option {payload + 1}"
         await query.answer(f"✓ {label}"[:200] if ok else "❌ send failed")

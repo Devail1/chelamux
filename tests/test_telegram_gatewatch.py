@@ -1,18 +1,24 @@
-"""Permission-gate watcher — two-channel correlation + edge-triggered relay (C1).
+"""Pane watcher — permission-gate correlation (C1) + AskUserQuestion relay (A2).
 
 Locks in the load-bearing behaviour of :class:`PermissionGateWatcher`:
 
-  * it only reads a pane when the window's latest ``tool_use`` is unpaired
-    (transcript-gated — no blind scraping);
-  * a newly-detected gate relays EXACTLY ONE enriched line naming the real
-    command from the transcript's unpaired ``tool_use``;
-  * the relay is edge-triggered — a still-open gate is not re-posted, and the
-    marker clears on the ``tool_result`` or when the pane stops showing a gate;
-  * the transcript identity → tool + args extraction (Bash command, Edit path).
+  * the permission gate only relays when the window's latest ``tool_use`` is
+    unpaired (transcript-gated — no blind relay), naming the real command;
+  * an AskUserQuestion selector is relayed straight from the pane (no
+    transcript gate — its tool_use is post-answer), with a semantic answer
+    keyboard for a single-select and the nav row only for the multi-tab shape;
+  * both relays are edge-triggered — a still-open prompt is not re-posted; the
+    gate marker clears on its ``tool_result`` / when the pane clears, and the
+    selector marker clears when it leaves the pane (answered) or on the
+    AskUserQuestion ``tool_result`` (belt-and-suspenders).
 """
 from __future__ import annotations
 
-from chela.telegram.gatewatch import PermissionGateWatcher, format_gate_message
+from chela.telegram.gatewatch import (
+    PermissionGateWatcher,
+    format_askuq_message,
+    format_gate_message,
+)
 from chela.telegram.panescan import Gate
 from chela.telegram.parser import Message
 
@@ -38,13 +44,13 @@ class _Registry:
 
 
 class _Sender:
-    """Records every send(text, parse_mode, thread) call."""
+    """Records every send(text, parse_mode, thread, reply_markup=...) call."""
 
     def __init__(self):
         self.calls = []
 
-    def __call__(self, text, parse_mode=None, thread=None):
-        self.calls.append((text, parse_mode, thread))
+    def __call__(self, text, parse_mode=None, thread=None, reply_markup=None):
+        self.calls.append((text, parse_mode, thread, reply_markup))
         return True
 
 
@@ -78,16 +84,13 @@ def _watcher(sender, registry, panes):
 # ── gated polling ─────────────────────────────────────────────────────────
 
 
-def test_no_pending_tool_use_never_reads_the_pane():
-    captured = []
+def test_no_pending_tool_use_never_relays_a_permission_gate():
     sender = _Sender()
-    w = PermissionGateWatcher(
-        sender, _Registry({"@1": "100"}),
-        capture=lambda wid: (captured.append(wid), PERMISSION_PANE)[1],
-    )
-    # No tool_use observed → nothing pending → pane must not be scraped at all.
+    w = PermissionGateWatcher(sender, _Registry({"@1": "100"}), capture=_capture({"@1": PERMISSION_PANE}))
+    # No tool_use observed → no transcript identity → the permission gate must NOT
+    # relay (the pane is still read each tick for AskUserQuestion, but this pane
+    # shows a permission prompt, not a selector, so nothing is posted).
     w.poll(["@1"])
-    assert captured == []
     assert sender.calls == []
 
 
@@ -97,10 +100,11 @@ def test_pending_tool_use_with_gate_relays_one_enriched_message():
     w.observe("@1", _tool_use("Bash", "u1", {"command": "rm -rf build/"}))
     w.poll(["@1"])
     assert len(sender.calls) == 1
-    text, parse_mode, thread = sender.calls[0]
+    text, parse_mode, thread, reply_markup = sender.calls[0]
     assert text == "❓ Permission — Bash: rm -rf build/"
     assert parse_mode is None  # plain text — no MarkdownV2 escaping to get wrong
     assert thread == "100"
+    assert reply_markup is None  # C1 permission gate carries no keyboard
 
 
 # ── edge trigger / de-dup ───────────────────────────────────────────────────
@@ -204,3 +208,119 @@ def test_latest_unpaired_tool_use_drives_the_gate():
     w.observe("@1", _tool_use("Bash", "u2", {"command": "deploy"}))
     w.poll(["@1"])
     assert sender.calls[0][0] == "❓ Permission — Bash: deploy"
+
+
+# ── AskUserQuestion (pane-triggered, no transcript gate) ────────────────────
+
+# A real single-select selector (Claude Code 2.1.207): checkbox header, question,
+# numbered options (❯ marks the cursor), the meta-rows, then the footer.
+ASKUQ_SINGLE_PANE = """\
+ ☐ Fruit
+
+Which fruit do you prefer?
+
+❯ 1. Apple
+     A crisp red fruit
+  2. Banana
+     A soft yellow fruit
+  3. Cherry
+     A small red fruit
+  4. Type something.
+─────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
+# A multi-question / multi-select selector renders the ``←  ☐ … →`` tab strip.
+ASKUQ_MULTI_PANE = """\
+←  ☐ Fruit  ☐ Color  ✔ Submit  →
+
+Which fruit do you prefer?
+
+❯ 1. Apple
+     A crisp red fruit
+  2. Banana
+  3. Type something.
+─────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+"""
+
+
+def _ask_result(tuid="a1"):
+    return _tool_result("AskUserQuestion", tuid)
+
+
+def test_single_select_selector_relays_question_with_semantic_keyboard():
+    sender = _Sender()
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": ASKUQ_SINGLE_PANE})
+    # No pending tool_use needed — the selector is detected straight from the pane.
+    w.poll(["@1"])
+    assert len(sender.calls) == 1
+    text, parse_mode, thread, reply_markup = sender.calls[0]
+    assert text == "❓ Which fruit do you prefer?"
+    assert parse_mode is None  # plain text — scraped question, no MarkdownV2
+    assert thread == "100"
+    callbacks = [b["callback_data"] for row in reply_markup["inline_keyboard"] for b in row]
+    # One semantic button per REAL option (meta-rows excluded), plus the nav row.
+    assert [c for c in callbacks if not c.startswith("qa:nav:")] == ["qa:0", "qa:1", "qa:2"]
+    assert any(c.startswith("qa:nav:") for c in callbacks)
+
+
+def test_multi_tab_selector_relays_question_with_nav_only():
+    sender = _Sender()
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": ASKUQ_MULTI_PANE})
+    w.poll(["@1"])
+    assert len(sender.calls) == 1
+    text, _pm, _thread, reply_markup = sender.calls[0]
+    assert text == "❓ Which fruit do you prefer?"
+    callbacks = [b["callback_data"] for row in reply_markup["inline_keyboard"] for b in row]
+    # Multi-tab shape → nav row only, never a semantic button.
+    assert not any(not c.startswith("qa:nav:") for c in callbacks)
+
+
+def test_selector_relayed_once_then_deduped_until_it_leaves_the_pane():
+    sender = _Sender()
+    panes = {"@1": ASKUQ_SINGLE_PANE}
+    w = _watcher(sender, _Registry({"@1": "100"}), panes)
+    w.poll(["@1"])
+    w.poll(["@1"])  # same selector still on the pane — edge-triggered, not per-poll
+    assert len(sender.calls) == 1
+    # Answered → selector gone → marker clears; a fresh selector relays again.
+    panes["@1"] = WORKING_PANE
+    w.poll(["@1"])
+    assert len(sender.calls) == 1
+    panes["@1"] = ASKUQ_SINGLE_PANE
+    w.poll(["@1"])
+    assert len(sender.calls) == 2
+
+
+def test_askuserquestion_tool_result_clears_the_marker():
+    # Belt-and-suspenders: even if the pane is momentarily still showing the
+    # selector, the AskUserQuestion tool_result (which lands at answer-time) clears
+    # the de-dup marker so a genuinely new question can relay again.
+    sender = _Sender()
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": ASKUQ_SINGLE_PANE})
+    w.poll(["@1"])
+    assert len(sender.calls) == 1
+    w.observe("@1", _ask_result())  # answered
+    w.poll(["@1"])
+    assert len(sender.calls) == 2
+
+
+def test_unbound_window_selector_is_not_relayed():
+    sender = _Sender()
+    w = _watcher(sender, _Registry({}), {"@1": ASKUQ_SINGLE_PANE})
+    w.poll(["@1"])
+    assert sender.calls == []
+
+
+def test_format_askuq_message_is_the_question():
+    from chela.telegram.panescan import AskUQ
+
+    uq = AskUQ(question="Which fruit?", options=("Apple",), cursor=0, multi=False)
+    assert format_askuq_message(uq) == "❓ Which fruit?"
+    blank = AskUQ(question="", options=(), cursor=-1, multi=True)
+    assert format_askuq_message(blank).startswith("❓ ")

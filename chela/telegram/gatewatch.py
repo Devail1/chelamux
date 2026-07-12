@@ -1,29 +1,33 @@
-"""Permission-gate watcher — correlate the transcript's pending tool with the pane.
+"""Pane watcher — surface the live-TUI prompts that the transcript can't relay.
 
-A tool **permission gate** ("Do you want to proceed?" for a Bash/Edit) is NOT in
-the JSONL transcript — only Claude Code's live TUI shows it. Blind-scraping every
-window's pane every tick to find one would be wasteful and racy, so this watcher
-correlates the two channels instead:
+Two blocked-agent prompts are rendered only in Claude Code's live TUI, so this
+watcher reads the tmux pane to surface them to the bound topic:
 
-  * **transcript = identity** — observing the parsed :class:`~chela.telegram.
-    parser.Message` stream tells us, per window, whether the latest ``tool_use``
-    is still *unpaired* (no ``tool_result`` yet) and what it was (tool name +
-    input);
-  * **pane = liveness** — ONLY for a window with an unpaired ``tool_use`` do we
-    :func:`~chela.messenger.capture_pane` and run
-    :func:`~chela.telegram.panescan.detect_permission_gate`.
+  * a **permission gate** ("Do you want to proceed?" for a Bash/Edit) — never in
+    the transcript at all. Blind-scraping to find one would be wasteful and racy,
+    so it is **transcript-correlated**: *identity* comes from observing the parsed
+    :class:`~chela.telegram.parser.Message` stream (per window, whether the latest
+    ``tool_use`` is still *unpaired* and what it was), and only for a window with
+    an unpaired ``tool_use`` is the pane read for
+    :func:`~chela.telegram.panescan.detect_permission_gate`. A newly-detected gate
+    posts ``❓ Permission — <tool>: <command/args>`` (the real command from the
+    transcript, falling back to the scraped region).
 
-On a NEWLY-detected gate it posts ONE line to the window's bound topic —
-``❓ Permission — <tool>: <command/args>`` — with the tool name + args taken from
-the transcript's unpaired ``tool_use`` (the two-channel win: the *real* command,
-not blind pane text), falling back to the scraped gate region if the transcript
-identity is unavailable. The relay is **edge-triggered**: the relayed gate is
-tracked per window (by ``tool_use_id``) and cleared when the ``tool_result``
-arrives OR the pane stops showing a gate — so a still-open gate is not re-posted
-every poll.
+  * an **AskUserQuestion** selector — its ``tool_use`` was measured to land in the
+    transcript only *after* the question is answered, so the unpaired-``tool_use``
+    gate would never fire while the question is still answerable. It is therefore
+    detected **directly from the pane** every tick (no transcript gate), running
+    :func:`~chela.telegram.panescan.detect_askuserquestion` on the same
+    :func:`~chela.messenger.capture_pane` read the permission gate uses (one
+    capture per window, two detectors). A newly-detected selector posts the
+    scraped question text with an inline answer keyboard (semantic ``qa:<i>``
+    buttons for a simple single-select, nav row only for the multi-tab fallback).
 
-This slice is DETECTION + enriched relay only. The ✅ Allow / ❌ Deny answer
-keyboard is Slice C2 (it will reuse the ``qa:nav`` Enter/Esc plumbing).
+Both relays are **edge-triggered / de-duped per window**: a permission gate is
+tracked by ``tool_use_id`` (cleared on its ``tool_result`` or when the pane stops
+showing it); an AskUserQuestion is tracked by a scraped-content signature (cleared
+when the selector leaves the pane — answered — with the AskUserQuestion
+``tool_result`` as a belt-and-suspenders clear).
 """
 from __future__ import annotations
 
@@ -31,13 +35,21 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
-from chela.telegram.panescan import Gate, detect_permission_gate
+from chela.telegram.interactive import nav_only_markup, scraped_reply_markup
+from chela.telegram.panescan import (
+    AskUQ,
+    Gate,
+    detect_askuserquestion,
+    detect_permission_gate,
+)
 
 log = logging.getLogger(__name__)
 
-# A sender posts one plain line to a topic: ``send(text, parse_mode, thread)``.
-# The gate line carries shell/path characters, so it is sent as plain text
-# (``parse_mode=None``) — no MarkdownV2 escaping to get wrong.
+# A sender posts one line to a topic:
+# ``send(text, parse_mode, thread, reply_markup=...)`` — the gate line carries
+# shell/path characters and the AskUserQuestion question is scraped pane text, so
+# both go as plain text (``parse_mode=None``); no MarkdownV2 escaping to get wrong.
+# ``reply_markup`` rides along only for the AskUserQuestion answer keyboard.
 Sender = Callable[..., bool]
 # A capture reads a window's visible pane text: ``capture(window_id) -> str``.
 Capture = Callable[[str], str]
@@ -95,14 +107,44 @@ def format_gate_message(info: _PendingTool | None, gate: Gate) -> str:
     return f"❓ Permission\n{text}" if text else "❓ Permission"
 
 
+def format_askuq_message(uq: AskUQ) -> str:
+    """The plain-text relay line for a detected AskUserQuestion selector.
+
+    Just the scraped question (the answer buttons carry the options); ``❓`` marks
+    it as needing a human. Falls back to a generic prompt if the question scraped
+    empty.
+    """
+    q = (uq.question or "").strip()
+    return f"❓ {q}" if q else "❓ Claude is asking a question"
+
+
+def _askuq_signature(uq: AskUQ) -> str:
+    """A stable key for one selector instance — the de-dup / edge-trigger marker."""
+    return "\x00".join((uq.question, "|".join(uq.options)))
+
+
+def _askuq_markup(uq: AskUQ) -> dict:
+    """The answer keyboard for a detected selector.
+
+    Semantic ``qa:<i>`` option buttons for a simple single-select; the nav row
+    only for the multi-tab / multi-select fallback (never a broken keyboard).
+    """
+    if uq.multi or not uq.options:
+        return nav_only_markup()
+    return scraped_reply_markup(uq.options)
+
+
 class PermissionGateWatcher:
-    """Observes the message stream + polls panes to surface blocked-on-permission.
+    """Observes the message stream + polls panes to surface the live-TUI prompts.
 
     Wire :meth:`observe` into the monitor's ``on_message`` (alongside the relay)
-    so the watcher tracks per-window unpaired ``tool_use``s, and call :meth:`poll`
-    once per outbound cycle (after ``monitor.poll``) with the same window-id set —
-    it reads only the panes of windows with an unpaired tool and relays a newly
-    detected gate exactly once.
+    so the watcher tracks per-window unpaired ``tool_use``s (permission-gate
+    identity) and clears an answered selector's marker, and call :meth:`poll` once
+    per outbound cycle (after ``monitor.poll``) with the same window-id set. Each
+    poll captures every window's pane once and runs both detectors: the permission
+    gate only when a ``tool_use`` is unpaired, the AskUserQuestion selector always
+    (it is never in the transcript while pending). Each newly-detected prompt is
+    relayed exactly once.
     """
 
     def __init__(
@@ -112,22 +154,29 @@ class PermissionGateWatcher:
         *,
         capture: Capture,
         detect: Callable[[str], Gate | None] = detect_permission_gate,
+        detect_askuq: Callable[[str], AskUQ | None] = detect_askuserquestion,
     ):
         self._sender = sender
         self._registry = registry
         self._capture = capture
         self._detect = detect
+        self._detect_askuq = detect_askuq
         # window_id -> {tool_use_id: _PendingTool}, insertion-ordered so the most
         # recently added (the likely-blocked tool) is the last key.
         self._pending: dict[str, dict[str, _PendingTool]] = {}
         # window_id -> tool_use_id we've already relayed a gate for (edge trigger).
         self._relayed: dict[str, str] = {}
+        # window_id -> signature of the AskUserQuestion selector we've relayed
+        # (edge trigger); cleared when the selector leaves the pane / is answered.
+        self._relayed_uq: dict[str, str] = {}
 
     def observe(self, window_id: str, msg) -> None:
         """Track ``tool_use``/``tool_result`` pairing for one parsed message.
 
         Mirrors the transcript parser's own pairing (keyed by ``tool_use_id``) but
         retains the tool ``input`` so the gate relay can name the real command.
+        An AskUserQuestion ``tool_result`` (which lands at answer-time) clears that
+        window's selector marker — the belt-and-suspenders to the pane-gone clear.
         Non-tool events are ignored.
         """
         ct = getattr(msg, "content_type", None)
@@ -142,23 +191,62 @@ class PermissionGateWatcher:
             pend = self._pending.get(window_id)
             if pend and uid:
                 pend.pop(uid, None)
+            if getattr(msg, "tool_name", None) == "AskUserQuestion":
+                # The question was just answered → let a later selector relay again.
+                self._relayed_uq.pop(window_id, None)
 
     def forget(self, window_id: str) -> None:
         """Drop all state for a window (e.g. after it closes)."""
         self._pending.pop(window_id, None)
         self._relayed.pop(window_id, None)
+        self._relayed_uq.pop(window_id, None)
 
     def poll(self, window_ids) -> None:
-        """Read the pane of each window with an unpaired tool and relay new gates."""
+        """Read each window's pane once and relay newly-detected prompts.
+
+        Every bound window's pane is captured each tick — the AskUserQuestion
+        selector is never in the transcript while pending, so its detection can't
+        be gated on an unpaired ``tool_use`` the way the permission gate is. The
+        single capture feeds both detectors.
+        """
         for wid in window_ids:
             try:
                 self._poll_window(wid)
             except Exception:
-                log.exception("permission-gate poll failed for %s", wid)
+                log.exception("pane-watch poll failed for %s", wid)
 
     # -- internals ---------------------------------------------------------
 
     def _poll_window(self, window_id: str) -> None:
+        # One capture per window per tick, shared by both detectors.
+        pane = self._capture(window_id)
+        self._poll_askuq(window_id, pane)
+        self._poll_gate(window_id, pane)
+
+    def _poll_askuq(self, window_id: str, pane: str) -> None:
+        """Relay a newly-detected AskUserQuestion selector (pane-only, edge-triggered)."""
+        uq = self._detect_askuq(pane)
+        if uq is None:
+            # Selector gone (answered / dismissed) — clear so the next relays again.
+            self._relayed_uq.pop(window_id, None)
+            return
+
+        signature = _askuq_signature(uq)
+        if self._relayed_uq.get(window_id) == signature:
+            return  # already relayed this selector — edge-triggered, not per-poll
+
+        thread = self._registry.thread_for_window(window_id)
+        if thread is None:
+            log.debug("AskUserQuestion on %s but no bound topic; skipping", window_id)
+            return
+
+        self._sender(
+            format_askuq_message(uq), None, thread, reply_markup=_askuq_markup(uq)
+        )
+        self._relayed_uq[window_id] = signature
+
+    def _poll_gate(self, window_id: str, pane: str) -> None:
+        """Relay a newly-detected permission gate (transcript-gated, edge-triggered)."""
         pend = self._pending.get(window_id)
         if not pend:
             # No unpaired tool_use → nothing can be blocked; clear any relayed gate
@@ -169,7 +257,6 @@ class PermissionGateWatcher:
         uid = next(reversed(pend))  # latest unpaired tool_use
         info = pend[uid]
 
-        pane = self._capture(window_id)
         gate = self._detect(pane)
         if gate is None:
             # Pane no longer shows a gate — clear so a fresh one relays again.

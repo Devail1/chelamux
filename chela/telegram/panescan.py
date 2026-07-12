@@ -1,22 +1,27 @@
-"""Pane-scrape detector for permission/approval gates — the one TUI-regex module.
+"""Pane-scrape detectors for the live-TUI prompts — the one TUI-regex module.
 
-Unlike ``AskUserQuestion``/``ExitPlanMode`` (whose prompts are structured in the
-JSONL transcript), a tool **permission gate** ("Do you want to proceed?" for a
-Bash/Edit) is rendered only in Claude Code's live TUI — it never appears in the
-transcript. Detecting a blocked agent therefore requires reading the tmux pane.
+Two kinds of blocked-agent prompt are rendered only in Claude Code's live TUI and
+must be read off the tmux pane rather than the JSONL transcript:
 
-This module is the **sole home** for the Claude-Code permission/bash-approval TUI
-regexes — the "signatures table". Keeping every such pattern here means a Claude
-Code version bump that reworded a prompt is a one-file edit. Only the
-permission/bash-approval patterns are ported from six-ddc/ccbot's
-``terminal_parser.py`` (https://github.com/six-ddc/ccbot, MIT); the broader
-interactive-UI / status-line parsing there is deliberately NOT ported (the
-structured prompts come through the transcript). See the top-level NOTICE file
-for upstream attribution.
+* a tool **permission gate** ("Do you want to proceed?" for a Bash/Edit) — never
+  in the transcript at all (:func:`detect_permission_gate`);
+* an **AskUserQuestion** selector — measured live to land in the transcript only
+  once the question is *answered* (the ``tool_use`` record is appended at
+  answer-time, not while the selector is pending), so a transcript-triggered relay
+  can never show the buttons while the question is still answerable. The pane shows
+  it live, so detection comes from the pane (:func:`detect_askuserquestion`).
 
-Public API: :func:`detect_permission_gate` returns a :class:`Gate` (the matched
-region text + a kind tag) when the pane shows a permission/bash-approval prompt,
-else ``None``.
+This module is the **sole home** for the Claude-Code TUI regexes — the "signatures
+table". Keeping every such pattern here means a Claude Code version bump that
+reworded a prompt is a one-file edit. The permission/bash-approval **and**
+AskUserQuestion patterns are ported from six-ddc/ccbot's ``terminal_parser.py``
+(https://github.com/six-ddc/ccbot, MIT); the broader status-line parsing there is
+deliberately NOT ported. See the top-level NOTICE file for upstream attribution.
+
+Public API: :func:`detect_permission_gate` returns a :class:`Gate` when the pane
+shows a permission/bash-approval prompt; :func:`detect_askuserquestion` returns an
+:class:`AskUQ` when the pane shows an AskUserQuestion selector; both return
+``None`` for a normal / working pane.
 """
 from __future__ import annotations
 
@@ -150,3 +155,151 @@ def detect_permission_gate(pane_text: str) -> Gate | None:
         if region is not None:
             return Gate(text=region, kind=pattern.name)
     return None
+
+
+# ── AskUserQuestion selector ─────────────────────────────────────────────
+#
+# Measured against Claude Code 2.1.207. A single-select, single-question selector
+# renders (leading spaces significant)::
+#
+#      ☐ Fruit                       <- checkbox + question HEADER
+#
+#     Which fruit do you prefer?     <- the question text
+#
+#     ❯ 1. Apple                     <- options; ❯ marks the cursor
+#          A crisp red fruit         <- descriptions (indented, no number)
+#       2. Banana
+#          A soft yellow fruit
+#       3. Cherry
+#       4. Type something.           <- free-text meta-row (not a real option)
+#     ─────
+#       5. Chat about this           <- chat meta-row (not a real option)
+#
+#     Enter to select · ↑/↓ to navigate · Esc to cancel
+#
+# A multi-SELECT or MULTI-question selector instead renders a tab strip
+# (``←  ☐ Fruits  ✔ Submit  →``) and ``[ ]`` checkboxes per option — the MVP
+# treats both as the fallback shape (question text + nav row only, no semantic
+# option buttons), so it is enough to detect the ``←  ☐`` tab strip.
+_RE_ENTER_SELECT = re.compile(r"^\s*Enter to select")
+_RE_MULTI_TAB = re.compile(r"^\s*←\s+[☐✔☒]")  # multi-tab / multi-select strip
+_RE_SINGLE_HEAD = re.compile(r"^\s*[☐✔☒]")  # single-question checkbox header
+# An option row: an optional ❯ cursor, the 1-based number, then the label. The
+# indented description lines carry no ``N.`` so they never match.
+_RE_OPTION = re.compile(r"^\s*(❯)?\s*(\d+)\.\s+(.*\S)\s*$")
+# The trailing rows Claude Code always appends (free-text + chat escape hatches);
+# they are navigable but are NOT real options, so they never get a semantic button.
+_RE_META = re.compile(r"^(type something\.?|chat about this|submit)$", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class AskUQ:
+    """A detected AskUserQuestion selector.
+
+    ``question`` is the scraped question text. ``options`` are the real option
+    labels in display order (the free-text / chat meta-rows excluded); it is empty
+    for the ``multi`` fallback shape. ``cursor`` is the 0-based ordinal of the
+    ``❯``-marked row among ALL navigable numbered rows (semantic + meta) — so a
+    tap on semantic option ``i`` (which occupies ordinal ``i``, options being the
+    first rows) injects ``i - cursor`` Down/Up presses; it is ``-1`` when no cursor
+    row was found. ``multi`` is True for a multi-tab / multi-select selector (or an
+    otherwise unparseable one): the relay then offers the nav row only.
+    """
+
+    question: str
+    options: tuple[str, ...]
+    cursor: int
+    multi: bool
+
+
+def _first_match(lines: list[str], pattern: re.Pattern[str]) -> int | None:
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            return i
+    return None
+
+
+def _extract_question(lines: list[str], head_idx: int, enter_idx: int) -> str:
+    """The question text between the checkbox header and the first option row.
+
+    Joins the non-blank lines after ``head_idx`` up to the first numbered option
+    (handles a wrapped question); falls back to the header label (the checkbox /
+    tab glyphs stripped) when there is nothing between them.
+    """
+    collected: list[str] = []
+    for line in lines[head_idx + 1 : enter_idx]:
+        if _RE_OPTION.match(line):
+            break
+        stripped = line.strip()
+        if stripped:
+            collected.append(stripped)
+    if collected:
+        return " ".join(collected)
+    return lines[head_idx].strip().lstrip("←☐✔☒→ ").strip()
+
+
+def _parse_options(
+    lines: list[str], head_idx: int, enter_idx: int
+) -> tuple[list[str], int]:
+    """The real option labels (meta-rows excluded) + the cursor's row ordinal.
+
+    ``cursor`` counts ALL numbered rows (semantic + meta) in display order, so the
+    ordinal lines up with one Down/Up press per row for cursor-relative injection.
+    """
+    options: list[str] = []
+    cursor = -1
+    ordinal = 0
+    for line in lines[head_idx + 1 : enter_idx]:
+        m = _RE_OPTION.match(line)
+        if not m:
+            continue
+        label = m.group(3).strip()
+        if m.group(1):  # ❯ cursor on this row
+            cursor = ordinal
+        if not _RE_META.match(label):
+            options.append(label)
+        ordinal += 1
+    return options, cursor
+
+
+def detect_askuserquestion(pane_text: str) -> AskUQ | None:
+    """Detect an AskUserQuestion selector in captured pane text.
+
+    Requires the ``Enter to select`` footer plus a checkbox header (single ``☐`` or
+    the ``←  ☐`` multi-tab strip) above it — so it never fires on a permission
+    prompt or a normal pane. A multi-tab / multi-select selector returns the
+    fallback shape (``options == ()``, ``multi is True``); a simple single-select
+    returns the ordered option labels and the cursor ordinal. Returns ``None`` when
+    the pane shows no selector.
+    """
+    if not pane_text:
+        return None
+
+    lines = pane_text.split("\n")
+    enter_idx = _first_match(lines, _RE_ENTER_SELECT)
+    if enter_idx is None:
+        return None
+
+    # The checkbox header closest above the footer is this selector's header.
+    head_idx: int | None = None
+    multi = False
+    for i in range(enter_idx - 1, -1, -1):
+        if _RE_MULTI_TAB.match(lines[i]):
+            head_idx, multi = i, True
+            break
+        if _RE_SINGLE_HEAD.match(lines[i]):
+            head_idx, multi = i, False
+            break
+    if head_idx is None:
+        return None
+
+    question = _extract_question(lines, head_idx, enter_idx)
+    if multi:
+        return AskUQ(question=question, options=(), cursor=-1, multi=True)
+
+    options, cursor = _parse_options(lines, head_idx, enter_idx)
+    if not options:
+        # A single-question selector with no parseable options (unexpected) still
+        # gets the nav row so the human is never handed a broken keyboard.
+        return AskUQ(question=question, options=(), cursor=-1, multi=True)
+    return AskUQ(question=question, options=tuple(options), cursor=cursor, multi=False)
