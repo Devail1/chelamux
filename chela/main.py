@@ -33,6 +33,7 @@ from chela.config import (
     DISPATCH_TICK_INTERVAL,
     DISPATCH_WORKFLOWS,
     NOTIFY_INTERVAL,
+    SHOW_TOOL_CALLS,
 )
 
 logging.basicConfig(
@@ -484,8 +485,13 @@ def cmd_telegram(args) -> None:
 
     interval = max(1, int(args.interval))
     # One BotSender (fixed chat, no fixed topic); RegistryRelay supplies the
-    # per-window message_thread_id looked up from the registry.
-    relay = RegistryRelay(BotSender(token, chat).send, registry)
+    # per-window message_thread_id looked up from the registry. With
+    # CHELA_SHOW_TOOL_CALLS unset (the default) the relay drops the noisy
+    # tool_use/tool_result stream, keeping text/thinking/user turns plus the
+    # interactive prompts that need a human.
+    relay = RegistryRelay(
+        BotSender(token, chat).send, registry, show_tool_calls=SHOW_TOOL_CALLS
+    )
     monitor = TranscriptMonitor(on_message=relay.on_message)
 
     topic_api = None

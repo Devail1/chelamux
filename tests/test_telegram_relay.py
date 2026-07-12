@@ -12,7 +12,13 @@ from __future__ import annotations
 from chela.telegram.bindings import BindingRegistry
 from chela.telegram.format import escape_markdown_v2, to_markdown_v2, to_plain_text
 from chela.telegram.parser import Message
-from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay, split_message
+from chela.telegram.relay import (
+    INTERACTIVE_TOOL_NAMES,
+    BotSender,
+    RegistryRelay,
+    TelegramRelay,
+    split_message,
+)
 
 
 # --------------------------------------------------------------------------
@@ -233,3 +239,89 @@ def test_registry_relay_falls_back_to_plain_text_with_thread_preserved():
     assert len(stub.calls) == 2
     assert stub.calls[0] == ("*🤖*\nok\\. go", "MarkdownV2", "42")
     assert stub.calls[1] == ("🤖\nok. go", None, "42")  # thread kept on retry
+
+
+# --------------------------------------------------------------------------
+# show_tool_calls — hide the tool_use/tool_result firehose by default, but
+# NEVER hide interactive prompts (AskUserQuestion / ExitPlanMode) or content
+# --------------------------------------------------------------------------
+
+def test_interactive_tool_names_covers_the_prompt_tools():
+    assert "AskUserQuestion" in INTERACTIVE_TOOL_NAMES
+    assert "ExitPlanMode" in INTERACTIVE_TOOL_NAMES
+
+
+def test_relay_hidden_drops_tool_calls_but_keeps_prompts_and_text():
+    # Flag OFF (default): a Bash tool_use + tool_result are dropped, while an
+    # AskUserQuestion tool_use and a plain text turn are relayed.
+    stub = _StubSender()
+    relay = TelegramRelay(stub, show_tool_calls=False)
+
+    relay.on_message("@1", Message("assistant", "tool_use", "Bash", tool_name="Bash"))
+    relay.on_message("@1", Message("assistant", "tool_result", "exit 0", tool_name="Bash"))
+    relay.on_message(
+        "@1", Message("assistant", "tool_use", "AskUserQuestion", tool_name="AskUserQuestion")
+    )
+    relay.on_message("@1", Message("assistant", "text", "done"))
+
+    # Only the AskUserQuestion prompt and the text turn made it through.
+    assert len(stub.calls) == 2
+    assert stub.calls[0][0] == "*🔧 AskUserQuestion*"
+    assert stub.calls[1][0] == "*🤖*\ndone"
+
+
+def test_relay_hidden_keeps_exit_plan_mode_prompt():
+    stub = _StubSender()
+    relay = TelegramRelay(stub, show_tool_calls=False)
+    relay.on_message(
+        "@1", Message("assistant", "tool_use", "ExitPlanMode", tool_name="ExitPlanMode")
+    )
+    assert len(stub.calls) == 1
+
+
+def test_relay_shown_keeps_all_tool_calls():
+    # Flag ON: today's behaviour — every event relays.
+    stub = _StubSender()
+    relay = TelegramRelay(stub, show_tool_calls=True)
+
+    relay.on_message("@1", Message("assistant", "tool_use", "Bash", tool_name="Bash"))
+    relay.on_message("@1", Message("assistant", "tool_result", "exit 0", tool_name="Bash"))
+    relay.on_message("@1", Message("assistant", "text", "done"))
+
+    assert len(stub.calls) == 3
+
+
+def test_relay_default_shows_tool_calls_for_back_compat():
+    # No show_tool_calls kwarg -> preserves the pre-flag relay behaviour.
+    stub = _StubSender()
+    TelegramRelay(stub).on_message(
+        "@1", Message("assistant", "tool_use", "Bash", tool_name="Bash")
+    )
+    assert len(stub.calls) == 1
+
+
+def test_registry_relay_hidden_drops_tool_calls_but_keeps_prompts():
+    stub = _ThreadStubSender()
+    reg = _registry(("@1", "42"))
+    relay = RegistryRelay(stub, reg, show_tool_calls=False)
+
+    relay.on_message("@1", Message("assistant", "tool_use", "Bash", tool_name="Bash"))
+    relay.on_message("@1", Message("assistant", "tool_result", "exit 0", tool_name="Bash"))
+    relay.on_message(
+        "@1", Message("assistant", "tool_use", "AskUserQuestion", tool_name="AskUserQuestion")
+    )
+    relay.on_message("@1", Message("assistant", "text", "done"))
+
+    assert len(stub.calls) == 2  # prompt + text only, both to @1's topic
+    assert all(thread == "42" for _, _, thread in stub.calls)
+
+
+def test_registry_relay_shown_keeps_all_tool_calls():
+    stub = _ThreadStubSender()
+    relay = RegistryRelay(stub, _registry(("@1", "42")), show_tool_calls=True)
+
+    relay.on_message("@1", Message("assistant", "tool_use", "Bash", tool_name="Bash"))
+    relay.on_message("@1", Message("assistant", "tool_result", "exit 0", tool_name="Bash"))
+    relay.on_message("@1", Message("assistant", "text", "done"))
+
+    assert len(stub.calls) == 3

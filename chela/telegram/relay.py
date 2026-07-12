@@ -39,6 +39,27 @@ Sender = Callable[[str, "str | None"], bool]
 # (the decoded Telegram JSON, ``{"ok": bool, ...}``). Injectable for tests.
 Transport = Callable[[str, dict], dict]
 
+# Tools whose ``tool_use`` is an interactive prompt the human must answer — these
+# always relay even when tool-call notifications are hidden, or the operator
+# never sees the question. Ported from ccbot's INTERACTIVE_TOOL_NAMES.
+INTERACTIVE_TOOL_NAMES = frozenset({"AskUserQuestion", "ExitPlanMode"})
+
+
+def _hide_tool_event(msg: Message, show_tool_calls: bool) -> bool:
+    """True when ``msg`` is a tool notification that should be dropped.
+
+    When ``show_tool_calls`` is False the noisy ``tool_use``/``tool_result``
+    events are skipped BEFORE any formatting/sending — EXCEPT the interactive
+    prompts in :data:`INTERACTIVE_TOOL_NAMES`, verified by ``tool_name``, which
+    must always reach the human. ``text``/``thinking``/``user`` events carry no
+    tool name and are never tool events, so they always relay.
+    """
+    if show_tool_calls:
+        return False
+    if msg.content_type not in ("tool_use", "tool_result"):
+        return False
+    return msg.tool_name not in INTERACTIVE_TOOL_NAMES
+
 
 def split_message(text: str, n: int = MAX_LEN) -> list[str]:
     """Split ``text`` into ≤``n``-char chunks (Telegram's per-message limit)."""
@@ -119,11 +140,14 @@ class TelegramRelay:
         mon = TranscriptMonitor(on_message=relay.on_message)
     """
 
-    def __init__(self, sender: Sender):
+    def __init__(self, sender: Sender, *, show_tool_calls: bool = True):
         self._sender = sender
+        self._show_tool_calls = show_tool_calls
 
     def on_message(self, window_id: str, msg: Message) -> None:
         """Relay one parsed message (monitor callback signature)."""
+        if _hide_tool_event(msg, self._show_tool_calls):
+            return
         if self._sender(to_markdown_v2(msg), "MarkdownV2"):
             return
         # MarkdownV2 was rejected — retry the same content as plain text so a
@@ -150,12 +174,15 @@ class RegistryRelay:
     :meth:`BotSender.send` in production, a stub in tests.
     """
 
-    def __init__(self, sender: Sender, registry):
+    def __init__(self, sender: Sender, registry, *, show_tool_calls: bool = True):
         self._sender = sender
         self._registry = registry
+        self._show_tool_calls = show_tool_calls
 
     def on_message(self, window_id: str, msg: Message) -> None:
         """Relay one parsed message to the window's bound topic (monitor callback)."""
+        if _hide_tool_event(msg, self._show_tool_calls):
+            return
         thread = self._registry.thread_for_window(window_id)
         if thread is None:
             log.debug("no topic bound for %s; skipping outbound", window_id)
