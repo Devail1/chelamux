@@ -10,8 +10,10 @@ No live Telegram: :class:`BotSender` is driven through an injected transport and
 from __future__ import annotations
 
 from chela.telegram.bindings import BindingRegistry
+from chela.telegram import format as fmt
 from chela.telegram.format import (
     escape_markdown_v2,
+    render_markdown,
     to_code_block,
     to_markdown_v2,
     to_plain_text,
@@ -64,6 +66,47 @@ def test_to_markdown_v2_tool_result_uses_paired_tool_name():
 def test_to_plain_text_has_no_markup():
     assert to_plain_text(Message("assistant", "text", "hi. there")) == "🤖\nhi. there"
     assert to_plain_text(Message("assistant", "tool_use", "Read", tool_name="Read")) == "🔧 Read"
+
+
+# --------------------------------------------------------------------------
+# body markdown rendering (telegramify-markdown)
+# --------------------------------------------------------------------------
+
+def test_render_markdown_keeps_fenced_code_block():
+    # A fenced block must survive as a real MarkdownV2 code entity — the fence
+    # backticks are NOT blind-escaped (that was the old, literal-rendering bug).
+    out = render_markdown("```python\nprint(1)\n```")
+    assert out.startswith("```")
+    assert out.endswith("```")
+    assert "\\`" not in out
+
+
+def test_render_markdown_renders_bold_as_single_asterisk():
+    # Claude emits **bold** (CommonMark); MarkdownV2 bold is *single* asterisks.
+    assert render_markdown("This is **bold** text") == "This is *bold* text"
+
+
+def test_to_markdown_v2_body_renders_markdown_not_literally():
+    md = to_markdown_v2(Message("assistant", "text", "run `ls` then **stop**"))
+    # bold header, then the body with a real code span + bold — no escaped fences.
+    assert md == "*🤖*\nrun `ls` then *stop*"
+
+
+def test_render_markdown_falls_back_to_blind_escape_without_telegramify(monkeypatch):
+    # Core install (no [telegram] extra): the module stays importable and the
+    # body degrades to the blind character-escape instead of crashing.
+    monkeypatch.setattr(fmt, "_telegramify", None)
+    assert render_markdown("**bold** a.b") == escape_markdown_v2("**bold** a.b")
+
+
+def test_render_markdown_falls_back_when_telegramify_raises(monkeypatch):
+    class Boom:
+        @staticmethod
+        def markdownify(_text):
+            raise ValueError("malformed")
+
+    monkeypatch.setattr(fmt, "_telegramify", Boom)
+    assert render_markdown("a.b") == escape_markdown_v2("a.b")
 
 
 # --------------------------------------------------------------------------

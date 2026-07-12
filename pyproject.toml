@@ -27,12 +27,14 @@ dashboard = [
 # telegram`) to enable the Telegram Forum ↔ Claude Code session bridge.
 # Adapted from six-ddc/ccbot (MIT) — see the top-level NOTICE file.
 telegram = [
-    "python-telegram-bot>=21.0",  # Telegram Bot API client for the bridge
-    "Pillow>=10.0",               # /screenshot: render a tmux pane -> PNG (ANSI colour)
+    "python-telegram-bot>=21.0",       # Telegram Bot API client for the bridge
+    "Pillow>=10.0",                    # /screenshot: render a tmux pane -> PNG (ANSI colour)
+    "telegramify-markdown>=0.5,<1.0",  # render Claude's Markdown body as real MarkdownV2 entities
 ]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "telegramify-markdown>=0.5,<1.0",  # so format tests exercise real rendering (CI omits [telegram])
 ]
 
 [project.scripts]
