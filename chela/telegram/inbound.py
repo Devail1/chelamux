@@ -1,0 +1,119 @@
+"""Inbound routing — deliver Telegram topic messages to a tmux window.
+
+This is the inbound half of the bridge (Telegram → tmux); the outbound half
+(tmux → Telegram) lives in :mod:`chela.telegram.relay` / :mod:`chela.telegram.
+monitor`. A ``python-telegram-bot`` :class:`~telegram.ext.Application` listens on
+the bound forum topic and routes each incoming message to the mapped tmux window
+via :func:`chela.messenger.send_tmux` — the reliable-submit path (load-buffer +
+paste + stranded-chip guard). We never reimplement tmux sending here.
+
+Topic↔window resolution goes through chela's own registry (tmux is the source of
+truth via :mod:`chela.discovery`), NOT ccbot's ``session_map.json`` (Decision 1).
+For the single-window ``chela telegram`` daemon the binding is fixed: the
+configured ``TELEGRAM_TOPIC_ID`` delivers to the one bound window id.
+
+:class:`TopicRouter` holds the pure routing decision and takes an injectable
+``sender`` so ``topic → window`` routing can be unit-tested against a stub with
+no live Telegram. :func:`build_application` is the thin ``python-telegram-bot``
+glue; PTB is imported lazily inside it so the pure router (and the test suite)
+never depend on the ``[telegram]`` extra.
+
+Adapted from six-ddc/ccbot (https://github.com/six-ddc/ccbot), which is
+MIT-licensed. See the top-level NOTICE file for the upstream copyright and
+attribution.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Callable
+
+from chela import messenger
+
+log = logging.getLogger(__name__)
+
+# A sender delivers text to a tmux window: ``send(window_id, text) -> ok``.
+# Production is ``chela.messenger.send_tmux``; tests inject a recording stub.
+Sender = Callable[[str, str], bool]
+
+
+class TopicRouter:
+    """Routes an inbound Telegram message to one bound tmux window.
+
+    Binds a single ``(chat_id, topic_id) → window_id``. :meth:`route` validates
+    that a message came from the bound chat (and, when a topic is configured, the
+    bound topic) before delivering its text to the window via the injected
+    ``sender`` — :func:`chela.messenger.send_tmux` in production, a stub in tests.
+    Messages from any other chat/topic, and empty messages, are dropped.
+    """
+
+    def __init__(
+        self,
+        chat_id: str | int,
+        window_id: str,
+        topic_id: str | int | None = None,
+        *,
+        sender: Sender | None = None,
+    ):
+        self._chat_id = str(chat_id)
+        self._window_id = window_id
+        # Telegram's General topic reports message_thread_id as None (or 1); a
+        # named topic reports its id. Normalise a configured topic to str so it
+        # compares cleanly against the int thread id off the wire.
+        self._topic_id = str(topic_id) if topic_id not in (None, "") else None
+        self._sender = sender or messenger.send_tmux
+
+    def route(self, chat_id: str | int | None, topic_id: str | int | None, text: str) -> bool:
+        """Deliver ``text`` to the bound window if it came from the bound topic.
+
+        Returns True if the message was delivered, False if it was dropped
+        (wrong chat/topic, empty text) or the tmux send failed.
+        """
+        if not text or not text.strip():
+            return False
+        if chat_id is None or str(chat_id) != self._chat_id:
+            log.debug("dropping inbound from chat %s (bound=%s)", chat_id, self._chat_id)
+            return False
+        if self._topic_id is not None and (
+            topic_id is None or str(topic_id) != self._topic_id
+        ):
+            log.debug("dropping inbound from topic %s (bound=%s)", topic_id, self._topic_id)
+            return False
+        log.info("Telegram → %s: %s", self._window_id, text.splitlines()[0][:80])
+        return self._sender(self._window_id, text)
+
+
+def build_application(token: str, router: TopicRouter):
+    """Build a ``python-telegram-bot`` Application wired to ``router``.
+
+    Registers a single text handler that pulls ``(chat_id, thread_id, text)`` off
+    each update and hands it to :meth:`TopicRouter.route`. Slash commands are
+    forwarded too (``filters.TEXT`` includes them) so ``/`` commands reach the
+    window's Claude Code prompt via ``send_tmux``'s slash-command path. PTB is
+    imported here (not at module load) so this module — and the pure router — do
+    not require the optional ``[telegram]`` extra.
+    """
+    try:
+        from telegram.ext import Application, ContextTypes, MessageHandler, filters
+    except ImportError as e:  # pragma: no cover - exercised only without the extra
+        raise ImportError(
+            "Inbound Telegram routing needs python-telegram-bot. "
+            "Install the extra:  uv sync --extra telegram  "
+            "(or:  pip install 'chelamux[telegram]')"
+        ) from e
+
+    async def _on_message(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+        msg = update.message
+        if msg is None or not msg.text:
+            return
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        # message_thread_id is absent outside a forum topic; getattr guards it.
+        thread_id = getattr(msg, "message_thread_id", None)
+        try:
+            router.route(chat_id, thread_id, msg.text)
+        except Exception:  # a stuck tmux send must not wedge the update queue
+            log.exception("inbound routing failed")
+
+    application = Application.builder().token(token).build()
+    application.add_handler(MessageHandler(filters.TEXT, _on_message))
+    return application

@@ -4,7 +4,8 @@
 (scheduler tick + work-item dispatcher). `chela schedule ...` manages scheduled
 tasks; `chela dispatch ...` runs the markdown-TODO → worktree → PR dispatcher;
 `chela msg`/`broadcast` route messages between live agents over tmux.
-`chela telegram` relays one window's Claude Code output to a Telegram topic.
+`chela telegram` bridges one window and a Telegram topic (outbound relay of the
+window's Claude Code output + inbound routing of topic messages back to it).
 `chela dashboard` launches the optional web UI (requires the `dashboard` extra).
 """
 from __future__ import annotations
@@ -348,14 +349,31 @@ def cmd_install_statusline(args) -> None:
     print(f"Installed chela statusLine into {settings_path}. Restart agents to apply.")
 
 
+def _outbound_loop(monitor, wid: str, interval: int, stop) -> None:
+    """Poll one window's transcript and relay new output, until ``stop`` is set."""
+    while not stop.is_set():
+        try:
+            monitor.poll([wid])
+        except Exception:
+            log.exception("Telegram relay poll failed")
+        stop.wait(interval)
+
+
 def cmd_telegram(args) -> None:
-    """Relay one window's new Claude Code output to a Telegram topic (outbound).
+    """Bridge one window and a Telegram topic — outbound AND inbound.
 
     Reads TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / TELEGRAM_TOPIC_ID from the
-    environment, binds a single window (--wid @N) to the topic, and polls its
-    transcript, posting each new message via the direct Bot API. Inbound
-    (Telegram -> tmux) is a later slice; this is outbound only.
+    environment and binds a single window (--wid @N) to the topic. One process
+    then does both halves: OUTBOUND polls the window's transcript and posts each
+    new message to the topic via the direct Bot API (a background thread), while
+    INBOUND runs a python-telegram-bot Application that routes topic messages
+    back to the window via messenger.send_tmux (the reliable-submit path).
+
+    Inbound needs the `[telegram]` extra (python-telegram-bot); pass
+    --no-inbound to run outbound-only with no PTB dependency.
     """
+    import threading
+
     from chela.telegram import BotSender, TelegramRelay, TranscriptMonitor
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -373,13 +391,35 @@ def cmd_telegram(args) -> None:
     interval = max(1, int(args.interval))
     relay = TelegramRelay(BotSender(token, chat, topic).send)
     monitor = TranscriptMonitor(on_message=relay.on_message)
-    log.info("Relaying %s -> Telegram topic %s every %ds", wid, topic or "(none)", interval)
-    while True:
-        try:
-            monitor.poll([wid])
-        except Exception:
-            log.exception("Telegram relay poll failed")
-        time.sleep(interval)
+
+    if args.no_inbound:
+        # Outbound-only (no PTB dependency): poll in the foreground forever.
+        log.info("Relaying %s -> Telegram topic %s every %ds", wid, topic or "(none)", interval)
+        _outbound_loop(monitor, wid, interval, threading.Event())
+        return
+
+    try:
+        from chela.telegram import TopicRouter, build_application
+        router = TopicRouter(chat, wid, topic)
+        application = build_application(token, router)
+    except ImportError as e:
+        print(f"{e}\n(or run outbound-only:  chela telegram --wid {wid} --no-inbound)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Outbound polling runs in a daemon thread; PTB owns the main thread (it
+    # installs signal handlers, so it must run there) for inbound routing.
+    stop = threading.Event()
+    outbound = threading.Thread(
+        target=_outbound_loop, args=(monitor, wid, interval, stop), daemon=True,
+    )
+    outbound.start()
+    log.info("Bridging %s <-> Telegram topic %s (outbound %ds + inbound)",
+             wid, topic or "(none)", interval)
+    try:
+        application.run_polling()
+    finally:
+        stop.set()
 
 
 def cmd_dashboard(args) -> None:
@@ -511,13 +551,17 @@ def main() -> None:
     p_sl.add_argument("--force", action="store_true", help="Overwrite an existing statusLine (with --write)")
     p_sl.add_argument("--settings", default=None, help="settings.json path (default: ~/.claude/settings.json)")
 
-    # telegram — outbound relay of one window's output to a Telegram topic
+    # telegram — bridge one window and a Telegram topic (outbound + inbound)
     p_tg = sub.add_parser(
         "telegram",
-        help="Relay one window's Claude Code output to a Telegram topic (outbound)",
+        help="Bridge one window and a Telegram topic (outbound relay + inbound routing)",
     )
-    p_tg.add_argument("--wid", required=True, help="Window id to relay (@N or N)")
-    p_tg.add_argument("--interval", type=int, default=2, help="Poll interval in seconds (default 2)")
+    p_tg.add_argument("--wid", required=True, help="Window id to bridge (@N or N)")
+    p_tg.add_argument("--interval", type=int, default=2, help="Outbound poll interval in seconds (default 2)")
+    p_tg.add_argument(
+        "--no-inbound", action="store_true",
+        help="Outbound relay only; skip inbound routing (no python-telegram-bot dependency)",
+    )
 
     # dashboard (optional component)
     p_dash = sub.add_parser("dashboard", help="Launch the optional web dashboard (needs the 'dashboard' extra)")
