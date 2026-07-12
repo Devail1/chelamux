@@ -1,35 +1,40 @@
 """Interactive-prompt inline keyboards — answer prompts from Telegram.
 
-When an agent calls ``AskUserQuestion`` its ``tool_use`` block carries the
-structured prompt (``input.questions[]`` with ``{question, header, multiSelect,
-options:[{label, description, preview}]}``). The outbound relay
-(:mod:`chela.telegram.relay`) already forwards the question text to the bound
-topic; this module turns that same structured payload into an **inline keyboard**
-so the human can tap an answer from their phone instead of typing it back.
+Two agent prompts get a tap-to-answer inline keyboard on their bound topic:
 
-``ExitPlanMode`` (Slice B) gets an approval keyboard the same additive way — but
-its choices are harness-rendered TUI, not in the transcript, so instead of
-enumerating options it binds ✅ Approve (auto mode) / 📝 Keep planning to single,
-option-count-independent keystrokes (Enter / Escape) via the same nav plumbing.
-Enter's default proceed option enables auto mode, so that button says so (see
-:func:`_plan_rows`); the nav row lets the human arrow to "manually approve edits".
+* **AskUserQuestion** — surfaced live from the tmux **pane** (Slice A2), because
+  its structured ``tool_use`` record only lands in the transcript once the
+  question is *answered*. The pane watcher scrapes the selector
+  (:func:`~chela.telegram.panescan.detect_askuserquestion`) and builds the
+  keyboard from the scraped option labels: :func:`scraped_reply_markup` for a
+  simple single-select, :func:`nav_only_markup` for the multi-tab / multi-select
+  fallback. Answering re-reads the live ``❯`` cursor and injects the
+  cursor-relative keystrokes (:func:`select_keystrokes_relative`).
+* **ExitPlanMode** (Slice B) — surfaced from the transcript ``tool_use`` via
+  :func:`ask_reply_markup`. Its choices are harness-rendered TUI, not in the
+  transcript, so instead of enumerating options it binds ✅ Approve (auto mode) /
+  📝 Keep planning to single, option-count-independent keystrokes (Enter / Escape)
+  via the same nav plumbing. Enter's default proceed option enables auto mode, so
+  that button says so (see :func:`_plan_rows`); the nav row lets the human arrow
+  to "manually approve edits".
 
 Everything here is pure data (plain dicts + tmux key names), with **no
-``python-telegram-bot`` import**, so the keyboard the urllib-based relay attaches
+``python-telegram-bot`` import**, so the keyboards the urllib-based relay attaches
 and the callback the PTB inbound handler decodes share one source of truth and
 can be unit-tested without the ``[telegram]`` extra:
 
-* :func:`ask_reply_markup` builds the Bot-API ``reply_markup`` dict the relay
-  json-encodes onto the ``sendMessage`` for an AskUserQuestion ``tool_use``.
+* :func:`ask_reply_markup` builds the ``reply_markup`` for an ExitPlanMode
+  ``tool_use``; :func:`scraped_reply_markup` / :func:`nav_only_markup` build the
+  pane-triggered AskUserQuestion keyboards.
 * :func:`decode_callback` decodes a tapped button's ``callback_data`` back into
   an action for the inbound handler to run (:mod:`chela.telegram.inbound`).
-* :func:`select_keystrokes` is the answer-injection contract: the tmux key
-  sequence that selects option ``i`` in Claude Code's single-select selector.
+* :func:`select_keystrokes_relative` (and the :func:`select_keystrokes` blind
+  fallback) is the answer-injection contract: the tmux key sequence that moves the
+  selector to option ``i`` and submits it.
 
-**MVP boundary (Slice A):** semantic option buttons are attached ONLY for a
-single question with ``multiSelect == False`` and well-formed options. Any other
-shape (multiple questions, multi-select, missing/blank option labels) gets the
-navigation-fallback row only, so the human drives the selector manually rather
+**MVP boundary (Slice A2):** semantic option buttons are attached ONLY for a
+single question, single-select selector. Any multi-tab / multi-select shape gets
+the navigation-fallback row only, so the human drives the selector manually rather
 than being handed a keyboard that would answer the wrong thing.
 
 The navigation row is ported from six-ddc/ccbot's ``_build_interactive_keyboard``
@@ -73,15 +78,34 @@ NAV_ACTIONS: dict[str, tuple[str, str]] = {
 
 
 def select_keystrokes(index: int) -> list[str]:
-    """The tmux key sequence that selects option ``index`` and submits it.
+    """Blind fallback: assume the cursor is on option 0 and submit option ``index``.
 
     Claude Code's AskUserQuestion selector highlights option 0 on render, so
     ``index`` ``Down`` presses move the highlight to option ``index`` and
-    ``Enter`` submits (single question → the selection is the answer). The MVP
-    excludes multi-select and free-text, and the auto-appended "Other" row sorts
-    *after* the semantic options, so it never offsets these indices.
+    ``Enter`` submits. This is the fallback used only when the current cursor
+    position can't be read from the pane; the pane-triggered path prefers
+    :func:`select_keystrokes_relative`, which never assumes the cursor is at 0
+    (the operator may have arrowed the selector before tapping a button).
     """
     return ["Down"] * index + ["Enter"]
+
+
+def select_keystrokes_relative(target: int, cursor: int) -> list[str]:
+    """Move the selector from row ``cursor`` to option ``target`` and submit it.
+
+    The pane-triggered answer contract: instead of assuming the highlight is on
+    option 0, the handler re-reads the live ``❯`` cursor ordinal at tap time
+    (:func:`~chela.telegram.panescan.detect_askuserquestion`) and this computes the
+    signed delta — ``Down``×(target−cursor) when moving down, ``Up``×(cursor−target)
+    when moving up — then ``Enter``. Semantic option ``i`` occupies navigable row
+    ``i`` (the options are the first rows), so ``target`` is the option index.
+    """
+    delta = target - cursor
+    if delta > 0:
+        return ["Down"] * delta + ["Enter"]
+    if delta < 0:
+        return ["Up"] * (-delta) + ["Enter"]
+    return ["Enter"]
 
 
 def _truncate(text: str, n: int = _BTN_TEXT_MAX) -> str:
@@ -134,67 +158,58 @@ def _plan_rows() -> list[list[dict]]:
     ]
 
 
-def _semantic_rows(questions: list) -> list[list[dict]]:
-    """One button per option label for a simple single-select question, else [].
+def scraped_reply_markup(labels) -> dict:
+    """Bot-API ``reply_markup`` for a pane-scraped single-select AskUserQuestion.
 
-    Returns semantic option buttons ONLY when the prompt is exactly one question,
-    ``multiSelect`` is false, and every option is a dict with a non-blank label
-    (a blank/missing label is how a free-text-style option shows up — we bail to
-    nav-only rather than emit a button that would answer the wrong option).
+    One semantic ``qa:<i>`` button per option label (index-only callback, so a
+    long option can't blow Telegram's 64-byte cap), then the always-present nav
+    row. Built from the labels the pane watcher scraped
+    (:func:`~chela.telegram.panescan.detect_askuserquestion`), because the
+    structured transcript record only lands *after* the question is answered.
     """
-    if len(questions) != 1:
-        return []
-    q = questions[0]
-    if not isinstance(q, dict) or q.get("multiSelect"):
-        return []
-    options = q.get("options")
-    if not isinstance(options, list) or not options:
-        return []
-    if not all(
-        isinstance(o, dict) and str(o.get("label") or "").strip() for o in options
-    ):
-        return []
-    return [
-        [{"text": _truncate(str(opt["label"])), "callback_data": f"{QA_CB_PREFIX}{i}"}]
-        for i, opt in enumerate(options)
+    rows = [
+        [{"text": _truncate(str(label)), "callback_data": f"{QA_CB_PREFIX}{i}"}]
+        for i, label in enumerate(labels)
     ]
+    rows.append(_nav_row())
+    return {"inline_keyboard": rows}
+
+
+def nav_only_markup() -> dict:
+    """The nav-fallback row alone — for the multi-tab / multi-select shapes.
+
+    The MVP never hands out semantic option buttons for a multi-question or
+    multi-select selector (they would answer the wrong thing), so the operator
+    drives the selector by hand with the nav keys.
+    """
+    return {"inline_keyboard": [_nav_row()]}
 
 
 def ask_reply_markup(msg) -> dict | None:
-    """Bot-API ``reply_markup`` for an interactive-prompt ``tool_use``, else None.
+    """Bot-API ``reply_markup`` for a transcript-triggered ``tool_use``, else None.
 
-    ``msg`` is a :class:`~chela.telegram.parser.Message`. Dispatches on
-    ``tool_name``:
+    ``msg`` is a :class:`~chela.telegram.parser.Message`. Only ``ExitPlanMode``
+    (Slice B) gets a keyboard here: two approval buttons (:func:`_plan_rows`) plus
+    the nav row — option-count-independent keystrokes, so it attaches for any
+    ExitPlanMode ``tool_use`` (the harness-rendered choices aren't in the
+    transcript, so there is nothing to enumerate).
 
-    * ``ExitPlanMode`` (Slice B) → two approval buttons (:func:`_plan_rows`) plus
-      the nav row. The buttons are option-count-independent keystrokes, so this
-      attaches for any ExitPlanMode ``tool_use`` — the harness-rendered choices
-      aren't in the transcript, so there is nothing to enumerate.
-    * ``AskUserQuestion`` (Slice A) → semantic option buttons for the MVP
-      single-select shape (:func:`_semantic_rows`) plus the nav row, but only when
-      the payload carries a non-empty ``questions`` list.
+    ``AskUserQuestion`` no longer gets a keyboard here. Its ``tool_use`` record was
+    measured to land in the transcript only once the question is *answered*, so a
+    keyboard attached at that point would be useless (the selector is gone) and
+    would double-post the already-relayed prompt. Slice A2 surfaces it live from
+    the **pane** instead (:func:`~chela.telegram.gatewatch.PermissionGateWatcher`),
+    building the keyboard from the scraped options (:func:`scraped_reply_markup` /
+    :func:`nav_only_markup`); the relay drops the post-answer transcript ``tool_use``.
 
-    Returns ``None`` for anything else — so the relay attaches a keyboard only
-    when there is a real prompt to answer, and never crashes on a missing or
-    malformed payload. The nav-fallback row is always included on the keyboards we
-    do build.
+    Returns ``None`` for anything else — so the relay attaches a keyboard only when
+    there is a real prompt to answer, and never crashes on a missing payload.
     """
     if getattr(msg, "content_type", None) != "tool_use":
         return None
-    tool = getattr(msg, "tool_name", None)
-    if tool == "ExitPlanMode":
-        rows = _plan_rows()
-        rows.append(_nav_row())
-        return {"inline_keyboard": rows}
-    if tool != "AskUserQuestion":
+    if getattr(msg, "tool_name", None) != "ExitPlanMode":
         return None
-    inp = getattr(msg, "tool_input", None)
-    if not isinstance(inp, dict):
-        return None
-    questions = inp.get("questions")
-    if not isinstance(questions, list) or not questions:
-        return None
-    rows = _semantic_rows(questions)
+    rows = _plan_rows()
     rows.append(_nav_row())
     return {"inline_keyboard": rows}
 

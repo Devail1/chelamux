@@ -1,14 +1,15 @@
-"""Permission-gate pane detector — the sole TUI-regex module (Slice C1).
+"""Pane detectors — the sole TUI-regex module (Slice C1 permission + A2 AskUQ).
 
 Locks in that :func:`detect_permission_gate` recognises the permission-prompt and
-bash-approval TUI regions (which never reach the JSONL transcript) and returns
-None for a normal/working pane. The exact snippets keyed on are recorded here as
-the version-canary: a Claude Code reword that breaks these is a one-file edit in
-``panescan.py``.
+bash-approval TUI regions, and that :func:`detect_askuserquestion` recognises the
+AskUserQuestion selector (question text + ordered options + cursor ordinal, with
+the multi-tab / multi-select fallback), while both return None for a normal pane.
+The exact snippets keyed on are recorded here as the version-canary: a Claude Code
+reword that breaks these is a one-file edit in ``panescan.py``.
 """
 from __future__ import annotations
 
-from chela.telegram.panescan import detect_permission_gate
+from chela.telegram.panescan import detect_askuserquestion, detect_permission_gate
 
 # A Bash permission prompt: "Do you want to proceed?" framed by "Esc to cancel".
 PERMISSION_PANE = """\
@@ -106,3 +107,99 @@ def test_normal_pane_is_not_a_gate():
 def test_empty_pane_is_none():
     assert detect_permission_gate("") is None
     assert detect_permission_gate("   \n  \n") is None
+
+
+# ── AskUserQuestion selector (Slice A2) ──────────────────────────────────────
+#
+# The exact snippets keyed on, captured live from Claude Code 2.1.207.
+
+# Single question, single-select: checkbox header, question, ❯-cursored options,
+# the free-text / chat meta-rows, then the "Enter to select" footer.
+ASKUQ_SINGLE_PANE = """\
+ ☐ Fruit
+
+Which fruit do you prefer?
+
+❯ 1. Apple
+     A crisp red fruit
+  2. Banana
+     A soft yellow fruit
+  3. Cherry
+     A small red fruit
+  4. Type something.
+─────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
+# The same selector after one ↓ press — the ❯ cursor has moved to option 2.
+ASKUQ_SINGLE_PANE_CURSOR_ON_2 = """\
+ ☐ Fruit
+
+Which fruit do you prefer?
+
+  1. Apple
+     A crisp red fruit
+❯ 2. Banana
+     A soft yellow fruit
+  3. Cherry
+  4. Type something.
+─────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
+# Multi-question (or multi-select): the ``←  ☐ … →`` tab strip → fallback shape.
+ASKUQ_MULTI_PANE = """\
+←  ☐ Fruit  ☐ Color  ✔ Submit  →
+
+Which fruit do you prefer?
+
+❯ 1. Apple
+     A crisp red fruit
+  2. Banana
+  3. Type something.
+─────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+"""
+
+
+def test_single_select_parses_question_options_and_cursor():
+    uq = detect_askuserquestion(ASKUQ_SINGLE_PANE)
+    assert uq is not None
+    assert uq.multi is False
+    assert uq.question == "Which fruit do you prefer?"
+    # Only the real options — the "Type something." / "Chat about this" meta-rows
+    # are dropped.
+    assert uq.options == ("Apple", "Banana", "Cherry")
+    assert uq.cursor == 0  # ❯ on option 1 (Apple) at render
+
+
+def test_single_select_tracks_a_moved_cursor():
+    uq = detect_askuserquestion(ASKUQ_SINGLE_PANE_CURSOR_ON_2)
+    assert uq is not None
+    assert uq.options == ("Apple", "Banana", "Cherry")
+    assert uq.cursor == 1  # ❯ moved to option 2 (Banana)
+
+
+def test_multi_tab_selector_is_the_fallback_shape():
+    uq = detect_askuserquestion(ASKUQ_MULTI_PANE)
+    assert uq is not None
+    assert uq.multi is True          # multi-tab → nav-only fallback
+    assert uq.options == ()          # no semantic buttons
+    assert uq.question == "Which fruit do you prefer?"
+
+
+def test_permission_and_working_panes_are_not_selectors():
+    assert detect_askuserquestion(PERMISSION_PANE) is None
+    assert detect_askuserquestion(WORKING_PANE) is None
+    assert detect_askuserquestion(MENU_PANE) is None
+
+
+def test_askuq_empty_pane_is_none():
+    assert detect_askuserquestion("") is None
+    assert detect_askuserquestion("   \n  \n") is None

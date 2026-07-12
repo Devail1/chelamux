@@ -40,7 +40,12 @@ from chela.telegram.inbound import (
 )
 from chela.telegram.gatewatch import PermissionGateWatcher
 from chela.telegram.monitor import TranscriptMonitor
-from chela.telegram.panescan import Gate, detect_permission_gate
+from chela.telegram.panescan import (
+    AskUQ,
+    Gate,
+    detect_askuserquestion,
+    detect_permission_gate,
+)
 from chela.telegram.parser import Message, parse_entries, parse_line
 from chela.telegram.reconcile import (
     TopicClosedHandler,
@@ -56,6 +61,8 @@ __all__ = [
     "PermissionGateWatcher",
     "Gate",
     "detect_permission_gate",
+    "AskUQ",
+    "detect_askuserquestion",
     "Message",
     "parse_entries",
     "parse_line",

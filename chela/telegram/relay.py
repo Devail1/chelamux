@@ -55,7 +55,16 @@ def _hide_tool_event(msg: Message, show_tool_calls: bool) -> bool:
     prompts in :data:`INTERACTIVE_TOOL_NAMES`, verified by ``tool_name``, which
     must always reach the human. ``text``/``thinking``/``user`` events carry no
     tool name and are never tool events, so they always relay.
+
+    The one exception that fires regardless of ``show_tool_calls``: an
+    AskUserQuestion ``tool_use``. Slice A2 surfaces that prompt live from the pane
+    (with answer buttons) while the selector is still pending; its transcript
+    ``tool_use`` only lands *after* the answer, so relaying it here would just
+    double-post the already-answered question. Its ``tool_result`` still relays as
+    the "answered: X" confirmation.
     """
+    if msg.content_type == "tool_use" and msg.tool_name == "AskUserQuestion":
+        return True
     if show_tool_calls:
         return False
     if msg.content_type not in ("tool_use", "tool_result"):

@@ -554,11 +554,13 @@ def cmd_telegram(args) -> None:
     # interactive prompts that need a human.
     bot = BotSender(token, chat)
     relay = RegistryRelay(bot.send, registry, show_tool_calls=SHOW_TOOL_CALLS)
-    # Permission-gate watcher (Slice C1): correlates the transcript's unpaired
-    # tool_use with a pane read to surface an agent blocked on a permission prompt
-    # (which never reaches the JSONL). It observes the SAME message stream the
-    # relay does — regardless of SHOW_TOOL_CALLS, since it needs every
-    # tool_use/tool_result to track pairing — and polls in the outbound loop.
+    # Pane watcher (Slice C1 + A2): reads each bound window's pane to surface the
+    # live-TUI prompts the transcript can't relay in time — a permission gate
+    # (correlated with the transcript's unpaired tool_use; never in the JSONL) and
+    # an AskUserQuestion selector (whose tool_use only lands AFTER the answer, so it
+    # is detected straight from the pane, with answer buttons). It observes the SAME
+    # message stream the relay does — regardless of SHOW_TOOL_CALLS, since it needs
+    # every tool_use/tool_result to track pairing — and polls in the outbound loop.
     from chela.messenger import capture_pane
     gate_watcher = PermissionGateWatcher(bot.send, registry, capture=capture_pane)
 
