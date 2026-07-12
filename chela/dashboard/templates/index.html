@@ -221,9 +221,20 @@
         <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
       </div>
       <div class="kanban-filters" id="kanban-filters"></div>
-      <!-- Mobile-only column selector (one column fits on phone widths). -->
-      <select class="kanban-col-select" id="kanban-col-select"
-              onchange="chela.setKanbanCol(this.value)" aria-label="Kanban column"></select>
+      <!-- Mobile-only layout controls (≤768px). Swipe = scroll-snap carousel
+           (default), Rows = collapsible accordion. Hidden on desktop, which
+           keeps its 7-column grid. -->
+      <div class="kanban-mobile-controls" id="kanban-mobile-controls">
+        <div class="kanban-layout-toggle" role="group" aria-label="Mobile board layout">
+          <button type="button" class="kanban-layout-btn" data-layout="swipe"
+                  aria-pressed="true" onclick="chela.setKanbanLayout('swipe')">Swipe</button>
+          <button type="button" class="kanban-layout-btn" data-layout="rows"
+                  aria-pressed="false" onclick="chela.setKanbanLayout('rows')">Rows</button>
+        </div>
+        <!-- Swipe-layout quick-nav: one chip per column (label + live count),
+             tap to snap-scroll. Populated + shown only in the swipe layout. -->
+        <div class="kanban-nav-strip" id="kanban-nav-strip" aria-label="Jump to column"></div>
+      </div>
       <div class="kanban-board" id="kanban-board"></div>
       <div id="kanban-empty" class="work-empty" style="display:none;">
         <div class="work-empty-icon">▤</div>
