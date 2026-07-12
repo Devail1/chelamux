@@ -1336,11 +1336,18 @@ def _settings_status() -> dict:
     if config.TERMINALS_ENABLED and config.TERMINALS_EXPOSE:
         wall_detail = "exposed on non-loopback binds (CHELA_TERMINALS_EXPOSE)"
 
-    n_wf = len(config.DISPATCH_WORKFLOWS)
+    # Match /api/dispatcher: count AUTO-DISCOVERED workflows (explicit config +
+    # repo-root WORKFLOW.md + any workflow that has runs) — not the raw
+    # CHELA_DISPATCH_WORKFLOWS env, which CMX-3's auto-discovery made obsolete
+    # (env-only would read "Off" while the Kanban shows live runs).
+    try:
+        n_wf = len(_discover_dispatch_workflows(dispatcher.list_runs()))
+    except Exception:
+        n_wf = len(config.DISPATCH_WORKFLOWS)
     dispatch_on = n_wf > 0
     dispatch_state = f"{n_wf} workflow{'' if n_wf == 1 else 's'}" if dispatch_on else "Off"
-    dispatch_detail = (f"every {config.DISPATCH_TICK_INTERVAL}s" if dispatch_on
-                       else "set CHELA_DISPATCH_WORKFLOWS to enable")
+    dispatch_detail = (f"every {config.DISPATCH_TICK_INTERVAL}s · auto-discovered" if dispatch_on
+                       else "no workflows yet — run `chela dispatch`")
 
     try:
         n_tasks = len(scheduler.list_tasks())
