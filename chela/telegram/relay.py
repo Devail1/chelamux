@@ -148,6 +148,69 @@ class BotSender:
                 return False
         return True
 
+    def post(
+        self,
+        text: str,
+        parse_mode: str | None = None,
+        message_thread_id: str | int | None = None,
+        reply_markup: dict | None = None,
+    ) -> int | None:
+        """Post ONE message and return its ``message_id`` (None on failure).
+
+        The edit-in-place sibling of :meth:`send`: the pane watcher's interactive
+        prompts (an AskUserQuestion selector + its keyboard) are short, so this
+        does NOT split at 4096 chars, and it returns the id so a later scrape can
+        :meth:`edit` the same message rather than post a duplicate as the selector
+        settles.
+        """
+        thread = message_thread_id if message_thread_id is not None else self._topic_id
+        fields = {"chat_id": self._chat_id, "text": text[:MAX_LEN]}
+        if thread:
+            fields["message_thread_id"] = thread
+        if parse_mode:
+            fields["parse_mode"] = parse_mode
+        if reply_markup:
+            fields["reply_markup"] = json.dumps(reply_markup)
+        resp = self._transport("sendMessage", fields)
+        if not resp.get("ok"):
+            log.warning("telegram sendMessage failed: %s", resp.get("description", resp))
+            return None
+        mid = (resp.get("result") or {}).get("message_id")
+        return int(mid) if isinstance(mid, int) else None
+
+    def edit(
+        self,
+        message_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: dict | None = None,
+    ) -> bool:
+        """``editMessageText`` an existing message; True once it shows ``text``.
+
+        Tolerates Telegram's "message is not modified" (the content was already
+        current) as success — so a re-scrape that produced the same text is a
+        no-op, not an error. Any other failure (e.g. the tracked message was
+        deleted) returns False so the caller can post a fresh one. A message is
+        addressed by chat + id, so no ``message_thread_id`` is needed here.
+        """
+        fields: dict = {
+            "chat_id": self._chat_id,
+            "message_id": message_id,
+            "text": text[:MAX_LEN],
+        }
+        if parse_mode:
+            fields["parse_mode"] = parse_mode
+        if reply_markup:
+            fields["reply_markup"] = json.dumps(reply_markup)
+        resp = self._transport("editMessageText", fields)
+        if resp.get("ok"):
+            return True
+        desc = str(resp.get("description", ""))
+        if "not modified" in desc.lower():
+            return True
+        log.warning("telegram editMessageText failed: %s", desc or resp)
+        return False
+
 
 class TelegramRelay:
     """Renders each new message to MarkdownV2 and posts it, plain-text on failure.

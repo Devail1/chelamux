@@ -101,6 +101,14 @@ def test_nav_only_markup_is_just_the_nav_row():
     assert _callbacks(markup) == [f"qa:nav:{key_id}" for (_l, key_id, _t) in NAV_KEYS]
 
 
+def test_nav_row_labels_are_glyph_only_so_they_dont_truncate_on_mobile():
+    # Five buttons share one row; a worded caption ("⏎ Enter") truncates to "⏎ E…"
+    # on a narrow phone, so every label must be a single short glyph (no words).
+    for label, _key_id, _tmux in NAV_KEYS:
+        assert " " not in label, f"nav label {label!r} has a word — will truncate"
+        assert len(label) <= 2  # a glyph (some emoji are 2 code points)
+
+
 # --------------------------------------------------------------------------
 # ask_reply_markup — AskUserQuestion is now pane-triggered: no transcript keyboard
 # --------------------------------------------------------------------------
@@ -166,8 +174,8 @@ def test_exitplanmode_gets_approve_keep_planning_plus_nav():
 def test_exitplanmode_approval_keys_decode_to_enter_and_escape():
     # The two approval buttons must round-trip through the existing decoder so the
     # inbound handler fires the right tmux key with no new callback scheme.
-    assert decode_callback("qa:nav:ent") == ("key", ("Enter", "⏎ Enter"))
-    assert decode_callback("qa:nav:esc") == ("key", ("Escape", "⎋ Esc"))
+    assert decode_callback("qa:nav:ent") == ("key", ("Enter", "⏎"))
+    assert decode_callback("qa:nav:esc") == ("key", ("Escape", "⎋"))
 
 
 def test_exitplanmode_keyboard_attaches_even_without_plan_payload():
@@ -189,7 +197,7 @@ def test_decode_semantic_select():
 def test_decode_nav_keys_and_refresh():
     assert decode_callback("qa:nav:up") == ("key", NAV_ACTIONS["up"])
     assert decode_callback("qa:nav:dn") == ("key", ("Down", "↓"))
-    assert decode_callback("qa:nav:ent") == ("key", ("Enter", "⏎ Enter"))
+    assert decode_callback("qa:nav:ent") == ("key", ("Enter", "⏎"))
     assert decode_callback("qa:nav:ref") == ("refresh", None)
 
 

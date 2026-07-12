@@ -51,6 +51,13 @@ log = logging.getLogger(__name__)
 # both go as plain text (``parse_mode=None``); no MarkdownV2 escaping to get wrong.
 # ``reply_markup`` rides along only for the AskUserQuestion answer keyboard.
 Sender = Callable[..., bool]
+# A poster posts one AskUserQuestion prompt and returns its Telegram message_id
+# (or None on failure): ``post(text, parse_mode, thread, reply_markup) -> id``.
+# The watcher remembers that id so a re-scrape edits the same message in place.
+Poster = Callable[..., "int | None"]
+# An editor rewrites a tracked message by id (tolerating "not modified"):
+# ``edit(message_id, text, parse_mode, reply_markup) -> ok``.
+Editor = Callable[..., bool]
 # A capture reads a window's visible pane text: ``capture(window_id) -> str``.
 Capture = Callable[[str], str]
 
@@ -155,12 +162,21 @@ class PermissionGateWatcher:
         capture: Capture,
         detect: Callable[[str], Gate | None] = detect_permission_gate,
         detect_askuq: Callable[[str], AskUQ | None] = detect_askuserquestion,
+        post: Poster | None = None,
+        edit: Editor | None = None,
     ):
         self._sender = sender
         self._registry = registry
         self._capture = capture
         self._detect = detect
         self._detect_askuq = detect_askuq
+        # The AskUserQuestion relay edits its message in place as the selector
+        # settles (a mid-render partial → the full option list is ONE message, not
+        # two). Production wires ``post``/``edit`` from :class:`BotSender`; when
+        # they're absent (plain-sender tests) it degrades to posting via ``sender``
+        # with no id to edit, so a changed scrape re-posts (the pre-A2 behaviour).
+        self._post = post
+        self._edit = edit
         # window_id -> {tool_use_id: _PendingTool}, insertion-ordered so the most
         # recently added (the likely-blocked tool) is the last key.
         self._pending: dict[str, dict[str, _PendingTool]] = {}
@@ -169,6 +185,10 @@ class PermissionGateWatcher:
         # window_id -> signature of the AskUserQuestion selector we've relayed
         # (edge trigger); cleared when the selector leaves the pane / is answered.
         self._relayed_uq: dict[str, str] = {}
+        # window_id -> message_id of the AskUserQuestion prompt we posted, so a
+        # re-scrape (more options rendered / cursor moved) edits it in place
+        # instead of double-posting. Cleared alongside ``_relayed_uq``.
+        self._uq_msg: dict[str, int] = {}
 
     def observe(self, window_id: str, msg) -> None:
         """Track ``tool_use``/``tool_result`` pairing for one parsed message.
@@ -192,14 +212,17 @@ class PermissionGateWatcher:
             if pend and uid:
                 pend.pop(uid, None)
             if getattr(msg, "tool_name", None) == "AskUserQuestion":
-                # The question was just answered → let a later selector relay again.
+                # The question was just answered → drop the tracked message so a
+                # genuinely new question posts fresh (never edits the answered one).
                 self._relayed_uq.pop(window_id, None)
+                self._uq_msg.pop(window_id, None)
 
     def forget(self, window_id: str) -> None:
         """Drop all state for a window (e.g. after it closes)."""
         self._pending.pop(window_id, None)
         self._relayed.pop(window_id, None)
         self._relayed_uq.pop(window_id, None)
+        self._uq_msg.pop(window_id, None)
 
     def poll(self, window_ids) -> None:
         """Read each window's pane once and relay newly-detected prompts.
@@ -224,25 +247,53 @@ class PermissionGateWatcher:
         self._poll_gate(window_id, pane)
 
     def _poll_askuq(self, window_id: str, pane: str) -> None:
-        """Relay a newly-detected AskUserQuestion selector (pane-only, edge-triggered)."""
+        """Relay a newly-detected AskUserQuestion selector (pane-only, edge-triggered).
+
+        The selector is drawn incrementally, so successive scrapes of the SAME
+        question differ (option 1 only → all options; cursor moves). Rather than
+        post a fresh message per changed scrape (the double-relay bug), the first
+        scrape posts ONE message and every later scrape of that window **edits it
+        in place** — the partial and the settled selector collapse into a single
+        message that fills in. The tracking clears when the selector leaves the
+        pane (answered) so the next question posts fresh.
+        """
         uq = self._detect_askuq(pane)
         if uq is None:
             # Selector gone (answered / dismissed) — clear so the next relays again.
             self._relayed_uq.pop(window_id, None)
+            self._uq_msg.pop(window_id, None)
             return
 
         signature = _askuq_signature(uq)
         if self._relayed_uq.get(window_id) == signature:
-            return  # already relayed this selector — edge-triggered, not per-poll
+            return  # unchanged scrape — edge-triggered, neither re-post nor edit
 
         thread = self._registry.thread_for_window(window_id)
         if thread is None:
             log.debug("AskUserQuestion on %s but no bound topic; skipping", window_id)
             return
 
-        self._sender(
-            format_askuq_message(uq), None, thread, reply_markup=_askuq_markup(uq)
-        )
+        text = format_askuq_message(uq)
+        markup = _askuq_markup(uq)
+        msg_id = self._uq_msg.get(window_id)
+
+        # A changed scrape for a window we already posted for → EDIT that message
+        # (collapse partial + full into one). On edit failure (message deleted)
+        # drop the id and fall through to a fresh post.
+        if msg_id is not None and self._edit is not None:
+            if self._edit(msg_id, text, None, markup):
+                self._relayed_uq[window_id] = signature
+                return
+            self._uq_msg.pop(window_id, None)
+
+        if self._post is not None:
+            new_id = self._post(text, None, thread, markup)
+            if new_id is not None:
+                self._uq_msg[window_id] = new_id
+        else:
+            # No id-returning poster (plain-sender tests) — post via the sender;
+            # without an id we can't edit, so a changed scrape re-posts (pre-A2).
+            self._sender(text, None, thread, reply_markup=markup)
         self._relayed_uq[window_id] = signature
 
     def _poll_gate(self, window_id: str, pane: str) -> None:

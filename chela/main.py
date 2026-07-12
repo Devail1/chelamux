@@ -562,7 +562,12 @@ def cmd_telegram(args) -> None:
     # message stream the relay does — regardless of SHOW_TOOL_CALLS, since it needs
     # every tool_use/tool_result to track pairing — and polls in the outbound loop.
     from chela.messenger import capture_pane
-    gate_watcher = PermissionGateWatcher(bot.send, registry, capture=capture_pane)
+    # ``post``/``edit`` let the AskUserQuestion relay update one message in place as
+    # the selector renders (mid-render partial → full option list is ONE message,
+    # not a double-post); the permission gate stays send-only.
+    gate_watcher = PermissionGateWatcher(
+        bot.send, registry, capture=capture_pane, post=bot.post, edit=bot.edit
+    )
 
     def _on_message(window_id, msg):
         gate_watcher.observe(window_id, msg)
