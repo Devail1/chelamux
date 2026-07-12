@@ -1,4 +1,4 @@
-"""Interactive-prompt inline keyboards — answer AskUserQuestion from Telegram.
+"""Interactive-prompt inline keyboards — answer prompts from Telegram.
 
 When an agent calls ``AskUserQuestion`` its ``tool_use`` block carries the
 structured prompt (``input.questions[]`` with ``{question, header, multiSelect,
@@ -6,6 +6,13 @@ options:[{label, description, preview}]}``). The outbound relay
 (:mod:`chela.telegram.relay`) already forwards the question text to the bound
 topic; this module turns that same structured payload into an **inline keyboard**
 so the human can tap an answer from their phone instead of typing it back.
+
+``ExitPlanMode`` (Slice B) gets an approval keyboard the same additive way — but
+its choices are harness-rendered TUI, not in the transcript, so instead of
+enumerating options it binds ✅ Approve (auto mode) / 📝 Keep planning to single,
+option-count-independent keystrokes (Enter / Escape) via the same nav plumbing.
+Enter's default proceed option enables auto mode, so that button says so (see
+:func:`_plan_rows`); the nav row lets the human arrow to "manually approve edits".
 
 Everything here is pure data (plain dicts + tmux key names), with **no
 ``python-telegram-bot`` import**, so the keyboard the urllib-based relay attaches
@@ -90,6 +97,43 @@ def _nav_row() -> list[dict]:
     ]
 
 
+def _plan_rows() -> list[list[dict]]:
+    """Two approval buttons for an ExitPlanMode ``tool_use`` (Slice B).
+
+    Unlike AskUserQuestion, ExitPlanMode's approval CHOICES are harness-rendered
+    TUI and are **not** in the transcript — ``input`` carries only ``plan``. So we
+    can't enumerate them; instead we bind the two default actions to single,
+    option-count-independent keystrokes routed through Slice A's
+    ``qa:nav:ent``/``qa:nav:esc`` plumbing (``_on_qa`` → :data:`NAV_ACTIONS` →
+    ``send_key``), so no inbound handler change is needed.
+
+    Empirically (Claude Code 2.1.207) the plan-approval dialog is::
+
+        Would you like to proceed?
+        ❯ 1. Yes, and use auto mode        <- default-highlighted
+          2. Yes, manually approve edits
+          3. No, refine …
+          4. Tell Claude what to change
+
+    * ``Enter`` accepts option 1 → approves the plan **and switches the session
+      into auto mode** (status line flips ``⏸ plan mode on`` → ``⏵⏵ auto mode``).
+      That is a real permission change, so the button is labelled to say so — a
+      plain "Approve" would hide it.
+    * ``Escape`` dismisses the dialog and **stays in plan mode** (does NOT cancel
+      the task), so the human keeps refining.
+
+    The full :func:`_nav_row` is still appended so the operator can arrow ``↓`` to
+    option 2 ("manually approve edits") and press ``⏎`` when they want manual
+    approval instead of auto mode.
+    """
+    return [
+        [
+            {"text": "✅ Approve (auto mode)", "callback_data": f"{QA_NAV_PREFIX}ent"},
+            {"text": "📝 Keep planning", "callback_data": f"{QA_NAV_PREFIX}esc"},
+        ],
+    ]
+
+
 def _semantic_rows(questions: list) -> list[list[dict]]:
     """One button per option label for a simple single-select question, else [].
 
@@ -117,18 +161,32 @@ def _semantic_rows(questions: list) -> list[list[dict]]:
 
 
 def ask_reply_markup(msg) -> dict | None:
-    """Bot-API ``reply_markup`` for an AskUserQuestion ``tool_use``, else None.
+    """Bot-API ``reply_markup`` for an interactive-prompt ``tool_use``, else None.
 
-    ``msg`` is a :class:`~chela.telegram.parser.Message`. Returns ``None`` for
-    anything that is not an ``AskUserQuestion`` ``tool_use`` carrying a non-empty
-    ``questions`` list — so the relay attaches a keyboard only when there is a
-    real prompt to answer, and never crashes if the payload is missing/malformed.
-    The nav-fallback row is always included; semantic option buttons are added
-    only for the MVP single-select shape (:func:`_semantic_rows`).
+    ``msg`` is a :class:`~chela.telegram.parser.Message`. Dispatches on
+    ``tool_name``:
+
+    * ``ExitPlanMode`` (Slice B) → two approval buttons (:func:`_plan_rows`) plus
+      the nav row. The buttons are option-count-independent keystrokes, so this
+      attaches for any ExitPlanMode ``tool_use`` — the harness-rendered choices
+      aren't in the transcript, so there is nothing to enumerate.
+    * ``AskUserQuestion`` (Slice A) → semantic option buttons for the MVP
+      single-select shape (:func:`_semantic_rows`) plus the nav row, but only when
+      the payload carries a non-empty ``questions`` list.
+
+    Returns ``None`` for anything else — so the relay attaches a keyboard only
+    when there is a real prompt to answer, and never crashes on a missing or
+    malformed payload. The nav-fallback row is always included on the keyboards we
+    do build.
     """
     if getattr(msg, "content_type", None) != "tool_use":
         return None
-    if getattr(msg, "tool_name", None) != "AskUserQuestion":
+    tool = getattr(msg, "tool_name", None)
+    if tool == "ExitPlanMode":
+        rows = _plan_rows()
+        rows.append(_nav_row())
+        return {"inline_keyboard": rows}
+    if tool != "AskUserQuestion":
         return None
     inp = getattr(msg, "tool_input", None)
     if not isinstance(inp, dict):
