@@ -13,6 +13,7 @@ from chela.telegram.panescan import (
     detect_askuserquestion,
     detect_exitplanmode,
     detect_permission_gate,
+    scrape_gate_identity,
 )
 
 # A Bash permission prompt: "Do you want to proceed?" framed by "Esc to cancel".
@@ -81,6 +82,33 @@ def test_detects_bash_permission_prompt():
     assert gate.kind == "PermissionPrompt"
     assert "Do you want to proceed?" in gate.text
     assert "Esc to cancel" in gate.text
+
+
+def test_gate_carries_the_scraped_command_identity():
+    # The gate's identity comes from the pane (Slice C2): while the gate is pending
+    # the gated tool_use is NOT in the transcript, so the dialog's own header is the
+    # only place the command exists.
+    gate = detect_permission_gate(PERMISSION_PANE)
+    assert gate.tool == "Bash"
+    assert gate.detail.startswith("rm -rf build/")
+
+
+def test_gate_identity_from_the_edit_dialog_header():
+    gate = detect_permission_gate(EDIT_PERMISSION_PANE)
+    assert (gate.tool, gate.detail) == ("Edit", "src/app.py")
+
+
+def test_gate_identity_from_the_prompt_when_there_is_no_header():
+    # No "Edit file" header — the prompt itself names the file.
+    tool, detail = scrape_gate_identity(
+        " Do you want to make this edit to app.py?\n ❯ 1. Yes\n\n Esc to cancel\n"
+    )
+    assert (tool, detail) == ("Edit", "app.py")
+
+
+def test_gate_identity_is_none_for_an_unrecognised_dialog():
+    # The relay then falls back to the scraped region text — never a crash.
+    assert scrape_gate_identity(MENU_PANE) == (None, None)
 
 
 def test_detects_edit_permission_prompt():

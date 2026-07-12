@@ -215,6 +215,23 @@ class BotSender:
         log.warning("telegram editMessageText failed: %s", desc or resp)
         return False
 
+    def delete(self, message_id: int) -> bool:
+        """``deleteMessage`` — poof an interactive prompt once it is answered.
+
+        The pane watcher deletes the question / plan / permission message it posted
+        as soon as the prompt leaves the pane: its buttons would otherwise stay
+        tappable and fire keystrokes at whatever the agent went on to do. A failure
+        (already deleted, too old to delete) is logged and reported, never raised —
+        the watcher has already dropped its tracking either way.
+        """
+        resp = self._transport(
+            "deleteMessage", {"chat_id": self._chat_id, "message_id": message_id}
+        )
+        if resp.get("ok"):
+            return True
+        log.warning("telegram deleteMessage failed: %s", resp.get("description", resp))
+        return False
+
 
 class TelegramRelay:
     """Renders each new message to MarkdownV2 and posts it, plain-text on failure.

@@ -4,7 +4,11 @@ Three kinds of blocked-agent prompt are rendered only in Claude Code's live TUI
 and must be read off the tmux pane rather than the JSONL transcript:
 
 * a tool **permission gate** ("Do you want to proceed?" for a Bash/Edit) — never
-  in the transcript at all (:func:`detect_permission_gate`);
+  in the transcript at all (:func:`detect_permission_gate`). Its *identity* (which
+  command it wants to run) is scraped from the dialog too
+  (:func:`scrape_gate_identity`): the gated call's ``tool_use`` is appended to the
+  JSONL only once the human answers, so during the gate the pane is the one place
+  the command exists;
 * an **AskUserQuestion** selector — measured live to land in the transcript only
   once the question is *answered* (the ``tool_use`` record is appended at
   answer-time, not while the selector is pending), so a transcript-triggered relay
@@ -39,12 +43,21 @@ class Gate:
     """A detected permission/approval gate.
 
     ``text`` is the extracted pane region (top→bottom marker, inclusive), used as
-    the relay fallback when the transcript identity is unavailable. ``kind`` is
-    the matching pattern's tag (``"PermissionPrompt"`` / ``"BashApproval"``).
+    the relay fallback when no identity could be scraped. ``kind`` is the matching
+    pattern's tag (``"PermissionPrompt"`` / ``"BashApproval"``).
+
+    ``tool``/``detail`` are the gate's identity scraped from the pane (``"Bash"`` /
+    ``"rm -rf build/"``, ``"Edit"`` / ``"src/app.py"``) — see
+    :func:`scrape_gate_identity`. The pane is the only place they exist while the
+    gate is pending: Claude Code appends the gated call's ``tool_use`` to the
+    transcript only once the human answers, so a transcript lookup during the gate
+    finds nothing (or, worse, some *other* still-unpaired call).
     """
 
     text: str
     kind: str
+    tool: str | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,12 +157,71 @@ def _try_extract(lines: list[str], pattern: _UIPattern) -> str | None:
     return _shorten_separators(region)
 
 
+# ── The gate's identity (what is it asking permission FOR) ───────────────
+#
+# Claude Code heads a permission dialog with the call it wants to make, above the
+# "Do you want to proceed?" line::
+#
+#      Bash command
+#        rm -rf build/
+#        Remove the build directory
+#
+#      Do you want to proceed?
+#
+# The header names the tool and the indented block under it is the command (a
+# multi-line command keeps rendering until the blank line before the prompt; the
+# last line is the human-readable description Claude wrote, which we keep — it is
+# usually one short line and it is what makes the relayed gate readable).
+#
+# The file tools head their dialog the same way ("Edit file" / "Create file" …);
+# when there is no header at all, the prompt itself names the file ("Do you want
+# to make this edit to app.py?").
+_RE_GATE_HEADER = re.compile(r"^\s*(Bash) command\s*$|^\s*(Edit|Create|Write|Read) file\s*$")
+_RE_GATE_FILE_PROMPT = re.compile(
+    r"^\s*Do you want to (?:make this edit to|create|delete)\s+(\S+?)\??\s*$"
+)
+# Where the identity block ends — the prompt line that follows it.
+_RE_GATE_PROMPT = re.compile(r"^\s*(Do you want to|This command requires approval)")
+
+
+def scrape_gate_identity(pane_text: str) -> tuple[str | None, str | None]:
+    """The ``(tool, detail)`` a permission gate is asking about, scraped from the pane.
+
+    Reads the dialog header ("Bash command" → ``("Bash", "rm -rf build/")``,
+    "Edit file" → ``("Edit", "src/app.py")``) or, absent a header, the file named
+    in the prompt itself ("Do you want to make this edit to app.py?"). Either half
+    may be ``None`` — the caller then falls back to the scraped region text, so an
+    unrecognised dialog still relays *something* a human can act on.
+    """
+    lines = pane_text.split("\n")
+    for i, line in enumerate(lines):
+        m = _RE_GATE_HEADER.match(line)
+        if not m:
+            continue
+        tool = m.group(1) or m.group(2)
+        body: list[str] = []
+        for nxt in lines[i + 1 :]:
+            if _RE_GATE_PROMPT.match(nxt):
+                break
+            stripped = nxt.strip()
+            if stripped:
+                body.append(stripped)
+        return tool, " · ".join(body) or None
+
+    for line in lines:
+        m = _RE_GATE_FILE_PROMPT.match(line)
+        if m:
+            return "Edit", m.group(1)
+    return None, None
+
+
 def detect_permission_gate(pane_text: str) -> Gate | None:
     """Detect a permission/approval gate in captured pane text.
 
     Tries each pattern in :data:`GATE_PATTERNS` in declaration order; first match
-    wins. Returns a :class:`Gate` with the region text + kind, or ``None`` when
-    the pane shows no recognizable gate (a normal / working pane).
+    wins. Returns a :class:`Gate` with the region text + kind + the scraped
+    identity (:func:`scrape_gate_identity`), or ``None`` when the pane shows no
+    recognizable gate (a normal / working pane).
     """
     if not pane_text:
         return None
@@ -158,7 +230,8 @@ def detect_permission_gate(pane_text: str) -> Gate | None:
     for pattern in GATE_PATTERNS:
         region = _try_extract(lines, pattern)
         if region is not None:
-            return Gate(text=region, kind=pattern.name)
+            tool, detail = scrape_gate_identity(pane_text)
+            return Gate(text=region, kind=pattern.name, tool=tool, detail=detail)
     return None
 
 
