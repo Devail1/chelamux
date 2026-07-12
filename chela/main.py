@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from chela import (
@@ -277,11 +278,62 @@ def cmd_dispatch(args) -> None:
         time.sleep(interval)
 
 
+def _filter_runs(runs: list[dict], status: str | None) -> list[dict]:
+    """Runs in ``status`` (exact match), or all runs when ``status`` is None.
+
+    Reuses the single ``dispatcher.list_runs()`` source of truth — the filter is
+    a pure view over it, never a second query."""
+    if not status:
+        return runs
+    return [r for r in runs if r.get("status") == status]
+
+
+def _run_age_str(started_at: str | None, *, now: datetime | None = None) -> str:
+    """Coarse human age (``s``/``m``/``h``/``d``) from an ISO ``started_at``.
+
+    ``?`` when the timestamp is missing/unparseable. ``now`` is injectable so the
+    formatting is deterministically testable."""
+    dt = dispatcher._parse_ts(started_at)
+    if dt is None:
+        return "?"
+    now = now or datetime.now(timezone.utc)
+    secs = max(0, int((now - dt).total_seconds()))
+    if secs < 60:
+        return f"{secs}s"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m"
+    hrs = mins // 60
+    if hrs < 24:
+        return f"{hrs}h"
+    return f"{hrs // 24}d"
+
+
+def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:
+    """One line for the status-filtered view: task id, status, age, PR URL, title."""
+    task_id = r.get("task_id") or "-"
+    status = r.get("status") or "-"
+    age = _run_age_str(r.get("started_at"), now=now)
+    pr = r.get("pr_url") or "-"
+    title = (r.get("title") or "")[:50]
+    return f"  {task_id}  {status:<16}  age={age:<5}  {pr:<45}  {title}"
+
+
 def cmd_dispatch_runs(args) -> None:
-    """Show dispatcher runs."""
-    runs = dispatcher.list_runs()
+    """Show dispatcher runs, optionally filtered by status.
+
+    ``--awaiting`` is shorthand for ``--status awaiting_review`` — the "what's up
+    for review?" view: only runs blocked on a human, each with its PR URL + age,
+    so the orchestrator can answer on demand without polling the dashboard.
+    """
+    status = "awaiting_review" if getattr(args, "awaiting", False) else getattr(args, "status", None)
+    runs = _filter_runs(dispatcher.list_runs(), status)
     if not runs:
-        print("No runs")
+        print(f"No runs in status {status!r}" if status else "No runs")
+        return
+    if status:
+        for r in runs:
+            print(_format_awaiting_run(r))
         return
     for r in runs:
         title = (r["title"] or "")[:60]
@@ -666,7 +718,15 @@ def main() -> None:
     )
 
     # dispatch-runs (inspection)
-    sub.add_parser("dispatch-runs", help="List dispatcher runs")
+    p_runs = sub.add_parser("dispatch-runs", help="List dispatcher runs")
+    p_runs.add_argument(
+        "--status", default=None,
+        help="Only show runs in this status (e.g. awaiting_review, running, failed, done)",
+    )
+    p_runs.add_argument(
+        "--awaiting", action="store_true",
+        help="Shorthand for --status awaiting_review — runs waiting on human review, with PR URL + age",
+    )
 
     # knowledge — export the fleet's knowledge as an OKF bundle (local data; see docs/OKF.md)
     p_know = sub.add_parser("knowledge", help="Export fleet knowledge as an OKF bundle")

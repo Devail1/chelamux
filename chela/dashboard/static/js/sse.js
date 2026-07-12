@@ -1,8 +1,9 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, TERMINALS_ON, _agentsCache, api, currentTab, setAgentsCache } from './util.js';
+import { $, BASE_PATH, TERMINALS_ON, _agentsCache, api, attrEsc, currentTab, escHtml, setAgentsCache } from './util.js';
 import { refreshAgents } from './agents.js';
 import { refreshDispatcher } from './dispatcher.js';
 import { refreshKanban } from './kanban.js';
+import { RUN_TOAST_KINDS, runToastKind } from './runtoast.js';
 import { _absorbFreshTerminals, _cssEsc, _refreshPaneLabels, _renderedWids, _stopReadyPoll, _swapToFrame, _termReady, dropTerminalPane } from './terminals.js';
 
 // ---------------------------------------------------------------------------
@@ -46,11 +47,70 @@ function _sseWindows(d) {
     }
 }
 
-function _sseRuns() {
-    // A dispatcher run's status / PR state changed — redraw whichever board is
-    // showing it. Both refetch /api/dispatcher and fully re-render.
+function _sseRuns(d) {
+    // A dispatcher run's status / PR state changed. First fire any run-state
+    // toasts (works regardless of the active tab), then redraw whichever board
+    // is showing it. Both refetch /api/dispatcher and fully re-render.
+    _runStateToasts(d);
     if (currentTab === 'dispatcher') refreshDispatcher();
     else if (currentTab === 'kanban') refreshKanban();
+}
+
+// Per-run last-seen status, so the toast is EDGE-TRIGGERED (fires only on the
+// transition, not on every ~1s poll that carries an unrelated pr_state change).
+// Primed from the SSE `hello` baseline so a run already in awaiting_review when
+// the page loads / reconnects is recorded — not re-toasted.
+const _prevRunStatus = new Map();
+
+function _primeRunStatus(d) {
+    (d && d.runs || []).forEach(r => {
+        if (r && r.task_id) _prevRunStatus.set(r.task_id, r.status);
+    });
+}
+
+function _runToastsMuted() {
+    // Hung off the Notifications settings entry; persisted like other prefs.
+    try { return localStorage.getItem('chela_mute_run_toasts') === '1'; }
+    catch (e) { return false; }
+}
+
+function _runStateToasts(d) {
+    (d && d.runs || []).forEach(r => {
+        if (!r || !r.task_id) return;
+        const prev = _prevRunStatus.get(r.task_id);
+        _prevRunStatus.set(r.task_id, r.status);
+        const kind = runToastKind(prev, r.status);
+        if (!kind || _runToastsMuted()) return;
+        _runReviewToast(r, kind);
+    });
+}
+
+function _runReviewToast(r, kind) {
+    // Floating, click-to-dismiss toast reusing the .kanban-toast surface, stacked
+    // bottom-right via #run-toast-stack so several transitions don't overlap. The
+    // PR link (when present) lets the viewer jump straight to review.
+    const meta = RUN_TOAST_KINDS[kind];
+    let stack = $('#run-toast-stack');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'run-toast-stack';
+        stack.className = 'run-toast-stack';
+        document.body.appendChild(stack);
+    }
+    const label = r.label || r.task_id || 'run';
+    const toast = document.createElement('div');
+    toast.className = 'run-toast';
+    let html = `${meta.icon} <strong>${escHtml(label)}</strong> → ${escHtml(meta.text)}`;
+    if (r.pr_url) {
+        // Link click dismisses on its own navigation; stop it re-triggering the
+        // toast's click-to-dismiss so the href actually opens.
+        html += ` · <a href="${attrEsc(r.pr_url)}" target="_blank" rel="noopener"
+                       onclick="event.stopPropagation()">PR</a>`;
+    }
+    toast.innerHTML = html;
+    toast.onclick = () => toast.remove();
+    stack.appendChild(toast);
+    setTimeout(() => { toast.remove(); }, 15000);
 }
 
 function _sseTermReady(d) {
@@ -79,12 +139,21 @@ function initSSE() {
         console.warn('SSE unavailable, polling-only:', e);
         return;
     }
+    _sse.addEventListener('hello', e => {
+        let d = null;
+        try { d = JSON.parse(e.data); } catch (_) { /* baseline optional */ }
+        _primeRunStatus(d);
+    });
     _sse.addEventListener('windows', e => {
         let d = null;
         try { d = JSON.parse(e.data); } catch (_) { /* trigger-only */ }
         _sseWindows(d);
     });
-    _sse.addEventListener('runs', () => _sseRuns());
+    _sse.addEventListener('runs', e => {
+        let d = null;
+        try { d = JSON.parse(e.data); } catch (_) { /* trigger-only */ }
+        _sseRuns(d);
+    });
     _sse.addEventListener('term-ready', e => {
         let d = null;
         try { d = JSON.parse(e.data); } catch (_) { /* trigger-only */ }

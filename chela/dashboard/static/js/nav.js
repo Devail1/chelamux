@@ -409,6 +409,7 @@ function renderSettings(focus) {
     const termSize = localStorage.getItem('chela_term_fontsize') || '14';
     const collabName = localStorage.getItem('chela_collab_name') || '';
     const collabAuto = localStorage.getItem('chela_collab_autoname') || 'auto-assigned';
+    const runToastsMuted = localStorage.getItem('chela_mute_run_toasts') === '1';
     body.innerHTML = `
         <section class="settings-section" id="settings-status">
             <h4>Connections &amp; Status</h4>
@@ -433,6 +434,16 @@ function renderSettings(focus) {
             <h4>Needs-input notifications</h4>
             <p class="s-desc">Fires a one-shot ping when an agent's pane enters
             <code>waiting</code> (blocked on a prompt or question).</p>
+            <div class="s-row">
+                <span class="s-rowlabel">Review toasts</span>
+                <select id="run-toasts-select" class="s-select" onchange="chela.setRunToastsMuted(this.value)">
+                    <option value="show"${runToastsMuted ? '' : ' selected'}>Show</option>
+                    <option value="muted"${runToastsMuted ? ' selected' : ''}>Muted</option>
+                </select>
+            </div>
+            <p class="s-desc">Pop a dashboard toast when a dispatcher run turns
+            <code>awaiting_review</code> (or done / failed) — so you learn a run
+            needs review without watching the board.</p>
             <p class="s-desc">Set on the daemon (env), then restart <code>chela run</code>:</p>
             <div class="s-kv"><code>CHELA_NOTIFY_URL</code><span>ntfy / Telegram / webhook (auto-detected)</span></div>
             <div class="s-examples">
@@ -664,6 +675,12 @@ function setTermFont(v) {
 function setTermSize(v) {
     localStorage.setItem('chela_term_fontsize', v);
     applyTermPrefsToIframes();
+}
+
+// Mute / unmute the dispatcher run-state review toasts (sse.js reads this key).
+function setRunToastsMuted(v) {
+    if (v === 'muted') localStorage.setItem('chela_mute_run_toasts', '1');
+    else localStorage.removeItem('chela_mute_run_toasts');
 }
 
 function applyTermPrefsToIframes() {
@@ -920,4 +937,4 @@ export { openPalette, refreshSidebar, renderAgentDetail, renderSidebarAgents, se
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentFilter, setCollabName, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentFilter, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
