@@ -2219,6 +2219,33 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .s-badge.on { color: var(--green); border-color: var(--green); }
 .s-badge.off { color: var(--text-dim); }
 
+/* Live "Connections & Status" surface — READ-ONLY status rows.
+   Colorblind-safe: the ●/○ glyph + the state word carry the state; colour is a
+   secondary hint only (Liav is red-weak). */
+.s-status-list { display: flex; flex-direction: column; gap: 12px; }
+.s-status-group { display: flex; flex-direction: column; gap: 6px; }
+.s-status-grouphead {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-dim);
+}
+.s-status-row {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    font-size: 12px;
+}
+.s-status-badge {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px;
+    min-width: 92px; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-dim);
+}
+.s-status-badge.on { color: var(--green); border-color: var(--green); }
+.s-status-dot { font-size: 9px; line-height: 1; }
+.s-status-label { color: var(--text); flex: 0 0 auto; }
+.s-status-detail {
+    color: var(--text-dim); font-size: 11px; word-break: break-all;
+    flex: 1 1 auto; min-width: 0; text-align: right;
+}
+
 /* --- "+ new" popover --- */
 .popover {
     position: fixed; z-index: 60; min-width: 152px;

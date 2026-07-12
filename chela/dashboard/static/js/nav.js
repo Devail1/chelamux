@@ -410,6 +410,11 @@ function renderSettings(focus) {
     const collabName = localStorage.getItem('chela_collab_name') || '';
     const collabAuto = localStorage.getItem('chela_collab_autoname') || 'auto-assigned';
     body.innerHTML = `
+        <section class="settings-section" id="settings-status">
+            <h4>Connections &amp; Status</h4>
+            <div class="s-status-list"><div class="s-desc">Loading…</div></div>
+        </section>
+
         <section class="settings-section">
             <h4>Projects folder</h4>
             <p class="s-desc">Scanned for git repos to suggest in the <strong>Launch</strong>
@@ -512,19 +517,48 @@ function renderSettings(focus) {
             is a zero-knowledge fan-out that only ever sees ciphertext (keys are derived in your
             browser from the pairing code). It does see room names + traffic timing (metadata) —
             run your own relay for full metadata privacy.</p>
-        </section>
-
-        <section class="settings-section">
-            <h4>Terminal wall</h4>
-            <div class="s-row">
-                <span class="s-rowlabel">Embedded ttyd wall</span>
-                <span class="s-badge ${TERMINALS_ON ? 'on' : 'off'}">${TERMINALS_ON ? 'Enabled' : 'Off'}</span>
-            </div>
-            <p class="s-desc">Streams live when on. Toggle with <code>CHELA_TERMINALS_ENABLED</code>.</p>
         </section>`;
     if (focus === 'notify') body.scrollTop = 0;
     _loadProjectsSetting();
     _loadCollabSetting();
+    _loadSettingsStatus();
+}
+
+// Live "Connections & Status" surface (READ-ONLY). Fetches /api/settings and
+// renders each section's items as rows with a colorblind-safe status badge:
+// ●/○ SHAPE + a text label ("Connected" / "Off"), never colour alone — Liav is
+// red-weak, so the glyph and word carry the state and colour is only a hint.
+async function _loadSettingsStatus() {
+    const host = document.querySelector('#settings-status .s-status-list');
+    if (!host) return;
+    let data;
+    try {
+        data = await api('/api/settings');
+    } catch (e) {
+        host.innerHTML = '<div class="s-desc">Status unavailable.</div>';
+        return;
+    }
+    const sections = (data && data.sections) || [];
+    if (!sections.length) { host.innerHTML = '<div class="s-desc">No status.</div>'; return; }
+    host.innerHTML = sections.map(sec => `
+        <div class="s-status-group">
+            <div class="s-status-grouphead">${escHtml(sec.title || '')}</div>
+            ${(sec.items || []).map(_statusRowHtml).join('')}
+        </div>`).join('');
+}
+
+function _statusRowHtml(it) {
+    const on = !!it.on;
+    // ●/○ shape carries the on/off state independently of colour (Liav red-weak).
+    const glyph = on ? '●' : '○';
+    const detail = it.detail ? `<span class="s-status-detail" title="${attrEsc(it.detail)}">${escHtml(it.detail)}</span>` : '';
+    return `<div class="s-status-row">
+        <span class="s-status-badge ${on ? 'on' : 'off'}">
+            <span class="s-status-dot" aria-hidden="true">${glyph}</span>${escHtml(it.state || '')}
+        </span>
+        <span class="s-status-label">${escHtml(it.label || '')}</span>
+        ${detail}
+    </div>`;
 }
 
 // Persistent collab display name (per browser). Empty → clear → presence.js falls
