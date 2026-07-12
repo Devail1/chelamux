@@ -118,24 +118,37 @@ def capture_pane(window_id: str, *, ansi: bool = False) -> str:
     return out.stdout if out.returncode == 0 else ""
 
 
+def send_key(window_id: str, key: str) -> bool:
+    """Send a single tmux key press (``Up``, ``C-c``, ``Space``…) to ``window_id``.
+
+    The generic primitive behind the Telegram bridge's ``/screenshot`` control-key
+    keyboard: each tapped button maps to a tmux ``send-keys`` key *name* delivered
+    here, so an operator can drive the bound terminal from their phone. ``key`` is
+    a tmux key name — no Enter is appended (``Enter`` is itself a valid key name,
+    so the caller asks for it explicitly). Read-only otherwise; returns True on
+    success, False if tmux errors.
+    """
+    target = f"{config.current_session()}:{window_id}"
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, key],
+            check=True, capture_output=True,
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        log.error("tmux send-keys %s failed for %s: %s", key, window_id, e.stderr.decode())
+        return False
+
+
 def send_escape(window_id: str) -> bool:
     """Send a single Escape keypress to ``window_id`` (no Enter). True on success.
 
     Mirrors the Escape :func:`send_tmux` fires before a slash command, exposed
     on its own for the bridge's ``/esc`` command: it interrupts an in-progress
     Claude Code response and returns the window to its prompt without submitting
-    anything.
+    anything. A thin alias for :func:`send_key` with the ``Escape`` key name.
     """
-    target = f"{config.current_session()}:{window_id}"
-    try:
-        subprocess.run(
-            ["tmux", "send-keys", "-t", target, "Escape"],
-            check=True, capture_output=True,
-        )
-        return True
-    except subprocess.CalledProcessError as e:
-        log.error("tmux Escape failed for %s: %s", window_id, e.stderr.decode())
-        return False
+    return send_key(window_id, "Escape")
 
 
 def send_message(from_agent: str, to_agent: str, message: str, priority: str = "normal") -> bool:

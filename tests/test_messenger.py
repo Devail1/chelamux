@@ -127,6 +127,27 @@ def test_capture_pane_returns_empty_on_error():
         assert messenger.capture_pane("@2") == ""
 
 
+def test_send_key_sends_named_key_without_enter():
+    # The control-key keyboard's tmux primitive: a bare key name, no Enter.
+    with patch.object(messenger.subprocess, "run", return_value=_FakeResult()) as m, \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.send_key("@2", "C-c") is True
+    assert _cmds(m.call_args_list) == [
+        ["tmux", "send-keys", "-t", "chela:@2", "C-c"]
+    ]
+
+
+def test_send_key_returns_false_on_tmux_error():
+    import subprocess
+
+    def boom(cmd, *a, **kw):
+        raise subprocess.CalledProcessError(1, cmd, stderr=b"no server")
+
+    with patch.object(messenger.subprocess, "run", side_effect=boom), \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.send_key("@2", "Up") is False
+
+
 def test_send_escape_sends_escape_without_enter():
     with patch.object(messenger.subprocess, "run", return_value=_FakeResult()) as m, \
             patch.object(messenger.config, "current_session", return_value="chela"):

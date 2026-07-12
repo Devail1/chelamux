@@ -51,7 +51,7 @@ Sender = Callable[[str, str], bool]
 # ``/command`` falls through to the window's Claude Code prompt via send_tmux.
 # ``(name, description)`` pairs — descriptions are what Telegram shows in the menu.
 BRIDGE_COMMANDS: list[tuple[str, str]] = [
-    ("screenshot", "Snapshot the agent's terminal pane"),
+    ("screenshot", "Snapshot the terminal (with control keys)"),
     ("esc", "Send Escape to interrupt the agent"),
 ]
 
@@ -59,6 +59,31 @@ BRIDGE_COMMANDS: list[tuple[str, str]] = [
 # ``/screenshot`` reply stays under Telegram's 4096-char per-message limit
 # (with headroom for the code-fence markup).
 _SNAPSHOT_MAX_CHARS = 3500
+
+# The control-key inline keyboard attached to every ``/screenshot`` reply, so an
+# operator can drive the bound terminal from Telegram (ccbot's "with control
+# keys" parity). Each entry is ``(label, key_id, tmux_key)``: the button caption,
+# the id packed into the callback payload, and the tmux ``send-keys`` key name
+# delivered on a tap. Rows render exactly as grouped here (3 keys per row).
+SCREENSHOT_KEYS: list[list[tuple[str, str, str]]] = [
+    [("␣ Space", "spc", "Space"), ("↑", "up", "Up"), ("⇥ Tab", "tab", "Tab")],
+    [("← Left", "lt", "Left"), ("↓ Down", "dn", "Down"), ("→ Right", "rt", "Right")],
+    [("⎋ Esc", "esc", "Escape"), ("^C", "cc", "C-c"), ("⏎ Enter", "ent", "Enter")],
+]
+
+# Callback-data prefix marking a control-key tap from the screenshot keyboard,
+# so the single CallbackQueryHandler can tell these taps from any other.
+_KEY_CB_PREFIX = "k:"
+
+# key_id → (tmux key name, toast label), flattened from :data:`SCREENSHOT_KEYS`
+# so a button and the key it fires can never drift apart. The callback handler
+# looks a tapped ``key_id`` up here; the target window is re-resolved from the
+# message's topic (never trusted from the payload), so no window id is packed in.
+_KEY_ACTIONS: dict[str, tuple[str, str]] = {
+    key_id: (tmux_key, label)
+    for row in SCREENSHOT_KEYS
+    for (label, key_id, tmux_key) in row
+}
 
 
 class TopicRouter:
@@ -179,6 +204,7 @@ def build_application(
     on_topic_closed=None,
     capture=None,
     send_escape=None,
+    send_key=None,
 ):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
@@ -196,14 +222,21 @@ def build_application(
     menu. PTB is imported here (not at module load) so this module — and the pure
     router — do not require the optional ``[telegram]`` extra.
 
-    ``capture`` / ``send_escape`` back the two commands: ``/screenshot`` captures
-    ``capture(window_id, ansi=True)`` (default :func:`chela.messenger.capture_pane`)
-    and replies with a PNG rendered by :func:`chela.telegram.screenshot.text_to_image`
-    (a monospaced text block if Pillow is unavailable), while ``/esc`` fires
-    ``send_escape(window_id)`` (default :func:`chela.messenger.send_escape`). Both
-    resolve the target window through ``router.resolve``, so they honour the exact
-    same chat/topic gate as a routed message and stay silent for messages outside
-    it — and reply into the SAME forum topic. Injectable for testing.
+    ``capture`` / ``send_escape`` / ``send_key`` back the commands: ``/screenshot``
+    captures ``capture(window_id, ansi=True)`` (default
+    :func:`chela.messenger.capture_pane`) and replies with a PNG rendered by
+    :func:`chela.telegram.screenshot.text_to_image` (a monospaced text block if
+    Pillow is unavailable), carrying an :class:`~telegram.InlineKeyboardMarkup` of
+    control keys (:data:`SCREENSHOT_KEYS`) so an operator can drive the terminal
+    from their phone; ``/esc`` fires ``send_escape(window_id)`` (default
+    :func:`chela.messenger.send_escape`). Tapping a control key routes through a
+    single :class:`~telegram.ext.CallbackQueryHandler` that fires
+    ``send_key(window_id, tmux_key)`` (default :func:`chela.messenger.send_key`)
+    and refreshes the snapshot in place. Every path resolves its target window
+    through ``router.resolve`` — the callback re-resolves from the keyboard
+    message's topic and never trusts a window id off the wire — so they honour the
+    exact same chat/topic gate as a routed message, stay silent outside it, and
+    reply into the SAME forum topic. Injectable for testing.
 
     ``on_topic_closed`` (optional) is a callable ``(thread_id) -> None`` invoked on
     a ``StatusUpdate.FORUM_TOPIC_CLOSED`` service message — Slice B's auto-topics
@@ -212,9 +245,15 @@ def build_application(
     ``None`` (single-topic / manual bindings), no such handler is registered.
     """
     try:
-        from telegram import BotCommand
+        from telegram import (
+            BotCommand,
+            InlineKeyboardButton,
+            InlineKeyboardMarkup,
+            InputMediaPhoto,
+        )
         from telegram.ext import (
             Application,
+            CallbackQueryHandler,
             CommandHandler,
             ContextTypes,
             MessageHandler,
@@ -229,6 +268,19 @@ def build_application(
 
     capture = capture or messenger.capture_pane
     send_escape = send_escape or messenger.send_escape
+    send_key = send_key or messenger.send_key
+
+    def _screenshot_keyboard() -> "InlineKeyboardMarkup":
+        """The control-key keyboard attached to every ``/screenshot`` reply."""
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(label, callback_data=f"{_KEY_CB_PREFIX}{key_id}")
+                    for (label, key_id, _tmux) in row
+                ]
+                for row in SCREENSHOT_KEYS
+            ]
+        )
 
     def _window_for(update) -> "str | None":
         """Resolve the bound window for a command update through the chat gate."""
@@ -258,14 +310,18 @@ def build_application(
 
         Trims to the most recent output so a single reply stays under Telegram's
         4096-char limit, and drops to plain text if the MarkdownV2 code fence is
-        rejected.
+        rejected. Carries the same control-key keyboard as the PNG reply so the
+        keys still drive the terminal when Pillow is absent.
         """
         body = pane.rstrip("\n")[-_SNAPSHOT_MAX_CHARS:]
+        keyboard = _screenshot_keyboard()
         try:
-            await msg.reply_text(to_code_block(body), parse_mode="MarkdownV2")
+            await msg.reply_text(
+                to_code_block(body), parse_mode="MarkdownV2", reply_markup=keyboard
+            )
         except Exception:  # MarkdownV2 edge case — resend as plain text
             log.debug("MarkdownV2 screenshot rejected; sending plain", exc_info=True)
-            await msg.reply_text(body)
+            await msg.reply_text(body, reply_markup=keyboard)
 
     async def _on_screenshot(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
         msg = update.message
@@ -291,8 +347,13 @@ def build_application(
         try:
             png = await asyncio.to_thread(text_to_image, pane)
             # reply_photo inherits the message's forum topic, so the PNG lands
-            # back in the SAME topic the command arrived on.
-            await msg.reply_photo(photo=io.BytesIO(png), filename="screenshot.png")
+            # back in the SAME topic the command arrived on; the control-key
+            # keyboard rides along so the terminal can be driven from the reply.
+            await msg.reply_photo(
+                photo=io.BytesIO(png),
+                filename="screenshot.png",
+                reply_markup=_screenshot_keyboard(),
+            )
         except Exception:  # rendering/upload failed — fall back to text
             log.exception("screenshot render failed for %s; sending text", window_id)
             await _reply_text_snapshot(msg, pane)
@@ -306,6 +367,53 @@ def build_application(
             return
         ok = send_escape(window_id)
         await msg.reply_text("⎋ Sent Escape" if ok else "❌ Couldn't send Escape.")
+
+    async def _on_key(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Deliver a tapped control key to the window bound to the keyboard's topic.
+
+        The target window is re-resolved from the callback message's own topic
+        via ``router.resolve`` (never trusted from the callback payload), so a tap
+        honours the same chat/topic gate as ``/screenshot`` itself. The tap is
+        always answered — even when gated out or unknown — so Telegram stops the
+        button's spinner. On a successful key press the snapshot is refreshed in
+        place (best-effort) so the terminal's reaction is visible.
+        """
+        query = update.callback_query
+        if query is None:
+            return
+        data = query.data or ""
+        if not data.startswith(_KEY_CB_PREFIX):
+            return  # not ours — some other inline keyboard
+        action = _KEY_ACTIONS.get(data[len(_KEY_CB_PREFIX):])
+        msg = query.message
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        thread_id = getattr(msg, "message_thread_id", None) if msg else None
+        window_id = router.resolve(chat_id, thread_id)
+        if window_id is None or action is None:  # wrong chat/topic or bad payload
+            await query.answer()
+            return
+        tmux_key, label = action
+        ok = send_key(window_id, tmux_key)
+        await query.answer(label if ok else "❌ send failed")
+        if not ok or msg is None:
+            return
+        # Best-effort refresh so the keypress's effect shows without re-running
+        # /screenshot — the whole point of driving the terminal from a phone.
+        try:
+            from chela.telegram.screenshot import text_to_image
+
+            await asyncio.sleep(0.4)  # let the pane repaint after the keystroke
+            pane = capture(window_id, ansi=True)
+            if not pane.strip():
+                return
+            png = await asyncio.to_thread(text_to_image, pane)
+            await query.edit_message_media(
+                media=InputMediaPhoto(io.BytesIO(png)),
+                reply_markup=_screenshot_keyboard(),
+            )
+        except Exception:  # unchanged pane, stale message, or no Pillow — ignore
+            log.debug("snapshot refresh after keypress failed", exc_info=True)
 
     async def _post_init(app) -> None:
         """Publish the bridge commands to Telegram's "/" autocomplete menu."""
@@ -321,6 +429,8 @@ def build_application(
     # catch-all text handler forwards every other message (and /command) onward.
     application.add_handler(CommandHandler("screenshot", _on_screenshot))
     application.add_handler(CommandHandler("esc", _on_esc))
+    # Control-key taps from the /screenshot keyboard (callback queries, not text).
+    application.add_handler(CallbackQueryHandler(_on_key))
     application.add_handler(MessageHandler(filters.TEXT, _on_message))
 
     if on_topic_closed is not None:
