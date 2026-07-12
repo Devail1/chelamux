@@ -15,11 +15,14 @@ calls:
 """
 from __future__ import annotations
 
+import os
+
 from chela.telegram.bindings import BindingRegistry
 from chela.telegram.reconcile import (
     TopicClosedHandler,
     TopicManager,
     reconcile_bindings,
+    topic_name_for,
 )
 
 
@@ -212,3 +215,60 @@ def test_topic_manager_close_reports_success_and_failure():
         return {"ok": False, "description": "TOPIC_ID_INVALID"}
 
     assert TopicManager("tok", "777", transport=failing).close_topic(42) is False
+
+
+# --------------------------------------------------------------------------
+# topic_name_for — name a topic after the agent's project, not the tmux window
+# --------------------------------------------------------------------------
+
+def test_topic_name_for_project_path_returns_basename():
+    # A project cwd → its basename, so "shell-1" reads as the real project.
+    assert topic_name_for("/home/liav/projects/chelamux", "shell-1") == "chelamux"
+
+
+def test_topic_name_for_strips_trailing_slash():
+    assert topic_name_for("/home/liav/projects/nautilus/", "shell-2") == "nautilus"
+
+
+def test_topic_name_for_home_dir_falls_back_to_window_name():
+    # A ~-rooted session must NOT become the login-name basename (e.g. "liavedunix").
+    assert topic_name_for(os.path.expanduser("~"), "orchestrator") == "orchestrator"
+
+
+def test_topic_name_for_root_falls_back_to_window_name():
+    assert topic_name_for("/", "shell-3") == "shell-3"
+
+
+def test_topic_name_for_empty_or_none_falls_back_to_window_name():
+    assert topic_name_for("", "shell-4") == "shell-4"
+    assert topic_name_for(None, "shell-4") == "shell-4"
+
+
+def test_reconcile_names_topic_after_project_when_cwd_for_given():
+    # With a cwd resolver injected, the topic is named for the agent's project.
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42"])
+    cwds = {"@3": "/home/liav/projects/chelamux"}
+    changed = reconcile_bindings(
+        reg, {"@3": "shell-1"}, {"@3"}, api, cwd_for=cwds.get
+    )
+    assert changed is True
+    assert api.created == ["chelamux"]          # project basename, not "shell-1"
+    assert reg.thread_for_window("@3") == "42"
+
+
+def test_reconcile_falls_back_to_window_name_for_home_cwd():
+    # A ~-rooted agent keeps its (meaningful) tmux window name.
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42"])
+    cwds = {"@3": os.path.expanduser("~")}
+    reconcile_bindings(reg, {"@3": "orchestrator"}, {"@3"}, api, cwd_for=cwds.get)
+    assert api.created == ["orchestrator"]
+
+
+def test_reconcile_without_cwd_for_uses_window_name():
+    # No resolver injected (back-compat) → topic named after the window as before.
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42"])
+    reconcile_bindings(reg, {"@3": "coder"}, {"@3"}, api)
+    assert api.created == ["coder"]

@@ -375,12 +375,13 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
     reconciles before we advertise. Idempotent, so a missed/duplicated tick is
     harmless.
     """
+    from chela.discovery import get_window_cwd_by_id
     from chela.telegram import live_agent_windows, reconcile_bindings
 
     while not stop.is_set():
         try:
             live, agents = live_agent_windows()
-            if reconcile_bindings(registry, live, agents, topic_api):
+            if reconcile_bindings(registry, live, agents, topic_api, cwd_for=get_window_cwd_by_id):
                 registry.save()
                 log.info("auto-topics: now bridging %s", ", ".join(registry.windows()) or "(none)")
         except Exception:
