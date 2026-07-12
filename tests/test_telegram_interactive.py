@@ -12,8 +12,10 @@ data, so these lock in
     longer builds any keyboard (Slice A2 + B2; both transcript records are
     post-answer);
   * one semantic ``qa:<i>`` button per scraped option, index-only within
-    Telegram's 64-byte cap, then the nav row; nav-only for the fallback shape;
-  * the ExitPlanMode approve / keep-planning buttons (Enter / Escape) + nav row;
+    Telegram's 64-byte cap, then ⎋ alone; the full nav row only for the fallback
+    shape that has no semantic buttons at all (Slice C2);
+  * the ExitPlanMode approve / keep-planning and the permission allow / deny
+    buttons — both pairs of option-count-independent Enter / Escape keystrokes;
   * cursor-relative select-and-submit keystrokes (never a blind Down×i);
   * decode round-trips (select / nav-key / refresh) and rejects junk payloads.
 """
@@ -26,6 +28,7 @@ from chela.telegram.interactive import (
     ask_reply_markup,
     decode_callback,
     nav_only_markup,
+    permission_reply_markup,
     plan_reply_markup,
     scraped_reply_markup,
     select_keystrokes,
@@ -79,13 +82,15 @@ def test_cursor_relative_keystrokes_move_down_up_or_stay():
 # scraped_reply_markup / nav_only_markup — the pane-triggered keyboards
 # --------------------------------------------------------------------------
 
-def test_scraped_markup_one_semantic_button_per_option_then_nav():
+def test_scraped_markup_one_semantic_button_per_option_then_esc_only():
     markup = scraped_reply_markup(["main", "dev"])
-    # One index-only semantic row per scraped option, then the nav row.
+    # One index-only semantic row per scraped option …
     assert markup["inline_keyboard"][0] == [{"text": "main", "callback_data": "qa:0"}]
     assert markup["inline_keyboard"][1] == [{"text": "dev", "callback_data": "qa:1"}]
-    assert _callbacks({"inline_keyboard": [markup["inline_keyboard"][-1]]}) == [
-        f"qa:nav:{key_id}" for (_l, key_id, _t) in NAV_KEYS
+    # … then ⎋ alone (Slice C2): Telegram shows no caret, so ↑ ↓ ⏎ 🔄 would be blind
+    # presses and the option buttons already answer the question.
+    assert markup["inline_keyboard"][-1] == [
+        {"text": "⎋ Esc", "callback_data": "qa:nav:esc"}
     ]
 
 
@@ -152,26 +157,37 @@ def test_exitplanmode_transcript_tool_use_gets_no_keyboard():
 # plan_reply_markup — ExitPlanMode (Slice B2): approve / keep-planning buttons
 # --------------------------------------------------------------------------
 
-def test_plan_markup_gets_approve_keep_planning_plus_nav():
+def test_plan_markup_is_approve_keep_planning_only():
     markup = plan_reply_markup()
     # Two semantic approval buttons, both reusing Slice A's nav plumbing so no
     # inbound handler change is needed: Approve→Enter, Keep planning→Escape.
     # Enter's default proceed option enables auto mode (verified live against
     # Claude Code 2.1.207), so the button says so rather than a bare "Approve".
-    assert markup["inline_keyboard"][0] == [
+    assert markup["inline_keyboard"] == [[
         {"text": "✅ Approve (auto mode)", "callback_data": "qa:nav:ent"},
         {"text": "📝 Keep planning", "callback_data": "qa:nav:esc"},
-    ]
-    # The full nav-fallback row is still appended (arrow to a specific variant).
-    assert markup["inline_keyboard"][-1] == [
-        {"text": label, "callback_data": f"qa:nav:{key_id}"}
-        for (label, key_id, _t) in NAV_KEYS
-    ]
+    ]]
+    # No nav row (Slice C2): these two buttons already bind both keys a human can
+    # press without seeing the pane, and a ⎋ button would just duplicate "Keep
+    # planning".
     # These are option-count-independent single keystrokes — no index buttons.
     assert not any(
         c.startswith(QA_CB_PREFIX) and not c.startswith("qa:nav:")
         for c in _callbacks(markup)
     )
+
+
+def test_permission_markup_is_allow_once_deny_only():
+    markup = permission_reply_markup()
+    # Slice C2: the gate's option 1 ("Yes") is default-highlighted, so Enter allows
+    # it once and Escape denies — option-count-independent, like the plan approval.
+    assert markup["inline_keyboard"] == [[
+        {"text": "✅ Allow once", "callback_data": "qa:nav:ent"},
+        {"text": "❌ Deny", "callback_data": "qa:nav:esc"},
+    ]]
+    # Deliberately NO one-tap "Yes, and don't ask again" — a mis-tap from a phone
+    # must not be able to widen the session's permissions for every later command.
+    assert len(_buttons(markup)) == 2
 
 
 def test_exitplanmode_approval_keys_decode_to_enter_and_escape():

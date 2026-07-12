@@ -1,6 +1,6 @@
 """Interactive-prompt inline keyboards — answer prompts from Telegram.
 
-Two agent prompts get a tap-to-answer inline keyboard on their bound topic:
+Three agent prompts get a tap-to-answer inline keyboard on their bound topic:
 
 * **AskUserQuestion** — surfaced live from the tmux **pane** (Slice A2), because
   its structured ``tool_use`` record only lands in the transcript once the
@@ -18,8 +18,14 @@ Two agent prompts get a tap-to-answer inline keyboard on their bound topic:
   transcript, so instead of enumerating options it binds ✅ Approve (auto mode) /
   📝 Keep planning to single, option-count-independent keystrokes (Enter / Escape)
   via the same nav plumbing. Enter's default proceed option enables auto mode, so
-  that button says so (see :func:`_plan_rows`); the nav row lets the human arrow
-  to "manually approve edits".
+  that button says so (see :func:`_plan_rows`).
+* a **permission gate** (Slice C2) — a tool-approval dialog, which is not in the
+  transcript at *any* point, so it too is scraped from the pane
+  (:func:`~chela.telegram.panescan.detect_permission_gate`) and gets
+  :func:`permission_reply_markup`: ✅ Allow once (Enter, the default-highlighted
+  "1. Yes") / ❌ Deny (Escape) — both verified live against Claude Code 2.1.207.
+  The gate's "always allow" option is deliberately left unbound (see
+  :func:`_permission_rows`).
 
 Everything here is pure data (plain dicts + tmux key names), with **no
 ``python-telegram-bot`` import**, so the keyboards the urllib-based relay attaches
@@ -27,10 +33,10 @@ and the callback the PTB inbound handler decodes share one source of truth and
 can be unit-tested without the ``[telegram]`` extra:
 
 * :func:`scraped_reply_markup` / :func:`nav_only_markup` build the pane-triggered
-  AskUserQuestion keyboards; :func:`plan_reply_markup` builds the pane-triggered
-  ExitPlanMode approve / keep-planning keyboard. :func:`ask_reply_markup` is the
-  now-vestigial transcript keyboard seam (always ``None`` — both prompts moved to
-  the pane).
+  AskUserQuestion keyboards; :func:`plan_reply_markup` and
+  :func:`permission_reply_markup` build the ExitPlanMode and permission-gate ones.
+  :func:`ask_reply_markup` is the now-vestigial transcript keyboard seam (always
+  ``None`` — every prompt moved to the pane).
 * :func:`decode_callback` decodes a tapped button's ``callback_data`` back into
   an action for the inbound handler to run (:mod:`chela.telegram.inbound`).
 * :func:`select_keystrokes_relative` (and the :func:`select_keystrokes` blind
@@ -122,11 +128,27 @@ def _truncate(text: str, n: int = _BTN_TEXT_MAX) -> str:
 
 
 def _nav_row() -> list[dict]:
-    """The navigation-fallback row as Bot-API inline buttons."""
+    """The full navigation-fallback row as Bot-API inline buttons.
+
+    Only used where there are **no** semantic buttons (:func:`nav_only_markup`) —
+    the multi-tab / multi-select selector the MVP won't hand a keyboard to. There
+    the operator really is driving the selector blind and needs every key.
+    """
     return [
         {"text": label, "callback_data": f"{QA_NAV_PREFIX}{key_id}"}
         for (label, key_id, _tmux) in NAV_KEYS
     ]
+
+
+def _esc_row() -> list[dict]:
+    """The one-button escape hatch that rides under semantic option buttons.
+
+    Where the keyboard already carries semantic buttons, the ↑ ↓ ⏎ 🔄 keys are
+    dead weight: Telegram shows no caret, so arrowing is blind, and ⏎ would submit
+    whatever row the invisible cursor happens to sit on. Only ⎋ (dismiss the
+    prompt) is meaningful without seeing the pane, so that is all we keep.
+    """
+    return [{"text": "⎋ Esc", "callback_data": f"{QA_NAV_PREFIX}esc"}]
 
 
 def _plan_rows() -> list[list[dict]]:
@@ -154,9 +176,11 @@ def _plan_rows() -> list[list[dict]]:
     * ``Escape`` dismisses the dialog and **stays in plan mode** (does NOT cancel
       the task), so the human keeps refining.
 
-    The full :func:`_nav_row` is still appended so the operator can arrow ``↓`` to
-    option 2 ("manually approve edits") and press ``⏎`` when they want manual
-    approval instead of auto mode.
+    These two buttons already bind both keys the human can press without seeing
+    the pane, so no nav row is appended (Slice C2): ↑ ↓ ⏎ 🔄 would be blind
+    presses against an invisible caret, and a ⎋ button would just duplicate
+    "Keep planning". Arrowing to option 2 ("manually approve edits") is still
+    possible from the ``/screenshot`` control keyboard, which shows the pane.
     """
     return [
         [
@@ -166,20 +190,50 @@ def _plan_rows() -> list[list[dict]]:
     ]
 
 
+def _permission_rows() -> list[list[dict]]:
+    """The two approval buttons for a pane-detected permission gate (Slice C2).
+
+    A tool/permission gate is a numbered TUI menu whose option 1 ("Yes") is
+    default-highlighted, so — exactly like the plan approval — the two answers are
+    option-count-independent single keystrokes routed through the existing
+    ``qa:nav:ent`` / ``qa:nav:esc`` plumbing (``_on_qa`` → :data:`NAV_ACTIONS` →
+    ``send_key``)::
+
+        Do you want to proceed?
+        ❯ 1. Yes                                       <- Enter  → ✅ Allow once
+          2. Yes, and don't ask again for rm commands  <- deliberately NOT bound
+          3. No, and tell Claude what to do (esc)      <- Escape → ❌ Deny
+
+    Option 2 ("don't ask again" / "allow all edits this session") widens the
+    session's permissions for good, so it gets **no one-tap button** — a mis-tap
+    from a phone must not be able to disarm the gate for every later command.
+    """
+    return [
+        [
+            {"text": "✅ Allow once", "callback_data": f"{QA_NAV_PREFIX}ent"},
+            {"text": "❌ Deny", "callback_data": f"{QA_NAV_PREFIX}esc"},
+        ],
+    ]
+
+
 def scraped_reply_markup(labels) -> dict:
     """Bot-API ``reply_markup`` for a pane-scraped single-select AskUserQuestion.
 
     One semantic ``qa:<i>`` button per option label (index-only callback, so a
-    long option can't blow Telegram's 64-byte cap), then the always-present nav
-    row. Built from the labels the pane watcher scraped
+    long option can't blow Telegram's 64-byte cap), then the ⎋ escape hatch. Built
+    from the labels the pane watcher scraped
     (:func:`~chela.telegram.panescan.detect_askuserquestion`), because the
     structured transcript record only lands *after* the question is answered.
+
+    An option button answers the question outright, so the only key still worth a
+    button is ⎋ (:func:`_esc_row`) — the rest of the nav row was blind-driving an
+    invisible caret.
     """
     rows = [
         [{"text": _truncate(str(label)), "callback_data": f"{QA_CB_PREFIX}{i}"}]
         for i, label in enumerate(labels)
     ]
-    rows.append(_nav_row())
+    rows.append(_esc_row())
     return {"inline_keyboard": rows}
 
 
@@ -196,17 +250,27 @@ def nav_only_markup() -> dict:
 def plan_reply_markup() -> dict:
     """Bot-API ``reply_markup`` for a pane-scraped ExitPlanMode plan approval.
 
-    The two approval buttons (:func:`_plan_rows`) plus the nav row — the same
-    option-count-independent keystrokes Slice B built, now attached to the
-    pane-triggered plan relay (:func:`~chela.telegram.gatewatch.PermissionGateWatcher`)
-    rather than the transcript, because the ExitPlanMode ``tool_use`` only lands
-    once the plan is resolved. There are no options to enumerate (the choices are
-    harness-rendered TUI, not in the transcript), so this keyboard is independent
-    of the scraped plan text and attaches for any detected plan-approval selector.
+    The two approval buttons (:func:`_plan_rows`) — the same option-count-independent
+    keystrokes Slice B built, now attached to the pane-triggered plan relay
+    (:func:`~chela.telegram.gatewatch.PermissionGateWatcher`) rather than the
+    transcript, because the ExitPlanMode ``tool_use`` only lands once the plan is
+    resolved. There are no options to enumerate (the choices are harness-rendered
+    TUI, not in the transcript), so this keyboard is independent of the scraped
+    plan text and attaches for any detected plan-approval selector.
     """
-    rows = _plan_rows()
-    rows.append(_nav_row())
-    return {"inline_keyboard": rows}
+    return {"inline_keyboard": _plan_rows()}
+
+
+def permission_reply_markup() -> dict:
+    """Bot-API ``reply_markup`` for a pane-detected permission gate (Slice C2).
+
+    The ✅ Allow once / ❌ Deny buttons (:func:`_permission_rows`), attached to the
+    gate the pane watcher detected
+    (:func:`~chela.telegram.panescan.detect_permission_gate`). Like the plan
+    approval, the gate's answers are single option-count-independent keystrokes
+    (Enter / Escape), so the keyboard is the same whatever menu the gate rendered.
+    """
+    return {"inline_keyboard": _permission_rows()}
 
 
 def ask_reply_markup(msg) -> dict | None:

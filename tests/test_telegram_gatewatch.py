@@ -1,18 +1,22 @@
-"""Pane watcher — permission-gate correlation (C1) + AskUserQuestion relay (A2).
+"""Pane watcher — the three live-TUI prompts, relayed with answer keyboards.
 
 Locks in the load-bearing behaviour of :class:`PermissionGateWatcher`:
 
-  * the permission gate only relays when the window's latest ``tool_use`` is
-    unpaired (transcript-gated — no blind relay), naming the real command;
-  * an AskUserQuestion selector is relayed straight from the pane (no
-    transcript gate — its tool_use is post-answer), with a semantic answer
-    keyboard for a single-select and the nav row only for the multi-tab shape;
-  * an ExitPlanMode plan approval is relayed straight from the pane too (same
-    post-answer tool_use), with the approve / keep-planning keyboard;
-  * all relays are edge-triggered — a still-open prompt is not re-posted; the
-    gate marker clears on its ``tool_result`` / when the pane clears, and each
-    selector marker clears when it leaves the pane (resolved) or on the matching
-    ``tool_result`` (belt-and-suspenders).
+  * a permission gate relays **with NO ``tool_use`` in the transcript** — the
+    live-broken case C1 shipped with (it read the pane only for a window with an
+    unpaired ``tool_use``, but the gated call is appended to the JSONL only at
+    approval-time, so the gate never posted). Identity is scraped from the pane
+    dialog, and it carries the ✅ Allow once / ❌ Deny keyboard (C2);
+  * an AskUserQuestion selector is relayed straight from the pane too, with a
+    semantic answer keyboard for a single-select and the nav row only for the
+    multi-tab shape;
+  * an ExitPlanMode plan approval likewise, with the approve / keep-planning
+    keyboard — and a plan pane never ALSO relays a permission gate (its
+    "❯ 1. Yes, …" row matches the permission-menu signature);
+  * every relay is edge-triggered — a still-open prompt is not re-posted, a
+    changed scrape edits it in place — and **poofs** (the message is deleted) when
+    the prompt leaves the pane or its ``tool_result`` lands, so no live keyboard is
+    left behind on an answered prompt.
 """
 from __future__ import annotations
 
@@ -25,10 +29,16 @@ from chela.telegram.gatewatch import (
 from chela.telegram.panescan import Gate
 from chela.telegram.parser import Message
 
+# A real Bash gate (Claude Code 2.1.207): the dialog is headed by the command it
+# wants to run — the only place that command exists while the gate is pending.
 PERMISSION_PANE = """\
+ Bash command
+   rm -rf build/
+
  Do you want to proceed?
  ❯ 1. Yes
-   2. No
+   2. Yes, and don't ask again for rm commands in this project
+   3. No, and tell Claude what to do differently (esc)
 
  Esc to cancel
 """
@@ -84,30 +94,37 @@ def _watcher(sender, registry, panes):
     return PermissionGateWatcher(sender, registry, capture=_capture(panes))
 
 
-# ── gated polling ─────────────────────────────────────────────────────────
+# ── ungated pane detection (the C1 bug C2 fixes) ──────────────────────────
 
 
-def test_no_pending_tool_use_never_relays_a_permission_gate():
-    sender = _Sender()
-    w = PermissionGateWatcher(sender, _Registry({"@1": "100"}), capture=_capture({"@1": PERMISSION_PANE}))
-    # No tool_use observed → no transcript identity → the permission gate must NOT
-    # relay (the pane is still read each tick for AskUserQuestion, but this pane
-    # shows a permission prompt, not a selector, so nothing is posted).
-    w.poll(["@1"])
-    assert sender.calls == []
-
-
-def test_pending_tool_use_with_gate_relays_one_enriched_message():
+def test_gate_relays_with_no_tool_use_in_the_transcript():
+    # THE core fix. While a gate is pending, the gated call is NOT in the JSONL
+    # (Claude Code appends its tool_use only at approval-time), so C1's
+    # "only read the pane when a tool_use is unpaired" precondition was never true
+    # and the ❓ Permission message never posted. Detection is now pane-only.
     sender = _Sender()
     w = _watcher(sender, _Registry({"@1": "100"}), {"@1": PERMISSION_PANE})
-    w.observe("@1", _tool_use("Bash", "u1", {"command": "rm -rf build/"}))
-    w.poll(["@1"])
+    w.poll(["@1"])  # nothing observed from the transcript at all
     assert len(sender.calls) == 1
     text, parse_mode, thread, reply_markup = sender.calls[0]
+    # The command comes from the pane dialog's own "Bash command" header.
     assert text == "❓ Permission — Bash: rm -rf build/"
     assert parse_mode is None  # plain text — no MarkdownV2 escaping to get wrong
     assert thread == "100"
-    assert reply_markup is None  # C1 permission gate carries no keyboard
+    # Slice C2's keyboard: Enter allows the default "1. Yes" once, Escape denies.
+    callbacks = [b["callback_data"] for row in reply_markup["inline_keyboard"] for b in row]
+    assert callbacks == ["qa:nav:ent", "qa:nav:esc"]
+
+
+def test_gate_falls_back_to_an_unpaired_tool_use_when_the_dialog_is_unrecognised():
+    # A reworded dialog we can't scrape an identity from still names the tool when
+    # the transcript happens to have one unpaired.
+    sender = _Sender()
+    bare = " Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n"
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": bare})
+    w.observe("@1", _tool_use("Bash", "u1", {"command": "make  test\n"}))
+    w.poll(["@1"])
+    assert sender.calls[0][0] == "❓ Permission — Bash: make test"
 
 
 # ── edge trigger / de-dup ───────────────────────────────────────────────────
@@ -116,46 +133,39 @@ def test_pending_tool_use_with_gate_relays_one_enriched_message():
 def test_same_open_gate_is_not_relayed_twice():
     sender = _Sender()
     w = _watcher(sender, _Registry({"@1": "100"}), {"@1": PERMISSION_PANE})
-    w.observe("@1", _tool_use("Bash", "u1", {"command": "ls"}))
     w.poll(["@1"])
-    w.poll(["@1"])  # gate still open, same unpaired tool_use
-    w.poll(["@1"])
-    assert len(sender.calls) == 1
-
-
-def test_marker_clears_on_tool_result_and_new_gate_relays_again():
-    sender = _Sender()
-    panes = {"@1": PERMISSION_PANE}
-    w = _watcher(sender, _Registry({"@1": "100"}), panes)
-    w.observe("@1", _tool_use("Bash", "u1", {"command": "ls"}))
+    w.poll(["@1"])  # gate still open, same scrape
     w.poll(["@1"])
     assert len(sender.calls) == 1
-    # Tool resolved → its result arrives → pending cleared.
-    w.observe("@1", _tool_result("Bash", "u1"))
-    w.poll(["@1"])  # no pending → no read, marker cleared
-    assert len(sender.calls) == 1
-    # A fresh blocked tool_use with a gate should relay again.
-    w.observe("@1", _tool_use("Edit", "u2", {"file_path": "/repo/app.py"}))
-    w.poll(["@1"])
-    assert len(sender.calls) == 2
-    assert sender.calls[1][0] == "❓ Permission — Edit: /repo/app.py"
 
 
 def test_marker_clears_when_pane_no_longer_shows_a_gate():
     sender = _Sender()
     panes = {"@1": PERMISSION_PANE}
     w = _watcher(sender, _Registry({"@1": "100"}), panes)
-    w.observe("@1", _tool_use("Bash", "u1", {"command": "ls"}))
     w.poll(["@1"])
     assert len(sender.calls) == 1
-    # Same tool_use still pending, but the gate is gone (e.g. auto-approved) —
-    # marker clears; if a gate reappears for the SAME tool it relays once more.
+    # Answered → the gate leaves the pane → tracking clears …
     panes["@1"] = WORKING_PANE
     w.poll(["@1"])
     assert len(sender.calls) == 1
+    # … so the next gate relays again.
     panes["@1"] = PERMISSION_PANE
     w.poll(["@1"])
     assert len(sender.calls) == 2
+
+
+def test_a_different_gate_relays_again_without_leaving_the_pane():
+    sender = _Sender()
+    panes = {"@1": PERMISSION_PANE}
+    w = _watcher(sender, _Registry({"@1": "100"}), panes)
+    w.poll(["@1"])
+    # A second gate (a different command) drawn straight after the first is
+    # answered: a changed scrape, so it must not be swallowed by the de-dup.
+    panes["@1"] = PERMISSION_PANE.replace("rm -rf build/", "npm run deploy")
+    w.poll(["@1"])
+    assert len(sender.calls) == 2
+    assert sender.calls[1][0] == "❓ Permission — Bash: npm run deploy"
 
 
 # ── binding gate ────────────────────────────────────────────────────────────
@@ -203,14 +213,25 @@ def test_format_falls_back_to_gate_text_without_identity():
     assert "Do you want to proceed?" in msg
 
 
-def test_latest_unpaired_tool_use_drives_the_gate():
+def test_latest_unpaired_tool_use_drives_the_fallback_identity():
     sender = _Sender()
-    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": PERMISSION_PANE})
+    bare = " Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n"
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": bare})
     # Two unpaired tool_uses; the most-recent one is the likely-blocked tool.
     w.observe("@1", _tool_use("Read", "u1", {"file_path": "/a"}))
     w.observe("@1", _tool_use("Bash", "u2", {"command": "deploy"}))
     w.poll(["@1"])
     assert sender.calls[0][0] == "❓ Permission — Bash: deploy"
+
+
+def test_scraped_pane_identity_wins_over_a_stale_unpaired_tool_use():
+    # The pane is authoritative: the gated call is not in the transcript, so an
+    # unpaired tool_use is some OTHER call and must not mislabel the gate.
+    sender = _Sender()
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": PERMISSION_PANE})
+    w.observe("@1", _tool_use("Read", "u1", {"file_path": "/somewhere/else.py"}))
+    w.poll(["@1"])
+    assert sender.calls[0][0] == "❓ Permission — Bash: rm -rf build/"
 
 
 # ── AskUserQuestion (pane-triggered, no transcript gate) ────────────────────
@@ -562,3 +583,86 @@ def test_format_plan_message_bodies():
     long_plan = format_plan_message(ExitPlan(text="x" * 5000))
     assert "/screenshot" in long_plan
     assert len(long_plan) < 5000
+
+
+# ── one pane, one prompt (a plan pane must not ALSO relay a gate) ────────────
+
+
+def test_plan_pane_does_not_also_relay_a_permission_gate():
+    # The plan-approval selector's "❯ 1. Yes, and auto-accept edits" row matches the
+    # permission-menu signature too. With permission detection now ungated, the
+    # selectors take precedence — one pane relays exactly one prompt.
+    sender = _Sender()
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": EXITPLAN_PANE})
+    w.poll(["@1"])
+    assert len(sender.calls) == 1
+    assert sender.calls[0][0].startswith("📋")
+
+
+def test_askuq_pane_does_not_also_relay_a_permission_gate():
+    sender = _Sender()
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": ASKUQ_SINGLE_PANE})
+    w.poll(["@1"])
+    assert len(sender.calls) == 1
+    assert sender.calls[0][0].startswith("❓ Which fruit")
+
+
+# ── poof on resolve (the answered prompt's message is deleted) ───────────────
+
+
+class _DeletingBot(_Bot):
+    """A fake BotSender that also records deleteMessage calls."""
+
+    def __init__(self):
+        super().__init__()
+        self.deleted = []
+
+    def delete(self, message_id):
+        self.deleted.append(message_id)
+        return True
+
+
+def _poofing_watcher(bot, registry, panes):
+    return PermissionGateWatcher(
+        bot.post, registry, capture=_capture(panes),
+        post=bot.post, edit=bot.edit, delete=bot.delete,
+    )
+
+
+def test_answered_question_message_is_deleted():
+    bot = _DeletingBot()
+    panes = {"@1": ASKUQ_SINGLE_PANE}
+    w = _poofing_watcher(bot, _Registry({"@1": "100"}), panes)
+    w.poll(["@1"])
+    panes["@1"] = WORKING_PANE  # answered → selector leaves the pane
+    w.poll(["@1"])
+    assert bot.deleted == [bot.posts[0][0]]
+
+
+def test_resolved_plan_and_gate_messages_are_deleted():
+    for pane in (EXITPLAN_PANE, PERMISSION_PANE):
+        bot = _DeletingBot()
+        panes = {"@1": pane}
+        w = _poofing_watcher(bot, _Registry({"@1": "100"}), panes)
+        w.poll(["@1"])
+        panes["@1"] = WORKING_PANE
+        w.poll(["@1"])
+        assert bot.deleted == [bot.posts[0][0]]
+
+
+def test_tool_result_poofs_the_prompt_even_before_the_pane_repaints():
+    # Belt-and-suspenders: the AskUserQuestion / ExitPlanMode tool_result lands at
+    # answer-time, so it deletes the message without waiting for the next capture.
+    bot = _DeletingBot()
+    w = _poofing_watcher(bot, _Registry({"@1": "100"}), {"@1": ASKUQ_SINGLE_PANE})
+    w.poll(["@1"])
+    w.observe("@1", _ask_result())
+    assert bot.deleted == [bot.posts[0][0]]
+
+
+def test_a_still_open_prompt_is_never_deleted():
+    bot = _DeletingBot()
+    w = _poofing_watcher(bot, _Registry({"@1": "100"}), {"@1": PERMISSION_PANE})
+    w.poll(["@1"])
+    w.poll(["@1"])
+    assert bot.deleted == []
