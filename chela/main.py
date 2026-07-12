@@ -554,17 +554,18 @@ def cmd_telegram(args) -> None:
     # interactive prompts that need a human.
     bot = BotSender(token, chat)
     relay = RegistryRelay(bot.send, registry, show_tool_calls=SHOW_TOOL_CALLS)
-    # Pane watcher (Slice C1 + A2): reads each bound window's pane to surface the
-    # live-TUI prompts the transcript can't relay in time — a permission gate
-    # (correlated with the transcript's unpaired tool_use; never in the JSONL) and
-    # an AskUserQuestion selector (whose tool_use only lands AFTER the answer, so it
-    # is detected straight from the pane, with answer buttons). It observes the SAME
-    # message stream the relay does — regardless of SHOW_TOOL_CALLS, since it needs
-    # every tool_use/tool_result to track pairing — and polls in the outbound loop.
+    # Pane watcher (Slice C1 + A2 + B2): reads each bound window's pane to surface
+    # the live-TUI prompts the transcript can't relay in time — a permission gate
+    # (correlated with the transcript's unpaired tool_use; never in the JSONL), an
+    # AskUserQuestion selector, and an ExitPlanMode plan approval (both selectors'
+    # tool_use only lands AFTER the answer, so they are detected straight from the
+    # pane, with answer / approval buttons). It observes the SAME message stream the
+    # relay does — regardless of SHOW_TOOL_CALLS, since it needs every
+    # tool_use/tool_result to track pairing — and polls in the outbound loop.
     from chela.messenger import capture_pane
-    # ``post``/``edit`` let the AskUserQuestion relay update one message in place as
-    # the selector renders (mid-render partial → full option list is ONE message,
-    # not a double-post); the permission gate stays send-only.
+    # ``post``/``edit`` let the AskUserQuestion and ExitPlanMode relays update one
+    # message in place as the selector renders (mid-render partial → settled UI is
+    # ONE message, not a double-post); the permission gate stays send-only.
     gate_watcher = PermissionGateWatcher(
         bot.send, registry, capture=capture_pane, post=bot.post, edit=bot.edit
     )

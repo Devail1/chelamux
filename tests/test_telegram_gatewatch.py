@@ -7,10 +7,12 @@ Locks in the load-bearing behaviour of :class:`PermissionGateWatcher`:
   * an AskUserQuestion selector is relayed straight from the pane (no
     transcript gate — its tool_use is post-answer), with a semantic answer
     keyboard for a single-select and the nav row only for the multi-tab shape;
-  * both relays are edge-triggered — a still-open prompt is not re-posted; the
-    gate marker clears on its ``tool_result`` / when the pane clears, and the
-    selector marker clears when it leaves the pane (answered) or on the
-    AskUserQuestion ``tool_result`` (belt-and-suspenders).
+  * an ExitPlanMode plan approval is relayed straight from the pane too (same
+    post-answer tool_use), with the approve / keep-planning keyboard;
+  * all relays are edge-triggered — a still-open prompt is not re-posted; the
+    gate marker clears on its ``tool_result`` / when the pane clears, and each
+    selector marker clears when it leaves the pane (resolved) or on the matching
+    ``tool_result`` (belt-and-suspenders).
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from chela.telegram.gatewatch import (
     PermissionGateWatcher,
     format_askuq_message,
     format_gate_message,
+    format_plan_message,
 )
 from chela.telegram.panescan import Gate
 from chela.telegram.parser import Message
@@ -425,3 +428,137 @@ def test_edit_failure_falls_back_to_a_fresh_post():
     panes["@1"] = ASKUQ_SINGLE_PANE
     w.poll(["@1"])  # edit returns False → post a fresh message
     assert len(bot.posts) == 2
+
+
+# ── ExitPlanMode plan approval (pane-triggered, no transcript gate — B2) ─────
+
+# A plan-approval pane (Claude Code 2.1.207): the plan text, the proceed prompt +
+# numbered choices, then the "Esc to cancel" footer. Mirrors AskUserQuestion —
+# the tool_use lands post-answer, so it's detected straight from the pane.
+EXITPLAN_PANE = """\
+● Here is my plan:
+
+  1. Add detect_exitplanmode to panescan.py
+  2. Wire the pane trigger into gatewatch
+
+ Would you like to proceed?
+ ❯ 1. Yes, and auto-accept edits
+   2. Yes, and manually approve edits
+   3. No, keep planning
+
+ Esc to cancel
+"""
+
+# The same plan mid-render (the second step hasn't drawn yet) — a different
+# scraped signature, so a re-scrape edits the message rather than double-posting.
+EXITPLAN_PARTIAL_PANE = """\
+● Here is my plan:
+
+  1. Add detect_exitplanmode to panescan.py
+
+ Would you like to proceed?
+ ❯ 1. Yes, and auto-accept edits
+   2. No, keep planning
+
+ Esc to cancel
+"""
+
+
+def _plan_result(tuid="p1"):
+    return _tool_result("ExitPlanMode", tuid)
+
+
+def test_plan_selector_relays_the_plan_with_approve_keyboard():
+    sender = _Sender()
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": EXITPLAN_PANE})
+    # No pending tool_use needed — the plan approval is detected from the pane.
+    w.poll(["@1"])
+    assert len(sender.calls) == 1
+    text, parse_mode, thread, reply_markup = sender.calls[0]
+    assert text.startswith("📋")
+    assert "Here is my plan:" in text            # the scraped plan is the body …
+    assert "Would you like to proceed?" not in text  # … not the options (buttons carry those)
+    assert parse_mode is None                     # plain text — scraped, no MarkdownV2
+    assert thread == "100"
+    callbacks = [b["callback_data"] for row in reply_markup["inline_keyboard"] for b in row]
+    assert "qa:nav:ent" in callbacks              # ✅ Approve (auto mode) → Enter
+    assert "qa:nav:esc" in callbacks              # 📝 Keep planning → Escape
+    # Option-count-independent: no semantic index buttons for ExitPlanMode.
+    assert not any(c.startswith("qa:") and not c.startswith("qa:nav:") for c in callbacks)
+
+
+def test_plan_selector_relayed_once_then_deduped_until_it_leaves_the_pane():
+    sender = _Sender()
+    panes = {"@1": EXITPLAN_PANE}
+    w = _watcher(sender, _Registry({"@1": "100"}), panes)
+    w.poll(["@1"])
+    w.poll(["@1"])  # same plan still on the pane — edge-triggered, not per-poll
+    assert len(sender.calls) == 1
+    # Resolved → selector gone → marker clears; a fresh plan relays again.
+    panes["@1"] = WORKING_PANE
+    w.poll(["@1"])
+    assert len(sender.calls) == 1
+    panes["@1"] = EXITPLAN_PANE
+    w.poll(["@1"])
+    assert len(sender.calls) == 2
+
+
+def test_exitplanmode_tool_result_clears_the_marker():
+    # Belt-and-suspenders: the ExitPlanMode tool_result (lands at answer-time)
+    # clears the de-dup marker so a genuinely new plan can relay again.
+    sender = _Sender()
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": EXITPLAN_PANE})
+    w.poll(["@1"])
+    assert len(sender.calls) == 1
+    w.observe("@1", _plan_result())  # resolved
+    w.poll(["@1"])
+    assert len(sender.calls) == 2
+
+
+def test_unbound_window_plan_is_not_relayed():
+    sender = _Sender()
+    w = _watcher(sender, _Registry({}), {"@1": EXITPLAN_PANE})
+    w.poll(["@1"])
+    assert sender.calls == []
+
+
+def test_plan_changed_scrape_edits_in_place_instead_of_double_posting():
+    bot = _Bot()
+    panes = {"@1": EXITPLAN_PARTIAL_PANE}
+    w = _editing_watcher(bot, _Registry({"@1": "100"}), panes)
+    # First scrape (mid-render) → ONE post.
+    w.poll(["@1"])
+    assert len(bot.posts) == 1
+    # The plan finishes rendering (a different signature) → EDIT, not a new post.
+    panes["@1"] = EXITPLAN_PANE
+    w.poll(["@1"])
+    assert len(bot.posts) == 1
+    assert len(bot.edits) == 1
+    assert bot.edits[0][0] == bot.posts[0][0]
+
+
+def test_plan_answered_posts_fresh_never_edits_the_old_message():
+    bot = _Bot()
+    panes = {"@1": EXITPLAN_PANE}
+    w = _editing_watcher(bot, _Registry({"@1": "100"}), panes)
+    w.poll(["@1"])
+    assert len(bot.posts) == 1
+    panes["@1"] = WORKING_PANE  # resolved → tracked id dropped
+    w.poll(["@1"])
+    panes["@1"] = EXITPLAN_PANE  # a genuinely new plan
+    w.poll(["@1"])
+    assert len(bot.posts) == 2
+    assert bot.edits == []
+
+
+def test_format_plan_message_bodies():
+    from chela.telegram.panescan import ExitPlan
+
+    assert format_plan_message(ExitPlan(text="do X\ndo Y")).startswith("📋")
+    assert "do X" in format_plan_message(ExitPlan(text="do X"))
+    # An empty scrape (plan scrolled off) still gets a generic prompt, never crashes.
+    assert format_plan_message(ExitPlan(text="")).startswith("📋")
+    # A very long plan is truncated with a /screenshot pointer.
+    long_plan = format_plan_message(ExitPlan(text="x" * 5000))
+    assert "/screenshot" in long_plan
+    assert len(long_plan) < 5000

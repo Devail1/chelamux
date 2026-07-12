@@ -10,8 +10,11 @@ Two agent prompts get a tap-to-answer inline keyboard on their bound topic:
   simple single-select, :func:`nav_only_markup` for the multi-tab / multi-select
   fallback. Answering re-reads the live ``❯`` cursor and injects the
   cursor-relative keystrokes (:func:`select_keystrokes_relative`).
-* **ExitPlanMode** (Slice B) — surfaced from the transcript ``tool_use`` via
-  :func:`ask_reply_markup`. Its choices are harness-rendered TUI, not in the
+* **ExitPlanMode** (Slice B2) — also surfaced live from the tmux **pane**, because
+  its ``tool_use`` record likewise lands in the transcript only once the plan is
+  resolved. The pane watcher scrapes the plan-approval selector
+  (:func:`~chela.telegram.panescan.detect_exitplanmode`) and attaches
+  :func:`plan_reply_markup`. Its choices are harness-rendered TUI, not in the
   transcript, so instead of enumerating options it binds ✅ Approve (auto mode) /
   📝 Keep planning to single, option-count-independent keystrokes (Enter / Escape)
   via the same nav plumbing. Enter's default proceed option enables auto mode, so
@@ -23,9 +26,11 @@ Everything here is pure data (plain dicts + tmux key names), with **no
 and the callback the PTB inbound handler decodes share one source of truth and
 can be unit-tested without the ``[telegram]`` extra:
 
-* :func:`ask_reply_markup` builds the ``reply_markup`` for an ExitPlanMode
-  ``tool_use``; :func:`scraped_reply_markup` / :func:`nav_only_markup` build the
-  pane-triggered AskUserQuestion keyboards.
+* :func:`scraped_reply_markup` / :func:`nav_only_markup` build the pane-triggered
+  AskUserQuestion keyboards; :func:`plan_reply_markup` builds the pane-triggered
+  ExitPlanMode approve / keep-planning keyboard. :func:`ask_reply_markup` is the
+  now-vestigial transcript keyboard seam (always ``None`` — both prompts moved to
+  the pane).
 * :func:`decode_callback` decodes a tapped button's ``callback_data`` back into
   an action for the inbound handler to run (:mod:`chela.telegram.inbound`).
 * :func:`select_keystrokes_relative` (and the :func:`select_keystrokes` blind
@@ -188,33 +193,43 @@ def nav_only_markup() -> dict:
     return {"inline_keyboard": [_nav_row()]}
 
 
-def ask_reply_markup(msg) -> dict | None:
-    """Bot-API ``reply_markup`` for a transcript-triggered ``tool_use``, else None.
+def plan_reply_markup() -> dict:
+    """Bot-API ``reply_markup`` for a pane-scraped ExitPlanMode plan approval.
 
-    ``msg`` is a :class:`~chela.telegram.parser.Message`. Only ``ExitPlanMode``
-    (Slice B) gets a keyboard here: two approval buttons (:func:`_plan_rows`) plus
-    the nav row — option-count-independent keystrokes, so it attaches for any
-    ExitPlanMode ``tool_use`` (the harness-rendered choices aren't in the
-    transcript, so there is nothing to enumerate).
-
-    ``AskUserQuestion`` no longer gets a keyboard here. Its ``tool_use`` record was
-    measured to land in the transcript only once the question is *answered*, so a
-    keyboard attached at that point would be useless (the selector is gone) and
-    would double-post the already-relayed prompt. Slice A2 surfaces it live from
-    the **pane** instead (:func:`~chela.telegram.gatewatch.PermissionGateWatcher`),
-    building the keyboard from the scraped options (:func:`scraped_reply_markup` /
-    :func:`nav_only_markup`); the relay drops the post-answer transcript ``tool_use``.
-
-    Returns ``None`` for anything else — so the relay attaches a keyboard only when
-    there is a real prompt to answer, and never crashes on a missing payload.
+    The two approval buttons (:func:`_plan_rows`) plus the nav row — the same
+    option-count-independent keystrokes Slice B built, now attached to the
+    pane-triggered plan relay (:func:`~chela.telegram.gatewatch.PermissionGateWatcher`)
+    rather than the transcript, because the ExitPlanMode ``tool_use`` only lands
+    once the plan is resolved. There are no options to enumerate (the choices are
+    harness-rendered TUI, not in the transcript), so this keyboard is independent
+    of the scraped plan text and attaches for any detected plan-approval selector.
     """
-    if getattr(msg, "content_type", None) != "tool_use":
-        return None
-    if getattr(msg, "tool_name", None) != "ExitPlanMode":
-        return None
     rows = _plan_rows()
     rows.append(_nav_row())
     return {"inline_keyboard": rows}
+
+
+def ask_reply_markup(msg) -> dict | None:
+    """Transcript-triggered keyboard seam — now always ``None`` (both prompts moved).
+
+    ``msg`` is a :class:`~chela.telegram.parser.Message`. Both interactive prompts
+    that once attached a keyboard here are now surfaced live from the tmux **pane**
+    instead, because each one's ``tool_use`` record was measured to land in the
+    transcript only *after* the prompt is resolved — too late for the buttons to
+    be answerable:
+
+    * **AskUserQuestion** (Slice A2) → :func:`scraped_reply_markup` /
+      :func:`nav_only_markup`, built from the scraped options;
+    * **ExitPlanMode** (Slice B2) → :func:`plan_reply_markup`, the approve /
+      keep-planning buttons.
+
+    Both are attached by :class:`~chela.telegram.gatewatch.PermissionGateWatcher`
+    from the pane, and the relay drops the corresponding post-answer transcript
+    ``tool_use``. This function is kept as the relay's extension seam and returns
+    ``None`` for every message, so the relay never crashes on a missing payload and
+    a future transcript-triggered keyboard has a home.
+    """
+    return None
 
 
 def decode_callback(data: str) -> tuple[str, Any] | None:
