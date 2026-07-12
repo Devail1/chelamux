@@ -403,17 +403,27 @@ def cmd_install_statusline(args) -> None:
     print(f"Installed chela statusLine into {settings_path}. Restart agents to apply.")
 
 
-def _outbound_loop(monitor, registry, interval: int, stop) -> None:
+def _outbound_loop(monitor, registry, interval: int, stop, gate_watcher=None) -> None:
     """Poll every bound window's transcript and relay new output, until stopped.
 
     ``registry.windows()`` is re-read each tick so the polled set follows the
-    live bindings (Slice B mutates them without restarting this loop).
+    live bindings (Slice B mutates them without restarting this loop). When a
+    ``gate_watcher`` is given, it runs in the SAME tick right after the transcript
+    poll (no new thread): the transcript poll has just updated its per-window
+    pending-tool state, so the gate watcher reads only the panes of windows whose
+    latest ``tool_use`` is still unpaired.
     """
     while not stop.is_set():
+        wids = registry.windows()
         try:
-            monitor.poll(registry.windows())
+            monitor.poll(wids)
         except Exception:
             log.exception("Telegram relay poll failed")
+        if gate_watcher is not None:
+            try:
+                gate_watcher.poll(wids)
+            except Exception:
+                log.exception("Telegram permission-gate poll failed")
         stop.wait(interval)
 
 
@@ -505,6 +515,7 @@ def cmd_telegram(args) -> None:
 
     from chela.telegram import (
         BotSender,
+        PermissionGateWatcher,
         RegistryRelay,
         TranscriptMonitor,
         default_bindings_path,
@@ -541,10 +552,21 @@ def cmd_telegram(args) -> None:
     # CHELA_SHOW_TOOL_CALLS unset (the default) the relay drops the noisy
     # tool_use/tool_result stream, keeping text/thinking/user turns plus the
     # interactive prompts that need a human.
-    relay = RegistryRelay(
-        BotSender(token, chat).send, registry, show_tool_calls=SHOW_TOOL_CALLS
-    )
-    monitor = TranscriptMonitor(on_message=relay.on_message)
+    bot = BotSender(token, chat)
+    relay = RegistryRelay(bot.send, registry, show_tool_calls=SHOW_TOOL_CALLS)
+    # Permission-gate watcher (Slice C1): correlates the transcript's unpaired
+    # tool_use with a pane read to surface an agent blocked on a permission prompt
+    # (which never reaches the JSONL). It observes the SAME message stream the
+    # relay does — regardless of SHOW_TOOL_CALLS, since it needs every
+    # tool_use/tool_result to track pairing — and polls in the outbound loop.
+    from chela.messenger import capture_pane
+    gate_watcher = PermissionGateWatcher(bot.send, registry, capture=capture_pane)
+
+    def _on_message(window_id, msg):
+        gate_watcher.observe(window_id, msg)
+        relay.on_message(window_id, msg)
+
+    monitor = TranscriptMonitor(on_message=_on_message)
 
     topic_api = None
     reconcile_interval = max(1, int(args.reconcile_interval))
@@ -568,7 +590,7 @@ def cmd_telegram(args) -> None:
             log.info("auto-topics reconcile every %ds", reconcile_interval)
         log.info("Relaying %s -> Telegram topics every %ds", _describe(), interval)
         try:
-            _outbound_loop(monitor, registry, interval, stop)
+            _outbound_loop(monitor, registry, interval, stop, gate_watcher)
         finally:
             stop.set()
         return
@@ -591,7 +613,9 @@ def cmd_telegram(args) -> None:
     # the main thread (it installs signal handlers, so it must run there).
     stop = threading.Event()
     threading.Thread(
-        target=_outbound_loop, args=(monitor, registry, interval, stop), daemon=True,
+        target=_outbound_loop,
+        args=(monitor, registry, interval, stop, gate_watcher),
+        daemon=True,
     ).start()
     if topic_api is not None:
         threading.Thread(

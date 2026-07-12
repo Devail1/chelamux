@@ -38,7 +38,9 @@ from chela.telegram.inbound import (
     TopicRouter,
     build_application,
 )
+from chela.telegram.gatewatch import PermissionGateWatcher
 from chela.telegram.monitor import TranscriptMonitor
+from chela.telegram.panescan import Gate, detect_permission_gate
 from chela.telegram.parser import Message, parse_entries, parse_line
 from chela.telegram.reconcile import (
     TopicClosedHandler,
@@ -51,6 +53,9 @@ from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay
 
 __all__ = [
     "TranscriptMonitor",
+    "PermissionGateWatcher",
+    "Gate",
+    "detect_permission_gate",
     "Message",
     "parse_entries",
     "parse_line",
