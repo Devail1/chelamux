@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -169,15 +170,42 @@ def latest_pr(path: Path) -> PRLink | None:
 # Dashboard-facing helpers
 # ---------------------------------------------------------------------------
 
+def _last_record_ts(path: Path) -> datetime | None:
+    """Timestamp of the newest JSONL record that carries one, or None.
+
+    Reverse-scans the transcript for the most recent record with a string
+    ``timestamp`` field and parses it. This measures the session's *content*
+    recency, which is what we want — distinct from the file mtime, which a
+    ``/clear`` marker appended to an otherwise-stale pre-clear transcript can
+    momentarily bump ahead of the fresh session that is actually current.
+    """
+    rec = latest_record(path, lambda o: isinstance(o.get("timestamp"), str))
+    if not rec:
+        return None
+    try:
+        return datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def transcript_for_cwd(cwd: str | None, base: Path | None = None) -> Path | None:
     """Resolve a working directory → its active transcript path, tmux-natively.
 
     Claude Code does not surface its session id over tmux, so rather than rely
     on any external session-id map we derive the transcript directory from the
-    cwd (``~/.claude/projects/<encoded-cwd>/``) and pick the most-recently-
-    modified ``<session-id>.jsonl`` in it — that is the session actively writing
-    from that directory. Returns None if cwd is empty, the project dir is
-    absent, or it holds no transcripts yet.
+    cwd (``~/.claude/projects/<encoded-cwd>/``) and pick the ``*.jsonl`` in it
+    whose newest *record* is latest — that is the session actively writing from
+    that directory. Returns None if cwd is empty, the project dir is absent, or
+    it holds no transcripts yet.
+
+    We rank by newest-record timestamp rather than file mtime because a
+    ``/clear`` starts a new session (new jsonl) while writing a marker into the
+    old one: for an instant the pre-clear file is newest by *mtime* even though
+    the fresh session is current. Ranking by the last record's timestamp binds
+    the right transcript, and ``monitor.py`` re-resolves each poll so it rebinds
+    as soon as the new session writes. A candidate with no timestamped record
+    yet (e.g. a just-created session) sorts below any that has one, with mtime
+    only breaking genuine ties.
 
     Keyed by cwd (not window name) so a caller holding a window *id* can resolve
     collision-free: ``discovery.get_window_cwd_by_id(wid)`` → here.
@@ -187,12 +215,15 @@ def transcript_for_cwd(cwd: str | None, base: Path | None = None) -> Path | None
     proj_dir = (base or CLAUDE_PROJECTS_DIR) / encode_cwd(cwd)
     if not proj_dir.is_dir():
         return None
-    found = sorted(
-        proj_dir.glob("*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return found[0] if found else None
+    found = list(proj_dir.glob("*.jsonl"))
+    if not found:
+        return None
+
+    def _key(p: Path) -> tuple[bool, float, float]:
+        ts = _last_record_ts(p)
+        return (ts is not None, ts.timestamp() if ts is not None else 0.0, p.stat().st_mtime)
+
+    return max(found, key=_key)
 
 
 def _resolve_agent_transcript(agent_name: str) -> Path | None:
