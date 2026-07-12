@@ -3,23 +3,36 @@
 Two renderings per message:
 
   * :func:`to_markdown_v2` — a Telegram *MarkdownV2* string: a bold, emoji-tagged
-    header (role / tool) followed by the escaped body. Every literal character is
-    run through :func:`escape_markdown_v2` so user/agent text can never inject or
-    break MarkdownV2 entities.
+    header (role / tool) followed by the body rendered via
+    :func:`render_markdown`. The header text is blind-escaped
+    (:func:`escape_markdown_v2`) so it can never break the entity; the *body* is
+    run through ``telegramify-markdown`` so Claude's Markdown (fenced code
+    blocks, bold, lists, tables) renders as real Telegram entities instead of
+    literal backslash-escaped characters.
   * :func:`to_plain_text` — the same content with no markup, used as the fallback
     when Telegram rejects the MarkdownV2 send (see :mod:`chela.telegram.relay`).
 
-The MarkdownV2 character-escape (:data:`_MDV2_SPECIAL` / :func:`escape_markdown_v2`)
-is ported from six-ddc/ccbot's ``markdown_v2.py`` (https://github.com/six-ddc/ccbot,
-MIT). We port only the escape table — not ccbot's ``telegramify_markdown`` /
-``mistletoe`` full-markdown pipeline — so this stays dependency-free. See the
+The body renderer wraps ``telegramify-markdown`` (mistletoe-based), ported in
+spirit from six-ddc/ccbot's ``markdown_v2.py`` (https://github.com/six-ddc/ccbot,
+MIT) — ccbot's approach we had previously declined in order to stay dep-free.
+``telegramify-markdown`` ships with the optional ``[telegram]`` extra; when it is
+absent (a core install), :func:`render_markdown` degrades to the blind
+character-escape so this module stays importable with the stdlib alone. See the
 top-level NOTICE file for upstream attribution.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from chela.telegram.parser import Message
+
+try:  # ships with the optional [telegram] extra; absent in a core install.
+    import telegramify_markdown as _telegramify
+except ImportError:  # pragma: no cover - exercised only without the extra
+    _telegramify = None
+
+log = logging.getLogger(__name__)
 
 # Characters Telegram requires be backslash-escaped in MarkdownV2 plain text.
 # Ported verbatim from six-ddc/ccbot's markdown_v2.py (MIT); see NOTICE.
@@ -29,6 +42,27 @@ _MDV2_SPECIAL = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
 def escape_markdown_v2(text: str) -> str:
     """Backslash-escape every MarkdownV2 special character in ``text``."""
     return _MDV2_SPECIAL.sub(r"\\\1", text)
+
+
+def render_markdown(text: str) -> str:
+    """Render a Markdown ``text`` body as a Telegram MarkdownV2 string.
+
+    Uses ``telegramify-markdown`` so fenced code blocks, bold/italic, lists and
+    tables become real Telegram entities rather than the literal, blind-escaped
+    characters :func:`escape_markdown_v2` would produce. Falls back to that blind
+    escape when ``telegramify-markdown`` isn't installed (core install without
+    the ``[telegram]`` extra) or if it raises on malformed input — so a body is
+    always rendered to *some* valid MarkdownV2 and never crashes the relay.
+    """
+    if _telegramify is None:
+        return escape_markdown_v2(text)
+    try:
+        # markdownify appends a trailing newline; drop it so concatenation with
+        # the header stays tight.
+        return _telegramify.markdownify(text).rstrip("\n")
+    except Exception:  # pragma: no cover - defensive; malformed markdown
+        log.debug("telegramify-markdown failed; blind-escaping body", exc_info=True)
+        return escape_markdown_v2(text)
 
 
 def to_code_block(text: str) -> str:
@@ -70,9 +104,13 @@ def to_plain_text(msg: Message) -> str:
 
 
 def to_markdown_v2(msg: Message) -> str:
-    """Render a message as a Telegram MarkdownV2 string (bold header + body)."""
+    """Render a message as a Telegram MarkdownV2 string (bold header + body).
+
+    The header is blind-escaped and bolded; the body is rendered through
+    :func:`render_markdown` so Claude's Markdown displays with real formatting.
+    """
     header, body = _header_and_body(msg)
     out = f"*{escape_markdown_v2(header)}*"
     if body:
-        out += f"\n{escape_markdown_v2(body)}"
+        out += f"\n{render_markdown(body)}"
     return out
