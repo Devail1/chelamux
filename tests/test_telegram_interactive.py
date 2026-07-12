@@ -160,6 +160,58 @@ def test_no_keyboard_for_other_tools_or_missing_payload():
 
 
 # --------------------------------------------------------------------------
+# ask_reply_markup — ExitPlanMode (Slice B): approve / keep-planning buttons
+# --------------------------------------------------------------------------
+
+_UNSET = object()
+
+
+def _plan(tool_input=_UNSET):
+    return Message(
+        "assistant", "tool_use", "ExitPlanMode",
+        tool_name="ExitPlanMode",
+        tool_input={"plan": "do the thing"} if tool_input is _UNSET else tool_input,
+    )
+
+
+def test_exitplanmode_gets_approve_keep_planning_plus_nav():
+    markup = ask_reply_markup(_plan())
+    assert markup is not None
+    # Two semantic approval buttons, both reusing Slice A's nav plumbing so no
+    # inbound handler change is needed: Approve→Enter, Keep planning→Escape.
+    # Enter's default proceed option enables auto mode (verified live against
+    # Claude Code 2.1.207), so the button says so rather than a bare "Approve".
+    assert markup["inline_keyboard"][0] == [
+        {"text": "✅ Approve (auto mode)", "callback_data": "qa:nav:ent"},
+        {"text": "📝 Keep planning", "callback_data": "qa:nav:esc"},
+    ]
+    # The full nav-fallback row is still appended (arrow to a specific variant).
+    assert markup["inline_keyboard"][-1] == [
+        {"text": label, "callback_data": f"qa:nav:{key_id}"}
+        for (label, key_id, _t) in NAV_KEYS
+    ]
+    # These are option-count-independent single keystrokes — no index buttons.
+    assert not any(
+        c.startswith(QA_CB_PREFIX) and not c.startswith("qa:nav:")
+        for c in _callbacks(markup)
+    )
+
+
+def test_exitplanmode_approval_keys_decode_to_enter_and_escape():
+    # The two approval buttons must round-trip through the existing decoder so the
+    # inbound handler fires the right tmux key with no new callback scheme.
+    assert decode_callback("qa:nav:ent") == ("key", ("Enter", "⏎ Enter"))
+    assert decode_callback("qa:nav:esc") == ("key", ("Escape", "⎋ Esc"))
+
+
+def test_exitplanmode_keyboard_attaches_even_without_plan_payload():
+    # The buttons don't depend on the plan text, so an empty/missing input still
+    # gets the keyboard (additive; never blocks relaying the plan).
+    assert ask_reply_markup(_plan({})) is not None
+    assert ask_reply_markup(_plan(None)) is not None
+
+
+# --------------------------------------------------------------------------
 # decode_callback — callback_data → action for the inbound handler
 # --------------------------------------------------------------------------
 

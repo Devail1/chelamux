@@ -227,7 +227,11 @@ class _StubSender:
         self.fail_markdown = fail_markdown
         self.calls: list[tuple[str, str | None]] = []
 
-    def __call__(self, text: str, parse_mode: str | None) -> bool:
+    def __call__(self, text: str, parse_mode: str | None, reply_markup=None) -> bool:
+        # ``reply_markup`` is accepted (an ExitPlanMode/AskUserQuestion prompt now
+        # rides one) but not part of the recorded tuple — count/text assertions in
+        # this stub's tests stay 2-element; keyboard content is asserted via the
+        # markup-aware stub below.
         self.calls.append((text, parse_mode))
         if parse_mode == "MarkdownV2" and self.fail_markdown:
             return False
@@ -430,6 +434,26 @@ def test_registry_relay_attaches_ask_keyboard():
     assert markup is not None
     callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
     assert "qa:0" in callbacks and "qa:1" in callbacks
+
+
+def test_registry_relay_attaches_exit_plan_mode_keyboard():
+    # Slice B: an ExitPlanMode prompt carries approve/keep-planning buttons that
+    # reuse Slice A's nav plumbing (Enter/Escape), so no inbound handler change.
+    stub = _MarkupStubSender()
+    relay = RegistryRelay(stub, _registry(("@1", "42")))
+    relay.on_message(
+        "@1", Message("assistant", "tool_use", "ExitPlanMode", tool_name="ExitPlanMode"),
+    )
+
+    assert len(stub.calls) == 1
+    markup = stub.calls[0]["reply_markup"]
+    assert markup is not None
+    callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert "qa:nav:ent" in callbacks  # ✅ Approve plan → Enter
+    assert "qa:nav:esc" in callbacks  # 📝 Keep planning → Escape
+    # Option-count-independent: no semantic index buttons (choices aren't in the
+    # transcript for ExitPlanMode).
+    assert not any(c.startswith("qa:") and not c.startswith("qa:nav:") for c in callbacks)
 
 
 def test_registry_relay_ordinary_text_has_no_keyboard_kwarg():
