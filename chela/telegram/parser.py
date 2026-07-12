@@ -47,6 +47,10 @@ class Message:
     tool_name: str | None = None
     tool_use_id: str | None = None
     timestamp: str | None = None
+    # The raw ``tool_use`` ``input`` dict (e.g. AskUserQuestion's ``questions``),
+    # carried so an interactive relay can build an inline keyboard from the
+    # structured prompt instead of scraping the pane. None for non-tool events.
+    tool_input: dict | None = None
 
 
 @dataclass
@@ -143,10 +147,12 @@ def parse_entries(
                     tuid = block.get("id") or None
                     if tuid:
                         pending[tuid] = _Pending(tool_name=name)
+                    tinput = block.get("input")
                     out.append(
                         Message(
                             "assistant", "tool_use", name,
                             tool_name=name, tool_use_id=tuid, timestamp=ts,
+                            tool_input=tinput if isinstance(tinput, dict) else None,
                         )
                     )
         else:  # user
