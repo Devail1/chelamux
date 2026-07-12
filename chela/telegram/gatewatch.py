@@ -23,11 +23,18 @@ watcher reads the tmux pane to surface them to the bound topic:
     scraped question text with an inline answer keyboard (semantic ``qa:<i>``
     buttons for a simple single-select, nav row only for the multi-tab fallback).
 
-Both relays are **edge-triggered / de-duped per window**: a permission gate is
-tracked by ``tool_use_id`` (cleared on its ``tool_result`` or when the pane stops
-showing it); an AskUserQuestion is tracked by a scraped-content signature (cleared
-when the selector leaves the pane — answered — with the AskUserQuestion
-``tool_result`` as a belt-and-suspenders clear).
+  * an **ExitPlanMode** plan-approval selector — same story as AskUserQuestion:
+    its ``tool_use`` lands only after the plan is resolved, so it too is detected
+    directly from the pane every tick
+    (:func:`~chela.telegram.panescan.detect_exitplanmode`, on the same capture). A
+    newly-detected selector posts the scraped plan text with the approve /
+    keep-planning keyboard (:func:`~chela.telegram.interactive.plan_reply_markup`).
+
+All three relays are **edge-triggered / de-duped per window**: a permission gate
+is tracked by ``tool_use_id`` (cleared on its ``tool_result`` or when the pane
+stops showing it); an AskUserQuestion and an ExitPlanMode are each tracked by a
+scraped-content signature (cleared when the selector leaves the pane — resolved —
+with the matching ``tool_result`` as a belt-and-suspenders clear).
 """
 from __future__ import annotations
 
@@ -35,11 +42,17 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
-from chela.telegram.interactive import nav_only_markup, scraped_reply_markup
+from chela.telegram.interactive import (
+    nav_only_markup,
+    plan_reply_markup,
+    scraped_reply_markup,
+)
 from chela.telegram.panescan import (
     AskUQ,
+    ExitPlan,
     Gate,
     detect_askuserquestion,
+    detect_exitplanmode,
     detect_permission_gate,
 )
 
@@ -141,6 +154,32 @@ def _askuq_markup(uq: AskUQ) -> dict:
     return scraped_reply_markup(uq.options)
 
 
+# Longest plan body inlined before truncating (the full plan is one /screenshot
+# away; a shorter cap keeps the approval message readable on a phone).
+_MAX_PLAN = 2000
+
+
+def format_plan_message(plan: ExitPlan) -> str:
+    """The plain-text relay body for a detected ExitPlanMode plan approval.
+
+    The scraped plan (the text above the options) under a 📋 header; the
+    approve / keep-planning buttons carry the choices, so the options are not
+    repeated. A long plan is truncated with a ``/screenshot`` pointer; an empty
+    scrape (plan scrolled off the pane) falls back to a generic prompt.
+    """
+    body = (plan.text or "").strip()
+    if not body:
+        return "📋 Claude has written up a plan — approve to proceed."
+    if len(body) > _MAX_PLAN:
+        body = body[:_MAX_PLAN].rstrip() + "\n… (/screenshot for full)"
+    return f"📋 Plan review:\n{body}"
+
+
+def _plan_signature(plan: ExitPlan) -> str:
+    """A stable key for one plan-approval instance — the de-dup / edge marker."""
+    return plan.text
+
+
 class PermissionGateWatcher:
     """Observes the message stream + polls panes to surface the live-TUI prompts.
 
@@ -162,6 +201,7 @@ class PermissionGateWatcher:
         capture: Capture,
         detect: Callable[[str], Gate | None] = detect_permission_gate,
         detect_askuq: Callable[[str], AskUQ | None] = detect_askuserquestion,
+        detect_plan: Callable[[str], ExitPlan | None] = detect_exitplanmode,
         post: Poster | None = None,
         edit: Editor | None = None,
     ):
@@ -170,6 +210,7 @@ class PermissionGateWatcher:
         self._capture = capture
         self._detect = detect
         self._detect_askuq = detect_askuq
+        self._detect_plan = detect_plan
         # The AskUserQuestion relay edits its message in place as the selector
         # settles (a mid-render partial → the full option list is ONE message, not
         # two). Production wires ``post``/``edit`` from :class:`BotSender`; when
@@ -189,6 +230,13 @@ class PermissionGateWatcher:
         # re-scrape (more options rendered / cursor moved) edits it in place
         # instead of double-posting. Cleared alongside ``_relayed_uq``.
         self._uq_msg: dict[str, int] = {}
+        # window_id -> signature of the ExitPlanMode plan approval we've relayed
+        # (edge trigger); cleared when the selector leaves the pane / is answered.
+        self._relayed_plan: dict[str, str] = {}
+        # window_id -> message_id of the plan-approval prompt we posted, so a
+        # re-scrape (the plan finished rendering) edits it in place rather than
+        # double-posting. Cleared alongside ``_relayed_plan``.
+        self._plan_msg: dict[str, int] = {}
 
     def observe(self, window_id: str, msg) -> None:
         """Track ``tool_use``/``tool_result`` pairing for one parsed message.
@@ -211,11 +259,17 @@ class PermissionGateWatcher:
             pend = self._pending.get(window_id)
             if pend and uid:
                 pend.pop(uid, None)
-            if getattr(msg, "tool_name", None) == "AskUserQuestion":
+            name = getattr(msg, "tool_name", None)
+            if name == "AskUserQuestion":
                 # The question was just answered → drop the tracked message so a
                 # genuinely new question posts fresh (never edits the answered one).
                 self._relayed_uq.pop(window_id, None)
                 self._uq_msg.pop(window_id, None)
+            elif name == "ExitPlanMode":
+                # The plan was just resolved (approved / kept planning) → same
+                # belt-and-suspenders clear so the next plan posts fresh.
+                self._relayed_plan.pop(window_id, None)
+                self._plan_msg.pop(window_id, None)
 
     def forget(self, window_id: str) -> None:
         """Drop all state for a window (e.g. after it closes)."""
@@ -223,6 +277,8 @@ class PermissionGateWatcher:
         self._relayed.pop(window_id, None)
         self._relayed_uq.pop(window_id, None)
         self._uq_msg.pop(window_id, None)
+        self._relayed_plan.pop(window_id, None)
+        self._plan_msg.pop(window_id, None)
 
     def poll(self, window_ids) -> None:
         """Read each window's pane once and relay newly-detected prompts.
@@ -241,9 +297,10 @@ class PermissionGateWatcher:
     # -- internals ---------------------------------------------------------
 
     def _poll_window(self, window_id: str) -> None:
-        # One capture per window per tick, shared by both detectors.
+        # One capture per window per tick, shared by all three detectors.
         pane = self._capture(window_id)
         self._poll_askuq(window_id, pane)
+        self._poll_plan(window_id, pane)
         self._poll_gate(window_id, pane)
 
     def _poll_askuq(self, window_id: str, pane: str) -> None:
@@ -295,6 +352,54 @@ class PermissionGateWatcher:
             # without an id we can't edit, so a changed scrape re-posts (pre-A2).
             self._sender(text, None, thread, reply_markup=markup)
         self._relayed_uq[window_id] = signature
+
+    def _poll_plan(self, window_id: str, pane: str) -> None:
+        """Relay a newly-detected ExitPlanMode plan approval (pane-only, edge-triggered).
+
+        The mirror of :meth:`_poll_askuq` for the plan-approval selector: it is
+        never in the transcript while pending (the ``tool_use`` lands post-answer),
+        so it is detected straight from the pane. The first scrape posts ONE
+        message with the scraped plan + the approve / keep-planning keyboard; a
+        later scrape of the same window (the plan finished rendering) **edits it in
+        place** rather than double-posting. Tracking clears when the selector
+        leaves the pane (resolved) so the next plan posts fresh.
+        """
+        plan = self._detect_plan(pane)
+        if plan is None:
+            # Selector gone (approved / kept planning) — clear so the next relays.
+            self._relayed_plan.pop(window_id, None)
+            self._plan_msg.pop(window_id, None)
+            return
+
+        signature = _plan_signature(plan)
+        if self._relayed_plan.get(window_id) == signature:
+            return  # unchanged scrape — edge-triggered, neither re-post nor edit
+
+        thread = self._registry.thread_for_window(window_id)
+        if thread is None:
+            log.debug("ExitPlanMode on %s but no bound topic; skipping", window_id)
+            return
+
+        text = format_plan_message(plan)
+        markup = plan_reply_markup()
+        msg_id = self._plan_msg.get(window_id)
+
+        # A changed scrape for a window we already posted for → EDIT that message.
+        # On edit failure (message deleted) drop the id and fall through to a post.
+        if msg_id is not None and self._edit is not None:
+            if self._edit(msg_id, text, None, markup):
+                self._relayed_plan[window_id] = signature
+                return
+            self._plan_msg.pop(window_id, None)
+
+        if self._post is not None:
+            new_id = self._post(text, None, thread, markup)
+            if new_id is not None:
+                self._plan_msg[window_id] = new_id
+        else:
+            # No id-returning poster (plain-sender tests) — post via the sender.
+            self._sender(text, None, thread, reply_markup=markup)
+        self._relayed_plan[window_id] = signature
 
     def _poll_gate(self, window_id: str, pane: str) -> None:
         """Relay a newly-detected permission gate (transcript-gated, edge-triggered)."""

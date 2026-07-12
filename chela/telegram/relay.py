@@ -56,14 +56,18 @@ def _hide_tool_event(msg: Message, show_tool_calls: bool) -> bool:
     must always reach the human. ``text``/``thinking``/``user`` events carry no
     tool name and are never tool events, so they always relay.
 
-    The one exception that fires regardless of ``show_tool_calls``: an
-    AskUserQuestion ``tool_use``. Slice A2 surfaces that prompt live from the pane
-    (with answer buttons) while the selector is still pending; its transcript
-    ``tool_use`` only lands *after* the answer, so relaying it here would just
-    double-post the already-answered question. Its ``tool_result`` still relays as
-    the "answered: X" confirmation.
+    The one class of exceptions that fires regardless of ``show_tool_calls``: the
+    ``tool_use`` of a pane-triggered prompt (AskUserQuestion — Slice A2 — and
+    ExitPlanMode — Slice B2). Both selectors are surfaced live from the pane (with
+    answer / approval buttons) while still pending; each one's transcript
+    ``tool_use`` only lands *after* it is resolved, so relaying it here would just
+    double-post the already-answered prompt. Their ``tool_result`` still relays as
+    the "answered" / "approved" confirmation.
     """
-    if msg.content_type == "tool_use" and msg.tool_name == "AskUserQuestion":
+    if msg.content_type == "tool_use" and msg.tool_name in (
+        "AskUserQuestion",
+        "ExitPlanMode",
+    ):
         return True
     if show_tool_calls:
         return False

@@ -1,16 +1,19 @@
 """Interactive-prompt inline keyboards — the pure data behind phone answering.
 
-No live Telegram and no PTB import: the ExitPlanMode keyboard the outbound relay
-attaches (:func:`ask_reply_markup`), the pane-triggered AskUserQuestion keyboards
-(:func:`scraped_reply_markup` / :func:`nav_only_markup`), the callback the inbound
-handler decodes (:func:`decode_callback`), and the answer-injection sequences
+No live Telegram and no PTB import: the pane-triggered AskUserQuestion keyboards
+(:func:`scraped_reply_markup` / :func:`nav_only_markup`), the pane-triggered
+ExitPlanMode keyboard (:func:`plan_reply_markup`), the now-vestigial transcript
+seam (:func:`ask_reply_markup`), the callback the inbound handler decodes
+(:func:`decode_callback`), and the answer-injection sequences
 (:func:`select_keystrokes_relative` / :func:`select_keystrokes`) are all plain
 data, so these lock in
 
-  * AskUserQuestion is now pane-triggered — ``ask_reply_markup`` no longer builds
-    its keyboard (Slice A2 suppression; its transcript record is post-answer);
+  * both interactive prompts are now pane-triggered — ``ask_reply_markup`` no
+    longer builds any keyboard (Slice A2 + B2; both transcript records are
+    post-answer);
   * one semantic ``qa:<i>`` button per scraped option, index-only within
     Telegram's 64-byte cap, then the nav row; nav-only for the fallback shape;
+  * the ExitPlanMode approve / keep-planning buttons (Enter / Escape) + nav row;
   * cursor-relative select-and-submit keystrokes (never a blind Down×i);
   * decode round-trips (select / nav-key / refresh) and rejects junk payloads.
 """
@@ -23,6 +26,7 @@ from chela.telegram.interactive import (
     ask_reply_markup,
     decode_callback,
     nav_only_markup,
+    plan_reply_markup,
     scraped_reply_markup,
     select_keystrokes,
     select_keystrokes_relative,
@@ -133,24 +137,23 @@ def test_no_keyboard_for_other_tools_or_missing_payload():
     assert ask_reply_markup(_ask({})) is None
 
 
-# --------------------------------------------------------------------------
-# ask_reply_markup — ExitPlanMode (Slice B): approve / keep-planning buttons
-# --------------------------------------------------------------------------
-
-_UNSET = object()
-
-
-def _plan(tool_input=_UNSET):
-    return Message(
+def test_exitplanmode_transcript_tool_use_gets_no_keyboard():
+    # Slice B2: like AskUserQuestion, the ExitPlanMode tool_use lands post-answer,
+    # so no keyboard is attached from the transcript — the pane watcher builds it
+    # live instead (:func:`plan_reply_markup`).
+    plan_msg = Message(
         "assistant", "tool_use", "ExitPlanMode",
-        tool_name="ExitPlanMode",
-        tool_input={"plan": "do the thing"} if tool_input is _UNSET else tool_input,
+        tool_name="ExitPlanMode", tool_input={"plan": "do the thing"},
     )
+    assert ask_reply_markup(plan_msg) is None
 
 
-def test_exitplanmode_gets_approve_keep_planning_plus_nav():
-    markup = ask_reply_markup(_plan())
-    assert markup is not None
+# --------------------------------------------------------------------------
+# plan_reply_markup — ExitPlanMode (Slice B2): approve / keep-planning buttons
+# --------------------------------------------------------------------------
+
+def test_plan_markup_gets_approve_keep_planning_plus_nav():
+    markup = plan_reply_markup()
     # Two semantic approval buttons, both reusing Slice A's nav plumbing so no
     # inbound handler change is needed: Approve→Enter, Keep planning→Escape.
     # Enter's default proceed option enables auto mode (verified live against
@@ -176,13 +179,6 @@ def test_exitplanmode_approval_keys_decode_to_enter_and_escape():
     # inbound handler fires the right tmux key with no new callback scheme.
     assert decode_callback("qa:nav:ent") == ("key", ("Enter", "⏎"))
     assert decode_callback("qa:nav:esc") == ("key", ("Escape", "⎋"))
-
-
-def test_exitplanmode_keyboard_attaches_even_without_plan_payload():
-    # The buttons don't depend on the plan text, so an empty/missing input still
-    # gets the keyboard (additive; never blocks relaying the plan).
-    assert ask_reply_markup(_plan({})) is not None
-    assert ask_reply_markup(_plan(None)) is not None
 
 
 # --------------------------------------------------------------------------

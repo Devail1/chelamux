@@ -348,10 +348,10 @@ class _StubSender:
         self.calls: list[tuple[str, str | None]] = []
 
     def __call__(self, text: str, parse_mode: str | None, reply_markup=None) -> bool:
-        # ``reply_markup`` is accepted (an ExitPlanMode/AskUserQuestion prompt now
-        # rides one) but not part of the recorded tuple — count/text assertions in
-        # this stub's tests stay 2-element; keyboard content is asserted via the
-        # markup-aware stub below.
+        # ``reply_markup`` is accepted for signature compatibility (the transcript
+        # relay's ``ask_reply_markup`` seam is now always None — both interactive
+        # prompts moved to the pane), but it's not part of the recorded tuple:
+        # count/text assertions here stay 2-element.
         self.calls.append((text, parse_mode))
         if parse_mode == "MarkdownV2" and self.fail_markdown:
             return False
@@ -485,13 +485,30 @@ def test_relay_drops_askuserquestion_tool_use_even_when_shown():
     assert stub.calls == []
 
 
-def test_relay_hidden_keeps_exit_plan_mode_prompt():
+def test_relay_drops_exit_plan_mode_tool_use_but_keeps_its_result():
+    # Slice B2: like AskUserQuestion, the ExitPlanMode tool_use lands post-answer,
+    # so it is dropped here (the pane watcher owns the plan prompt live); its
+    # tool_result still relays as the "approved / kept planning" confirmation.
     stub = _StubSender()
     relay = TelegramRelay(stub, show_tool_calls=False)
     relay.on_message(
         "@1", Message("assistant", "tool_use", "ExitPlanMode", tool_name="ExitPlanMode")
     )
-    assert len(stub.calls) == 1
+    relay.on_message(
+        "@1", Message("assistant", "tool_result", "approved", tool_name="ExitPlanMode")
+    )
+    assert len(stub.calls) == 1  # only the tool_result made it
+
+
+def test_relay_drops_exit_plan_mode_tool_use_even_when_shown():
+    # The double-post guard fires regardless of show_tool_calls: even with the
+    # firehose on, the pane watcher owns the ExitPlanMode prompt.
+    stub = _StubSender()
+    relay = TelegramRelay(stub, show_tool_calls=True)
+    relay.on_message(
+        "@1", Message("assistant", "tool_use", "ExitPlanMode", tool_name="ExitPlanMode")
+    )
+    assert stub.calls == []
 
 
 def test_relay_shown_keeps_all_tool_calls():
@@ -569,24 +586,16 @@ def test_registry_relay_drops_askuserquestion_tool_use_entirely():
     assert stub.calls == []
 
 
-def test_registry_relay_attaches_exit_plan_mode_keyboard():
-    # Slice B: an ExitPlanMode prompt carries approve/keep-planning buttons that
-    # reuse Slice A's nav plumbing (Enter/Escape), so no inbound handler change.
+def test_registry_relay_drops_exit_plan_mode_tool_use_entirely():
+    # Slice B2: the ExitPlanMode plan approval is surfaced live from the pane (with
+    # its approve/keep-planning keyboard) — the post-answer transcript tool_use is
+    # dropped here, so the relay neither re-posts the plan nor attaches a keyboard.
     stub = _MarkupStubSender()
     relay = RegistryRelay(stub, _registry(("@1", "42")))
     relay.on_message(
         "@1", Message("assistant", "tool_use", "ExitPlanMode", tool_name="ExitPlanMode"),
     )
-
-    assert len(stub.calls) == 1
-    markup = stub.calls[0]["reply_markup"]
-    assert markup is not None
-    callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
-    assert "qa:nav:ent" in callbacks  # ✅ Approve plan → Enter
-    assert "qa:nav:esc" in callbacks  # 📝 Keep planning → Escape
-    # Option-count-independent: no semantic index buttons (choices aren't in the
-    # transcript for ExitPlanMode).
-    assert not any(c.startswith("qa:") and not c.startswith("qa:nav:") for c in callbacks)
+    assert stub.calls == []
 
 
 def test_registry_relay_ordinary_text_has_no_keyboard_kwarg():

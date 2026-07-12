@@ -1,7 +1,7 @@
 """Pane-scrape detectors for the live-TUI prompts — the one TUI-regex module.
 
-Two kinds of blocked-agent prompt are rendered only in Claude Code's live TUI and
-must be read off the tmux pane rather than the JSONL transcript:
+Three kinds of blocked-agent prompt are rendered only in Claude Code's live TUI
+and must be read off the tmux pane rather than the JSONL transcript:
 
 * a tool **permission gate** ("Do you want to proceed?" for a Bash/Edit) — never
   in the transcript at all (:func:`detect_permission_gate`);
@@ -9,7 +9,11 @@ must be read off the tmux pane rather than the JSONL transcript:
   once the question is *answered* (the ``tool_use`` record is appended at
   answer-time, not while the selector is pending), so a transcript-triggered relay
   can never show the buttons while the question is still answerable. The pane shows
-  it live, so detection comes from the pane (:func:`detect_askuserquestion`).
+  it live, so detection comes from the pane (:func:`detect_askuserquestion`);
+* an **ExitPlanMode** plan-approval selector ("Would you like to proceed?" with
+  the Yes-auto / Yes-manual / No choices) — same story as AskUserQuestion: its
+  ``tool_use`` lands only at answer-time, so the approve / keep-planning buttons
+  are detected from the pane too (:func:`detect_exitplanmode`).
 
 This module is the **sole home** for the Claude-Code TUI regexes — the "signatures
 table". Keeping every such pattern here means a Claude Code version bump that
@@ -20,8 +24,9 @@ deliberately NOT ported. See the top-level NOTICE file for upstream attribution.
 
 Public API: :func:`detect_permission_gate` returns a :class:`Gate` when the pane
 shows a permission/bash-approval prompt; :func:`detect_askuserquestion` returns an
-:class:`AskUQ` when the pane shows an AskUserQuestion selector; both return
-``None`` for a normal / working pane.
+:class:`AskUQ` when the pane shows an AskUserQuestion selector;
+:func:`detect_exitplanmode` returns an :class:`ExitPlan` when the pane shows a
+plan-approval selector; all return ``None`` for a normal / working pane.
 """
 from __future__ import annotations
 
@@ -303,3 +308,88 @@ def detect_askuserquestion(pane_text: str) -> AskUQ | None:
         # gets the nav row so the human is never handed a broken keyboard.
         return AskUQ(question=question, options=(), cursor=-1, multi=True)
     return AskUQ(question=question, options=tuple(options), cursor=cursor, multi=False)
+
+
+# ── ExitPlanMode plan-approval selector (Slice B2) ───────────────────────────
+#
+# Like AskUserQuestion, ExitPlanMode's ``tool_use`` was measured to land in the
+# transcript only *after* the plan is resolved, so the approve/keep-planning
+# buttons (Slice B / CMX-20) were useless attached to the post-answer transcript
+# record. The plan-approval prompt is a **live pane** UI, so it is detected here
+# instead. A single-select prompt renders (leading spaces significant)::
+#
+#     ● Here is my plan:
+#         1. Do the first thing
+#         2. Do the second thing
+#
+#      Would you like to proceed?            <- the proceed prompt (anchor)
+#      ❯ 1. Yes, and auto-accept edits        <- options (❯ marks the default)
+#        2. Yes, and manually approve edits
+#        3. No, keep planning
+#
+#      Esc to cancel                          <- bottom marker (confirms live UI)
+#
+# The plan text the human must read is everything **above** the proceed prompt;
+# the options below are represented by the inline keyboard, so they are not part
+# of the relayed body. The proceed-prompt + bottom markers are ported from
+# six-ddc/ccbot's ``terminal_parser.py`` ExitPlanMode ``UIPattern`` (top /
+# bottom); the ``Claude has written up a plan`` alternative is the v2.1.29+
+# wording where the prompt wraps. See the top-level NOTICE for attribution.
+_RE_PLAN_TOP = (
+    re.compile(r"^\s*Would you like to proceed\?"),
+    re.compile(r"^\s*Claude has written up a plan"),
+)
+_RE_PLAN_BOTTOM = (
+    re.compile(r"^\s*ctrl-g to edit in "),
+    re.compile(r"^\s*Esc to (cancel|exit)"),
+)
+_PLAN_MIN_GAP = 2  # min lines from the proceed prompt to the bottom marker
+
+
+@dataclass(frozen=True)
+class ExitPlan:
+    """A detected ExitPlanMode plan-approval selector.
+
+    ``text`` is the scraped plan region — the lines shown *above* the proceed
+    prompt, which is what the human reads to decide. It may be empty when the plan
+    has scrolled off the visible pane (the relay then posts a generic prompt); the
+    approve / keep-planning buttons are option-count-independent, so they attach
+    regardless.
+    """
+
+    text: str
+
+
+def detect_exitplanmode(pane_text: str) -> ExitPlan | None:
+    """Detect an ExitPlanMode plan-approval selector in captured pane text.
+
+    Requires the ``Would you like to proceed?`` prompt (or the wrapped
+    ``Claude has written up a plan`` variant) followed by a ``ctrl-g``/``Esc``
+    footer — so it never fires on a permission prompt (``Do you want to
+    proceed?``), an AskUserQuestion selector (no such prompt), or a normal pane.
+    Returns an :class:`ExitPlan` carrying the plan region scraped from *above* the
+    prompt, or ``None`` when the pane shows no plan-approval selector.
+    """
+    if not pane_text:
+        return None
+
+    lines = pane_text.split("\n")
+
+    proceed_idx: int | None = None
+    for i, line in enumerate(lines):
+        if any(p.search(line) for p in _RE_PLAN_TOP):
+            proceed_idx = i
+            break
+    if proceed_idx is None:
+        return None
+
+    bottom_idx: int | None = None
+    for i in range(proceed_idx + 1, len(lines)):
+        if any(p.search(lines[i]) for p in _RE_PLAN_BOTTOM):
+            bottom_idx = i
+            break
+    if bottom_idx is None or bottom_idx - proceed_idx < _PLAN_MIN_GAP:
+        return None
+
+    plan = _shorten_separators("\n".join(lines[:proceed_idx])).strip()
+    return ExitPlan(text=plan)

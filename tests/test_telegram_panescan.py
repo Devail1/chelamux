@@ -9,7 +9,11 @@ reword that breaks these is a one-file edit in ``panescan.py``.
 """
 from __future__ import annotations
 
-from chela.telegram.panescan import detect_askuserquestion, detect_permission_gate
+from chela.telegram.panescan import (
+    detect_askuserquestion,
+    detect_exitplanmode,
+    detect_permission_gate,
+)
 
 # A Bash permission prompt: "Do you want to proceed?" framed by "Esc to cancel".
 PERMISSION_PANE = """\
@@ -203,3 +207,76 @@ def test_permission_and_working_panes_are_not_selectors():
 def test_askuq_empty_pane_is_none():
     assert detect_askuserquestion("") is None
     assert detect_askuserquestion("   \n  \n") is None
+
+
+# ── ExitPlanMode plan-approval selector (Slice B2) ───────────────────────────
+#
+# The plan-approval prompt ("Would you like to proceed?" with the Yes-auto /
+# Yes-manual / No choices) is a live-pane UI whose tool_use lands only at
+# answer-time — so it is scraped from the pane exactly like AskUserQuestion.
+
+# A plan approval: the plan text, then the proceed prompt + numbered choices,
+# then the "Esc to cancel" footer. The plan is ABOVE the options (the options are
+# carried by the buttons, so they're not part of the scraped body).
+EXITPLAN_PANE = """\
+● Here is my plan:
+
+  1. Add detect_exitplanmode to panescan.py
+  2. Wire the pane trigger into gatewatch
+  3. Suppress the transcript double-relay
+
+ Would you like to proceed?
+ ❯ 1. Yes, and auto-accept edits
+   2. Yes, and manually approve edits
+   3. No, keep planning
+
+ Esc to cancel
+"""
+
+# The v2.1.29+ wording where the prompt wraps ("Claude has written up a plan …").
+EXITPLAN_WRAPPED_PANE = """\
+● Plan:
+
+  Refactor the parser and add tests.
+
+ Claude has written up a plan. Would you like to proceed?
+ ❯ 1. Yes, and auto-accept edits
+   2. No, keep planning
+
+ ctrl-g to edit in $EDITOR
+"""
+
+
+def test_detects_exitplanmode_and_scrapes_the_plan_region():
+    plan = detect_exitplanmode(EXITPLAN_PANE)
+    assert plan is not None
+    # The plan text above the options is scraped as the body …
+    assert "Here is my plan:" in plan.text
+    assert "Add detect_exitplanmode to panescan.py" in plan.text
+    # … while the proceed prompt and the numbered options are NOT (the buttons
+    # carry the choices, so they'd be redundant in the body).
+    assert "Would you like to proceed?" not in plan.text
+    assert "auto-accept edits" not in plan.text
+    assert "Esc to cancel" not in plan.text
+
+
+def test_detects_exitplanmode_wrapped_prompt_variant():
+    plan = detect_exitplanmode(EXITPLAN_WRAPPED_PANE)
+    assert plan is not None
+    assert "Refactor the parser" in plan.text
+    assert "Would you like to proceed?" not in plan.text
+
+
+def test_exitplanmode_permission_and_askuq_panes_are_not_plans():
+    # A permission prompt says "Do you want to proceed?" (not "Would you like…"),
+    # an AskUserQuestion has no proceed prompt at all, a normal pane neither.
+    assert detect_exitplanmode(PERMISSION_PANE) is None
+    assert detect_exitplanmode(ASKUQ_SINGLE_PANE) is None
+    assert detect_exitplanmode(ASKUQ_MULTI_PANE) is None
+    assert detect_exitplanmode(WORKING_PANE) is None
+    assert detect_exitplanmode(MENU_PANE) is None
+
+
+def test_exitplanmode_empty_pane_is_none():
+    assert detect_exitplanmode("") is None
+    assert detect_exitplanmode("   \n  \n") is None
