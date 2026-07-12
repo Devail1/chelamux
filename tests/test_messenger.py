@@ -84,11 +84,29 @@ def test_paste_submitted_no_second_enter():
     assert len(enters) == 1
 
 
-def test_single_line_never_double_submits():
+def test_single_line_sends_literal_text_then_separate_enter():
     ok, cmds = _run_send("just one line", _PANE_STRANDED)
     assert ok is True
-    # Single-line branch: one combined send-keys with text + Enter, nothing else.
-    assert cmds == [["tmux", "send-keys", "-t", "chela:@1", "just one line", "Enter"]]
+    # Single-line branch: literal text (-l, NO Enter) then a SEPARATE Enter, so
+    # the TUI settles the (possibly long) blob before the Enter lands — a
+    # combined text+Enter strands long messages wrapped on the ❯ input line.
+    assert cmds == [
+        ["tmux", "send-keys", "-t", "chela:@1", "-l", "just one line"],
+        ["tmux", "send-keys", "-t", "chela:@1", "Enter"],
+    ]
+    # Exactly one Enter — no capture/second-Enter chip guard (that's paste-only).
+    enters = [c for c in cmds if c[:2] == ["tmux", "send-keys"] and c[-1] == "Enter"]
+    assert len(enters) == 1
+    assert not any(c[:2] == ["tmux", "capture-pane"] for c in cmds)
+
+
+def test_single_line_key_name_sent_literally():
+    # A message containing a tmux key name must be typed verbatim, not
+    # interpreted as a keypress — that's what ``-l`` guarantees.
+    ok, cmds = _run_send("Enter the code Up top", _PANE_STRANDED)
+    assert ok is True
+    assert cmds[0] == ["tmux", "send-keys", "-t", "chela:@1", "-l", "Enter the code Up top"]
+    assert cmds[1] == ["tmux", "send-keys", "-t", "chela:@1", "Enter"]
 
 
 def test_pane_has_unsubmitted_paste_guards_empty_prompt():
