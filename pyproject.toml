@@ -28,6 +28,7 @@ dashboard = [
 # Adapted from six-ddc/ccbot (MIT) — see the top-level NOTICE file.
 telegram = [
     "python-telegram-bot>=21.0",  # Telegram Bot API client for the bridge
+    "Pillow>=10.0",               # /screenshot: render a tmux pane -> PNG (ANSI colour)
 ]
 dev = [
     "pytest>=8.0",

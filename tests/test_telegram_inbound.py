@@ -172,3 +172,47 @@ def test_registry_router_propagates_send_failure():
     router = RegistryRouter(_registry("777", ("@3", "42")), sender=stub)
     assert router.route(777, 42, "will fail") is False
     assert stub.calls == [("@3", "will fail")]
+
+
+# --------------------------------------------------------------------------
+# resolve() — the chat/topic gate the bridge commands (/screenshot, /esc) share
+# --------------------------------------------------------------------------
+
+def test_topic_router_resolve_returns_window_for_bound_topic():
+    router = TopicRouter("777", "@3", "4")
+    # Wire ids arrive as ints; the gate compares them as str.
+    assert router.resolve(777, 4) == "@3"
+
+
+def test_topic_router_resolve_gates_wrong_chat_and_topic():
+    router = TopicRouter("777", "@3", "4")
+    assert router.resolve(999, 4) is None   # wrong chat
+    assert router.resolve(777, 9) is None   # wrong topic
+    assert router.resolve(None, 4) is None  # no chat
+    assert router.resolve(777, None) is None  # General topic, a topic is bound
+
+
+def test_topicless_router_resolve_accepts_any_topic_in_bound_chat():
+    router = TopicRouter("777", "@3", topic_id=None)
+    assert router.resolve(777, None) == "@3"
+    assert router.resolve(777, 12) == "@3"
+    assert router.resolve(888, 12) is None
+
+
+def test_registry_router_resolve_returns_window_for_bound_topic():
+    router = RegistryRouter(_registry("777", ("@3", "42"), ("@7", "88")))
+    assert router.resolve(777, 42) == "@3"
+    assert router.resolve(777, 88) == "@7"
+
+
+def test_registry_router_resolve_gates_wrong_chat_and_unbound_topic():
+    router = RegistryRouter(_registry("777", ("@3", "42")))
+    assert router.resolve(999, 42) is None   # wrong chat
+    assert router.resolve(777, 999) is None  # unbound topic
+    assert router.resolve(777, None) is None  # General topic
+
+
+def test_registry_router_resolve_fails_closed_with_no_chat_bound():
+    router = RegistryRouter(_registry(None, ("@3", "42")))
+    assert router.resolve(777, 42) is None
+    assert router.resolve(None, 42) is None

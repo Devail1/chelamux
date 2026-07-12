@@ -31,6 +31,18 @@ def escape_markdown_v2(text: str) -> str:
     return _MDV2_SPECIAL.sub(r"\\\1", text)
 
 
+def to_code_block(text: str) -> str:
+    """Wrap ``text`` in a Telegram MarkdownV2 fenced code block.
+
+    Used by the bridge's ``/screenshot`` command to send a terminal pane as a
+    monospaced snapshot. Inside a code entity only ``\\`` and `` ` `` are
+    special (the full :func:`escape_markdown_v2` table would leak visible
+    backslashes into the snapshot), so escape just those two.
+    """
+    escaped = text.replace("\\", "\\\\").replace("`", "\\`")
+    return f"```\n{escaped}\n```"
+
+
 # Emoji-tagged header for each event, so a topic reads like a conversation.
 _ROLE_EMOJI = {"assistant": "🤖", "user": "👤"}
 
