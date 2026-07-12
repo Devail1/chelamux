@@ -32,6 +32,16 @@ READY_POLL_INTERVAL = 1.0
 # once, then failed if it stays idle for another window of this length.
 WATCHDOG_IDLE_MINUTES = 5
 
+# Seed-delivery verification (see _seed_landed / _send_seed). After pasting the
+# prompt we confirm the agent actually picked it up — a late splash redraw can
+# swallow the paste, leaving the agent idle with no task. The agent flips
+# "idle" → "busy" the moment it accepts a prompt, so poll that status for a
+# short window; if it never flips, re-send (capped) instead of hoping.
+SEED_CONFIRM_TIMEOUT_SECONDS = 8.0
+SEED_CONFIRM_POLL_INTERVAL = 1.0
+SEED_MAX_SENDS = 3
+SEED_RESEND_SETTLE_SECONDS = 1.0
+
 # Claude Code TUI ready indicators, matched against `tmux capture-pane -p`.
 # The prompt glyph marks the (empty) input box and is present in every
 # permission mode. The bypass-permissions footer only shows under
@@ -165,6 +175,88 @@ def _pane_idle_empty_prompt(pane: str) -> bool:
             after = line.split(_PROMPT_CHAR, 1)[1].strip().strip("│").strip()
             return after == ""
     return False
+
+
+def _agent_status(window_id: str) -> str | None:
+    """Native session status of the agent in a window ("busy"/"idle"), or None.
+
+    Reads the same `claude agents --json` authority the dashboard uses, keyed by
+    the window's claude pid. None means "can't tell" (no claude child, session
+    not listed, command unavailable) — callers must treat that as unverifiable
+    rather than as evidence of idleness.
+    """
+    from chela import agent_manager
+
+    pid = agent_manager.claude_pid(window_id)
+    if pid is None:
+        return None
+    # force=True: the map is cached for a couple of seconds, and we are polling
+    # for a transition that happens within that window.
+    return agent_manager.session_status_map(force=True)["by_pid"].get(pid)
+
+
+def _seed_landed(
+    window_id: str,
+    timeout: float = SEED_CONFIRM_TIMEOUT_SECONDS,
+    poll: float = SEED_CONFIRM_POLL_INTERVAL,
+) -> bool | None:
+    """Did the seed prompt actually reach the agent?
+
+    True once the agent flips to "busy" (it only does that with a prompt in
+    hand), False if it is still "idle" when the window closes (the paste was
+    swallowed — a splash redraw landing after the ready glyph does exactly
+    that), and None when the status is unreadable, in which case delivery is
+    unverifiable and the caller should fail open rather than re-send blindly.
+
+    A freshly-booted agent reads "idle" until the seed makes it busy, so this
+    watches for the idle → busy transition, not for "is it idle right now".
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        status = _agent_status(window_id)
+        if status is None:
+            return None
+        if status == "busy":
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(poll, remaining))
+
+
+def _send_seed(window_id: str, prompt: str, task_id: str) -> bool:
+    """Send the seed prompt and confirm it landed, re-sending if it didn't.
+
+    Returns False only when the send itself fails. An unconfirmed seed after
+    SEED_MAX_SENDS is logged and left to the reconcile watchdog rather than
+    retried forever — a genuinely broken agent must fail cleanly.
+    """
+    for send in range(1, SEED_MAX_SENDS + 1):
+        if not send_tmux(window_id, prompt):
+            return False
+        landed = _seed_landed(window_id)
+        if landed is None:
+            log.debug(
+                "Task %s: agent status unreadable on %s; assuming the seed landed",
+                task_id, window_id,
+            )
+            return True
+        if landed:
+            if send > 1:
+                log.info("Task %s: seed landed on %s after %d sends", task_id, window_id, send)
+            return True
+        if send < SEED_MAX_SENDS:
+            log.warning(
+                "Task %s: agent on %s still idle %.0fs after the seed (paste dropped); "
+                "re-sending (%d/%d)",
+                task_id, window_id, SEED_CONFIRM_TIMEOUT_SECONDS, send + 1, SEED_MAX_SENDS,
+            )
+            time.sleep(SEED_RESEND_SETTLE_SECONDS)
+    log.warning(
+        "Task %s: agent on %s never went busy after %d seed sends; leaving it to the watchdog",
+        task_id, window_id, SEED_MAX_SENDS,
+    )
+    return True
 
 
 def _wait_for_ready(
@@ -549,7 +641,16 @@ def tick(workflow_path: str | Path) -> dict:
                     and (datetime.now(timezone.utc) - started).total_seconds()
                     >= WATCHDOG_IDLE_MINUTES * 60
                 )
-                if idle_age_ok and _pane_idle_empty_prompt(_capture_pane(row["window_name"])):
+                # Cross-check the pane signature against the native busy status
+                # (the same authority the seed-delivery check uses) so an agent
+                # that is actually working never gets nudged; an unreadable
+                # status falls back to the pane alone.
+                stuck = (
+                    idle_age_ok
+                    and _pane_idle_empty_prompt(_capture_pane(row["window_name"]))
+                    and _agent_status(row["window_name"]) != "busy"
+                )
+                if stuck:
                     nudged = _parse_ts(row["idle_nudged_at"])
                     task = tasks_by_id.get(row["task_id"])
                     if nudged is not None:
@@ -572,7 +673,7 @@ def tick(workflow_path: str | Path) -> dict:
                                 base_branch, row["task_number"],
                             ),
                         )
-                        send_tmux(row["window_name"], prompt)
+                        _send_seed(row["window_name"], prompt, row["task_id"])
                         conn.execute(
                             "UPDATE runs SET idle_nudged_at=? WHERE task_id=?",
                             (_now(), row["task_id"]),
@@ -768,8 +869,10 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     )
 
     # Target by the captured @id (not the bare name) so a duplicate-named
-    # window can't make the prompt send-keys ambiguous.
-    if not send_tmux(target_id, prompt):
+    # window can't make the prompt send-keys ambiguous. Confirm the paste
+    # actually landed (the agent goes busy) instead of trusting the readiness
+    # glyph: a late boot-splash redraw can still swallow it.
+    if not _send_seed(target_id, prompt, task.id):
         raise RuntimeError(f"failed to send prompt to {window_name} ({target_id})")
 
     conn.execute(
