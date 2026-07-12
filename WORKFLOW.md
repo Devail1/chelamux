@@ -20,6 +20,13 @@ agent:
   cmd: claude --permission-mode auto
   startup_delay_seconds: 4
   ready_timeout_seconds: 60
+
+hooks:
+  # Sync the per-worktree venv with ALL extras before the agent starts, so
+  # dashboard/telegram tests don't false-fail on a default-only sync (a `uv run`
+  # in a fresh worktree auto-syncs without extras — the CMX-21 trap). `--extra X`
+  # DROPS other extras, so it must be `--all-extras`.
+  before_run: uv sync --all-extras --quiet
 ---
 
 # Autonomous coding agent — chelamux

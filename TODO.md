@@ -38,7 +38,6 @@
 
 ## Backlog (not yet dispatchable)
 
-- **Dispatcher worktree bootstrap should `uv sync --all-extras`** — CMX-21 hit spurious dashboard-test failures because the per-task worktree venv was synced without the dashboard extra (agent fixed it manually with `uv sync --extra dev --extra dashboard`). Fix the venv-sync step in the worktree bootstrap (`chela/dispatcher.py` `_spawn`/worktree setup) to sync ALL extras, so dashboard/telegram tests don't false-fail in dispatched runs. Known landmine: `uv sync --extra X` DROPS other extras — must be `--all-extras`.
 - **Settings view — editable toggles (follow-up)**: in-UI write-back + daemon restart.
 - **Retire ccbot** ~07-19 after warm standby: `pm2 delete ccbot` + `pm2 save` + archive repo (ops).
 - Interactive UI: AskUserQuestion / ExitPlanMode / Permission phone **approvals (buttons)** + message merging.
