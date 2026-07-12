@@ -59,23 +59,25 @@ def test_session_probe_degrades_gracefully(client, monkeypatch):
     assert sess["state"] == "Unknown"
 
 
-def test_telegram_bridge_off_by_default(client, monkeypatch):
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+def test_telegram_bridge_off_when_daemon_not_running(client, monkeypatch):
+    # Detection is by process, not env — the dashboard has no bridge creds.
+    monkeypatch.setattr(dash, "_telegram_bridge_running", lambda: False)
     tg = _items(client.get("/api/settings").get_json())["Telegram bridge"]
     assert tg["on"] is False
     assert tg["state"] == "Off"
 
 
-def test_telegram_bridge_configured_hides_secrets(client, monkeypatch):
+def test_telegram_bridge_connected_hides_secrets(client, monkeypatch):
+    monkeypatch.setattr(dash, "_telegram_bridge_running", lambda: True)
+    # Even if the bridge's secrets happen to be in the env, they must NEVER ride
+    # along in the status detail (it reports only a bound count).
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:SECRET-TOKEN")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
     tg = _items(client.get("/api/settings").get_json())["Telegram bridge"]
     assert tg["on"] is True
-    assert tg["state"] == "Configured"
-    # Neither the bot token nor the chat id may ride along in the status detail.
+    assert tg["state"] == "Connected"
     assert "SECRET-TOKEN" not in tg["detail"]
-    assert "42" not in tg["detail"]
+    assert "api.telegram.org" not in tg["detail"]
 
 
 def test_notify_host_redacts_telegram_token():
