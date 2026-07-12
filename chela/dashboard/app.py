@@ -2590,13 +2590,36 @@ def _sse_windows_snapshot() -> dict:
         return {}
 
 
+def _sse_run_label(r: dict) -> str:
+    """Human display id for a run — mirrors the frontend's ``_runDisplayId``:
+    ``PROJECT_KEY-N`` when derivable, else the raw task id. Carried in the SSE
+    frame so the run-state toast names the run the viewer recognizes."""
+    key = _project_key_from_runs([r])
+    task_number = r.get("task_number")
+    if key and task_number is not None:
+        return f"{key}-{task_number}"
+    return r.get("task_id") or ""
+
+
 def _sse_runs_snapshot() -> dict:
+    """Per-run view diffed by the SSE loop. Values carry ``status`` + PR fields
+    (change-detection) plus ``pr_url`` + ``label`` so the ``runs`` frame can name
+    the run and link its PR without the client issuing a second fetch. Mirrors
+    the same source (``dispatcher.list_runs``) the REST ``/api/dispatcher`` uses."""
     try:
-        return {
-            r.get("task_id"): (r.get("status"), r.get("pr_state"), r.get("pr_mergeable"))
-            for r in dispatcher.list_runs()
-            if r.get("task_id")
-        }
+        snap: dict = {}
+        for r in dispatcher.list_runs():
+            tid = r.get("task_id")
+            if not tid:
+                continue
+            snap[tid] = {
+                "status": r.get("status"),
+                "pr_state": r.get("pr_state"),
+                "pr_mergeable": r.get("pr_mergeable"),
+                "pr_url": r.get("pr_url"),
+                "label": _sse_run_label(r),
+            }
+        return snap
     except Exception:
         log.exception("SSE: list_runs failed")
         return {}
@@ -2626,7 +2649,14 @@ def _sse_stream():
 
     # An initial 'hello' lets the client confirm the stream is live (it may
     # optionally lengthen its poll timers; default behavior leaves them as-is).
-    yield "event: hello\ndata: {}\n\n"
+    # It also carries the current per-run status baseline so the client's
+    # run-state toasts stay edge-triggered across reconnects: a run already in
+    # awaiting_review is recorded here (no toast), so only a later transition
+    # INTO a review state fires one.
+    hello = {
+        "runs": [{"task_id": tid, "status": v["status"]} for tid, v in prev_runs.items()]
+    }
+    yield f"event: hello\ndata: {json.dumps(hello)}\n\n"
 
     last_sent = time.monotonic()
     while True:
@@ -2643,10 +2673,21 @@ def _sse_stream():
 
         cur_runs = _sse_runs_snapshot()
         if cur_runs != prev_runs:
+            # Present-and-changed runs ride along with status + pr_url + label so
+            # the client can toast a → awaiting_review transition (and link its
+            # PR) without a second fetch. Removed runs need no payload — any diff
+            # still re-renders the board via the client's existing refresh path.
             changed = [
-                tid for tid, v in cur_runs.items() if prev_runs.get(tid) != v
-            ] + [tid for tid in prev_runs if tid not in cur_runs]
-            payload = json.dumps({"changed": len(changed)})
+                {
+                    "task_id": tid,
+                    "status": v["status"],
+                    "pr_url": v["pr_url"],
+                    "label": v["label"],
+                }
+                for tid, v in cur_runs.items()
+                if prev_runs.get(tid) != v
+            ]
+            payload = json.dumps({"changed": len(changed), "runs": changed})
             yield f"event: runs\ndata: {payload}\n\n"
             last_sent = time.monotonic()
         prev_runs = cur_runs
