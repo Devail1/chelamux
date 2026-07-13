@@ -13,7 +13,7 @@
   2. **Sweep for the same shape.** Grep the suite for other real-clock assertions (`time.monotonic()`, `time.time()`, `time.sleep` + a duration assert) and fix them the same way. A CI box under load is exactly where these fire.
   **Landmines:** don't delete the test — the graceful-shutdown contract it guards is real (a daemon that returns early from `wait()` would spin); don't "fix" it by widening the margin to something like `>= 0.05` (that is the same bug with a longer fuse); keep the other tests in the file (a second signal must not raise). Keep `uv run ruff check chela tests` green + `uv run pytest -q`. **Reference:** `tests/test_graceful_shutdown.py`, `chela/` (`GracefulShutdown` — the thing under test), `tests/test_telegram_status.py` (the **fake-clock** pattern to copy). **Verify:** the decisive check is **statistical, not a single green run** — run the full suite **20×** under concurrent load (e.g. with other pytest processes running) and show **20/20 green**. State that in the PR. One green run proves nothing about a flake.
 
-- [ ] **`/screenshot` keyboard: drop the arrow WORD-labels, and add the missing 🔄 refresh.** Liav, 2026-07-13: *"in the screenshot keys, no need to write the arrows labels, and i'm missing the refresh button."* Two defects in `SCREENSHOT_KEYS` (`chela/telegram/inbound.py` ~134):
+- [x] **`/screenshot` keyboard: drop the arrow WORD-labels, and add the missing 🔄 refresh.** Liav, 2026-07-13: *"in the screenshot keys, no need to write the arrows labels, and i'm missing the refresh button."* Two defects in `SCREENSHOT_KEYS` (`chela/telegram/inbound.py` ~134):
   ```
   ␣ Space   ↑        ⇥ Tab        <- ↑ is bare, but...
   ← Left    ↓ Down   → Right      <- ...these three carry redundant words
