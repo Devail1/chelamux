@@ -377,6 +377,10 @@ class _FakeMessage:
         self.message_thread_id = thread_id
         self.photo = None
         self.document = None
+        self.replies: list[str] = []
+
+    async def reply_text(self, text, **_kw):
+        self.replies.append(text)
 
 
 class _FakeUpdate:
@@ -405,9 +409,12 @@ def _text_handler_and_bot(stub):
     return on_message, cell
 
 
-def _drive(on_message, text):
+def _drive(on_message, text, **kw):
+    """Feed one message through the real handler; returns the message it replied to."""
     import asyncio
-    asyncio.run(on_message(_FakeUpdate(text), None))
+    update = _FakeUpdate(text, **kw)
+    asyncio.run(on_message(update, None))
+    return update.message
 
 
 def test_bridge_forwards_a_group_menu_tap_without_the_bot_suffix():
@@ -438,6 +445,68 @@ def test_bridge_leaves_ordinary_text_alone():
     _drive(on_message, "look at @3 and mail me at a@b.com")
 
     assert stub.calls == [("@3", "look at @3 and mail me at a@b.com")]
+
+
+# --------------------------------------------------------------------------
+# Passthrough commands CONFIRM the send (silence reads as "swallowed" on a phone).
+# --------------------------------------------------------------------------
+
+def test_a_passthrough_command_confirms_the_send():
+    stub = _StubSender()
+    on_message, bot = _text_handler_and_bot(stub)
+    bot["username"] = OUR_BOT
+
+    msg = _drive(on_message, "/clear@chelamuxbot")
+
+    assert stub.calls == [("@3", "/clear")]
+    assert msg.replies == ["⏎ Sent /clear"]
+    # It confirms the SEND, never the effect: "cleared" would be a guess.
+    assert "cleared" not in msg.replies[0].lower()
+
+
+def test_a_failed_passthrough_command_says_so():
+    stub = _StubSender(ok=False)                       # tmux send-keys failed
+    on_message, bot = _text_handler_and_bot(stub)
+    bot["username"] = OUR_BOT
+
+    msg = _drive(on_message, "/clear")
+
+    assert msg.replies == ["❌ Couldn't send /clear."]
+
+
+def test_a_dropped_command_is_not_confirmed_as_sent():
+    stub = _StubSender()
+    on_message, bot = _text_handler_and_bot(stub)
+    bot["username"] = OUR_BOT
+
+    # Unbound topic (the router binds thread 4) and, separately, the wrong chat.
+    unbound = _drive(on_message, "/clear", thread_id=9)
+    foreign = _drive(on_message, "/clear", chat_id=999)
+
+    assert stub.calls == []                            # never typed into a session
+    assert unbound.replies == [] and foreign.replies == []
+
+
+def test_a_plain_message_is_never_confirmed():
+    stub = _StubSender()
+    on_message, bot = _text_handler_and_bot(stub)
+    bot["username"] = OUR_BOT
+
+    msg = _drive(on_message, "run the tests please")
+
+    assert stub.calls == [("@3", "run the tests please")]
+    assert msg.replies == []                           # no acknowledgement spam
+
+
+def test_any_claude_code_slash_command_is_confirmed_with_its_own_name():
+    stub = _StubSender()
+    on_message, bot = _text_handler_and_bot(stub)
+    bot["username"] = OUR_BOT
+
+    msg = _drive(on_message, "/model@chelamuxbot opus")
+
+    assert stub.calls == [("@3", "/model opus")]       # args survive
+    assert msg.replies == ["⏎ Sent /model"]            # …but the reply names the command
 
 
 # --------------------------------------------------------------------------

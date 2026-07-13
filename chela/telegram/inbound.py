@@ -120,6 +120,21 @@ def resolve_command_for_window(text: str, bot_username: str | None) -> str | Non
         return None                       # meant for another bot in the group
     return f"/{command}{text[m.end():]}"  # our command: strip the suffix, keep the args
 
+
+def forwarded_command_name(text: str) -> str | None:
+    """The slash-command name in ``text``, or None when it isn't a command.
+
+    ``text`` is what :func:`resolve_command_for_window` decided to forward, so any
+    ``@botname`` suffix is already gone. Everything matching here takes the
+    passthrough path — no bridge handler claims it, so it is typed straight into
+    Claude Code's prompt (``/clear``, ``/compact``, ``/model opus``, …), which is
+    exactly the set of messages that must be CONFIRMED: an operator on a phone
+    otherwise cannot tell a forwarded command from a swallowed one. Plain chat text
+    returns None and is never acknowledged — a tick on every message is spam.
+    """
+    m = _COMMAND_RE.match(text)
+    return m.group(1) if m else None
+
 # A terminal snapshot is trimmed to its most recent characters so a single
 # ``/screenshot`` reply stays under Telegram's 4096-char per-message limit
 # (with headroom for the code-fence markup).
@@ -403,10 +418,28 @@ def build_application(
         if text is None:
             log.debug("dropping command addressed to another bot: %s", msg.text)
             return
+        # A passthrough slash command is forwarded raw and used to return SILENTLY,
+        # which from a phone is indistinguishable from being swallowed — and this
+        # path HAS silently swallowed /clear before. So confirm the send. The gate
+        # is checked FIRST: a command dropped for a wrong chat or an unbound topic
+        # must stay a drop, never a cheerful "sent".
+        command = forwarded_command_name(text)
+        if command is not None and router.resolve(chat_id, thread_id) is None:
+            return
         try:
-            router.route(chat_id, thread_id, text)
+            ok = router.route(chat_id, thread_id, text)
         except Exception:  # a stuck tmux send must not wedge the update queue
             log.exception("inbound routing failed")
+            ok = False
+        if command is None:
+            return  # ordinary chat text — acknowledging every message is spam
+        # Claim ONLY what is known: send_tmux returned True, so the whole
+        # Escape-then-command-then-Enter sequence landed in the pane. Whether Claude
+        # Code then acted on it is not ours to assert — "session cleared" would be a
+        # guess, and a guess is how a silent failure becomes a lying success.
+        await msg.reply_text(
+            f"⏎ Sent /{command}" if ok else f"❌ Couldn't send /{command}."
+        )
 
     async def _on_photo(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
         """Download a pasted photo and forward its path to the topic's window.
