@@ -34,7 +34,6 @@ from chela import (
 )
 from chela.config import (
     SCHEDULER_POLL_INTERVAL,
-    DISPATCH_TICK_INTERVAL,
     DISPATCH_WORKFLOWS,
     NOTIFY_INTERVAL,
     SHOW_TOOL_CALLS,
@@ -121,7 +120,11 @@ def cmd_run(args) -> None:
                  len(DISPATCH_WORKFLOWS), ", ".join(str(p) for p in DISPATCH_WORKFLOWS))
     if notify.enabled():
         log.info("Needs-input notifications enabled (every %ds)", NOTIFY_INTERVAL)
-    last_dispatch_check = 0.0
+    # Per-workflow, not global: each WORKFLOW.md carries its own effective poll
+    # interval (`polling.interval_ms`, re-read on change), so they no longer share
+    # one clock.
+    last_dispatch_check: dict[Path, float] = {}
+    dispatch_blocked: set[Path] = set()   # workflows whose file currently doesn't parse
     last_notify_check = 0.0
     waiting_seen: set[str] = set()
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
@@ -156,15 +159,33 @@ def cmd_run(args) -> None:
             now = time.time()
             if stop.stopping:
                 break          # a signal landed mid-tick: don't start new work
-            if DISPATCH_WORKFLOWS and now - last_dispatch_check >= DISPATCH_TICK_INTERVAL:
-                for wf_path in DISPATCH_WORKFLOWS:
-                    try:
-                        summary = dispatcher.tick(wf_path)
-                        if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
-                            log.info("Dispatch %s: %s", wf_path.name, summary)
-                    except Exception:
-                        log.exception("Dispatch tick failed for %s", wf_path)
-                last_dispatch_check = now
+            for wf_path in DISPATCH_WORKFLOWS:
+                # The workflow is HOT-RELOADED: `poll_interval` re-reads the file
+                # only when it changed on disk (a stat, otherwise), so an edited
+                # interval — like every other config key — takes effect on the
+                # next tick with no restart. An unparseable file keeps its
+                # last-good interval and reconciles on; dispatcher.tick() is what
+                # refuses to start new work, and says so.
+                try:
+                    interval = dispatcher.poll_interval(wf_path)
+                    if now - last_dispatch_check.get(wf_path, 0.0) < interval:
+                        continue
+                    last_dispatch_check[wf_path] = now
+                    summary = dispatcher.tick(wf_path)
+                    # Edge-triggered, like every other daemon-loop log: a broken
+                    # workflow can sit broken for hours, and a 60s drumbeat of the
+                    # same line is how an operator learns to ignore the log.
+                    if summary.get("blocked") and wf_path not in dispatch_blocked:
+                        dispatch_blocked.add(wf_path)
+                        log.error("Dispatch BLOCKED for %s (reconciliation continues on the "
+                                  "last known-good config): %s", wf_path.name, summary.get("error"))
+                    elif not summary.get("blocked") and wf_path in dispatch_blocked:
+                        dispatch_blocked.discard(wf_path)
+                        log.info("Dispatch resumed for %s — workflow parses again", wf_path.name)
+                    if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
+                        log.info("Dispatch %s: %s", wf_path.name, summary)
+                except Exception:
+                    log.exception("Dispatch tick failed for %s", wf_path)
 
             if notify.enabled() and now - last_notify_check >= NOTIFY_INTERVAL:
                 try:
@@ -395,6 +416,8 @@ def cmd_dispatch(args) -> None:
     interval = max(5, int(args.interval))
     if args.once:
         summary = dispatcher.tick(args.workflow)
+        if summary.get("error"):
+            print(f"workflow error — new dispatches blocked until it parses: {summary['error']}")
         print(summary)
         return
     log.info("Dispatcher starting (workflow=%s, interval=%ds)", args.workflow, interval)
@@ -406,6 +429,12 @@ def cmd_dispatch(args) -> None:
                 log.info("Dispatch tick: %s", summary)
         except Exception:
             log.exception("Dispatch tick failed")
+        # Re-read on every pass so a `polling.interval_ms` edit re-paces this loop
+        # too, without a restart. --interval is the operator's floor and default.
+        try:
+            interval = max(5, int(dispatcher.poll_interval(args.workflow, default=interval)))
+        except Exception:
+            log.exception("Could not refresh the poll interval; keeping %ds", interval)
         stop.wait(interval)
 
     stop.log_exit()

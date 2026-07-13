@@ -80,6 +80,36 @@ def test_telegram_bridge_connected_hides_secrets(client, monkeypatch):
     assert "api.telegram.org" not in tg["detail"]
 
 
+def test_work_dispatcher_row_reports_a_broken_workflow(client, monkeypatch, tmp_path):
+    # A WORKFLOW.md that stopped parsing is the one dispatcher fault an operator
+    # MUST see: the daemon stays up on its last-good config but starts no new
+    # work, and a log line nobody reads is not a notification.
+    bad = tmp_path / "WORKFLOW.md"
+    bad.write_text("---\ntracker: [unclosed\n---\n")
+    monkeypatch.setattr(dash, "_discover_dispatch_workflows", lambda runs: [bad])
+
+    payload = client.get("/api/settings").get_json()
+    row = _items(payload)["Work dispatcher"]
+
+    assert row["on"] is False
+    assert row["state"] == "Blocked"
+    assert "last good config" in row["detail"]
+    assert payload["workflow_errors"][0]["path"] == str(bad)
+
+
+def test_work_dispatcher_row_is_clean_when_the_workflow_parses(client, monkeypatch, tmp_path):
+    good = tmp_path / "WORKFLOW.md"
+    good.write_text("---\nproject_key: CMX\n---\nseed\n")
+    monkeypatch.setattr(dash, "_discover_dispatch_workflows", lambda runs: [good])
+
+    payload = client.get("/api/settings").get_json()
+    row = _items(payload)["Work dispatcher"]
+
+    assert row["on"] is True
+    assert row["state"] == "1 workflow"
+    assert payload["workflow_errors"] == []
+
+
 def test_notify_host_redacts_telegram_token():
     # A Telegram sendMessage URL carries the bot token in its PATH — the status
     # detail must expose only the host, never the token.
