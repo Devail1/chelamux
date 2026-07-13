@@ -5,11 +5,12 @@ Three agent prompts get a tap-to-answer inline keyboard on their bound topic:
 * **AskUserQuestion** — surfaced live from the tmux **pane** (Slice A2), because
   its structured ``tool_use`` record only lands in the transcript once the
   question is *answered*. The pane watcher scrapes the selector
-  (:func:`~chela.telegram.panescan.detect_askuserquestion`) and builds the
-  keyboard from the scraped option labels: :func:`scraped_reply_markup` for a
-  simple single-select, :func:`nav_only_markup` for the multi-tab / multi-select
-  fallback. Answering re-reads the live ``❯`` cursor and injects the
-  cursor-relative keystrokes (:func:`select_keystrokes_relative`).
+  (:func:`~chela.telegram.panescan.detect_askuserquestion`) and relays the options
+  numbered **in the message body**, with :func:`scraped_reply_markup` giving each
+  one a compact numeric selector button (or :func:`nav_only_markup` for the
+  multi-tab / multi-select fallback). Answering re-reads the live ``❯`` cursor and
+  injects the cursor-relative keystrokes (:func:`select_keystrokes_relative`),
+  submitting only after they settle (:func:`split_select_keys`).
 * **ExitPlanMode** (Slice B2) — also surfaced live from the tmux **pane**, because
   its ``tool_use`` record likewise lands in the transcript only once the plan is
   resolved. The pane watcher scrapes the plan-approval selector
@@ -63,9 +64,10 @@ from typing import Any
 QA_CB_PREFIX = "qa:"
 QA_NAV_PREFIX = "qa:nav:"
 
-# Telegram truncates over-long button captions; keep them short and add an
-# ellipsis so a verbose option label still renders a tidy button.
-_BTN_TEXT_MAX = 48
+# AskUserQuestion option buttons are bare numeric selectors ("1", "2", …), so
+# several fit one row at any phone width. The option text they select is in the
+# message body, which — unlike a button caption — wraps instead of truncating.
+_SELECTORS_PER_ROW = 4
 
 # The navigation-fallback row — always present so the operator can drive the
 # selector by hand if a semantic pick misfires (or in the non-MVP shapes above).
@@ -122,9 +124,31 @@ def select_keystrokes_relative(target: int, cursor: int) -> list[str]:
     return ["Enter"]
 
 
-def _truncate(text: str, n: int = _BTN_TEXT_MAX) -> str:
-    text = text.strip()
-    return text if len(text) <= n else text[: n - 1] + "…"
+def split_select_keys(keys: list[str]) -> tuple[list[str], list[str]]:
+    """Split an answer sequence into the cursor MOVES and the trailing submit.
+
+    The submit must not race the moves. Measured live (Claude Code 2.1.207, CMX-32)
+    on a real 4-option selector with the cursor on option 1: ``Down Down Enter``
+    fired back-to-back submits **option 2**, while the same presses with a ~250ms
+    pause before ``Enter`` submit option 3. Both ``Down``s do land — the highlight
+    ends up on the right row either way — but the selector commits arrow moves on a
+    render tick, so an ``Enter`` arriving in the same input burst is answered
+    against the row the selector had *before* the last move. Off by one, silently:
+    the human taps 3 and the agent is told 2.
+
+    So the caller sends the moves, waits :data:`SELECT_SETTLE_S`, and only then
+    sends the submit. This is why the gap exists — do not collapse it back into one
+    send loop.
+    """
+    if keys and keys[-1] == "Enter":
+        return keys[:-1], ["Enter"]
+    return list(keys), []
+
+
+# How long to let the selector settle between the cursor moves and the Enter that
+# submits them (see :func:`split_select_keys`). 250ms was enough live; this leaves
+# margin for a loaded machine.
+SELECT_SETTLE_S = 0.4
 
 
 def _nav_row() -> list[dict]:
@@ -219,19 +243,28 @@ def _permission_rows() -> list[list[dict]]:
 def scraped_reply_markup(labels) -> dict:
     """Bot-API ``reply_markup`` for a pane-scraped single-select AskUserQuestion.
 
-    One semantic ``qa:<i>`` button per option label (index-only callback, so a
-    long option can't blow Telegram's 64-byte cap), then the ⎋ escape hatch. Built
-    from the labels the pane watcher scraped
-    (:func:`~chela.telegram.panescan.detect_askuserquestion`), because the
-    structured transcript record only lands *after* the question is answered.
+    One ``qa:<i>`` button per scraped option, captioned with its **1-based number**
+    only — ``1`` ``2`` ``3`` … — packed :data:`_SELECTORS_PER_ROW` to a row, then
+    the ⎋ escape hatch (:func:`_esc_row`).
 
-    An option button answers the question outright, so the only key still worth a
-    button is ⎋ (:func:`_esc_row`) — the rest of the nav row was blind-driving an
-    invisible caret.
+    The captions used to be the option labels themselves, which made the question
+    unanswerable on a phone: a button caption is the one Telegram surface that
+    hard-truncates to a single line, and it was the *only* carrier of the options,
+    so the human got four half-sentences and none of the reasoning. The options now
+    live numbered and in full in the message body
+    (:func:`~chela.telegram.gatewatch.format_askuq_message`), which wraps; these
+    buttons are just the selector for them, so button *N* MUST stay option *N* in
+    scraped display order — a tap injects ``i − cursor`` Down/Up presses against
+    the live selector, so a reordered, filtered or gapped keyboard would answer the
+    wrong question.
     """
+    numbered = [
+        {"text": str(i + 1), "callback_data": f"{QA_CB_PREFIX}{i}"}
+        for i, _label in enumerate(labels)
+    ]
     rows = [
-        [{"text": _truncate(str(label)), "callback_data": f"{QA_CB_PREFIX}{i}"}]
-        for i, label in enumerate(labels)
+        numbered[i : i + _SELECTORS_PER_ROW]
+        for i in range(0, len(numbered), _SELECTORS_PER_ROW)
     ]
     rows.append(_esc_row())
     return {"inline_keyboard": rows}

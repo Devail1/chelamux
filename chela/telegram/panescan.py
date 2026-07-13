@@ -268,6 +268,9 @@ _RE_OPTION = re.compile(r"^\s*(❯)?\s*(\d+)\.\s+(.*\S)\s*$")
 # The trailing rows Claude Code always appends (free-text + chat escape hatches);
 # they are navigable but are NOT real options, so they never get a semantic button.
 _RE_META = re.compile(r"^(type something\.?|chat about this|submit)$", re.IGNORECASE)
+# The horizontal rule Claude Code draws above the "Chat about this" row — it sits
+# between option rows, so it must not be mistaken for a description line.
+_RE_RULE = re.compile(r"^[\s─—-]*$")
 
 
 @dataclass(frozen=True)
@@ -282,12 +285,22 @@ class AskUQ:
     first rows) injects ``i - cursor`` Down/Up presses; it is ``-1`` when no cursor
     row was found. ``multi`` is True for a multi-tab / multi-select selector (or an
     otherwise unparseable one): the relay then offers the nav row only.
+
+    ``descriptions`` is positionally parallel to ``options`` — the indented prose
+    Claude Code draws under each option, ``""`` where an option has none. The TUI
+    renders **every** option's description, not just the cursor-focused one
+    (measured on Claude Code 2.1.207 with a 4-option, long-description selector),
+    so this is real scraped text: nothing here is inferred or synthesized. Note a
+    label too long for the pane width wraps onto the same indented continuation
+    lines, so it folds into the description — which reads correctly, since the
+    relay prints the description directly under its option.
     """
 
     question: str
     options: tuple[str, ...]
     cursor: int
     multi: bool
+    descriptions: tuple[str, ...] = ()
 
 
 def _first_match(lines: list[str], pattern: re.Pattern[str]) -> int | None:
@@ -318,26 +331,41 @@ def _extract_question(lines: list[str], head_idx: int, enter_idx: int) -> str:
 
 def _parse_options(
     lines: list[str], head_idx: int, enter_idx: int
-) -> tuple[list[str], int]:
-    """The real option labels (meta-rows excluded) + the cursor's row ordinal.
+) -> tuple[list[str], list[str], int]:
+    """The real option labels + their descriptions + the cursor's row ordinal.
 
-    ``cursor`` counts ALL numbered rows (semantic + meta) in display order, so the
-    ordinal lines up with one Down/Up press per row for cursor-relative injection.
+    Meta-rows (free-text / chat) are excluded from the labels, so ``options`` holds
+    only the pickable options; ``descriptions`` is positionally parallel to it (the
+    indented prose under each option, ``""`` when it has none). ``cursor`` counts
+    ALL numbered rows (semantic + meta) in display order, so the ordinal lines up
+    with one Down/Up press per row for cursor-relative injection.
     """
     options: list[str] = []
+    descriptions: list[str] = []
     cursor = -1
     ordinal = 0
+    collecting: list[str] | None = None  # the current option's description lines
     for line in lines[head_idx + 1 : enter_idx]:
         m = _RE_OPTION.match(line)
-        if not m:
+        if m:
+            label = m.group(3).strip()
+            if m.group(1):  # ❯ cursor on this row
+                cursor = ordinal
+            if _RE_META.match(label):
+                collecting = None  # a meta-row's text is not a description
+            else:
+                options.append(label)
+                descriptions.append("")
+                collecting = []
+            ordinal += 1
             continue
-        label = m.group(3).strip()
-        if m.group(1):  # ❯ cursor on this row
-            cursor = ordinal
-        if not _RE_META.match(label):
-            options.append(label)
-        ordinal += 1
-    return options, cursor
+        if collecting is None or _RE_RULE.match(line):
+            continue
+        stripped = line.strip()
+        if stripped:
+            collecting.append(stripped)
+            descriptions[-1] = " ".join(collecting)
+    return options, descriptions, cursor
 
 
 def detect_askuserquestion(pane_text: str) -> AskUQ | None:
@@ -375,12 +403,18 @@ def detect_askuserquestion(pane_text: str) -> AskUQ | None:
     if multi:
         return AskUQ(question=question, options=(), cursor=-1, multi=True)
 
-    options, cursor = _parse_options(lines, head_idx, enter_idx)
+    options, descriptions, cursor = _parse_options(lines, head_idx, enter_idx)
     if not options:
         # A single-question selector with no parseable options (unexpected) still
         # gets the nav row so the human is never handed a broken keyboard.
         return AskUQ(question=question, options=(), cursor=-1, multi=True)
-    return AskUQ(question=question, options=tuple(options), cursor=cursor, multi=False)
+    return AskUQ(
+        question=question,
+        options=tuple(options),
+        cursor=cursor,
+        multi=False,
+        descriptions=tuple(descriptions),
+    )
 
 
 # ── ExitPlanMode plan-approval selector (Slice B2) ───────────────────────────

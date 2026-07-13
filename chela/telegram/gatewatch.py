@@ -7,9 +7,14 @@ window's topic with a tap-to-answer keyboard:
   * a **permission gate** ("Do you want to proceed?" for a Bash/Edit) — never in
     the transcript at all. Posts ``❓ Permission — <tool>: <command>`` with
     ✅ Allow once / ❌ Deny (:func:`~chela.telegram.interactive.permission_reply_markup`).
-  * an **AskUserQuestion** selector — posts the scraped question with one button
-    per option (:func:`~chela.telegram.interactive.scraped_reply_markup`; the nav
-    row only for the multi-tab / multi-select fallback).
+  * an **AskUserQuestion** selector — posts the scraped question with every option
+    numbered in full **in the message body** (the descriptions too), and a compact
+    numeric selector button per option
+    (:func:`~chela.telegram.interactive.scraped_reply_markup`; the nav row only for
+    the multi-tab / multi-select fallback). The options used to live *only* in the
+    button captions, which Telegram hard-truncates to one line — so on a phone the
+    human was handed four half-sentences and asked to decide (CMX-32). The body is
+    the only surface that wraps, so that is where the options belong.
   * an **ExitPlanMode** plan approval — posts the scraped plan with
     ✅ Approve / 📝 Keep planning (:func:`~chela.telegram.interactive.plan_reply_markup`).
 
@@ -84,6 +89,17 @@ _MAX_DETAIL = 300
 # Longest plan body inlined before truncating (the full plan is one /screenshot
 # away; a shorter cap keeps the approval message readable on a phone).
 _MAX_PLAN = 2000
+
+# Telegram rejects a message body over 4096 characters, so an AskUserQuestion body
+# (question + every option, in full) is budgeted against that cap: the question is
+# clipped first, then the remaining room is split evenly across the options, each
+# keeping at least _MIN_OPTION characters. ``_OPTION_PREFIX`` is the room the
+# "N. " numbering costs per line.
+_TG_TEXT_LIMIT = 4096
+_MAX_QUESTION = 700
+_MIN_OPTION = 80
+_MIN_DESC = 40
+_OPTION_PREFIX = 6
 
 # The prompt kinds this watcher tracks, one tracked message each per window.
 _GATE = "permission"
@@ -169,19 +185,60 @@ def _gate_signature(gate: Gate) -> str:
 
 
 def format_askuq_message(uq: AskUQ) -> str:
-    """The plain-text relay line for a detected AskUserQuestion selector.
+    """The plain-text relay body for a detected AskUserQuestion selector.
 
-    Just the scraped question (the answer buttons carry the options); ``❓`` marks
-    it as needing a human. Falls back to a generic prompt if the question scraped
-    empty.
+    The scraped question, then the option labels **in full, numbered** — because
+    the message body is the only Telegram surface that *wraps*. The options used to
+    live solely in the button captions, and a button caption is the one surface
+    Telegram hard-truncates to a single line: a phone showed four half-sentences
+    ("Rotate the group, skip the …") and none of the reasoning, i.e. the human was
+    asked to decide with the basis for the decision structurally withheld. So the
+    body carries the meaning now and the buttons are bare numeric selectors
+    (:func:`~chela.telegram.interactive.scraped_reply_markup`) — the numbering here
+    is what they select, so it must stay 1:1 with the scraped option order.
+
+    Options are listed only for the shapes that get semantic buttons; the multi-tab
+    / multi-select fallback gets the nav row, so its body stays the question alone.
+    Each option's scraped description (the prose Claude Code draws under it — the
+    TUI renders one per option, not just for the focused one) is indented beneath
+    it, so the *reasoning* the decision hinges on travels with the choice.
+
+    A pathological option is **truncated, never dropped** (a dropped option would be
+    unpickable), and the whole body stays inside Telegram's 4096-char cap.
     """
-    q = (uq.question or "").strip()
-    return f"❓ {q}" if q else "❓ Claude is asking a question"
+    q = _clip(uq.question, _MAX_QUESTION) if (uq.question or "").strip() else ""
+    head = f"❓ {q}" if q else "❓ Claude is asking a question"
+    if uq.multi or not uq.options:
+        return head
+
+    # Split what's left of the message cap evenly across the options, so one verbose
+    # option can't crowd the others out — each keeps a readable slice, label first.
+    room = _TG_TEXT_LIMIT - len(head) - 2 * (len(uq.options) + 1)
+    per_option = max(_MIN_OPTION, room // len(uq.options))
+    descriptions = uq.descriptions or ()
+    lines = [head]
+    for i, label in enumerate(uq.options, start=1):
+        label_text = _clip(label, max(_MIN_OPTION, per_option - _OPTION_PREFIX))
+        lines.append(f"\n{i}. {label_text}")
+        desc = descriptions[i - 1] if i - 1 < len(descriptions) else ""
+        left = per_option - len(label_text) - _OPTION_PREFIX
+        if desc and left >= _MIN_DESC:
+            lines.append(f"   {_clip(desc, left)}")
+    body = "\n".join(lines)
+    return body if len(body) <= _TG_TEXT_LIMIT else body[: _TG_TEXT_LIMIT - 1] + "…"
 
 
 def _askuq_signature(uq: AskUQ) -> str:
-    """A stable key for one selector instance — the de-dup / edge-trigger marker."""
-    return "\x00".join((uq.question, "|".join(uq.options)))
+    """A stable key for one selector instance — the de-dup / edge-trigger marker.
+
+    Everything the message body renders is in here (question, options **and their
+    descriptions**), so a scrape that changes the body — e.g. the descriptions
+    landing a repaint after the option rows — edits the message in place instead of
+    being swallowed as a no-op.
+    """
+    return "\x00".join(
+        (uq.question, "|".join(uq.options), "|".join(uq.descriptions or ()))
+    )
 
 
 def _askuq_markup(uq: AskUQ) -> dict:
