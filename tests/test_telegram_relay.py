@@ -21,9 +21,12 @@ from chela.telegram.format import (
 from chela.telegram.parser import Message
 from chela.telegram.relay import (
     INTERACTIVE_TOOL_NAMES,
+    MAX_LEN,
     BotSender,
     RegistryRelay,
     TelegramRelay,
+    _truncate_utf16,
+    _utf16_len,
     split_message,
 )
 
@@ -616,3 +619,147 @@ def test_registry_relay_shown_keeps_all_tool_calls():
     relay.on_message("@1", Message("assistant", "text", "done"))
 
     assert len(stub.calls) == 3
+
+
+# --------------------------------------------------------------------------
+# UTF-16 length: Telegram counts its 4096 limit in UTF-16 code units, so an
+# astral character (most emoji) counts as two — split/truncate must agree or an
+# emoji-heavy body sails past the limit and gets rejected on the wire.
+# --------------------------------------------------------------------------
+
+def test_utf16_len_counts_astral_chars_as_two():
+    assert _utf16_len("abc") == 3
+    assert _utf16_len("🎉") == 2          # one code point, two UTF-16 units
+    assert _utf16_len("a🎉b") == 4
+
+
+def test_split_message_measures_chunks_in_utf16_units():
+    # 3000 emoji = 6000 UTF-16 units > 4096: a code-point split would wrongly keep
+    # it whole; a UTF-16 split must produce >1 chunk, each within the limit.
+    text = "🎉" * 3000
+    chunks = split_message(text)
+    assert len(chunks) >= 2
+    assert all(_utf16_len(c) <= MAX_LEN for c in chunks)
+    assert "".join(chunks) == text        # lossless
+    # no surrogate pair was severed — every chunk round-trips through UTF-16.
+    for c in chunks:
+        c.encode("utf-16-le").decode("utf-16-le")
+
+
+def test_split_message_never_splits_a_surrogate_pair_at_the_boundary():
+    # An odd UTF-16 budget could tempt a split mid-emoji; the accumulator only
+    # ever cuts on a whole-character boundary.
+    text = "🎉" * 10
+    chunks = split_message(text, 3)       # 3 units = one emoji + 1 spare
+    assert all(_utf16_len(c) <= 3 for c in chunks)
+    assert "".join(chunks) == text
+
+
+def test_truncate_utf16_caps_at_utf16_units():
+    assert _truncate_utf16("hello", 100) == "hello"      # under limit: verbatim
+    assert _truncate_utf16("🎉🎉🎉", 4) == "🎉🎉"          # 2 units each → keep 2
+    assert _truncate_utf16("🎉🎉🎉", 3) == "🎉"            # odd budget → whole char only
+    assert _utf16_len(_truncate_utf16("🎉" * 5000, MAX_LEN)) <= MAX_LEN
+
+
+# --------------------------------------------------------------------------
+# Fenced code blocks: a split landing inside a ``` block closes the fence on the
+# chunk and reopens it on the next, so each chunk is valid MarkdownV2 on its own.
+# --------------------------------------------------------------------------
+
+def test_split_message_closes_and_reopens_fence_across_a_break():
+    body = "```\n" + ("x" * 5000) + "\n```"
+    chunks = split_message(body)
+    assert len(chunks) >= 2
+    # every chunk carries a balanced number of fences (opens == closes)
+    for c in chunks:
+        assert c.count("```") % 2 == 0
+    # the reserved headroom keeps even the fence-decorated chunks under the limit
+    assert all(_utf16_len(c) <= MAX_LEN for c in chunks)
+
+
+def test_split_message_leaves_short_fenced_body_verbatim():
+    # A message already under the limit is returned untouched — the fence logic
+    # only runs on a real split.
+    body = "```py\nprint(1)\n```"
+    assert split_message(body) == [body]
+
+
+# --------------------------------------------------------------------------
+# 429 flood control: a rejection carrying retry_after is retried (same payload),
+# not dropped — a duplicate on retry beats a lost agent message.
+# --------------------------------------------------------------------------
+
+class _ScriptedTransport:
+    """Returns queued responses in order; repeats the last one when exhausted."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(self, method: str, fields: dict) -> dict:
+        self.calls.append((method, dict(fields)))
+        i = min(len(self.calls) - 1, len(self._responses) - 1)
+        return self._responses[i]
+
+
+_OK = {"ok": True, "result": {"message_id": 1}}
+_FLOOD = {"ok": False, "error_code": 429, "parameters": {"retry_after": 2}}
+
+
+def test_bot_sender_retries_after_a_429_and_succeeds():
+    tr = _ScriptedTransport([_FLOOD, _OK])
+    slept: list[float] = []
+    sender = BotSender("tok", "c", None, transport=tr, sleep=slept.append)
+
+    assert sender.send("hi") is True
+    assert len(tr.calls) == 2                 # first 429, retry accepted
+    assert slept == [2.0]                     # honored the advertised retry_after
+    # the SAME payload was re-sent, not a truncated/altered one
+    assert tr.calls[0][1] == tr.calls[1][1]
+
+
+def test_bot_sender_caps_the_honored_retry_after():
+    tr = _ScriptedTransport([{"ok": False, "error_code": 429,
+                              "parameters": {"retry_after": 999}}, _OK])
+    slept: list[float] = []
+    sender = BotSender("tok", "c", None, transport=tr, sleep=slept.append)
+
+    assert sender.send("hi") is True
+    assert slept == [30.0]                    # capped at _MAX_RETRY_AFTER
+
+
+def test_bot_sender_gives_up_after_bounded_retries_on_persistent_429():
+    tr = _ScriptedTransport([_FLOOD])         # 429 forever
+    slept: list[float] = []
+    sender = BotSender("tok", "c", None, transport=tr, sleep=slept.append)
+
+    assert sender.send("hi") is False
+    assert len(tr.calls) == 3                  # _MAX_SEND_TRIES attempts total
+    assert len(slept) == 2                     # slept between the three attempts
+
+
+def test_bot_sender_does_not_retry_a_non_429_rejection():
+    # A real error (bad MarkdownV2) is terminal — no sleep, one call, the relay
+    # falls straight through to its plain-text retry.
+    tr = _ScriptedTransport([{"ok": False, "description": "can't parse entities"}])
+    slept: list[float] = []
+    sender = BotSender("tok", "c", None, transport=tr, sleep=slept.append)
+
+    assert sender.send("hi", "MarkdownV2") is False
+    assert len(tr.calls) == 1
+    assert slept == []
+
+
+def test_bot_sender_429_retry_covers_post_and_edit_paths():
+    tr = _ScriptedTransport([_FLOOD, _OK])
+    slept: list[float] = []
+    sender = BotSender("tok", "c", None, transport=tr, sleep=slept.append)
+    assert sender.post("hi") == 1
+    assert len(tr.calls) == 2 and slept == [2.0]
+
+    tr2 = _ScriptedTransport([_FLOOD, {"ok": True}])
+    slept2: list[float] = []
+    sender2 = BotSender("tok", "c", None, transport=tr2, sleep=slept2.append)
+    assert sender2.edit(7, "hi") is True
+    assert len(tr2.calls) == 2 and slept2 == [2.0]

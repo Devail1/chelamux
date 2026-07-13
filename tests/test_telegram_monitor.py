@@ -132,6 +132,40 @@ def test_partial_trailing_line_waits_for_completion(tmp_path, collected):
     assert [m.text for _, m in collected] == ["complete", "finished"]
 
 
+def test_corrupt_complete_line_is_skipped_without_swallowing_the_next(tmp_path, collected):
+    """A COMPLETE-but-corrupt line advances the offset and is skipped — but a
+    partial FINAL line is never advanced past, so nothing after it is lost.
+
+    ccbot's hardening distinguished *partial* (retry next tick, don't advance the
+    offset) from *corrupt* (skip). chela already draws that line at the newline
+    boundary in ``_read_new``: the offset only moves past bytes that ended in a
+    newline, so a mid-append final record can't be consumed-then-skipped. This
+    locks in both halves of the distinction.
+    """
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text("")
+    mon = _monitor(transcript, collected)
+    mon.poll(["@1"])
+
+    # A complete but unparseable line (has its newline), then a complete good one,
+    # then a partial tail with no newline.
+    transcript.write_text("{not valid json at all}\n")
+    good = _assistant_text("kept")
+    _append(transcript, good)
+    with transcript.open("a", encoding="utf-8") as f:
+        f.write('{"type": "assistant", "message": {"content": [{"type": "text",')
+    mon.poll(["@1"])
+
+    # The corrupt line was skipped (not relayed) but did not swallow the good one;
+    # the partial tail left the offset before itself, awaiting completion.
+    assert [m.text for _, m in collected] == ["kept"]
+    assert mon._tracked["@1"].offset == len("{not valid json at all}\n") + len(good)
+
+    _append(transcript, ' "text": "tail"}]}}\n')
+    mon.poll(["@1"])
+    assert [m.text for _, m in collected] == ["kept", "tail"]
+
+
 def test_truncation_resets_offset(tmp_path, collected):
     """A transcript that shrank (e.g. /clear) is re-read from the top."""
     transcript = tmp_path / "s.jsonl"
