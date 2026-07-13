@@ -25,10 +25,31 @@ from chela.telegram.relay import (
     BotSender,
     RegistryRelay,
     TelegramRelay,
+    _scan,
     _truncate_utf16,
     _utf16_len,
     split_message,
 )
+
+
+def _unclosed(chunk: str) -> list[str]:
+    """The MarkdownV2 entities left OPEN at the end of ``chunk``.
+
+    Telegram rejects a message whose entities aren't balanced ("Can't find end of
+    Bold entity"), so a chunk is individually valid only when this is empty. The
+    scanner is the relay's own, which is the point: it is what decides where an
+    entity opens (an escaped ``\\*`` and an asterisk inside `` `code` `` are not
+    openers), so the assertion tracks the same parse the splitter balances.
+    """
+    stack: list[str] = []
+    for u in _scan(chunk):
+        if u.marker is None:
+            continue
+        if u.close:
+            stack.pop()
+        else:
+            stack.append(u.marker)
+    return stack
 
 
 # --------------------------------------------------------------------------
@@ -687,6 +708,124 @@ def test_split_message_leaves_short_fenced_body_verbatim():
 
 
 # --------------------------------------------------------------------------
+# Inline entities across a chunk boundary. THE bug: a >4096 body whose split
+# landed inside *bold* or `code` left an unterminated entity, Telegram rejected
+# the chunk ("Can't find end of Bold entity at byte offset 4316"), and the relay
+# re-sent the WHOLE message unformatted — so a long report arrived as raw '**'
+# and '##'. Every chunk must now be valid MarkdownV2 on its own.
+# --------------------------------------------------------------------------
+
+def test_split_message_balances_bold_across_a_break():
+    # A single bold run straddling the limit: closed on chunk 1, reopened on 2.
+    body = "*" + ("b" * 5000) + "*"
+    chunks = split_message(body)
+    assert len(chunks) == 2
+    assert all(_unclosed(c) == [] for c in chunks)
+    assert chunks[0].endswith("*") and chunks[1].startswith("*")
+    assert all(_utf16_len(c) <= MAX_LEN for c in chunks)
+
+
+def test_split_message_balances_every_inline_entity_kind():
+    for marker in ("*", "_", "__", "~", "||", "`"):
+        body = marker + ("z" * 5000) + marker
+        chunks = split_message(body)
+        assert len(chunks) >= 2, marker
+        for c in chunks:
+            assert _unclosed(c) == [], (marker, c[:20])
+            assert _utf16_len(c) <= MAX_LEN, marker
+
+
+def test_split_message_prefers_a_blank_line_then_a_newline_then_a_space():
+    # A paragraph break can never sit inside an inline entity, so it is the
+    # cheapest correct place to cut. Each body is one long run of the given
+    # separator; the break must land ON it, not mid-token.
+    para = split_message(("word " * 400 + "\n\n") * 6)
+    assert all(c.endswith("\n\n") for c in para[:-1])
+
+    lines = split_message(("word " * 400 + "\n") * 6)
+    assert all(c.endswith("\n") for c in lines[:-1])
+
+    words = split_message("word " * 2000)          # no newline anywhere
+    assert all(c.endswith(" ") for c in words[:-1])
+    assert "".join(words) == "word " * 2000        # lossless: nothing was injected
+
+
+def test_split_message_ignores_escaped_and_code_span_markers():
+    # An ESCAPED asterisk is a literal character, and an asterisk inside a code
+    # span is not an entity — treating either as an opener would make the
+    # splitter inject a closer for an entity that was never open.
+    body = ("a\\*b " * 800) + ("`c*d` " * 800)
+    chunks = split_message(body)
+    assert len(chunks) >= 2
+    assert all(_unclosed(c) == [] for c in chunks)
+    assert "".join(chunks) == body                 # no closer was ever injected
+
+
+def test_split_message_keeps_a_long_rendered_report_formatted():
+    # The live repro: a nautilus-style long report (headings + bold + inline code)
+    # rendered exactly as the relay renders it, then split. Before the fix, one
+    # chunk ended inside a bold run and Telegram rejected it.
+    src = "\n\n".join(
+        f"## {i}. The funding tailwind\n\nThe basis is **zero funding** and "
+        f"`rate={i}` on the {i}th leg, which is why it matters."
+        for i in range(60)
+    )
+    body = to_markdown_v2(Message("assistant", "text", src))
+    assert _utf16_len(body) > MAX_LEN              # the trigger is length
+    chunks = split_message(body)
+    assert len(chunks) >= 2
+    for c in chunks:
+        assert _unclosed(c) == []
+        assert _utf16_len(c) <= MAX_LEN
+
+
+# --------------------------------------------------------------------------
+# Per-chunk fallback: a rejected chunk is downgraded ALONE. One bad chunk used
+# to strip the formatting from every other chunk of the same message.
+# --------------------------------------------------------------------------
+
+class _RejectNth:
+    """Rejects the n-th sendMessage that carries a parse_mode; accepts the rest."""
+
+    def __init__(self, n: int):
+        self._n = n
+        self._formatted = 0
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(self, method: str, fields: dict) -> dict:
+        self.calls.append((method, dict(fields)))
+        if "parse_mode" in fields:
+            self._formatted += 1
+            if self._formatted == self._n:
+                return {"ok": False, "description": "Bad Request: can't parse entities"}
+        return {"ok": True, "result": {"message_id": 1}}
+
+
+def test_bot_sender_falls_back_per_chunk_not_whole_message():
+    tr = _RejectNth(2)                             # the 2nd of 3 chunks is rejected
+    sender = BotSender("tok", "c", None, transport=tr)
+
+    assert sender.send("x" * (2 * MAX_LEN + 10), "MarkdownV2") is True
+    formatted = [f for _, f in tr.calls if "parse_mode" in f]
+    plain = [f for _, f in tr.calls if "parse_mode" not in f]
+    # All three chunks were attempted formatted; only the rejected one was
+    # re-sent unformatted — the other two stayed MarkdownV2.
+    assert len(formatted) == 3
+    assert len(plain) == 1
+    assert plain[0]["text"] == formatted[1]["text"]
+
+
+def test_bot_sender_plain_fallback_drops_the_backslash_escapes():
+    tr = _RejectNth(1)
+    sender = BotSender("tok", "c", None, transport=tr)
+
+    assert sender.send("done: 1\\.5 files", "MarkdownV2") is True
+    _, plain = tr.calls[1]
+    assert "parse_mode" not in plain
+    assert plain["text"] == "done: 1.5 files"      # no literal backslash on screen
+
+
+# --------------------------------------------------------------------------
 # 429 flood control: a rejection carrying retry_after is retried (same payload),
 # not dropped — a duplicate on retry beats a lost agent message.
 # --------------------------------------------------------------------------
@@ -741,14 +880,17 @@ def test_bot_sender_gives_up_after_bounded_retries_on_persistent_429():
 
 
 def test_bot_sender_does_not_retry_a_non_429_rejection():
-    # A real error (bad MarkdownV2) is terminal — no sleep, one call, the relay
-    # falls straight through to its plain-text retry.
+    # A real error (bad MarkdownV2) is terminal for the FORMATTED payload — no
+    # sleep, no re-send of the same fields. The one extra call is the chunk's own
+    # plain-text fallback (below), which also fails here, so send() reports False
+    # and the relay falls through to its whole-message plain-text retry.
     tr = _ScriptedTransport([{"ok": False, "description": "can't parse entities"}])
     slept: list[float] = []
     sender = BotSender("tok", "c", None, transport=tr, sleep=slept.append)
 
     assert sender.send("hi", "MarkdownV2") is False
-    assert len(tr.calls) == 1
+    assert len(tr.calls) == 2
+    assert "parse_mode" not in tr.calls[1][1]   # the fallback, not a 429 re-send
     assert slept == []
 
 
