@@ -209,6 +209,37 @@ def _resolve_start_dir(agent_name: str) -> str | None:
     return get_window_cwd(agent_name)
 
 
+def lock_window_name(target: str) -> None:
+    """Pin a managed window's name against BOTH of tmux's rename mechanisms.
+
+    Two independent tmux features can overwrite a window's name, and locking one
+    is not enough:
+
+    * ``allow-rename`` — an application (claude) renaming the window via an OSC
+      title escape.
+    * ``automatic-rename`` — tmux following ``pane_current_command``, so the name
+      flips to ``git`` / ``node`` / ``bash`` the instant claude shells out to a
+      subcommand, then back when it returns. That is the dashboard tile "name
+      flicker".
+
+    ``rename-window`` / ``new-window -n`` disable ``automatic-rename`` as a side
+    effect, so a window WE named is already safe. But a window that reaches us
+    already-correctly-named (e.g. hand-started, never renamed by us) keeps the
+    global default (``automatic-rename on``) and flickers on every subcommand.
+    Setting BOTH options off explicitly makes the lock hold no matter how the
+    window got its name. ``target`` is any tmux window ref (id or session:name);
+    idempotent and best-effort — a tmux failure is logged, never raised.
+    """
+    for option in ("allow-rename", "automatic-rename"):
+        try:
+            subprocess.run(
+                ["tmux", "set-window-option", "-t", target, option, "off"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log.warning("Failed to lock %s on window %s: %s", option, target, e)
+
+
 def _name_window_to_cwd(window_id: str, start_dir: str) -> str | None:
     """Rename a tmux window to its cwd basename and lock it.
 
@@ -230,14 +261,11 @@ def _name_window_to_cwd(window_id: str, start_dir: str) -> str | None:
             ["tmux", "rename-window", "-t", target, name],
             capture_output=True, text=True, timeout=5,
         )
-        # Lock it so tmux automatic-rename doesn't overwrite with the command name.
-        subprocess.run(
-            ["tmux", "set-window-option", "-t", target, "allow-rename", "off"],
-            capture_output=True, text=True, timeout=5,
-        )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log.warning("Failed to rename window %s to %s: %s", window_id, name, e)
         return None
+    # Lock against both allow-rename (OSC) and automatic-rename (command follow).
+    lock_window_name(target)
     return name
 
 
@@ -276,43 +304,55 @@ def reconcile_window_names() -> list[str]:
     Periodic counterpart to the start_agent rename: catches claude sessions
     started by hand (not via the dashboard Start button), so an ad-hoc shell
     stops showing its shell-N / stale name once claude is running in it. Uses
-    the live pane cwd (matches what `claude agents --json` reports) and locks
-    the name with allow-rename off.
+    the live pane cwd (matches what `claude agents --json` reports).
 
-    Leaves alone: NEVER_MANAGE windows, panes not running claude, and windows
-    whose name already matches their cwd. Collision-safe -N suffix. Returns a
-    list of "old -> new" actions.
+    It also (re)asserts the name lock — ``allow-rename off`` AND
+    ``automatic-rename off`` — on every managed claude window, INCLUDING one
+    whose name already matches its cwd. That already-correct case used to be
+    skipped before any lock ran, so a hand-started window kept tmux's default
+    ``automatic-rename on`` and its tile name flickered to the subcommand name
+    (git/node) on every shell-out. The lock is applied only when a window still
+    has a rename mechanism live, so steady-state ticks touch tmux for nothing.
+
+    Leaves alone: NEVER_MANAGE windows and panes not running claude.
+    Collision-safe -N suffix. Returns a list of "old -> new" rename actions.
     """
     actions: list[str] = []
     try:
         out = subprocess.run(
             ["tmux", "list-windows", "-t", config.current_session(), "-F",
-             "#{window_id}\t#{window_name}\t#{pane_current_command}\t#{pane_current_path}"],
+             "#{window_id}\t#{window_name}\t#{pane_current_command}\t"
+             "#{pane_current_path}\t#{automatic-rename}\t#{allow-rename}"],
             capture_output=True, text=True, timeout=5,
         ).stdout
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log.warning("reconcile_window_names: tmux list-windows failed: %s", e)
         return actions
 
-    rows = [tuple(line.split("\t")) for line in out.splitlines() if line.count("\t") == 3]
-    live_names = {name: wid for wid, name, _cmd, _cwd in rows}
+    rows = [tuple(line.split("\t")) for line in out.splitlines() if line.count("\t") == 5]
+    live_names = {name: wid for wid, name, *_rest in rows}
 
-    for wid, name, cmd, cwd in rows:
+    for wid, name, cmd, cwd, auto, allow in rows:
         if name in NEVER_MANAGE or "claude" not in cmd:
             continue
         base = Path(cwd).name
-        if not base or name == base:
+        if not base:
+            continue
+        target = f"{config.current_session()}:{wid}"
+        # Assert the lock on any managed claude window whose name could still be
+        # clobbered — an already-correctly-named-but-unlocked window is exactly
+        # the flicker case. "0" is tmux's off; anything else (on/unset) needs it.
+        if auto != "0" or allow != "0":
+            lock_window_name(target)
+        if name == base:
             continue
         target_name, counter = base, 2
         while target_name in live_names and live_names[target_name] != wid:
             target_name, counter = f"{base}-{counter}", counter + 1
         if name == target_name:
             continue
-        target = f"{config.current_session()}:{wid}"
         try:
             subprocess.run(["tmux", "rename-window", "-t", target, target_name],
-                           capture_output=True, text=True, timeout=5)
-            subprocess.run(["tmux", "set-window-option", "-t", target, "allow-rename", "off"],
                            capture_output=True, text=True, timeout=5)
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             log.warning("reconcile_window_names: rename %s failed: %s", wid, e)

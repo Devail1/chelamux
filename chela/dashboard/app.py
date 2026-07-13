@@ -1176,6 +1176,11 @@ def api_agents_spawn():
     # (self-identity for peek/read/drive), whether or not a command follows.
     new_wid = (proc.stdout or "").strip()
     target = f"{TMUX_SESSION}:{name}"
+    # Pin the name against tmux's automatic-rename (command-follow) and
+    # allow-rename (OSC) so a claude spawned here never flickers to the
+    # subcommand name mid-shell-out. `new-window -n` already disables
+    # automatic-rename; assert both explicitly so the invariant can't drift.
+    agent_manager.lock_window_name(new_wid if re.fullmatch(r"@\d+", new_wid) else target)
     if re.fullmatch(r"@\d+", new_wid):
         try:
             subprocess.run(["tmux", "send-keys", "-t", target, "-l",
