@@ -6,6 +6,7 @@ import logging
 import os
 import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -86,21 +87,62 @@ def is_claude_running(window_id: str) -> bool:
 # command covers all sessions, so we read it once per dashboard poll and cache
 # it briefly to coalesce bursts. Sessions are keyed by pid (exact) and cwd
 # (fallback); we map a tmux window -> its child claude pid to look up status.
+#
+# `claude agents --json` is a heavyweight process (~165 MB resident). The
+# dashboard is hit in bursts — multiple browser tabs, each with a 30s refresh, a
+# 4s terminals tick, and SSE deltas that trigger /api/agents — and Flask serves
+# those concurrently. A plain TTL is not enough on its own: the cache timestamp
+# is only stamped once the subprocess RETURNS, so a burst that arrives during the
+# ~1s the command runs all miss the cache and each spawn their own (measured 8
+# stacked processes, ~1.3 GB transient). So two guards work together:
+#   * TTL — a fresh cache satisfies callers with no subprocess at all.
+#   * single-flight — a module lock ensures exactly ONE `claude agents --json`
+#     runs at a time; concurrent callers block, then find the cache refreshed by
+#     the winner and return it instead of spawning their own.
 _STATUS_TTL = 2.0
+_STATUS_CMD_TIMEOUT = 10.0  # a hung `claude agents --json` must not stack forever
 _status_cache: dict = {"ts": 0.0, "by_pid": {}, "by_cwd": {}, "cwd_by_pid": {}}
+_status_lock = threading.Lock()
 
 
 def session_status_map(force: bool = False) -> dict:
     """Maps from `claude agents --json`: by_pid {pid: status},
-    by_cwd {cwd: status}, cwd_by_pid {pid: cwd}."""
-    now = time.time()
-    if not force and now - _status_cache["ts"] < _STATUS_TTL:
+    by_cwd {cwd: status}, cwd_by_pid {pid: cwd}.
+
+    Cached for :data:`_STATUS_TTL` s and single-flighted: a burst of concurrent
+    callers collapses to ONE subprocess. ``force`` skips the TTL fast path (the
+    caller needs fresh data) but still coalesces — if the winner refreshed the
+    cache while ``force`` waited on the lock, it returns that instead of spawning
+    a second command.
+    """
+    entered = time.time()
+    # Fast path: a recent cache satisfies everyone without touching the lock.
+    if not force and entered - _status_cache["ts"] < _STATUS_TTL:
         return _status_cache
+    with _status_lock:
+        # A concurrent caller may have refreshed the cache while we waited for the
+        # lock; if it is now newer than when we entered, that result is fresh
+        # enough for us too — return it rather than spawn a second subprocess.
+        if _status_cache["ts"] >= entered:
+            return _status_cache
+        _refresh_status_locked()
+    return _status_cache
+
+
+def _refresh_status_locked() -> None:
+    """Run `claude agents --json` once and update the cache. Holds ``_status_lock``.
+
+    On any failure the last-good maps are kept (a transient timeout must not blank
+    every status pill) and only the timestamp is bumped, so we back off for a TTL
+    instead of retry-storming. The completion time — not the caller's entry time —
+    is stamped so every caller that entered while the command ran coalesces onto
+    this result.
+    """
     by_pid, by_cwd, cwd_by_pid = {}, {}, {}
     try:
         r = subprocess.run(
             ["claude", "agents", "--json"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=_STATUS_CMD_TIMEOUT,
         )
         if r.returncode == 0:
             for s in json.loads(r.stdout or "[]"):
@@ -112,10 +154,24 @@ def session_status_map(force: bool = False) -> dict:
                         cwd_by_pid[int(pid)] = cwd
                 if cwd:
                     by_cwd[cwd] = st
-    except (subprocess.TimeoutExpired, ValueError, json.JSONDecodeError, Exception):
-        pass  # stale-but-safe: keep last cache on any failure
-    _status_cache.update(ts=now, by_pid=by_pid, by_cwd=by_cwd, cwd_by_pid=cwd_by_pid)
-    return _status_cache
+            _status_cache.update(
+                ts=time.time(), by_pid=by_pid, by_cwd=by_cwd, cwd_by_pid=cwd_by_pid
+            )
+            return
+        log.warning(
+            "claude agents --json exited %s; keeping last status cache", r.returncode
+        )
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "claude agents --json timed out after %ss; keeping last status cache",
+            _STATUS_CMD_TIMEOUT,
+        )
+    except (ValueError, json.JSONDecodeError) as e:
+        log.warning("claude agents --json unparseable (%s); keeping last status cache", e)
+    except Exception:
+        log.exception("claude agents --json failed; keeping last status cache")
+    # Stale-but-safe: preserve the last good maps, just back off for a TTL.
+    _status_cache["ts"] = time.time()
 
 
 def claude_pid(window_id: str) -> int | None:
