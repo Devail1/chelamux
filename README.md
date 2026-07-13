@@ -311,6 +311,7 @@ the dashboard *publishes* the port it bound.
 | `CHELA_ORCHESTRATOR_WID` | — | Pin the window the inbox pushes into (`@0`). Otherwise it's whichever session ran `chela watch` |
 | `CHELA_IGNORE_WINDOWS` | — | Comma-separated window names to hide from discovery (placeholder/keep-alive windows) |
 | `CHELA_SHOW_TOOL_CALLS` | `false` | Relay each agent's tool calls to Telegram too (noisy; off by default) |
+| `CHELA_STATUS_LINE` | `true` | Relay the live "Claude is working" verb (`✻ Cerebrating… · 2 shells`) as one self-updating message per topic. It edits in place while the agent works and clears itself when the turn ends — so a phone can tell a *thinking* agent from a *dead* one. A finished turn is kept only when it still says something (shells still running, or a turn ≥30s); anything shorter poofs |
 | `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind. The hooks plugin POSTs to this port, so set it **here**, not with `chela dashboard --port` (a per-process override nothing else can see) |
 | `CHELA_TERMINALS_ENABLED` | `true` | Embedded ttyd terminal wall (streams live; loopback-guarded — see below) |
 | `CHELA_TERMINALS_EXPOSE` | `false` | Serve the writable wall on a **non-loopback** bind too (RCE risk — opt-in) |

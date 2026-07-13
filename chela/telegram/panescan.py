@@ -19,18 +19,27 @@ and must be read off the tmux pane rather than the JSONL transcript:
   ``tool_use`` lands only at answer-time, so the approve / keep-planning buttons
   are detected from the pane too (:func:`detect_exitplanmode`).
 
+A fourth thing is read off the same pane, and for the same reason: the **status
+line** — Claude Code's live "working" verb (``✻ Cerebrating… (2m 45s · ↓ 12.0k
+tokens)``) plus the background-shell count. It is a TUI *render*, not an event:
+there is no ``Boondoggling`` hook and there never will be, so unlike the gates
+(which hooks may eventually supersede) the pane is the correct source here
+permanently (:func:`detect_status`).
+
 This module is the **sole home** for the Claude-Code TUI regexes — the "signatures
 table". Keeping every such pattern here means a Claude Code version bump that
-reworded a prompt is a one-file edit. The permission/bash-approval **and**
-AskUserQuestion patterns are ported from six-ddc/ccbot's ``terminal_parser.py``
-(https://github.com/six-ddc/ccbot, MIT); the broader status-line parsing there is
-deliberately NOT ported. See the top-level NOTICE file for upstream attribution.
+reworded a prompt is a one-file edit. The permission/bash-approval, AskUserQuestion
+**and status-line** patterns are ported from six-ddc/ccbot's ``terminal_parser.py``
+(https://github.com/six-ddc/ccbot, MIT). See the top-level NOTICE file for upstream
+attribution.
 
 Public API: :func:`detect_permission_gate` returns a :class:`Gate` when the pane
 shows a permission/bash-approval prompt; :func:`detect_askuserquestion` returns an
 :class:`AskUQ` when the pane shows an AskUserQuestion selector;
 :func:`detect_exitplanmode` returns an :class:`ExitPlan` when the pane shows a
-plan-approval selector; all return ``None`` for a normal / working pane.
+plan-approval selector — all return ``None`` for a normal / working pane; and
+:func:`detect_status` returns a :class:`Status` when the pane shows a *working*
+agent, ``None`` when it is idle.
 """
 from __future__ import annotations
 
@@ -500,3 +509,174 @@ def detect_exitplanmode(pane_text: str) -> ExitPlan | None:
 
     plan = _shorten_separators("\n".join(lines[:proceed_idx])).strip()
     return ExitPlan(text=plan)
+
+
+# ── Status line — the live "Claude is working" verb ─────────────────────────
+
+# The glyphs Claude Code cycles through at the head of its status line (measured
+# on 2.1.207: the same frame animates `·` → `✶` → `✽` → `✻` several times a
+# second). Ported from ccbot's ``STATUS_SPINNERS``.
+STATUS_SPINNERS = frozenset("·✻✽✶✳✢")
+
+# How far above / below the chrome separator the status line and the mode line
+# can sit (blank spacer rows in between), and how far up the pane to look for the
+# separator itself.
+_CHROME_SEARCH = 10
+_STATUS_LOOKBACK = 4
+_CHROME_RULE_MIN = 20
+
+# The shell counter, which on 2.1.207 is NOT part of the status line at all: it
+# is a segment of the **mode line**, the last row of the bottom chrome —
+# ``⏵⏵ auto mode on · 2 shells · ← for agents``. Anchored to a leading ``·`` (or
+# the start of the segment) so Claude's own prose — "Ran 4 shell commands" — can
+# never match; it is read only from the rows BELOW the separator, which is chrome
+# by construction, so the body cannot reach it either.
+_RE_SHELLS = re.compile(r"(?:^|·)\s*(\d+)\s+shells?\b")
+
+# ⚠️ THE TRAP, and the reason this detector is an ALLOWLIST. When a turn ENDS,
+# Claude Code does not clear the status slot — it rewrites it in the **past tense**,
+# behind the **same spinner glyph**, and leaves it there:
+#
+#     ✻ Cerebrating… (2m 45s · ↓ 12.0k tokens)      <- WORKING
+#     ✽ Razzmatazzing… (27s · ↓ 1.3k tokens)        <- WORKING (the verb is random)
+#     ✻ Worked for 1m 17s · 1 shell still running   <- the turn is OVER…
+#     ✻ Churned for 2m 31s                          <- …and so is this one
+#
+# Both shapes sit in the same slot, at column 0, behind the same glyph — so a
+# spinner-anchored parse matches both, "delete when the status line leaves the
+# pane" NEVER fires (it never leaves), and the relay is left showing a frozen
+# "Worked for 1m 17s" forever. That would defeat the entire point of an *ephemeral*
+# message, so the past-tense summary must resolve to None (→ poof), exactly like an
+# idle pane. Absence of the line is NOT the end-of-turn signal.
+#
+# The discriminator is NOT the verb — both verbs are drawn from an open-ended
+# whimsical set ("Worked", "Churned", …), so blocklisting them is whack-a-mole. It
+# is the **ellipsis**: a live verb is always rendered mid-action, ``Cerebrating…``,
+# and a finished summary never is. Keying on the ellipsis is an allowlist, so an
+# unrecognised line fails CLOSED — treated as "not working", i.e. poofed — which is
+# the safe direction: a missing status message costs a little live-ness, a sticky
+# one is a lie that never goes away. Measured on Claude Code 2.1.207.
+_STATUS_ACTIVE = "…"
+
+# The settled line's turn duration — "Worked for 1m 17s", "Churned for 2m 31s".
+# Read only from the settled shape, where it means exactly one thing (how long the
+# finished turn took); the ACTIVE line's parenthetical can carry a second, unrelated
+# time ("… · thought for 1s") that would corrupt a naive sum.
+_RE_DUR = re.compile(r"(\d+)\s*([hms])\b")
+_DUR_UNITS = {"h": 3600, "m": 60, "s": 1}
+
+
+def _duration_seconds(text: str) -> int | None:
+    """Total seconds in a "1m 17s" / "2m 31s" / "45s" duration, or None."""
+    total: int | None = None
+    for n, unit in _RE_DUR.findall(text):
+        total = (total or 0) + int(n) * _DUR_UNITS[unit]
+    return total
+
+
+@dataclass(frozen=True)
+class Status:
+    """The status line of an agent — either working, or settled.
+
+    ``verb`` is the text after the spinner glyph. ``shells`` is the number of
+    background shells running, or None when none are.
+
+    ``active`` is the distinction that drives the whole relay lifecycle:
+
+    * **active** (``✻ Cerebrating… (2m 45s · ↓ 12.0k tokens)``) — the turn is in
+      flight. Pure liveness: worthless the moment it stops being true, so the relay
+      ticks it and then stops.
+    * **settled** (``✻ Worked for 1m 17s · 1 shell still running``) — the turn is
+      OVER, and Claude leaves this line sitting in the same slot behind the same
+      glyph. It is not noise: ``seconds`` is how long the turn took and ``shells``
+      is background work that **outlived the turn** — a live warning, not a receipt.
+
+    ``seconds`` is the settled turn's duration; it is None for an active status (the
+    active line's parenthetical carries an elapsed time too, but also sometimes an
+    unrelated one — "thought for 1s" — so it is not read).
+
+    :func:`detect_status` returns None only when there is **no** status line at all.
+    """
+
+    verb: str
+    shells: int | None = None
+    active: bool = True
+    seconds: int | None = None
+
+
+def detect_status(pane_text: str) -> Status | None:
+    """Scrape the working verb (+ background shell count) from a live pane.
+
+    **The anchoring is the whole trick.** Claude's ordinary output is full of ``·``
+    bullets — this very docstring would match a naive "line starts with a spinner"
+    grep — so the status line is found *positionally* instead: locate the **chrome
+    separator** (the run of ``─`` that closes the scrollback and opens the prompt
+    box) in the last few rows, then read the first non-blank line **above** it. If
+    that line does not open with a spinner glyph, there is no status line and we
+    return None rather than searching further up into the transcript body.
+
+    The shell count is a second, equally cheap read of the **same** captured text:
+    on Claude Code 2.1.207 it is not in the status line but in the mode line below
+    the chrome (measured, not assumed — see :data:`_RE_SHELLS`). It rides along for
+    the price of one regex over four rows, and it is half of what a phone actually
+    wants to know, so it is parsed here rather than dropped.
+
+    Returns None for an idle pane, for a pane whose visible text merely *contains*
+    bullets, for a pane with no chrome at all (a scrolled-back or non-Claude
+    window) — and, critically, for the **past-tense summary a finished turn leaves
+    behind** (:data:`_RE_STATUS_DONE`), which wears the same spinner glyph in the
+    same slot and never goes away. Never a guess.
+    """
+    if not pane_text:
+        return None
+
+    lines = pane_text.split("\n")
+
+    # The chrome separator: the topmost ──── rule in the last few rows. (Claude
+    # draws two — above and below the prompt box — and the status line sits above
+    # the first, so the topmost is the one to anchor on.)
+    chrome_idx: int | None = None
+    for i in range(max(0, len(lines) - _CHROME_SEARCH), len(lines)):
+        stripped = lines[i].strip()
+        if len(stripped) >= _CHROME_RULE_MIN and all(c == "─" for c in stripped):
+            chrome_idx = i
+            break
+    if chrome_idx is None:
+        return None  # no chrome visible → we cannot say anything about the status
+
+    verb: str | None = None
+    for i in range(chrome_idx - 1, max(chrome_idx - 1 - _STATUS_LOOKBACK, -1), -1):
+        line = lines[i]
+        if not line.strip():
+            continue
+        # The first non-blank row above the chrome is either a status line or the
+        # tail of the transcript. The spinner must sit at **column 0**: Claude
+        # gutter-indents every line of its own output, so an indented "· a bullet"
+        # — which its prose is full of, and which lands in exactly this position
+        # whenever a turn's last line is a bullet — is body text, not a status.
+        # Don't search further up: that is how a stale spinner line from an earlier
+        # turn gets mistaken for a live one.
+        if line[0] in STATUS_SPINNERS:
+            verb = line[1:].strip()
+        break
+    if not verb:
+        return None
+
+    # Working, or the settled summary of a turn that is already over? See
+    # _STATUS_ACTIVE — the ellipsis is the discriminator, and it is an allowlist,
+    # so an unrecognised shape settles rather than ticking forever.
+    active = _STATUS_ACTIVE in verb
+
+    # The shell count lives in the mode line (below the chrome) while a turn runs,
+    # and in the settled line itself once it ends ("· 1 shell still running") — so
+    # look in both, the status line first: after the turn it is the authority on
+    # what is *still* running.
+    shells: int | None = None
+    for line in [verb, *lines[chrome_idx:]]:
+        m = _RE_SHELLS.search(line)
+        if m:
+            shells = int(m.group(1))
+            break
+
+    seconds = None if active else _duration_seconds(verb)
+    return Status(verb=verb, shells=shells, active=active, seconds=seconds)

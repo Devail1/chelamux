@@ -280,6 +280,16 @@ SHOW_TOOL_CALLS = os.environ.get("CHELA_SHOW_TOOL_CALLS", "false").strip().lower
     "false", "0", "no", "off",
 )
 
+# Ephemeral status line: relay Claude Code's live "working" verb (and background
+# shell count) to each bound topic as a single self-deleting message that edits in
+# place while the agent works and is poofed when the turn ends. It is what lets a
+# phone tell a *thinking* agent from a *dead* one, so it is ON by default; set
+# CHELA_STATUS_LINE=false to turn it off (it costs a Telegram edit every few
+# seconds per WORKING window — no extra tmux calls, and idle windows cost nothing).
+STATUS_LINE = os.environ.get("CHELA_STATUS_LINE", "true").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+
 # Embedded ttyd terminal wall on/off (read by the dashboard and the ttyd
 # supervisor in scripts/agent-terminals.sh). The wall — the flagship feature —
 # is ON by default, but it serves writable shells, so the dashboard gates it on
