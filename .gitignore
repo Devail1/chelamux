@@ -35,3 +35,7 @@ secrets.*
 
 # Claude Code session/local state
 .claude/
+
+# Private scope doc — must NEVER be committed (autonomous agents run `git add`;
+# without this line one `git add -A` would publish it). See CLAUDE.md.
+docs/AUTH_PLANE_SCOPE.md
