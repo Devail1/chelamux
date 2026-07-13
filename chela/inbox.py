@@ -30,6 +30,14 @@ an orchestrator really works, are not dispatcher runs, and have no run-state eve
 of their own. The watch is cleared when the completion fires, so one dispatch yields
 exactly one "finished".
 
+**A gone window is not a dead agent.** An agent that finishes normally EXITS, and its
+tmux window goes away — so "window gone" was reporting every SUCCESSFUL dispatch as
+``DIED mid-task``, in the same tick that the run's ``awaiting_review`` event went out.
+A vanished window is now corroborated against the runs DB (:func:`_gone_event`) before
+any claim is made: settled run → the window was meant to go (silent, watch cleared);
+still running with no PR → a genuine death, reported loudly; no run row at all → the
+outcome is honestly reported as unknown.
+
 **The loop cannot run away.** Delivering a push makes the orchestrator busy and then
 idle — which is precisely the transition that would re-trigger. It can't: the
 orchestrator's own window is excluded from the event scan, and :func:`watch` refuses
@@ -63,6 +71,20 @@ BUSY, IDLE, WAITING = "busy", "idle", "waiting"
 # a second paste would land mid-thought (or, worse, race its status back to idle).
 # The rest of the queue drains on subsequent idle ticks, oldest first.
 MAX_DELIVERIES_PER_TICK = 1
+
+# Run states that mean "this window was SUPPOSED to go away" — the dispatcher itself
+# kills the window on `task-finished`, and a failed run has already been announced by
+# run_events(). A watched window vanishing while its run sits in one of these is
+# completion, not death.
+SETTLED_RUN_STATES = ("awaiting_review", "done", "failed")
+
+# How long a vanished window's run row gets to settle before we call it a death.
+# The window dies a moment BEFORE the row lands: `chela task-finished` flips the run
+# to awaiting_review and kills the tmux window, and the daemon can easily sample the
+# gone window while the write is still in flight. Deciding on the first sample is what
+# made a successful agent get reported as DIED. So the first tick that sees the window
+# gone only STAMPS it; the claim is made a tick later, re-reading the run state.
+DEATH_CONFIRM_SECONDS = 30
 
 
 def enabled() -> bool:
@@ -156,7 +178,8 @@ def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:
     session that delegates is the session that gets told. Watching your own window is
     refused: that is the self-notify loop, and it is closed here at the source.
     """
-    if wid not in discovery.get_windows_by_id():   # slow-ish (tmux) — do it OUTSIDE the lock
+    names = discovery.get_windows_by_id()          # slow-ish (tmux) — do it OUTSIDE the lock
+    if wid not in names:
         return {"ok": False, "error": f"no such window: {wid}"}
     with locked_store() as store:                  # ...so a concurrent daemon tick can't
         if by:                                     #    clobber the watch we are writing
@@ -165,8 +188,10 @@ def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:
         if target and wid == target:
             return {"ok": False, "error": "refusing to watch the orchestrator's own window"}
         # `since` is the completion evidence line: work the transcript shows AFTER this
-        # instant is work this dispatch caused (see agent_events).
-        store["watches"][wid] = {"note": note.strip(), "since": time.time()}
+        # instant is work this dispatch caused (see agent_events). `name` outlives the
+        # window itself and is what links it back to its run row (see run_for_window).
+        store["watches"][wid] = {"note": note.strip(), "since": time.time(),
+                                 "name": names[wid]}
     return {"ok": True, "wid": wid, "note": note.strip(), "orchestrator": target}
 
 
@@ -210,7 +235,55 @@ def did_work_since(wid: str, since: float) -> bool:
     return last is not None and last > since
 
 
-def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict) -> list[dict]:
+def run_for_window(name: str | None, runs: list[dict]) -> dict | None:
+    """The dispatcher run that owns the window called ``name`` (newest first), if any.
+
+    The dispatcher names an agent's window after its branch (``window_name`` on the
+    run row), which is the only handle a *gone* window still gives us — its id is
+    meaningless once tmux has reaped it. A retry re-uses the name, so we take the
+    newest matching row; :func:`chela.dispatcher.list_runs` already sorts DESC.
+    An ad-hoc ``tmux send-keys`` dispatch has no row at all → None.
+    """
+    if not name:
+        return None
+    for run in runs:
+        if run.get("window_name") == name:
+            return run
+    return None
+
+
+def _gone_event(wid: str, name: str, note: str, run: dict | None) -> dict | None:
+    """What a vanished watched window actually MEANS, given its run row.
+
+    A window disappearing is not evidence of death — an agent that finishes normally
+    EXITS, and `chela task-finished` kills the window on purpose. Inferring death from
+    the disappearance alone reported every successful dispatch as ``DIED mid-task``,
+    while the same tick queued that run's ``awaiting_review`` event: two contradictory
+    messages for one run, with the false one being the alarming one.
+
+    So the disappearance is corroborated against the run state:
+
+    * settled run (``awaiting_review`` / ``done`` / ``failed``) or a PR exists →
+      the window was *supposed* to go: emit nothing (``run_events`` already announced
+      it — a second event here is the self-contradiction) and clear the watch.
+    * run still ``claimed`` / ``running`` with no PR → a genuine mid-task death. This
+      is the whole point of the watch and it must still shout.
+    * no run row (ad-hoc dispatch) → we simply do not know. Say that, rather than
+      asserting an outcome we cannot see.
+    """
+    if run is not None and (run.get("status") in SETTLED_RUN_STATES or run.get("pr_url")):
+        return {"kind": "completed_gone", "wid": wid, "clear_watch": True, "silent": True}
+    if run is None:
+        return {"kind": "gone_unknown", "wid": wid, "clear_watch": True,
+                "text": _line(wid, name, "window closed — no run state to confirm the "
+                                         "outcome; check before assuming either way.", note)}
+    return {"kind": "died", "wid": wid, "clear_watch": True,
+            "text": _line(wid, name, "DIED mid-task (window gone) — "
+                                     "the work was not finished.", note)}
+
+
+def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
+                 runs: list[dict] | None = None) -> list[dict]:
     """Events from agent status transitions, scoped to WATCHED windows only.
 
     Edge-triggered (mirrors :func:`chela.notify.check_waiting`) so a window that sits
@@ -223,11 +296,18 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict) -> list
     registered (:func:`did_work_since`) is also finished. The evidence path needs no
     baseline at all, which is why it also survives a daemon restart mid-task.
 
+    A window that is GONE is corroborated against ``runs`` (see :func:`_gone_event`)
+    rather than being called dead on sight, and only after ``DEATH_CONFIRM_SECONDS``,
+    so the run row racing the window's exit cannot produce a false death. This writes
+    ``name``/``gone_since`` back onto the watch — the caller persists the store.
+
     The orchestrator's own window is never a source, so the busy→idle its own reply
     produces (including the reply to one of our own pushes) can never become an event.
     """
     orch = orchestrator_wid(store)
     names = discovery.get_windows_by_id()
+    runs = runs or []
+    now_ts = time.time()
     out: list[dict] = []
     for wid, meta in sorted(store["watches"].items()):
         if wid == orch:
@@ -235,8 +315,31 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict) -> list
         meta = meta or {}
         note = meta.get("note", "")
         since = meta.get("since") or 0.0
-        name = names.get(wid, wid)
         was, now = prev.get(wid), cur.get(wid)
+
+        if wid not in names:
+            # Gone. Remember the name we last saw it under: it is the ONLY link back to
+            # the run row (window ids die with the window), and it is why the false
+            # death report could only ever say "@6 (@6)".
+            name = meta.get("name") or wid
+            gone_since = meta.get("gone_since")
+            if not gone_since:
+                meta["gone_since"] = now_ts   # first sample only stamps; never decides
+                store["watches"][wid] = meta
+            run = run_for_window(meta.get("name"), runs)
+            settled = run is not None and (
+                run.get("status") in SETTLED_RUN_STATES or run.get("pr_url"))
+            if not settled and now_ts - (gone_since or now_ts) < DEATH_CONFIRM_SECONDS:
+                continue                  # let the run row catch up before we accuse
+            event = _gone_event(wid, name, note, run)
+            if event:
+                out.append(event)
+            continue
+
+        meta["name"] = names[wid]         # keep the id→name link fresh while it lives
+        meta.pop("gone_since", None)      # it came back (or tmux blipped) — not gone
+        store["watches"][wid] = meta
+        name = names[wid]
         finished_edge = was == BUSY and now == IDLE
         # The not-missed path: idle now, and the transcript proves it worked for us.
         # Gated on `idle` so an agent still mid-task (busy/waiting) is never called done.
@@ -247,16 +350,12 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict) -> list
                                                  "verify + commit.", note)})
             continue
         if was is None:
-            continue                      # no baseline — the transitions below need one
+            continue                      # no baseline — the transition below needs one
         if was != WAITING and now == WAITING:
             # Keep the watch: it is blocked, not done — it still owes you the work.
             out.append({"kind": "blocked", "wid": wid, "clear_watch": False,
                         "text": _line(wid, name, "is BLOCKED on a prompt (permission/"
                                                  "question) — answer it.", note)})
-        elif was in (BUSY, IDLE, WAITING) and now is None and wid not in names:
-            out.append({"kind": "died", "wid": wid, "clear_watch": True,
-                        "text": _line(wid, name, "DIED mid-task (window gone) — "
-                                                 "the work was not finished.", note)})
     return out
 
 
@@ -343,17 +442,22 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         runs = dispatcher.list_runs()
 
     with locked_store() as store:
-        events = agent_events(prev, statuses, store)
+        events = agent_events(prev, statuses, store, runs)
         r_events, store["runs_seen"] = run_events(runs, store.get("runs_seen", {}))
         events += r_events
 
         for event in events:
-            store["queue"].append(event)
+            # A `silent` event carries no message — it exists only to retire a watch
+            # whose window went away because the work SUCCEEDED. Queueing anything for
+            # it would be the self-contradiction (run_events already announced the run).
+            if not event.get("silent"):
+                store["queue"].append(event)
             if event.get("clear_watch") and event.get("wid"):
                 # Interest is satisfied — one dispatch, one completion. (A "blocked"
                 # event keeps the watch: the agent still owes you the finish.)
                 store["watches"].pop(event["wid"], None)
-            log.info("inbox: queued %s (%s)", event["kind"], event.get("wid") or "run")
+            log.info("inbox: %s %s (%s)", "resolved" if event.get("silent") else "queued",
+                     event["kind"], event.get("wid") or "run")
 
         deliver(store, statuses)
     return statuses

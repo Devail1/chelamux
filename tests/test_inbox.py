@@ -84,6 +84,17 @@ def _registered(note="fix the parser"):
     inbox.watch(AGENT, note, by=ORCH)
 
 
+def _run(status, **over):
+    """A dispatcher run row for AGENT's window (the dispatcher names it after the branch)."""
+    return {"task_id": "T9", "title": "fix the parser", "status": status,
+            "window_name": "cmx-9", "pr_url": None, **over}
+
+
+def _decide_immediately(monkeypatch):
+    """Collapse the settle window — the race itself is covered by its own test below."""
+    monkeypatch.setattr(inbox, "DEATH_CONFIRM_SECONDS", 0)
+
+
 # --- the edge trigger ----------------------------------------------------------
 
 def test_busy_to_idle_on_a_watched_window_fires_once(store_file, windows, sends, monkeypatch):
@@ -124,14 +135,16 @@ def test_a_watched_window_going_waiting_is_reported_but_keeps_its_watch(
 
 
 def test_a_watched_window_that_dies_mid_task_is_reported(store_file, sends, monkeypatch):
+    # The real alarm — DO NOT let the fix for the false positive below silence it. The
+    # window is gone while its run is still `running` with no PR: the work IS unfinished.
+    _decide_immediately(monkeypatch)
     monkeypatch.setattr(inbox.discovery, "get_windows_by_id",
-                        lambda: {ORCH: "orchestrator", AGENT: "chelamux"})
+                        lambda: {ORCH: "orchestrator", AGENT: "cmx-9"})
     _registered()
-    # The agent's window is gone (crashed / killed) — it never finished.
     monkeypatch.setattr(inbox.discovery, "get_windows_by_id", lambda: {ORCH: "orchestrator"})
     _statuses(monkeypatch, {ORCH: inbox.IDLE})
 
-    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY}, runs=[_run("running")])
 
     assert "DIED mid-task" in sends[0][1]
     assert inbox.watches() == {}
@@ -450,3 +463,104 @@ def test_a_watch_registered_at_runtime_works_without_a_daemon_restart(
     inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
 
     assert len(sends) == 1                          # ...and it fires. No restart needed.
+
+
+# --- BUG 3 (live, twice on 2026-07-13): a SUCCESSFUL agent was reported as DIED ---
+#
+# A dispatched agent that finishes normally EXITS — `chela task-finished` flips the run
+# to awaiting_review and kills its tmux window. The watcher read that disappearance as
+# death, so the one message a human is most likely to act on ("your agent died, the work
+# was not finished") was false PRECISELY when everything went right — and the same tick
+# queued that run's correct "awaiting review" line, contradicting itself in its own
+# queue. Death is now CORROBORATED against the run state, never inferred from the window.
+
+@pytest.fixture
+def gone_agent(store_file, monkeypatch):
+    """AGENT's window existed (named after its branch), was watched, and is now gone."""
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id",
+                        lambda: {ORCH: "orchestrator", AGENT: "cmx-9"})
+    _registered()
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id", lambda: {ORCH: "orchestrator"})
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+
+
+@pytest.mark.parametrize("run", [
+    _run("awaiting_review", pr_url="https://github.com/x/y/pull/45"),
+    _run("done"),
+    _run("running", pr_url="https://github.com/x/y/pull/45"),   # row still lagging, PR is proof
+])
+def test_a_window_that_vanishes_on_a_settled_run_is_not_a_death(
+        store_file, sends, monkeypatch, gone_agent, run):
+    _decide_immediately(monkeypatch)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY}, runs=[run])
+
+    assert [t for _, t in sends if "DIED" in t] == []      # the false alarm, silenced
+    assert inbox.watches() == {}                           # ...and no stale watch left
+    # Silent: run_events already announced this run. A second event here IS the bug.
+    assert [e for e in inbox.load()["queue"] if e["wid"] == AGENT] == []
+
+
+def test_one_run_never_produces_both_awaiting_review_and_died(
+        store_file, sends, monkeypatch, gone_agent):
+    # The self-contradiction, end to end: the run reaches awaiting_review in the same
+    # tick that its window disappears. Exactly one message may come out of that, and it
+    # is the true one.
+    _decide_immediately(monkeypatch)
+    run = _run("awaiting_review", pr_url="https://github.com/x/y/pull/45")
+
+    prev = inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY}, runs=[run])
+    inbox.tick(prev, runs=[run])
+
+    texts = [t for _, t in sends]
+    assert len(texts) == 1
+    assert "awaiting review" in texts[0] and "pull/45" in texts[0]
+    assert not any("DIED" in t for t in texts)
+
+
+def test_a_vanished_window_with_no_run_row_admits_it_does_not_know(
+        store_file, sends, monkeypatch, gone_agent):
+    # An ad-hoc `tmux send-keys` dispatch has no run row, so there is nothing to
+    # corroborate against. Say so honestly instead of asserting an outcome we can't see.
+    _decide_immediately(monkeypatch)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY}, runs=[])
+
+    text = sends[0][1]
+    assert "no run state to confirm the outcome" in text
+    assert "DIED" not in text and "was not finished" not in text
+    assert inbox.watches() == {}
+
+
+def test_the_run_row_is_allowed_to_lag_the_window_it_belongs_to(
+        store_file, sends, monkeypatch, gone_agent):
+    # THE race that produced the live false positive: `task-finished` kills the window a
+    # moment BEFORE the awaiting_review write lands, so the first sample sees a gone
+    # window on a still-`running` run. Deciding on that first sample is what accused a
+    # successful agent. The first tick may only STAMP; the claim waits for a re-read.
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY}, runs=[_run("running")])
+
+    assert sends == []                                     # nothing claimed yet...
+    assert AGENT in inbox.watches()                        # ...and the watch is held
+
+    run = _run("awaiting_review", pr_url="https://github.com/x/y/pull/45")
+    inbox.tick({ORCH: inbox.IDLE}, runs=[run])             # the row lands a tick later
+
+    assert not any("DIED" in t for _, t in sends)
+    assert inbox.watches() == {}
+
+
+def test_a_death_still_fires_once_the_settle_window_has_passed(
+        store_file, sends, monkeypatch, gone_agent):
+    # ...but the settle window only DELAYS the alarm — it must not swallow it. The run
+    # is still `running` with no PR when we re-read it: that is a real crash.
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY}, runs=[_run("running")])
+    assert sends == []
+
+    store = inbox.load()                                   # ...the settle window elapses
+    store["watches"][AGENT]["gone_since"] -= inbox.DEATH_CONFIRM_SECONDS + 1
+    inbox.save(store)
+    inbox.tick({ORCH: inbox.IDLE}, runs=[_run("running")])
+
+    assert "DIED mid-task" in sends[0][1]
+    assert inbox.watches() == {}
