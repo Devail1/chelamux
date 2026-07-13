@@ -1291,20 +1291,63 @@ def api_launcher_suggest():
     return jsonify(launcher.suggest())
 
 
+def _agent_cmd_overrides() -> list[dict]:
+    """Discovered workflows that pin ``agent.cmd`` — i.e. that SHADOW the Settings
+    permission mode (see dispatcher.resolve_agent_cmd). Surfaced so the drawer can
+    say which source is actually winning instead of implying the setting always
+    applies. Best-effort: an unreadable workflow is skipped, not fatal."""
+    out: list[dict] = []
+    try:
+        paths = _discover_dispatch_workflows(dispatcher.list_runs())
+    except Exception:
+        return out
+    for p in paths:
+        try:
+            cmd = load_workflow(p).get("agent", "cmd", default=None)
+        except Exception:
+            continue
+        if isinstance(cmd, str) and cmd.strip():
+            out.append({"workflow": p.name, "path": str(p), "cmd": cmd.strip()})
+    return out
+
+
 @app.route("/api/config", methods=["GET", "POST"])
 @require_auth
 def api_config():
     """Dashboard-editable user prefs (userconfig.json). GET reports the stored
     projects_dir plus the effective dir the launcher will scan (after env/default
-    fallback); POST {projects_dir} sets or (empty) clears it."""
+    fallback), and the dispatcher's agent permission mode (stored + effective +
+    the closed enum of valid modes + any WORKFLOW.md that overrides it). POST
+    {projects_dir} and/or {agent_permission_mode} sets or (empty) clears them.
+
+    ``agent_permission_mode`` is validated against dispatcher.PERMISSION_MODES
+    HERE, server-side — the UI's <select> is a convenience, not the gate. An
+    unknown value is rejected 400 and the stored mode is left untouched (fail
+    closed): the mode is interpolated into the shell command that spawns an
+    agent, so only the enum may ever reach it. There is deliberately no endpoint
+    to set the command itself."""
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
+        if "agent_permission_mode" in data:
+            mode = (data.get("agent_permission_mode") or "").strip()
+            if mode and mode not in dispatcher.PERMISSION_MODES:
+                return jsonify({
+                    "error": "invalid permission mode",
+                    "valid": list(dispatcher.PERMISSION_MODES),
+                }), 400
+            userconfig.set_(dispatcher.PERMISSION_MODE_KEY, mode)
         if "projects_dir" in data:
             userconfig.set_("projects_dir", (data.get("projects_dir") or "").strip())
+    stored_mode = dispatcher.settings_permission_mode()
     return jsonify({
         "projects_dir": userconfig.get("projects_dir", ""),
         "projects_dir_effective": str(launcher._projects_dir()),
         "collab_relay": config.COLLAB_RELAY,
+        "agent_permission_mode": stored_mode or "",
+        "agent_permission_mode_effective": stored_mode or dispatcher.DEFAULT_PERMISSION_MODE,
+        "agent_permission_mode_default": dispatcher.DEFAULT_PERMISSION_MODE,
+        "agent_permission_modes": list(dispatcher.PERMISSION_MODES),
+        "agent_cmd_overrides": _agent_cmd_overrides(),
     })
 
 

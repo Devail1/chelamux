@@ -387,6 +387,7 @@ def cmd_dispatch(args) -> None:
             print(f"=== task {p['task_id']}: {p['title']}")
             print(f"  worktree: {p['worktree_path']}")
             print(f"  branch:   {p['branch']}")
+            print(f"  agent:    {p['agent_cmd']}  ({p['agent_cmd_source']})")
             print("  prompt:")
             for line in p["prompt"].splitlines():
                 print(f"    {line}")

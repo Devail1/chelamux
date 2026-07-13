@@ -430,6 +430,23 @@ function renderSettings(focus) {
             <div id="cfg-projects-msg" class="s-savemsg"></div>
         </section>
 
+        <section class="settings-section" id="settings-agentmode">
+            <h4>Dispatcher agent mode</h4>
+            <p class="s-desc">Permission mode for agents the <strong>dispatcher</strong> spawns.
+            Applies to the <strong>next</strong> dispatch — an agent already running keeps the
+            mode it started with. Only the mode is settable; the rest of the launch command is
+            fixed in code.</p>
+            <div class="s-row">
+                <span class="s-rowlabel">Permission mode</span>
+                <select id="agent-mode-select" class="s-select"
+                        onchange="chela.setAgentPermissionMode(this.value)">
+                    <option value="">Loading…</option>
+                </select>
+            </div>
+            <div id="agent-mode-msg" class="s-savemsg"></div>
+            <p class="s-desc" id="agent-mode-source"></p>
+        </section>
+
         <section class="settings-section">
             <h4>Needs-input notifications</h4>
             <p class="s-desc">Fires a one-shot ping when an agent's pane enters
@@ -532,7 +549,83 @@ function renderSettings(focus) {
     if (focus === 'notify') body.scrollTop = 0;
     _loadProjectsSetting();
     _loadCollabSetting();
+    _loadAgentModeSetting();
     _loadSettingsStatus();
+}
+
+// Dispatcher agent permission mode. The <select> is populated from the server's
+// enum (/api/config → agent_permission_modes) rather than a hardcoded list here,
+// so the UI can never offer a mode the server would reject — and the server
+// re-validates anyway (the gate is there, not here). Annotations are only given
+// for the modes whose behaviour is documented; the rest show the raw CLI name.
+const AGENT_MODE_NOTES = {
+    auto: 'safe ops auto-approved, risky ones gated',
+    bypassPermissions: '⚠ no prompts at all',
+};
+
+function _agentModeLabel(m, dflt) {
+    const note = AGENT_MODE_NOTES[m];
+    return m + (m === dflt ? ' · built-in default' : '') + (note ? ' · ' + note : '');
+}
+
+// Renders "which source is winning" honestly: a WORKFLOW.md that pins agent.cmd
+// SHADOWS this setting for that workflow (dispatcher.resolve_agent_cmd), so say
+// so rather than letting the drawer imply the mode always applies.
+function _renderAgentModeSource(cfg) {
+    const el = document.getElementById('agent-mode-source');
+    if (!el) return;
+    const overrides = (cfg && cfg.agent_cmd_overrides) || [];
+    const eff = (cfg && cfg.agent_permission_mode_effective) || '';
+    const stored = (cfg && cfg.agent_permission_mode) || '';
+    const src = stored ? 'this setting' : 'the built-in default';
+    let html = `In effect: <code>claude --permission-mode ${escHtml(eff)}</code> — from ${src}.`;
+    if (overrides.length) {
+        html += ' <strong>Overridden</strong> for ' + overrides.map(o =>
+            `<code>${escHtml(o.workflow)}</code> (<code>${escHtml(o.cmd)}</code>)`).join(', ') +
+            ' — a workflow that pins <code>agent.cmd</code> wins over this setting.';
+    }
+    el.innerHTML = html;
+}
+
+async function _loadAgentModeSetting() {
+    const sel = document.getElementById('agent-mode-select');
+    if (!sel) return;
+    let cfg;
+    try {
+        cfg = await api('/api/config');
+    } catch (e) { sel.innerHTML = '<option value="">(unavailable)</option>'; return; }
+    const modes = (cfg && cfg.agent_permission_modes) || [];
+    const dflt = (cfg && cfg.agent_permission_mode_default) || '';
+    const stored = (cfg && cfg.agent_permission_mode) || '';
+    sel.innerHTML = modes.map(m =>
+        `<option value="${attrEsc(m)}"${stored === m ? ' selected' : ''}>${escHtml(_agentModeLabel(m, dflt))}</option>`
+    ).join('');
+    // Unset reads as the built-in default — select it without storing anything.
+    if (!stored && dflt) sel.value = dflt;
+    _renderAgentModeSource(cfg);
+}
+
+async function setAgentPermissionMode(v) {
+    const msg = document.getElementById('agent-mode-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    setMsg('', 'Saving…');
+    let cfg;
+    try {
+        cfg = await api('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_permission_mode: v }),
+        });
+    } catch (e) { setMsg('err', 'Save failed — mode unchanged.'); return; }
+    // api() resolves on a 4xx too, so the server's rejection arrives as a body,
+    // not a throw. Fail closed: report it and re-read the mode that IS stored.
+    if (!cfg || cfg.error) {
+        setMsg('err', 'Rejected — mode unchanged.');
+        _loadAgentModeSetting();
+        return;
+    }
+    setMsg('ok', 'Saved · next dispatch launches in ' + (cfg.agent_permission_mode_effective || v));
+    _renderAgentModeSource(cfg);
 }
 
 // Live "Connections & Status" surface (READ-ONLY). Fetches /api/settings and
@@ -937,4 +1030,4 @@ export { openPalette, refreshSidebar, renderAgentDetail, renderSidebarAgents, se
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentFilter, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentFilter, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
