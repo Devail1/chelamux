@@ -18,6 +18,7 @@ from chela.telegram.bindings import BindingRegistry
 from chela.telegram.inbound import (
     _KEY_ACTIONS,
     _KEY_CB_PREFIX,
+    _REFRESH_KEY_ID,
     BRIDGE_COMMANDS,
     MENU_COMMANDS,
     PASSTHROUGH_COMMANDS,
@@ -309,13 +310,17 @@ def test_registry_router_resolve_fails_closed_with_no_chat_bound():
 # and its callback handler (the PTB glue itself needs the [telegram] extra).
 # --------------------------------------------------------------------------
 
-def test_key_actions_flatten_every_button_in_the_keyboard():
+def test_key_actions_flatten_every_key_sending_button_in_the_keyboard():
     # Every (label, key_id, tmux_key) button maps to its (tmux_key, label) action
-    # so a button and the key it fires can never drift apart.
+    # so a button and the key it fires can never drift apart. The keyless 🔄
+    # button sends nothing (it re-captures the pane), so it stays out of the map.
     buttons = [b for row in SCREENSHOT_KEYS for b in row]
     assert _KEY_ACTIONS == {
-        key_id: (tmux_key, label) for (label, key_id, tmux_key) in buttons
+        key_id: (tmux_key, label)
+        for (label, key_id, tmux_key) in buttons
+        if tmux_key is not None
     }
+    assert _REFRESH_KEY_ID not in _KEY_ACTIONS
     # key_ids are unique across the whole keyboard (no button shadows another).
     assert len({key_id for (_l, key_id, _k) in buttons}) == len(buttons)
 
@@ -327,6 +332,24 @@ def test_key_actions_map_to_valid_tmux_key_names():
     assert {_KEY_ACTIONS[k][0] for k in ("up", "dn", "lt", "rt")} == {
         "Up", "Down", "Left", "Right"
     }
+
+
+def test_arrow_buttons_are_glyph_only():
+    # The direction is in the glyph; a worded caption ("→ Right") only steals
+    # width, which Telegram then truncates on a narrow phone.
+    labels = {
+        key_id: label for row in SCREENSHOT_KEYS for (label, key_id, _k) in row
+    }
+    assert [labels[k] for k in ("up", "dn", "lt", "rt")] == ["↑", "↓", "←", "→"]
+
+
+def test_keyboard_carries_a_refresh_button():
+    # Re-capturing the pane without sending a key is the most-reached-for action
+    # between keypresses, so the keyboard must offer it.
+    refresh = [
+        b for row in SCREENSHOT_KEYS for b in row if b[1] == _REFRESH_KEY_ID
+    ]
+    assert refresh == [("🔄", _REFRESH_KEY_ID, None)]
 
 
 def test_callback_data_stays_within_telegram_64_byte_limit():
@@ -415,3 +438,78 @@ def test_bridge_leaves_ordinary_text_alone():
     _drive(on_message, "look at @3 and mail me at a@b.com")
 
     assert stub.calls == [("@3", "look at @3 and mail me at a@b.com")]
+
+
+# --------------------------------------------------------------------------
+# The 🔄 control key — wired, not just present in the data.
+# --------------------------------------------------------------------------
+
+class _FakeCallbackMessage:
+    """The keyboard message a control-key tap arrives on."""
+
+    def __init__(self, thread_id=4):
+        self.message_thread_id = thread_id
+        self.photos: list[bytes] = []
+        self.texts: list[str] = []
+
+    async def reply_photo(self, photo, **_kw):
+        self.photos.append(photo.read())
+
+    async def reply_text(self, text, **_kw):
+        self.texts.append(text)
+
+
+class _FakeCallbackQuery:
+    def __init__(self, data, msg):
+        self.data = data
+        self.message = msg
+        self.answers: list[str | None] = []
+
+    async def answer(self, text=None, **_kw):
+        self.answers.append(text)
+
+    async def edit_message_media(self, **_kw):  # pragma: no cover - must not run
+        raise AssertionError("a refresh tap must reply fresh, not edit in place")
+
+
+class _FakeCallbackUpdate:
+    def __init__(self, data, chat_id=777, thread_id=4):
+        self.message = None
+        self.callback_query = _FakeCallbackQuery(data, _FakeCallbackMessage(thread_id))
+        self.effective_chat = type("Chat", (), {"id": chat_id})()
+
+
+def _key_handler(*, capture, send_key):
+    """The real _on_key callback from a real build_application."""
+    from telegram.ext import CallbackQueryHandler
+
+    from chela.telegram.inbound import build_application
+
+    app = build_application(
+        "123:fake-token",
+        TopicRouter("777", "@3", "4", sender=_StubSender()),
+        capture=capture,
+        send_key=send_key,
+    )
+    handlers = [h for group in app.handlers.values() for h in group]
+    cbs = [h for h in handlers if isinstance(h, CallbackQueryHandler)]
+    return cbs[-1].callback  # the pattern-less catch-all: _on_key
+
+
+def test_refresh_tap_recaptures_the_pane_and_sends_no_key():
+    import asyncio
+
+    sent: list[str] = []
+    update = _FakeCallbackUpdate(f"{_KEY_CB_PREFIX}{_REFRESH_KEY_ID}")
+    on_key = _key_handler(
+        capture=lambda _wid, **_kw: "fresh pane",
+        send_key=lambda _wid, key: sent.append(key) or True,
+    )
+
+    asyncio.run(on_key(update, None))
+
+    assert sent == [], "🔄 must not type anything into the session"
+    query = update.callback_query
+    assert query.answers == ["🔄"]
+    # A snapshot came back — a PNG, or the text block when Pillow is absent.
+    assert query.message.photos or query.message.texts
