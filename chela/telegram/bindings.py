@@ -56,6 +56,12 @@ class BindingRegistry:
         self._chat_id = _norm(chat_id)
         self._window_to_thread: dict[str, str] = {}
         self._thread_to_window: dict[str, str] = {}
+        # window_id -> the name its topic currently carries on Telegram. NOT a
+        # source of truth for the agent's name (the tmux window is) — a CACHE of
+        # what we last told Telegram, so the reconcile tick can spot a drifted
+        # topic and rename it without hitting the Bot API for every window, every
+        # tick, forever. An unknown/absent entry just means "resync once".
+        self._topic_names: dict[str, str] = {}
 
     @property
     def chat_id(self) -> str | None:
@@ -79,6 +85,12 @@ class BindingRegistry:
         old_window = self._thread_to_window.pop(t, None)
         if old_window is not None:
             self._window_to_thread.pop(old_window, None)
+            self._topic_names.pop(old_window, None)
+        # A fresh binding means a different topic, so whatever name we cached for
+        # this window describes someone else's topic now. Drop it: unknown reads as
+        # "resync once", which is always safe; a stale name reads as "in sync" and
+        # would leave the topic misnamed forever.
+        self._topic_names.pop(w, None)
         self._window_to_thread[w] = t
         self._thread_to_window[t] = w
 
@@ -91,7 +103,21 @@ class BindingRegistry:
         if thread is None:
             return False
         self._thread_to_window.pop(thread, None)
+        self._topic_names.pop(w, None)
         return True
+
+    def set_topic_name(self, window_id: str, name: str) -> None:
+        """Record the name ``window_id``'s topic now carries on Telegram."""
+        w = _norm(window_id)
+        if w is not None:
+            self._topic_names[w] = name
+
+    def topic_name(self, window_id: str | int | None) -> str | None:
+        """The name we last gave this window's topic (None → never synced)."""
+        w = _norm(window_id)
+        if w is None:
+            return None
+        return self._topic_names.get(w)
 
     def window_for_thread(self, thread_id: str | int | None) -> str | None:
         """The window bound to ``thread_id`` (None → unbound / General topic)."""
@@ -117,8 +143,12 @@ class BindingRegistry:
     # -- persistence -------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise to a JSON-ready ``{chat_id, bindings: {window: thread}}``."""
-        return {"chat_id": self._chat_id, "bindings": dict(self._window_to_thread)}
+        """Serialise to ``{chat_id, bindings: {window: thread}, topic_names: {...}}``."""
+        return {
+            "chat_id": self._chat_id,
+            "bindings": dict(self._window_to_thread),
+            "topic_names": dict(self._topic_names),
+        }
 
     @classmethod
     def from_dict(cls, data: dict, *, chat_id: str | int | None = None) -> "BindingRegistry":
@@ -130,6 +160,12 @@ class BindingRegistry:
         reg = cls(chat_id if chat_id is not None else data.get("chat_id"))
         for window, thread in (data.get("bindings") or {}).items():
             reg.bind(window, thread)
+        # Absent in files written before topic renaming existed: those windows just
+        # look unsynced, so the next reconcile tick renames each topic once to the
+        # live tmux name and records it. Bind first — bind() clears the cache entry.
+        for window, name in (data.get("topic_names") or {}).items():
+            if reg.thread_for_window(window) is not None:
+                reg.set_topic_name(window, name)
         return reg
 
     def save(self, path: str | Path | None = None) -> None:

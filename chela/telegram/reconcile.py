@@ -42,25 +42,35 @@ import logging
 import os
 from typing import Callable
 
+from chela.agent_manager import is_generic_name
 from chela.telegram.relay import Transport, _urllib_transport
 
 log = logging.getLogger(__name__)
 
 
 def topic_name_for(cwd: str | None, window_name: str) -> str:
-    """Name a topic after the agent's *project* (its cwd basename), else the window.
+    """The topic's name: a DELIBERATE window name wins, else the agent's project.
 
-    Returns ``basename(cwd)`` — e.g. ``/home/liav/projects/chelamux`` → ``chelamux``
-    — so an auto-created topic reads as the project the agent is working in rather
-    than a generic ``shell-1`` tmux window name. Falls back to ``window_name`` when
-    the cwd carries no project signal: empty/``None``, the filesystem root ``/``, or
-    the user's home directory (a ``~``-rooted session would otherwise collapse to the
-    useless login-name basename, e.g. ``liavedunix``).
+    The tmux window name is the single source of truth for an agent's display name,
+    so a name a human chose — via the dashboard rename or ``tmux rename-window`` —
+    is what the topic is called, and the bridge keeps the two bound as it changes.
+
+    Only when the window carries no intentional name (a generic ``shell-1``, or
+    tmux's command-follow ``claude``; see
+    :func:`chela.agent_manager.is_generic_name`) do we fall back to naming the topic
+    after the *project*: ``basename(cwd)`` — e.g. ``/home/liav/projects/chelamux`` →
+    ``chelamux`` — so an auto-created topic reads as the work rather than as
+    ``shell-1``. That falls back to ``window_name`` in turn when the cwd carries no
+    project signal: empty/``None``, the filesystem root ``/``, or the user's home
+    directory (a ``~``-rooted session would otherwise collapse to the useless
+    login-name basename, e.g. ``liavedunix``).
 
     Pure — cwd is passed in (in production resolved via
     :func:`chela.discovery.get_window_cwd_by_id`), so it unit-tests with no live
     tmux/Telegram.
     """
+    if window_name and not is_generic_name(window_name):
+        return window_name
     if not cwd:
         return window_name
     normalized = os.path.normpath(cwd)
@@ -102,6 +112,25 @@ class TopicManager:
             log.warning("createForumTopic(%s) returned no message_thread_id: %s", name, resp)
             return None
         return str(thread)
+
+    def rename_topic(self, thread_id: str | int, name: str) -> bool:
+        """Rename forum topic ``thread_id`` to ``name``. True if Telegram accepted.
+
+        The propagation half of a window rename: ``editForumTopic`` with only ``name``
+        set leaves the topic's icon untouched. A failure (missing *Manage Topics*
+        permission, deleted topic) is logged and swallowed — the caller then leaves
+        the cached name unset, so the next tick simply retries rather than wedging
+        the daemon over a cosmetic rename.
+        """
+        resp = self._transport(
+            "editForumTopic",
+            {"chat_id": self._chat_id, "message_thread_id": thread_id, "name": name},
+        )
+        if not resp.get("ok"):
+            log.warning("editForumTopic(%s -> %s) failed: %s",
+                        thread_id, name, resp.get("description", resp))
+            return False
+        return True
 
     def close_topic(self, thread_id: str | int) -> bool:
         """Close (archive, not delete) the forum topic ``thread_id``.
@@ -164,7 +193,28 @@ def reconcile_bindings(
         if thread is None:
             continue  # create failed (perms?); leave unbound and retry next tick
         registry.bind(wid, thread)
+        registry.set_topic_name(wid, name)
         log.info("auto-topics: created topic %s for %s (%s)", thread, wid, name)
+        changed = True
+
+    # Rename: keep a bound topic's name tied to its window's. A rename lands in tmux
+    # (the source of truth) and reaches Telegram here, on the next tick, so the two
+    # stay bound instead of drifting apart the moment anyone renames anything. We
+    # diff against the name we last gave Telegram, so a steady-state tick makes no
+    # API call at all; an unknown name (a binding from before this existed, or a
+    # rename Telegram rejected) resyncs once.
+    for wid in agent_ids:
+        thread = registry.thread_for_window(wid)
+        if thread is None:
+            continue
+        cwd = cwd_for(wid) if cwd_for is not None else None
+        desired = topic_name_for(cwd, live_windows.get(wid, wid))
+        if registry.topic_name(wid) == desired:
+            continue
+        if not topic_api.rename_topic(thread, desired):
+            continue  # perms/deleted topic; leave it unsynced and retry next tick
+        registry.set_topic_name(wid, desired)
+        log.info("auto-topics: renamed topic %s for %s -> %s", thread, wid, desired)
         changed = True
 
     # Reap: a bound window that is no longer live is dead — archive its topic and

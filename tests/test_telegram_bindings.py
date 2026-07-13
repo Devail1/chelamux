@@ -96,9 +96,15 @@ def test_save_load_round_trip(tmp_path):
     path = tmp_path / "bindings.json"
     reg.save(path)
 
-    # Persisted shape is stable and JSON-clean.
+    # Persisted shape is stable and JSON-clean. `topic_names` caches the name each
+    # window's topic currently carries on Telegram (empty until a topic is named),
+    # so a reconcile tick can spot a drifted topic without calling the Bot API for
+    # every window on every tick. It is a cache, never a source of truth — the tmux
+    # window name is.
     data = json.loads(path.read_text())
-    assert data == {"chat_id": "777", "bindings": {"@3": "42", "@7": "88"}}
+    assert data == {"chat_id": "777",
+                    "bindings": {"@3": "42", "@7": "88"},
+                    "topic_names": {}}
 
     loaded = BindingRegistry.load(path)
     assert loaded.chat_id == "777"
@@ -135,3 +141,15 @@ def test_load_corrupt_file_yields_empty_registry(tmp_path):
 def test_default_bindings_path_honours_env(monkeypatch, tmp_path):
     monkeypatch.setenv("CHELA_TELEGRAM_BINDINGS", str(tmp_path / "custom.json"))
     assert default_bindings_path() == tmp_path / "custom.json"
+
+
+def test_load_tolerates_a_file_written_before_topic_names_existed(tmp_path):
+    # Back-compat: bindings files predating the topic-name cache have no such key.
+    # Those windows simply read as "never synced", so the next reconcile tick names
+    # each topic once from the live tmux name — no migration step, no crash.
+    path = tmp_path / "bindings.json"
+    path.write_text(json.dumps({"chat_id": "777", "bindings": {"@3": "42"}}))
+
+    loaded = BindingRegistry.load(path)
+    assert loaded.thread_for_window("@3") == "42"
+    assert loaded.topic_name("@3") is None

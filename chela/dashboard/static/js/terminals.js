@@ -261,19 +261,22 @@ function _isManaged(wid) {
     return false;
 }
 
-// ---- Per-pane custom titles (display-only; the wid stays the routing key).
-// Persisted in localStorage keyed by wid; empty = reset.
-function _paneTitles() {
-    try { return JSON.parse(localStorage.getItem('pc_pane_titles') || '{}'); } catch (e) { return {}; }
-}
-// Friendly display label for a window, shared by agent cards + terminal panes
-// so the two stay aligned. Precedence: an explicit user rename wins; else a
-// generic "shell-N" is relabelled to its repo (cwd basename from
-// `claude agents --json`) so cards read as the project, not shell-1/shell-2;
-// multiple shells in the same repo get a trailing index; else the raw name.
+// ---- Display labels. THE TMUX WINDOW NAME IS THE SOURCE OF TRUTH: a rename goes
+// to the server (renamePane -> POST /api/agents/<wid>/rename -> tmux rename-window)
+// and comes back to every client through /api/agents. There is deliberately NO
+// local label store. The old one (localStorage `pc_pane_titles`) was per-browser:
+// a rename on the laptop was invisible on the phone, never reached tmux or the
+// bound Telegram topic, and died with the browser's data. Drop any leftovers so
+// the two layers can't disagree.
+try { localStorage.removeItem('pc_pane_titles'); } catch (e) { /* private mode */ }
+
+// Friendly display label for a window, shared by agent cards + terminal panes so
+// the two stay aligned. This is a FORMATTER over the real name, not a second name:
+// a generic "shell-N" is shown as its repo (cwd basename from `claude agents
+// --json`) so cards read as the project, not shell-1/shell-2, and multiple shells
+// in one repo get a trailing index. Any other name was chosen by a human — the
+// same rule the server's is_generic_name() applies — so it's shown verbatim.
 function _displayLabel(wid) {
-    const custom = _paneTitles()[wid];
-    if (typeof custom === 'string' && custom) return custom;
     const cache = _agentsCache || [];
     const a = cache.find(x => x.window_id === wid);
     const name = a ? a.name : wid;
@@ -292,35 +295,56 @@ function _displayLabel(wid) {
 function _paneTitle(wid) {
     return _displayLabel(wid);
 }
-function _setPaneTitle(wid, title) {
-    const all = _paneTitles();
-    const name = _nameOfWid(wid);
-    if (title && title !== name) all[wid] = title; else delete all[wid];
-    localStorage.setItem('pc_pane_titles', JSON.stringify(all));
+
+// Rename the WINDOW (not a local label): POST the new name, which renames the tmux
+// window, so it shows up on every client, in tmux, and on the bound Telegram topic.
+// Refetches /api/agents so the wall, cards and nav all relabel from the real name.
+async function _commitRename(wid, name) {
+    const res = await api(`/api/agents/${encodeURIComponent(wid)}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+    });
+    if (!res || !res.ok) throw new Error((res && res.error) || 'rename failed');
+    const agents = await api('/api/agents');
+    setAgentsCache(agents);
+    _refreshPaneLabels();
 }
 
-// Swap a pane title span for an inline input. Enter saves, Esc cancels, empty
-// resets to the real name. Only the displayed label changes — never the gs-id.
+// Swap a pane title span for an inline input. Enter saves, Esc cancels. The name is
+// the window's real name, so an unchanged (or empty) value is simply not submitted.
 function renamePane(ev, span, wid) {
     ev.stopPropagation();
     const input = document.createElement('input');
     input.className = 'pane-title-edit';
-    input.value = _paneTitle(wid);
-    input.title = 'Enter to save · Esc to cancel · empty to reset';
+    input.value = _nameOfWid(wid);   // edit the REAL name, not the prettified label
+    input.title = 'Enter to save · Esc to cancel';
     span.replaceWith(input);
     input.focus();
     input.select();
     let done = false;
-    const commit = (save) => {
-        if (done) return;
-        done = true;
-        if (save) _setPaneTitle(wid, input.value.trim());
+    const restore = () => {
         const fresh = document.createElement('span');
         fresh.className = 'pane-title';
         fresh.title = 'double-click to rename';
         fresh.textContent = _paneTitle(wid);
         fresh.addEventListener('dblclick', e2 => renamePane(e2, fresh, wid));
         input.replaceWith(fresh);
+        return fresh;
+    };
+    const commit = async (save) => {
+        if (done) return;
+        done = true;
+        const name = input.value.trim();
+        const unchanged = !name || name === _nameOfWid(wid);
+        restore();
+        if (!save || unchanged) return;
+        try {
+            await _commitRename(wid, name);
+        } catch (e) {
+            console.error('renamePane', e);
+            alert('Rename failed: ' + e.message);
+        }
     };
     input.addEventListener('keydown', e2 => {
         e2.stopPropagation();
@@ -646,7 +670,7 @@ function _shareBtnHTML(wid) {
 
 function paneHead(wid, draggable) {
     const j = _jsStr(wid);
-    const title = `<span class="pane-title" title="double-click to rename" ondblclick="renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
+    const title = `<span class="pane-title" title="double-click to rename" ondblclick="chela.renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
     const label = draggable
         ? `<span class="gs-grip" title="drag to move">&#9776; ${title}</span>`
         : `<span class="gs-label">${title}</span>`;
@@ -2025,4 +2049,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabe
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termScrollToggle, toggleDockChip, toggleWallLock });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termScrollToggle, toggleDockChip, toggleWallLock });

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -25,6 +26,37 @@ DEFAULT_LAUNCH_CMD = os.environ.get("CHELA_AGENT_CMD", "claude")
 # reconcile_window_names() has a single honored exclusion point if a deployment
 # ever needs to pin a window's name.
 NEVER_MANAGE: set[str] = set()
+
+# Names nobody chose — a placeholder chela handed out (shell-N, the session
+# anchor) or one tmux's automatic-rename derived from the running command. A
+# window still carrying one of these has no intentional name, so chela is free to
+# fill it in from the cwd. ANYTHING ELSE IS A DELIBERATE NAME AND IS NEVER TOUCHED:
+# that is what makes a user rename stick (see is_generic_name).
+_GENERIC_SHELL_RE = re.compile(r"^shell(-\d+)?$", re.IGNORECASE)
+GENERIC_NAMES = {"bash", "zsh", "sh", "fish", "claude", "node", "python", "python3"}
+
+
+def is_generic_name(name: str) -> bool:
+    """True if ``name`` is a placeholder chela may auto-manage, not a chosen name.
+
+    The whole rename story hangs off this predicate. The tmux window name is the
+    single source of truth for an agent's display name — wall panes, agent cards,
+    nav and the bound Telegram topic all read it — so the auto-namers must FILL IN
+    BLANKS AND NEVER OVERRIDE INTENT. A generic name (``shell-3``, or tmux's
+    command-follow ``claude``/``bash``) is a blank; anything else was chosen by a
+    human and is left alone.
+
+    Deriving intent from the name itself, rather than persisting a set of
+    "user-pinned" window ids, is deliberate: a sidecar pin file is a SECOND source
+    of truth (the very split-brain this replaces), it has to be pruned as windows
+    die, and — decisively — tmux REUSES window ids after a server restart (@0 comes
+    back), so a stale pin silently attaches to an unrelated new window. This needs
+    no state, survives restarts, and keeps tmux authoritative.
+    """
+    n = (name or "").strip()
+    if not n:
+        return True
+    return bool(_GENERIC_SHELL_RE.match(n)) or n.lower() in GENERIC_NAMES
 
 
 def liveness(claude_running: bool, session_status: str | None) -> tuple[str, str]:
@@ -303,11 +335,19 @@ def _name_window_to_cwd(window_id: str, start_dir: str) -> str | None:
     stale/persisted name or tmux's automatic-rename clobbering it to "claude".
     Adds a ``-N`` suffix on collision (excluding this window's own current
     name). Returns the applied name, or None if it couldn't be set.
+
+    Same rule as the reconciler: this fills in a blank, it never overrides intent.
+    Starting claude in a window a human deliberately named ("billing-fix") keeps
+    that name — only a generic ``shell-N``/command-follow name gets replaced.
     """
     base = Path(start_dir).name
     if not base:
         return None
-    taken = {n for n, wid in get_all_windows().items() if wid != window_id}
+    live = get_all_windows()
+    current = next((n for n, wid in live.items() if wid == window_id), None)
+    if current is not None and not is_generic_name(current):
+        return None
+    taken = {n for n, wid in live.items() if wid != window_id}
     name, counter = base, 2
     while name in taken:
         name, counter = f"{base}-{counter}", counter + 1
@@ -400,6 +440,23 @@ def reconcile_window_names() -> list[str]:
         # the flicker case. "0" is tmux's off; anything else (on/unset) needs it.
         if auto != "0" or allow != "0":
             lock_window_name(target)
+        # Only ever FILL IN A BLANK. A DELIBERATE name — one a human chose, via the
+        # dashboard rename or `tmux rename-window` — is left alone. Without this,
+        # every 30s tick renamed it straight back to the cwd basename, so a rename
+        # appeared to work and then silently reverted; the tmux name could never be
+        # the source of truth it now is.
+        #
+        # "Deliberate" is read off tmux itself rather than guessed from the string:
+        # a LOCKED name (automatic-rename off, `auto == "0"`) was set explicitly —
+        # both `rename-window` and our rename endpoint turn that option off — while
+        # a window with automatic-rename still ON is merely wearing whatever tmux
+        # last derived from its running command. That's what keeps a command-drifted
+        # name ("git", "node", any binary at all) auto-correctable without having to
+        # enumerate every command name on earth, while still protecting a chosen one.
+        # A generic name never counts as deliberate even when locked: `shell-3` is a
+        # placeholder we handed out, not a choice.
+        if auto == "0" and not is_generic_name(name):
+            continue
         if name == base:
             continue
         target_name, counter = base, 2

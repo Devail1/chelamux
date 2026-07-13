@@ -29,17 +29,23 @@ from chela.telegram.reconcile import (
 class _StubTopicApi:
     """Records create/close; hands out canned thread ids in sequence."""
 
-    def __init__(self, threads=("100", "101", "102"), *, create_ok=True):
+    def __init__(self, threads=("100", "101", "102"), *, create_ok=True, rename_ok=True):
         self._threads = list(threads)
         self._create_ok = create_ok
+        self._rename_ok = rename_ok
         self.created: list[str] = []          # names passed to create_topic
         self.closed: list[str] = []           # thread ids passed to close_topic
+        self.renamed: list[tuple[str, str]] = []   # (thread_id, name) pairs
 
     def create_topic(self, name: str):
         self.created.append(name)
         if not self._create_ok or not self._threads:
             return None
         return self._threads.pop(0)
+
+    def rename_topic(self, thread_id, name: str):
+        self.renamed.append((str(thread_id), name))
+        return self._rename_ok
 
     def close_topic(self, thread_id):
         self.closed.append(str(thread_id))
@@ -81,26 +87,34 @@ def test_dead_window_topic_is_closed_and_unbound():
 
 
 def test_restart_with_persisted_binding_does_not_double_create():
-    # Idempotence: an already-bound, still-live agent window is left untouched.
+    # Idempotence: an already-bound, still-live agent window whose topic already
+    # carries the window's name is left entirely untouched — no API calls at all.
     reg = BindingRegistry("777")
     reg.bind("@3", "42")
+    reg.set_topic_name("@3", "coder")         # topic already in sync
     api = _StubTopicApi()
     changed = reconcile_bindings(reg, {"@3": "coder"}, {"@3"}, api)
     assert changed is False
     assert api.created == []                  # NO createForumTopic
     assert api.closed == []
+    assert api.renamed == []                  # NO editForumTopic — steady state
     assert reg.thread_for_window("@3") == "42"
 
 
-def test_window_rename_keeps_its_topic():
-    # Match by window_id, never by name — a rename must not orphan the topic.
+def test_window_rename_keeps_its_topic_and_renames_it():
+    # Match by window_id, never by name — a rename must not orphan the topic. And
+    # now it PROPAGATES: the tmux name is the source of truth, so the bound topic is
+    # renamed to match instead of drifting away from the window it bridges.
     reg = BindingRegistry("777")
     reg.bind("@3", "42")
+    reg.set_topic_name("@3", "coder")
     api = _StubTopicApi()
     changed = reconcile_bindings(reg, {"@3": "coder-renamed"}, {"@3"}, api)
-    assert changed is False
-    assert api.created == []
+    assert changed is True
+    assert api.created == []                            # same topic, not a new one
+    assert api.renamed == [("42", "coder-renamed")]     # ...renamed to match
     assert reg.thread_for_window("@3") == "42"
+    assert reg.topic_name("@3") == "coder-renamed"
 
 
 def test_mixed_provision_and_reap_in_one_tick():

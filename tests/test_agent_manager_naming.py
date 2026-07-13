@@ -143,3 +143,80 @@ def test_reconcile_skips_non_claude_pane(monkeypatch):
     assert actions == []
     assert fake.set_options() == {}
     assert fake.renames() == []
+
+# --- deliberate names: the auto-namers fill in blanks, they never override intent -
+
+def test_is_generic_name_classifies_placeholders_vs_chosen_names():
+    # Blanks chela may auto-manage: its own shell-N placeholders, and the names
+    # tmux's automatic-rename derives from the running command.
+    for placeholder in ("shell", "shell-1", "shell-42", "SHELL-2", "bash", "zsh",
+                        "claude", "node", "python3", "", "   "):
+        assert agent_manager.is_generic_name(placeholder) is True, placeholder
+    # Anything else was chosen by a human and is off-limits to the auto-namers.
+    for chosen in ("billing-fix", "chelamux", "nautilus", "shell-fix", "my-shell"):
+        assert agent_manager.is_generic_name(chosen) is False, chosen
+
+
+def test_reconcile_does_not_revert_a_user_renamed_window(monkeypatch):
+    # THE regression. reconcile_window_names() renamed every claude window whose
+    # name != its cwd basename, on every 30s daemon tick — so a deliberate rename
+    # (dashboard, or `tmux rename-window`) was silently reverted within 30s and the
+    # tmux name could never be the source of truth. A chosen name must SURVIVE a
+    # tick. The name is LOCKED (automatic-rename off, as both `tmux rename-window`
+    # and the rename endpoint leave it) — that lock is what marks it deliberate.
+    fake = _FakeTmux(_row("@9", "billing-fix", "claude",
+                          "/home/x/projects/nautilus", "0", "0") + "\n")
+    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(config, "current_session", lambda: "sess")
+
+    actions = agent_manager.reconcile_window_names()
+
+    assert actions == []                      # NOT renamed back to "nautilus"
+    assert fake.renames() == []
+    assert [c[:2] for c in fake.calls] == [["tmux", "list-windows"]]   # no churn
+
+
+def test_reconcile_still_corrects_a_command_drifted_name(monkeypatch):
+    # The counterpart: automatic-rename is ON, so the name is tmux's doing (it
+    # follows the running command — "git" here), not a human's. That is a blank, and
+    # it is auto-corrected + locked, so drift can't come back.
+    fake = _FakeTmux(_row("@9", "billing-fix", "claude",
+                          "/home/x/projects/nautilus", "1", "1") + "\n")
+    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(config, "current_session", lambda: "sess")
+
+    assert agent_manager.reconcile_window_names() == ["billing-fix -> nautilus"]
+    assert fake.set_options() == {"allow-rename": "off", "automatic-rename": "off"}
+
+
+def test_reconcile_still_names_a_generic_window_after_the_rename_fix(monkeypatch):
+    # The other half of the contract: a window still carrying a placeholder name is
+    # a blank, so reconcile fills it in from the cwd exactly as before.
+    fake = _FakeTmux(_row("@9", "shell-3", "claude",
+                          "/home/x/projects/nautilus", "1", "1") + "\n")
+    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(config, "current_session", lambda: "sess")
+
+    assert agent_manager.reconcile_window_names() == ["shell-3 -> nautilus"]
+    assert fake.renames() == ["nautilus"]
+
+
+def test_start_agent_rename_keeps_a_deliberate_window_name(monkeypatch):
+    # Starting claude in a window a human named must not clobber that name either.
+    fake = _FakeTmux()
+    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(config, "current_session", lambda: "sess")
+    monkeypatch.setattr(agent_manager, "get_all_windows", lambda: {"billing-fix": "@9"})
+
+    assert agent_manager._name_window_to_cwd("@9", "/home/x/projects/nautilus") is None
+    assert fake.renames() == []
+
+
+def test_start_agent_rename_still_fills_in_a_generic_window_name(monkeypatch):
+    fake = _FakeTmux()
+    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(config, "current_session", lambda: "sess")
+    monkeypatch.setattr(agent_manager, "get_all_windows", lambda: {"shell-2": "@9"})
+
+    assert agent_manager._name_window_to_cwd("@9", "/home/x/projects/nautilus") == "nautilus"
+    assert fake.renames() == ["nautilus"]

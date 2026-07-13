@@ -1112,6 +1112,55 @@ _WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _LAUNCH_CMD_RE = re.compile(r"^claude(\s.+)?$")
 
 
+@app.route("/api/agents/<wid>/rename", methods=["POST"])
+@require_auth
+def api_agents_rename(wid):
+    """Rename a window. The tmux window name is the SINGLE SOURCE OF TRUTH.
+
+    Renaming the tmux window IS the rename — there is no per-client label to keep
+    in sync. Everything that shows an agent's name reads it back from tmux, so one
+    rename lands everywhere: wall panes, agent cards, nav, tmux itself, and the
+    bound Telegram topic (the telegram daemon's reconcile tick renames the forum
+    topic to match — see chela.telegram.reconcile.reconcile_bindings). This
+    replaced a localStorage-only label that never left the browser it was typed in.
+
+    Keyed by WINDOW ID, never by name: ids are stable across renames and unique,
+    while names collide (two repos with the same basename). Body: ``{"name": ...}``.
+
+    The name must survive a reconcile tick, which it does because it isn't generic
+    (agent_manager.is_generic_name) — the auto-namers only fill in blanks. We also
+    lock the window against tmux's own renamers, so a shell-out can't clobber it.
+    """
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not _WINDOW_NAME_RE.match(name):
+        return jsonify({"ok": False,
+                        "error": "name must be letters, digits, '-' or '_'"}), 400
+
+    windows = discovery.get_windows_by_id()   # {wid: name}
+    if wid not in windows:
+        return jsonify({"ok": False, "error": f"no such window: {wid}"}), 404
+    # Names are an identity users read AND that name→id lookups resolve on, so keep
+    # them unique: a duplicate would make two tiles indistinguishable and could send
+    # a by-name lookup to the wrong window.
+    if any(n == name and w != wid for w, n in windows.items()):
+        return jsonify({"ok": False, "error": f"another window is already named {name}"}), 409
+
+    target = f"{TMUX_SESSION}:{wid}"
+    try:
+        proc = subprocess.run(["tmux", "rename-window", "-t", target, name],
+                              capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "tmux rename-window failed").strip()
+        return jsonify({"ok": False, "error": err}), 500
+
+    agent_manager.lock_window_name(target)
+    log.info("renamed %s: %s -> %s", wid, windows[wid], name)
+    return jsonify({"ok": True, "wid": wid, "name": name})
+
+
 def _next_shell_name(existing: set[str]) -> str:
     """Smallest ``shell-N`` (N >= 1) not already a live window name."""
     n = 1
