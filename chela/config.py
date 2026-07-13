@@ -109,6 +109,12 @@ SHOW_TOOL_CALLS = os.environ.get("CHELA_SHOW_TOOL_CALLS", "false").strip().lower
 # the wall off entirely.
 TERMINALS_ENABLED = os.environ.get("CHELA_TERMINALS_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 
+# Decisions inbox (chela/inbox.py): push agent/run events into the orchestrator's
+# session when it is idle, so a finished agent stops being invisible to it. Inert
+# until a session registers itself as the orchestrator (`chela watch`), so this
+# defaults ON safely; set CHELA_INBOX_ENABLED=false to disable it outright.
+INBOX_ENABLED = os.environ.get("CHELA_INBOX_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
+
 # Explicit opt-in to serve the writable terminal wall on a NON-loopback bind
 # (e.g. --host 0.0.0.0 or a LAN/tailnet IP). Off by default: a public bind would
 # otherwise hand out unauthenticated remote shells (RCE). Loopback binds, fronted

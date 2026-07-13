@@ -99,24 +99,6 @@
 
 ## Backlog (not yet dispatchable)
 
-- **🎯 DECISIONS INBOX — the orchestration loop's missing half.** Today (2026-07-13) an agent was
-  dispatched, finished, and *nothing told the orchestrator*: it had to poll the pane, and the human
-  ended up being the message bus ("he's done"). The awareness feature above shipped the **pull** side
-  only (its scope guard deliberately deferred push). This is that deferred decision.
-  **The hole:** an orchestrator agent is a Claude Code session — it can only act when a human messages
-  it, or when a background task it started exits. So agent completion is *structurally invisible* to it.
-  Worse, ad-hoc `tmux send-keys` dispatches (how the orchestrator actually works) aren't dispatcher
-  runs at all, so no run-state event exists for them.
-  **Design sketch (reuse, don't invent):** a durable inbox + **push-gated-on-idle** — deliver an event
-  into the orchestrator's window via `send_tmux` ONLY when that window is `idle` (never interrupt a
-  busy session mid-thought); otherwise queue and deliver on next idle. Every piece already exists:
-  `notify.check_waiting`'s edge-trigger pattern, `agent_manager.session_status_map()` (busy/idle/waiting
-  — the poll we just coalesced), the hardened `messenger.send_tmux` paste contract, the runs DB
-  (`awaiting_review`), and the daemon's 30s loop.
-  **DECIDED 2026-07-13 (Liav):** (a) **push, GATED ON IDLE** — deliver via `send_tmux` only when the
-  orchestrator window is `idle`; if busy, queue and deliver on next idle. (b) **All four triggers:**
-  agent busy→idle (task finished — must cover ad-hoc `send_keys` dispatches, not just dispatcher runs),
-  agent→waiting (blocked), dispatcher run→`awaiting_review`, and failures (agent/run).
 - **Settings view — editable toggles (follow-up)**: in-UI write-back + daemon restart.
 - **Retire ccbot** ~07-19 after warm standby: `pm2 delete ccbot` + `pm2 save` + archive repo (ops).
 - `/kill` (explicit agent-kill + close topic) — optional, higher-stakes; `/unbind` `/history` `/usage` skipped (don't fit auto-topics).
@@ -125,6 +107,8 @@
 - **Unified graph viewer** (cockpit): memory `[[wikilinks]]` + fleet; renderer = **Sigma.js + Graphology (MIT, WebGL)**, clean-room (not a GitNexus fork — PolyForm-NC). Colorblind-safe.
 
 ## Done
+
+- [x] **🎯 Decisions inbox** — agent/run events pushed into the orchestrator's session, GATED ON IDLE (never into a `busy` or — critically — a `waiting` pane, which would answer its permission prompt). Durable queue + watch store (`chela watch <wid> --note`); triggers = watched busy→idle / →waiting / died, plus run `awaiting_review` / `failed`. `CHELA_INBOX_ENABLED=false` to disable.
 
 - [x] telegram-setup (#14) · scaffold+extra (#15) · dashboard workflow discovery (#16) · monitor port (#17) · outbound relay+CLI (#18).
 - [x] Fold steps 1-3 — paste-submit (#19), INBOUND (#21), monitor resolve-by-record (#22) [CMX-6/8/9].

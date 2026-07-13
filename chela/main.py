@@ -23,6 +23,7 @@ from chela import (
     config,
     discovery,
     dispatcher,
+    inbox,
     messenger,
     notify,
     okf,
@@ -69,9 +70,16 @@ def cmd_run(args) -> None:
                  len(DISPATCH_WORKFLOWS), ", ".join(str(p) for p in DISPATCH_WORKFLOWS))
     if notify.enabled():
         log.info("Needs-input notifications enabled (every %ds)", NOTIFY_INTERVAL)
+    if inbox.enabled():
+        log.info("Decisions inbox enabled (orchestrator=%s)",
+                 inbox.orchestrator_wid() or "unregistered — inert until `chela watch`")
     last_dispatch_check = 0.0
     last_notify_check = 0.0
     waiting_seen: set[str] = set()
+    # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
+    # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
+    # silently on its first tick instead of announcing every already-idle agent.
+    inbox_statuses: dict[str, str] = {}
 
     while True:
         try:
@@ -106,6 +114,14 @@ def cmd_run(args) -> None:
                 except Exception:
                     log.exception("Needs-input check failed")
                 last_notify_check = now
+
+            # Decisions inbox: tell the orchestrator when work it delegated finishes,
+            # blocks, or fails — pushed into its session only while it is idle.
+            if inbox.enabled():
+                try:
+                    inbox_statuses = inbox.tick(inbox_statuses)
+                except Exception:
+                    log.exception("Decisions-inbox tick failed")
         except Exception:
             log.exception("Error in daemon loop")
         time.sleep(SCHEDULER_POLL_INTERVAL)
@@ -173,6 +189,54 @@ def _resolve_wid(token: str | None) -> str | None:
     if token.isdigit():
         return "@" + token
     return token
+
+
+def cmd_watch(args) -> None:
+    """Register interest in a window you just delegated work to (the decisions inbox).
+
+    The session that runs this becomes THE orchestrator — the one and only window the
+    inbox may push into ($CHELA_WID, or $CHELA_ORCHESTRATOR_WID to pin it). Call it
+    right after you dispatch: when that agent finishes, blocks, or dies, the event is
+    pushed back into your session the moment you are idle, instead of the completion
+    being invisible to you (and a human having to relay it).
+    """
+    wid = _resolve_wid(args.wid)
+    if not wid:
+        print("no window id (pass @N)", file=sys.stderr)
+        sys.exit(1)
+    result = inbox.watch(wid, args.note or "", by=orchestrator.self_wid())
+    if not result["ok"]:
+        print(f"watch failed: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+    orch = result["orchestrator"] or "(unregistered)"
+    note = f' — note: "{result["note"]}"' if result["note"] else ""
+    print(f"watching {wid}{note}; events -> {orch} when idle")
+
+
+def cmd_unwatch(args) -> None:
+    """Drop interest in a window (no completion event will be reported for it)."""
+    wid = _resolve_wid(args.wid)
+    result = inbox.unwatch(wid)
+    print(f"unwatched {wid}" if result["ok"] else f"{wid} was not watched")
+
+
+def cmd_watching(args) -> None:
+    """What the inbox is watching, and what is queued for delivery."""
+    store = inbox.load()
+    orch = inbox.orchestrator_wid(store)
+    print(f"orchestrator: {orch or '(unregistered — the inbox is inert)'}")
+    if not inbox.enabled():
+        print("inbox: DISABLED (CHELA_INBOX_ENABLED=false)")
+    names = discovery.get_windows_by_id()
+    watches = store["watches"]
+    print(f"\nwatching ({len(watches)}):")
+    for wid, meta in sorted(watches.items()):
+        note = f' — "{meta.get("note")}"' if meta.get("note") else ""
+        print(f"  {wid:<6} {names.get(wid, '(gone)'):<24}{note}")
+    queue = store["queue"]
+    print(f"\nqueued, awaiting your next idle ({len(queue)}):")
+    for event in queue:
+        print(f"  {event['text']}")
 
 
 def cmd_whoami(args) -> None:
@@ -730,6 +794,16 @@ def main() -> None:
     p_peek.add_argument("wid", nargs="?", help="Target window id (@N, N, or 'self'); default self")
     p_peek.add_argument("--json", action="store_true", help="Emit the raw peek dict as JSON")
 
+    p_watch = sub.add_parser(
+        "watch", help="Report back when a window you delegated to finishes/blocks/dies")
+    p_watch.add_argument("wid", help="Window you dispatched work to (@N or N)")
+    p_watch.add_argument("--note", help="What you asked it to do (echoed back to you)")
+
+    p_unwatch = sub.add_parser("unwatch", help="Stop watching a window")
+    p_unwatch.add_argument("wid", help="Window to stop watching (@N or N)")
+
+    sub.add_parser("watching", help="Show inbox watches + the queued events")
+
     p_read = sub.add_parser(
         "read", help="Distilled read of a sibling's Claude Code transcript")
     p_read.add_argument("wid", nargs="?", help="Target window id (@N, N, or 'self'); default self")
@@ -845,6 +919,12 @@ def main() -> None:
         cmd_peek(args)
     elif args.command == "read":
         cmd_read(args)
+    elif args.command == "watch":
+        cmd_watch(args)
+    elif args.command == "unwatch":
+        cmd_unwatch(args)
+    elif args.command == "watching":
+        cmd_watching(args)
     elif args.command == "drive":
         cmd_drive(args)
     elif args.command == "dispatch":

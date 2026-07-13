@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from chela import config
-from chela.discovery import get_window_id, get_window_cwd, get_all_windows
+from chela.discovery import get_window_id, get_window_cwd, get_all_windows, get_windows_by_id
 from chela.messenger import send_tmux
 
 log = logging.getLogger(__name__)
@@ -204,6 +204,25 @@ def _refresh_status_locked() -> None:
         log.exception("claude agents --json failed; keeping last status cache")
     # Stale-but-safe: preserve the last good maps, just back off for a TTL.
     _status_cache["ts"] = time.time()
+
+
+def status_by_wid() -> dict[str, str]:
+    """``{window_id: busy|idle|waiting}`` for every live window running claude.
+
+    The window-keyed view of :func:`session_status_map` (which is pid-keyed, because
+    that is what ``claude agents --json`` reports). Windows with no claude session are
+    absent — they have no status, which is NOT the same as being idle. One authority
+    for busy/idle/waiting, shared by the decisions inbox and anything else that needs
+    it; never add a second source.
+    """
+    by_pid = session_status_map().get("by_pid", {})
+    out: dict[str, str] = {}
+    for wid in get_windows_by_id():
+        pid = claude_pid(wid)
+        status = by_pid.get(pid) if pid is not None else None
+        if status:
+            out[wid] = status
+    return out
 
 
 def claude_pid(window_id: str) -> int | None:
