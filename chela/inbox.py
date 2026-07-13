@@ -78,7 +78,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from chela import agent_manager, discovery, messenger, transcripts
+from chela import agent_manager, discovery, event_log, messenger, transcripts
 from chela.config import CHELA_DIR, INBOX_ENABLED
 
 log = logging.getLogger(__name__)
@@ -632,4 +632,14 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         # `runs` is the snapshot fetched above, outside the lock — re-validating against
         # it is a list scan, so the critical section stays as short as it was.
         deliver(store, statuses, runs)
+
+    # The durable record. Written OUTSIDE the store lock — an append is another file's
+    # I/O, and locked_store()'s one rule is that nothing slow happens inside it. EVERY
+    # event is logged, including the `silent` ones (a watch retired because the work
+    # succeeded is a fact worth having): the queue is what the orchestrator is TOLD, the
+    # log is what HAPPENED, and conflating the two is what left the inbox with no
+    # history to reconcile against. `event_log.append` never raises, so this cannot take
+    # the inbox down with it.
+    for event in events:
+        event_log.from_inbox(event)
     return statuses
