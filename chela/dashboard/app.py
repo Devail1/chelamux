@@ -1152,6 +1152,14 @@ def api_agents_spawn():
     if command and not _LAUNCH_CMD_RE.match(command):
         return jsonify({"ok": False, "error": "only `claude` may be auto-launched"}), 400
 
+    # The session may not exist yet (fresh boot, or a `wsl --shutdown` that took the
+    # tmux server with it). It's chela's own session, so create it rather than fail
+    # the spawn with a raw "error connecting to /tmp/tmux-1000/default" the user can
+    # do nothing about. Idempotent + race-safe; only tmux being unreachable fails.
+    if not discovery.ensure_session():
+        return jsonify({"ok": False,
+                        "error": "tmux is unreachable — cannot create the chela session"}), 500
+
     existing = set(discovery.get_all_windows())
     name = _next_shell_name(existing)
     if not _WINDOW_NAME_RE.match(name):
