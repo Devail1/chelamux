@@ -226,6 +226,35 @@ def transcript_for_cwd(cwd: str | None, base: Path | None = None) -> Path | None
     return max(found, key=_key)
 
 
+def last_assistant_activity(cwd: str | None, base: Path | None = None) -> float | None:
+    """Epoch seconds of the newest ASSISTANT record in ``cwd``'s active transcript.
+
+    "Did this agent actually do work, and by when?" — the evidence the decisions inbox
+    uses to detect a completion it never sampled (see chela.inbox). ASSISTANT, not just
+    any record: the orchestrator's own dispatched prompt lands as a *user* record, so
+    counting that would read "your prompt arrived" as "the agent replied".
+
+    Content-derived (the record's timestamp), not the file mtime — same reasoning as
+    :func:`_last_record_ts`. Sidechains (sub-agent turns) are skipped: a finished task
+    always ends with a main-chain assistant turn. None when there is no transcript, no
+    assistant turn yet, or the timestamp is unparseable.
+    """
+    path = transcript_for_cwd(cwd, base=base)
+    if path is None:
+        return None
+    rec = latest_record(path, lambda o: (
+        o.get("type") == "assistant"
+        and not o.get("isSidechain")
+        and isinstance(o.get("timestamp"), str)
+    ))
+    if not rec:
+        return None
+    try:
+        return datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def _resolve_agent_transcript(agent_name: str) -> Path | None:
     """Resolve agent_name → transcript path via its window's live cwd."""
     return transcript_for_cwd(discovery.get_window_cwd(agent_name))

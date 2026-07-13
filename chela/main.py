@@ -70,16 +70,20 @@ def cmd_run(args) -> None:
                  len(DISPATCH_WORKFLOWS), ", ".join(str(p) for p in DISPATCH_WORKFLOWS))
     if notify.enabled():
         log.info("Needs-input notifications enabled (every %ds)", NOTIFY_INTERVAL)
-    if inbox.enabled():
-        log.info("Decisions inbox enabled (orchestrator=%s)",
-                 inbox.orchestrator_wid() or "unregistered — inert until `chela watch`")
     last_dispatch_check = 0.0
     last_notify_check = 0.0
     waiting_seen: set[str] = set()
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
-    # silently on its first tick instead of announcing every already-idle agent.
+    # silently on its first tick instead of announcing every already-idle agent. (A
+    # completion is NOT lost to that baseline — inbox.did_work_since() detects it from
+    # the transcript, with no prior sample needed.)
     inbox_statuses: dict[str, str] = {}
+    # Who the inbox is pushing to is RE-READ every tick, never latched at startup: you
+    # register the orchestrator at RUNTIME (`chela watch`, right after dispatching), and
+    # requiring a daemon restart before the feature ever works is dead on arrival. We
+    # only log the TRANSITION (unregistered -> @0), so a 30s loop stays quiet.
+    inbox_orch = object()   # sentinel: distinct from every real value, incl. None
 
     while True:
         try:
@@ -119,6 +123,11 @@ def cmd_run(args) -> None:
             # blocks, or fails — pushed into its session only while it is idle.
             if inbox.enabled():
                 try:
+                    orch = inbox.orchestrator_wid()
+                    if orch != inbox_orch:
+                        log.info("Decisions inbox: orchestrator=%s",
+                                 orch or "unregistered (inert until `chela watch`)")
+                        inbox_orch = orch
                     inbox_statuses = inbox.tick(inbox_statuses)
                 except Exception:
                     log.exception("Decisions-inbox tick failed")

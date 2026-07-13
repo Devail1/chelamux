@@ -16,6 +16,9 @@ Pure: tmux/`claude agents --json`/send are all stubbed, so no live session is to
 """
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from chela import inbox
@@ -39,6 +42,17 @@ def sends(monkeypatch):
     monkeypatch.setattr(inbox.messenger, "send_tmux",
                         lambda wid, text: (calls.append((wid, text)), True)[1])
     return calls
+
+
+@pytest.fixture(autouse=True)
+def no_transcript_evidence(monkeypatch):
+    """Default: the transcript shows no work (so status transitions are the only signal).
+
+    Autouse so no test can reach the real tmux/transcripts of the LIVE fleet, and so the
+    evidence path is opt-in per test rather than silently on.
+    """
+    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: f"/proj/{wid}")
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity", lambda cwd: None)
 
 
 @pytest.fixture
@@ -304,3 +318,122 @@ def test_a_run_that_changes_status_fires_again(store_file, windows, sends, monke
 
     assert len(sends) == 2
     assert "FAILED" in sends[1][1]
+
+
+# --- BUG 2 (live): a task shorter than the poll interval was missed ENTIRELY -----
+#
+# The daemon samples every 30s and detected completion as a busy→idle EDGE. A watched
+# window that went idle→busy→idle BETWEEN two polls is sampled `idle, idle`: `busy` is
+# never observed, so there is no transition and the completion is dropped FOREVER.
+# Live, a ~15s delegation produced nothing at all. Quick delegations are exactly what
+# this feature exists to catch, so completion cannot depend on catching it mid-flight.
+# These fail on the edge-only code.
+
+def test_a_task_that_starts_and_finishes_between_two_polls_is_still_reported(
+        store_file, windows, sends, monkeypatch):
+    _registered()
+    # Both samples see idle: the entire busy period fell between them. The transcript is
+    # the evidence — the agent wrote an assistant turn AFTER the watch was registered.
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity",
+                        lambda cwd: watched_since + 5)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    prev = inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})   # never saw it busy
+
+    assert len(sends) == 1
+    assert "finished the task you dispatched" in sends[0][1]
+    assert inbox.watches() == {}          # ...and it fires exactly once
+    inbox.tick(prev)
+    assert len(sends) == 1
+
+
+def test_completion_is_reported_even_with_no_baseline_at_all(
+        store_file, windows, sends, monkeypatch):
+    # The daemon restarted while the agent worked, so there is no previous sample to
+    # compare against. The evidence path needs none — it must still report.
+    _registered()
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity",
+                        lambda cwd: watched_since + 5)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    inbox.tick({})                        # empty prev — a fresh daemon
+
+    assert len(sends) == 1
+
+
+def test_evidence_never_reports_an_agent_that_is_still_working(
+        store_file, windows, sends, monkeypatch):
+    # It has written assistant turns (it is mid-task, using tools) but is NOT idle.
+    # Work-since-watch alone must never mean "done" — the idle gate still rules.
+    _registered()
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity",
+                        lambda cwd: watched_since + 5)
+
+    for status in (inbox.BUSY, inbox.WAITING):
+        _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: status})
+        inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+        assert [t for _, t in sends if "finished" in t] == []
+    assert AGENT in inbox.watches()       # still watched — it still owes us the work
+
+
+def test_evidence_ignores_work_that_predates_the_watch(
+        store_file, windows, sends, monkeypatch):
+    # An idle window whose last assistant turn is OLDER than the watch has not done
+    # anything for THIS dispatch — reporting it would be a phantom completion.
+    _registered()
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity",
+                        lambda cwd: watched_since - 60)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert sends == []
+    assert AGENT in inbox.watches()
+
+
+# --- BUG 1 (live): a `chela watch` registered at RUNTIME was silently clobbered ---
+
+def test_a_watch_registered_during_a_tick_is_not_clobbered(store_file, windows, sends, monkeypatch):
+    # The real mechanism behind "my first watch never activates until I restart the
+    # daemon": tick() loaded the store, spent ~1s probing `claude agents --json`, then
+    # saved its STALE copy back — erasing a watch that landed in between. The CLI even
+    # reported ok. Reproduced deterministically here with a slow status probe.
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    def slow_status():
+        time.sleep(0.4)                    # the window between tick's read and write
+        return {ORCH: inbox.IDLE, AGENT: inbox.IDLE}
+
+    monkeypatch.setattr(inbox.agent_manager, "status_by_wid", slow_status)
+
+    t = threading.Thread(target=lambda: inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE}))
+    t.start()
+    time.sleep(0.15)                       # ...tick is mid-probe, holding a stale copy
+    assert inbox.watch(AGENT, "fix the parser", by=ORCH)["ok"] is True
+    t.join()
+
+    assert AGENT in inbox.watches(), "the daemon's tick clobbered a concurrent watch"
+
+
+def test_a_watch_registered_at_runtime_works_without_a_daemon_restart(
+        store_file, windows, sends, monkeypatch):
+    # The daemon has already ticked (orchestrator unregistered, nothing watched) — the
+    # state a long-running daemon is really in when you first use the feature.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+    assert inbox.orchestrator_wid() is None
+
+    # NOW the orchestrator dispatches and registers, with the daemon still running.
+    _registered()
+    assert inbox.orchestrator_wid() == ORCH        # re-read from the store, not latched
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+
+    assert len(sends) == 1                          # ...and it fires. No restart needed.

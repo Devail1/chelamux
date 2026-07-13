@@ -43,13 +43,15 @@ one. Turn the whole thing off with ``CHELA_INBOX_ENABLED=false``.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from chela import agent_manager, discovery, messenger
+from chela import agent_manager, discovery, messenger, transcripts
 from chela.config import CHELA_DIR, INBOX_ENABLED
 
 log = logging.getLogger(__name__)
@@ -97,6 +99,36 @@ def save(store: dict) -> None:
     tmp.replace(path)
 
 
+@contextmanager
+def locked_store():
+    """Read-modify-write the store under an exclusive lock. THE fix for lost updates.
+
+    The daemon and the CLI mutate the same file CONCURRENTLY — that is the normal case
+    here, since you run ``chela watch`` from an agent session while the daemon ticks in
+    the background. Plain load→modify→save loses writes: the daemon loads the store,
+    spends a second probing statuses, then saves its stale copy back — silently erasing
+    a ``chela watch`` that landed in between. Live, that looked like "my first watch
+    never activates until I restart the daemon"; the watch was simply gone (reproduced
+    deterministically: the CLI reports ok, the store comes back ``{}``).
+
+    An advisory flock over the whole read-modify-write serialises them, so a concurrent
+    watch either happens fully before the tick's read or fully after its write. Callers
+    must keep the critical section short — do slow work (status probes, the runs query)
+    BEFORE taking the lock.
+    """
+    path = store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(".lock")
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            store = load()
+            yield store
+            save(store)
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 # --- who the orchestrator is (explicit, never guessed) -------------------------
 
 def orchestrator_wid(store: dict | None = None) -> str | None:
@@ -124,23 +156,23 @@ def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:
     session that delegates is the session that gets told. Watching your own window is
     refused: that is the self-notify loop, and it is closed here at the source.
     """
-    store = load()
-    if by:
-        store["orchestrator"] = by
-    target = orchestrator_wid(store)
-    if target and wid == target:
-        return {"ok": False, "error": "refusing to watch the orchestrator's own window"}
-    if wid not in discovery.get_windows_by_id():
+    if wid not in discovery.get_windows_by_id():   # slow-ish (tmux) — do it OUTSIDE the lock
         return {"ok": False, "error": f"no such window: {wid}"}
-    store["watches"][wid] = {"note": note.strip(), "since": time.time()}
-    save(store)
+    with locked_store() as store:                  # ...so a concurrent daemon tick can't
+        if by:                                     #    clobber the watch we are writing
+            store["orchestrator"] = by
+        target = orchestrator_wid(store)
+        if target and wid == target:
+            return {"ok": False, "error": "refusing to watch the orchestrator's own window"}
+        # `since` is the completion evidence line: work the transcript shows AFTER this
+        # instant is work this dispatch caused (see agent_events).
+        store["watches"][wid] = {"note": note.strip(), "since": time.time()}
     return {"ok": True, "wid": wid, "note": note.strip(), "orchestrator": target}
 
 
 def unwatch(wid: str) -> dict:
-    store = load()
-    existed = store["watches"].pop(wid, None) is not None
-    save(store)
+    with locked_store() as store:
+        existed = store["watches"].pop(wid, None) is not None
     return {"ok": existed, "wid": wid}
 
 
@@ -156,13 +188,40 @@ def _line(wid: str, name: str, body: str, note: str = "") -> str:
     return f"📥 {wid} ({name}) {body}{tail}"
 
 
+def did_work_since(wid: str, since: float) -> bool:
+    """Did this agent's transcript gain an ASSISTANT turn after ``since``?
+
+    The completion evidence that makes detection independent of the poll rate. The
+    busy→idle edge alone cannot see a task shorter than the sampling interval: a 15s
+    delegation between two 30s ticks is sampled ``idle, idle``, the daemon never
+    observes ``busy``, and the completion is dropped FOREVER. Quick delegations are
+    exactly what this feature exists to catch, so "finished" must not depend on having
+    caught the window mid-flight.
+
+    An assistant turn written after the watch was registered is proof the agent did
+    work for THIS dispatch; combined with the window now being idle, it is finished.
+    We require an *assistant* turn specifically: the dispatched prompt itself lands as
+    a *user* record, so counting any activity would read "your prompt arrived" as "the
+    agent replied". Best-effort — no transcript (or an unreadable one) simply yields
+    False, leaving the busy→idle edge as the detector.
+    """
+    cwd = discovery.get_window_cwd_by_id(wid)
+    last = transcripts.last_assistant_activity(cwd)
+    return last is not None and last > since
+
+
 def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict) -> list[dict]:
     """Events from agent status transitions, scoped to WATCHED windows only.
 
-    Edge-triggered (mirrors :func:`chela.notify.check_waiting`): an event fires on the
-    transition, so a window that sits idle — or sits waiting — across many ticks is
-    announced exactly once. ``prev`` empty (a fresh daemon) baselines silently rather
-    than announcing every idle agent at once.
+    Edge-triggered (mirrors :func:`chela.notify.check_waiting`) so a window that sits
+    idle — or sits waiting — across many ticks is announced exactly once.
+
+    Completion is detected TWO ways, because the edge alone is not enough. The
+    busy→idle transition is the fast, precise signal when we catch it; but a task that
+    starts and finishes BETWEEN two polls is never observed as busy, so it would be
+    missed forever. So an idle watched window that has done work since its watch was
+    registered (:func:`did_work_since`) is also finished. The evidence path needs no
+    baseline at all, which is why it also survives a daemon restart mid-task.
 
     The orchestrator's own window is never a source, so the busy→idle its own reply
     produces (including the reply to one of our own pushes) can never become an event.
@@ -173,16 +232,23 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict) -> list
     for wid, meta in sorted(store["watches"].items()):
         if wid == orch:
             continue                      # never notify about the orchestrator itself
-        note = (meta or {}).get("note", "")
+        meta = meta or {}
+        note = meta.get("note", "")
+        since = meta.get("since") or 0.0
         name = names.get(wid, wid)
         was, now = prev.get(wid), cur.get(wid)
-        if was is None:
-            continue                      # no baseline yet — nothing to compare against
-        if was == BUSY and now == IDLE:
+        finished_edge = was == BUSY and now == IDLE
+        # The not-missed path: idle now, and the transcript proves it worked for us.
+        # Gated on `idle` so an agent still mid-task (busy/waiting) is never called done.
+        finished_evidence = now == IDLE and did_work_since(wid, since)
+        if finished_edge or finished_evidence:
             out.append({"kind": "finished", "wid": wid, "clear_watch": True,
                         "text": _line(wid, name, "finished the task you dispatched — "
                                                  "verify + commit.", note)})
-        elif was != WAITING and now == WAITING:
+            continue
+        if was is None:
+            continue                      # no baseline — the transitions below need one
+        if was != WAITING and now == WAITING:
             # Keep the watch: it is blocked, not done — it still owes you the work.
             out.append({"kind": "blocked", "wid": wid, "clear_watch": False,
                         "text": _line(wid, name, "is BLOCKED on a prompt (permission/"
@@ -267,25 +333,27 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     """
     if not enabled():
         return {}
-    store = load()
-    statuses = status_snapshot()
 
+    # Slow work FIRST, outside the lock: `claude agents --json` (a heavyweight process)
+    # and the runs query. Holding the store lock across them is what let a tick clobber
+    # a concurrent `chela watch` — the very bug locked_store() exists to close.
+    statuses = status_snapshot()
     if runs is None:
         from chela import dispatcher
         runs = dispatcher.list_runs()
 
-    events = agent_events(prev, statuses, store)
-    r_events, store["runs_seen"] = run_events(runs, store.get("runs_seen", {}))
-    events += r_events
+    with locked_store() as store:
+        events = agent_events(prev, statuses, store)
+        r_events, store["runs_seen"] = run_events(runs, store.get("runs_seen", {}))
+        events += r_events
 
-    for event in events:
-        store["queue"].append(event)
-        if event.get("clear_watch") and event.get("wid"):
-            # Interest is satisfied — one dispatch, one completion. (A "blocked"
-            # event keeps the watch: the agent still owes you the finish.)
-            store["watches"].pop(event["wid"], None)
-        log.info("inbox: queued %s (%s)", event["kind"], event.get("wid") or "run")
+        for event in events:
+            store["queue"].append(event)
+            if event.get("clear_watch") and event.get("wid"):
+                # Interest is satisfied — one dispatch, one completion. (A "blocked"
+                # event keeps the watch: the agent still owes you the finish.)
+                store["watches"].pop(event["wid"], None)
+            log.info("inbox: queued %s (%s)", event["kind"], event.get("wid") or "run")
 
-    deliver(store, statuses)
-    save(store)
+        deliver(store, statuses)
     return statuses
