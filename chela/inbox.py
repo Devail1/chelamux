@@ -45,6 +45,24 @@ to watch it, so no busy→idle of the orchestrator is ever an event source. Even
 originate only from OTHER windows the orchestrator explicitly asked about, and from
 the runs DB.
 
+**An event is a RECORD, not a sentence.** Each event carries a ``kind``, a one-line
+``summary`` (what the tmux push renders) and a structured ``payload`` (run id, window,
+PR url, task title, timestamps). It used to be a single pre-rendered ``text`` string
+built at queue time, which had two consequences, both observed live on 2026-07-13:
+the notification was the *entire* TODO item pasted into the orchestrator's window
+(``title`` on a run row is the whole ``- [ ]`` line), and nothing downstream could
+filter, re-check or re-render it — a string is not a fact. The summary is for the
+human/orchestrator; the payload is for the log and the UI that will consume it next.
+
+**A queued event is a claim about the PAST, so it is re-checked at DELIVERY time.**
+Delivery is deliberately deferred until the orchestrator is idle, and the world moves
+in the meantime: an ``awaiting_review`` event was delivered *after* its PR had already
+been reviewed and merged, handing the orchestrator work that was already done. Before
+a run event goes out it is re-validated against the CURRENT runs DB
+(:func:`stale_reason`) and dropped — loudly, in the log — if the fact it asserts no
+longer holds. The check is a lookup in the runs list the tick already fetched, so it
+costs no I/O and holds no lock across one.
+
 State (watches, the queue, and the run-status marks) lives in one JSON file under
 ``$CHELA_DIR`` so a daemon restart neither loses a pending event nor re-fires an old
 one. Turn the whole thing off with ``CHELA_INBOX_ENABLED=false``.
@@ -55,6 +73,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -85,6 +104,18 @@ SETTLED_RUN_STATES = ("awaiting_review", "done", "failed")
 # made a successful agent get reported as DIED. So the first tick that sees the window
 # gone only STAMPS it; the claim is made a tick later, re-reading the run state.
 DEATH_CONFIRM_SECONDS = 30
+
+# A run's `title` is the WHOLE tracker line — for this repo, a multi-paragraph brief
+# with landmines and references. It is a task body, not a notification: pushing it
+# verbatim pasted an essay into the orchestrator's window. The summary carries this
+# much of it; the payload carries all of it.
+SUMMARY_TITLE_CHARS = 60
+
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:[/?#]|$)")
+# `*` and backticks only. NOT `_` or `~`: a tracker title is full of snake_case
+# identifiers and approximations ("~4096 chars", "pr_state"), and stripping those
+# characters mangles the words rather than unwrapping emphasis.
+_MARKUP_RE = re.compile(r"[*`]+")
 
 
 def enabled() -> bool:
@@ -213,6 +244,54 @@ def _line(wid: str, name: str, body: str, note: str = "") -> str:
     return f"📥 {wid} ({name}) {body}{tail}"
 
 
+def _event(kind: str, summary: str, payload: dict, *, wid: str | None = None,
+           clear_watch: bool = False, silent: bool = False) -> dict:
+    """The queued event record: what happened, in one line, plus the facts behind it.
+
+    ``summary`` is the ONLY thing ever pushed into a session — one line, no newlines.
+    ``payload`` is the structured record (run id, wid, PR url, full title, timestamps)
+    that a log, a filter, a de-dup or a UI can actually work with, and that
+    :func:`stale_reason` re-checks at delivery. Keeping the two apart is what stops a
+    notification from being an essay and stops a fact from being un-re-checkable.
+    """
+    event = {"kind": kind, "summary": " ".join(summary.split()), "payload": payload,
+             "wid": wid, "clear_watch": clear_watch, "ts": time.time()}
+    if silent:
+        event["silent"] = True
+    return event
+
+
+def render(event: dict) -> str:
+    """The one line an event renders to. Legacy queues held a pre-rendered ``text``.
+
+    An event queued by an older daemon (before events were records) is still sitting in
+    ``inbox.json`` across the upgrade, and must still be deliverable — hence the
+    fallback. New events never set ``text``.
+    """
+    return event.get("summary") or event.get("text") or ""
+
+
+def _short_title(title: str, limit: int = SUMMARY_TITLE_CHARS) -> str:
+    """A tracker line, cut down to something you can read in a notification.
+
+    Strips markdown emphasis (the tracker's titles are mostly ``**bold**``), collapses
+    the whitespace, and truncates on a word boundary. The full title is in the payload.
+    """
+    text = " ".join(_MARKUP_RE.sub("", title or "").split())
+    if len(text) <= limit:
+        return text
+    head = text[:limit].rsplit(" ", 1)[0] or text[:limit]
+    return head + "…"
+
+
+def pr_ref(pr_url: str | None) -> str:
+    """``PR #47`` when the url looks like a PR, else the url itself (or nothing)."""
+    if not pr_url:
+        return ""
+    m = _PR_NUMBER_RE.search(pr_url)
+    return f"PR #{m.group(1)}" if m else pr_url
+
+
 def did_work_since(wid: str, since: float) -> bool:
     """Did this agent's transcript gain an ASSISTANT turn after ``since``?
 
@@ -271,15 +350,28 @@ def _gone_event(wid: str, name: str, note: str, run: dict | None) -> dict | None
     * no run row (ad-hoc dispatch) → we simply do not know. Say that, rather than
       asserting an outcome we cannot see.
     """
+    payload = _window_payload(wid, name, note, run)
     if run is not None and (run.get("status") in SETTLED_RUN_STATES or run.get("pr_url")):
-        return {"kind": "completed_gone", "wid": wid, "clear_watch": True, "silent": True}
+        return _event("completed_gone", _line(wid, name, "completed (window closed)", note),
+                      payload, wid=wid, clear_watch=True, silent=True)
     if run is None:
-        return {"kind": "gone_unknown", "wid": wid, "clear_watch": True,
-                "text": _line(wid, name, "window closed — no run state to confirm the "
-                                         "outcome; check before assuming either way.", note)}
-    return {"kind": "died", "wid": wid, "clear_watch": True,
-            "text": _line(wid, name, "DIED mid-task (window gone) — "
-                                     "the work was not finished.", note)}
+        return _event("gone_unknown",
+                      _line(wid, name, "window closed — no run state to confirm the "
+                                       "outcome; check before assuming either way.", note),
+                      payload, wid=wid, clear_watch=True)
+    return _event("died",
+                  _line(wid, name, "DIED mid-task (window gone) — the work was not "
+                                   "finished.", note),
+                  payload, wid=wid, clear_watch=True)
+
+
+def _window_payload(wid: str, name: str, note: str, run: dict | None = None) -> dict:
+    """The facts behind a window event — the run row's identity, not its prose."""
+    payload = {"wid": wid, "window_name": name, "note": note}
+    if run is not None:
+        payload.update({"task_id": run.get("task_id"), "run_status": run.get("status"),
+                        "pr_url": run.get("pr_url"), "task_title": run.get("title")})
+    return payload
 
 
 def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
@@ -345,17 +437,23 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
         # Gated on `idle` so an agent still mid-task (busy/waiting) is never called done.
         finished_evidence = now == IDLE and did_work_since(wid, since)
         if finished_edge or finished_evidence:
-            out.append({"kind": "finished", "wid": wid, "clear_watch": True,
-                        "text": _line(wid, name, "finished the task you dispatched — "
-                                                 "verify + commit.", note)})
+            out.append(_event("finished",
+                              _line(wid, name, "finished the task you dispatched — "
+                                               "verify + commit.", note),
+                              _window_payload(wid, name, note,
+                                              run_for_window(name, runs)),
+                              wid=wid, clear_watch=True))
             continue
         if was is None:
             continue                      # no baseline — the transition below needs one
         if was != WAITING and now == WAITING:
             # Keep the watch: it is blocked, not done — it still owes you the work.
-            out.append({"kind": "blocked", "wid": wid, "clear_watch": False,
-                        "text": _line(wid, name, "is BLOCKED on a prompt (permission/"
-                                                 "question) — answer it.", note)})
+            out.append(_event("blocked",
+                              _line(wid, name, "is BLOCKED on a prompt (permission/"
+                                               "question) — answer it.", note),
+                              _window_payload(wid, name, note,
+                                              run_for_window(name, runs)),
+                              wid=wid))
     return out
 
 
@@ -365,6 +463,11 @@ def run_events(runs: list[dict], seen: dict[str, str]) -> tuple[list[dict], dict
     Edge-triggered on the run's status, against a DURABLE mark: a run parked in
     awaiting_review must announce once, not once per 30s tick, and not again after a
     daemon restart. Runs are delegated work by definition, so these need no watch.
+
+    The event's ``summary`` is one line — a label, the state, the PR, and a *snippet*
+    of the title. The run's ``title`` is the whole tracker line (here: a brief with
+    landmines and a verify plan), so putting it in the notification pasted the entire
+    task body into the orchestrator's window. It lives in the payload instead.
     """
     out: list[dict] = []
     fresh: dict[str, str] = {}
@@ -375,17 +478,28 @@ def run_events(runs: list[dict], seen: dict[str, str]) -> tuple[list[dict], dict
         fresh[task_id] = status
         if seen.get(task_id) == status:
             continue                      # already announced at this status
-        title = run.get("title") or task_id
+        title = run.get("title") or ""
+        # The branch is the handle a human recognises ("cmx-38"); the id is the handle
+        # the dispatcher does. Prefer the branch, fall back to the id.
+        label = run.get("branch_name") or task_id
+        snippet = _short_title(title)
+        payload = {"task_id": task_id, "run_status": status, "title": title,
+                   "branch_name": run.get("branch_name"),
+                   "window_name": run.get("window_name"), "pr_url": run.get("pr_url"),
+                   "pr_state": run.get("pr_state"), "attempt": run.get("attempt"),
+                   "started_at": run.get("started_at"), "ended_at": run.get("ended_at")}
         if status == "awaiting_review":
             pr = run.get("pr_url")
-            out.append({"kind": "run_review", "wid": None, "clear_watch": False,
-                        "text": f"📥 run {task_id} ({title}) is awaiting review"
-                                f"{' — ' + pr if pr else ' — no PR link'}"})
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            out.append(_event("run_review",
+                              f"📥 {label} awaiting review — {ref}"
+                              f"{' · ' + snippet if snippet else ''}", payload))
         elif status == "failed":
             err = (run.get("last_error") or "").splitlines()
-            out.append({"kind": "run_failed", "wid": None, "clear_watch": False,
-                        "text": f"📥 run {task_id} ({title}) FAILED"
-                                f"{' — ' + err[0][:120] if err else ''}"})
+            payload["last_error"] = run.get("last_error")
+            out.append(_event("run_failed",
+                              f"📥 {label} FAILED{' — ' + err[0][:120] if err else ''}"
+                              f"{' · ' + snippet if snippet else ''}", payload))
     return out, fresh
 
 
@@ -396,13 +510,56 @@ def status_snapshot() -> dict[str, str]:
     return agent_manager.status_by_wid()
 
 
-def deliver(store: dict, statuses: dict[str, str]) -> list[dict]:
+def stale_reason(event: dict, runs: list[dict]) -> str | None:
+    """Why this queued event is no longer TRUE — or None if it still is.
+
+    A queued event is a claim about the past. Delivery is deferred until the
+    orchestrator is idle, and the world does not wait: live on 2026-07-13 an
+    ``awaiting_review`` event was pushed *after* its PR had been reviewed and merged,
+    so the orchestrator was handed an instruction to do work that was already done.
+    The event was true when queued and rotted in the queue — which is exactly why the
+    check belongs HERE, at delivery, and not only at queue time.
+
+    Only claims that can rot are re-checked, and only against the runs list the tick
+    already fetched: no network, no DB read, no I/O of any kind, so this stays safe to
+    call inside the store lock. Window events (finished/died/blocked) assert something
+    that already happened and are left alone.
+    """
+    kind = event.get("kind")
+    if kind not in ("run_review", "run_failed"):
+        return None
+    task_id = (event.get("payload") or {}).get("task_id")
+    if not task_id:
+        return None                        # legacy/unstructured event — deliver it
+    run = next((r for r in runs if r.get("task_id") == task_id), None)
+    if run is None:
+        return "run row is gone"
+    status, pr_state = run.get("status"), run.get("pr_state")
+    if kind == "run_review":
+        if status != "awaiting_review":
+            return f"run is now {status!r}, not awaiting_review"
+        if pr_state in ("merged", "closed"):
+            # The row can lag the PR by a reconcile tick: pr_state is refreshed before
+            # awaiting_review → done. A merged PR is not awaiting review either way.
+            return f"PR is {pr_state}"
+    elif kind == "run_failed" and status != "failed":
+        return f"run is now {status!r}, not failed"
+    return None
+
+
+def deliver(store: dict, statuses: dict[str, str],
+            runs: list[dict] | None = None) -> list[dict]:
     """Push queued events into the orchestrator — ONLY if its window is ``idle``.
 
     The gate is a strict equality against ``idle``. ``waiting`` must never be written
     to: that session is sitting on a permission/question prompt, and our paste would
     be consumed as the ANSWER to that prompt. ``busy`` we leave alone by design (never
     interrupt a session mid-thought) — the event just waits for the next idle tick.
+
+    Every event is re-validated against the CURRENT runs (:func:`stale_reason`) on its
+    way out; one that has rotted in the queue is dropped and LOGGED — never silently,
+    or a real event lost to a bug becomes undebuggable. Only the event's ``summary``
+    is pushed: the payload is the record, not the notification.
 
     Returns the events actually delivered (each exactly once — a delivered event is
     popped from the durable queue before we return, so no tick can re-send it).
@@ -412,13 +569,26 @@ def deliver(store: dict, statuses: dict[str, str]) -> list[dict]:
         return []
     if statuses.get(orch) != IDLE:
         return []
+    runs = runs or []
 
     sent: list[dict] = []
-    for event in list(store["queue"])[:MAX_DELIVERIES_PER_TICK]:
-        if not messenger.send_tmux(orch, event["text"]):
+    while store["queue"] and len(sent) < MAX_DELIVERIES_PER_TICK:
+        event = store["queue"][0]
+        stale = stale_reason(event, runs)
+        if stale:
+            store["queue"].pop(0)
+            log.warning("inbox: dropping stale %s (%s) — %s", event.get("kind"),
+                        (event.get("payload") or {}).get("task_id") or "?", stale)
+            continue                       # a dropped event doesn't spend the tick's slot
+        text = render(event)
+        if not text:
+            store["queue"].pop(0)          # nothing to say — don't wedge the queue on it
+            log.warning("inbox: dropping unrenderable %s event", event.get("kind"))
+            continue
+        if not messenger.send_tmux(orch, text):
             log.warning("inbox: delivery to %s failed; leaving it queued", orch)
             break
-        store["queue"].remove(event)
+        store["queue"].pop(0)
         sent.append(event)
         log.info("inbox: delivered %s -> %s", event["kind"], orch)
     return sent
@@ -459,5 +629,7 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
             log.info("inbox: %s %s (%s)", "resolved" if event.get("silent") else "queued",
                      event["kind"], event.get("wid") or "run")
 
-        deliver(store, statuses)
+        # `runs` is the snapshot fetched above, outside the lock — re-validating against
+        # it is a list scan, so the critical section stays as short as it was.
+        deliver(store, statuses, runs)
     return statuses
