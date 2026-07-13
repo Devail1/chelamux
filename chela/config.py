@@ -1,14 +1,101 @@
-"""Configuration — environment variables with sensible defaults.
+"""Configuration — **the environment is the single source of truth.**
 
-Everything chela needs is discoverable from plain tmux; there is no external
-service to point at. State lives under ``~/.chela`` (override with ``CHELA_DIR``).
+Everything chela needs is discoverable from plain tmux; there is no external service to
+point at. State lives under ``~/.chela`` (override with ``CHELA_DIR``).
+
+One file, one authority: ``$CHELA_DIR/chela.env`` (``KEY=value`` lines) is *sourced* —
+by :func:`load_env_file` here for anything importing chela, and by ``scripts/run-chela.sh``
+for anything PM2 starts. A real environment variable always wins over the file, so an
+override stays possible; what is NOT allowed any more is a second *place* config lives.
+A PM2 ``env:`` block is exactly that second place, and it drifted: three copies of
+``CHELA_TMUX_SESSION`` still said ``ccbot`` a day after the session was renamed.
+
+The dashboard port is the case that proves the rule. It is baked into the Claude Code
+hooks plugin as a literal (Claude Code does not expand env vars in a hook ``url``), and
+``chela plugin`` renders that manifest from a **different process** than the dashboard —
+so a port that only exists inside the dashboard's own process (``--port``) makes every
+hook POST into a closed socket, silently. Hence :func:`publish_dashboard_port`: the
+dashboard writes down the port it actually bound, and :func:`live_dashboard_port` — what
+the plugin renders — reads it back. Nobody has to guess.
 """
+import json
 import os
+import re
 import subprocess
+import time
 from pathlib import Path
 
 # Where chela keeps its own state (scheduler.db, dispatcher runs, context cache).
 CHELA_DIR = Path(os.environ.get("CHELA_DIR", Path.home() / ".chela"))
+
+
+# --- the env file: one place config lives -----------------------------------------
+
+# What a shell will accept as a variable name. Anything else in the file is skipped
+# rather than passed to os.environ, which raises on one (a truncated or binary file must
+# not take the CLI down before it can tell you the file is broken).
+_VALID_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+def env_file_path() -> Path | None:
+    """``$CHELA_DIR/chela.env``, or ``$CHELA_ENV_FILE`` when set. ``CHELA_ENV_FILE=""``
+    disables the file entirely (what the test suite does — a developer's real
+    ``~/.chela/chela.env`` must never leak into a unit test)."""
+    raw = os.environ.get("CHELA_ENV_FILE")
+    if raw is None:
+        return CHELA_DIR / "chela.env"
+    raw = raw.strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    """``KEY=value`` lines → a dict. Blank lines and ``#`` comments are skipped, a
+    leading ``export`` and one layer of surrounding quotes are stripped — the subset of
+    shell syntax ``set -a; . file`` and this parser agree on. Anything unreadable or
+    unparseable is skipped, never raised: a typo in a config file must not stop the CLI
+    from starting (``chela doctor`` is where it becomes visible)."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not _VALID_KEY.fullmatch(key):
+            continue        # not a variable name — a stray line, or a corrupt file
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        out[key] = value
+    return out
+
+
+def load_env_file(path: Path | None = None) -> dict[str, str]:
+    """Source the env file into ``os.environ``; return what it declared.
+
+    ``setdefault``, not assignment: an explicitly exported variable outranks the file
+    (that is how a one-off ``CHELA_TMUX_SESSION=other chela status`` still works, and how
+    ``scripts/run-chela.sh`` sourcing the same file first is a no-op rather than a
+    conflict). Child processes inherit it, so a tmux-spawned agent sees the same config.
+    """
+    path = path if path is not None else env_file_path()
+    if path is None:
+        return {}
+    declared = parse_env_file(path)
+    for key, value in declared.items():
+        os.environ.setdefault(key, value)
+    return declared
+
+
+ENV_FILE: Path | None = env_file_path()
+# At import, before anything below reads os.environ — so a plain `chela status` in a bare
+# shell is configured identically to the PM2 daemon, with nothing exported by hand.
+ENV_FILE_VARS: dict[str, str] = load_env_file(ENV_FILE)
 
 # The tmux session chela orchestrates. Each agent lives in its own window of
 # this session, and the window name IS the agent's display name. Override with
@@ -70,21 +157,89 @@ def dashboard_host() -> str:
 
 
 def dashboard_port() -> int:
-    """Where the dashboard binds — the ONE authority for the number.
+    """The port the dashboard is CONFIGURED to bind — ``CHELA_DASHBOARD_PORT`` (which the
+    env file supplies), else the default.
 
-    The Claude Code hooks plugin POSTs to it, and a plugin manifest is static JSON:
-    Claude Code does NOT expand env vars in a hook ``url`` (measured on 2.1.207), so
-    the port is baked into the plugin when it is rendered (``chela plugin`` — see
-    :mod:`chela.hooks`). A port read from two places is a plugin quietly posting into
-    a closed socket, which looks exactly like "hooks don't work".
+    This is what the dashboard binds. It is *not* necessarily what it is listening on:
+    ``chela dashboard --port`` can override it for a one-off run, and then the flag —
+    not the env — is the truth. Anything that has to *reach* the dashboard from another
+    process (the hooks plugin, above all) must ask :func:`live_dashboard_port`.
 
-    Resolved per call, never at import: ``chela dashboard --port`` sets the env var
-    *after* this module is imported, and a cached constant would ignore it.
+    Resolved per call, never at import: ``--port`` sets the env var after this module is
+    imported, and a cached constant would ignore it.
     """
     try:
         return int(os.environ.get("CHELA_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT))
     except ValueError:
         return DEFAULT_DASHBOARD_PORT
+
+
+def dashboard_port_file() -> Path:
+    """Where the dashboard writes down the port it actually bound."""
+    return CHELA_DIR / "dashboard.port"
+
+
+def publish_dashboard_port(port: int, host: str = "127.0.0.1") -> None:
+    """Record the port the dashboard REALLY bound, for every other process to read.
+
+    Best-effort by design: a dashboard that cannot write this file still serves. What it
+    loses is the guarantee that ``chela plugin`` renders a reachable URL — which
+    ``chela doctor`` then reports, loudly, rather than the feature failing in silence.
+    """
+    try:
+        CHELA_DIR.mkdir(parents=True, exist_ok=True)
+        dashboard_port_file().write_text(
+            json.dumps({"port": int(port), "host": host, "pid": os.getpid(),
+                        "ts": time.time()}) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def clear_dashboard_port() -> None:
+    """Drop the published port on a clean shutdown (a crash leaves it; the pid check
+    below is what makes a stale file harmless either way)."""
+    try:
+        dashboard_port_file().unlink()
+    except OSError:
+        pass
+
+
+def live_dashboard() -> dict | None:
+    """What the running dashboard published, or None if none is running.
+
+    A file whose ``pid`` is gone is stale — the dashboard died — and is treated as no
+    dashboard at all, so a crashed instance can't keep pointing hooks at a closed socket.
+    """
+    try:
+        data = json.loads(dashboard_port_file().read_text(encoding="utf-8"))
+        port = int(data["port"])
+        pid = int(data.get("pid") or 0)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if pid > 0:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            pass                     # alive, owned by someone else — still listening
+        except OSError:
+            return None
+    return {"port": port, "host": str(data.get("host") or "127.0.0.1"), "pid": pid}
+
+
+def live_dashboard_port() -> int:
+    """The port the dashboard is ACTUALLY listening on — what a hook must POST to.
+
+    Prefers what the running dashboard published over what the config says, because a
+    ``--port`` flag makes those two differ and the *plugin* has to be right regardless.
+    Falls back to the configured port when no dashboard is running (rendering a plugin
+    before starting one is legitimate). ``chela doctor`` flags the disagreement.
+    """
+    live = live_dashboard()
+    return live["port"] if live else dashboard_port()
 
 
 # Context-window status-line cache, written by scripts/cache-statusline.sh after

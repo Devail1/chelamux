@@ -26,6 +26,7 @@ from chela import (
     config,
     discovery,
     dispatcher,
+    doctor,
     event_log,
     hooks,
     inbox,
@@ -418,10 +419,26 @@ def cmd_plugin(args) -> None:
     a literal — Claude Code does not expand env vars in it. So a dashboard on any other
     port needs its own copy of the manifest, or the hooks post into a closed socket and
     the feature looks simply broken. This is that copy.
+
+    The port comes from the RUNNING dashboard (the one it published at startup), not from
+    whatever this process's environment happens to say — the two disagreeing is precisely
+    how the manifest ended up pointing at a port nobody served. A disagreement is printed
+    here, loudly, instead of being resolved behind the user's back.
     """
-    port = args.port or config.dashboard_port()
+    live = config.live_dashboard()
+    port = args.port or config.live_dashboard_port()
     directory = hooks.render_plugin(Path(args.dir).expanduser(), port=port)
     print(f"plugin rendered at {directory} (posting to 127.0.0.1:{port})")
+    if live and live["port"] != port:
+        print(f"\n⚠️  the running dashboard is listening on {live['port']}, not {port} — "
+              "these hooks will POST into a closed socket (and fail open, silently).")
+    elif not live:
+        print("\n⚠️  no dashboard is running, so this port is the CONFIGURED one, not an "
+              "observed one. Re-run `chela plugin` (or `chela doctor`) once it is up.")
+    if config.dashboard_port() != port and not args.port:
+        print(f"⚠️  the env says CHELA_DASHBOARD_PORT={config.dashboard_port()} while the "
+              f"dashboard actually serves {port}. The env is meant to be the source of "
+              "truth — fix the env file and restart it without --port.")
     print("\ninstall it for one session:")
     print(f"  claude --plugin-dir {directory}")
     print("\nor persistently, from Claude Code:")
@@ -925,14 +942,33 @@ def cmd_dashboard(args) -> None:
         print("              (or:  pip install 'chelamux[dashboard]')")
         print(f"  import error: {e}")
         sys.exit(1)
+    # The env (i.e. $CHELA_DIR/chela.env) is the source of truth for the bind; these
+    # flags are a one-off override for a hand-started instance. Either way the dashboard
+    # PUBLISHES the port it really bound (config.publish_dashboard_port), so `chela
+    # plugin` in another process renders a URL that is actually served.
     if args.host:
         os.environ["CHELA_DASH_HOST"] = args.host
     if args.port:
         os.environ["CHELA_DASHBOARD_PORT"] = str(args.port)
-    host = os.environ.get("CHELA_DASH_HOST", "127.0.0.1")
-    port = os.environ.get("CHELA_DASHBOARD_PORT", "5001")
+    host, port = config.dashboard_host(), config.dashboard_port()
     log.info("chela dashboard on http://%s:%s (zero auth — keep it loopback/tailnet)", host, port)
     dashboard_app.main()
+
+
+def cmd_doctor(args) -> None:
+    """Report where the config a process is RUNNING with disagrees with the env file.
+
+    Exits 1 on an error-level finding — a drift that is breaking something right now (the
+    dashboard on a port the plugin does not know about, say), as against a warning, which
+    is a difference that is merely worth knowing about.
+    """
+    findings = doctor.check()
+    for finding in findings:
+        print(finding.render())
+    errors = [f for f in findings if f.level == doctor.ERROR]
+    if errors:
+        print(f"\n{len(errors)} problem(s) — see above.")
+        sys.exit(1)
 
 
 def cmd_task_finished(args) -> None:
@@ -1120,8 +1156,17 @@ def main() -> None:
 
     # dashboard (optional component)
     p_dash = sub.add_parser("dashboard", help="Launch the optional web dashboard (needs the 'dashboard' extra)")
-    p_dash.add_argument("--host", default=None, help="Bind host (default 127.0.0.1)")
-    p_dash.add_argument("--port", type=int, default=None, help="Bind port (default 5001)")
+    p_dash.add_argument("--host", default=None,
+                        help="Bind host (default: $CHELA_DASH_HOST, else 127.0.0.1)")
+    p_dash.add_argument("--port", type=int, default=None,
+                        help="One-off override of $CHELA_DASHBOARD_PORT (the env file is "
+                             "the source of truth; default 5001)")
+
+    # doctor — is what the fleet is RUNNING with still what the env file says?
+    sub.add_parser(
+        "doctor",
+        help="Check the running config against $CHELA_DIR/chela.env (exits 1 on a break)",
+    )
 
     # task-finished — final step in the dispatcher work-item lifecycle
     p_tf = sub.add_parser(
@@ -1168,6 +1213,8 @@ def main() -> None:
             cmd_events_emit(args)
         else:
             cmd_events(args)
+    elif args.command == "doctor":
+        cmd_doctor(args)
     elif args.command == "drive":
         cmd_drive(args)
     elif args.command == "dispatch":
