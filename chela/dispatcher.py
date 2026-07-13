@@ -9,11 +9,18 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from chela.config import CHELA_DIR, TMUX_SESSION
+from chela.config import CHELA_DIR, DISPATCH_TICK_INTERVAL, TMUX_SESSION
 from chela.messenger import send_tmux
 from chela.sources import Task, get_source
 from chela.transcripts import agent_transcript_summary
-from chela.workflow import WorkflowDef, load_workflow, render_prompt, resolve_workspace_root
+from chela.workflow import (
+    WorkflowDef,
+    load_workflow,
+    load_workflow_cached,
+    poll_interval_seconds,
+    render_prompt,
+    resolve_workspace_root,
+)
 from chela.worktree import ensure_worktree
 
 log = logging.getLogger(__name__)
@@ -726,9 +733,42 @@ def _tmux_windows() -> set[str]:
     return set(line.strip() for line in out.stdout.splitlines() if line.strip())
 
 
+def poll_interval(workflow_path: str | Path, default: float | None = None) -> float:
+    """The effective seconds between ticks for this workflow.
+
+    Reads `polling.interval_ms` from the (hot-reloaded) front matter, falling
+    back to ``default`` / ``CHELA_DISPATCH_TICK_INTERVAL``. Called from the
+    daemon loop on every pass so an edited interval takes effect without a
+    restart; it is stat-gated, so an unchanged file costs one ``stat``.
+    """
+    base = DISPATCH_TICK_INTERVAL if default is None else default
+    return poll_interval_seconds(load_workflow_cached(workflow_path).workflow, base)
+
+
 def tick(workflow_path: str | Path) -> dict:
-    """One dispatcher pass. Returns a dict summary for logging."""
-    wf = load_workflow(workflow_path)
+    """One dispatcher pass. Returns a dict summary for logging.
+
+    The workflow is re-read at this tick boundary (never mid-dispatch): a change
+    is picked up here and governs everything this pass does, while an agent
+    already in flight keeps the config it launched with.
+
+    If the file is currently unparseable, the LAST KNOWN-GOOD config stays in
+    force: reconciliation (PR states, done/failed, tracker strikes) keeps
+    running, but new dispatches are BLOCKED until it parses again, and the
+    summary carries ``blocked`` + ``error`` so the daemon and the Settings
+    drawer can say why (Symphony SPEC 6.2/6.3).
+    """
+    status = load_workflow_cached(workflow_path)
+    wf = status.workflow
+    if wf is None:
+        # Nothing has ever parsed — there is no last-good config to reconcile
+        # against. Report, don't raise: a broken file must not kill the loop.
+        return {
+            "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
+            "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
+            "blocked": True, "error": status.error,
+        }
+    blocked = status.error is not None
     source = get_source(wf)
     open_tasks = source.list_open_tasks()
     open_ids = {t.id for t in open_tasks}
@@ -742,6 +782,8 @@ def tick(workflow_path: str | Path) -> dict:
         "pr_state_refreshed": 0,
         "watchdog_renudged": 0,
         "tracker_struck": 0,
+        "blocked": blocked,
+        "error": status.error,
     }
     merged_in_tick = 0  # awaiting_review → done transitions; fires hooks.after_done
 
@@ -930,7 +972,17 @@ def tick(workflow_path: str | Path) -> dict:
         if merged_in_tick:
             _fire_after_done(wf)
 
-        # 3. Dispatch
+        # 3. Dispatch — BLOCKED while the workflow file does not parse.
+        # Everything above (PR-state refresh, done/failed reconcile, the tracker
+        # strike) has already run on the last known-good config, which is the
+        # point: a YAML typo must not strand in-flight runs. Starting a NEW run
+        # from a config the operator is visibly in the middle of breaking is the
+        # part that would be wrong, so that is the only part we stop.
+        if blocked:
+            log.warning("Dispatch paused for %s — %s. Reconciliation continues on "
+                        "the last known-good config.", wf.path, status.error)
+            return summary
+
         max_concurrent = wf.get("concurrency", "max", default=1) or 1
         active = conn.execute(
             "SELECT COUNT(*) FROM runs WHERE status IN ('claimed', 'running')"

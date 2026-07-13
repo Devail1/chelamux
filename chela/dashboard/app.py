@@ -29,7 +29,7 @@ from chela import agent_manager, collab, collab_stream, context, discovery, disp
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
-from chela.workflow import load_workflow, PROJECT_KEY_RE
+from chela.workflow import load_workflow, workflow_error, PROJECT_KEY_RE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1445,14 +1445,31 @@ def _settings_status() -> dict:
     # repo-root WORKFLOW.md + any workflow that has runs) — not the raw
     # CHELA_DISPATCH_WORKFLOWS env, which CMX-3's auto-discovery made obsolete
     # (env-only would read "Off" while the Kanban shows live runs).
+    # A workflow that no longer parses is the one dispatcher fault an operator
+    # MUST see: the daemon keeps reconciling on its last known-good config, but
+    # it will not start new work until the file is fixed, and a log line nobody
+    # reads is not a notification. The check is stat-gated (see
+    # workflow.load_workflow_cached) — polling it from the drawer is cheap, and
+    # the error is a property of the file on disk, so this process observes the
+    # same fault the daemon does without sharing memory with it.
+    wf_errors: list[dict] = []
     try:
-        n_wf = len(_discover_dispatch_workflows(dispatcher.list_runs()))
+        wf_paths = _discover_dispatch_workflows(dispatcher.list_runs())
+        n_wf = len(wf_paths)
+        for p in wf_paths:
+            err = workflow_error(p)
+            if err:
+                wf_errors.append({"workflow": p.name, "path": str(p), "error": err})
     except Exception:
         n_wf = len(config.DISPATCH_WORKFLOWS)
-    dispatch_on = n_wf > 0
-    dispatch_state = f"{n_wf} workflow{'' if n_wf == 1 else 's'}" if dispatch_on else "Off"
-    dispatch_detail = (f"every {config.DISPATCH_TICK_INTERVAL}s · auto-discovered" if dispatch_on
+    dispatch_on = n_wf > 0 and not wf_errors
+    dispatch_state = f"{n_wf} workflow{'' if n_wf == 1 else 's'}" if n_wf else "Off"
+    dispatch_detail = (f"every {config.DISPATCH_TICK_INTERVAL}s · auto-discovered" if n_wf
                        else "no workflows yet — run `chela dispatch`")
+    if wf_errors:
+        dispatch_state = "Blocked"
+        dispatch_detail = ("new dispatches paused, still reconciling on the last good config — "
+                           + "; ".join(f"{e['workflow']}: {e['error']}" for e in wf_errors))
 
     try:
         n_tasks = len(scheduler.list_tasks())
@@ -1471,17 +1488,26 @@ def _settings_status() -> dict:
                    else "text + interactive prompts only (CHELA_SHOW_TOOL_CALLS)"},
     ]
 
-    return {"sections": [
-        {"title": "Connections", "items": connections},
-        {"title": "Features", "items": features},
-    ]}
+    return {
+        "sections": [
+            {"title": "Connections", "items": connections},
+            {"title": "Features", "items": features},
+        ],
+        # Machine-readable twin of the "Work dispatcher" row above, for anything
+        # that wants to act on a broken workflow rather than render a sentence.
+        "workflow_errors": wf_errors,
+    }
 
 
 @app.route("/api/settings")
 @require_auth
 def api_settings():
     """READ-ONLY status aggregation for the Settings drawer. Reports live
-    connection + feature status (see ``_settings_status``); mutates nothing."""
+    connection + feature status (see ``_settings_status``); mutates nothing.
+
+    Also the operator-visible surface for a WORKFLOW.md that no longer parses:
+    the "Work dispatcher" row reads *Blocked*, and ``workflow_errors`` carries
+    the parse error per workflow."""
     return jsonify(_settings_status())
 
 

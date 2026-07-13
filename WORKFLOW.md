@@ -3,11 +3,21 @@
 # Run:  chela dispatch ./WORKFLOW.md --dry-run   (preview)
 #       chela dispatch ./WORKFLOW.md --once      (one pass)
 
+# This file is HOT-RELOADED: the daemon re-reads it when it changes and applies
+# the new config (and prompt body) from the next tick — no restart. If an edit
+# leaves it unparseable, the daemon keeps running on the last known-good config,
+# keeps reconciling, and pauses NEW dispatches until it parses again (the error
+# shows up in the dashboard's Settings drawer).
+
 project_key: CMX
 
 tracker:
   kind: markdown
   path: TODO.md
+
+# polling:
+#   interval_ms: 60000      # seconds between dispatcher ticks for this workflow.
+#                           # Unset → CHELA_DISPATCH_TICK_INTERVAL (60s). Floor: 5s.
 
 workspace:
   root: ~/.chela/worktrees/chelamux
