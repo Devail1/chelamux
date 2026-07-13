@@ -284,13 +284,22 @@ def test_single_select_selector_relays_question_with_semantic_keyboard():
     w.poll(["@1"])
     assert len(sender.calls) == 1
     text, parse_mode, thread, reply_markup = sender.calls[0]
-    assert text == "❓ Which fruit do you prefer?"
     assert parse_mode is None  # plain text — scraped question, no MarkdownV2
     assert thread == "100"
+    # The BODY carries the question AND every option in full, numbered — a button
+    # caption truncates to one line, the body wraps, so this is the only surface
+    # that can actually show the choices.
+    assert text.startswith("❓ Which fruit do you prefer?")
+    assert "1. Apple" in text and "2. Banana" in text and "3. Cherry" in text
+    assert "Type something" not in text  # meta-rows are not options
+    # … and each option's scraped description rides under it.
+    assert "A crisp red fruit" in text and "A soft yellow fruit" in text
     callbacks = [b["callback_data"] for row in reply_markup["inline_keyboard"] for b in row]
-    # One semantic button per REAL option (meta-rows excluded), plus the nav row.
+    # One compact selector per REAL option (meta-rows excluded), plus the nav row.
     assert [c for c in callbacks if not c.startswith("qa:nav:")] == ["qa:0", "qa:1", "qa:2"]
     assert any(c.startswith("qa:nav:") for c in callbacks)
+    captions = [b["text"] for row in reply_markup["inline_keyboard"] for b in row]
+    assert captions[:3] == ["1", "2", "3"]  # numbers, keyed to the numbered body
 
 
 def test_multi_tab_selector_relays_question_with_nav_only():
@@ -341,13 +350,57 @@ def test_unbound_window_selector_is_not_relayed():
     assert sender.calls == []
 
 
-def test_format_askuq_message_is_the_question():
+def test_format_askuq_message_numbers_every_option_in_the_body():
     from chela.telegram.panescan import AskUQ
 
-    uq = AskUQ(question="Which fruit?", options=("Apple",), cursor=0, multi=False)
-    assert format_askuq_message(uq) == "❓ Which fruit?"
+    uq = AskUQ(
+        question="Which fruit?",
+        options=("Apple", "Banana"),
+        cursor=0,
+        multi=False,
+        descriptions=("A crisp red fruit", ""),
+    )
+    body = format_askuq_message(uq)
+    assert body.splitlines()[0] == "❓ Which fruit?"
+    # Numbered, in scraped order, 1:1 with the qa:<i> selector buttons.
+    assert "1. Apple" in body and "2. Banana" in body
+    assert body.index("1. Apple") < body.index("2. Banana")
+    # The description is indented under its own option, never attached to another.
+    assert "\n   A crisp red fruit" in body
+    assert body.index("A crisp red fruit") < body.index("2. Banana")
+
+
+def test_format_askuq_message_falls_back_when_the_question_scraped_empty():
+    from chela.telegram.panescan import AskUQ
+
     blank = AskUQ(question="", options=(), cursor=-1, multi=True)
     assert format_askuq_message(blank).startswith("❓ ")
+
+
+def test_format_askuq_message_body_omits_options_for_the_multi_fallback():
+    from chela.telegram.panescan import AskUQ
+
+    # The multi shape gets the nav row (no per-option buttons), so numbering
+    # options in the body would promise selectors that aren't there.
+    multi = AskUQ(question="Pick some", options=(), cursor=-1, multi=True)
+    assert format_askuq_message(multi) == "❓ Pick some"
+
+
+def test_format_askuq_message_truncates_a_pathological_option_never_drops_it():
+    from chela.telegram.panescan import AskUQ
+
+    uq = AskUQ(
+        question="Which?",
+        options=("A" * 6000, "B" * 6000, "sane"),
+        cursor=0,
+        multi=False,
+        descriptions=("D" * 6000, "", ""),
+    )
+    body = format_askuq_message(uq)
+    assert len(body) <= 4096  # Telegram's hard cap on a message body
+    # Every option still has its numbered line — an unlisted option is unpickable,
+    # since its selector button is still on the keyboard.
+    assert "1. A" in body and "2. B" in body and "3. sane" in body
 
 
 # ── AskUserQuestion edit-in-place (no double-relay across mid-render) ─────────
@@ -401,7 +454,7 @@ def test_changed_scrape_edits_in_place_instead_of_double_posting():
     # First scrape (mid-render, only option 1) → ONE post.
     w.poll(["@1"])
     assert len(bot.posts) == 1
-    assert bot.posts[0][1] == "❓ Which fruit do you prefer?"
+    assert bot.posts[0][1].startswith("❓ Which fruit do you prefer?\n\n1. Apple")
     # Selector finishes rendering (all three options) → a DIFFERENT signature.
     panes["@1"] = ASKUQ_SINGLE_PANE
     w.poll(["@1"])

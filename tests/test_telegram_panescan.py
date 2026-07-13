@@ -218,6 +218,56 @@ def test_single_select_tracks_a_moved_cursor():
     assert uq.cursor == 1  # ❯ moved to option 2 (Banana)
 
 
+def test_single_select_scrapes_a_description_for_every_option():
+    uq = detect_askuserquestion(ASKUQ_SINGLE_PANE)
+    assert uq is not None
+    # Positionally parallel to `options` — Claude Code renders EVERY option's
+    # description, not just the cursor-focused one (CMX-32, measured live).
+    assert uq.descriptions == (
+        "A crisp red fruit",
+        "A soft yellow fruit",
+        "A small red fruit",
+    )
+
+
+# Captured live (Claude Code 2.1.207, CMX-32) — a 4-option selector with long
+# labels and multi-line WRAPPED descriptions, the shape that made the question
+# unanswerable when the options only existed as button captions.
+ASKUQ_LONG_PANE = """\
+ ☐ History
+
+Which repo-history strategy should we use?
+
+❯ 1. Squash the entire branch into a single commit before merging into main
+     Every change on the branch collapses into one commit with one message. Main stays extremely clean and
+     each merge maps to exactly one logical unit of work.
+  2. Rebase the branch onto main and preserve every individual commit as-is
+     History stays linear and every commit is retained, so bisect can pinpoint the exact commit that broke
+     something.
+  3. Merge with a true merge commit and keep the full branch topology intact
+     Nothing is rewritten: the branch's real shape, timing, and parallel work are all preserved.
+  4. Type something.
+─────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
+
+def test_long_option_descriptions_are_unwrapped_and_stay_with_their_option():
+    uq = detect_askuserquestion(ASKUQ_LONG_PANE)
+    assert uq is not None
+    assert uq.options[0].startswith("Squash the entire branch")
+    assert len(uq.options) == 3  # meta-rows excluded
+    # A description wrapped across pane lines is rejoined into one string …
+    assert uq.descriptions[0].startswith("Every change on the branch collapses")
+    assert uq.descriptions[0].endswith("one logical unit of work.")
+    # … and never bleeds into the next option (nor does the ───── rule).
+    assert "Rebase" not in uq.descriptions[0]
+    assert "─" not in uq.descriptions[2]
+    assert uq.descriptions[2].startswith("Nothing is rewritten")
+
+
 def test_multi_tab_selector_is_the_fallback_shape():
     uq = detect_askuserquestion(ASKUQ_MULTI_PANE)
     assert uq is not None

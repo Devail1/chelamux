@@ -30,9 +30,11 @@ from chela.telegram.interactive import (
     nav_only_markup,
     permission_reply_markup,
     plan_reply_markup,
+    SELECT_SETTLE_S,
     scraped_reply_markup,
     select_keystrokes,
     select_keystrokes_relative,
+    split_select_keys,
 )
 from chela.telegram.parser import Message
 
@@ -75,6 +77,18 @@ def test_cursor_relative_keystrokes_move_down_up_or_stay():
     # Target above the cursor (the operator arrowed down first) → Up×delta.
     # Verify case from the TODO: current=1, target=0 → one Up.
     assert select_keystrokes_relative(0, 1) == ["Up", "Enter"]
+
+
+def test_submit_is_split_off_so_enter_cannot_race_the_cursor_moves():
+    # Live (CMX-32): Down Down Enter sent back-to-back submitted option 2, not 3 —
+    # the selector answers Enter against the row it held before the last move. The
+    # moves and the submit must go out separately, with SELECT_SETTLE_S between.
+    assert split_select_keys(["Down", "Down", "Enter"]) == (["Down", "Down"], ["Enter"])
+    # Cursor already on target → nothing to settle, just submit.
+    assert split_select_keys(["Enter"]) == ([], ["Enter"])
+    # A sequence with no trailing submit is left whole (nothing to race).
+    assert split_select_keys(["Up"]) == (["Up"], [])
+    assert SELECT_SETTLE_S > 0
     assert select_keystrokes_relative(0, 3) == ["Up", "Up", "Up", "Enter"]
 
 
@@ -82,15 +96,31 @@ def test_cursor_relative_keystrokes_move_down_up_or_stay():
 # scraped_reply_markup / nav_only_markup — the pane-triggered keyboards
 # --------------------------------------------------------------------------
 
-def test_scraped_markup_one_semantic_button_per_option_then_esc_only():
+def test_scraped_markup_is_compact_numeric_selectors_then_esc_only():
     markup = scraped_reply_markup(["main", "dev"])
-    # One index-only semantic row per scraped option …
-    assert markup["inline_keyboard"][0] == [{"text": "main", "callback_data": "qa:0"}]
-    assert markup["inline_keyboard"][1] == [{"text": "dev", "callback_data": "qa:1"}]
+    # Buttons are bare NUMBERS, not the labels: a caption is the one Telegram
+    # surface that hard-truncates to a single line, so a label there is unreadable
+    # on a phone. The full labels live in the message body (which wraps); these
+    # just select them, 1-based caption ↔ 0-based index.
+    assert markup["inline_keyboard"][0] == [
+        {"text": "1", "callback_data": "qa:0"},
+        {"text": "2", "callback_data": "qa:1"},
+    ]
     # … then ⎋ alone (Slice C2): Telegram shows no caret, so ↑ ↓ ⏎ 🔄 would be blind
     # presses and the option buttons already answer the question.
     assert markup["inline_keyboard"][-1] == [
         {"text": "⎋ Esc", "callback_data": "qa:nav:esc"}
+    ]
+
+
+def test_scraped_markup_packs_selectors_a_few_per_row_in_option_order():
+    markup = scraped_reply_markup([f"option {i}" for i in range(6)])
+    rows = markup["inline_keyboard"][:-1]  # drop the ⎋ row
+    assert [[b["text"] for b in row] for row in rows] == [["1", "2", "3", "4"], ["5", "6"]]
+    # Order is load-bearing: a tap injects (i − cursor) Down/Up presses against the
+    # live selector, so button N must still be option N, with no gaps.
+    assert [c for c in _callbacks(markup) if not c.startswith("qa:nav:")] == [
+        f"qa:{i}" for i in range(6)
     ]
 
 
@@ -100,8 +130,8 @@ def test_scraped_markup_callback_data_is_index_only_within_64_bytes():
     assert semantic == ["qa:0", "qa:1"]
     for cb in _callbacks(markup):
         assert len(cb.encode()) <= 64
-    # The 400-char label is truncated for display, never packed into the payload.
-    assert len(_buttons(markup)[0]["text"]) < 400
+    # A 400-char label can't bloat a caption either — the caption is just "1".
+    assert _buttons(markup)[0]["text"] == "1"
 
 
 def test_nav_only_markup_is_just_the_nav_row():

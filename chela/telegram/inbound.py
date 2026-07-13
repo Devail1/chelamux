@@ -42,9 +42,11 @@ from chela import config, messenger
 from chela.telegram import media
 from chela.telegram.format import to_code_block
 from chela.telegram.interactive import (
+    SELECT_SETTLE_S,
     decode_callback,
     select_keystrokes,
     select_keystrokes_relative,
+    split_select_keys,
 )
 from chela.telegram.panescan import detect_askuserquestion
 
@@ -559,20 +561,6 @@ def build_application(
         except Exception:  # unchanged pane, stale message, or no Pillow — ignore
             log.debug("snapshot refresh after keypress failed", exc_info=True)
 
-    def _tapped_label(query, data: str) -> "str | None":
-        """The caption of the tapped button, read from the message's own keyboard.
-
-        Lets the toast echo the option's label without ever packing that label
-        into ``callback_data`` (which stays index-only, under Telegram's 64-byte
-        cap). Returns None if the keyboard is gone (edited/stale message).
-        """
-        markup = getattr(query.message, "reply_markup", None) if query.message else None
-        for row in getattr(markup, "inline_keyboard", None) or []:
-            for button in row:
-                if getattr(button, "callback_data", None) == data:
-                    return button.text
-        return None
-
     def _select_keys_for(window_id: str, target: int) -> "list[str]":
         """Cursor-relative keystrokes to pick option ``target``, re-reading the pane.
 
@@ -630,11 +618,21 @@ def build_application(
             return
         # kind == "select": re-read the live cursor, then inject the keystrokes
         # that move to + submit option i (never a blind Down×i from option 0).
+        moves, submit = split_select_keys(_select_keys_for(window_id, payload))
         ok = True
-        for key in _select_keys_for(window_id, payload):
+        for key in moves:
             ok = send_key(window_id, key) and ok
-        label = _tapped_label(query, query.data or "") or f"Option {payload + 1}"
-        await query.answer(f"✓ {label}"[:200] if ok else "❌ send failed")
+        if moves and submit:
+            # The selector commits arrow moves on a render tick; an Enter in the
+            # same input burst submits the row it was on BEFORE the last move (live
+            # CMX-32: tapping 3 answered 2). Let it settle first.
+            await asyncio.sleep(SELECT_SETTLE_S)
+        for key in submit:
+            ok = send_key(window_id, key) and ok
+        # The buttons are bare numeric selectors now (the option text lives in the
+        # message body, the one surface Telegram doesn't truncate), so the toast
+        # echoes the number rather than reading a label back off the keyboard.
+        await query.answer(f"✓ Option {payload + 1}" if ok else "❌ send failed")
 
     # Our own @username, learned from the Bot API at startup (never hardcoded) and
     # cached here — it is needed on EVERY group command, and get_me() is a network
