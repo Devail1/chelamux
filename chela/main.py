@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +46,55 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("chela")
+
+
+class GracefulShutdown:
+    """SIGINT/SIGTERM → a flag + an interruptible wait. No traceback, prompt exit.
+
+    Python's default SIGINT handler raises KeyboardInterrupt *wherever the interpreter
+    happens to be*, so a ``while True: ... time.sleep()`` daemon died with a traceback
+    pointing at whatever line the loop was on when the signal landed. That is worse
+    than useless: every ``pm2 restart`` left a stack trace fingering an innocent line
+    (it blamed the inbox tick, and cost real debugging time chasing a crash-loop that
+    was just a restart). Noise that masks real errors is a bug, not a cosmetic issue.
+
+    Installing our own handler means the signal raises NOTHING — it sets an
+    :class:`threading.Event`. Two consequences the loops rely on:
+
+    * ``wait()`` replaces ``time.sleep()``, so a signal arriving during the idle gap
+      returns IMMEDIATELY instead of sitting out the rest of a 30s nap. PM2 sends
+      SIGINT and SIGKILLs after a short grace period, so a daemon that naps through
+      its notice gets force-killed; this one exits under its own power.
+    * ``stopping`` is checked between phases of a tick, so a signal mid-tick doesn't
+      start new work — the loop finishes what it's doing and leaves.
+    """
+
+    def __init__(self, name: str):
+        self._name = name
+        self._event = threading.Event()
+        self.signame: str | None = None
+
+    def install(self) -> "GracefulShutdown":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, self._handle)
+        return self
+
+    def _handle(self, signum, _frame) -> None:
+        self.signame = signal.Signals(signum).name
+        # Re-entrant by design: a second Ctrl-C just re-sets an already-set flag. It
+        # must never raise, or we are back to a traceback on the way out the door.
+        self._event.set()
+
+    @property
+    def stopping(self) -> bool:
+        return self._event.is_set()
+
+    def wait(self, seconds: float) -> bool:
+        """Sleep, returning True the moment a shutdown signal arrives."""
+        return self._event.wait(seconds)
+
+    def log_exit(self) -> None:
+        log.info("%s: shutting down (%s)", self._name, self.signame or "stop requested")
 
 
 def cmd_status(args) -> None:
@@ -84,8 +135,9 @@ def cmd_run(args) -> None:
     # requiring a daemon restart before the feature ever works is dead on arrival. We
     # only log the TRANSITION (unregistered -> @0), so a 30s loop stays quiet.
     inbox_orch = object()   # sentinel: distinct from every real value, incl. None
+    stop = GracefulShutdown("chela daemon").install()
 
-    while True:
+    while not stop.stopping:
         try:
             executed = scheduler.tick()
             if executed:
@@ -102,6 +154,8 @@ def cmd_run(args) -> None:
                 log.exception("Window-name reconcile failed")
 
             now = time.time()
+            if stop.stopping:
+                break          # a signal landed mid-tick: don't start new work
             if DISPATCH_WORKFLOWS and now - last_dispatch_check >= DISPATCH_TICK_INTERVAL:
                 for wf_path in DISPATCH_WORKFLOWS:
                     try:
@@ -133,7 +187,9 @@ def cmd_run(args) -> None:
                     log.exception("Decisions-inbox tick failed")
         except Exception:
             log.exception("Error in daemon loop")
-        time.sleep(SCHEDULER_POLL_INTERVAL)
+        stop.wait(SCHEDULER_POLL_INTERVAL)
+
+    stop.log_exit()
 
 
 def cmd_schedule_add(args) -> None:
@@ -341,14 +397,17 @@ def cmd_dispatch(args) -> None:
         print(summary)
         return
     log.info("Dispatcher starting (workflow=%s, interval=%ds)", args.workflow, interval)
-    while True:
+    stop = GracefulShutdown("chela dispatcher").install()
+    while not stop.stopping:
         try:
             summary = dispatcher.tick(args.workflow)
             if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
                 log.info("Dispatch tick: %s", summary)
         except Exception:
             log.exception("Dispatch tick failed")
-        time.sleep(interval)
+        stop.wait(interval)
+
+    stop.log_exit()
 
 
 def _filter_runs(runs: list[dict], status: str | None) -> list[dict]:
