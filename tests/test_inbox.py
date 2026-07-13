@@ -21,10 +21,23 @@ import time
 
 import pytest
 
-from chela import inbox
+from chela import dispatcher, inbox
 
 ORCH = "@1"      # the orchestrator's own window
 AGENT = "@2"     # a window it delegated work to
+
+
+@pytest.fixture(autouse=True)
+def no_live_runs(monkeypatch):
+    """Default: the dispatcher has no runs.
+
+    ``tick(prev)`` with no ``runs=`` falls back to ``dispatcher.list_runs()``, which
+    reads the REAL runs DB under ``~/.chela``. Without this the suite was green only on
+    an idle machine: a live run parked in ``awaiting_review`` synthesized an extra event
+    into the tmp store and every count assertion here went off by one. The ``runs=``
+    parameter is the seam — a test that wants run events passes them in explicitly.
+    """
+    monkeypatch.setattr(dispatcher, "list_runs", lambda: [])
 
 
 @pytest.fixture
