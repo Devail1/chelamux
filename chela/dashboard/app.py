@@ -11,6 +11,7 @@ core CLI never imports this module at top level.
 """
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import logging
@@ -2946,7 +2947,17 @@ def main():
     scheduler.init()  # open the WAL scheduler DB + init schema once, before serving
     _start_notifier()
     collab.start()  # P3: publish running agents as presence peers (to shared viewers)
-    app.run(host=host, port=port, debug=False, threaded=True)
+
+    # Write down the port we are really binding, so another process (`chela plugin`,
+    # `chela doctor`) can address us without guessing. A hook `url` is a literal baked
+    # into the plugin manifest at render time — get this wrong and every hook POSTs into
+    # a closed socket, fails open, and the feature does nothing at all, quietly.
+    config.publish_dashboard_port(port, host)
+    atexit.register(config.clear_dashboard_port)
+    try:
+        app.run(host=host, port=port, debug=False, threaded=True)
+    finally:
+        config.clear_dashboard_port()
 
 
 if __name__ == "__main__":

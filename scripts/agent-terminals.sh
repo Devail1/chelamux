@@ -25,6 +25,11 @@
 set -o pipefail
 
 cd "$(dirname "$0")/.."
+
+# Config comes from $CHELA_DIR/chela.env, like every other chela process — never from a
+# PM2 `env:` block (that second copy is what drifted). An exported value still wins.
+# shellcheck source=scripts/chela-env.sh
+. scripts/chela-env.sh
 if [[ -n "${PYTHON:-}" ]]; then :;
 elif [[ -x .venv/bin/python ]]; then PYTHON=".venv/bin/python";
 else PYTHON="python3"; fi

@@ -95,7 +95,10 @@ def event_type(hook_event_name: str) -> str:
 # precedence) — which is exactly right for something that only observes.
 
 def hook_url(event: str, port: int | None = None, host: str = "127.0.0.1") -> str:
-    return f"http://{host}:{port or config.dashboard_port()}/hooks/{event}"
+    """The URL a hook POSTs to. The port defaults to the one the running dashboard
+    PUBLISHED (``config.live_dashboard_port``), not merely the one configured — a
+    manifest rendered against a port nobody is listening on is the whole CMX-41 bug."""
+    return f"http://{host}:{port or config.live_dashboard_port()}/hooks/{event}"
 
 
 def hooks_spec(port: int | None = None) -> dict:

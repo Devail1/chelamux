@@ -260,6 +260,7 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | `chela knowledge export [--out DIR] [--since DATE]` | Write an [OKF](docs/OKF.md) bundle of runs / schedules / agents / projects |
 | `chela events [--after-seq N] [--type T] [--wid @N] [--follow]` | Replay / filter / tail the [event log](docs/EVENTS.md) — the durable record of what happened |
 | `chela plugin [--dir PATH] [--port N]` | Render the [Claude Code hooks plugin](docs/HOOKS.md) that feeds the event log |
+| `chela doctor` | Check the running config against `~/.chela/chela.env` — [drift is silent otherwise](docs/CONFIG.md) |
 
 **Agent-facing** — an agent runs these *about its siblings*, from inside its own
 window (it knows itself via `$CHELA_WID`, injected at spawn):
@@ -278,10 +279,25 @@ window (it knows itself via `$CHELA_WID`, injected at spawn):
 
 ## Config (environment)
 
+The environment is the single source of truth, and it is written down in **one file**:
+
+```bash
+cp examples/chela.env ~/.chela/chela.env    # sourced by chela and by scripts/run-chela.sh
+chela doctor                                # does what's RUNNING still match the file?
+```
+
+An exported variable beats the file; the file beats the defaults; and chela runs correctly
+from a plain shell with neither. Nothing else keeps a copy — a process manager's `env:`
+block is a second place for config to live, and that is where drift comes from. Start
+services with `scripts/run-chela.sh` (see `examples/ecosystem.config.js`), and read
+**[docs/CONFIG.md](docs/CONFIG.md)** for the precedence rules, the PM2 migration, and why
+the dashboard *publishes* the port it bound.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `CHELA_TMUX_SESSION` | `chela` | tmux session chela orchestrates |
 | `CHELA_DIR` | `~/.chela` | State dir (scheduler.db, worktrees, context) |
+| `CHELA_ENV_FILE` | `$CHELA_DIR/chela.env` | The env file itself. Empty = don't read one |
 | `CHELA_SCHEDULER_POLL_INTERVAL` | `30` | Daemon loop interval (s) |
 | `CHELA_DISPATCH_WORKFLOWS` | — | Colon-separated WORKFLOW.md paths the daemon dispatches |
 | `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick interval in the daemon (s) |
@@ -295,7 +311,7 @@ window (it knows itself via `$CHELA_WID`, injected at spawn):
 | `CHELA_ORCHESTRATOR_WID` | — | Pin the window the inbox pushes into (`@0`). Otherwise it's whichever session ran `chela watch` |
 | `CHELA_IGNORE_WINDOWS` | — | Comma-separated window names to hide from discovery (placeholder/keep-alive windows) |
 | `CHELA_SHOW_TOOL_CALLS` | `false` | Relay each agent's tool calls to Telegram too (noisy; off by default) |
-| `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind |
+| `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind. The hooks plugin POSTs to this port, so set it **here**, not with `chela dashboard --port` (a per-process override nothing else can see) |
 | `CHELA_TERMINALS_ENABLED` | `true` | Embedded ttyd terminal wall (streams live; loopback-guarded — see below) |
 | `CHELA_TERMINALS_EXPOSE` | `false` | Serve the writable wall on a **non-loopback** bind too (RCE risk — opt-in) |
 | `CHELA_DEFAULT_CONTEXT_WINDOW` | `200000` | Window size assumed by the transcript-based context estimate (fallback only) |

@@ -26,6 +26,12 @@ variables in it — so render your own copy of this plugin with the right port b
 chela plugin --dir ~/.chela/plugin      # then: claude --plugin-dir ~/.chela/plugin
 ```
 
+`chela plugin` takes the port from the **running** dashboard (which publishes what it
+actually bound to `$CHELA_DIR/dashboard.port`), not from whatever this shell's environment
+says — the two disagreeing is how the manifest once came to name a port nobody served, and
+a hook that cannot connect fails open, silently. `chela doctor` re-checks it afterwards;
+re-render whenever the dashboard moves.
+
 If the daemon is down, the hooks simply fail open: Claude Code logs a warning, the event
 is lost, and **your agent carries on**. It will never wedge a session.
 

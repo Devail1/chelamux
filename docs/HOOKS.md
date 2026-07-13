@@ -51,6 +51,14 @@ claude --plugin-dir ~/.chela/plugin     # one session
 # ...or /plugin marketplace add ~/.chela/plugin   (it is a one-plugin marketplace too)
 ```
 
+"Actually on" is meant literally, and it is the difference between this feature working
+and doing nothing at all: the dashboard **publishes the port it bound** to
+`$CHELA_DIR/dashboard.port`, and `chela plugin` — a different process, which sees none of
+the dashboard's own environment — renders *that*. When it was left to read
+`CHELA_DASHBOARD_PORT` instead, a dashboard started with `--port 5005` produced a manifest
+aimed at 5001; every hook POSTed into a closed socket, failed open exactly as designed, and
+said nothing. Run `chela doctor` if you suspect it (see [CONFIG.md](CONFIG.md)).
+
 Restart an agent to pick the hooks up. A running one will not.
 
 ## How an event gets in
@@ -60,6 +68,8 @@ Each hook is an **`http`** hook posting to the daemon the dashboard is already r
 ```json
 {"type": "http", "url": "http://127.0.0.1:5001/hooks/PreToolUse", "timeout": 2}
 ```
+
+(5001 is chela's default port; the rendered manifest carries whatever yours is on.)
 
 No shell script, no process spawn per tool call, no PATH assumption — and no way for a
 chatty `.bashrc` to put stray stdout into the JSON contract a `command` hook has to
