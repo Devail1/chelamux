@@ -52,6 +52,80 @@ _PROMPT_CHAR = "❯"  # ❯
 
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:[/?#]|$)")
 
+# --- agent launch command ---------------------------------------------------
+#
+# The command that spawns an agent is a SHELL STRING, so nothing user-editable
+# may ever reach it verbatim. What the dashboard may set is the permission mode
+# and nothing else: a closed enum, validated here (server-side) on both write
+# and read, with the rest of the command line fixed in code below. A value
+# outside the enum fails closed to the built-in default — it never reaches a
+# shell. Do NOT turn this into an editable command string: the dashboard is
+# reachable over the tailnet, and a free-text `agent.cmd` field would be remote
+# code execution by design.
+#
+# The enum is the mode list the installed CLI actually accepts
+# (`claude --help` → --permission-mode choices). Note there is no "default"
+# mode; omitting the flag is what "the CLI's own default" means.
+PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")
+
+# Default to auto: a classifier auto-approves safe ops and gates dangerous ones.
+# NOT bypassPermissions (reckless as an OSS default). Auto-mode is a CLI flag
+# only (ignored from .claude/settings.json) and needs Opus/Sonnet 4.6+ on the
+# Anthropic API.
+DEFAULT_PERMISSION_MODE = "auto"
+
+# The dashboard-writable key in ~/.chela/config.json (see chela.userconfig).
+PERMISSION_MODE_KEY = "agent_permission_mode"
+
+AGENT_BASE_CMD = "claude"
+
+
+def settings_permission_mode() -> str | None:
+    """The permission mode set from Settings, or None if unset/invalid.
+
+    Read defensively: the dispatcher runs unattended under PM2, so a missing,
+    corrupt, or hand-edited config.json must degrade to "unset" (→ built-in
+    default), never crash the daemon loop and never yield an unvalidated string.
+    """
+    try:
+        from chela import userconfig
+        val = userconfig.get(PERMISSION_MODE_KEY)
+    except Exception:  # unreadable config, import failure — fail closed
+        return None
+    return val if val in PERMISSION_MODES else None
+
+
+def resolve_agent_cmd(wf: WorkflowDef) -> tuple[str, str]:
+    """The command that launches an agent, and where it came from.
+
+    PRECEDENCE (highest first) — the one place this is decided:
+
+      1. ``agent.cmd`` in WORKFLOW.md  → source ``"workflow"``.
+         An explicit per-workflow override stays authoritative: it is set by
+         someone who can already write files in the repo, so it may be any
+         command, and it deliberately shadows Settings.
+      2. the Settings permission mode → source ``"settings"``.
+         ``agent_permission_mode`` in ~/.chela/config.json, written by the
+         dashboard. Only ever one of :data:`PERMISSION_MODES`; anything else is
+         treated as unset (fail closed) rather than interpolated.
+      3. the built-in default        → source ``"default"``.
+         ``claude --permission-mode auto``.
+
+    Because (1) shadows (2), a workflow that pins ``agent.cmd`` makes the
+    Settings control inert *for that workflow* — which is why chelamux's own
+    WORKFLOW.md no longer sets it, and why the dashboard surfaces the winning
+    source instead of implying the setting always applies.
+
+    Returns ``(cmd, source)``.
+    """
+    cmd = wf.get("agent", "cmd", default=None)
+    if isinstance(cmd, str) and cmd.strip():
+        return cmd.strip(), "workflow"
+    mode = settings_permission_mode()
+    if mode:
+        return f"{AGENT_BASE_CMD} --permission-mode {mode}", "settings"
+    return f"{AGENT_BASE_CMD} --permission-mode {DEFAULT_PERMISSION_MODE}", "default"
+
 
 def _task_file_relative(task_file: str, repo_path: Path) -> str:
     """Path of the source file relative to the repo, or "" for non-file sources.
@@ -825,14 +899,11 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # window can make send-keys ambiguous and exit non-zero.
     target_id = _new_window(window_name, str(worktree))
 
-    # Default to --permission-mode auto: a classifier auto-approves safe ops and
-    # gates dangerous ones. NOT --dangerously-skip-permissions (reckless as an
-    # OSS default). Override per-workflow via agent.cmd in WORKFLOW.md — a
-    # power-user on a trusted repo can opt into `--permission-mode
-    # bypassPermissions` for zero-hang autonomy. Auto-mode is a CLI flag only
-    # (ignored from .claude/settings.json) and needs Opus/Sonnet 4.6+ on the
-    # Anthropic API.
-    agent_cmd = wf.get("agent", "cmd", default="claude --permission-mode auto")
+    # WORKFLOW.md's agent.cmd → the Settings permission mode → the built-in
+    # default (see resolve_agent_cmd). The mode is fixed at spawn: changing it in
+    # Settings affects the NEXT dispatch, never an agent already running.
+    agent_cmd, cmd_source = resolve_agent_cmd(wf)
+    log.info("Launching %s with %r (source: %s)", task.id, agent_cmd, cmd_source)
     # Export CHELA_WID first so the worktree agent knows its own window id
     # (self-identity for peek/read/drive), then launch. Only when we captured a
     # real @id — _new_window falls back to the bare name under a mock.
@@ -947,8 +1018,9 @@ def dry_run(workflow_path: str | Path) -> list[dict]:
     """Compute what `tick` would dispatch, without touching tmux, hooks, or the DB.
 
     Returns one dict per open task with keys: task_id, title, worktree_path,
-    branch, prompt. The worktree path is the would-be path — no git worktree
-    is created.
+    branch, prompt, agent_cmd, agent_cmd_source. The worktree path is the
+    would-be path — no git worktree is created; agent_cmd is the command that
+    live dispatch WOULD run (see resolve_agent_cmd), previewed but not executed.
 
     Reuses any task_number already assigned to a known task_id; for unknown
     tasks, projects a synthetic sequence above the current MAX(task_number) so
@@ -962,6 +1034,7 @@ def dry_run(workflow_path: str | Path) -> list[dict]:
     project_key = wf.project_key
     root = resolve_workspace_root(wf)
     repo_path = wf.path.parent
+    agent_cmd, agent_cmd_source = resolve_agent_cmd(wf)
 
     with _db() as conn:
         max_row = conn.execute(
@@ -1006,5 +1079,7 @@ def dry_run(workflow_path: str | Path) -> list[dict]:
             "worktree_path": str(worktree),
             "branch": branch,
             "prompt": prompt,
+            "agent_cmd": agent_cmd,
+            "agent_cmd_source": agent_cmd_source,
         })
     return plans

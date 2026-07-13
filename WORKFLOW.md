@@ -17,7 +17,12 @@ concurrency:
   max: 1                    # pilot: one task in flight
 
 agent:
-  cmd: claude --permission-mode auto
+  # No `cmd:` here on purpose. An explicit agent.cmd is an authoritative
+  # per-workflow override that SHADOWS the permission mode set in the dashboard's
+  # Settings drawer (precedence: agent.cmd → Settings mode → the built-in
+  # `claude --permission-mode auto`; see dispatcher.resolve_agent_cmd). Leaving it
+  # unset is what makes the Settings control reachable for this workflow. Set it
+  # only to pin a workflow to a command regardless of Settings.
   startup_delay_seconds: 4
   ready_timeout_seconds: 60
 
