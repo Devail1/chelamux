@@ -129,25 +129,38 @@ _SNAPSHOT_MAX_CHARS = 3500
 # operator can drive the bound terminal from Telegram (ccbot's "with control
 # keys" parity). Each entry is ``(label, key_id, tmux_key)``: the button caption,
 # the id packed into the callback payload, and the tmux ``send-keys`` key name
-# delivered on a tap. Rows render exactly as grouped here (3 keys per row).
-SCREENSHOT_KEYS: list[list[tuple[str, str, str]]] = [
+# delivered on a tap. Rows render exactly as grouped here.
+#
+# The arrows are **glyph-only** — the direction is in the glyph, and a worded
+# caption ("→ Right") only steals width Telegram then truncates on a narrow
+# phone. ``ref`` is the odd one out: it fires no key, it re-captures the pane
+# (see :data:`_REFRESH_KEY_ID`), so it carries no tmux key and gets its own
+# full-width row — it is the button reached for most, between keypresses.
+SCREENSHOT_KEYS: list[list[tuple[str, str, str | None]]] = [
     [("␣ Space", "spc", "Space"), ("↑", "up", "Up"), ("⇥ Tab", "tab", "Tab")],
-    [("← Left", "lt", "Left"), ("↓ Down", "dn", "Down"), ("→ Right", "rt", "Right")],
+    [("←", "lt", "Left"), ("↓", "dn", "Down"), ("→", "rt", "Right")],
     [("⎋ Esc", "esc", "Escape"), ("^C", "cc", "C-c"), ("⏎ Enter", "ent", "Enter")],
+    [("🔄", "ref", None)],
 ]
 
 # Callback-data prefix marking a control-key tap from the screenshot keyboard,
 # so the single CallbackQueryHandler can tell these taps from any other.
 _KEY_CB_PREFIX = "k:"
 
+# The key_id of the 🔄 button: a tap re-captures the pane instead of sending a
+# key, so it is deliberately absent from :data:`_KEY_ACTIONS`.
+_REFRESH_KEY_ID = "ref"
+
 # key_id → (tmux key name, toast label), flattened from :data:`SCREENSHOT_KEYS`
 # so a button and the key it fires can never drift apart. The callback handler
 # looks a tapped ``key_id`` up here; the target window is re-resolved from the
 # message's topic (never trusted from the payload), so no window id is packed in.
+# Keyless buttons (🔄) are excluded — they are handled on their own.
 _KEY_ACTIONS: dict[str, tuple[str, str]] = {
     key_id: (tmux_key, label)
     for row in SCREENSHOT_KEYS
     for (label, key_id, tmux_key) in row
+    if tmux_key is not None
 }
 
 
@@ -303,7 +316,8 @@ def build_application(
     :func:`chela.messenger.send_escape`). Tapping a control key routes through a
     single :class:`~telegram.ext.CallbackQueryHandler` that fires
     ``send_key(window_id, tmux_key)`` (default :func:`chela.messenger.send_key`)
-    and refreshes the snapshot in place. Every path resolves its target window
+    and refreshes the snapshot in place; its 🔄 key sends nothing and replies with
+    a fresh snapshot instead. Every path resolves its target window
     through ``router.resolve`` — the callback re-resolves from the keyboard
     message's topic and never trusts a window id off the wire — so they honour the
     exact same chat/topic gate as a routed message, stay silent outside it, and
@@ -462,10 +476,10 @@ def build_application(
     async def _reply_screenshot(reply_to, window_id: str) -> None:
         """Capture ``window_id`` and reply to ``reply_to`` with a PNG snapshot.
 
-        Shared by the ``/screenshot`` command and the AskUserQuestion 🔄 refresh
-        button: replies into the message's own forum topic, carries the
-        control-key keyboard, and degrades to a text snapshot when Pillow is
-        absent or rendering fails.
+        Shared by the ``/screenshot`` command and both 🔄 refresh buttons (the
+        control keyboard's and AskUserQuestion's): replies into the message's own
+        forum topic, carries the control-key keyboard, and degrades to a text
+        snapshot when Pillow is absent or rendering fails.
         """
         try:
             pane = capture(window_id, ansi=True)  # -e keeps SGR colour for the PNG
@@ -522,7 +536,10 @@ def build_application(
         honours the same chat/topic gate as ``/screenshot`` itself. The tap is
         always answered — even when gated out or unknown — so Telegram stops the
         button's spinner. On a successful key press the snapshot is refreshed in
-        place (best-effort) so the terminal's reaction is visible.
+        place (best-effort) so the terminal's reaction is visible. The 🔄 button
+        sends no key: it replies with a FRESH snapshot (like the AskUserQuestion
+        refresh), because an in-place edit of an unchanged pane is rejected by
+        Telegram — a refresh tap must always show something.
         """
         query = update.callback_query
         if query is None:
@@ -530,13 +547,22 @@ def build_application(
         data = query.data or ""
         if not data.startswith(_KEY_CB_PREFIX):
             return  # not ours — some other inline keyboard
-        action = _KEY_ACTIONS.get(data[len(_KEY_CB_PREFIX):])
+        key_id = data[len(_KEY_CB_PREFIX):]
+        action = _KEY_ACTIONS.get(key_id)
         msg = query.message
         chat = update.effective_chat
         chat_id = chat.id if chat else None
         thread_id = getattr(msg, "message_thread_id", None) if msg else None
         window_id = router.resolve(chat_id, thread_id)
-        if window_id is None or action is None:  # wrong chat/topic or bad payload
+        if window_id is None:  # wrong chat / unbound topic — stay silent
+            await query.answer()
+            return
+        if key_id == _REFRESH_KEY_ID:
+            await query.answer("🔄")
+            if msg is not None:
+                await _reply_screenshot(msg, window_id)
+            return
+        if action is None:  # bad payload
             await query.answer()
             return
         tmux_key, label = action
