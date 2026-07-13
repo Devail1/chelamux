@@ -2,7 +2,7 @@
 
 ## Open — interactive UI (phone approvals)
 
-- [ ] **FLAKY TEST — `test_wait_sleeps_normally_when_no_signal_arrives` asserts on the real wall clock and fails ~1 run in 5 under load.** Caught 2026-07-14 while verifying CMX-43 (it is **not** that PR's fault — it predates it, from `d82729e`, and is on `dev`). `tests/test_graceful_shutdown.py`:
+- [x] **FLAKY TEST — `test_wait_sleeps_normally_when_no_signal_arrives` asserts on the real wall clock and fails ~1 run in 5 under load.** Caught 2026-07-14 while verifying CMX-43 (it is **not** that PR's fault — it predates it, from `d82729e`, and is on `dev`). `tests/test_graceful_shutdown.py`:
   ```python
   started = time.monotonic()
   assert stop.wait(0.2) is False        # no signal → a plain sleep
