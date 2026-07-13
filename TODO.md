@@ -2,6 +2,17 @@
 
 ## Open — interactive UI (phone approvals)
 
+- [ ] **FLAKY TEST — `test_wait_sleeps_normally_when_no_signal_arrives` asserts on the real wall clock and fails ~1 run in 5 under load.** Caught 2026-07-14 while verifying CMX-43 (it is **not** that PR's fault — it predates it, from `d82729e`, and is on `dev`). `tests/test_graceful_shutdown.py`:
+  ```python
+  started = time.monotonic()
+  assert stop.wait(0.2) is False        # no signal → a plain sleep
+  assert time.monotonic() - started >= 0.15
+  ```
+  Observed failure: `assert (28437.504260218 - 28437.388405753) >= 0.15` — the 0.2s wait measured **0.116s** on a busy machine. **A flaky test is worse than a failing one**: it teaches everyone to re-run until green, and this repo has *already* shipped four bugs that were green in CI and broken live — a suite nobody trusts is how the fifth gets through. ⚠️ **BEFORE implementing, open `TODO.md`, read items 1–2 + Verify.**
+  1. **Stop asserting on the real clock.** The test's *intent* is "with no signal, `wait()` does not return early — it sleeps." Assert that **behaviourally**, not chronometrically: inject/patch the clock or the underlying `Event`, or assert on what `wait()` **returned** (`False` = timed out, which is already the first assertion and is the real contract) and drop the duration check entirely. If a duration assertion is genuinely wanted, it must tolerate a starved scheduler (a wide margin is a smell — prefer a fake clock, as `tests/test_telegram_status.py` correctly does for its throttle).
+  2. **Sweep for the same shape.** Grep the suite for other real-clock assertions (`time.monotonic()`, `time.time()`, `time.sleep` + a duration assert) and fix them the same way. A CI box under load is exactly where these fire.
+  **Landmines:** don't delete the test — the graceful-shutdown contract it guards is real (a daemon that returns early from `wait()` would spin); don't "fix" it by widening the margin to something like `>= 0.05` (that is the same bug with a longer fuse); keep the other tests in the file (a second signal must not raise). Keep `uv run ruff check chela tests` green + `uv run pytest -q`. **Reference:** `tests/test_graceful_shutdown.py`, `chela/` (`GracefulShutdown` — the thing under test), `tests/test_telegram_status.py` (the **fake-clock** pattern to copy). **Verify:** the decisive check is **statistical, not a single green run** — run the full suite **20×** under concurrent load (e.g. with other pytest processes running) and show **20/20 green**. State that in the PR. One green run proves nothing about a flake.
+
 - [ ] **`/screenshot` keyboard: drop the arrow WORD-labels, and add the missing 🔄 refresh.** Liav, 2026-07-13: *"in the screenshot keys, no need to write the arrows labels, and i'm missing the refresh button."* Two defects in `SCREENSHOT_KEYS` (`chela/telegram/inbound.py` ~134):
   ```
   ␣ Space   ↑        ⇥ Tab        <- ↑ is bare, but...
