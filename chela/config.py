@@ -62,6 +62,31 @@ IGNORE_WINDOWS = {
     w.strip() for w in os.environ.get("CHELA_IGNORE_WINDOWS", "").split(",") if w.strip()
 }
 
+DEFAULT_DASHBOARD_PORT = 5001
+
+
+def dashboard_host() -> str:
+    return os.environ.get("CHELA_DASH_HOST", "127.0.0.1")
+
+
+def dashboard_port() -> int:
+    """Where the dashboard binds — the ONE authority for the number.
+
+    The Claude Code hooks plugin POSTs to it, and a plugin manifest is static JSON:
+    Claude Code does NOT expand env vars in a hook ``url`` (measured on 2.1.207), so
+    the port is baked into the plugin when it is rendered (``chela plugin`` — see
+    :mod:`chela.hooks`). A port read from two places is a plugin quietly posting into
+    a closed socket, which looks exactly like "hooks don't work".
+
+    Resolved per call, never at import: ``chela dashboard --port`` sets the env var
+    *after* this module is imported, and a cached constant would ignore it.
+    """
+    try:
+        return int(os.environ.get("CHELA_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT))
+    except ValueError:
+        return DEFAULT_DASHBOARD_PORT
+
+
 # Context-window status-line cache, written by scripts/cache-statusline.sh after
 # each assistant turn. The daemon reads these to track per-agent context usage.
 CONTEXT_CACHE_DIR = CHELA_DIR / "context"

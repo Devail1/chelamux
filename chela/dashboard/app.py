@@ -25,7 +25,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, collab, collab_stream, context, discovery, dispatcher, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, collab, collab_stream, context, discovery, dispatcher, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -1582,6 +1582,41 @@ def api_agents_kill():
 
 
 # ---------------------------------------------------------------------------
+# Hook ingestion — Claude Code hooks -> the event log. OBSERVE-ONLY.
+# ---------------------------------------------------------------------------
+
+@app.route("/hooks/<event>", methods=["POST"])
+@require_auth
+def api_hooks(event):
+    """Receive one Claude Code hook and append it to the event log. Nothing else.
+
+    The plugin (``plugin/hooks/hooks.json``, rendered by :func:`chela.hooks.hooks_spec`)
+    POSTs each event here as an ``http`` hook, so there is no shell script and no process
+    spawn per tool call. Correlation to a window happens off ``cwd`` — no pane is read.
+
+    **OBSERVE-ONLY, and the response is the reason it stays that way.** An agent is
+    *blocked* on this request, and Claude Code reads what comes back: a
+    ``permissionDecision`` or a ``hookSpecificOutput`` in this body would silently start
+    answering the user's permission prompts on their behalf. So the body is ``{}``,
+    always — the only thing that can block a tool call is a command hook exiting 2, and
+    this is not one. If a future slice ever answers a gate from here, that is a decision
+    to make out loud, not a field to add quietly.
+
+    It also never fails the caller. A malformed payload, an unparseable body, a full
+    disk: 200 and an empty object, every time. The agent's tool call is not ours to
+    break, and the daemon being down at all is already a fail-OPEN path (the connection
+    is refused, the agent proceeds, the event is lost).
+    """
+    if event not in hooks.HOOK_EVENTS:
+        abort(404)
+    if (request.content_length or 0) > hooks.MAX_BODY:
+        log.warning("hooks: %s body over %d bytes — not read", event, hooks.MAX_BODY)
+        return jsonify({})
+    hooks.ingest(event, request.get_json(force=True, silent=True))
+    return jsonify({})
+
+
+# ---------------------------------------------------------------------------
 # API: Context Usage
 # ---------------------------------------------------------------------------
 
@@ -2889,8 +2924,8 @@ def main():
     # Binds 127.0.0.1 by default — ZERO auth (see module docstring); put it
     # behind a tailnet / SSH tunnel for remote access. Override host/port with
     # CHELA_DASH_HOST / CHELA_DASHBOARD_PORT.
-    host = os.environ.get("CHELA_DASH_HOST", "127.0.0.1")
-    port = int(os.environ.get("CHELA_DASHBOARD_PORT", "5001"))
+    host = config.dashboard_host()
+    port = config.dashboard_port()
 
     # Loopback guard for the writable terminal wall. The wall is ON by default,
     # but it serves unauthenticated, writable shells — so if we're binding a

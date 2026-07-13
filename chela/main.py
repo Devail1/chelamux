@@ -27,6 +27,7 @@ from chela import (
     discovery,
     dispatcher,
     event_log,
+    hooks,
     inbox,
     messenger,
     notify,
@@ -408,6 +409,25 @@ def cmd_events_emit(args) -> None:
         print("append failed (see the log)", file=sys.stderr)
         sys.exit(1)
     print(f"seq={record['seq']} boot_id={record['boot_id']} {record['type']}")
+
+
+def cmd_plugin(args) -> None:
+    """Render the Claude Code hooks plugin with THIS install's dashboard port baked in.
+
+    The plugin committed to the repo targets chela's default port, and a hook ``url`` is
+    a literal — Claude Code does not expand env vars in it. So a dashboard on any other
+    port needs its own copy of the manifest, or the hooks post into a closed socket and
+    the feature looks simply broken. This is that copy.
+    """
+    port = args.port or config.dashboard_port()
+    directory = hooks.render_plugin(Path(args.dir).expanduser(), port=port)
+    print(f"plugin rendered at {directory} (posting to 127.0.0.1:{port})")
+    print("\ninstall it for one session:")
+    print(f"  claude --plugin-dir {directory}")
+    print("\nor persistently, from Claude Code:")
+    print(f"  /plugin marketplace add {directory}")
+    print("  /plugin install chela@chela")
+    print("\nHooks are read at agent STARTUP — a running agent will not pick them up.")
 
 
 def cmd_whoami(args) -> None:
@@ -1012,6 +1032,14 @@ def main() -> None:
     p_emit.add_argument("--wid", default=None, help="Window this event is about (@N or N)")
     p_emit.add_argument("--session-id", default=None, help="Claude Code session id, if known")
 
+    # plugin — the Claude Code hooks plugin, with this install's dashboard port in it.
+    p_plugin = sub.add_parser(
+        "plugin", help="Render the Claude Code hooks plugin (feeds the event log)")
+    p_plugin.add_argument("--dir", default=str(config.CHELA_DIR / "plugin"), metavar="PATH",
+                          help="Where to write it (default: $CHELA_DIR/plugin)")
+    p_plugin.add_argument("--port", type=int, default=None, metavar="N",
+                          help="Dashboard port to post to (default: the resolved one)")
+
     p_read = sub.add_parser(
         "read", help="Distilled read of a sibling's Claude Code transcript")
     p_read.add_argument("wid", nargs="?", help="Target window id (@N, N, or 'self'); default self")
@@ -1121,6 +1149,8 @@ def main() -> None:
         cmd_msg(args)
     elif args.command == "broadcast":
         cmd_broadcast(args)
+    elif args.command == "plugin":
+        cmd_plugin(args)
     elif args.command == "whoami":
         cmd_whoami(args)
     elif args.command == "peek":
