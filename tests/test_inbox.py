@@ -564,3 +564,173 @@ def test_a_death_still_fires_once_the_settle_window_has_passed(
 
     assert "DIED mid-task" in sends[0][1]
     assert inbox.watches() == {}
+
+
+# --- BUG (live 2026-07-13): an event is a PROSE SNAPSHOT, so it rots and it shouts ---
+#
+# Delivery is deliberately deferred until the orchestrator is idle, and the world moves
+# in the meantime: `📥 run aeaae296 … is awaiting review — <PR #47>` was pushed AFTER
+# that PR had been reviewed and merged, handing the orchestrator work already done. And
+# because the event was a pre-rendered string built from the run's `title` — which for a
+# markdown tracker is the WHOLE `- [ ]` line — the notification was the entire
+# multi-paragraph task brief. One root cause: the event was a sentence, not a record.
+
+TRACKER_LINE = (
+    "**Make the dispatcher's default agent launch mode editable in Settings (the FIRST "
+    "editable setting — there is no write path yet).** Today the launch command is "
+    "hard-wired in `WORKFLOW.md` … ⚠️ **BEFORE implementing, read items 1–3 + Landmines.**"
+)
+
+
+def _review_run(**over):
+    return {"task_id": "T7", "title": TRACKER_LINE, "status": "awaiting_review",
+            "branch_name": "cmx-34", "window_name": "cmx-34", "pr_state": "open",
+            "pr_url": "https://github.com/x/y/pull/47", **over}
+
+
+def test_a_queued_review_event_whose_pr_merged_before_delivery_is_dropped(
+        store_file, windows, sends, monkeypatch, caplog):
+    # The orchestrator is BUSY when the run lands, so the event queues...
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_review_run()])
+    assert len(inbox.load()["queue"]) == 1
+    assert sends == []
+
+    # ...and by the time it goes idle, the PR has been reviewed and merged. The claim
+    # the event makes is no longer true, so it must never reach the orchestrator.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[_review_run(status="done", pr_state="merged")])
+
+    assert sends == []                              # NOT handed work that is already done
+    assert inbox.load()["queue"] == []              # and the rotted event is retired
+    assert "dropping stale run_review" in caplog.text   # loudly — never silently
+
+
+def test_a_review_event_whose_pr_is_still_open_is_delivered_normally(
+        store_file, windows, sends, monkeypatch):
+    # The re-validation must not eat live events: an open PR is still awaiting review.
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_review_run()])
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    inbox.tick({}, runs=[_review_run()])
+
+    assert len(sends) == 1
+    assert "awaiting review" in sends[0][1] and "pull/47" in sends[0][1]
+
+
+def test_a_stale_event_does_not_spend_the_ticks_delivery_slot(
+        store_file, windows, sends, monkeypatch):
+    # Only ONE event is delivered per idle tick (a paste makes the orchestrator busy).
+    # A dropped event isn't a delivery, so the live one behind it must still go out now.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    store["queue"] = [
+        inbox._event("run_review", "📥 stale", {"task_id": "T7"}),
+        inbox._event("run_review", "📥 live", {"task_id": "T8"}),
+    ]
+    inbox.save(store)
+
+    runs = [_review_run(status="done", pr_state="merged"),
+            _review_run(task_id="T8")]
+    with inbox.locked_store() as st:
+        inbox.deliver(st, {ORCH: inbox.IDLE}, runs)
+
+    assert [t for _, t in sends] == ["📥 live"]
+    assert inbox.load()["queue"] == []
+
+
+def test_a_failed_event_is_dropped_if_the_run_was_retried_into_flight(
+        store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    event = inbox._event("run_failed", "📥 T7 FAILED", {"task_id": "T7"})
+    assert inbox.stale_reason(event, [_review_run(status="failed")]) is None
+    assert inbox.stale_reason(event, [_review_run(status="running")])
+    assert inbox.stale_reason(event, [])            # row deleted → the claim is unmoored
+
+
+def test_a_window_event_is_never_re_validated_away(store_file):
+    # `finished`/`died`/`blocked` assert something that ALREADY happened — there is no
+    # later fact that makes them false, so re-validation must leave them alone.
+    for kind in ("finished", "died", "blocked", "gone_unknown"):
+        event = inbox._event(kind, "📥 @2 (cmx-9) …", {"wid": AGENT}, wid=AGENT)
+        assert inbox.stale_reason(event, []) is None
+
+
+# --- the notification is a SUMMARY; the essay is a PAYLOAD ----------------------
+
+def test_a_run_event_carries_kind_summary_and_payload(store_file, windows, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_review_run()])
+
+    event = inbox.load()["queue"][0]
+    assert event["kind"] == "run_review"
+    assert set(event) >= {"kind", "summary", "payload", "ts"}
+
+    summary = event["summary"]
+    assert "\n" not in summary                     # ONE line — this is a notification
+    assert len(summary) < 200                      # not the multi-paragraph task brief
+    assert "cmx-34" in summary and "PR #47" in summary
+    assert "Landmines" not in summary              # the essay does NOT ride along
+
+    payload = event["payload"]                     # ...it lives here, in full, for the
+    assert payload["task_id"] == "T7"              #    log/UI that will consume it next
+    assert payload["title"] == TRACKER_LINE
+    assert payload["pr_url"].endswith("/pull/47")
+    assert payload["run_status"] == "awaiting_review"
+    assert payload["branch_name"] == "cmx-34"
+
+
+def test_the_tmux_push_renders_only_the_summary(store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_review_run()])
+
+    pushed = sends[0][1]
+    assert "Landmines" not in pushed and "WORKFLOW.md" not in pushed
+    assert pushed.startswith("📥 cmx-34 awaiting review — PR #47")
+
+
+def test_a_legacy_pre_rendered_event_still_delivers(store_file, windows, sends, monkeypatch):
+    # A daemon upgraded mid-flight finds `text`-only events already in inbox.json. They
+    # must still go out — an upgrade may not swallow a queued event.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    store["queue"] = [{"kind": "run_review", "wid": None, "text": "📥 legacy line"}]
+    inbox.save(store)
+
+    inbox.tick({}, runs=[])
+
+    assert [t for _, t in sends] == ["📥 legacy line"]
+
+
+def test_short_title_strips_markup_and_truncates_on_a_word_boundary():
+    assert inbox._short_title("**bold** `code` title") == "bold code title"
+    # `_` and `~` are NOT emphasis here — they are identifiers and approximations.
+    assert inbox._short_title("pr_state after ~30s") == "pr_state after ~30s"
+    cut = inbox._short_title(TRACKER_LINE)
+    assert len(cut) <= inbox.SUMMARY_TITLE_CHARS + 1     # +1 for the ellipsis
+    assert cut.endswith("…") and not cut.endswith(" …")
+    assert inbox._short_title("") == ""
+
+
+def test_pr_ref_reads_the_number_and_falls_back_to_the_url():
+    assert inbox.pr_ref("https://github.com/x/y/pull/47") == "PR #47"
+    assert inbox.pr_ref("https://example.test/nope") == "https://example.test/nope"
+    assert inbox.pr_ref(None) == ""

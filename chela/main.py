@@ -301,7 +301,7 @@ def cmd_watching(args) -> None:
     queue = store["queue"]
     print(f"\nqueued, awaiting your next idle ({len(queue)}):")
     for event in queue:
-        print(f"  {event['text']}")
+        print(f"  {inbox.render(event)}")
 
 
 def cmd_whoami(args) -> None:
