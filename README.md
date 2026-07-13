@@ -13,12 +13,16 @@
 
 **A tiny control plane that puts a fleet of Claude Code agents to work — unattended.**
 
-chela runs as a small daemon over a single tmux session. It does two things:
+chela runs as a small daemon over a single tmux session. It does three things:
 
 - **Schedules** long-lived agents — poke an agent's pane on an interval or cron
   (`every 1h`, `0 */8 * * *`, a one-shot timestamp).
 - **Dispatches** work — turn a markdown `TODO.md` (or GitHub issues) into one
   **git worktree per task**, spawn an agent in it, and let it **open a PR**.
+- **Closes the loop** — when a delegated agent finishes (or blocks, or dies), the
+  daemon **pushes that into the orchestrator agent's own session**, so an agent
+  that gives out work learns when it comes back. See
+  [the orchestration loop](#the-orchestration-loop).
 
 Most tmux + Claude Code tools help you *talk to and supervise* agents; chela is
 for **putting them to work** and walking away. You watch them however you
@@ -71,6 +75,14 @@ already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
   dashboard tracks the 5h / 7d limits so you can see headroom at a glance.
 - **Needs-input alerts** — when an agent blocks on a prompt, chela fires a
   one-shot push (ntfy / Telegram / webhook) so you're not babysitting.
+- **Decisions inbox** — an *orchestrator* agent that hands work to other agents
+  gets told when that work finishes, blocks, or fails: the event is delivered
+  into its own session, but only while it's idle. Without this, agent completion
+  is invisible to an orchestrator (a Claude Code session only acts when something
+  messages it), and a human ends up being the message bus.
+- **Telegram bridge** — one forum topic per agent window: drive or supervise any
+  agent from your phone, two-way (`chela telegram`; see
+  [`skills/telegram-setup`](skills/telegram-setup/SKILL.md)).
 - **tmux-native discovery** — windows are agents; `tmux list-windows` is the
   single source of truth. No external registry, no heartbeat daemon.
 - **Lean core, optional dashboard** — a two-dependency headless core; the Flask
@@ -119,13 +131,29 @@ uv run chela status
 # 3. Schedule an agent:
 uv run chela schedule add researcher --every 1h --prompt "Run your research cycle."
 
-# 4. Start the daemon (scheduler + optional dispatcher + needs-input notify):
+# 4. Start the daemon. NOT OPTIONAL — it is what makes chela do anything on its
+#    own (see below). Run it under a process manager (pm2/systemd/tmux window):
 uv run chela run
 
 # 5. Dispatch work items from a repo's WORKFLOW.md (see examples/):
 uv run chela dispatch /path/to/repo/WORKFLOW.md --once    # one pass
 uv run chela dispatch /path/to/repo/WORKFLOW.md           # poll
 ```
+
+**`chela run` is the engine, not a helper.** Everything autonomous lives in its
+loop, so if it isn't running, chela is just a CLI. Each pass it:
+
+| It runs | Without the daemon |
+|---|---|
+| the **scheduler** tick | schedules never fire — no interval/cron pokes |
+| the **dispatcher** (for `CHELA_DISPATCH_WORKFLOWS`) | TODOs are never turned into worktrees/PRs |
+| the **needs-input** scan | no push when an agent blocks on a prompt |
+| the **decisions inbox** | a finished agent never wakes the orchestrator |
+| the **window-name reconciler** | windows stay stuck at `shell-N` instead of their project |
+
+The daemon is easy to *forget* you killed — the dashboard still works, agents
+still run, and nothing looks broken; the fleet just quietly stops doing anything
+by itself. If schedules seem "stuck", check that `chela run` is alive first.
 
 The **dispatcher** is the headline feature. Drop a `WORKFLOW.md` + `TODO.md` in
 a repo (copy `examples/`), and each `- [ ] task` becomes: a worktree on a fresh
@@ -136,6 +164,51 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 > [`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/` and
 > a Claude Code agent can install chela and seed a starter `WORKFLOW.md` + `TODO.md`
 > for the current repo for you.
+
+---
+
+## The orchestration loop
+
+An **orchestrator** is just another agent — a Claude Code session whose job is to
+hand work to the others. It has a structural blind spot: a Claude Code session can
+only act when something messages it, so an agent *finishing* is invisible to it. It
+has to poll the pane, or a human has to walk over and say "he's done". The decisions
+inbox closes that: completion is pushed back into the orchestrator's session.
+
+```bash
+# in the orchestrator's session, after dispatching work to window @3:
+chela drive @3 "Fix the parser bug in src/lex.rs; commit when tests pass."
+chela watch @3 --note "parser bug"     # register interest — you'll be told
+chela watching                         # what's watched + what's queued
+```
+
+The daemon then reports, once, when `@3` **finishes**, **blocks** on a prompt, or
+**dies** mid-task — plus dispatcher runs that hit `awaiting_review` or `failed` —
+as one line typed into the orchestrator's session:
+
+```
+📥 @3 (chelamux) finished the task you dispatched — verify + commit. — note: "parser bug"
+```
+
+Three rules make pushing into a live session safe:
+
+- **Delivery is gated on `idle`, strictly.** A `busy` session is mid-thought and is
+  never interrupted — the event queues durably and goes out on the next idle tick.
+  A **`waiting`** session is worse than busy: it's sitting on a permission prompt,
+  and a paste there would be read as the *answer to that prompt*. So `not busy` is
+  not good enough; only a genuinely idle session is ever written to.
+- **You must register interest.** Every agent turn ends busy→idle, including the
+  orchestrator's own replies, so only work you explicitly `chela watch`ed produces
+  an event. This also covers plain `chela drive` / `tmux send-keys` delegation,
+  which isn't a dispatcher run and has no run state of its own. The watch clears
+  when the completion fires: one dispatch, one report.
+- **The orchestrator is identified explicitly, never guessed.** Whichever session
+  runs `chela watch` registers itself (via `$CHELA_WID`); pin it with
+  `CHELA_ORCHESTRATOR_WID=@0`. Until something registers, the inbox is **inert** —
+  it can't push into a random agent's session. It never reports on the
+  orchestrator's own window either, so it can't notify itself in a loop.
+
+Kill it entirely with `CHELA_INBOX_ENABLED=false`.
 
 ---
 
@@ -173,16 +246,31 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | Command | What it does |
 |---|---|
 | `chela status` | List the agent windows chela sees in the tmux session |
-| `chela run` | The daemon loop: scheduler tick + dispatcher + needs-input notify |
+| `chela run` | **The daemon.** Every pass: scheduler tick · dispatcher · needs-input scan · [decisions inbox](#the-orchestration-loop) · window-name reconcile. Required — see [Run](#run) |
 | `chela schedule add <agent> --every/--cron/--once --prompt ...` | Add a scheduled poke |
 | `chela schedule list` / `remove <id>` | Manage scheduled tasks |
 | `chela dispatch <WORKFLOW.md> [--once] [--interval N] [--dry-run]` | Run the work-item dispatcher |
 | `chela dispatch-runs` | List dispatcher runs and their status |
 | `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
-| `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux |
+| `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux (by name) |
 | `chela broadcast <text>` | Message every other live agent |
+| `chela telegram [--no-inbound]` | Bridge agent windows ↔ Telegram forum topics (see [`skills/telegram-setup`](skills/telegram-setup/SKILL.md)) |
 | `chela install-statusline [--write]` | Print/install the Claude Code statusLine hook for the context bar |
 | `chela dashboard [--host] [--port]` | Launch the dashboard + live terminal wall (needs the `[dashboard]` install) |
+| `chela knowledge export [--out DIR] [--since DATE]` | Write an [OKF](docs/OKF.md) bundle of runs / schedules / agents / projects |
+
+**Agent-facing** — an agent runs these *about its siblings*, from inside its own
+window (it knows itself via `$CHELA_WID`, injected at spawn):
+
+| Command | What it does |
+|---|---|
+| `chela whoami` | Print this agent's own window id (`$CHELA_WID`) |
+| `chela peek [wid]` | Status of a window: liveness, cwd, latest recap, health (default: self) |
+| `chela read [wid] [--tail N \| --query Q \| --all]` | Distilled read of a sibling's Claude Code transcript |
+| `chela drive <wid> <message>` | Message a sibling window, keyed by window id (rename-proof) |
+| `chela watch <wid> [--note "..."]` | Delegated work to `<wid>`: tell me when it finishes / blocks / dies, and register me as the orchestrator |
+| `chela watching` | What's being watched, and what's queued for delivery |
+| `chela unwatch <wid>` | Stop watching a window |
 
 ---
 
@@ -201,6 +289,10 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | `CHELA_NOTIFY_KIND` | auto | Force `ntfy` \| `telegram` \| `webhook` |
 | `CHELA_NOTIFY_CHAT_ID` | — | Telegram chat id (if not in the URL) |
 | `CHELA_NOTIFY_INTERVAL` | `20` | Pane-state scan interval (s) |
+| `CHELA_INBOX_ENABLED` | `true` | [Decisions inbox](#the-orchestration-loop). Inert until a session registers as the orchestrator; `false` disables it outright |
+| `CHELA_ORCHESTRATOR_WID` | — | Pin the window the inbox pushes into (`@0`). Otherwise it's whichever session ran `chela watch` |
+| `CHELA_IGNORE_WINDOWS` | — | Comma-separated window names to hide from discovery (placeholder/keep-alive windows) |
+| `CHELA_SHOW_TOOL_CALLS` | `false` | Relay each agent's tool calls to Telegram too (noisy; off by default) |
 | `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind |
 | `CHELA_TERMINALS_ENABLED` | `true` | Embedded ttyd terminal wall (streams live; loopback-guarded — see below) |
 | `CHELA_TERMINALS_EXPOSE` | `false` | Serve the writable wall on a **non-loopback** bind too (RCE risk — opt-in) |
@@ -262,13 +354,17 @@ a mobile terminal — [Blink](https://blink.sh/) (iOS), [Termius](https://termiu
 or any Mosh-capable client — then `tmux attach -t chela` and you've got the live
 panes. A QR of the connect string makes this one tap.
 
-> **Pairs well with [ccbot](https://github.com/six-ddc/ccbot)** — a Telegram ↔ tmux
-> bridge for Claude Code (1 topic = 1 window = 1 session). It shares chela's model
-> — a tmux window per agent — so you can let chela put the fleet to work and
-> *drive or supervise any agent from a Telegram topic* on your phone (text,
-> images, and file attachments flow both ways). (chela's
-> built-in needs-input notifications just ping you; ccbot is a full two-way bridge.)
-> Independent project, not required by chela.
+**Or bridge the fleet to Telegram.** `chela telegram` maps each agent window to a
+**forum topic** in one supergroup — 1 topic = 1 window = 1 session — and relays
+both ways: the agent's output streams into its topic, and anything you type there
+lands in its pane. Topics are created, named after the agent's project, and closed
+as windows come and go; a rename of the window renames the topic. So you can drive
+or supervise any agent from your phone, not just get pinged by it. Setup (bot
+token, forum group, PM2): [`skills/telegram-setup`](skills/telegram-setup/SKILL.md).
+
+> The bridge is text/media over the Bot API — it needs no inbound port and doesn't
+> expose the wall. It's a supervision channel, not a substitute for the tailnet
+> boundary above.
 
 ### Collaborative terminals (end-to-end encrypted)
 
@@ -334,6 +430,13 @@ routes 404 and its UI is hidden — unless you explicitly set
   <em>Schedules — interval, cron, and one-shot pokes that type a prompt into an agent's window.</em>
 </p>
 
+**Renaming an agent.** Double-click a pane's title on the wall. That renames the
+**tmux window** — the window name is the single source of truth for an agent's
+name — so it updates everywhere at once: the wall, the agent cards, the nav, tmux
+itself, and the agent's bound Telegram topic. It sticks: chela's auto-namer only
+fills in *blank* names (a placeholder `shell-N`, or a name tmux derived from the
+running command), and never overrides one you chose.
+
 **Keys not reaching the terminal?** If `Esc` (or other keys) never reaches an
 embedded terminal, a vim-style browser extension such as **Vimium** is almost
 certainly capturing them at the page level — it injects into the terminal's
@@ -394,12 +497,13 @@ agent is waiting for you right now.
 
 ## Roadmap
 
-- **OKF knowledge layer + viewer** — export the fleet's accumulated knowledge
-  (dispatch runs, schedules, agent recaps, PR links) as a portable
-  [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
-  bundle (vendor-neutral markdown + YAML), with a glance / browse / search /
-  graph viewer — embedded in the dashboard and shipped self-contained inside
-  each bundle. Full design: [docs/OKF.md](docs/OKF.md).
+- **Portable OKF bundle viewer** — `chela knowledge export` already writes the
+  fleet's accumulated knowledge (dispatch runs, schedules, agent recaps, PR links)
+  as an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+  bundle (vendor-neutral markdown + YAML), and the dashboard has an embedded
+  **Knowledge** view over it (glance / browse / search / graph). Still to come: a
+  self-contained `viewer.html` shipped *inside* each bundle, so it travels without
+  the dashboard. Full design: [docs/OKF.md](docs/OKF.md).
 - Agent personas (customizable behavior templates).
 - Custom functions / harnesses (per-project agent config).
 - Scheduling integration.
