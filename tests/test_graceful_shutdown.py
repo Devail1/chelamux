@@ -20,6 +20,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -65,10 +66,28 @@ def test_wait_returns_immediately_once_a_signal_arrives():
 
 
 def test_wait_sleeps_normally_when_no_signal_arrives():
+    # No signal → `wait` is a plain sleep: it blocks for the whole nap and reports False
+    # ("nobody woke me"). Asserted WITHOUT timing the sleep on purpose. The old version
+    # slept 0.2s and asserted `monotonic() - started >= 0.15`, which failed ~1 run in 5
+    # on a loaded box: `Event.wait` derives its deadline from the SYSTEM clock while the
+    # test measured the MONOTONIC one, so a resync between the two makes a full sleep
+    # measure short. Park a long nap in a thread and prove it is still parked instead —
+    # the margin is then the entire 30s nap rather than 50ms of scheduler jitter.
     stop = GracefulShutdown("test").install()
-    started = time.monotonic()
-    assert stop.wait(0.2) is False                    # no signal → a plain sleep
-    assert time.monotonic() - started >= 0.15
+    assert stop.wait(0.01) is False
+
+    naps: list[bool] = []
+    napper = threading.Thread(target=lambda: naps.append(stop.wait(30)), daemon=True)
+    napper.start()
+
+    napper.join(0.2)
+    assert napper.is_alive(), "wait() returned early — it did not sleep"
+    assert stop.stopping is False
+
+    os.kill(os.getpid(), signal.SIGTERM)              # release it the way a daemon is released
+    napper.join(5)
+    assert not napper.is_alive(), "wait() slept through its wake-up signal"
+    assert naps == [True]
 
 
 def test_a_second_signal_does_not_raise():
