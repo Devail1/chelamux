@@ -11,6 +11,7 @@ messages back to its window), routed via a persisted thread↔window registry.
 """
 from __future__ import annotations
 import argparse
+import json
 import logging
 import os
 import signal
@@ -25,6 +26,7 @@ from chela import (
     config,
     discovery,
     dispatcher,
+    event_log,
     inbox,
     messenger,
     notify,
@@ -115,6 +117,14 @@ def cmd_run(args) -> None:
     log.info("chela daemon starting (session=%s, poll=%ds)",
              config.current_session(), SCHEDULER_POLL_INTERVAL)
     scheduler.init()  # open the WAL scheduler DB + init schema once, before ticking
+    # A new epoch for the event log's cursors. `seq` keeps counting (it is the log's
+    # identity), but anything that happened while the daemon was down never reached the
+    # log — so a reader that remembered a cursor is told the boot changed rather than
+    # resuming across a hole it cannot see.
+    boot_id = event_log.new_boot()
+    event_log.append("daemon_start", f"chela daemon started (session={config.current_session()})",
+                     {"session": config.current_session(), "pid": os.getpid()})
+    log.info("Event log: %s (boot_id=%s)", event_log.log_path(), boot_id)
     if DISPATCH_WORKFLOWS:
         log.info("Dispatcher enabled for %d workflow(s): %s",
                  len(DISPATCH_WORKFLOWS), ", ".join(str(p) for p in DISPATCH_WORKFLOWS))
@@ -323,6 +333,81 @@ def cmd_watching(args) -> None:
     print(f"\nqueued, awaiting your next idle ({len(queue)}):")
     for event in queue:
         print(f"  {inbox.render(event)}")
+
+
+def _fmt_event(event: dict) -> str:
+    """One event, one line: the cursor, the clock, the type, the window, the summary."""
+    ts = datetime.fromtimestamp(event.get("ts") or 0).strftime("%H:%M:%S")
+    wid = event.get("wid") or "-"
+    return (f"{event.get('seq'):>6}  {ts}  {event.get('type', '?'):<18} "
+            f"{wid:<5} {event.get('summary') or ''}")
+
+
+def _print_batch(batch: dict, as_json: bool) -> None:
+    gap = batch.get("gap")
+    if gap:
+        # Loud, on stderr, and never mixed into the event stream: a reader that silently
+        # resumed across a hole is the failure this whole design exists to prevent.
+        print(f"⚠ resume gap: {gap['reason']}", file=sys.stderr)
+    for event in batch["events"]:
+        print(json.dumps(event, ensure_ascii=False) if as_json else _fmt_event(event),
+              flush=True)
+
+
+def cmd_events(args) -> None:
+    """Replay / filter / tail the event log — the durable record of what happened.
+
+    ``--after-seq`` is a cursor; pair it with ``--after-boot`` (the ``boot_id`` you were
+    given last time) and a restart or a reset log is reported as a GAP instead of being
+    silently resumed across.
+    """
+    if args.follow:
+        try:
+            for batch in event_log.follow(args.after_seq, after_boot=args.after_boot,
+                                          types=args.types, wid=args.wid):
+                _print_batch(batch, args.json)
+        except KeyboardInterrupt:
+            pass
+        return
+
+    batch = event_log.read(args.after_seq, after_boot=args.after_boot,
+                           types=args.types, wid=args.wid, limit=args.limit)
+    events = batch["events"]
+    if args.tail:
+        events = events[-args.tail:]
+    _print_batch({**batch, "events": events}, args.json)
+    if not args.json:
+        print(f"\nboot_id={batch['boot_id']} seq={batch['first_seq']}..{batch['last_seq']} "
+              f"({len(events)} shown, resume with --after-seq {batch['next_seq']})",
+              file=sys.stderr)
+        if batch["corrupt_lines"]:
+            print(f"note: skipped {batch['corrupt_lines']} unparseable line(s)",
+                  file=sys.stderr)
+
+
+def cmd_events_emit(args) -> None:
+    """Append one event from the shell — the programmatic write path, exposed.
+
+    This is how the log is exercised with zero Claude Code involvement (and how N
+    concurrent writers are hammered at it in the tests).
+    """
+    payload = {}
+    if args.payload:
+        try:
+            payload = json.loads(args.payload)
+        except json.JSONDecodeError as exc:
+            print(f"--payload is not valid JSON: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(payload, dict):
+            print("--payload must be a JSON object", file=sys.stderr)
+            sys.exit(1)
+    record = event_log.append(args.type, args.summary or "", payload,
+                              wid=_resolve_wid(args.wid) if args.wid else None,
+                              session_id=args.session_id)
+    if record is None:
+        print("append failed (see the log)", file=sys.stderr)
+        sys.exit(1)
+    print(f"seq={record['seq']} boot_id={record['boot_id']} {record['type']}")
 
 
 def cmd_whoami(args) -> None:
@@ -902,6 +987,31 @@ def main() -> None:
 
     sub.add_parser("watching", help="Show inbox watches + the queued events")
 
+    # events — the durable log: replay from a cursor, filter, tail. `emit` is the
+    # programmatic append, exposed to the shell (and to N concurrent writers).
+    p_ev = sub.add_parser("events", help="Replay / filter / follow the event log")
+    p_ev.add_argument("--after-seq", type=int, default=None, metavar="N",
+                      help="Only events after this seq (a cursor)")
+    p_ev.add_argument("--after-boot", default=None, metavar="ID",
+                      help="The boot_id your cursor came from; a change is reported as a gap")
+    p_ev.add_argument("--type", dest="types", action="append", metavar="T",
+                      help="Only this event type (repeatable)")
+    p_ev.add_argument("--wid", default=None, metavar="@N", help="Only events for this window")
+    p_ev.add_argument("--limit", type=int, default=None, metavar="N",
+                      help="At most N events, oldest-first from the cursor (resumable)")
+    p_ev.add_argument("--tail", type=int, default=None, metavar="N",
+                      help="Show only the last N of the result")
+    p_ev.add_argument("--follow", "-f", action="store_true", help="Tail the log live")
+    p_ev.add_argument("--json", action="store_true", help="Emit each event as JSON (one per line)")
+
+    ev_sub = p_ev.add_subparsers(dest="events_cmd")
+    p_emit = ev_sub.add_parser("emit", help="Append one event to the log")
+    p_emit.add_argument("--type", required=True, help="Event type (mirrors an inbox `kind`)")
+    p_emit.add_argument("--summary", default="", help="One line — what a notification renders")
+    p_emit.add_argument("--payload", default=None, help="JSON object — the structured record")
+    p_emit.add_argument("--wid", default=None, help="Window this event is about (@N or N)")
+    p_emit.add_argument("--session-id", default=None, help="Claude Code session id, if known")
+
     p_read = sub.add_parser(
         "read", help="Distilled read of a sibling's Claude Code transcript")
     p_read.add_argument("wid", nargs="?", help="Target window id (@N, N, or 'self'); default self")
@@ -1023,6 +1133,11 @@ def main() -> None:
         cmd_unwatch(args)
     elif args.command == "watching":
         cmd_watching(args)
+    elif args.command == "events":
+        if args.events_cmd == "emit":
+            cmd_events_emit(args)
+        else:
+            cmd_events(args)
     elif args.command == "drive":
         cmd_drive(args)
     elif args.command == "dispatch":

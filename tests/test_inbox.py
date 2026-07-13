@@ -40,6 +40,18 @@ def no_live_runs(monkeypatch):
     monkeypatch.setattr(dispatcher, "list_runs", lambda: [])
 
 
+@pytest.fixture(autouse=True)
+def event_log_file(tmp_path, monkeypatch):
+    """Never the real ``~/.chela/events.jsonl``.
+
+    ``tick()`` appends every event it generates to the durable log. Autouse for the same
+    reason ``no_live_runs`` is: a test that reaches live state under ``~/.chela`` is only
+    green by luck — here it would also POLLUTE the fleet's real audit trail with
+    synthetic events, which is worse than a flaky assertion.
+    """
+    monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
+
+
 @pytest.fixture
 def store_file(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
@@ -734,3 +746,30 @@ def test_pr_ref_reads_the_number_and_falls_back_to_the_url():
     assert inbox.pr_ref("https://github.com/x/y/pull/47") == "PR #47"
     assert inbox.pr_ref("https://example.test/nope") == "https://example.test/nope"
     assert inbox.pr_ref(None) == ""
+
+
+def test_every_event_lands_in_the_durable_log(store_file, windows, sends, monkeypatch):
+    """The inbox is the event log's first consumer — the queue is what the orchestrator
+    is TOLD, the log is what HAPPENED.
+
+    They are deliberately not the same list: an event dropped as stale, or a `silent`
+    one that only retires a watch, still belongs in the record. Reconciling a bug like
+    the false `DIED` against a queue that had already drained is exactly what was
+    impossible before there was a log.
+    """
+    from chela import event_log
+
+    _registered()
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+    runs = [{"task_id": "T1", "title": "**add** the parser", "status": "awaiting_review",
+             "pr_url": "https://github.com/x/y/pull/3"}]
+
+    inbox.tick({ORCH: inbox.IDLE}, runs=runs)
+
+    logged = event_log.read()["events"]
+    assert [e["type"] for e in logged] == ["run_review"]     # `kind` → `type`, one schema
+    event = logged[0]
+    assert event["seq"] == 1 and event["boot_id"]
+    assert "pull/3" in event["summary"] and "\n" not in event["summary"]
+    assert event["payload"]["task_id"] == "T1"
+    assert event["payload"]["title"] == "**add** the parser"  # the essay, kept in the payload

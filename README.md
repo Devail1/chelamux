@@ -258,6 +258,7 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | `chela install-statusline [--write]` | Print/install the Claude Code statusLine hook for the context bar |
 | `chela dashboard [--host] [--port]` | Launch the dashboard + live terminal wall (needs the `[dashboard]` install) |
 | `chela knowledge export [--out DIR] [--since DATE]` | Write an [OKF](docs/OKF.md) bundle of runs / schedules / agents / projects |
+| `chela events [--after-seq N] [--type T] [--wid @N] [--follow]` | Replay / filter / tail the [event log](docs/EVENTS.md) — the durable record of what happened |
 
 **Agent-facing** — an agent runs these *about its siblings*, from inside its own
 window (it knows itself via `$CHELA_WID`, injected at spawn):
