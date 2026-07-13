@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 from typing import Callable
 
 from chela import config, messenger
@@ -73,6 +74,49 @@ PASSTHROUGH_COMMANDS: list[tuple[str, str]] = [
 
 # Everything published to Telegram's "/" menu: bridge-intercepted + passthrough.
 MENU_COMMANDS: list[tuple[str, str]] = BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS
+
+# A leading ``/command``, with the ``@botname`` suffix Telegram appends in GROUPS.
+# Anchored, and the command must END the token (``(?=\s|$)``), so a path-like
+# ``/home/liav/x`` is not a command and a body ``@`` is never in scope.
+_COMMAND_RE = re.compile(r"^/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?=\s|$)")
+
+
+def resolve_command_for_window(text: str, bot_username: str | None) -> str | None:
+    """The text to forward to Claude Code, or None to DROP it.
+
+    In a group, Telegram appends ``@<botname>`` to a command tapped from the "/" menu
+    to disambiguate between bots: ``/clear`` is delivered as ``/clear@chelamuxbot``.
+    PTB's ``CommandHandler`` strips that natively, so the BRIDGE commands
+    (:data:`BRIDGE_COMMANDS`) were fine — but the passthrough path
+    (:data:`PASSTHROUGH_COMMANDS`) forwards the raw text, so Claude Code received the
+    literal ``/clear@chelamuxbot``, did not recognise its own command, and took it as a
+    plain prompt. The session was never cleared. That broke EVERY Claude Code slash
+    command tapped from the menu in a group, not just ``/clear``.
+
+    Only the FIRST token is ever rewritten, and only when it is a real ``/command``.
+    An ``@`` anywhere in the body is left alone — we pass window ids (``look at @3``),
+    handles and emails through this path constantly, and mangling those would be a far
+    worse bug than the one being fixed.
+
+    ``/cmd@some_other_bot`` is DROPPED. It is explicitly addressed to a different bot in
+    the group, so it was never meant for this agent; forwarding it would type a stray
+    command into a Claude session (our bridge sees it at all only because privacy mode
+    is off, which it must be for the bridge to relay ordinary text).
+
+    When our own username isn't known yet (``get_me`` failed, or an update raced
+    ``post_init``), we strip the suffix and forward rather than drop: forwarding a
+    stripped command is the behaviour the operator asked for, whereas silently eating
+    their ``/clear`` reproduces the reported bug in a harder-to-see form.
+    """
+    m = _COMMAND_RE.match(text)
+    if not m:
+        return text                       # not a command — never touched
+    command, addressed_to = m.group(1), m.group(2)
+    if addressed_to is None:
+        return text                       # bare /command (DM style) — already correct
+    if bot_username and addressed_to.lower() != bot_username.lower():
+        return None                       # meant for another bot in the group
+    return f"/{command}{text[m.end():]}"  # our command: strip the suffix, keep the args
 
 # A terminal snapshot is trimmed to its most recent characters so a single
 # ``/screenshot`` reply stays under Telegram's 4096-char per-message limit
@@ -336,8 +380,15 @@ def build_application(
         chat_id = chat.id if chat else None
         # message_thread_id is absent outside a forum topic; getattr guards it.
         thread_id = getattr(msg, "message_thread_id", None)
+        # In a group, a command tapped from the "/" menu arrives as `/clear@ourbot`.
+        # Claude Code doesn't know that name, so the suffix must go before we forward
+        # (see resolve_command_for_window); a command aimed at ANOTHER bot is dropped.
+        text = resolve_command_for_window(msg.text, bot["username"])
+        if text is None:
+            log.debug("dropping command addressed to another bot: %s", msg.text)
+            return
         try:
-            router.route(chat_id, thread_id, msg.text)
+            router.route(chat_id, thread_id, text)
         except Exception:  # a stuck tmux send must not wedge the update queue
             log.exception("inbound routing failed")
 
@@ -585,13 +636,23 @@ def build_application(
         label = _tapped_label(query, query.data or "") or f"Option {payload + 1}"
         await query.answer(f"✓ {label}"[:200] if ok else "❌ send failed")
 
+    # Our own @username, learned from the Bot API at startup (never hardcoded) and
+    # cached here — it is needed on EVERY group command, and get_me() is a network
+    # call. A dict so the _post_init/_on_message closures share one cell.
+    bot: dict[str, str | None] = {"username": None}
+
     async def _post_init(app) -> None:
-        """Publish the menu commands to Telegram's "/" autocomplete menu.
+        """Cache our @username, and publish the menu commands to Telegram's "/" menu.
 
         Both bridge-intercepted commands and passthrough Claude Code commands
         (:data:`MENU_COMMANDS`) are published so they autocomplete; only the
         bridge ones have handlers, the rest fall through to send_tmux.
         """
+        try:
+            bot["username"] = (await app.bot.get_me()).username
+            log.info("telegram: bridging as @%s", bot["username"])
+        except Exception:  # not fatal: resolve_command_for_window still strips the suffix
+            log.warning("could not read the bot's own username", exc_info=True)
         try:
             await app.bot.set_my_commands(
                 [BotCommand(name, desc) for name, desc in MENU_COMMANDS]

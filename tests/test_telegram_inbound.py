@@ -12,6 +12,8 @@ delivery, so these lock in the routing decision:
 """
 from __future__ import annotations
 
+import pytest
+
 from chela.telegram.bindings import BindingRegistry
 from chela.telegram.inbound import (
     _KEY_ACTIONS,
@@ -22,6 +24,7 @@ from chela.telegram.inbound import (
     SCREENSHOT_KEYS,
     RegistryRouter,
     TopicRouter,
+    resolve_command_for_window,
 )
 
 
@@ -119,6 +122,64 @@ def test_slash_command_is_forwarded_verbatim():
 # --------------------------------------------------------------------------
 # "/" command menu — what gets published to Telegram's autocomplete
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Group "/" menu taps — Telegram appends @botname; Claude Code must not see it
+# --------------------------------------------------------------------------
+#
+# Live bug: tapping /clear from the bot's command menu in the forum delivered
+# `/clear@chelamuxbot`. The passthrough path forwards text VERBATIM, so Claude Code
+# got a string it doesn't recognise and treated it as a plain prompt — the session was
+# never cleared. (The bridge commands were fine: PTB's CommandHandler strips the suffix
+# natively.) This broke every Claude Code slash command tapped from the menu in a group.
+
+OUR_BOT = "chelamuxbot"
+
+
+def test_menu_tap_in_a_group_strips_our_bot_suffix():
+    assert resolve_command_for_window("/clear@chelamuxbot", OUR_BOT) == "/clear"
+
+
+def test_bot_suffix_match_is_case_insensitive():
+    assert resolve_command_for_window("/clear@ChelamuxBot", OUR_BOT) == "/clear"
+
+
+def test_command_arguments_survive_the_strip():
+    assert resolve_command_for_window("/model@chelamuxbot opus", OUR_BOT) == "/model opus"
+
+
+def test_a_bare_command_is_unchanged():
+    # DM style (Telegram appends nothing) — must pass through byte-identical.
+    assert resolve_command_for_window("/clear", OUR_BOT) == "/clear"
+    assert resolve_command_for_window("/model opus", OUR_BOT) == "/model opus"
+
+
+@pytest.mark.parametrize("text", [
+    "look at @3 and tell me what it's doing",   # a window id — we use these constantly
+    "mail me at a@b.com",
+    "ping @liav about the parser",
+    "/home/liav/projects/chelamux is the path",  # path-like: not a command at all
+    "the file is at src/x.py@v2",
+])
+def test_an_at_sign_in_the_body_is_never_mangled(text):
+    # Only the FIRST token is ever rewritten, and only if it is a real /command.
+    # Mangling window ids / handles / emails would be a worse bug than the one fixed.
+    assert resolve_command_for_window(text, OUR_BOT) == text
+
+
+def test_a_command_addressed_to_another_bot_is_dropped():
+    # Explicitly aimed at a different bot in the group: forwarding it would type a
+    # stray command into a Claude session. None == drop.
+    assert resolve_command_for_window("/clear@someotherbot", OUR_BOT) is None
+    assert resolve_command_for_window("/start@rando_bot now", OUR_BOT) is None
+
+
+def test_unknown_own_username_strips_rather_than_drops():
+    # get_me() failed or an update raced post_init. Forward the stripped command:
+    # silently eating the operator's /clear would reproduce the reported bug in a
+    # harder-to-see form.
+    assert resolve_command_for_window("/clear@chelamuxbot", None) == "/clear"
+
 
 def test_clear_is_published_to_menu_but_not_bridge_intercepted():
     # /clear autocompletes (it's in the published MENU_COMMANDS) yet is a
@@ -273,3 +334,84 @@ def test_callback_data_stays_within_telegram_64_byte_limit():
     for row in SCREENSHOT_KEYS:
         for (_label, key_id, _tmux) in row:
             assert len(f"{_KEY_CB_PREFIX}{key_id}".encode()) <= 64
+
+
+# --------------------------------------------------------------------------
+# The WIRING, not just the helper: drive the real _on_message handler.
+# --------------------------------------------------------------------------
+#
+# The helper being correct is not the same as the bridge being correct — the live bug
+# was in the forwarding path, and a green unit test on a pure function would not have
+# caught it. So build the actual PTB Application, take its text handler, and feed it a
+# group message exactly as Telegram delivers one.
+
+pytest.importorskip("telegram")
+
+
+class _FakeMessage:
+    def __init__(self, text, thread_id=4):
+        self.text = text
+        self.message_thread_id = thread_id
+        self.photo = None
+        self.document = None
+
+
+class _FakeUpdate:
+    def __init__(self, text, chat_id=777, thread_id=4):
+        self.message = _FakeMessage(text, thread_id)
+        self.effective_chat = type("Chat", (), {"id": chat_id})()
+
+
+def _text_handler_and_bot(stub):
+    """The real _on_message callback from a real build_application, + its bot cell."""
+    from telegram.ext import MessageHandler
+
+    from chela.telegram.inbound import build_application
+
+    app = build_application(
+        "123:fake-token", TopicRouter("777", "@3", "4", sender=stub),
+    )
+    handlers = [h for group in app.handlers.values() for h in group]
+    text_handlers = [h for h in handlers if isinstance(h, MessageHandler)]
+    on_message = text_handlers[-1].callback           # the TEXT catch-all, added last
+    # The username cell lives in build_application's closure (filled by post_init from
+    # get_me()); reach it the same way post_init does, without a network call.
+    cell = on_message.__closure__[
+        on_message.__code__.co_freevars.index("bot")
+    ].cell_contents
+    return on_message, cell
+
+
+def _drive(on_message, text):
+    import asyncio
+    asyncio.run(on_message(_FakeUpdate(text), None))
+
+
+def test_bridge_forwards_a_group_menu_tap_without_the_bot_suffix():
+    stub = _StubSender()
+    on_message, bot = _text_handler_and_bot(stub)
+    bot["username"] = OUR_BOT                          # what post_init's get_me() caches
+
+    _drive(on_message, "/clear@chelamuxbot")           # the live repro, verbatim
+
+    assert stub.calls == [("@3", "/clear")], "Claude Code must receive its own command"
+
+
+def test_bridge_drops_a_group_command_aimed_at_another_bot():
+    stub = _StubSender()
+    on_message, bot = _text_handler_and_bot(stub)
+    bot["username"] = OUR_BOT
+
+    _drive(on_message, "/clear@someotherbot")
+
+    assert stub.calls == []                            # never typed into the session
+
+
+def test_bridge_leaves_ordinary_text_alone():
+    stub = _StubSender()
+    on_message, bot = _text_handler_and_bot(stub)
+    bot["username"] = OUR_BOT
+
+    _drive(on_message, "look at @3 and mail me at a@b.com")
+
+    assert stub.calls == [("@3", "look at @3 and mail me at a@b.com")]
