@@ -41,6 +41,7 @@ from chela.config import (
     DISPATCH_WORKFLOWS,
     NOTIFY_INTERVAL,
     SHOW_TOOL_CALLS,
+    STATUS_LINE,
 )
 
 logging.basicConfig(
@@ -797,10 +798,13 @@ def cmd_telegram(args) -> None:
     """
     import threading
 
+    from functools import partial
+
     from chela.telegram import (
         BotSender,
         PermissionGateWatcher,
         RegistryRelay,
+        StatusRelay,
         TranscriptMonitor,
         default_bindings_path,
     )
@@ -850,6 +854,22 @@ def cmd_telegram(args) -> None:
     # ``post``/``edit`` let a relay update one message in place as the prompt renders
     # (mid-render partial → settled UI is ONE message, not a double-post), and
     # ``delete`` poofs it once answered so no live keyboard is left behind.
+    # The ephemeral status line (CMX-43) rides that same per-tick capture: the live
+    # working verb as ONE message that edits in place and poofs when the turn ends,
+    # so a phone can tell a thinking agent from a dead one. Its Telegram calls opt
+    # OUT of the 429 sleep-and-retry loop (retry_flood=False): they run in this same
+    # outbound thread, and stalling every real agent message behind a flood-control
+    # wait — to redeliver a decoration that the next poll would refresh anyway — is
+    # a trade that only ever goes the wrong way.
+    status = None
+    if STATUS_LINE:
+        status = StatusRelay(
+            registry,
+            post=partial(bot.post, retry_flood=False),
+            edit=partial(bot.edit, retry_flood=False),
+            delete=partial(bot.delete, retry_flood=False),
+            typing=lambda thread: bot.chat_action("typing", thread),
+        )
     gate_watcher = PermissionGateWatcher(
         bot.send,
         registry,
@@ -857,6 +877,7 @@ def cmd_telegram(args) -> None:
         post=bot.post,
         edit=bot.edit,
         delete=bot.delete,
+        status=status,
     )
 
     def _on_message(window_id, msg):

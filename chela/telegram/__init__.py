@@ -40,13 +40,15 @@ from chela.telegram.inbound import (
     TopicRouter,
     build_application,
 )
-from chela.telegram.gatewatch import PermissionGateWatcher
+from chela.telegram.gatewatch import PermissionGateWatcher, StatusRelay
 from chela.telegram.monitor import TranscriptMonitor
 from chela.telegram.panescan import (
     AskUQ,
     Gate,
+    Status,
     detect_askuserquestion,
     detect_permission_gate,
+    detect_status,
 )
 from chela.telegram.parser import Message, parse_entries, parse_line
 from chela.telegram.reconcile import (
@@ -61,10 +63,13 @@ from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay
 __all__ = [
     "TranscriptMonitor",
     "PermissionGateWatcher",
+    "StatusRelay",
     "Gate",
     "detect_permission_gate",
     "AskUQ",
     "detect_askuserquestion",
+    "Status",
+    "detect_status",
     "Message",
     "parse_entries",
     "parse_line",

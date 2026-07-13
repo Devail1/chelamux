@@ -394,15 +394,27 @@ class BotSender:
         self._transport = transport or _urllib_transport(token)
         self._sleep = sleep
 
-    def _call(self, method: str, fields: dict) -> dict:
+    def _call(self, method: str, fields: dict, *, retry_flood: bool = True) -> dict:
         """Perform a Bot API call, retrying the SAME payload on a 429.
 
         On flood control we sleep for the advertised ``retry_after`` (bounded by
         :data:`_MAX_RETRY_AFTER`) and re-send, up to :data:`_MAX_SEND_TRIES`
         attempts. Any non-429 response — success or a real error — is returned
         immediately. Preferring a duplicate on retry over a dropped message.
+
+        ``retry_flood=False`` returns the 429 **immediately instead of sleeping**.
+        That is the right trade for the *ephemeral status line* and only for it:
+        this loop runs in the outbound thread, so honouring a flood-control wait
+        for a decoration would stall every real agent message queued behind it for
+        up to ``_MAX_RETRY_AFTER * (_MAX_SEND_TRIES - 1)`` seconds. A dropped status
+        update costs nothing — the next poll re-sends the *latest* verb anyway,
+        which is strictly better than re-sending a stale one — whereas a delayed
+        assistant message is the relay failing at its job. The retry loop is not
+        bypassed for anything else.
         """
         resp = self._transport(method, fields)
+        if not retry_flood:
+            return resp
         for _ in range(_MAX_SEND_TRIES - 1):
             wait = _retry_after(resp)
             if wait is None:
@@ -465,6 +477,7 @@ class BotSender:
         parse_mode: str | None = None,
         message_thread_id: str | int | None = None,
         reply_markup: dict | None = None,
+        retry_flood: bool = True,
     ) -> int | None:
         """Post ONE message and return its ``message_id`` (None on failure).
 
@@ -472,7 +485,8 @@ class BotSender:
         prompts (an AskUserQuestion selector + its keyboard) are short, so this
         does NOT split at 4096 chars, and it returns the id so a later scrape can
         :meth:`edit` the same message rather than post a duplicate as the selector
-        settles.
+        settles. ``retry_flood=False`` (the status line) never sleeps on a 429 —
+        see :meth:`_call`.
         """
         thread = message_thread_id if message_thread_id is not None else self._topic_id
         fields = {"chat_id": self._chat_id, "text": _truncate_utf16(text)}
@@ -482,7 +496,7 @@ class BotSender:
             fields["parse_mode"] = parse_mode
         if reply_markup:
             fields["reply_markup"] = json.dumps(reply_markup)
-        resp = self._call("sendMessage", fields)
+        resp = self._call("sendMessage", fields, retry_flood=retry_flood)
         if not resp.get("ok"):
             log.warning("telegram sendMessage failed: %s", resp.get("description", resp))
             return None
@@ -495,6 +509,7 @@ class BotSender:
         text: str,
         parse_mode: str | None = None,
         reply_markup: dict | None = None,
+        retry_flood: bool = True,
     ) -> bool:
         """``editMessageText`` an existing message; True once it shows ``text``.
 
@@ -503,6 +518,8 @@ class BotSender:
         no-op, not an error. Any other failure (e.g. the tracked message was
         deleted) returns False so the caller can post a fresh one. A message is
         addressed by chat + id, so no ``message_thread_id`` is needed here.
+        ``retry_flood=False`` (the status line) never sleeps on a 429 — see
+        :meth:`_call`.
         """
         fields: dict = {
             "chat_id": self._chat_id,
@@ -513,7 +530,7 @@ class BotSender:
             fields["parse_mode"] = parse_mode
         if reply_markup:
             fields["reply_markup"] = json.dumps(reply_markup)
-        resp = self._call("editMessageText", fields)
+        resp = self._call("editMessageText", fields, retry_flood=retry_flood)
         if resp.get("ok"):
             return True
         desc = str(resp.get("description", ""))
@@ -522,21 +539,46 @@ class BotSender:
         log.warning("telegram editMessageText failed: %s", desc or resp)
         return False
 
-    def delete(self, message_id: int) -> bool:
+    def delete(self, message_id: int, retry_flood: bool = True) -> bool:
         """``deleteMessage`` — poof an interactive prompt once it is answered.
 
         The pane watcher deletes the question / plan / permission message it posted
         as soon as the prompt leaves the pane: its buttons would otherwise stay
-        tappable and fire keystrokes at whatever the agent went on to do. A failure
+        tappable and fire keystrokes at whatever the agent went on to do. The
+        ephemeral status line is deleted for a different reason — the turn ended,
+        so the message is a corpse and a topic must not accumulate them. A failure
         (already deleted, too old to delete) is logged and reported, never raised —
         the watcher has already dropped its tracking either way.
         """
         resp = self._call(
-            "deleteMessage", {"chat_id": self._chat_id, "message_id": message_id}
+            "deleteMessage",
+            {"chat_id": self._chat_id, "message_id": message_id},
+            retry_flood=retry_flood,
         )
         if resp.get("ok"):
             return True
         log.warning("telegram deleteMessage failed: %s", resp.get("description", resp))
+        return False
+
+    def chat_action(
+        self, action: str = "typing", message_thread_id: str | int | None = None
+    ) -> bool:
+        """``sendChatAction`` — the "typing…" indicator, while an agent is working.
+
+        This is what makes a phone feel *live*: a thinking agent and a dead one are
+        otherwise indistinguishable until the turn lands. Telegram expires the
+        indicator after ~5s, so the status watcher re-sends it on each throttled
+        tick. Fire-and-forget by design: never retried on flood control (it is pure
+        decoration — see :meth:`_call`) and a failure is reported, never raised.
+        """
+        thread = message_thread_id if message_thread_id is not None else self._topic_id
+        fields = {"chat_id": self._chat_id, "action": action}
+        if thread:
+            fields["message_thread_id"] = thread
+        resp = self._call("sendChatAction", fields, retry_flood=False)
+        if resp.get("ok"):
+            return True
+        log.debug("telegram sendChatAction failed: %s", resp.get("description", resp))
         return False
 
 
