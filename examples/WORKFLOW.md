@@ -82,26 +82,27 @@ Make your changes here, not in the main checkout.
 3. **Commit in the worktree.** Stage only the files you intentionally changed
    (`git add <paths>` — never `git add -A`). Confirm with `git status` and
    `git diff --cached --stat` before committing.
-4. **Strike the TODO line in your branch.** In the worktree, edit
-   `{{task_file_relative}}` and change `- [ ] {{task_title}}` to
-   `- [x] {{task_title}}`. Include this in your commit. It lands on
-   `{{base_branch}}` only when the PR merges — never commit it there directly.
-5. **Push and open a PR.** `git push -u origin {{branch_name}}` then
+4. **Push and open a PR.** `git push -u origin {{branch_name}}` then
    `gh pr create --base {{base_branch}} --title "{{project_key}}-{{task_number}}: <summary>" --body ...`.
    Put the task ID `{{task_id}}` in the body so the run is traceable.
-6. **Run `chela task-finished {{task_id}}` as your last step.** This marks the
+5. **Run `chela task-finished {{task_id}}` as your last step.** This marks the
    run `awaiting_review`, records the PR URL, and kills your tmux window. chela
    owns the window lifecycle — you don't need to exit manually. When the PR
-   merges, the TODO line disappears from `{{base_branch}}` and the run flips to
-   `done` on the next tick.
+   merges, the run flips to `done` on the next tick and the dispatcher strikes
+   the TODO line on `{{base_branch}}` for you.
+
+**Do not touch the TODO file.** You never tick your own checkbox — the dispatcher
+strikes it on `{{base_branch}}` once your PR actually **merges**, and it is that
+file's only writer. That is what keeps your PR from conflicting with the items
+being added to `{{base_branch}}` while you work.
 
 ## If you get stuck
 
-Append `<!-- blocked: <reason> -->` to the TODO line and commit it. The next
-poll will skip this task. Then stop.
+Stop and say why, plainly, in your final message — name the blocker. Don't record
+it in the TODO file, and don't open a half-done PR.
 
 ## Boundaries
 
-- Do not modify other TODO lines.
+- Do not edit the TODO file.
 - Do not touch other worktrees under the workspace root.
 - Do not push `{{base_branch}}`; only push your feature branch.

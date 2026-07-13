@@ -61,22 +61,28 @@ A fresh git worktree at `{{workspace_path}}` on branch `{{branch_name}}` (forked
 3. **Commit in the worktree.** Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`). Verify with `git status` +
    `git diff --cached --stat` before committing.
-4. **Strike the TODO line in your branch.** In `{{task_file_relative}}`, change
-   `- [ ] {{task_title}}` to `- [x] {{task_title}}` and include it in your commit. It
-   lands on `{{base_branch}}` only when the PR merges — never commit it there directly.
-5. **Push and open a PR.** `git push -u origin {{branch_name}}` then
+4. **Push and open a PR.** `git push -u origin {{branch_name}}` then
    `gh pr create --base {{base_branch}} --title "{{project_key}}-{{task_number}}: <summary>" --body ...`
    (put `{{task_id}}` in the body).
-6. **Run `chela task-finished {{task_id}}` as your last step** — marks the run
+5. **Run `chela task-finished {{task_id}}` as your last step** — marks the run
    `awaiting_review`, records the PR URL, and kills your tmux window.
+
+**Do NOT touch the tracker file.** You do not tick your own checkbox — the dispatcher
+strikes it on `{{base_branch}}` once your PR actually **merges**. It is the file's only
+writer, on purpose: when agents struck their own line in their branch while the
+orchestrator kept appending items to `{{base_branch}}`, every dispatched PR conflicted
+on it. Leave it alone and your PR merges clean.
 
 ## Public-repo boundaries (load-bearing — this is a public MIT repo)
 
 - **No secrets or private data in committed code**: no real tokens, chat ids, absolute
   `/home/<user>` paths, or private project/host names. Config must be env-driven; use
   generic placeholders in docs/examples.
-- Don't modify other TODO lines, touch other worktrees, or push `{{base_branch}}`.
+- Don't edit the tracker file, touch other worktrees, or push `{{base_branch}}`.
 
 ## If you get stuck
 
-Append `<!-- blocked: <reason> -->` to the TODO line, commit it, and stop.
+Stop and say why, plainly, in your final message — name the blocker. Don't edit the
+tracker to record it (that file is the dispatcher's) and don't open a half-done PR. A
+human picks it up from there; the dispatcher gives a task a bounded number of attempts,
+so a genuinely blocked task stops being retried rather than spinning.

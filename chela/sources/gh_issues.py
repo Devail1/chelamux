@@ -121,8 +121,10 @@ class GhIssuesSource:
                 id=_task_id(repo, number),
                 # Clean title — the issue number lives in line_number, not here.
                 title=title,
-                # Non-filesystem source: no source file. The dispatcher guards
-                # task_file_relative against this empty string.
+                # Non-filesystem source: no source file. There is nothing for
+                # the dispatcher to strike either — a merged PR closes the
+                # issue, so the task leaves list_open_tasks on its own (see
+                # dispatcher._strike_merged_tasks).
                 file="",
                 line_number=int(number),
                 raw=issue.get("url") or "",

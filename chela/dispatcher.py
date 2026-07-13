@@ -32,6 +32,12 @@ READY_POLL_INTERVAL = 1.0
 # once, then failed if it stays idle for another window of this length.
 WATCHDOG_IDLE_MINUTES = 5
 
+# Tracker strike (see _strike_merged_tasks) — the dispatcher marks a task done
+# on base_branch once its PR merges. Local git is fast; fetch/push touch the
+# network and must never hang the reconcile loop.
+GIT_TIMEOUT_SECONDS = 30
+GIT_NET_TIMEOUT_SECONDS = 60
+
 # Seed-delivery verification (see _seed_landed / _send_seed). After pasting the
 # prompt we confirm the agent actually picked it up — a late splash redraw can
 # swallow the paste, leaving the agent idle with no task. The agent flips
@@ -127,21 +133,139 @@ def resolve_agent_cmd(wf: WorkflowDef) -> tuple[str, str]:
     return f"{AGENT_BASE_CMD} --permission-mode {DEFAULT_PERMISSION_MODE}", "default"
 
 
-def _task_file_relative(task_file: str, repo_path: Path) -> str:
-    """Path of the source file relative to the repo, or "" for non-file sources.
-
-    Filesystem sources (markdown) yield an absolute path under repo_path, which
-    resolves to e.g. "TODO.md". Non-filesystem sources (gh_issues) set
-    task.file == "", and an issue-backed task isn't under any repo path — so
-    relative_to() would raise ValueError. Guard both cases by degrading to ""
-    rather than crashing the tick; the markdown path is byte-for-byte unchanged.
-    """
-    if not task_file:
-        return ""
+def _git(repo: Path, *args: str, timeout: float = GIT_TIMEOUT_SECONDS):
+    """Run a git command in `repo`. Returns None if git is missing or hung."""
     try:
-        return str(Path(task_file).relative_to(repo_path))
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.warning("git %s failed in %s: %s", " ".join(args), repo, e)
+        return None
+
+
+def _git_ok(cp) -> bool:
+    return cp is not None and cp.returncode == 0
+
+
+def _git_out(cp) -> str:
+    return cp.stdout.strip() if _git_ok(cp) else ""
+
+
+def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
+    """Mark merged tasks `- [x]` in the tracker, on base_branch, in ONE commit.
+
+    The dispatcher is the tracker's *only* writer. Agents used to strike their
+    own line inside their branch while the orchestrator kept appending items to
+    base_branch behind them — two writers, both editing the top of one file, so
+    every single dispatched PR conflicted on it. Now the agent never touches the
+    tracker and the strike happens here, once the PR has actually merged. That
+    also makes the checkbox mean *merged* rather than *the agent believed it was
+    finished*, which is strictly more truthful.
+
+    Tasks are matched by their stable task id (the hash of the line's title), not
+    by fuzzy text, and the strike is idempotent — see markdown.strike_lines.
+
+    This runs unattended under PM2, so every step FAILS CLOSED: it writes only
+    when it is on base_branch, only when the tracker file is clean, and only
+    after a fast-forward to the remote. It never force-pushes, never commits a
+    path other than the tracker, and rolls its own commit back if the push is
+    rejected. A missed checkbox is cosmetic and self-heals — the pending set is
+    recomputed from the runs table on every tick, not remembered — whereas a
+    mangled base branch is not.
+
+    Returns the number of lines actually struck.
+    """
+    close_tasks = getattr(source, "close_tasks", None)
+    tracker = getattr(source, "path", None)
+    if close_tasks is None or tracker is None:
+        # A non-file tracker (gh_issues) closes itself: the merged PR closes the
+        # issue, so the task leaves list_open_tasks with no write from us.
+        return 0
+
+    repo = wf.path.parent
+    base = wf.get("workspace", "base_branch", default="master")
+    try:
+        rel = str(Path(tracker).relative_to(repo))
     except ValueError:
-        return ""
+        log.warning("tracker strike skipped: %s is outside the repo %s", tracker, repo)
+        return 0
+
+    # Only ever write the branch we were told to write.
+    head = _git_out(_git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
+    if head != base:
+        log.warning(
+            "tracker strike skipped: %s is on %r, not %r", repo, head or "?", base
+        )
+        return 0
+
+    # Never sweep a human's in-progress edit of the tracker into our commit.
+    status = _git(repo, "status", "--porcelain", "--", rel)
+    if not _git_ok(status):
+        return 0
+    if status.stdout.strip():
+        log.warning("tracker strike skipped: %s has uncommitted changes", rel)
+        return 0
+
+    # Get level with the remote first, fast-forward only: a diverged base branch
+    # is a skip-and-retry, never a rebase we weren't asked for and never a force.
+    remote = _git_out(_git(repo, "remote"))
+    if remote:
+        if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
+            log.warning("tracker strike skipped: could not fetch origin/%s", base)
+            return 0
+        if not _git_ok(_git(repo, "merge", "--ff-only", "FETCH_HEAD")):
+            log.warning(
+                "tracker strike skipped: %s has diverged from origin/%s — "
+                "leaving it for a human", base, base,
+            )
+            return 0
+
+    try:
+        results = close_tasks(task_ids)
+    except OSError as e:
+        log.warning("tracker strike failed to write %s: %s", rel, e)
+        _git(repo, "checkout", "--", rel)
+        return 0
+
+    for tid, outcome in sorted(results.items()):
+        if outcome == "missing":
+            log.warning(
+                "tracker strike: no line matches task %s — a human edited or "
+                "removed it; not guessing", tid,
+            )
+        elif outcome == "already":
+            log.info("tracker strike: task %s was already struck", tid)
+    struck = sorted(t for t, outcome in results.items() if outcome == "struck")
+    if not struck:
+        return 0
+
+    parent = _git_out(_git(repo, "rev-parse", "HEAD"))
+    subject = f"chore({rel}): strike {len(struck)} merged task" + ("s" if len(struck) > 1 else "")
+    body = "\n".join(f"- {tid}" for tid in struck)
+    # Pathspec form: commits ONLY the tracker, ignoring whatever else a human
+    # may have staged in this checkout.
+    if not _git_ok(_git(repo, "commit", "-m", subject, "-m", body, "--", rel)):
+        log.warning("tracker strike: commit failed; restoring %s", rel)
+        _git(repo, "checkout", "--", rel)
+        return 0
+
+    if remote:
+        mine = _git_out(_git(repo, "rev-parse", "HEAD"))
+        if not _git_ok(_git(repo, "push", "origin", f"HEAD:{base}", timeout=GIT_NET_TIMEOUT_SECONDS)):
+            # Someone pushed between our fetch and our push. Roll our own commit
+            # back — but only if HEAD is still exactly it — and retry next tick.
+            if parent and mine and _git_out(_git(repo, "rev-parse", "HEAD")) == mine:
+                _git(repo, "reset", "--soft", parent)
+                _git(repo, "checkout", "HEAD", "--", rel)
+            log.warning(
+                "tracker strike: push to %s rejected — rolled back, retrying next tick", base
+            )
+            return 0
+
+    log.info("tracker strike: marked %d task(s) done on %s: %s", len(struck), base, ", ".join(struck))
+    return len(struck)
 
 
 @contextmanager
@@ -372,7 +496,6 @@ def _prompt_vars(
         "task_id": task.id,
         "task_title": task.title,
         "task_file": task.file,
-        "task_file_relative": _task_file_relative(task.file, repo_path),
         "task_line_number": task.line_number,
         "workspace_path": str(worktree_path),
         "branch_name": branch,
@@ -618,6 +741,7 @@ def tick(workflow_path: str | Path) -> dict:
         "dispatched": 0,
         "pr_state_refreshed": 0,
         "watchdog_renudged": 0,
+        "tracker_struck": 0,
     }
     merged_in_tick = 0  # awaiting_review → done transitions; fires hooks.after_done
 
@@ -654,13 +778,30 @@ def tick(workflow_path: str | Path) -> dict:
 
         # 1. Reconcile
         live_windows = _tmux_windows()
-        # claimed/running can disappear from source (legacy direct master-strike
-        # flow) or have their tmux window die; awaiting_review rows just wait
-        # for the TODO line to disappear from master (PR merge with --rebase).
+        # A run finishes when its PR merges. The task ALSO leaving the source is
+        # still honoured (a human striking the line by hand, an issue closing
+        # itself, or the legacy flow where the agent struck its own line), but it
+        # is no longer the signal we rely on: agents don't touch the tracker any
+        # more, so an awaiting_review row would otherwise sit there forever
+        # waiting for a line that only we will ever strike (_strike_merged_tasks).
         rows = conn.execute(
             "SELECT * FROM runs WHERE status IN ('claimed', 'running', 'awaiting_review')"
         ).fetchall()
         for row in rows:
+            if row["status"] == "awaiting_review" and row["pr_state"] == "merged":
+                # pr_state was refreshed in phase 0 above, so we see the merge on
+                # the very tick it lands. The tracker strike happens in 1b, after
+                # this transition is durable — if it fails, this row stays `done`
+                # and the strike is simply retried on the next tick.
+                if row["window_name"]:
+                    _kill_window(row["window_name"])
+                conn.execute(
+                    "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
+                )
+                merged_in_tick += 1
+                summary["reconciled_done"] += 1
+                log.info("Task %s done (PR merged)", row["task_id"])
+                continue
             if row["task_id"] not in open_ids:
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
@@ -757,6 +898,26 @@ def tick(workflow_path: str | Path) -> dict:
                             "Task %s idle at empty prompt; re-sent prompt to %s",
                             row["task_id"], row["window_name"],
                         )
+
+        # 1b. Strike the merged tasks in the tracker — we are its only writer.
+        # Commit the reconcile first so the `done` rows are durable: if the
+        # strike (or this process) dies, the pending set below is recomputed
+        # from the runs table next tick and the strike simply retries. It is
+        # derived state, never remembered — which is also what makes it
+        # self-healing and what batches several runs merged in the same tick,
+        # plus any strike a previous tick couldn't land, into ONE commit.
+        conn.commit()
+        pending_strikes = [
+            r["task_id"]
+            for r in conn.execute(
+                "SELECT task_id FROM runs "
+                "WHERE workflow_path=? AND status='done' AND pr_state='merged'",
+                (str(wf.path),),
+            ).fetchall()
+            if r["task_id"] in open_ids  # still unstruck in the tracker
+        ]
+        if pending_strikes:
+            summary["tracker_struck"] = _strike_merged_tasks(wf, source, pending_strikes)
 
         # 2. Keep done rows for the "recent runs" view; just cap history per workflow.
         _prune_done_rows(conn, str(wf.path))
@@ -1062,7 +1223,6 @@ def dry_run(workflow_path: str | Path) -> list[dict]:
             "task_id": task.id,
             "task_title": task.title,
             "task_file": task.file,
-            "task_file_relative": _task_file_relative(task.file, repo_path),
             "task_line_number": task.line_number,
             "workspace_path": str(worktree),
             "branch_name": branch,

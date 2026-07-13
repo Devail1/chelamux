@@ -108,23 +108,25 @@ from `{{base_branch}}`). Make changes here, not in the main checkout.
 2. Validate: run the project's linter/tests if they exist; fix what you broke.
 3. Commit in the worktree. Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`).
-4. Strike the TODO line in your branch: in `{{task_file_relative}}`, change
-   `- [ ] {{task_title}}` to `- [x] {{task_title}}` and include it in your commit.
-   It lands on `{{base_branch}}` only when the PR merges.
-5. Push and open a PR: `git push -u origin {{branch_name}}` then
+4. Push and open a PR: `git push -u origin {{branch_name}}` then
    `gh pr create --base {{base_branch}} --title "{{project_key}}-{{task_number}}: <summary>" --body ...`
    (put `{{task_id}}` in the body).
-6. Run `chela task-finished {{task_id}}` as your last step — marks the run
+5. Run `chela task-finished {{task_id}}` as your last step — marks the run
    `awaiting_review`, records the PR URL, and kills your tmux window.
+
+**Do not touch the TODO file.** You never tick your own checkbox — the dispatcher
+strikes it on `{{base_branch}}` once your PR actually merges, and it is that file's
+only writer. That is what keeps your PR from conflicting with the items added to
+`{{base_branch}}` while you work.
 
 ## If you get stuck
 
-Append `<!-- blocked: <reason> -->` to the TODO line, commit it, and stop. The
-next poll skips that task.
+Stop and say why in your final message — name the blocker. Don't record it in the
+TODO file, and don't open a half-done PR.
 
 ## Boundaries
 
-- Don't modify other TODO lines, touch other worktrees, or push `{{base_branch}}`.
+- Don't edit the TODO file, touch other worktrees, or push `{{base_branch}}`.
 ```
 
 Then create `TODO.md` at the repo root. Each unchecked `- [ ]` bullet is one work
