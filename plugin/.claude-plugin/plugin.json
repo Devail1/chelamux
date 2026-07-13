@@ -1,0 +1,15 @@
+{
+  "name": "chela",
+  "version": "0.1.0",
+  "description": "Feed a chela fleet's event log from Claude Code hooks (observe-only \u2014 it never answers a prompt).",
+  "author": {
+    "name": "chela"
+  },
+  "homepage": "https://github.com/Devail1/chelamux",
+  "license": "MIT",
+  "keywords": [
+    "observability",
+    "orchestration",
+    "tmux"
+  ]
+}

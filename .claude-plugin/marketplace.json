@@ -1,0 +1,14 @@
+{
+  "name": "chela",
+  "owner": {
+    "name": "chela"
+  },
+  "description": "chela \u2014 a tmux-driven orchestrator for Claude Code agents.",
+  "plugins": [
+    {
+      "name": "chela",
+      "source": "./plugin",
+      "description": "Feed a chela fleet's event log from Claude Code hooks (observe-only \u2014 it never answers a prompt)."
+    }
+  ]
+}

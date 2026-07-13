@@ -1,0 +1,124 @@
+# Hooks — feeding the event log from Claude Code
+
+Everything chela knows about a *blocked* agent today, it learned by scraping a tmux pane.
+That is not an aesthetic choice. Claude Code writes an interactive tool's `tool_use`
+record to the transcript **when the human answers it** — measured, not assumed — so at the
+exact moment an agent is stuck on an `AskUserQuestion` or a permission gate, the
+structured channel is *empty*. Reading characters off a terminal was the only thing left.
+
+**Hooks are the channel that was missing.** They are typed, they carry the whole
+`tool_input`, and they arrive *before* the fact. Where a pane scrape gives you a
+truncated button caption, a hook gives you this, while the agent is still waiting:
+
+```json
+{"seq": 4, "type": "hook.permission_request", "wid": "@29",
+ "summary": "permission asked — AskUserQuestion: Which storage backend should we use?",
+ "payload": {"tool_name": "AskUserQuestion", "permission_mode": "auto",
+   "tool_input": {"questions": [{"question": "Which storage backend should we use?",
+     "options": [{"label": "SQLite",   "description": "One file, no server, transactional"},
+                 {"label": "Postgres", "description": "A server to run, but concurrent writers"}]}]}}}
+```
+
+## This slice is OBSERVE-ONLY
+
+It **ingests**. It answers nothing. The endpoint returns `{}` — no `permissionDecision`,
+no `hookSpecificOutput`, ever — because a decision in that response would silently start
+answering the user's permission prompts on their behalf. The pane-scraped gates
+(`chela/telegram/{panescan,gatewatch,interactive}.py`) are still what answers a gate, and
+they stay: **hooks are read at agent startup**, so a fleet that is already running has
+none, and a fleet member launched without the plugin never will. Hooks are the better
+channel; they are not yet the *only* channel, and nothing here assumes they are.
+
+## Install
+
+chela ships the hooks as a **plugin**, and never by writing your `settings.json` — that
+file holds your hand-curated permission rules and chela has no business opening it.
+Plugin hooks *merge* additively with your own (at the lowest precedence, firing last),
+which is exactly right for something that only watches.
+
+```
+/plugin marketplace add Devail1/chelamux
+/plugin install chela@chela
+```
+
+**Not on the default dashboard port?** Then you need your own copy of the manifest. A hook
+`url` is a literal — Claude Code does **not** expand environment variables in it (measured
+on 2.1.207) — so the port is baked in when the plugin is rendered:
+
+```bash
+chela plugin --dir ~/.chela/plugin      # bakes in the port the dashboard is actually on
+claude --plugin-dir ~/.chela/plugin     # one session
+# ...or /plugin marketplace add ~/.chela/plugin   (it is a one-plugin marketplace too)
+```
+
+Restart an agent to pick the hooks up. A running one will not.
+
+## How an event gets in
+
+Each hook is an **`http`** hook posting to the daemon the dashboard is already running:
+
+```json
+{"type": "http", "url": "http://127.0.0.1:5001/hooks/PreToolUse", "timeout": 2}
+```
+
+No shell script, no process spawn per tool call, no PATH assumption — and no way for a
+chatty `.bashrc` to put stray stdout into the JSON contract a `command` hook has to
+honour. The endpoint appends via [the event log](EVENTS.md) and returns.
+
+**A hook runs synchronously inside a live agent**, so every choice here is made against
+one constraint: *a slow or crashing hook stalls or breaks somebody's session.*
+
+* the timeout is short (2s) and the receiver only appends;
+* `hooks.ingest()` and `event_log.append()` both refuse to raise;
+* a malformed body is dropped, a huge one is clipped, and either way the answer is `200`;
+* **the daemon being down fails OPEN** — the connection is refused, Claude Code logs a
+  warning and carries on. The event is lost. A lost event is a bug; a wedged agent is an
+  outage, and this trade is made deliberately and in that direction.
+
+## Correlating an event to a window, without the pane
+
+A hook payload carries `cwd` and `session_id`. It does not carry a tmux window, and going
+back to the pane to find one would reinvent the thing this replaces. So `cwd` is matched
+against `#{pane_current_path}` in a single `tmux list-windows` call (~5 ms, cached ~1 s) —
+a Claude Code agent *is* its pane's process, so the two are the same directory.
+
+**Ambiguity resolves to `None`, never to a guess.** Two agents in one cwd cannot be told
+apart, and an event filed against the *wrong* window is worse than one filed against no
+window — the `cwd` and `session_id` are in the payload regardless, so nothing is lost but
+the shortcut.
+
+## What actually fires (measured on Claude Code 2.1.207)
+
+`AskUserQuestion` and `ExitPlanMode` are **not** hook events — they are **tools**, and
+arrive as `PreToolUse` / `PermissionRequest` carrying `tool_name` and the full
+`tool_input`. `PermissionRequest` fires for `AskUserQuestion` **in every permission mode,
+`auto` included**: auto does not auto-answer a question, it genuinely blocks on the picker.
+
+Registered: `PreToolUse`, `PostToolUse`, `PermissionRequest`, `PermissionDenied`,
+`UserPromptSubmit`, `SessionStart`, `SessionEnd`, `Stop`, `SubagentStart`, `SubagentStop`,
+`Notification`, `PreCompact`, `PostCompact`, `Elicitation`.
+
+Two of those do not deliver, and are documented rather than quietly missing:
+
+| event | measured behaviour |
+|---|---|
+| `SessionStart` | **Never fires over the `http` transport** — it fires as a `command` hook, and `SessionEnd`/`Stop` fire over http, so this is the transport, not the config. chela does not spawn a `curl` for it: a session announces itself with its first `UserPromptSubmit` or `PreToolUse` anyway, and a `SessionStart` command-hook's **stdout is injected into the agent's context** — a strictly worse failure than a missing marker. It stays registered, so it starts working if Claude Code starts delivering it. |
+| `PermissionDenied` | Does not fire when a human denies a gate interactively (neither `Esc` nor picking "No"). It appears to be for rule-based denials. Registered; simply rare. |
+
+## Event types in the log
+
+A hook event is namespaced — `hook.pre_tool_use`, `hook.permission_request` — so *an agent
+told us this* is distinguishable at a glance from chela's own bookkeeping (`run_review`,
+`died`, `daemon_start`). Everything else is [the event log's ordinary record](EVENTS.md):
+`seq`, `boot_id`, `ts`, `wid`, `session_id`, a one-line `summary`, and the payload.
+
+```bash
+chela events --type hook.permission_request --follow    # every gate, live, fleet-wide
+chela events --wid @3 --type hook.pre_tool_use          # what @3 is doing
+```
+
+A big payload is **clipped, never dropped** — a `Write` of a 200 KB file carries that file
+in `tool_input.content`, and the log is a line-per-event JSONL a human tails. Strings are
+bounded, and a payload past the ceiling degrades to a stub. What the bound is written to
+protect is the per-option `label`/`description` of an `AskUserQuestion` and a Bash
+`command`: the things a decision is actually made from.

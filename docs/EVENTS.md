@@ -110,12 +110,17 @@ duplicates and no gaps.
 
 ## What feeds it
 
-Today: the daemon (`daemon_start`) and the decisions inbox — every event it generates,
-including the ones it never delivers. The queue is what the orchestrator is *told*; the
-log is what *happened*, and conflating the two is why a bug like the false `DIED` had no
-history to be reconciled against.
+The daemon (`daemon_start`) and the decisions inbox — every event it generates, including
+the ones it never delivers. The queue is what the orchestrator is *told*; the log is what
+*happened*, and conflating the two is why a bug like the false `DIED` had no history to be
+reconciled against.
 
-Next (part B): Claude Code **hooks**, shipped as a plugin, POSTing typed events straight
-into the daemon. This log is the one authority they will append to, and the one the
-dashboard timeline and the inbox will both read — there is deliberately no second event
-source alongside it.
+And **[Claude Code hooks](HOOKS.md)**, shipped as a plugin: typed events POSTed straight
+into the daemon by the agents themselves, namespaced `hook.*` (`hook.permission_request`,
+`hook.pre_tool_use`, …). They arrive *before* the fact — a gate lands in the log while the
+agent is still blocked on it, with the full `tool_input` attached — which the transcript
+cannot do and a pane scrape can only approximate. Ingestion is **observe-only**: it feeds
+the log and answers nothing.
+
+This log is the one authority all of them append to, and the one the dashboard timeline
+and the inbox both read — there is deliberately no second event source alongside it.

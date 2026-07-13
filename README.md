@@ -259,6 +259,7 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | `chela dashboard [--host] [--port]` | Launch the dashboard + live terminal wall (needs the `[dashboard]` install) |
 | `chela knowledge export [--out DIR] [--since DATE]` | Write an [OKF](docs/OKF.md) bundle of runs / schedules / agents / projects |
 | `chela events [--after-seq N] [--type T] [--wid @N] [--follow]` | Replay / filter / tail the [event log](docs/EVENTS.md) — the durable record of what happened |
+| `chela plugin [--dir PATH] [--port N]` | Render the [Claude Code hooks plugin](docs/HOOKS.md) that feeds the event log |
 
 **Agent-facing** — an agent runs these *about its siblings*, from inside its own
 window (it knows itself via `$CHELA_WID`, injected at spawn):
@@ -493,6 +494,16 @@ protocol session trades that away. So chela keeps the human-drivable PTY and
 recovers the *structure* a protocol would give from the channel that already has
 it — the transcript — reserving the pane for the one thing only it knows: that an
 agent is waiting for you right now.
+
+**And increasingly, not even that.** The transcript only records an interactive tool
+*when it is answered*, which is why a pending gate had to be read off the terminal at all.
+[Claude Code hooks](docs/HOOKS.md) — shipped as a plugin, POSTing into the daemon — close
+that gap from the other side: a permission request or an `AskUserQuestion` lands in the
+[event log](docs/EVENTS.md) **while the agent is still blocked on it**, typed, with every
+option's label and description attached. Ingestion is observe-only today and the
+pane-scraped gates remain the fallback (hooks are read at agent startup, so a running
+fleet has none) — but the structure a protocol would have handed us is arriving anyway,
+without giving up the terminal.
 
 ---
 
