@@ -21,9 +21,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Callable
+from typing import Callable, NamedTuple
 
-from chela.telegram.format import to_markdown_v2, to_plain_text
+from chela.telegram.format import to_markdown_v2, to_plain_text, unescape_markdown_v2
 from chela.telegram.interactive import ask_reply_markup
 from chela.telegram.parser import Message
 
@@ -40,11 +40,16 @@ MAX_LEN = 4096
 # wait and the number of attempts so a stuck topic can't wedge the relay.
 _MAX_RETRY_AFTER = 30.0  # cap the honored flood-control wait (seconds)
 _MAX_SEND_TRIES = 3      # total attempts per payload before giving up
-# When a chunk is split mid ``` fence we append a closer and reopen on the next
-# chunk; keep this many UTF-16 units free so the added "```" still fits under the
-# limit (a closing "\n```" plus a little slack).
+
+# MarkdownV2 entity markers. A chunk boundary must never land between an opener
+# and its closer, so :func:`split_message` closes whatever is open at the end of a
+# chunk and reopens it at the top of the next — for the ``` fence AND for every
+# inline entity. Longest first: ``__`` must win over ``_``.
 _FENCE = "```"
-_FENCE_RESERVE = 8
+_INLINE_MARKERS = ("||", "__", "*", "_", "~", "`")
+# Prefer to break a chunk here, best first — a paragraph break can never sit
+# inside an inline entity, and a mid-word break is the one that used to sever one.
+_BREAK_BLANK, _BREAK_LINE, _BREAK_SPACE, _BREAK_ANY = 3, 2, 1, 0
 
 # A sender posts one message body to Telegram and reports whether it was
 # accepted: ``send(text, parse_mode, ...) -> ok``. ``parse_mode`` is "MarkdownV2"
@@ -120,69 +125,197 @@ def _truncate_utf16(text: str, n: int = MAX_LEN) -> str:
     return "".join(out)
 
 
+class _Unit(NamedTuple):
+    """One indivisible piece of a MarkdownV2 body, as :func:`_scan` sees it.
+
+    ``s`` is the literal text (a character, a ``\\x`` escape pair, or an entity
+    marker). ``marker`` is the entity marker when this unit is one, ``close``
+    whether it closes the currently-open one, and ``link`` whether the unit sits
+    inside a ``[label](url)`` construct — a link cannot be closed and reopened
+    across a chunk, so we never break inside one.
+    """
+
+    s: str
+    marker: str | None
+    close: bool
+    link: bool
+
+
+def _scan(text: str) -> list[_Unit]:
+    """Tokenize an already-rendered MarkdownV2 body into entity-aware units.
+
+    This parses **what is actually emitted** (by ``render_markdown`` /
+    ``telegramify-markdown``), not the source Markdown: a ``\\*`` escape is an
+    ordinary character, never a bold opener. Inside a ``` fence or an inline
+    `` ` `` code span nothing but the matching closer is a marker, which is what
+    keeps a literal asterisk in a code sample from opening an entity.
+    """
+    units: list[_Unit] = []
+    stack: list[str] = []
+    at_line_start = True
+    in_link = False
+    i, end = 0, len(text)
+    while i < end:
+        ch = text[i]
+        if ch == "\\" and i + 1 < end:  # escaped char — atomic, never a marker
+            units.append(_Unit(text[i : i + 2], None, False, in_link))
+            i += 2
+            at_line_start = False
+            continue
+        in_code = bool(stack) and stack[-1] in (_FENCE, "`")
+        if in_code:
+            marker = stack[-1]
+            # A fence closes only at a line start; an inline span at any backtick.
+            if text.startswith(marker, i) and (marker == "`" or at_line_start):
+                stack.pop()
+                units.append(_Unit(marker, marker, True, in_link))
+                i += len(marker)
+                at_line_start = False
+                continue
+            units.append(_Unit(ch, None, False, in_link))
+            at_line_start = ch == "\n"
+            i += 1
+            continue
+        if at_line_start and text.startswith(_FENCE, i):
+            stack.append(_FENCE)
+            units.append(_Unit(_FENCE, _FENCE, False, in_link))
+            i += len(_FENCE)
+            at_line_start = False
+            continue
+        marker = next((m for m in _INLINE_MARKERS if text.startswith(m, i)), None)
+        if marker:
+            closing = bool(stack) and stack[-1] == marker
+            if closing:
+                stack.pop()
+            else:
+                stack.append(marker)
+            units.append(_Unit(marker, marker, closing, in_link))
+            i += len(marker)
+            at_line_start = False
+            continue
+        if ch == "[":
+            in_link = True
+        units.append(_Unit(ch, None, False, in_link))
+        if ch == ")" and in_link:
+            in_link = False
+        at_line_start = ch == "\n"
+        i += 1
+    return units
+
+
+def _advance(stack: list[str], u: _Unit) -> list[str]:
+    """The open-entity stack after ``u`` (a new list only when it changes)."""
+    if u.marker is None:
+        return stack
+    return stack[:-1] if u.close else stack + [u.marker]
+
+
+def _closer_len(stack: list[str]) -> int:
+    """UTF-16 units needed to close everything in ``stack`` at a chunk boundary.
+
+    The closers we inject count against Telegram's limit like any other text, so
+    the budget check has to reserve them — a fence closer is ``\\n``+``` ``` ```.
+    """
+    return sum(len(m) + 1 if m == _FENCE else len(m) for m in stack)
+
+
+def _reopen(stack: list[str]) -> str:
+    """The markers to re-emit at the top of a continuation chunk, outermost first."""
+    return "".join(_FENCE + "\n" if m == _FENCE else m for m in stack)
+
+
+def _close(body: str, stack: list[str]) -> str:
+    """Close every entity left open in ``body``, innermost first."""
+    for m in reversed(stack):
+        if m == _FENCE:
+            if body and not body.endswith("\n"):
+                body += "\n"
+        body += m
+    return body
+
+
 def split_message(text: str, n: int = MAX_LEN) -> list[str]:
     """Split ``text`` into chunks Telegram will accept as one message each.
 
-    Two subtleties over a naive ``text[i:i+n]`` slice:
+    ``text`` is a *rendered MarkdownV2* body, and every chunk is posted with
+    ``parse_mode=MarkdownV2`` — so each one must be valid MarkdownV2 **on its
+    own**. Three subtleties over a naive ``text[i:i+n]`` slice:
 
     * **UTF-16 length.** Telegram measures its limit in UTF-16 code units, not
       Python code points (:func:`_utf16_len`), so an astral character (most
       emoji) counts as two. We accumulate whole characters — never splitting a
       surrogate pair — until the next would exceed the budget.
-    * **Fenced code blocks.** A split landing inside a ```` ``` ```` block would
-      leave a chunk with an unbalanced fence (invalid MarkdownV2, so the relay
-      would drop to its plain-text fallback). When we break mid-fence we close
-      the fence on this chunk and reopen it on the next, reserving
-      :data:`_FENCE_RESERVE` UTF-16 units so the added closer still fits under
-      ``n``. A message that is already under the limit is returned verbatim — the
-      fence handling only ever runs when an actual split happens.
+    * **Entity-safe boundaries.** We prefer to break at a blank line, then a
+      newline, then a space (never mid-token), as long as the resulting chunk is
+      at least half full. A paragraph break cannot sit inside an inline entity,
+      so this alone avoids most severed entities.
+    * **Balanced entities.** When a break still lands inside an open entity —
+      ``*bold*``, ``_italic_``, ``__underline__``, ``~strike~``, ``||spoiler||``,
+      `` `code` `` or a ``` fence — we close it at the end of the chunk and
+      reopen it at the top of the next, reserving room for the closers so the
+      decorated chunk still fits under ``n``. An unterminated entity is exactly
+      what Telegram rejects with "Can't find end of Bold entity", which used to
+      downgrade the whole message to raw, unformatted Markdown.
+
+    A message already under the limit is returned verbatim — none of this runs
+    unless there is an actual split.
     """
+    if _utf16_len(text) <= n:
+        return [text]
+
+    units = _scan(text)
     chunks: list[str] = []
-    cur: list[str] = []
-    cur_len = 0
-    fence_open = False  # is a ``` code fence open at the current position?
-    at_line_start = True
-    run = 0  # consecutive backticks since the line start (for fence detection)
+    stack: list[str] = []
+    i = 0
+    while i < len(units):
+        prefix = _reopen(stack)
+        cur_len = _utf16_len(prefix)
+        cur_stack = stack
+        # Best break seen so far per priority, plus the last legal boundary of
+        # any kind: (unit index, open-entity stack there, chunk length there).
+        best: dict[int, tuple[int, list[str], int]] = {}
+        last: tuple[int, list[str], int] | None = None
+        k = i
+        while k < len(units):
+            u = units[k]
+            nxt = _advance(cur_stack, u)
+            ulen = _utf16_len(u.s)
+            # Always take at least one unit, or an oversized unit would loop.
+            if k > i and cur_len + ulen + _closer_len(nxt) > n:
+                break
+            cur_len += ulen
+            cur_stack = nxt
+            k += 1
+            if k < len(units) and not (u.link and units[k].link):
+                if u.s == "\n":
+                    blank = k - 2 >= i and units[k - 2].s == "\n"
+                    prio = _BREAK_BLANK if blank else _BREAK_LINE
+                elif u.s == " ":
+                    prio = _BREAK_SPACE
+                else:
+                    prio = _BREAK_ANY
+                last = best[prio] = (k, cur_stack, cur_len)
 
-    def emit() -> None:
-        nonlocal cur, cur_len
-        body = "".join(cur)
-        if fence_open:  # close the dangling fence so this chunk is valid on its own
-            if body and not body.endswith("\n"):
-                body += "\n"
-            body += _FENCE
-        chunks.append(body)
-        cur, cur_len = [], 0
-
-    for ch in text:
-        # Reopen the fence at the top of a fresh chunk before adding content.
-        if not cur and fence_open:
-            reopen = _FENCE + "\n"
-            cur.append(reopen)
-            cur_len = _utf16_len(reopen)
-        limit = n - _FENCE_RESERVE if fence_open else n
-        clen = 2 if ord(ch) > 0xFFFF else 1
-        if cur and cur_len + clen > limit:
-            emit()
-            if fence_open:
-                reopen = _FENCE + "\n"
-                cur.append(reopen)
-                cur_len = _utf16_len(reopen)
-        cur.append(ch)
-        cur_len += clen
-        # Track fenced blocks: a line whose first three characters are backticks
-        # toggles the fence. Extra backticks (4+) and inline `code` don't toggle.
-        if ch == "\n":
-            at_line_start, run = True, 0
-        elif at_line_start and ch == "`":
-            run += 1
-            if run == 3:
-                fence_open = not fence_open
+        if k >= len(units):
+            end, end_stack = len(units), cur_stack
         else:
-            at_line_start, run = False, 0
+            # A preferred boundary only wins if it doesn't waste half the chunk;
+            # otherwise take the fullest legal one (a hard break at ``k`` is the
+            # last resort — it can only happen inside an over-long link).
+            pick = next(
+                (
+                    best[p]
+                    for p in (_BREAK_BLANK, _BREAK_LINE, _BREAK_SPACE)
+                    if p in best and best[p][2] >= n // 2
+                ),
+                last or (k, cur_stack, cur_len),
+            )
+            end, end_stack = pick[0], pick[1]
 
-    if cur or not chunks:
-        emit()
+        body = prefix + "".join(u.s for u in units[i:end])
+        chunks.append(_close(body, end_stack))
+        stack = end_stack
+        i = end
     return chunks
 
 
@@ -235,9 +368,13 @@ def _retry_after(resp: dict) -> float | None:
 class BotSender:
     """Posts message bodies to one chat/topic via the direct Bot API.
 
-    ``send(text, parse_mode)`` splits ``text`` at 4096 chars and posts each
-    chunk with ``sendMessage``; it returns ``True`` only if every chunk was
-    accepted, so the relay can fall back to plain text on the first rejection.
+    ``send(text, parse_mode)`` splits ``text`` at 4096 UTF-16 units
+    (:func:`split_message`) and posts each chunk with ``sendMessage``. A chunk
+    Telegram rejects is re-sent **as that chunk alone**, unformatted — the
+    fallback is per-chunk, so one bad chunk can no longer downgrade a whole
+    six-chunk report to raw Markdown. ``True`` means every chunk got delivered
+    one way or the other; ``False`` (a chunk that failed even as plain text)
+    leaves the relay's whole-message plain-text retry as the last resort.
     A Telegram 429 (flood control) is not a rejection — every send goes through
     :meth:`_call`, which sleeps for the advertised ``retry_after`` (capped) and
     re-sends the same payload a bounded number of times before giving up.
@@ -301,8 +438,24 @@ class BotSender:
             if markup_json and i == 0:
                 fields["reply_markup"] = markup_json
             resp = self._call("sendMessage", fields)
+            if resp.get("ok"):
+                continue
+            log.warning("telegram sendMessage failed: %s", resp.get("description", resp))
+            if not parse_mode:
+                return False
+            # A rejected chunk is downgraded ON ITS OWN — one bad chunk must not
+            # strip the formatting from the other five (which is what returning
+            # False here did: the relay re-sent the WHOLE message as plain text).
+            # ``_call`` has already exhausted the 429 retries, so this is a real
+            # rejection — a formatting one, since the payload is otherwise fine.
+            fields["text"] = unescape_markdown_v2(chunk)
+            fields.pop("parse_mode")
+            resp = self._call("sendMessage", fields)
             if not resp.get("ok"):
-                log.warning("telegram sendMessage failed: %s", resp.get("description", resp))
+                log.warning(
+                    "telegram plain-text fallback failed: %s",
+                    resp.get("description", resp),
+                )
                 return False
         return True
 

@@ -37,6 +37,8 @@ log = logging.getLogger(__name__)
 # Characters Telegram requires be backslash-escaped in MarkdownV2 plain text.
 # Ported verbatim from six-ddc/ccbot's markdown_v2.py (MIT); see NOTICE.
 _MDV2_SPECIAL = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
+# The same table, matched as an ESCAPE pair — the inverse of the rule above.
+_MDV2_ESCAPED = re.compile(r"\\([_*\[\]()~`>#+\-=|{}.!\\])")
 
 # A markdown table's separator row: only pipes, colons, dashes and whitespace.
 # Ported from six-ddc/ccbot's markdown_v2.py (MIT); see NOTICE.
@@ -46,6 +48,18 @@ _TABLE_SEP = re.compile(r"^[\s|:\-]+$")
 def escape_markdown_v2(text: str) -> str:
     """Backslash-escape every MarkdownV2 special character in ``text``."""
     return _MDV2_SPECIAL.sub(r"\\\1", text)
+
+
+def unescape_markdown_v2(text: str) -> str:
+    """Drop the backslash escapes from a rendered MarkdownV2 string.
+
+    The per-chunk plain-text fallback (:meth:`chela.telegram.relay.BotSender.send`)
+    re-sends a rejected chunk with ``parse_mode=None``, where a backslash is no
+    longer an escape and would show up literally. This strips them, leaving the
+    entity markers themselves visible — unformatted but readable, and only ever on
+    the path where Telegram refused the formatted chunk.
+    """
+    return _MDV2_ESCAPED.sub(r"\1", text)
 
 
 def _split_table_row(line: str) -> list[str]:
