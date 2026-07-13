@@ -163,8 +163,10 @@ def to_code_block(text: str) -> str:
     return f"```\n{escaped}\n```"
 
 
-# Emoji-tagged header for each event, so a topic reads like a conversation.
-_ROLE_EMOJI = {"assistant": "🤖", "user": "👤"}
+# Emoji-tagged header for each event, so a topic reads like a conversation. The
+# assistant has no marker: Telegram already shows the message came from the bot,
+# so an assistant turn renders as its body alone (see _header_and_body).
+_ROLE_EMOJI = {"user": "👤"}
 
 
 def _header_and_body(msg: Message) -> tuple[str, str]:
@@ -179,13 +181,18 @@ def _header_and_body(msg: Message) -> tuple[str, str]:
         return f"🔧 {msg.tool_name or msg.text or 'tool'}", ""
     if msg.content_type == "tool_result":
         return f"✅ {msg.tool_name or 'tool'} result", msg.text
-    # plain text turn
+    # plain text turn — an assistant turn needs no header (Telegram already marks
+    # it as the bot), so its body renders alone; other roles keep a marker.
+    if msg.role == "assistant":
+        return "", msg.text
     return _ROLE_EMOJI.get(msg.role, "•"), msg.text
 
 
 def to_plain_text(msg: Message) -> str:
     """Render a message as unformatted text (the MarkdownV2 fallback)."""
     header, body = _header_and_body(msg)
+    if not header:                       # headerless (assistant turn) — body alone
+        return body.rstrip()
     return f"{header}\n{body}".rstrip() if body else header
 
 
@@ -196,6 +203,8 @@ def to_markdown_v2(msg: Message) -> str:
     :func:`render_markdown` so Claude's Markdown displays with real formatting.
     """
     header, body = _header_and_body(msg)
+    if not header:                       # headerless (assistant turn) — body alone
+        return render_markdown(body) if body else ""
     out = f"*{escape_markdown_v2(header)}*"
     if body:
         out += f"\n{render_markdown(body)}"

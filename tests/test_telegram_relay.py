@@ -41,10 +41,11 @@ def test_escape_markdown_v2_escapes_every_special_char():
     assert escape_markdown_v2("plain text") == "plain text"
 
 
-def test_to_markdown_v2_renders_bold_header_and_escaped_body():
+def test_to_markdown_v2_assistant_is_headerless_body_only():
+    # An assistant plain-text turn has NO header (Telegram marks the bot itself);
+    # only the body renders, with the '.' escaped for MarkdownV2.
     md = to_markdown_v2(Message("assistant", "text", "done: 1.5 files"))
-    # header is bold (unescaped emoji), body escapes the '.' and ':'
-    assert md == "*🤖*\ndone: 1\\.5 files"
+    assert md == "done: 1\\.5 files"
 
 
 def test_to_code_block_wraps_and_escapes_only_fence_specials():
@@ -67,7 +68,7 @@ def test_to_markdown_v2_tool_result_uses_paired_tool_name():
 
 
 def test_to_plain_text_has_no_markup():
-    assert to_plain_text(Message("assistant", "text", "hi. there")) == "🤖\nhi. there"
+    assert to_plain_text(Message("assistant", "text", "hi. there")) == "hi. there"
     assert to_plain_text(Message("assistant", "tool_use", "Read", tool_name="Read")) == "🔧 Read"
 
 
@@ -91,8 +92,8 @@ def test_render_markdown_renders_bold_as_single_asterisk():
 
 def test_to_markdown_v2_body_renders_markdown_not_literally():
     md = to_markdown_v2(Message("assistant", "text", "run `ls` then **stop**"))
-    # bold header, then the body with a real code span + bold — no escaped fences.
-    assert md == "*🤖*\nrun `ls` then *stop*"
+    # headerless assistant turn: body with a real code span + bold, no escaped fences.
+    assert md == "run `ls` then *stop*"
 
 
 def test_render_markdown_falls_back_to_blind_escape_without_telegramify(monkeypatch):
@@ -368,7 +369,7 @@ def test_relay_sends_markdown_v2_and_does_not_fall_back_on_success():
     assert len(stub.calls) == 1
     text, parse_mode = stub.calls[0]
     assert parse_mode == "MarkdownV2"
-    assert text == "*🤖*\nok\\. go"
+    assert text == "ok\\. go"
 
 
 def test_relay_falls_back_to_plain_text_when_markdown_rejected():
@@ -377,7 +378,7 @@ def test_relay_falls_back_to_plain_text_when_markdown_rejected():
 
     assert len(stub.calls) == 2
     assert stub.calls[0][1] == "MarkdownV2"          # attempted formatted first
-    assert stub.calls[1] == ("🤖\nok. go", None)      # then plain, unescaped
+    assert stub.calls[1] == ("ok. go", None)         # then plain, unescaped
 
 
 def test_relay_is_a_valid_monitor_on_message_sink():
@@ -440,8 +441,8 @@ def test_registry_relay_falls_back_to_plain_text_with_thread_preserved():
     relay.on_message("@1", Message("assistant", "text", "ok. go"))
 
     assert len(stub.calls) == 2
-    assert stub.calls[0] == ("*🤖*\nok\\. go", "MarkdownV2", "42")
-    assert stub.calls[1] == ("🤖\nok. go", None, "42")  # thread kept on retry
+    assert stub.calls[0] == ("ok\\. go", "MarkdownV2", "42")
+    assert stub.calls[1] == ("ok. go", None, "42")  # thread kept on retry
 
 
 # --------------------------------------------------------------------------
@@ -474,7 +475,7 @@ def test_relay_hidden_drops_tool_calls_and_askuserquestion_tool_use():
 
     # The AskUserQuestion tool_result (confirmation) and the text turn made it.
     assert len(stub.calls) == 2
-    assert stub.calls[1][0] == "*🤖*\ndone"
+    assert stub.calls[1][0] == "done"
 
 
 def test_relay_drops_askuserquestion_tool_use_even_when_shown():
