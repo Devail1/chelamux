@@ -184,3 +184,67 @@ def test_send_escape_returns_false_on_tmux_error():
     with patch.object(messenger.subprocess, "run", side_effect=boom), \
             patch.object(messenger.config, "current_session", return_value="chela"):
         assert messenger.send_escape("@1") is False
+
+
+# --- resolve_window / send_message — the "@32 is offline" bug -----------------
+#
+# `chela msg @32` reported a live, BUSY agent as offline and dropped the message:
+# the recipient was resolved by window NAME only, so a window *id* — the identity
+# the wall, /api/agents, `chela peek` and `chela drive` all show — matched nothing.
+# Liveness now comes from the one authority (the live tmux window table), which is
+# what /api/agents walks too, and it accepts ids as well as names.
+
+_LIVE = {"@32": "cmx-43", "@7": "orchestrator", "@9": "cmx-43"}  # note: colliding names
+
+
+def _with_windows(windows=None):
+    return patch.object(messenger, "get_windows_by_id", return_value=dict(windows or _LIVE))
+
+
+def test_resolve_window_accepts_window_id_bare_number_and_name():
+    with _with_windows():
+        assert messenger.resolve_window("@32") == "@32"   # the case that failed live
+        assert messenger.resolve_window("32") == "@32"    # bare number = same window
+        assert messenger.resolve_window("orchestrator") == "@7"  # names still work
+        assert messenger.resolve_window(" @32 ") == "@32"
+
+
+def test_resolve_window_none_for_dead_window_and_empty():
+    with _with_windows():
+        assert messenger.resolve_window("@99") is None    # genuinely not live
+        assert messenger.resolve_window("ghost-agent") is None
+        assert messenger.resolve_window("") is None
+        assert messenger.resolve_window(None) is None
+
+
+def test_send_message_to_busy_agent_by_wid_is_delivered():
+    # The exact live failure: a working agent addressed by its window id. Busy is
+    # not a failure mode — nothing here may consult claude_pid/session status.
+    with _with_windows(), patch.object(messenger, "send_tmux", return_value=True) as send:
+        assert messenger.send_message("orchestrator", "@32", "ping") is True
+    send.assert_called_once_with("@32", "[orchestrator] ping")
+
+
+def test_send_message_to_dead_window_is_not_delivered_and_never_sends():
+    with _with_windows(), patch.object(messenger, "send_tmux") as send:
+        assert messenger.send_message("orchestrator", "@99", "ping") is False
+    send.assert_not_called()
+
+
+def test_send_message_false_when_tmux_send_fails():
+    with _with_windows(), patch.object(messenger, "send_tmux", return_value=False):
+        assert messenger.send_message("orchestrator", "@32", "ping") is False
+
+
+def test_broadcast_skips_own_window_and_reaches_colliding_names():
+    with _with_windows(), patch.object(messenger, "send_tmux", return_value=True) as send:
+        results = messenger.broadcast("@7", "standup")
+    targets = sorted(c.args[0] for c in send.call_args_list)
+    assert targets == ["@32", "@9"]           # @7 (the sender) is skipped — no self-loop
+    assert results == {"cmx-43": True, "cmx-43 (@9)": True}  # both, despite one name
+
+
+def test_broadcast_skips_own_window_when_sender_is_a_name():
+    with _with_windows(), patch.object(messenger, "send_tmux", return_value=True) as send:
+        messenger.broadcast("orchestrator", "standup")
+    assert sorted(c.args[0] for c in send.call_args_list) == ["@32", "@9"]

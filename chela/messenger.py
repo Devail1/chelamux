@@ -2,9 +2,9 @@
 
 ``send_tmux`` is the low-level primitive: given a tmux window id and text, type
 it into that window's Claude Code prompt and press Enter. On top of it,
-``send_message``/``broadcast`` resolve an agent's window by name and deliver
-there. Delivery is live-only: if the agent has no live window the message is
-not delivered (there is no persistent queue).
+``send_message``/``broadcast`` resolve an agent reference to a live window with
+:func:`resolve_window` and deliver there. Delivery is live-only: if the agent
+has no live window the message is not delivered (there is no persistent queue).
 """
 from __future__ import annotations
 import logging
@@ -12,7 +12,7 @@ import subprocess
 import time
 
 from chela import config
-from chela.discovery import get_window_id, get_all_windows
+from chela.discovery import get_windows_by_id
 
 log = logging.getLogger(__name__)
 
@@ -168,27 +168,74 @@ def send_escape(window_id: str) -> bool:
     return send_key(window_id, "Escape")
 
 
+def resolve_window(agent: str | None) -> str | None:
+    """Resolve an agent reference to its live tmux window id — id OR display name.
+
+    THE one liveness authority for the message path, and deliberately the same
+    one ``/api/agents`` walks: the live tmux window table (``discovery``). tmux
+    never lies about what is running right now, so "not in this table" is the
+    only thing that legitimately means offline.
+
+    Accepts what every other chela surface accepts — a window id (``@32``, or a
+    bare ``32``) or a window name. That breadth IS the fix: this used to be a
+    name-only lookup, so ``chela msg @32`` (a window *id*, which is what the
+    wall, ``/api/agents``, ``chela peek`` and ``chela drive`` all show you) found
+    no window *named* ``@32`` and reported a live, busy agent as "offline" while
+    dropping the message. Returns None only when the window is genuinely gone.
+
+    Note this is liveness, not busy/idle: a *busy* agent is a perfectly valid
+    recipient (Claude Code queues the paste and picks it up), so nothing here
+    consults ``session_status_map``/``claude_pid``. Gating delivery on "idle"
+    is what would silently drop a message to a working agent.
+    """
+    agent = (agent or "").strip()
+    if not agent:
+        return None
+    windows = get_windows_by_id()  # {window_id: name} — ids never collide, names can
+    if agent in windows:
+        return agent
+    if agent.isdigit() and f"@{agent}" in windows:
+        return f"@{agent}"
+    for wid, name in windows.items():
+        if name == agent:
+            return wid
+    return None
+
+
 def send_message(from_agent: str, to_agent: str, message: str, priority: str = "normal") -> bool:
     """Send a message to an agent via tmux. Live-only — no fallback queue.
 
-    Returns True if delivered to a live window, False if the agent is offline
-    (no live window) or the send failed.
+    ``to_agent`` is anything :func:`resolve_window` accepts (window id or name).
+    Returns True if delivered to a live window, False if the window is genuinely
+    not live or the tmux send failed. Callers that must not lose a message should
+    resolve first and report the two cases apart (``chela msg`` does).
     """
-    window_id = get_window_id(to_agent)
-    if window_id:
-        # Prefix with the sender so the recipient has context on who pinged them.
-        formatted = f"[{from_agent}] {message}"
-        if send_tmux(window_id, formatted):
-            return True
-    log.info("%s offline — message not delivered", to_agent)
+    window_id = resolve_window(to_agent)
+    if window_id is None:
+        log.warning("%s is not a live tmux window — message NOT delivered", to_agent)
+        return False
+    # Prefix with the sender so the recipient has context on who pinged them.
+    if send_tmux(window_id, f"[{from_agent}] {message}"):
+        return True
+    log.warning("tmux send to %s (%s) failed — message NOT delivered", to_agent, window_id)
     return False
 
 
 def broadcast(from_agent: str, message: str, priority: str = "normal") -> dict[str, bool]:
-    """Send a message to every other live agent. Returns {agent: delivered?}."""
-    results = {}
-    for agent_name in get_all_windows():
-        if agent_name == from_agent:
+    """Send a message to every other live agent. Returns {agent: delivered?}.
+
+    Iterates the window-id-keyed table so two windows sharing a display name both
+    get the message, and skips the sender's OWN window — an orchestrator that
+    broadcasts into its own pane feeds its message back to itself, which is a
+    loop. The sender is matched by window id when it names one, else by name.
+    """
+    sender_wid = resolve_window(from_agent)
+    results: dict[str, bool] = {}
+    for wid, name in sorted(get_windows_by_id().items()):
+        if wid == sender_wid or name == from_agent:
             continue
-        results[agent_name] = send_message(from_agent, agent_name, message, priority)
+        # Name-keyed for the caller's benefit, but disambiguated on collision so a
+        # duplicate name can't make one delivery's result overwrite another's.
+        key = name if name not in results else f"{name} ({wid})"
+        results[key] = send_message(from_agent, wid, message, priority)
     return results

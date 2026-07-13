@@ -262,22 +262,47 @@ def cmd_schedule_remove(args) -> None:
 
 
 def cmd_msg(args) -> None:
-    """Send a message to one live agent over tmux."""
-    delivered = messenger.send_message(args.from_agent, args.agent, args.message, args.priority)
-    if delivered:
-        print(f"Sent to {args.agent}")
-    else:
-        print(f"{args.agent} offline — not delivered")
+    """Send a message to one live agent over tmux — by window id (``@32``) or name.
+
+    A message must never be lost quietly, so the two failure modes are reported
+    apart and both exit NON-ZERO: "the window is gone" and "tmux refused the
+    send". The old code collapsed both into a chatty `offline` on stdout with a
+    zero exit — and, because it resolved the recipient by *name* only, said it
+    about live windows addressed by id. A "busy" agent is NOT a failure mode: it
+    is a valid recipient, and Claude Code queues the paste.
+    """
+    target = messenger.resolve_window(args.agent)
+    if target is None:
+        live = discovery.get_windows_by_id()
+        roster = ", ".join(f"{wid} {name}" for wid, name in sorted(live.items())) or "(none)"
+        print(f"{args.agent} is not a live window in tmux session "
+              f"'{config.current_session()}' — message NOT delivered.\nlive windows: {roster}",
+              file=sys.stderr)
+        sys.exit(1)
+    # An orchestrator messaging its own window feeds the message straight back to
+    # itself. Deliberate refusal — keep it.
+    if target == orchestrator.self_wid():
+        print(f"{args.agent} resolves to this very window ({target}) — refusing to "
+              "message myself (that is a loop). Pass a sibling's @wid.", file=sys.stderr)
+        sys.exit(1)
+    if messenger.send_message(args.from_agent, target, args.message, args.priority):
+        print(f"Sent to {args.agent} ({target})")
+        return
+    print(f"{args.agent} ({target}) is live but the tmux send FAILED — message not "
+          "delivered (see the log for tmux's error).", file=sys.stderr)
+    sys.exit(1)
 
 
 def cmd_broadcast(args) -> None:
-    """Send a message to every other live agent."""
+    """Send a message to every other live agent. Non-zero if any delivery failed."""
     results = messenger.broadcast(args.from_agent, args.message, args.priority)
     if not results:
         print("No other agents online")
         return
     for agent, delivered in sorted(results.items()):
-        print(f"  {agent:<24} {'sent' if delivered else 'offline'}")
+        print(f"  {agent:<24} {'sent' if delivered else 'FAILED — not delivered'}")
+    if not all(results.values()):
+        sys.exit(1)
 
 
 def _resolve_wid(token: str | None) -> str | None:
@@ -1035,7 +1060,7 @@ def main() -> None:
 
     # msg
     p_msg = sub.add_parser("msg", help="Send a message to an agent")
-    p_msg.add_argument("agent", help="Recipient agent (tmux window name)")
+    p_msg.add_argument("agent", help="Recipient agent — window id (@32) or tmux window name")
     p_msg.add_argument("message", help="Message text")
     p_msg.add_argument("--from", dest="from_agent", default="chela-cli", help="Sender label")
     p_msg.add_argument("--priority", default="normal", help="critical|high|normal|low")
