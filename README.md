@@ -252,7 +252,7 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | `chela dispatch <WORKFLOW.md> [--once] [--interval N] [--dry-run]` | Run the work-item dispatcher |
 | `chela dispatch-runs` | List dispatcher runs and their status |
 | `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
-| `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux (by name) |
+| `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux (by window id `@32` or name; non-zero exit if not delivered) |
 | `chela broadcast <text>` | Message every other live agent |
 | `chela telegram [--no-inbound]` | Bridge agent windows ↔ Telegram forum topics (see [`skills/telegram-setup`](skills/telegram-setup/SKILL.md)) |
 | `chela install-statusline [--write]` | Print/install the Claude Code statusLine hook for the context bar |

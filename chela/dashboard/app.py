@@ -188,13 +188,14 @@ def api_agents_msg():
     message = data.get("message", "")
     if not agent or not message:
         return jsonify({"error": "agent and message required"}), 400
-    if message.startswith("/"):
-        wid = discovery.get_window_id(agent)
-        if not wid:
-            return jsonify({"error": f"agent {agent} not found"}), 404
-        ok = messenger.send_tmux(wid, message)
-    else:
-        ok = messenger.send_message("dashboard", agent, message)
+    # One resolver for both branches — the same live-window authority /api/agents
+    # itself reports from, so a window this API calls "busy" is always messageable.
+    wid = messenger.resolve_window(agent)
+    if not wid:
+        return jsonify({"error": f"agent {agent} not found"}), 404
+    # A slash command goes in raw (a "[sender] /foo" prefix would not be a command).
+    ok = (messenger.send_tmux(wid, message) if message.startswith("/")
+          else messenger.send_message("dashboard", wid, message))
     return jsonify({"sent": ok, "agent": agent})
 
 
