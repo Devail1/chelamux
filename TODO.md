@@ -79,6 +79,20 @@
   3. **⛔ AGENT-AUTHORED TEXT MUST NEVER BE INDISTINGUISHABLE FROM SOMETHING THE HUMAN TYPED.** That is the general defect, and this is its third instance: the Wall's `--writable` ttyd into `@0` (logged, unfixed) and the inbox paste (here). **Say so in the PR body** — the next one of these is coming.
   4. **Guard it:** a test that an inbox item whose summary contains `$(…)`, a backtick, and a control byte is **either refused or neutralised**, and that a pane in bash-input mode is **NOT pushed into**. ⚠️ **Corrupt each guard and watch it go RED — the judge will.**
 
+- [ ] **🚨⚖️ THE JUDGE IS INERT — it returns `cannot_verify` on EVERY PR because its worktree never installs jsdom.** ⛔ **The centerpiece we shipped 07-15 has NEVER verified a single PR.** Measured 07-15.
+
+  **ROOT CAUSE — two individually-correct decisions that deadlock:**
+  1. `judge.test_cmd = CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (WORKFLOW.md). The flag is **deliberate and correct** (WORKFLOW.md:48): without it, missing node/jsdom makes the `.mjs` DOM suites **SKIP silently and green**, and the judge would mutate `terminals.js`, watch a suite that never ran pass, and send a GOOD PR back / pass a BAD one. So it **fails LOUD** on missing JS deps.
+  2. `hooks.before_run = uv sync --all-extras` installs **only PYTHON deps.** It **never runs `npm ci`**, so **jsdom is always missing** in the judge's fresh worktree.
+  → Every judge baseline: `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` → the 2 jsdom suites (`sidebar.test.mjs`, `wall.test.mjs`) ERROR → exit 1 → **`cannot_verify`, always.** **PROVEN:** fresh worktree = `2 failed, 1223 passed`; `npm install jsdom` → **`1225 passed`**. jsdom is the SOLE cause.
+
+  ⛔ **IT FAILED SAFE, WHICH IS WHY IT WAS INVISIBLE.** `cannot_verify` quietly defers to a human. A judge that wrongly BLOCKED would have screamed; one that can't verify looks like it's just being cautious. **Every `cannot_verify` this session was mis-attributed** (first to the red shutdown-test baseline — but it persisted AFTER CMX-78 fixed that, for this different reason). The bug class of the night, on the thing built to catch it: **the judge's LOGIC was verified (guards mutate RED); the judge was never driven END-TO-END in its real environment.**
+
+  1. **`before_run` MUST install the JS deps the judge measures against.** Make it `uv sync --all-extras && npm ci` (CI uses `npm ci`, `.github/workflows/ci.yml:41`). ⛔ The judge is only as trustworthy as the suite it runs — and right now it runs no suite at all.
+  2. 🔴 **PROVE THE JUDGE ACTUALLY VERIFIES — drive it END TO END, not its logic.** A GOOD PR must reach `reviewed_clean` (or whatever the pass state is); a PR with a deliberately-broken guard must reach `changes_requested` via the judge. ⛔ **A green `test_judge.py` is NOT evidence the judge works in production — that is the exact hole this bug lived in.** Watch a real run's `judge_state` leave `cannot_verify`.
+  3. **Add a `chela doctor` fact: the judge's `test_cmd` passes in a freshly-set-up judge worktree.** ⛔ A judge that cannot verify anything must not read as healthy. Doctor was green through this entire outage.
+  4. ⚠️ **CHECK before_run renders/runs in BOTH the fresh-worktree and attached-worktree paths** (dispatcher.py:2347 notes this constraint). `npm ci` needs `package-lock.json` present in the worktree — confirm it is.
+
 - [ ] **🗜️ THE WALL: A DISPATCHED AGENT'S PANE OPENS MINIMIZED — and POPS OUT when it wants a human.** Same principle as the Telegram lazy-bind (`CHELA_TELEGRAM_BIND_DISPATCHED`), second surface: ⛔ **a dispatched worker should not occupy human attention surface — a topic OR a Wall tile — until it needs a human.** Liav, 07-14. **⚠️ DEPENDS ON the lazy-bind task's `dispatched_window_ids()` helper (run-row-derived) — reuse it, do not re-derive.**
 
   ✅ **The machinery EXISTS — do not build a new one.** `terminals.js` already has `_minimized` (a Set), `_minimizeItem`, and a **dock**, persisted to `localStorage` `pc_wall_minimized` (`terminals.js:801-817`).
