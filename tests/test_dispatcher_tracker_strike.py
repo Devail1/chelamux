@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from chela.sources.markdown import MarkdownSource, _title_id, strike_lines
-from chela import dispatcher
+from chela import config, dispatcher
 from chela.workflow import WorkflowDef
 
 
@@ -109,7 +109,11 @@ def _wf(repo: Path) -> WorkflowDef:
         path=repo / "WORKFLOW.md",
         config={
             "tracker": {"kind": "markdown", "path": "TODO.md"},
-            "workspace": {"base_branch": "dev"},
+            # `root` is not optional under a scratch CHELA_DIR: omitting it defaults to
+            # ~/.chela/worktrees/default — the REAL install — and the workspace fence
+            # (tests/test_workspace_fence.py) refuses the tick outright. That refusal is
+            # the feature; the test just has to say where its own worktrees go.
+            "workspace": {"root": str(config.CHELA_DIR / "worktrees"), "base_branch": "dev"},
         },
         prompt_template="",
     )
@@ -286,7 +290,7 @@ seed
 @pytest.fixture
 def ticking(repo, tmp_path, monkeypatch):
     """A repo whose WORKFLOW.md drives a real tick(), with tmux/gh/spawn stubbed."""
-    (repo / "WORKFLOW.md").write_text(WORKFLOW.format(root=tmp_path / "worktrees"))
+    (repo / "WORKFLOW.md").write_text(WORKFLOW.format(root=tmp_path / ".chela" / "worktrees"))
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
     monkeypatch.setattr(dispatcher, "_tmux_windows", lambda: set())
     monkeypatch.setattr(dispatcher, "_kill_window", lambda name: None)

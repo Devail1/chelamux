@@ -88,6 +88,16 @@ atexit.register(shutil.rmtree, SANDBOX_CHELA_DIR, ignore_errors=True)
 for _var in ("CHELA_EVENTS_FILE", "CHELA_INBOX_FILE"):
     os.environ.pop(_var, None)
 
+# **And the suite must not be able to DISPATCH.** This one is not about reading or writing
+# a file: `CHELA_DISPATCH_WORKFLOWS` is the daemon's work queue, and the developer's shell
+# has it set (that is how chela runs on this box). tests/test_graceful_shutdown.py spawns
+# the REAL `python -m chela.main run` daemon and passes `os.environ` through, so on
+# 2026-07-14 `pytest` loaded the real WORKFLOW.md and the real TODO.md and dispatched REAL
+# OPEN TASKS into ~/.chela/worktrees — it only failed because it collided with a live run's
+# worktree. On a clean box it would have spawned agents. Blanked here, for every test and
+# every subprocess a test starts: nothing under pytest may claim work.
+os.environ["CHELA_DISPATCH_WORKFLOWS"] = ""
+
 # tmux is live state too, and it is not a file, so the fence below cannot catch it.
 # ``chela doctor`` now READS BACK from tmux (does the session exist? is the window a run
 # claims still alive? — the runtime-truth registry), so on this machine the suite would be

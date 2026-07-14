@@ -207,8 +207,15 @@ def cmd_run(args) -> None:
                     # same line is how an operator learns to ignore the log.
                     if summary.get("blocked") and wf_path not in dispatch_blocked:
                         dispatch_blocked.add(wf_path)
-                        log.error("Dispatch BLOCKED for %s (reconciliation continues on the "
-                                  "last known-good config): %s", wf_path.name, summary.get("error"))
+                        if summary.get("refused"):
+                            # The workspace fence: NOTHING ran this tick — not the claim,
+                            # not the reconcile. Saying "reconciliation continues" here
+                            # would be a lie, and a log that lies is how this bug hid.
+                            log.error("Dispatch REFUSED for %s — this daemon does NOTHING "
+                                      "for it: %s", wf_path.name, summary.get("error"))
+                        else:
+                            log.error("Dispatch BLOCKED for %s (reconciliation continues on the "
+                                      "last known-good config): %s", wf_path.name, summary.get("error"))
                     elif not summary.get("blocked") and wf_path in dispatch_blocked:
                         dispatch_blocked.discard(wf_path)
                         log.info("Dispatch resumed for %s — workflow parses again", wf_path.name)

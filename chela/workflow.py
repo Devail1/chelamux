@@ -17,6 +17,8 @@ from pathlib import Path
 
 import yaml
 
+from chela import config
+
 log = logging.getLogger(__name__)
 
 PROJECT_KEY_RE = re.compile(r"^[A-Z]{2,5}$")
@@ -238,3 +240,42 @@ def resolve_workspace_root(wf: WorkflowDef) -> Path:
     if not p.is_absolute():
         p = (wf.path.parent / p).resolve()
     return p
+
+
+def default_chela_dir() -> Path:
+    """Where a daemon with no ``CHELA_DIR`` set keeps its state — the REAL install."""
+    return Path.home() / ".chela"
+
+
+def workspace_escape(wf: WorkflowDef) -> str | None:
+    """Why this process must NOT dispatch ``wf`` — or None when it may.
+
+    ``CHELA_DIR`` isolates chela's STATE (scheduler.db, the runs table, the event log).
+    It never isolated the WORKSPACE: that comes from ``workspace.root`` in the workflow
+    file, which is read from the repo. So a daemon pointed at a scratch state dir still
+    created worktrees under the REAL ``~/.chela/worktrees``, against the REAL tracker,
+    and spawned REAL agents. That is not hypothetical — ``pytest`` did it (the shutdown
+    test spawns the real ``chela run`` daemon under a ``tmp_path`` ``CHELA_DIR``), and on
+    2026-07-14 it collided with a live run's worktree. On a clean box it would have
+    launched agents.
+
+    So: **a process whose ``CHELA_DIR`` is not the default owns nothing outside it**, and
+    its workspace must live inside it. Anything else is refused — loudly, by the caller.
+
+    Refuse rather than silently relocate the root: rewriting a path an operator
+    configured leaves two half-populated worktree trees and no way to tell which one is
+    live, and a daemon quietly working somewhere other than where it was told is the same
+    class of bug as this one.
+    """
+    chela_dir = Path(config.CHELA_DIR).expanduser().resolve()
+    if chela_dir == default_chela_dir().resolve():
+        return None                                   # the real install: nothing to fence
+    root = resolve_workspace_root(wf)
+    if root == chela_dir or chela_dir in root.parents:
+        return None
+    return (
+        f"{wf.path.name}: refusing to dispatch. CHELA_DIR is {chela_dir} (not the default "
+        f"{default_chela_dir()}), but workspace.root resolves to {root}, which is OUTSIDE "
+        "it — this daemon would create worktrees and spawn agents in a workspace it does "
+        "not own. Point workspace.root inside CHELA_DIR, or run with the default CHELA_DIR."
+    )

@@ -45,7 +45,7 @@ def _wf(tmp_path: Path, **cfg) -> WorkflowDef:
         config={
             "project_key": "TEST",
             "tracker": {"kind": "markdown", "path": "TODO.md"},
-            "workspace": {"root": str(tmp_path / "wts"), "base_branch": "dev"},
+            "workspace": {"root": str(tmp_path / ".chela" / "wts"), "base_branch": "dev"},
             **cfg,
         },
         prompt_template="fresh dispatch: {{task_title}}",

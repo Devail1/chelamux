@@ -60,7 +60,7 @@ def _wf(tmp_path: Path, **cfg) -> WorkflowDef:
         config={
             "project_key": "TEST",
             "tracker": {"kind": "markdown", "path": "TODO.md"},
-            "workspace": {"root": str(tmp_path / "wts"), "base_branch": "dev"},
+            "workspace": {"root": str(tmp_path / ".chela" / "wts"), "base_branch": "dev"},
             "hooks": {
                 "after_create": "seed-settings {{workspace_path}}",   # the permission file
                 "before_run": "uv sync --all-extras",                 # the venv
@@ -244,7 +244,7 @@ def test_the_tick_respawns_into_the_existing_worktree_and_branch(tmp_path):
     """⛔ NOT a fresh fork from the base branch — that would abandon the PR's commits."""
     wf = _wf(tmp_path)
     source = _Source("abc123")
-    original_wt = tmp_path / "wts" / "abc123"
+    original_wt = tmp_path / ".chela" / "wts" / "abc123"
     original_wt.mkdir(parents=True)
     fake = _FakeTmux()
     prompts: list[str] = []
@@ -294,7 +294,7 @@ def test_a_missing_worktree_is_recreated_from_the_branch(tmp_path):
                    check=True, env=_git_env())
     subprocess.run(["git", "-C", str(repo), "branch", "test-1"], check=True)
 
-    gone = tmp_path / "wts" / "abc123"
+    gone = tmp_path / ".chela" / "wts" / "abc123"
     assert not gone.exists()
 
     path, attached = worktree.attach_worktree(repo, "test-1", gone)
@@ -438,7 +438,7 @@ def test_a_rework_takes_the_slot_before_a_fresh_task_claims_it(tmp_path):
     """Finishing work beats starting more of it — and both draw on the same one slot."""
     wf = _wf(tmp_path, concurrency={"max": 1})
     source = _Source("abc123", "fresh")
-    wt = tmp_path / "wts" / "abc123"
+    wt = tmp_path / ".chela" / "wts" / "abc123"
     wt.mkdir(parents=True)
     fresh = Task(id="fresh", title="a new thing", file=str(tmp_path / "TODO.md"),
                  line_number=1, raw="- [ ] a new thing")
@@ -546,7 +546,7 @@ def test_a_vanished_window_in_a_review_state_is_completion_not_death(tmp_path):
 def _rework_tick(tmp_path, *, attached: bool, **kw):
     """One tick that re-spawns a sent-back run. Returns (summary, fake, prompts)."""
     wf = kw.pop("wf", None) or _wf(tmp_path)
-    wt = tmp_path / "wts" / "abc123"
+    wt = tmp_path / ".chela" / "wts" / "abc123"
     wt.mkdir(parents=True, exist_ok=True)
     fake = _FakeTmux()
     prompts: list[str] = []
@@ -577,7 +577,7 @@ def test_a_rework_runs_before_run_LIKE_EVERY_OTHER_LAUNCH(tmp_path):
 
     Seen to go red: reverting `_respawn_rework` to call `_launch_agent` without the hooks
     leaves `fake.hooks == []` here."""
-    wt = tmp_path / "wts" / "abc123"
+    wt = tmp_path / ".chela" / "wts" / "abc123"
     summary, fake, _ = _rework_tick(tmp_path, attached=False)
 
     assert summary["reworked"] == 1
@@ -596,7 +596,7 @@ def test_a_RE_CREATED_worktree_gets_after_create_too(tmp_path):
     and NOTHING else — no `.claude/settings.local.json`. _spawn's own comment calls a missing
     one a hard dispatch abort, because the agent hangs on its first permission prompt. A
     re-created worktree IS a fresh worktree."""
-    wt = tmp_path / "wts" / "abc123"
+    wt = tmp_path / ".chela" / "wts" / "abc123"
     _, fake, _ = _rework_tick(tmp_path, attached=True)
 
     assert fake.hooks == [
@@ -609,7 +609,7 @@ def test_a_REUSED_worktree_skips_after_create_but_still_syncs(tmp_path):
     """The worktree survived, so its settings file did too — seeding it again is the one
     thing after_create must not do. `before_run` still runs: it is per-LAUNCH, not
     per-worktree (the branch moved on, and so did the lockfile)."""
-    wt = tmp_path / "wts" / "abc123"
+    wt = tmp_path / ".chela" / "wts" / "abc123"
     _, fake, _ = _rework_tick(tmp_path, attached=False)
 
     assert fake.hooks == [("uv sync --all-extras", str(wt))]
@@ -620,7 +620,7 @@ def test_a_hook_that_fails_does_not_launch_an_agent_into_a_broken_worktree(tmp_p
     is not a fresh dispatch to retry), one round poorer, so a hook that always fails walks
     the run to needs_human instead of spinning."""
     wf = _wf(tmp_path)
-    wt = tmp_path / "wts" / "abc123"
+    wt = tmp_path / ".chela" / "wts" / "abc123"
     wt.mkdir(parents=True)
     fake = _FakeTmux()
 
@@ -668,7 +668,7 @@ def test_a_rework_that_cannot_launch_is_NEVER_re_claimed_as_a_FRESH_task(tmp_pat
     """
     monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
     wf = _wf(tmp_path)
-    wt = tmp_path / "wts" / "abc123"
+    wt = tmp_path / ".chela" / "wts" / "abc123"
     wt.mkdir(parents=True)
     task = _Source("abc123").list_open_tasks()[0]
     prompts: list[str] = []

@@ -66,7 +66,7 @@ def _clean_cache():
 @pytest.fixture
 def wf_file(tmp_path) -> Path:
     p = tmp_path / "WORKFLOW.md"
-    _write(p, WF.format(root=tmp_path / "wt", max=1, v=1))
+    _write(p, WF.format(root=tmp_path / ".chela" / "wt", max=1, v=1))
     return p
 
 
@@ -78,7 +78,7 @@ def test_a_changed_workflow_is_reapplied_without_a_restart(wf_file, tmp_path):
     assert first.workflow.get("concurrency", "max") == 1
     assert first.workflow.prompt_template == "seed prompt v1"
 
-    _write(wf_file, WF.format(root=tmp_path / "wt", max=3, v=2))
+    _write(wf_file, WF.format(root=tmp_path / ".chela" / "wt", max=3, v=2))
 
     # Same process, same object graph — no restart anywhere in this test.
     second = load_workflow_cached(wf_file)
@@ -129,7 +129,7 @@ def test_a_broken_edit_keeps_the_last_known_good_config(wf_file, tmp_path, caplo
     assert "keeping the last known-good config" in caplog.text
 
     # And it recovers on its own once the file parses again — no restart.
-    _write(wf_file, WF.format(root=tmp_path / "wt", max=2, v=3))
+    _write(wf_file, WF.format(root=tmp_path / ".chela" / "wt", max=2, v=3))
     healed = load_workflow_cached(wf_file)
     assert healed.ok
     assert healed.workflow.get("concurrency", "max") == 2
@@ -182,7 +182,7 @@ def test_poll_interval_comes_from_the_workflow_and_falls_back_to_the_default():
 
 def test_poll_interval_is_re_read_when_the_file_changes(wf_file, tmp_path):
     assert dispatcher.poll_interval(wf_file, default=60) == 60
-    _write(wf_file, WF.format(root=tmp_path / "wt", max=1, v=1).replace(
+    _write(wf_file, WF.format(root=tmp_path / ".chela" / "wt", max=1, v=1).replace(
         "project_key: CMX", "project_key: CMX\npolling:\n  interval_ms: 20000"))
     assert dispatcher.poll_interval(wf_file, default=60) == 20
 
@@ -207,7 +207,7 @@ def repo(tmp_path):
 
 @pytest.fixture
 def ticking(repo, tmp_path, monkeypatch):
-    _write(repo / "WORKFLOW.md", WF.format(root=tmp_path / "wt", max=1, v=1))
+    _write(repo / "WORKFLOW.md", WF.format(root=tmp_path / ".chela" / "wt", max=1, v=1))
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
     monkeypatch.setattr(dispatcher, "_tmux_windows", lambda: set())
     monkeypatch.setattr(dispatcher, "_kill_window", lambda name: None)
@@ -243,7 +243,7 @@ def test_tick_reapplies_a_changed_concurrency_without_a_restart(ticking, tmp_pat
     assert len(spawned) == 1
 
     # Widen the lane. No restart — the very next tick honors it.
-    _write(wf_path, WF.format(root=tmp_path / "wt", max=2, v=1))
+    _write(wf_path, WF.format(root=tmp_path / ".chela" / "wt", max=2, v=1))
     assert dispatcher.tick(wf_path)["dispatched"] == 2   # concurrency.max: 2
 
 
@@ -273,7 +273,7 @@ def test_a_broken_workflow_blocks_dispatch_but_keeps_reconciling(ticking, monkey
     assert "Dispatch paused" in caplog.text
 
     # Fix the file: dispatch resumes on the next tick, still no restart.
-    _write(wf_path, WF.format(root=repo.parent / "wt", max=1, v=1))
+    _write(wf_path, WF.format(root=repo.parent / ".chela" / "wt", max=1, v=1))
     healed = dispatcher.tick(wf_path)
     assert healed["blocked"] is False
     assert healed["error"] is None
