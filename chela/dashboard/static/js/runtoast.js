@@ -10,8 +10,16 @@
 // Terminal review states that warrant a toast, in payload-status → display form.
 // awaiting_review is the primary signal ("needs review"); done/failed ride along
 // as secondary, informational transitions (mutable via the Notifications mute).
+//
+// The rework loop (CMX-68) adds the other two ends of the review cycle, through this
+// same edge-trigger rather than a second poller: changes_requested (the reviewer sent
+// the PR back — the agent is about to be re-spawned in its own worktree) and
+// needs_human (the loop hit CHELA_MAX_REWORKS and STOPPED, which is the one a human
+// must not miss). Each carries a word, not just an icon: hue is never the only signal.
 export const RUN_TOAST_KINDS = {
     awaiting_review: { icon: '🔍', text: 'awaiting review' },
+    changes_requested: { icon: '🔁', text: 'changes requested — reworking' },
+    needs_human: { icon: '🛑', text: 'NEEDS A HUMAN — rework cap reached' },
     done: { icon: '✅', text: 'done' },
     failed: { icon: '⚠️', text: 'failed' },
 };

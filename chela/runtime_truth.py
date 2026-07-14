@@ -376,6 +376,95 @@ def _windows_report(claimed: dict[str, str], obs: Observation) -> list[Finding]:
     ]
 
 
+# --- fact: the branch a parked run must return to, and whether git still has it -------
+#
+# The rework loop (CMX-68) parks a run in `changes_requested` (the reviewer sent the PR
+# back) or `needs_human` (the loop hit its cap) and comes back to it LATER — re-spawning
+# the agent in its own worktree, on its own branch, so the branch history and the open PR
+# survive. The run row is chela's copy of that claim. **git owns whether it is true.** A
+# branch deleted in between (a tidy-up, a `git push --delete`, a worktree pruned by hand)
+# turns the whole loop into a run that can never resume — and nothing would say so: the
+# row still reads `changes_requested`, and the dispatcher only finds out at the moment it
+# tries. Rule (b): read back from the owner.
+
+
+def _parked_runs() -> dict[str, dict]:
+    """``{task_id: {branch, worktree, repo}}`` for every run parked in the review loop."""
+    from chela import dispatcher                    # lazy: doctor must import cheaply
+
+    if not Path(dispatcher.DB_PATH).exists():
+        return {}
+    parked: dict[str, dict] = {}
+    for run in dispatcher.list_runs():
+        if run.get("status") not in ("changes_requested", "needs_human"):
+            continue
+        branch, wf_path = run.get("branch_name"), run.get("workflow_path")
+        if not branch or not wf_path:
+            continue                               # nothing claimed — nothing to check
+        parked[str(run["task_id"])] = {
+            "branch": str(branch),
+            "worktree": str(run.get("worktree_path") or ""),
+            "repo": str(Path(wf_path).parent),
+        }
+    return parked
+
+
+def _git_branches(repo: str) -> set[str] | None:
+    """Every local branch in ``repo`` — or None when git could not answer for it."""
+    out = subprocess.run(
+        ["git", "-C", repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if out.returncode != 0:
+        return None
+    return {line.strip() for line in out.stdout.splitlines() if line.strip()}
+
+
+def _parked_read() -> Observation:
+    if shutil.which("git") is None:
+        return cannot_verify("git is not on PATH — chela cannot ask whether the branches "
+                             "its parked runs point at still exist, and a rework that "
+                             "cannot find its branch has lost the work it was sent back "
+                             "to fix.")
+    parked = _parked_runs()
+    if not parked:
+        return observed({})                        # nothing parked — nothing to ask about
+    by_repo: dict[str, set[str]] = {}
+    for repo in sorted({p["repo"] for p in parked.values()}):
+        branches = _git_branches(repo)
+        if branches is None:
+            return cannot_verify(f"git could not list the branches of {repo} — it is the "
+                                 "repo a parked run has to go back into")
+        by_repo[repo] = branches
+    return observed(by_repo)
+
+
+def _parked_report(parked: dict[str, dict], obs: Observation) -> list[Finding]:
+    by_repo: dict[str, set[str]] = obs.value or {}
+    if not parked:
+        return []                                  # nothing is parked — nothing to check
+    gone = [
+        (task, claim) for task, claim in sorted(parked.items())
+        if claim["branch"] not in by_repo.get(claim["repo"], set())
+    ]
+    if not gone:
+        return [Finding(OK, f"{len(parked)} run(s) parked in review: every branch git has "
+                            "to hand back still exists")]
+    return [
+        Finding(
+            ERROR,
+            f"run {task} is parked on branch {claim['branch']!r} — git has no such branch",
+            "The run is waiting to be re-spawned into that branch (the rework loop), and "
+            "the branch is gone: its commits and its open PR are unreachable, so the "
+            "rework can never resume. The dispatcher escalates it to `needs_human` the "
+            "moment it tries — this says so BEFORE it tries. Restore the branch (it may "
+            "still be on the remote: `git fetch origin "
+            f"{claim['branch']}:{claim['branch']}`) or close the run out by hand.",
+        )
+        for task, claim in gone
+    ]
+
+
 # --- fact: the port the dashboard actually BOUND -------------------------------------
 
 def _port_read() -> Observation:
@@ -873,6 +962,16 @@ def facts() -> list[Fact]:
             read_back=_windows_read,
             report=_windows_report,
             unverifiable_level=WARN,      # same reason as tmux.session
+        ),
+        Fact(
+            name="runs.parked_branch",
+            declared_by="the run row's branch_name, for runs parked in the rework loop "
+                        "(changes_requested / needs_human)",
+            owned_by="git — the branch either exists or the work is unreachable, and that "
+                     "is not chela's to say",
+            declare=_parked_runs,
+            read_back=_parked_read,
+            report=_parked_report,
         ),
         Fact(
             name="tests.js_suites",

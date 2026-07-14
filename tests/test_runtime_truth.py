@@ -75,6 +75,13 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "cmx-66"})
     monkeypatch.setattr(runtime_truth, "_in_flight_runs", lambda: {"CMX-66": "@1"})
 
+    # the rework loop: a run is parked in changes_requested, and git still has the branch
+    # it must be re-spawned into. git is the OWNER here, for the same reason tmux is above.
+    monkeypatch.setattr(runtime_truth, "_parked_runs", lambda: {
+        "CMX-68": {"branch": "cmx-68", "worktree": str(tmp_path / "wt"), "repo": str(repo)},
+    })
+    monkeypatch.setattr(runtime_truth, "_git_branches", lambda repo: {"dev", "cmx-68"})
+
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
         runtime_truth, "collected_js_suites",
@@ -189,6 +196,17 @@ def _break_tests_js_suites(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_runs_parked_branch(tmp_path, monkeypatch):
+    """The branch a sent-back run has to be re-spawned INTO is gone (CMX-68).
+
+    The run row still says `changes_requested`, the PR is still open, and the work the PR
+    points at is now unreachable — the rework loop can never turn again for this run, and
+    without this check nothing would say so until the dispatcher tried and failed.
+    """
+    monkeypatch.setattr(runtime_truth, "_git_branches", lambda repo: {"dev"})
+    return doctor.ERROR
+
+
 CORRUPTIONS = {
     "env.file": _break_env_file,
     "env.running": _break_env_running,
@@ -200,6 +218,7 @@ CORRUPTIONS = {
     "dispatch.workflows": _break_dispatch_workflows,
     "dispatch.hold": _break_dispatch_hold,
     "tmux.windows": _break_tmux_windows,
+    "runs.parked_branch": _break_runs_parked_branch,
     "tests.js_suites": _break_tests_js_suites,
 }
 

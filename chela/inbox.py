@@ -96,7 +96,12 @@ MAX_DELIVERIES_PER_TICK = 1
 # kills the window on `task-finished`, and a failed run has already been announced by
 # run_events(). A watched window vanishing while its run sits in one of these is
 # completion, not death.
-SETTLED_RUN_STATES = ("awaiting_review", "done", "failed")
+#
+# `changes_requested` and `needs_human` belong here for exactly the same reason: both are
+# reached FROM awaiting_review, whose window the agent already killed on its way out. A
+# window that is gone because its agent finished and its PR then failed review is not a
+# corpse — reporting it as one is the false-DIED bug wearing a new state's hat.
+SETTLED_RUN_STATES = ("awaiting_review", "changes_requested", "needs_human", "done", "failed")
 
 # How long a vanished window's run row gets to settle before we call it a death.
 # The window dies a moment BEFORE the row lands: `chela task-finished` flips the run
@@ -511,7 +516,7 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
 
 def run_events(runs: list[dict], seen: dict[str, str],
                windows: dict[str, str] | None = None) -> tuple[list[dict], dict[str, str]]:
-    """Events from the dispatcher runs DB: → ``awaiting_review`` and → ``failed``.
+    """Events from the dispatcher runs DB: → ``awaiting_review``, ``needs_human``, ``failed``.
 
     Edge-triggered on the run's status, against a DURABLE mark: a run parked in
     awaiting_review must announce once, not once per 30s tick, and not again after a
@@ -557,6 +562,24 @@ def run_events(runs: list[dict], seen: dict[str, str],
             out.append(_event("run_review",
                               f"📥 {label} awaiting review — {ref}"
                               f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif status == "needs_human":
+            # The rework loop gave up (CMX-68): the PR was sent back MAX_REWORKS times and
+            # still fails review. This is the one run state a human MUST see — the loop is
+            # bounded precisely so it surfaces here instead of spinning — so it carries the
+            # HISTORY: every verdict this run ever received, not just the last thing said.
+            # Nothing has been thrown away: the branch, the worktree and the PR are intact.
+            reviews = _reviews(run)
+            payload["rework_count"] = run.get("rework_count") or 0
+            payload["reviews"] = reviews
+            payload["last_error"] = run.get("last_error")
+            payload["worktree_path"] = run.get("worktree_path")
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            out.append(_event(
+                "run_needs_human",
+                f"📥 {label} NEEDS A HUMAN — {payload['rework_count']} rework(s) and the PR "
+                f"still fails review ({len(reviews)} verdict(s) on the row) — {ref}"
+                f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "failed":
             err = (run.get("last_error") or "").splitlines()
             payload["last_error"] = run.get("last_error")
@@ -564,6 +587,20 @@ def run_events(runs: list[dict], seen: dict[str, str],
                               f"📥 {label} FAILED{' — ' + err[0][:120] if err else ''}"
                               f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
     return out, fresh
+
+
+def _reviews(run: dict) -> list[dict]:
+    """The run's verdict history (``dispatcher.reviews_of``), tolerantly.
+
+    Parsed here rather than imported so ``run_events`` stays a pure function over plain
+    dicts — it is fed a runs snapshot, not a DB. A row written by an older dispatcher has
+    no history and reads as an empty list.
+    """
+    try:
+        parsed = json.loads(run.get("review_history") or "[]")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    return [r for r in parsed if isinstance(r, dict)] if isinstance(parsed, list) else []
 
 
 # --- the daemon tick ------------------------------------------------------------
@@ -589,7 +626,7 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
     that already happened and are left alone.
     """
     kind = event.get("kind")
-    if kind not in ("run_review", "run_failed"):
+    if kind not in ("run_review", "run_failed", "run_needs_human"):
         return None
     task_id = (event.get("payload") or {}).get("task_id")
     if not task_id:
@@ -600,6 +637,9 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
     status, pr_state = run.get("status"), run.get("pr_state")
     if kind == "run_review":
         if status != "awaiting_review":
+            # Includes the rework loop's own transition: an `awaiting_review` event that
+            # was still queued when the reviewer sent the PR back is a claim about a run
+            # that has moved on, and delivering it would ask for a review twice.
             return f"run is now {status!r}, not awaiting_review"
         if pr_state in ("merged", "closed"):
             # The row can lag the PR by a reconcile tick: pr_state is refreshed before
@@ -607,6 +647,11 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
             return f"PR is {pr_state}"
     elif kind == "run_failed" and status != "failed":
         return f"run is now {status!r}, not failed"
+    elif kind == "run_needs_human":
+        if status != "needs_human":
+            return f"run is now {status!r}, not needs_human"
+        if pr_state in ("merged", "closed"):
+            return f"PR is {pr_state}"      # a human merged it anyway — nothing to escalate
     return None
 
 

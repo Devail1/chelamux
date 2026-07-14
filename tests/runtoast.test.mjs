@@ -29,8 +29,32 @@ test('first-seen (undefined prev) into a review state still fires', () => {
 });
 
 test('every returned kind has display metadata', () => {
-  for (const kind of ['awaiting_review', 'done', 'failed']) {
+  for (const kind of ['awaiting_review', 'changes_requested', 'needs_human', 'done', 'failed']) {
     const meta = RUN_TOAST_KINDS[kind];
     assert.ok(meta && meta.icon && meta.text, `metadata for ${kind}`);
   }
+});
+
+// The rework loop (CMX-68). The reviewer sends a PR back and the dispatcher re-spawns its
+// agent; the loop is bounded, and when it gives up the run stops dead in needs_human. Both
+// ends ride the SAME edge-trigger — no second poller — and both must be visible.
+test('the rework loop toasts both of its ends', () => {
+  assert.equal(runToastKind('awaiting_review', 'changes_requested'), 'changes_requested');
+  assert.equal(runToastKind('changes_requested', 'needs_human'), 'needs_human');
+});
+
+test('a run going back round does not toast the same state twice', () => {
+  // changes_requested → running (re-spawned) → awaiting_review (pushed again): the last
+  // step toasts, the middle one does not, and a poll that changes nothing never does.
+  assert.equal(runToastKind('changes_requested', 'running'), null);
+  assert.equal(runToastKind('running', 'awaiting_review'), 'awaiting_review');
+  assert.equal(runToastKind('changes_requested', 'changes_requested'), null);
+  assert.equal(runToastKind('needs_human', 'needs_human'), null);
+});
+
+test('the toast says which state it is IN WORDS, not by colour alone', () => {
+  // Hue is never the only signal (Liav is red-weak) — a toast whose text did not name the
+  // state would be unreadable to the person it is for.
+  assert.match(RUN_TOAST_KINDS.changes_requested.text, /changes requested/i);
+  assert.match(RUN_TOAST_KINDS.needs_human.text, /human/i);
 });

@@ -183,7 +183,8 @@ chela watching                         # what's watched + what's queued
 ```
 
 The daemon then reports, once, when `@3` **finishes**, **blocks** on a prompt, or
-**dies** mid-task — plus dispatcher runs that hit `awaiting_review` or `failed` —
+**dies** mid-task — plus dispatcher runs that hit `awaiting_review`, `failed`, or
+`needs_human` (the rework loop gave up — every verdict it was given rides along) —
 as one line typed into the orchestrator's session:
 
 ```
@@ -308,7 +309,8 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | `chela schedule list` / `remove <id>` | Manage scheduled tasks |
 | `chela dispatch <WORKFLOW.md> [--once] [--interval N] [--dry-run]` | Run the work-item dispatcher |
 | `chela dispatch --pause [--reason R] [--ttl 30m]` / `--resume` / `--hold-status` | **Hold the queue** while you reorder the tracker: claims stop, reconciliation continues, and the hold self-releases at its expiry |
-| `chela dispatch-runs` | List dispatcher runs and their status |
+| `chela dispatch-runs [--awaiting]` | List dispatcher runs; `--awaiting` shows everything parked in review (awaiting review, sent back, needs a human) |
+| `chela review <run\|branch> --request-changes --body-file -` | **Fail a PR and send it back**: the run re-enters its *own* worktree and branch, with your verdict as the prompt. `--approve` records a pass and merges nothing |
 | `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
 | `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux (by window id `@32` or name; non-zero exit if not delivered) |
 | `chela broadcast <text>` | Message every other live agent |
@@ -366,6 +368,7 @@ the dashboard *publishes* the port it bound.
 | `CHELA_SCHEDULER_POLL_INTERVAL` | `30` | Daemon loop interval (s) |
 | `CHELA_DISPATCH_WORKFLOWS` | — | Colon-separated WORKFLOW.md paths the daemon dispatches |
 | `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick interval in the daemon (s) |
+| `CHELA_MAX_REWORKS` | `2` | How many times a PR that fails review is sent back to its agent before the run stops at `needs_human`. `0` = no rework at all |
 | `CHELA_AGENT_CMD` | `claude` | Launch command for the dashboard Start button |
 | `CHELA_PROJECTS_DIR` | `~/projects` | Folder scanned for git repos to suggest in the Launch sidebar (also settable in dashboard **Settings → Projects folder**, which wins) |
 | `CHELA_NOTIFY_URL` | — | Needs-input notification target (ntfy / Telegram / webhook) |
@@ -557,6 +560,20 @@ literal Escape.
   `claude --permission-mode auto` (a classifier auto-approves safe ops and gates
   dangerous ones); set `agent.cmd: claude --permission-mode bypassPermissions`
   in `WORKFLOW.md` for zero-hang autonomy on a repo you trust.
+- **A PR that fails review goes back to the agent that wrote it.** `awaiting_review` used
+  to be the end of the line: the reviewer found real defects and had nowhere to put them,
+  so a human climbed into the worktree and hand-started a fix agent. Now
+  `chela review <run> --request-changes --body-file -` writes the verdict on the run and
+  the next tick re-spawns that agent **in its original worktree, on its original branch**,
+  with the verdict as its prompt — so the branch history and the open PR survive, and the
+  PR simply updates when it pushes. The loop is **bounded** (`CHELA_MAX_REWORKS`, default
+  2): past the cap the run stops at `needs_human`, keeping its branch, worktree and PR, and
+  surfaces to you through the [decisions inbox](#the-orchestration-loop) carrying *every*
+  verdict it was given. A rework draws on the same `concurrency.max` slots as any other
+  work — it never preempts a running agent, and a run that has stopped never holds a slot.
+  ⚠️ **The run row is the authority, not GitHub**: `gh pr review --request-changes` is
+  refused on a PR your own account authored, and a fleet is one account — so the verdict
+  lives on the run and the PR comment is its human-readable copy.
 - **The queue belongs to whoever holds it, not to whoever is faster.** The tracker
   has two writers — you reorder it, the dispatcher claims from it — and you lose
   that race every time: a merge frees the slot, and the next tick fires long before

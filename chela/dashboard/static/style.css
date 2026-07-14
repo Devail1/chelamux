@@ -1574,6 +1574,21 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-card-failed          { border-left-color: var(--red); background: rgba(248, 81, 73, 0.04); }
 .kanban-card-done            { border-left-color: var(--text-dim); opacity: 0.75; }
 
+/* The rework loop's two other states share the Awaiting Review column. The border is a
+   secondary cue only — the card also carries a WORD (.kanban-state-chip), because a
+   colour on its own is not a signal anyone can be assumed to read. */
+.kanban-card-changes_requested { border-left-color: var(--orange, #d18616); background: rgba(209, 134, 22, 0.06); }
+.kanban-card-needs_human       { border-left-color: var(--red); background: rgba(248, 81, 73, 0.07); }
+
+.kanban-state-chip {
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid rgba(248, 81, 73, 0.45);
+    border-radius: 10px;
+    padding: 0 8px;
+    font-size: 10px;
+    white-space: nowrap;
+}
+
 .kanban-card-error {
     color: var(--red);
     font-size: 10px;
