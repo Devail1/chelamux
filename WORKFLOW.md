@@ -57,11 +57,22 @@ judge:
   suite_timeout_seconds: 900
 
 hooks:
-  # Sync the per-worktree venv with ALL extras before the agent starts, so
-  # dashboard/telegram tests don't false-fail on a default-only sync (a `uv run`
-  # in a fresh worktree auto-syncs without extras — the CMX-21 trap). `--extra X`
-  # DROPS other extras, so it must be `--all-extras`.
-  before_run: uv sync --all-extras --quiet
+  # ⛔ THIS HOOK IS THE JUDGE'S ENVIRONMENT, not just the agent's — `_launch_agent` runs it
+  # on every launch, and a judge worktree is a launch. It therefore has to build an
+  # environment in which `judge.test_cmd` above can be GREEN. It did not, and the cost was
+  # total: from the day the judge shipped (2026-07-15) it returned CANNOT VERIFY on every
+  # single PR, because this line synced the venv and never installed jsdom, so the two
+  # real-DOM suites FAILED under CHELA_REQUIRE_JS_TESTS=1 and the baseline was red before a
+  # single mutation was applied. A judge whose baseline can never be green judges nothing.
+  # (`tests/test_judge_env.py` is the guard: it fails if either half of that contract —
+  # the env var above, the install below — goes away again.)
+  #
+  # `uv sync --all-extras`: dashboard/telegram tests false-fail on a default-only sync (a
+  # `uv run` in a fresh worktree auto-syncs WITHOUT extras — the CMX-21 trap), and
+  # `--extra X` DROPS the other extras, so it must be `--all-extras`.
+  # `npm ci`: jsdom, the repo's one npm dep (dev-only, nothing is bundled or shipped) —
+  # what CI installs, in the same breath, for the same reason.
+  before_run: uv sync --all-extras --quiet && npm ci --no-audit --no-fund --silent
 ---
 
 # Autonomous coding agent — chelamux

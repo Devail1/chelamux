@@ -308,6 +308,15 @@ def _counts(text: str) -> tuple[int, int, int]:
     return passed, failed, errors
 
 
+def _last_meaningful_line(tail: str, limit: int = 300) -> str:
+    """The last line the suite actually printed — its summary, or whatever killed it."""
+    for line in reversed((tail or "").splitlines()):
+        line = line.strip()
+        if line and not set(line) <= set("=-_ "):     # pytest's rules and separators say nothing
+            return line[:limit]
+    return ""
+
+
 def run_suite(test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS) -> SuiteResult:
     """Run the repo's OWN test command and read its exit code. Never raises.
 
@@ -480,9 +489,13 @@ def run_experiments(
     baseline = run_suite(test_cmd, worktree, timeout)
     report.baseline = baseline
     if not baseline.green:
+        # ⛔ CMX-80: name the CAUSE, not just the exit code. `judge_detail` (this string) is
+        # what the dashboard shows, and for three weeks it showed "exited 1" on every PR
+        # while the suite itself was saying "jsdom is not installed" one pipe away.
+        why = baseline.detail or _last_meaningful_line(baseline.tail)
         report.cannot_verify = (
             f"the suite is NOT GREEN before any mutation (`{test_cmd}` exited "
-            f"{baseline.exit_code}{': ' + baseline.detail if baseline.detail else ''}). Every "
+            f"{baseline.exit_code}{': ' + why if why else ''}). Every "
             "mutation experiment measures 'did the suite go red?', so a suite that is already "
             "red measures nothing. ⛔ Nothing was blocked and nothing was cleared."
         )
@@ -552,6 +565,29 @@ def _suite_line(s: SuiteResult | None) -> str:
     if not s.ok:
         return s.detail or "(the suite could not be run)"
     return (f"exit {s.exit_code} — {s.passed} passed, {s.failed} failed, {s.errors} error(s)")
+
+
+def _why_the_suite_was_not_green(s: SuiteResult | None) -> str:
+    """The suite's own last words, verbatim, when it was not green.
+
+    ⛔ CMX-80. A judge that CANNOT VERIFY says so loudly — but for three weeks it said only
+    "the suite is NOT GREEN before any mutation (`…` exited 1)", and an exit code names no
+    cause. The cause was jsdom, absent from every judge worktree, and the suite had been
+    printing that in plain English into a pipe nobody read. An unknown has to carry enough
+    to be FIXED, or it is just a shrug with a timestamp.
+    """
+    if s is None or s.green or not (s.tail or "").strip():
+        return ""
+    return "\n".join([
+        "",
+        "<details><summary>what the suite actually said (its last output)</summary>",
+        "",
+        "```",
+        s.tail.strip()[-SUITE_TAIL_CHARS:],
+        "```",
+        "",
+        "</details>",
+    ])
 
 
 def _notes_section(notes: list[dict]) -> str:
@@ -634,6 +670,9 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
             "Nothing was sent back and nothing was cleared: an unknown is never a pass, and "
             "never a fail either. This PR is a human's to review.",
         ]
+        tail = _why_the_suite_was_not_green(report.baseline)
+        if tail:
+            head.append(tail)
     else:
         head = [
             "## ⚖️ THE JUDGE — every guard held",
