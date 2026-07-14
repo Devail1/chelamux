@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, collab, collab_stream, context, discovery, dispatcher, gateanswer, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, gateanswer, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -1431,8 +1431,23 @@ def _settings_status() -> dict:
     else:
         tg_state, tg_detail = "Off", "start `chela telegram` to enable"
 
+    # The daemon (`chela run`) — the process that ticks the scheduler, the dispatcher and
+    # reconciliation. Read from what it publishes at startup ($CHELA_DIR/daemon.json,
+    # pid-checked), never from this process's config: the dashboard is a DIFFERENT process
+    # and its env is not evidence about the daemon's. Nothing published = nothing running,
+    # and that is worth a row of its own — the fleet looks identical either way.
+    daemon_live = capabilities.live()
+    if daemon_live:
+        n_on = sum(1 for c in daemon_live["capabilities"] if c.get("on"))
+        n_all = len(daemon_live["capabilities"])
+        daemon_state = "Running"
+        daemon_detail = f"pid {daemon_live.get('pid')} · {n_on}/{n_all} capabilities on"
+    else:
+        daemon_state, daemon_detail = "Off", "not running — start it with `chela run`"
+
     connections = [
         {"label": "tmux session", "on": session_on, "state": session_state, "detail": session_detail},
+        {"label": "Daemon", "on": bool(daemon_live), "state": daemon_state, "detail": daemon_detail},
         {"label": "Telegram bridge", "on": tg_on, "state": tg_state, "detail": tg_detail},
         {"label": "Collaboration relay", "on": collab_on, "state": collab_state, "detail": collab_detail},
         {"label": "Needs-input notifications", "on": notify_on, "state": notify_state, "detail": notify_detail},
@@ -1472,6 +1487,25 @@ def _settings_status() -> dict:
         dispatch_state = "Blocked"
         dispatch_detail = ("new dispatches paused, still reconciling on the last good config — "
                            + "; ".join(f"{e['workflow']}: {e['error']}" for e in wf_errors))
+
+    # ...and the fault that beats every one of the above: the daemon that would DO the
+    # dispatching has it turned off. Auto-discovery finds a WORKFLOW.md on disk and runs
+    # show in the Kanban, so this row read "1 workflow · On" for nine hours while the
+    # daemon dispatched nothing and reconciled nothing. What the file system says is not
+    # what the daemon does — so ask the daemon (it publishes its effective capabilities),
+    # and let that answer win. `None` = no daemon has published: don't guess, don't lie.
+    daemon_dispatch = next(
+        (c for c in (daemon_live["capabilities"] if daemon_live else [])
+         if c.get("key") == "dispatch"),
+        None,
+    )
+    if daemon_dispatch is not None and not daemon_dispatch.get("on"):
+        dispatch_on = False
+        dispatch_state = "Off"
+        dispatch_detail = ("the RUNNING daemon has dispatch AND reconcile off — "
+                           "CHELA_DISPATCH_WORKFLOWS is empty in its environment")
+    elif daemon_live is None and n_wf:
+        dispatch_detail += " · no daemon running (`chela run`)"
 
     try:
         n_tasks = len(scheduler.list_tasks())

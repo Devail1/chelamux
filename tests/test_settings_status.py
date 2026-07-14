@@ -32,7 +32,7 @@ def test_settings_shape(client, monkeypatch):
 
     items = _items(data)
     # Every documented row is present...
-    for label in ("tmux session", "Telegram bridge", "Collaboration relay",
+    for label in ("tmux session", "Daemon", "Telegram bridge", "Collaboration relay",
                   "Needs-input notifications",
                   "Terminal wall", "Work dispatcher", "Scheduler", "Tool-call relay"):
         assert label in items, label
@@ -80,6 +80,16 @@ def test_telegram_bridge_connected_hides_secrets(client, monkeypatch):
     assert "api.telegram.org" not in tg["detail"]
 
 
+def _daemon(monkeypatch, *, dispatch_on: bool):
+    """Pin what the RUNNING daemon published. The dashboard is a different process from
+    the daemon, so it must never infer this from its own env — and a test must never read
+    the developer's real ~/.chela/daemon.json (see conftest)."""
+    monkeypatch.setattr(dash.capabilities, "live", lambda: {
+        "pid": 4242,
+        "capabilities": [{"key": "dispatch", "label": "Work dispatcher", "on": dispatch_on}],
+    })
+
+
 def test_work_dispatcher_row_reports_a_broken_workflow(client, monkeypatch, tmp_path):
     # A WORKFLOW.md that stopped parsing is the one dispatcher fault an operator
     # MUST see: the daemon stays up on its last-good config but starts no new
@@ -87,6 +97,7 @@ def test_work_dispatcher_row_reports_a_broken_workflow(client, monkeypatch, tmp_
     bad = tmp_path / "WORKFLOW.md"
     bad.write_text("---\ntracker: [unclosed\n---\n")
     monkeypatch.setattr(dash, "_discover_dispatch_workflows", lambda runs: [bad])
+    _daemon(monkeypatch, dispatch_on=True)
 
     payload = client.get("/api/settings").get_json()
     row = _items(payload)["Work dispatcher"]
@@ -101,6 +112,7 @@ def test_work_dispatcher_row_is_clean_when_the_workflow_parses(client, monkeypat
     good = tmp_path / "WORKFLOW.md"
     good.write_text("---\nproject_key: CMX\n---\nseed\n")
     monkeypatch.setattr(dash, "_discover_dispatch_workflows", lambda runs: [good])
+    _daemon(monkeypatch, dispatch_on=True)
 
     payload = client.get("/api/settings").get_json()
     row = _items(payload)["Work dispatcher"]
@@ -108,6 +120,38 @@ def test_work_dispatcher_row_is_clean_when_the_workflow_parses(client, monkeypat
     assert row["on"] is True
     assert row["state"] == "1 workflow"
     assert payload["workflow_errors"] == []
+
+
+def test_work_dispatcher_row_is_OFF_when_the_running_daemon_has_it_off(client, monkeypatch, tmp_path):
+    """The nine-hour bug, seen from the drawer. A WORKFLOW.md exists on disk and
+    auto-discovery finds it — so this row read "1 workflow · On" while the daemon,
+    whose CHELA_DISPATCH_WORKFLOWS was empty, dispatched nothing and reconciled nothing.
+    What the filesystem says is not what the daemon does: the daemon wins."""
+    good = tmp_path / "WORKFLOW.md"
+    good.write_text("---\nproject_key: CMX\n---\nseed\n")
+    monkeypatch.setattr(dash, "_discover_dispatch_workflows", lambda runs: [good])
+    _daemon(monkeypatch, dispatch_on=False)
+
+    row = _items(client.get("/api/settings").get_json())["Work dispatcher"]
+
+    assert row["on"] is False
+    assert row["state"] == "Off"
+    assert "reconcile" in row["detail"]            # both, or the row still under-reports
+    assert "CHELA_DISPATCH_WORKFLOWS" in row["detail"]
+
+
+def test_daemon_row_reports_a_daemon_that_is_not_running(client, monkeypatch):
+    monkeypatch.setattr(dash.capabilities, "live", lambda: None)
+    row = _items(client.get("/api/settings").get_json())["Daemon"]
+    assert row["on"] is False and row["state"] == "Off"
+    assert "chela run" in row["detail"]
+
+
+def test_daemon_row_reports_a_running_daemon(client, monkeypatch):
+    _daemon(monkeypatch, dispatch_on=True)
+    row = _items(client.get("/api/settings").get_json())["Daemon"]
+    assert row["on"] is True and row["state"] == "Running"
+    assert "4242" in row["detail"]
 
 
 def test_notify_host_redacts_telegram_token():

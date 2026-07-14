@@ -17,6 +17,17 @@ one week:
 Each is the same shape: two copies of one fact, disagreeing, with no one to notice. So
 this module compares — for real, against the *running* processes and files — and returns
 findings. :data:`ERROR` findings mean something is broken right now; the CLI exits 1.
+
+There is a fourth, and it is the one that indicts the three above: the dispatcher was
+dead for nine hours and doctor printed ALL-GREEN. ``CHELA_DISPATCH_WORKFLOWS`` was gone
+from the env file, so the running environment and the file **agreed — and both were
+wrong**. Checking that two copies of a fact match is not checking the fact. So doctor now
+asserts the *capability*: is the dispatcher on, does each configured ``WORKFLOW.md``
+exist and parse, does its tracker exist — and, because doctor runs in a **different
+process** than the daemon, it reads what the RUNNING daemon published
+(``$CHELA_DIR/daemon.json``, the ``dashboard.port`` pattern) rather than re-reading the
+config that was already lying. With no daemon running it says, out loud, that it is
+inferring.
 """
 from __future__ import annotations
 
@@ -25,7 +36,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from chela import config
+from chela import capabilities, config
+from chela.sources import get_source
+from chela.workflow import load_workflow
 
 OK = "ok"
 WARN = "warn"
@@ -68,6 +81,7 @@ def check() -> list[Finding]:
     _check_session(findings, declared)
     port = _check_dashboard_port(findings)
     _check_plugin(findings, port)
+    _check_daemon(findings)
     return findings
 
 
@@ -159,6 +173,99 @@ def _check_dashboard_port(findings: list[Finding]) -> int:
         return live["port"]
     findings.append(Finding(OK, f"dashboard listening on {live['port']} (pid {live['pid']})"))
     return live["port"]
+
+
+def _check_daemon(findings: list[Finding]) -> None:
+    """The capability check: is the daemon actually DOING the job, not merely configured
+    to. Observed from what the running daemon published; inferred (and said to be
+    inferred) when none is running."""
+    live = capabilities.live()
+    if live is None:
+        caps = [c.as_dict() for c in capabilities.effective()]
+        findings.append(Finding(
+            WARN, f"no daemon has published {capabilities.state_file()}",
+            "`chela run` is not running (or predates this check). The capabilities below "
+            "are INFERRED from this shell's config — they are what a daemon started now "
+            "would do, not what anything is doing.",
+        ))
+    else:
+        caps = [c for c in live["capabilities"] if isinstance(c, dict)]
+        findings.append(Finding(
+            OK, f"daemon running (pid {live.get('pid')}, session "
+                f"{live.get('session') or '?'}) — capabilities read from it, not from config"))
+
+    for cap in caps:
+        label = cap.get("label") or cap.get("key") or "?"
+        if cap.get("on"):
+            findings.append(Finding(OK, f"{label}: ON", str(cap.get("detail") or "")))
+        elif cap.get("warn_when_off"):
+            detail = str(cap.get("detail") or "")
+            fix = str(cap.get("fix") or "")
+            findings.append(Finding(
+                WARN, f"{label}: OFF", f"{detail} — fix: {fix}" if fix else detail))
+        # A capability that is merely *unset* (notifications, the inbox) is reported by
+        # the daemon's startup log; repeating every off-by-choice toggle here would bury
+        # the one that matters. `warn_when_off` is what marks a foot-gun.
+
+    dispatch = next((c for c in caps if c.get("key") == "dispatch"), None)
+    if dispatch is None:
+        return
+    # A daemon started before the env changed carries the OLD capability. That
+    # config-vs-running disagreement is exactly the CMX-42 trap, and it is invisible
+    # unless something says it: the running process, not the file, is what dispatches —
+    # and only a restart closes the gap.
+    if live is not None and bool(dispatch.get("on")) != bool(config.DISPATCH_WORKFLOWS):
+        findings.append(Finding(
+            ERROR,
+            "the RUNNING daemon's dispatcher is "
+            f"{'ON' if dispatch.get('on') else 'OFF'}, but this shell's config says "
+            f"{'ON' if config.DISPATCH_WORKFLOWS else 'OFF'}",
+            "The daemon is running on a stale environment — CHELA_DISPATCH_WORKFLOWS "
+            "changed after it started. Restart it (e.g. `pm2 restart chela-daemon`); "
+            "until then the config describes a daemon that does not exist. (If this "
+            "shell simply has a different env than the service, that is the same drift "
+            "the env file exists to end — export nothing, source the file.)",
+        ))
+    _check_workflows(findings, [Path(p) for p in dispatch.get("workflows") or []])
+
+
+def _check_workflows(findings: list[Finding], paths: list[Path]) -> None:
+    """Each dispatched workflow must EXIST, PARSE, and have a tracker to read. All three
+    are file reads — no subprocess: doctor is run interactively and must stay instant."""
+    for path in paths:
+        if not path.exists():
+            findings.append(Finding(
+                ERROR, f"dispatch workflow {path} does not exist",
+                "The daemon is configured to dispatch a file that is not there: it will "
+                "claim no work. Fix CHELA_DISPATCH_WORKFLOWS or restore the file.",
+            ))
+            continue
+        try:
+            wf = load_workflow(path)
+        except Exception as exc:
+            findings.append(Finding(
+                ERROR, f"dispatch workflow {path.name} does not parse",
+                f"{exc} — the daemon keeps reconciling on its last known-good config but "
+                "starts NO new work until this parses.",
+            ))
+            continue
+        try:
+            source = get_source(wf)
+        except Exception as exc:
+            findings.append(Finding(ERROR, f"{path.name}: unusable tracker", str(exc)))
+            continue
+        tracker = getattr(source, "path", None)   # a gh_issues tracker is not a file
+        if tracker is not None and not Path(tracker).exists():
+            findings.append(Finding(
+                ERROR, f"{path.name}: tracker {tracker} does not exist",
+                "The dispatcher reads its work items from this file. With no file there "
+                "is no queue — and nothing says so.",
+            ))
+            continue
+        findings.append(Finding(
+            OK, f"{path.name} parses (project {wf.project_key})",
+            f"tracker: {tracker}" if tracker else "tracker: gh_issues",
+        ))
 
 
 def _check_plugin(findings: list[Finding], port: int) -> None:
