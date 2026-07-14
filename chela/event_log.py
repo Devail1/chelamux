@@ -58,7 +58,7 @@ from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
-from chela.config import CHELA_DIR
+from chela import config
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +75,12 @@ FOLLOW_INTERVAL = 0.5
 
 
 def log_path() -> Path:
-    return Path(os.environ.get("CHELA_EVENTS_FILE") or (CHELA_DIR / "events.jsonl"))
+    # ``config.CHELA_DIR`` read per call, never latched at import: a module-level
+    # ``from chela.config import CHELA_DIR`` binds the value the *importing* process saw
+    # first, which is how the test suite ended up appending 43 synthetic events to the
+    # developer's real ~/.chela/events.jsonl — the redirect could not reach a name that
+    # was already copied. Resolve it late and the sandbox always wins.
+    return Path(os.environ.get("CHELA_EVENTS_FILE") or (config.CHELA_DIR / "events.jsonl"))
 
 
 def _state_path() -> Path:

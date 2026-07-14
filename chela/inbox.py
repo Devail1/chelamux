@@ -79,7 +79,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chela import agent_manager, discovery, event_log, messenger, transcripts
-from chela.config import CHELA_DIR, INBOX_ENABLED
+from chela import config
+from chela.config import INBOX_ENABLED
 
 log = logging.getLogger(__name__)
 
@@ -123,7 +124,8 @@ def enabled() -> bool:
 
 
 def store_path() -> Path:
-    return Path(os.environ.get("CHELA_INBOX_FILE") or (CHELA_DIR / "inbox.json"))
+    # ``config.CHELA_DIR`` per call, not latched at import — see event_log.log_path().
+    return Path(os.environ.get("CHELA_INBOX_FILE") or (config.CHELA_DIR / "inbox.json"))
 
 
 def _empty() -> dict:
