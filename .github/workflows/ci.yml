@@ -28,4 +28,10 @@ jobs:
         run: uv run ruff check chela tests
 
       - name: Pytest
+        # The JS suites (every *.test.mjs) run inside pytest via tests/test_js_suites.py and
+        # need `node`. It is preinstalled on the runner — and CHELA_REQUIRE_JS_TESTS makes a
+        # missing one a FAILURE rather than a skip, because a suite CI never executed must
+        # never be reported as green. That is the bug this whole file's suite just fixed.
+        env:
+          CHELA_REQUIRE_JS_TESTS: "1"
         run: uv run pytest -q

@@ -10,7 +10,7 @@
 //   2. ONE poller for /api/dispatcher — Dispatch, Kanban and the sidebar badges
 //      each used to fetch it on their own timer. Structural, over the sources.
 //
-// Run: node --test tests/
+// Run: node --test tests/  (or `uv run pytest -q` — tests/test_js_suites.py runs every .test.mjs)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -112,12 +112,20 @@ test('the sidebar WORK badges are fed from that same payload, not a third fetch'
 
 // --- the Feed rides the existing stream --------------------------------------
 
-test('the Feed reads /api/log and resumes from next_seq (never last_seq)', () => {
+// ⚠️ This test used to assert the resume CONTRACT by grepping feed.js for the string
+// `batch.last_seq` — and it was RED on dev, against correct code: CMX-60's bounded
+// catch-up loop legitimately reads `last_seq` to know it has reached the tail. A grep
+// tests spelling; it fails the right code and would pass the wrong code under another
+// name. The contract now lives in feedmodel.js's `drainLog` (pure) and is proven
+// BEHAVIOURALLY in tests/feed.test.mjs — against a fake log, alongside a reader that
+// resumes from `last_seq` and is SHOWN to skip 15 of 25 events. What is left here is
+// the only thing a source-level test can honestly claim: the Feed has ONE reader.
+test('the Feed reads /api/log through the one drain — no second event source', () => {
     const feed = src('feed.js');
     assert.ok(feed.includes("'/api/log?'"));
-    assert.ok(feed.includes('batch.next_seq'));
-    assert.ok(!feed.includes('batch.last_seq'));
-    assert.ok(feed.includes('batch.gap'));          // a gap is rendered, not swallowed
+    assert.ok(feed.includes('drainLog'));           // the cursor rule, tested in feed.test.mjs
+    assert.ok(!feed.includes('new EventSource'));   // it rides sse.js's stream, it opens none
+    assert.ok(feed.includes('_gap'));               // a gap is rendered, not swallowed
 });
 
 test('the log delta rides the ONE EventSource — no second stream is opened', () => {
