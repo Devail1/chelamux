@@ -133,6 +133,34 @@ def test_two_windows_in_one_directory_do_not_tail_each_others_transcript(
     assert sessions.resolve_window("@2").path == b
 
 
+def test_two_windows_in_one_directory_with_NO_hook_event_resolve_to_NOTHING(
+        projects, monkeypatch):
+    """The same collision, on the path the event log CANNOT cover — and it is reachable
+    twice over: before either agent's first hook, and again (permanently) on a busy fleet,
+    where the log is a bounded ring and a quiet window's last event AGES OUT, dropping
+    resolution back here. The cwd would hand both windows the same newest file. Two agents,
+    one origin: which one is it? Unanswerable — so it is refused, loudly, exactly as
+    ``hooks._wid_in`` refuses it. A relay into the wrong agent's topic is worse than
+    silence."""
+    _transcript(projects, "/home/u/repo", SID)
+    newest = _transcript(projects, "/home/u/repo", OTHER)
+    _panes(monkeypatch,
+           sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+                         launched_in="/home/u/repo", started=time.time() - 60),
+           sessions.Pane(wid="@2", path="/home/u/repo", command="claude", claude_pid=2,
+                         launched_in="/home/u/repo", started=time.time() - 60))
+    assert not [r for r in event_log.ring() if r.get("wid") in ("@1", "@2")]
+
+    # what the cwd fallback HAS to hand out here, and would hand to BOTH of them:
+    assert transcripts.transcript_for_cwd("/home/u/repo") == newest
+
+    for wid in ("@1", "@2"):
+        res = sessions.resolve_window(wid)
+        assert res.path is None and not res.ok and res.source == "none"
+        assert "@1" in res.detail and "@2" in res.detail   # it NAMES the two it cannot split
+        assert "/home/u/repo" in sessions.explain(wid)
+
+
 def test_a_recycled_window_id_does_not_inherit_the_dead_agents_session(
         projects, monkeypatch):
     """tmux numbers windows from scratch after a server restart, and the log outlives the
@@ -152,7 +180,47 @@ def test_a_recycled_window_id_does_not_inherit_the_dead_agents_session(
     assert not res.ok
 
 
+def test_a_window_whose_process_cannot_be_read_does_not_inherit_a_SESSION_either(
+        projects, monkeypatch):
+    """The floor above is the claude process's start time — so what happens when it cannot
+    be read (no ``/proc``, or a wrapper deeper than ``_MAX_DEPTH``)? There is then NO bound
+    on how old a mapping may be, and a recycled window id inherits the dead agent's session
+    straight out of the log. Unknown is never a pass: the event log is REFUSED, and the
+    resolution says so out loud."""
+    _transcript(projects, "/home/u/old", SID)      # the DEAD agent's transcript, still there
+    event_log.append("hook.pre_tool_use", "the DEAD agent", wid="@2", session_id=SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/new", command="claude", claude_pid=5,
+        launched_in="/home/u/new", started=None))  # ← /proc had nothing to say about it
+
+    res = sessions.resolve_window("@2")
+    assert res.session_id != SID
+    assert res.path is None and not res.ok
+    assert "REFUSED" in res.detail and "start time" in res.detail
+
+
 # --- the fallback, and its limits ----------------------------------------------------
+
+def test_the_cwd_fallback_uses_the_ORIGIN_not_the_pane_path_a_cd_moved(
+        projects, monkeypatch):
+    """The one case the cwd fallback exists for — a window with no hook event and no
+    ``--resume`` — is ALSO a case a ``cd`` can lie about. The pane path follows the shell;
+    the claude process's own cwd does not (Claude Code tracks its working directory
+    internally and never ``chdir``s). Prefer the pane path and this window tails the OTHER
+    agent's transcript, which is the very lie the whole design now rests on not telling."""
+    live = _transcript(projects, "/home/u/mine", SID)
+    _transcript(projects, "/home/u/repo", OTHER)   # a DIFFERENT agent's session, where we cd-ed
+    pane = sessions.Pane(wid="@6", path="/home/u/repo",          # ← cd-ed: the moving thing
+                         command="claude", claude_pid=8,
+                         launched_in="/home/u/mine",             # ← the process never moves
+                         started=time.time())
+    _panes(monkeypatch, pane)                      # no event record, no --resume: cwd is ALL
+
+    assert pane.origin == "/home/u/mine"           # the process's cwd, never the pane's
+    res = sessions.resolve_window("@6")
+    assert res.source == "cwd"
+    assert res.path == live                        # NOT /home/u/repo's transcript
+
 
 def test_a_fresh_window_with_no_hook_and_no_resume_still_resolves_by_cwd(
         projects, monkeypatch):
@@ -199,22 +267,42 @@ def test_a_session_is_found_without_knowing_its_project_dir(projects):
     assert sessions.transcript_for_session(SID) == live
 
 
-def test_a_session_id_cannot_walk_out_of_the_projects_dir(projects):
-    """It is pasted into a glob. It is validated, not trusted."""
+def test_a_session_id_is_VALIDATED_because_it_is_pasted_into_a_glob(projects):
+    """Traversal is the lesser half of this. The half that bites: a session id carrying a
+    GLOB METACHARACTER. Unvalidated, ``transcript_for_session("*")`` globs ``*/*.jsonl`` and
+    hands back an ARBITRARY agent's transcript — the relay then tails a stranger."""
+    mine = _transcript(projects, "/home/u/mine", SID)
+    _transcript(projects, "/home/u/theirs", OTHER)          # another agent's, on disk
+    assert sessions.transcript_for_session(SID) == mine     # the glob does its job…
+
+    # …and these are exactly what it must not match, though all of them WOULD:
+    assert sessions.transcript_for_session("*") is None
+    assert sessions.transcript_for_session(f"{SID[:8]}*") is None
+    assert sessions.transcript_for_session("?" * 36) is None
+    assert sessions.transcript_for_session("[a-f0-9]" * 5) is None
     assert sessions.transcript_for_session("../../etc/passwd") is None
     assert sessions.transcript_for_session("") is None
 
 
 def test_a_symlinked_transcript_and_its_target_are_ONE_file(projects):
     """The 07-14 duct tape was a hand-made symlink from the searched dir to the real
-    transcript. The resolver must not see two files (the monitor keys its read offset on
-    the path, and would replay the whole session on every flip)."""
-    real = _transcript(projects, "/home/u/projects/analytics", SID)
-    shim_dir = projects / transcripts.encode_cwd("/home/u/projects/analytics/data_prep")
-    shim_dir.mkdir()
-    (shim_dir / f"{SID}.jsonl").symlink_to(real)
+    transcript. The resolver must not see two files: the monitor keys its read offset on
+    the returned path, so a flip between the two reads as a ROTATION — re-read from byte 0,
+    and the entire session history is replayed into the topic.
 
-    assert sessions.transcript_for_session(SID) == real     # the real path, not the shim
+    The shim dir here is named so it sorts BEFORE the real one, and the symlink means the
+    two entries tie on mtime: without the ``realpath``, this returns the SHIM."""
+    real = _transcript(projects, "/home/u/projects/zeta", SID)
+    shim_dir = projects / transcripts.encode_cwd("/home/u/projects/alpha")   # sorts first
+    shim_dir.mkdir()
+    shim = shim_dir / f"{SID}.jsonl"
+    shim.symlink_to(real)
+    assert shim_dir.name < real.parent.name
+    assert shim.stat().st_mtime == real.stat().st_mtime     # stat follows the link: a TIE
+
+    got = sessions.transcript_for_session(SID)
+    assert got == real                                      # the real path, never the shim
+    assert got != shim and got.parent.name == real.parent.name
 
 
 def test_a_pane_claims_the_session_it_was_resumed_with(monkeypatch):
@@ -225,6 +313,18 @@ def test_a_pane_claims_the_session_it_was_resumed_with(monkeypatch):
     assert sessions.wid_claiming_session(SID) == "@2"
     assert sessions.wid_claiming_session(OTHER) is None
     assert sessions.wid_claiming_session(None) is None
+
+
+def test_two_panes_claiming_ONE_session_claim_it_for_NEITHER(monkeypatch):
+    """Impossible in practice, and therefore evidence that something is wrong — so it must
+    not be answered by picking the first one. Whatever this returns, hooks files that
+    session's events against, and an event filed against the WRONG window is worse than an
+    unfiled one (CMX-48; the payload still carries session_id, cwd and transcript_path, so
+    nothing is lost but the shortcut)."""
+    _panes(monkeypatch,
+           sessions.Pane(wid="@2", command="claude", resumed=SID),
+           sessions.Pane(wid="@3", command="claude", resumed=SID))
+    assert sessions.wid_claiming_session(SID) is None
 
 
 # --- the process facts, off a fixture /proc ------------------------------------------

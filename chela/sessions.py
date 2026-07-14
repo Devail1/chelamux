@@ -38,11 +38,22 @@ window made by something that cannot be wrong about it:
    the plugin, the fleet was rebuilt by hand).
 3. **the cwd** — today's path, demoted to LAST. It is right for the only case the other
    two cannot cover: a brand-new window that has fired no hook and was not resumed. It
-   never overrides a session id that is actually known.
+   never overrides a session id that is actually known, and it **refuses an origin two
+   windows share** — exactly as :func:`chela.hooks._wid_in` does — because "newest file in
+   the project dir wins" is precisely how one agent's output lands in another's topic. The
+   event log is a bounded ring, so a quiet window's last hook event ages out on a busy
+   fleet and resolution *falls back here*: this is a Tuesday, not an edge case.
+
+Every signal that cannot be *bounded* is refused rather than believed. The event log is
+only read against the claude process's start time (tmux reuses window ids); if that start
+time cannot be read — no ``/proc``, a wrapper deeper than :data:`_MAX_DEPTH` — there is no
+floor, so a recycled ``wid`` would inherit a **dead** agent's session. Unknown is not a
+pass: the event log is then refused, and ``detail`` says so.
 
 A session id is globally unique, so a known session needs no project dir at all — glob
-``~/.claude/projects/*/<sid>.jsonl``. And nothing here guesses: a window whose transcript
-cannot be established resolves to **None**, loudly (see
+``~/.claude/projects/*/<sid>.jsonl`` (the id is validated first: it is pasted into a glob,
+so a ``*`` in it would match an *arbitrary agent's* transcript). And nothing here guesses:
+a window whose transcript cannot be established resolves to **None**, loudly (see
 :meth:`chela.telegram.monitor.TranscriptMonitor._poll_window` and the ``relay.transcripts``
 fact in :mod:`chela.runtime_truth`) — the silence is the bug.
 
@@ -67,7 +78,10 @@ from chela import config, event_log, transcripts
 log = logging.getLogger(__name__)
 
 # A session id is pasted into a glob, so it is validated as the uuid Claude Code emits
-# rather than trusted (`../../` from a payload or a command line must not walk the disk).
+# rather than trusted. Two attacks, and the second is the one that actually bites: `../../`
+# from a payload or a command line must not walk the disk, and a GLOB METACHARACTER must
+# not match — `transcript_for_session("*")` would otherwise glob `*/*.jsonl` and hand back
+# some arbitrary agent's transcript.
 SESSION_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{7,63}$")
 
 # Where the process facts come from. A module-level Path so a test can point the whole
@@ -296,25 +310,42 @@ def transcript_for_session(session_id: str | None, base: Path | None = None) -> 
     return max(hits, key=lambda p: p.stat().st_mtime)
 
 
-def _session_from_log(wid: str, since: float | None) -> str | None:
+def _session_from_log(wid: str, since: float) -> str | None:
     """The newest ``session_id`` the event log has filed against ``wid`` — hook-borne, so
     it comes from inside the agent's own process.
 
-    ``since`` is the claude process's start time: tmux reuses window ids across a server
-    restart, so a mapping recorded before the process now living in that window belongs to
-    a **different agent** and is refused. Newest-first, so the first record older than the
-    floor ends the search — everything behind it is older still.
+    ``since`` is the claude process's start time, and it is REQUIRED: tmux reuses window
+    ids across a server restart, so a mapping recorded before the process now living in
+    that window belongs to a **different agent** and is refused. A record with no readable
+    timestamp is refused for the same reason — an unbounded mapping is exactly the thing
+    the floor exists to reject. Newest-first, so the first record older than the floor ends
+    the search: everything behind it is older still.
     """
     for rec in reversed(event_log.ring()):
         if rec.get("wid") != wid:
             continue
         ts = rec.get("ts")
-        if since is not None and isinstance(ts, (int, float)) and ts < since:
+        if not isinstance(ts, (int, float)) or ts < since:
             return None
         sid = rec.get("session_id")
         if isinstance(sid, str) and sid:
             return sid
     return None
+
+
+def _norm(path: str) -> str:
+    """Both sides of an origin comparison through one normaliser (symlinks, ``~``, ``/``)."""
+    try:
+        return os.path.realpath(os.path.expanduser(path))
+    except (OSError, ValueError):
+        return path
+
+
+def _windows_sharing(origin: str, wid: str, pane_map: dict[str, Pane]) -> list[str]:
+    """The OTHER windows launched in ``origin`` — the panes the cwd guess cannot tell apart."""
+    want = _norm(origin)
+    return sorted(p.wid for p in pane_map.values()
+                  if p.wid != wid and p.origin and _norm(p.origin) == want)
 
 
 @dataclass(frozen=True)
@@ -332,8 +363,8 @@ class Resolution:
         return self.path is not None
 
 
-def resolve_window(wid: str, base: Path | None = None,
-                   pane: Pane | None = None) -> Resolution:
+def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
+                   pane_map: dict[str, Pane] | None = None) -> Resolution:
     """window id → the transcript it is really writing, by session id, cwd last.
 
     Returns a :class:`Resolution` whose ``path`` is None when the window's transcript
@@ -342,11 +373,23 @@ def resolve_window(wid: str, base: Path | None = None,
     """
     if not wid:
         return Resolution(wid="", detail="no window id")
+    if pane_map is None:
+        pane_map = panes()
     if pane is None:
-        pane = panes().get(wid)
+        pane = pane_map.get(wid)
     tried: list[str] = []
 
-    sid = _session_from_log(wid, since=pane.started if pane else None)
+    sid = None
+    if pane is None or pane.started is None:
+        # No floor, so no bound on how old a mapping may be — and tmux recycles window ids.
+        # Believing the log here inherits a DEAD agent's session into a live topic. Unknown
+        # is not a pass.
+        tried.append(f"the claude process in {wid} could not be read (no /proc, or a "
+                     "wrapper too deep), so its start time is unknown and the event log's "
+                     "session for this window is REFUSED: a recycled window id would "
+                     "inherit a dead agent's session")
+    else:
+        sid = _session_from_log(wid, since=pane.started)
     if sid:
         path = transcript_for_session(sid, base)
         if path is not None:
@@ -367,6 +410,19 @@ def resolve_window(wid: str, base: Path | None = None,
     if cwd is None:
         from chela import discovery                # lazy: keeps the hook path off tmux twice
         cwd = discovery.get_window_cwd_by_id(wid)
+
+    # The cwd cannot tell two agents in one directory apart: it hands both of them whichever
+    # file was written last, i.e. it posts one agent's output into the other's topic — worse
+    # than silence. `hooks._wid_in` refuses this; so does this. (And it is REACHABLE: the
+    # event log is a bounded ring, so a quiet window's last hook event ages out.)
+    shared = _windows_sharing(cwd, wid, pane_map) if cwd else []
+    if shared:
+        tried.append(f"the cwd fallback is REFUSED: {', '.join([wid] + shared)} were all "
+                     f"launched in {cwd}, and the newest transcript there could belong to "
+                     "any of them — a relay into the wrong agent's topic is worse than "
+                     "silence")
+        return Resolution(wid, None, None, "none", "; ".join(tried))
+
     path = transcripts.transcript_for_cwd(cwd, base=base)
     if path is not None:
         return Resolution(wid, None, Path(os.path.realpath(path)), "cwd",

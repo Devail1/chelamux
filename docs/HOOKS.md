@@ -290,6 +290,19 @@ whose `cwd` happens to match, because that fallback *is* the bug. An event filed
 the *wrong* window is worse than one filed against no window; the `session_id`, `cwd` and
 `transcript_path` are in the payload regardless, so nothing is lost but the shortcut.
 
+The same rule binds the **outbound relay**, which resolves through the same module: when a
+window has no hook event and was not resumed, the cwd is all that is left — and if a second
+window shares that origin, the newest transcript under it could belong to either, so the
+resolution is `None`, loudly. (This is not exotic. The event log is a bounded ring, so on a
+busy fleet a quiet window's last hook event ages out and resolution drops back to the cwd.)
+A relay that posts one agent's output into another agent's topic is worse than silence.
+
+And every signal that cannot be **bounded** is refused rather than believed: the event log
+is only read against the claude process's start time, because tmux reuses window ids across
+a server restart. If that start time cannot be read — no `/proc`, or a wrapper deeper than
+`sessions._MAX_DEPTH` — a recycled `wid` would inherit a **dead** agent's session, so the
+log is refused for that window and `sessions.explain()` says why. Unknown is never a pass.
+
 A **subagent**'s hooks carry its parent's `session_id`, so they resolve to the parent's
 window. That is the right answer rather than a near-miss: the subagent runs inside that
 agent, in that window, and has no window of its own.
