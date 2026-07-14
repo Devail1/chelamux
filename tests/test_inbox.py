@@ -119,8 +119,8 @@ def test_busy_to_idle_on_a_watched_window_fires_once(store_file, windows, sends,
     assert len(sends) == 1
     wid, text = sends[0]
     assert wid == ORCH                                  # ...into the ORCHESTRATOR
-    assert text.startswith("📥 @2 (chelamux) finished")  # one compact, actionable line
-    assert 'note: "fix the parser"' in text
+    assert text.startswith("📥 @2 · chelamux finished")  # one compact, actionable line
+    assert "note: “fix the parser”" in text             # curly quotes: `"` is shell meta
     assert "\n" not in text
 
     # A window that simply STAYS idle across further ticks is not re-announced: the

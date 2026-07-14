@@ -19,6 +19,22 @@ log = logging.getLogger(__name__)
 _PROMPT_CHAR = "❯"  # marks Claude Code's input line
 _PASTE_PLACEHOLDER = "Pasted text"  # e.g. "[Pasted text #1 +5 lines]"
 
+# The input box's left border — what tells an input LINE apart from anything else on screen.
+# The footer hint below the box literally reads "! for bash mode"; a detector that scanned
+# raw lines would read that as bash mode and refuse every pane forever.
+_BOX_EDGE = "│"
+# The first glyph of the input line IS the input mode. `❯` is the prose prompt; `!` and `#`
+# are Claude Code's bash-input and memory modes, in which what we type is NOT prose — in
+# `!` mode it is a shell command, run by that session's own unsandboxed shell.
+_MODE_GLYPHS = {"❯": "prompt", "!": "bash", "#": "memory"}
+# Modes we refuse to type into. `bash`: our text would be EXECUTED (CMX-79 — observed live).
+# `memory`: our text would be WRITTEN INTO that agent's CLAUDE.md — persistent instructions,
+# not a notification.
+UNSAFE_INPUT_MODES = ("bash", "memory")
+# The input box is at the bottom of the pane. Bounding the scan keeps a `!` further up the
+# scrollback (an agent quoting a shell command) from being read as the mode.
+_INPUT_SCAN_LINES = 15
+
 
 def _capture_pane(target: str) -> str:
     """Return the visible text of a tmux pane (empty string on error)."""
@@ -45,6 +61,47 @@ def _pane_has_unsubmitted_paste(pane: str) -> bool:
     return False
 
 
+def pane_input_mode(pane: str) -> str:
+    """What the pane's input line will DO with what we type: prompt/bash/memory/unknown.
+
+    The status authority (``claude agents --json``) reports busy/idle/waiting — it models
+    whether a session is THINKING. It says nothing about what MODE its prompt is in, and the
+    two are independent: an ``idle`` pane sitting in ``!`` bash-input mode will happily run
+    the next line it receives as a shell command. That is CMX-79, and it is why ``idle`` was
+    never the same thing as "the prompt will treat this as prose".
+
+    Read off the TUI, because the TUI is the only place the mode exists: the input box's
+    first glyph is the mode (``❯`` prose, ``!`` bash, ``#`` memory). Scanned bottom-up over
+    the box's own lines (``│``) so the footer hint "! for bash mode" — which is not in the
+    box — can never be mistaken for the mode itself.
+
+    ``unknown`` means we could not read it (capture failed, TUI redesign, a pane that isn't
+    Claude Code at all). Callers must NOT treat that as unsafe: refusing on unknown would let
+    one tmux hiccup silently wedge every notification. That fail-open is precisely why the
+    TEXT is neutralised too (:func:`chela.tui_text.sanitize_prompt`) — an undetected mode has
+    to be survivable, not merely unlikely.
+    """
+    for line in reversed((pane or "").splitlines()[-_INPUT_SCAN_LINES:]):
+        if _BOX_EDGE not in line:
+            continue                    # not an input-box line (footer, body, box border)
+        inner = line.split(_BOX_EDGE, 1)[1].strip()
+        if inner and inner[0] in _MODE_GLYPHS:
+            return _MODE_GLYPHS[inner[0]]
+    return "unknown"
+
+
+def refuses_paste(window_id: str) -> str | None:
+    """The input mode that makes ``window_id`` unsafe to type into — None if it is fine.
+
+    One authority, every sender. The decisions inbox is where this was observed, but it is
+    not the only thing that types into somebody's prompt (rooms, the CI verdict, ``chela
+    msg``, the Telegram bridge) — and in bash-input mode every one of them would have been
+    executed just the same.
+    """
+    mode = pane_input_mode(_capture_pane(f"{config.current_session()}:{window_id}"))
+    return mode if mode in UNSAFE_INPUT_MODES else None
+
+
 def send_tmux(window_id: str, text: str) -> bool:
     """Send text to a tmux window. Returns True on success.
 
@@ -53,8 +110,20 @@ def send_tmux(window_id: str, text: str) -> bool:
     (``-l``) with the Enter as a SEPARATE call after a short gap, so a long blob
     isn't read as paste input and the trailing Enter isn't absorbed as a newline
     (which strands the message on the ``❯`` input line unsubmitted).
+
+    Refuses a window whose prompt is in an unsafe INPUT MODE (:func:`refuses_paste`): in
+    ``!`` bash mode our text is not a message, it is a command that session's shell runs.
+    Refusing by returning False — rather than sending — is what lets a durable sender HOLD
+    its item: the decisions inbox leaves the event queued and re-tries on a later tick, so
+    nothing is lost by waiting for the pane to be prose again.
     """
     target = f"{config.current_session()}:{window_id}"
+    unsafe = refuses_paste(window_id)
+    if unsafe:
+        log.warning("refusing to type into %s: its prompt is in %s-input mode — the text "
+                    "would be %s, not read", window_id, unsafe,
+                    "EXECUTED as a shell command" if unsafe == "bash" else "stored as memory")
+        return False
     try:
         if text.startswith("/"):
             # Slash commands: send Escape first to interrupt any in-progress

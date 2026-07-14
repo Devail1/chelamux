@@ -15,6 +15,18 @@ goes out on the next idle tick. Two rules make that safe:
   session is sitting on a permission/question prompt, and pasting into it would
   ANSWER THE GATE with our notification. Only a session that is genuinely idle at
   its prompt is ever written to.
+* ⛔ **And ``idle`` is not "the prompt will treat this as prose".** The status
+  authority models whether a session is THINKING; it says nothing about the INPUT
+  MODE its prompt is in. On 2026-07-15 the orchestrator's idle pane was in ``!``
+  bash-input mode, this inbox typed a notification into it, and ``/bin/bash`` RAN
+  IT — surviving only because the summary contained ``(rework 1)`` and died on the
+  parens. The mode is now read off the TUI and an unsafe one is REFUSED
+  (:func:`chela.messenger.refuses_paste`, which holds the event in the queue), and —
+  because a refusal is a guess about somebody else's pane, while the text is the
+  thing we control — every summary is neutralised (:func:`_event`) so it cannot
+  execute in ANY mode. Two independent layers, because the chain is fully
+  agent-controlled: an agent writes a PR title, this builds a summary from it, this
+  types it at the prompt of the one session with merge authority and a real shell.
 * The orchestrator is identified EXPLICITLY (:func:`orchestrator_wid`) — registered
   by the orchestrator itself via ``chela watch``, or pinned with
   ``$CHELA_ORCHESTRATOR_WID``. It is never guessed, so a notification can never land
@@ -96,6 +108,7 @@ from pathlib import Path
 from chela import agent_manager, discovery, epoch, event_log, messenger, notify, transcripts
 from chela import config
 from chela.config import INBOX_ENABLED
+from chela.tui_text import sanitize_prompt
 
 log = logging.getLogger(__name__)
 
@@ -389,9 +402,16 @@ def watches() -> dict:
 # --- event generation (pure — no tmux, no send) ---------------------------------
 
 def _line(wid: str, name: str, body: str, note: str = "") -> str:
-    """One compact, actionable line. The orchestrator reads it as an instruction."""
-    tail = f' — note: "{note}"' if note else ""
-    return f"📥 {wid} ({name}) {body}{tail}"
+    """One compact, actionable line. The orchestrator reads it as an instruction.
+
+    The framing punctuation is ``·`` and curly quotes, NOT parentheses and ``"``. Those are
+    shell metacharacters, and every summary is neutralised before it is typed at a prompt
+    (:func:`_event`), so a frame built from them would just have its own punctuation stripped
+    back out — it was ``(name)``, and the live bash-mode execution died on exactly those
+    parens. Framing that is already inert renders identically before and after the sanitizer.
+    """
+    tail = f" — note: “{note}”" if note else ""
+    return f"📥 {wid} · {name} {body}{tail}"
 
 
 def _event(kind: str, summary: str, payload: dict, *, wid: str | None = None,
@@ -405,12 +425,20 @@ def _event(kind: str, summary: str, payload: dict, *, wid: str | None = None,
     :func:`stale_reason` re-checks at delivery. Keeping the two apart is what stops a
     notification from being an essay and stops a fact from being un-re-checkable.
 
+    ⛔ The summary is built from AGENT-AUTHORED text — a PR title, a tracker line, a CI
+    error — and it is TYPED AT A PROMPT. So it is neutralised HERE, at the source, before it
+    is ever durable: no shell metacharacters, no control bytes, no mode-switching first
+    character (:func:`chela.tui_text.sanitize_prompt`). CMX-79: an inbox summary was executed
+    as a shell command by an orchestrator pane sitting in ``!`` bash-input mode; it died on
+    the parens in "(rework 1)", and a PR title containing ``$(…)`` would not have. The
+    payload keeps the raw title — a record is read, not typed.
+
     ``wid`` ATTRIBUTES the event (it is the Feed's lane), so it must only ever hold an id
     that names the agent this event is about IN THE CURRENT EPOCH. ``watch_key`` is the
     bookkeeping id instead — the key to retire in ``watches`` — for the one event whose
     subject is precisely that its id no longer names anybody (``watch_epoch_lost``).
     """
-    event = {"kind": kind, "summary": " ".join(summary.split()), "payload": payload,
+    event = {"kind": kind, "summary": sanitize_prompt(summary), "payload": payload,
              "wid": wid, "clear_watch": clear_watch, "ts": time.time()}
     if silent:
         event["silent"] = True
@@ -425,8 +453,15 @@ def render(event: dict) -> str:
     An event queued by an older daemon (before events were records) is still sitting in
     ``inbox.json`` across the upgrade, and must still be deliverable — hence the
     fallback. New events never set ``text``.
+
+    Neutralised AGAIN here, deliberately: ``inbox.json`` survives the upgrade, so the live
+    queue already holds summaries built before :func:`_event` sanitized anything — and those
+    are exactly the ones written while nothing was watching for ``$(…)``. Sanitizing only at
+    queue time would leave the one queue that holds the observed payload as the thing the fix
+    misses. :func:`chela.tui_text.sanitize_prompt` is idempotent, so a clean summary is
+    unchanged by the second pass.
     """
-    return event.get("summary") or event.get("text") or ""
+    return sanitize_prompt(event.get("summary") or event.get("text") or "")
 
 
 def _short_title(title: str, limit: int = SUMMARY_TITLE_CHARS) -> str:
@@ -779,8 +814,10 @@ def run_events(runs: list[dict], seen: dict[str, str],
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
             out.append(_event(
                 "run_needs_human",
-                f"📥 {label} NEEDS A HUMAN — {payload['rework_count']} rework(s) and the PR "
-                f"still fails review ({len(reviews)} verdict(s) on the row) — {ref}"
+                # No parens, no `(s)`: the summary is sanitized before it is typed at a
+                # prompt (_event), and bracket punctuation comes back out mid-word.
+                f"📥 {label} NEEDS A HUMAN — reworks: {payload['rework_count']} · verdicts "
+                f"on the row: {len(reviews)} · the PR still fails review — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "changes_requested":
             # ⛔ NOT a silent state (CMX-68 review). A run sits here waiting for a dispatcher
@@ -800,7 +837,7 @@ def run_events(runs: list[dict], seen: dict[str, str],
                    else f"RETRY after: {str(run['last_error'])[:60]}")
             out.append(_event(
                 "run_changes_requested",
-                f"📥 {label} sent back for rework ({nxt}) — the next dispatcher tick "
+                f"📥 {label} sent back for rework — {nxt} — the next dispatcher tick "
                 f"re-spawns it in its own worktree — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "failed":
@@ -962,6 +999,13 @@ def deliver(store: dict, statuses: dict[str, str],
     something IS running under that number now — especially then, because that something is
     another agent, and a review instruction pasted into its prompt is one it will act on.
 
+    A live, idle pane in an unsafe INPUT MODE (``!`` bash, ``#`` memory) is the last unsafe
+    state, and it is refused by :func:`chela.messenger.send_tmux` itself — one authority,
+    every sender. The refusal reaches us as a failed send, which is exactly the behaviour we
+    want: the event stays at the head of the durable queue and goes out on a later tick. It
+    is HELD, never dropped — the notification still matters once the pane is prose again.
+    CMX-77 says WHICH window may be written to; this says WHAT may be typed into it.
+
     Every event is re-validated against the CURRENT runs (:func:`stale_reason`) on its
     way out; one that has rotted in the queue is dropped and LOGGED — never silently,
     or a real event lost to a bug becomes undebuggable. Only the event's ``summary``
@@ -1001,7 +1045,10 @@ def deliver(store: dict, statuses: dict[str, str],
             log.warning("inbox: dropping unrenderable %s event", event.get("kind"))
             continue
         if not messenger.send_tmux(orch, text):
-            log.warning("inbox: delivery to %s failed; leaving it queued", orch)
+            # Includes the unsafe-input-mode refusal: HOLD, never drop. The pane will be
+            # back at its prose prompt eventually, and the event is still true.
+            log.warning("inbox: delivery of %s to %s refused/failed; holding it queued",
+                        event.get("kind"), orch)
             break
         store["queue"].pop(0)
         sent.append(event)
