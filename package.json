@@ -1,0 +1,14 @@
+{
+  "name": "chela",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DEV ONLY — chela ships no npm dependencies. The dashboard's JS is hand-written ES modules served straight from chela/dashboard/static: nothing here is bundled, transpiled or shipped. This file exists for ONE reason: the DOM suites (tests/wall.test.mjs) run the REAL dashboard code in a REAL DOM (jsdom) under `node --test`, because the fake DOM they used to run against could not fail. Run `npm ci` before `pytest`; CI does, and CHELA_REQUIRE_JS_TESTS=1 turns a missing jsdom into a failure rather than a silent skip.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/ chela/dashboard/static/collab/"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

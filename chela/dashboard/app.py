@@ -1065,6 +1065,119 @@ def api_agents_broadcast():
 
 
 # ---------------------------------------------------------------------------
+# API: Rooms — the HTTP half of the Wall's wire gesture
+#
+# `chela/rooms.py` owns rooms: membership, the typed ledger, the loop guard. This
+# is a THIN transport over it — the wall drags a wire between two tiles, and these
+# two routes are what that drag calls. There is no second membership store here
+# (there must never be one): the read is `rooms.status()`, verbatim — the exact
+# dict `chela room status` prints, so the API and the CLI cannot disagree — and the
+# write is `rooms.create` + `rooms.join`, the same calls `chela room join` makes.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/rooms")
+@require_auth
+def api_rooms():
+    """Rooms and their members, keyed by tmux window id — which is what the Wall has."""
+    return jsonify(rooms.status())
+
+
+# A wire is a gesture between TILES, so the list is small by construction. It is also
+# untrusted input, and every wid in it is resolved against the live window table — i.e.
+# tmux subprocesses. Bound it at the door.
+MAX_WIRE_WIDS = 8
+
+
+def _auto_room_name(wids: list[str]) -> str:
+    """Name a room from the agents being wired — a DROP MUST COMPLETE IN ONE MOTION.
+
+    A modal text prompt on drop would make the gesture two acts and kill it, so the
+    name is derived (``wire-researcher-executor-1f9c02``) and the room can be renamed
+    later by whoever cares. Slugged to `rooms._ROOM_RE`'s alphabet, capped at its 40.
+
+    **The tail is not decoration — it is the identity.** The readable part comes from
+    the window DISPLAY NAMES, and names COLLIDE: ``discovery.get_windows_by_id`` says
+    so in its own docstring (two shells; two repos with the same basename). Window
+    *ids* never do. Name-only, a later unrelated pair of ``shell``s would derive the
+    same ``wire-shell-shell`` — and since ``rooms.create`` is idempotent it would not
+    fork a room, it would SILENTLY JOIN THE FIRST PAIR'S. A room does active dispatch,
+    so that pair's handoffs would be pasted into the first pair's terminals. Salting
+    with the sorted wids makes the id name the PAIR; sorted, so either drag direction
+    derives the same room and re-wiring stays idempotent.
+    """
+    live = discovery.get_windows_by_id()
+    parts = []
+    for wid in wids[:2]:
+        slug = re.sub(r"[^a-z0-9]+", "-", live.get(wid, wid).lower()).strip("-")
+        parts.append(slug or wid.lstrip("@") or "x")
+    salt = hashlib.sha256("|".join(sorted(wids)).encode()).hexdigest()[:6]
+    stem = ("wire-" + "-".join(parts))[:33].rstrip("-.")
+    return f"{stem}-{salt}"          # ≤ 33 + 1 + 6 = 40, rooms._ROOM_RE's cap
+
+
+@app.route("/api/rooms/join", methods=["POST"])
+@require_auth
+def api_rooms_join():
+    """Put two (or more) live windows in a room. `{"wids": ["@1", "@2"], "room"?: "..."}`
+
+    Idempotent: re-wiring a pair that is already roomed re-joins the same room and
+    changes nothing. Wiring onto a tile that is ALREADY in a room JOINS THAT ROOM —
+    a third agent joins the conversation rather than forking a second one beside it.
+
+    A wire onto a window that died mid-drag writes NOTHING — no room of one behind it.
+    That is `rooms.join_all`, which resolves every window before its single locked
+    write; the pre-check below is only there to answer 404 (and to know which rooms
+    the drop target is already in). `rooms.join` in a loop would NOT do: it re-resolves
+    each window as it writes it, so a window dying partway leaves the earlier members
+    written and rolls back nothing.
+    """
+    data = request.get_json(force=True) or {}
+    raw = data.get("wids") or []
+    if not isinstance(raw, list):
+        # A bare string here would iterate CHARACTERS ("@1@2" -> "@", "1", "@", "2").
+        return jsonify({"error": "wids must be a list of window ids"}), 400
+    if len(raw) > MAX_WIRE_WIDS:
+        return jsonify({"error": f"at most {MAX_WIRE_WIDS} windows in one wire"}), 400
+    wids = [w for w in dict.fromkeys(raw) if w and isinstance(w, str)]   # dedupe, order kept
+    if len(wids) < 2:
+        return jsonify({"error": "two distinct windows required"}), 400
+    resolved = []
+    for wid in wids:
+        target = messenger.resolve_window(wid)
+        if target is None:
+            return jsonify({"error": f"{wid} is not a live window — cannot join"}), 404
+        resolved.append(target)
+
+    room = (data.get("room") or "").strip()
+    if not room:
+        # The DROP TARGET is the last wid: its room wins (drag a third agent onto a
+        # roomed peer -> it joins that room), then the source's, else a fresh name.
+        for wid in reversed(resolved):
+            existing = rooms.rooms_for(wid)
+            if existing:
+                room = existing[0]
+                break
+    if not room:
+        room = _auto_room_name(resolved)
+
+    result = rooms.join_all(room, resolved)   # all of them, or none of them
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error", "join failed"), "room": room}), 400
+    return jsonify({"ok": True, "room": room, "wids": result["wids"]})
+
+
+@app.route("/api/rooms/leave", methods=["POST"])
+@require_auth
+def api_rooms_leave():
+    """Drop one window out of one room — the click on a tile's room badge."""
+    data = request.get_json(force=True) or {}
+    wid, room = (data.get("wid") or "").strip(), (data.get("room") or "").strip()
+    if not wid or not room:
+        return jsonify({"error": "wid and room required"}), 400
+    return jsonify(rooms.leave(room, wid))
+
+
+# ---------------------------------------------------------------------------
 # API: Agent lifecycle
 # ---------------------------------------------------------------------------
 

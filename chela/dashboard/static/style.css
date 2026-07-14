@@ -633,6 +633,57 @@ body.term-dragging { overflow: hidden; }
 .grid-stack-item.swap-target > .grid-stack-item-content {
     box-shadow: 0 0 0 2px var(--accent); outline: none;
 }
+
+/* --- THE WIRE: drag from a tile's port onto a peer to put them in a room -----
+   The gesture reuses `.gs-dragging` (above) to neutralise the iframes' pointer
+   events — it must NOT hide the terminals (`.term-dragging`): watching them while
+   you wire them is the whole point. */
+.gs-port {
+    flex: 0 0 auto; cursor: crosshair; background: none; border: 0; padding: 0 2px;
+    color: var(--text-dim); font-size: 13px; line-height: 1; opacity: 0.75;
+}
+.gs-port:hover { color: var(--accent); opacity: 1; }
+/* The live wire: an SVG over the whole stage. Above the tiles and gridstack's own
+   dragged item (z 100), below a maximized pane's own chrome (z 150 → 160 sits over
+   it, which is fine: the wire is transient and never intercepts a click). */
+.wire-overlay {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 160;
+}
+.wire-overlay path {
+    fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round;
+    stroke-dasharray: 7 5;
+}
+/* Discoverability: while a wire is in flight EVERY other tile sprouts a drop
+   socket. Without it, nobody finds out the gesture exists. */
+#term-stage.wire-live .grid-stack-item > .grid-stack-item-content { position: relative; }
+#term-stage.wire-live .grid-stack-item:not(.wire-source) > .grid-stack-item-content::after {
+    content: '\25C9'; position: absolute; inset: 0; z-index: 3;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 34px; color: var(--accent); pointer-events: none;
+    background: rgba(0, 0, 0, 0.35); text-shadow: 0 0 12px rgba(0, 0, 0, 0.9);
+}
+#term-stage.wire-live .grid-stack-item.wire-target > .grid-stack-item-content {
+    box-shadow: 0 0 0 2px var(--accent);
+}
+#term-stage.wire-live .grid-stack-item.wire-target > .grid-stack-item-content::after {
+    background: rgba(0, 0, 0, 0.15); transform: scale(1.15);
+}
+/* In a room: a shared border in the room's colour — PAIRED WITH A NON-HUE CUE
+   (the badge below carries the room's own name + a 🔌 glyph), because hue is never
+   the only signal here. */
+.grid-stack-item-content.in-room {
+    border-color: var(--room-accent, var(--accent));
+    box-shadow: 0 0 0 1px var(--room-accent, var(--accent)), 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.gs-room {
+    flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; cursor: pointer;
+    padding: 1px 6px; border-radius: 999px; font-size: 10px; line-height: 15px;
+    color: var(--text); background: color-mix(in srgb, var(--room-accent, var(--accent)) 22%, transparent);
+    border: 1px solid var(--room-accent, var(--accent));
+}
+.gs-room:hover { background: color-mix(in srgb, var(--room-accent, var(--accent)) 40%, transparent); }
 /* On-screen key bar: sticky bottom dock, collapsible, grouped + inverted-T D-pad */
 #term-stage { padding-bottom: 4px; }
 #term-bar {
