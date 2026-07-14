@@ -473,6 +473,14 @@ def cmd_plugin(args) -> None:
     whatever this process's environment happens to say — the two disagreeing is precisely
     how the manifest ended up pointing at a port nobody served. A disagreement is printed
     here, loudly, instead of being resolved behind the user's back.
+
+    **This file is not the one agents read.** ``/plugin install`` copies it into Claude
+    Code's cache, and that copy is what loads at startup — so rendering alone changes
+    nothing, and for a day it changed nothing while every check said otherwise. chela
+    therefore reads the installed copy back and says, here, whether it is stale. It does
+    NOT write into that cache: the cache is Claude Code's, keyed by plugin version and
+    recorded in its own bookkeeping, and a reinstall would overwrite anything we put
+    there — leaving Claude Code describing a copy it did not install. Detect and instruct.
     """
     live = config.live_dashboard()
     port = args.port or config.live_dashboard_port()
@@ -488,12 +496,45 @@ def cmd_plugin(args) -> None:
         print(f"⚠️  the env says CHELA_DASHBOARD_PORT={config.dashboard_port()} while the "
               f"dashboard actually serves {port}. The env is meant to be the source of "
               "truth — fix the env file and restart it without --port.")
-    print("\ninstall it for one session:")
-    print(f"  claude --plugin-dir {directory}")
-    print("\nor persistently, from Claude Code:")
-    print(f"  /plugin marketplace add {directory}")
-    print("  /plugin install chela@chela")
-    print("\nHooks are read at agent STARTUP — a running agent will not pick them up.")
+    _report_installed_plugin(directory, port)
+    print("\nHooks are read at agent STARTUP — a running agent keeps whatever manifest it "
+          "started with, no matter what this command just wrote. Restart an agent for a "
+          "change to reach it.")
+
+
+def _report_installed_plugin(directory: Path, port: int) -> None:
+    """What the AGENTS read — rendering is only half the loop. See :func:`cmd_plugin`."""
+    copies = hooks.installed_plugins()
+    if not copies:
+        print("\n⚠️  chela cannot find an INSTALLED copy of the plugin — and the installed "
+              "copy is the only one agents ever read. Rendering it does nothing on its "
+              "own. Install it, from Claude Code:")
+        print(f"\n  /plugin marketplace add {directory}")
+        print("  /plugin install chela@chela")
+        print(f"\n(or, for one session only: claude --plugin-dir {directory})")
+        return
+    expected = hooks.hooks_spec(port)
+    for copy in copies:
+        if copy.hooks is None:
+            print(f"\n⚠️  the installed copy at {copy.manifest} cannot be read "
+                  f"({copy.error}) — so chela cannot tell you whether the hooks agents "
+                  "actually run are the ones it just rendered.")
+            continue
+        drift = hooks.manifest_drift(copy.hooks, expected)
+        if not drift:
+            print(f"\n✓ the installed copy agents read agrees with what was just rendered:"
+                  f"\n    {copy.manifest} (v{copy.version or '?'})")
+            continue
+        print(f"\n🔴 STALE INSTALL — agents do NOT read {directory}. They read:")
+        print(f"    {copy.manifest}")
+        print("  and it disagrees with what was just rendered:")
+        for line in drift:
+            print(f"    - {line}")
+        print("\n  Refresh it from Claude Code (chela will not write into Claude Code's "
+              "plugin cache — that copy is Claude Code's to manage, and a reinstall would "
+              "overwrite anything chela put there):")
+        print("    /plugin uninstall chela@chela")
+        print("    /plugin install chela@chela")
 
 
 def cmd_whoami(args) -> None:

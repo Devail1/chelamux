@@ -36,7 +36,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from chela import capabilities, config, hold
+from chela import capabilities, config, hold, hooks
 from chela.sources import get_source
 from chela.workflow import load_workflow
 
@@ -301,23 +301,111 @@ def _check_workflows(findings: list[Finding], paths: list[Path]) -> None:
 
 
 def _check_plugin(findings: list[Finding], port: int) -> None:
-    """A rendered plugin bakes the port in as a literal. If the dashboard moved since,
-    the manifest points at a closed socket — and a hook that fails open says nothing."""
-    manifest = config.CHELA_DIR / "plugin" / "hooks" / "hooks.json"
-    if not manifest.exists():
+    """Two manifests, and only one of them runs.
+
+    ``chela plugin`` renders ``$CHELA_DIR/plugin/hooks/hooks.json``. **No agent reads that
+    file.** ``/plugin install`` COPIES the plugin into Claude Code's cache, and *that* copy
+    is what every agent loads at startup. So both are checked, against the manifest the
+    code would render right now:
+
+    * the rendered one, because a hook ``url`` bakes the port in as a literal, and a
+      dashboard that moved since leaves it pointing at a closed socket (CMX-41);
+    * the INSTALLED one, because it is the only one that runs. It said ``timeout: 2`` for
+      ``PermissionRequest`` for a day after we raised it to 120 — so every gate hook was
+      killed after two seconds, no gate was ever held, and the phone's answer buttons
+      never appeared, while doctor printed green (CMX-56).
+
+    Neither drift is a warning. Either one means the hooks are dead.
+    """
+    rendered_path = config.CHELA_DIR / "plugin" / "hooks" / "hooks.json"
+    if not rendered_path.exists():
+        # Nothing rendered: the operator has not run `chela plugin`, so they are not
+        # using hooks and there is nothing to be stale. Step one is `chela plugin`.
         return
+    expected = hooks.hooks_spec(port)
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        url = data["hooks"]["SessionStart"][0]["hooks"][0]["url"]
-        rendered = int(url.rsplit(":", 1)[1].split("/", 1)[0])
-    except (OSError, ValueError, TypeError, KeyError, IndexError):
-        findings.append(Finding(WARN, f"cannot read the rendered plugin at {manifest}"))
-        return
-    if rendered != port:
+        rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         findings.append(Finding(
-            ERROR, f"the rendered plugin POSTs to port {rendered} — the dashboard is on {port}",
-            f"Every hook is posting into a closed socket (and failing open, silently). "
-            f"Re-render it: `chela plugin --dir {manifest.parent.parent}`.",
+            ERROR, f"cannot read the rendered plugin at {rendered_path}",
+            "It is there but unreadable, so chela cannot say what the hooks declare. "
+            f"Re-render it: `chela plugin --dir {rendered_path.parent.parent}`.",
         ))
-    else:
-        findings.append(Finding(OK, f"rendered plugin posts to port {rendered}"))
+        rendered = None
+    if isinstance(rendered, dict):
+        drift = hooks.manifest_drift(rendered, expected)
+        if drift:
+            findings.append(Finding(
+                ERROR, f"the rendered plugin at {rendered_path} is STALE",
+                "This is the copy the plugin is INSTALLED from, so a stale one here "
+                "reinstalls stale:\n"
+                + _lines(drift)
+                + f"\n    Re-render it: `chela plugin --dir "
+                f"{rendered_path.parent.parent}` — then reinstall it (see below).",
+            ))
+        else:
+            findings.append(Finding(
+                OK, f"rendered plugin posts to port {port} ({rendered_path})"))
+    _check_installed_plugin(findings, expected)
+
+
+def _check_installed_plugin(findings: list[Finding], expected: dict) -> None:
+    """The manifest an agent actually loads. Found by DISCOVERY (the install path is
+    recorded by Claude Code, and carries the plugin version) — never by a path we build,
+    which a version bump would silently invalidate.
+
+    It cannot be found, or cannot be read? That is an ERROR, not a pass. Claude Code's
+    plugin cache is its own and may change shape between releases; when it does, the only
+    honest answer is a loud "I cannot verify this". A silent green here would be the very
+    bug this check exists to catch, one level up.
+    """
+    copies = hooks.installed_plugins()
+    if not copies:
+        findings.append(Finding(
+            ERROR, "chela's plugin is rendered but NOT INSTALLED — no agent runs its hooks",
+            "Nothing under "
+            f"{hooks.plugins_dir()} claims to be the chela plugin, so the manifest chela "
+            "renders is a file nobody reads: no events, no gates, no phone answers. "
+            "Install it from Claude Code — `/plugin marketplace add "
+            f"{config.CHELA_DIR / 'plugin'}` then `/plugin install chela@chela` — or, if "
+            "it IS installed, chela cannot see where: Claude Code's plugin cache is an "
+            "implementation detail, and this check refuses to pass without reading the "
+            "manifest that actually runs.",
+        ))
+        return
+    for copy in copies:
+        if copy.hooks is None:
+            findings.append(Finding(
+                ERROR, f"cannot verify the INSTALLED plugin at {copy.manifest}",
+                f"{copy.error}. That copy — not the one chela renders — is what every "
+                "agent loads at startup, so chela cannot say whether the hooks work. "
+                "Reinstall it from Claude Code (`/plugin install chela@chela`).",
+            ))
+            continue
+        drift = hooks.manifest_drift(copy.hooks, expected)
+        if drift:
+            findings.append(Finding(
+                ERROR,
+                "the INSTALLED plugin disagrees with the one chela renders — "
+                "THE HOOKS THAT RUN ARE STALE",
+                f"Agents do not read the manifest chela renders. They read:\n"
+                f"    {copy.manifest}\n"
+                f"    (found via {copy.found_via}; plugin version "
+                f"{copy.version or 'unknown'})\n"
+                + _lines(drift)
+                + "\n    Fix: `chela plugin`, then in Claude Code `/plugin uninstall "
+                "chela@chela` + `/plugin install chela@chela` to refresh that copy. "
+                "Hooks are read at agent STARTUP — a running agent keeps the stale ones "
+                "until it is restarted.",
+            ))
+        else:
+            findings.append(Finding(
+                OK,
+                f"installed plugin matches the rendered one (v{copy.version or '?'})",
+                f"the manifest agents actually load: {copy.manifest} "
+                f"(found via {copy.found_via})",
+            ))
+
+
+def _lines(items: list[str]) -> str:
+    return "\n".join(f"    - {item}" for item in items)

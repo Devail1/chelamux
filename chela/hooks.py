@@ -45,6 +45,7 @@ import re
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from chela import config, event_log, transcripts
@@ -199,6 +200,176 @@ def render_plugin(directory: Path, port: int | None = None) -> Path:
 
 def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+# --- the copy that actually RUNS ---------------------------------------------------
+#
+# `chela plugin` writes a manifest that no agent ever reads. `/plugin install` COPIES the
+# plugin into Claude Code's own cache, and *that* copy is what every agent loads at
+# startup. The two drifted for a day — the rendered manifest said `PermissionRequest`
+# timeout 120, the installed one still said 2 — so every gate hook was killed after two
+# seconds, no gate was ever held, and the phone's answer buttons never appeared. Every
+# check was green, because every check read the file we WRITE.
+#
+# So: find the copy an agent would load, and read *it*. Two things make that honest.
+#
+#   * The path is DISCOVERED, never constructed. Claude Code records it in
+#     `installed_plugins.json` (`plugins["chela@<marketplace>"][].installPath`), and that
+#     path contains the plugin VERSION — `…/cache/chela/chela/0.1.0/`. Build the path from
+#     a hardcoded version and the day someone bumps `plugin.json` you are checking a
+#     directory that no longer exists, silently. Read the path Claude Code wrote down.
+#   * The cache is Claude Code's implementation detail and may change shape between
+#     releases. When it does, the only acceptable failure is a loud "I cannot verify
+#     this" — a silent pass here would be the exact bug being fixed, reintroduced one
+#     level up. Hence :attr:`InstalledPlugin.error`, which the doctor reports as an ERROR.
+#
+# chela DETECTS and INSTRUCTS; it never writes into that cache. It is not ours, a
+# reinstall would overwrite whatever we put there, and Claude Code's own bookkeeping
+# (version, `installedAt`, the marketplace it came from) would then describe a copy it
+# did not install — a fourth place for one fact to live, which is how we got here.
+
+PLUGIN_NAME = "chela"
+
+
+def claude_config_dir() -> Path:
+    """Claude Code's config directory — ``$CLAUDE_CONFIG_DIR`` or ``~/.claude``."""
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    return Path(raw).expanduser() if raw else Path.home() / ".claude"
+
+
+def plugins_dir() -> Path:
+    return claude_config_dir() / "plugins"
+
+
+@dataclass(frozen=True)
+class InstalledPlugin:
+    """One installed copy of chela's plugin — the manifest an agent actually loads.
+
+    ``hooks`` is the parsed manifest, or ``None`` with ``error`` set when it cannot be
+    read or is not the shape we know. Never both.
+    """
+
+    root: Path
+    version: str | None
+    found_via: str
+    hooks: dict | None
+    error: str | None
+
+    @property
+    def manifest(self) -> Path:
+        return self.root / "hooks" / "hooks.json"
+
+
+def _registered_copies() -> list[tuple[Path, str | None]]:
+    """``(installPath, version)`` per installed copy, from Claude Code's own bookkeeping.
+
+    Version-proof by construction: the path is *recorded*, not reconstructed.
+    """
+    path = plugins_dir() / "installed_plugins.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict):
+        return []
+    out: list[tuple[Path, str | None]] = []
+    for key, entries in plugins.items():
+        # the key is `<plugin>@<marketplace>`; the marketplace is whatever the operator
+        # named it, so only the plugin half is ours to match.
+        if str(key).split("@", 1)[0] != PLUGIN_NAME or not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            install = entry.get("installPath")
+            if isinstance(install, str) and install:
+                version = entry.get("version")
+                out.append((Path(install).expanduser(),
+                            version if isinstance(version, str) else None))
+    return out
+
+
+def _cached_copies() -> list[tuple[Path, str | None]]:
+    """The fallback, when the registry is missing or has changed shape: scan the cache.
+
+    ``<plugins>/cache/<marketplace>/<plugin>/<version>/`` — globbed at every level,
+    including the version, so a bump moves the directory and this still finds it.
+    """
+    try:
+        manifests = sorted(
+            (plugins_dir() / "cache").glob(f"*/{PLUGIN_NAME}/*/hooks/hooks.json"))
+    except OSError:
+        return []
+    return [(m.parent.parent, m.parent.parent.name) for m in manifests]
+
+
+def installed_plugins() -> list[InstalledPlugin]:
+    """Every installed copy of chela's plugin — what agents READ, not what we render.
+
+    An empty list means no agent is running chela's hooks at all. It is never a pass.
+    """
+    found, via = _registered_copies(), "installed_plugins.json"
+    if not found:
+        found, via = _cached_copies(), "a scan of the plugin cache"
+    copies: list[InstalledPlugin] = []
+    for root, version in found:
+        data: dict | None = None
+        error: str | None = None
+        try:
+            parsed = json.loads((root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("hooks"), dict):
+                error = "it has no `hooks` object — not a manifest shape chela knows"
+            else:
+                data = parsed
+        except FileNotFoundError:
+            error = "there is no hooks/hooks.json in the installed copy"
+        except OSError as exc:
+            error = f"it cannot be read: {exc}"
+        except ValueError as exc:
+            error = f"it is not valid JSON: {exc}"
+        copies.append(InstalledPlugin(root, version, via, data, error))
+    return copies
+
+
+def _first_hook(entries) -> dict | None:
+    if not isinstance(entries, list) or not entries or not isinstance(entries[0], dict):
+        return None
+    declared = entries[0].get("hooks")
+    if not isinstance(declared, list) or not declared or not isinstance(declared[0], dict):
+        return None
+    return declared[0]
+
+
+def manifest_drift(installed: dict, expected: dict) -> list[str]:
+    """What the installed manifest says vs what we render, per event. ``[]`` = they agree.
+
+    Both the ``url`` (CMX-41: a port nobody serves) and the ``timeout`` (CMX-56: a gate
+    hook killed after 2s) are load-bearing, and a drift in either kills the feature
+    silently — so both are compared, and the difference is named rather than summarised.
+    """
+    got = installed.get("hooks") if isinstance(installed, dict) else None
+    if not isinstance(got, dict):
+        return ["the installed manifest has no `hooks` object"]
+    want = expected.get("hooks") or {}
+    drift: list[str] = []
+    for event, entries in want.items():
+        want_hook = _first_hook(entries) or {}
+        got_hook = _first_hook(got.get(event))
+        if got_hook is None:
+            drift.append(
+                f"{event}: MISSING from the installed manifest (we render "
+                f"{want_hook.get('url')}, timeout {want_hook.get('timeout')}s)")
+            continue
+        for field in ("url", "timeout"):
+            if got_hook.get(field) != want_hook.get(field):
+                drift.append(
+                    f"{event}: {field} is {got_hook.get(field)!r} in the installed "
+                    f"manifest, {want_hook.get(field)!r} in the one we render")
+    for event in got:
+        if event not in want:
+            drift.append(f"{event}: the installed manifest hooks an event we no longer do")
+    return drift
 
 
 # --- correlation: session → window, without touching a pane ------------------------

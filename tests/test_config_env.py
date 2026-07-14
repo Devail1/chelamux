@@ -179,13 +179,31 @@ def test_doctor_flags_a_port_the_config_does_not_know_about(chela_dir, monkeypat
     assert any("5005" in f.title and "5001" in f.title for f in errors)
 
 
+def _install_plugin(spec: dict, version: str = "0.1.0") -> None:
+    """A plugin copy where `/plugin install` puts one — the manifest agents really read.
+    Doctor refuses to pass without it (CMX-56), so an "everything agrees" test has to
+    include the copy that actually runs."""
+    root = hooks.plugins_dir() / "cache" / "chela" / "chela" / version
+    (root / "hooks").mkdir(parents=True)
+    (root / "hooks" / "hooks.json").write_text(json.dumps(spec), encoding="utf-8")
+    (hooks.plugins_dir() / "installed_plugins.json").write_text(json.dumps({
+        "version": 2,
+        "plugins": {"chela@chela": [{"scope": "user", "installPath": str(root),
+                                     "version": version}]},
+    }), encoding="utf-8")
+
+
 def test_doctor_flags_a_plugin_baked_against_a_stale_port(chela_dir, monkeypatch):
     """CMX-41, exactly: the manifest says 5001, the dashboard serves 5005."""
     monkeypatch.setenv("CHELA_DASHBOARD_PORT", "5005")
     config.publish_dashboard_port(5005)
     hooks.render_plugin(chela_dir / "plugin", port=5001)
+    _install_plugin(hooks.hooks_spec(5001))
     errors = _levels(doctor.check(), doctor.ERROR)
-    assert any("5001" in f.title and "closed socket" in f.detail for f in errors)
+    # Both copies are stale, and both are named: the one chela renders (a reinstall would
+    # only copy the dead URL forward) and the one agents load (the URL that is dead now).
+    assert any("rendered plugin" in f.title and "5001" in f.detail for f in errors)
+    assert any("INSTALLED" in f.title and "5001" in f.detail for f in errors)
 
 
 def test_doctor_is_quiet_when_everything_agrees(chela_dir, monkeypatch):
@@ -193,6 +211,7 @@ def test_doctor_is_quiet_when_everything_agrees(chela_dir, monkeypatch):
     monkeypatch.setenv("CHELA_DASHBOARD_PORT", "5005")
     config.publish_dashboard_port(5005)
     hooks.render_plugin(chela_dir / "plugin", port=5005)
+    _install_plugin(hooks.hooks_spec(5005))
     assert _levels(doctor.check(), doctor.ERROR) == []
 
 
