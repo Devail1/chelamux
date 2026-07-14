@@ -779,7 +779,18 @@ body.term-dragging { overflow: hidden; }
     border: 1px solid var(--ok-orange); color: var(--text);
     background: rgba(230, 159, 0, 0.16);
 }
+/* A dead window whose PR is still open (CMX-62). Same shape as NEEDS YOU because it is
+   the same kind of claim on you — but a different WORD, and a dotted rule so the two
+   read apart in greyscale: hue is decoration, never the signal. */
+.lane-needs.lane-review { border-style: dotted; background: rgba(86, 180, 233, 0.14); }
 .lane-rows { display: flex; flex-direction: column; }
+
+/* The folded graveyard: one row for every finished agent, saying what it holds. */
+.feed-graveyard {
+    border: 1px dashed var(--border); border-radius: 8px;
+    padding: 8px 12px; cursor: pointer; background: var(--surface);
+}
+.feed-graveyard:hover { border-color: var(--accent); }
 
 /* --- a row --- */
 .feed-row {

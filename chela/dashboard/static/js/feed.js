@@ -31,9 +31,10 @@
 // ---------------------------------------------------------------------------
 import { $, api, attrEsc, escHtml, setAgentsCache } from './util.js';
 import {
-    CLASSES, CLASS_IDS, DEFAULT_CLASSES,
-    buildLanes, classOf, flatRows, hiddenSummary,
+    CLASSES, CLASS_IDS, DEFAULT_CLASSES, LANE_ORDER,
+    buildLanes, classOf, flatRows, goneSummary, hiddenSummary, laneRank, splitGone,
 } from './feedmodel.js';
+import { awaitingReviewIds } from './work.js';
 
 const FEED_LIMIT = 500;      // per fetch
 const FEED_MAX = 1500;       // events kept in the browser
@@ -48,6 +49,8 @@ let _gap = null;             // non-null once the server has told us we missed s
 let _inflight = false;       // one fetch at a time — the SSE delta can outpace the network
 let _fleet = [];             // /api/agents — the ONE busy/idle/waiting authority
 let _collapsed = new Set();  // lanes the viewer has folded shut
+let _graveyard = false;      // is the folded GONE group open? (per view, not persisted:
+                             // collapsed-by-default IS the fix — a sticky "open" undoes it)
 
 // Persisted UI state: the grouping and the filter survive a reload.
 const MODE_KEY = 'chela_feed_mode';
@@ -187,6 +190,11 @@ function feedToggleLane(wid) {
     _renderFeed();
 }
 
+function feedToggleGraveyard() {
+    _graveyard = !_graveyard;
+    _renderFeed();
+}
+
 // --- the render -------------------------------------------------------------
 
 function _ts(e) {
@@ -220,12 +228,32 @@ function _hiddenHtml(counts, total) {
     </div>`;
 }
 
+// The folded graveyard: ONE row that says exactly what it is holding, with a click to
+// open it. The lanes behind it are COLLAPSED, not deleted — they are still in the model,
+// still in the flat view, and one click away here.
+function _goneHtml(group) {
+    if (!group.agents) return '';
+    return `<div class="feed-hidden feed-graveyard" role="button" tabindex="0"
+            onclick="chela.feedToggleGraveyard()">
+        <span class="lane-fold">${_graveyard ? '▾' : '▸'}</span>
+        <span>✕ gone — ${escHtml(goneSummary(group.agents, group.events))}</span>
+        <button type="button" class="feed-show-btn"
+            onclick="event.stopPropagation(); chela.feedToggleGraveyard()">
+            ${_graveyard ? 'hide' : 'show'} finished agents</button>
+    </div>`;
+}
+
 function _laneHtml(lane) {
     const collapsed = _collapsed.has(lane.wid);
     const rows = lane.events.slice(-LANE_ROWS);          // chronological, newest at the foot
     const earlier = lane.events.length - rows.length;
+    // Two different asks, two different words. `NEEDS YOU` = an agent sitting on a prompt
+    // right now; `REVIEW WAITING` = a dead window whose PR is still open (CMX-62) — the
+    // reason that lane is not in the graveyard, said in the header so it reads as a
+    // GLYPH + WORD and never as a hue (Liav is red-weak).
     const badge = lane.needsYou
-        ? '<span class="lane-needs">◆ NEEDS YOU</span>' : '';
+        ? '<span class="lane-needs">◆ NEEDS YOU</span>'
+        : (lane.openReview ? '<span class="lane-needs lane-review">◆ REVIEW WAITING</span>' : '');
     const status = lane.system ? 'system' : lane.status;
     const project = lane.project ? `<span class="lane-project">${escHtml(lane.project)}</span>` : '';
     const wid = lane.system ? '' : `<span class="lane-wid">${escHtml(lane.wid)}</span>`;
@@ -235,7 +263,7 @@ function _laneHtml(lane) {
             ${_hiddenHtml(lane.hidden, lane.hiddenTotal)}
             ${!rows.length && !lane.hiddenTotal ? '<div class="side-empty">Nothing said yet.</div>' : ''}
         </div>`;
-    return `<section class="feed-lane${lane.needsYou ? ' lane-attention' : ''}${lane.system ? ' lane-system' : ''}"
+    return `<section class="feed-lane${lane.needsYou || lane.openReview ? ' lane-attention' : ''}${lane.system ? ' lane-system' : ''}"
                      data-status="${attrEsc(status)}">
         <header class="lane-head" onclick="chela.feedToggleLane('${attrEsc(lane.wid)}')">
             <span class="lane-fold">${collapsed ? '▸' : '▾'}</span>
@@ -309,7 +337,26 @@ function _renderFeed() {
                 : '<div class="side-empty">Every row is filtered out — turn a chip back on.</div>');
     } else {
         const { lanes } = buildLanes(_events, _fleet, _classes);
-        host.innerHTML = gap + lanes.map(_laneHtml).join('');
+        // Which runs still owe you a review — read off the payload work.js's app-level
+        // poll already has (⛔ NOT a second fetch of /api/dispatcher; it is the one
+        // poller). The Feed needs it because a dispatched agent KILLS ITS OWN WINDOW and
+        // only then does the run reconcile to `awaiting_review`: the lane holding "go
+        // review this PR" is `gone` in tmux while the PR is wide open (CMX-62), and the
+        // log cannot tell us — it records the ask and nothing when it is answered. `null`
+        // (no poll has landed yet) means UNKNOWN, and splitGone shows those lanes rather
+        // than burying them.
+        const group = splitGone(lanes, awaitingReviewIds());
+        // The graveyard row sits where the gone lanes sat — after the fleet, before
+        // `chela itself`. The sort is unchanged (needs-you → busy → idle → gone → chela);
+        // this only folds the `gone` bucket, and the lanes it holds render right behind
+        // the row when it is open, in exactly the order they had.
+        const parts = group.lanes.map(_laneHtml);
+        const goneRank = LANE_ORDER.indexOf('gone');
+        let at = group.lanes.findIndex(l => laneRank(l) > goneRank);
+        if (at < 0) at = parts.length;
+        const fold = _goneHtml(group) + (_graveyard ? group.buried.map(_laneHtml).join('') : '');
+        parts.splice(at, 0, fold);
+        host.innerHTML = gap + parts.join('');
     }
     if (canvas) canvas.scrollTop = scroll;
 }
@@ -320,4 +367,4 @@ export { enterFeed, onLogDelta, refreshFeed, tickFeed };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { feedSetMode, feedToggleClass, feedToggleLane });
+Object.assign(window.chela, { feedSetMode, feedToggleClass, feedToggleGraveyard, feedToggleLane });
