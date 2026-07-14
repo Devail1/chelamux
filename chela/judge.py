@@ -436,6 +436,84 @@ def _git_dirty(worktree: Path) -> bool:
     return out.returncode != 0 or bool(out.stdout.strip())
 
 
+def declared_npm_packages(worktree: Path) -> list[str]:
+    """Every package ``package.json`` declares, dependencies and dev alike. [] if there is none."""
+    pkg = worktree / "package.json"
+    if not pkg.is_file():
+        return []
+    try:
+        raw = json.loads(pkg.read_text())
+    except (OSError, ValueError):
+        return []
+    names: list[str] = []
+    for key in ("dependencies", "devDependencies"):
+        block = raw.get(key)
+        if isinstance(block, dict):
+            names.extend(str(n) for n in block)
+    return sorted(set(names))
+
+
+def _unresolvable(worktree: Path, names: list[str]) -> list[str]:
+    """The declared packages node could NOT resolve from this worktree.
+
+    ``node_modules/<name>`` is the same thing ``tests/test_js_suites.py`` checks before it
+    calls a DOM suite un-runnable, and matching that gate exactly is the point: this
+    function must predict the suite's own verdict, not a stricter or looser one.
+    """
+    return [n for n in names if not (worktree / "node_modules" / Path(n)).is_dir()]
+
+
+def provision_suite_env(worktree: Path, timeout: float = 600.0) -> str:
+    """Make the judge worktree able to RUN the suite. "" if it can; the reason if it cannot.
+
+    ⛔ CMX-80, and the reason the first fix did not work. THE JUDGE CANNOT RELY ON
+    ``hooks.before_run`` TO BUILD ITS ENVIRONMENT. ``_launch_agent`` runs that hook out of
+    the WorkflowDef the DAEMON loaded — ``runs.workflow_path``, the WORKFLOW.md at the REPO
+    ROOT, on the default branch. It is NEVER the copy on the PR branch under judgment. So a
+    PR whose whole content is "before_run must also run npm ci" is judged by a worktree
+    built with the OLD before_run, watches its own DOM suites fail for want of jsdom, and
+    reports CANNOT VERIFY on itself. A config fix cannot fix the thing that runs before the
+    config is merged; only code in the judged tree can, and this is it.
+
+    Python never exposed this because ``uv run`` re-syncs the venv on every invocation — the
+    hook's ``uv sync`` is a speed-up, not a load-bearing step. Node has no equivalent:
+    ``npm ci`` runs once or never. This IS that equivalent, and it belongs here, in the code
+    the judge worktree executes, rather than in a hook the judged commit cannot reach.
+    """
+    names = declared_npm_packages(worktree)
+    if not names:
+        return ""                       # no npm deps declared — nothing to provision
+    missing = _unresolvable(worktree, names)
+    log.info("judge: suite env in %s: declared=%s missing=%s", worktree, names, missing or "none")
+    if not missing:
+        return ""
+
+    if not (worktree / "package-lock.json").is_file():
+        return (f"{', '.join(missing)} is not installed in {worktree}/node_modules and there "
+                "is no package-lock.json to install it from")
+    try:
+        out = subprocess.run(
+            ["npm", "ci", "--no-audit", "--no-fund", "--silent"],
+            cwd=str(worktree), capture_output=True, text=True,
+            errors="replace", timeout=timeout,
+        )
+    except FileNotFoundError:
+        return (f"{', '.join(missing)} is not installed in {worktree}/node_modules and npm is "
+                "not on this machine's PATH, so the judge could not install it either")
+    except subprocess.TimeoutExpired:
+        return f"`npm ci` did not finish in {timeout:.0f}s in {worktree}"
+    if out.returncode != 0:
+        why = _last_meaningful_line((out.stdout or "") + (out.stderr or ""))
+        return f"`npm ci` failed in {worktree} (exit {out.returncode}{': ' + why if why else ''})"
+
+    still = _unresolvable(worktree, names)
+    if still:
+        return (f"`npm ci` exited 0 in {worktree} but {', '.join(still)} is STILL not in "
+                "node_modules — the suite that needs it cannot run")
+    log.info("judge: suite env provisioned in %s (npm ci installed %s)", worktree, missing)
+    return ""
+
+
 def run_experiments(
     worktree: Path,
     test_cmd: str,
@@ -484,6 +562,22 @@ def run_experiments(
     if len(items) > MAX_EXPERIMENTS:
         report.dropped = len(items) - MAX_EXPERIMENTS
         items = items[:MAX_EXPERIMENTS]
+
+    # ⛔ CMX-80: PROVISION BEFORE MEASURING. A missing dependency and a broken guard both
+    # come out of the suite as "exit 1", and the judge used to report the first as the
+    # second — "the suite is NOT GREEN", on a PR whose code was fine. An environment the
+    # judge could not build is an unknown ABOUT THE JUDGE, and it has to say so in those
+    # words, naming the cwd, or the next reader debugs the PR instead of the box.
+    env_problem = provision_suite_env(worktree)
+    if env_problem:
+        report.cannot_verify = (
+            f"the judge worktree could not be PROVISIONED to run the suite: {env_problem}. "
+            "⛔ This is an unknown about the JUDGE'S ENVIRONMENT, not a verdict on this PR: "
+            "nothing here says the code is wrong. `hooks.before_run` in the WORKFLOW.md AT "
+            "THE REPO ROOT is what builds this worktree (never the copy on the branch under "
+            "judgment), and it did not install what `judge.test_cmd` needs."
+        )
+        return report
 
     # THE BASELINE — the suite as the PR actually ships it, before anything is touched.
     baseline = run_suite(test_cmd, worktree, timeout)

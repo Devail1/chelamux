@@ -57,8 +57,8 @@ judge:
   suite_timeout_seconds: 900
 
 hooks:
-  # ⛔ THIS HOOK IS THE JUDGE'S ENVIRONMENT, not just the agent's — `_launch_agent` runs it
-  # on every launch, and a judge worktree is a launch. It therefore has to build an
+  # ⛔ THIS HOOK IS THE JUDGE'S ENVIRONMENT TOO, not just the agent's — `_launch_agent` runs
+  # it on every launch, and a judge worktree is a launch. It therefore has to build an
   # environment in which `judge.test_cmd` above can be GREEN. It did not, and the cost was
   # total: from the day the judge shipped (2026-07-15) it returned CANNOT VERIFY on every
   # single PR, because this line synced the venv and never installed jsdom, so the two
@@ -66,6 +66,16 @@ hooks:
   # single mutation was applied. A judge whose baseline can never be green judges nothing.
   # (`tests/test_judge_env.py` is the guard: it fails if either half of that contract —
   # the env var above, the install below — goes away again.)
+  #
+  # ⛔ AND IT CANNOT BE THE JUDGE'S ONLY ENVIRONMENT — read this before "simplifying"
+  # `judge.provision_suite_env` away as a duplicate of the line below. The dispatcher runs
+  # hooks out of the WORKFLOW.md it LOADED (`runs.workflow_path`: the repo root, default
+  # branch), NEVER the copy on the PR branch it is judging. So this line only reaches a
+  # judge AFTER it is merged, and the first attempt at CMX-80 — which fixed only this line —
+  # was judged by the old hook and reported CANNOT VERIFY on itself. A config fix cannot fix
+  # what runs before it merges; `provision_suite_env` (in the judged tree, so it runs the
+  # moment it is pushed) is the half that can. Both halves stay: this one so AGENTS get a
+  # working worktree, that one so the JUDGE never depends on this one being right.
   #
   # `uv sync --all-extras`: dashboard/telegram tests false-fail on a default-only sync (a
   # `uv run` in a fresh worktree auto-syncs WITHOUT extras — the CMX-21 trap), and

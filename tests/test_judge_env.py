@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,78 @@ def test_the_hook_that_builds_a_worktree_installs_what_the_suites_need():
         f"every judge worktree, so the judge runs `judge.test_cmd` against a worktree missing "
         f"a dependency its own suites import: baseline red, CANNOT VERIFY, forever (CMX-80)."
     )
+
+
+def test_the_judge_provisions_its_own_worktree_and_does_not_trust_the_hook():
+    """⛔ THE ROUND-2 ONE, and the reason the hook above is not enough on its own.
+
+    ``_launch_agent`` runs ``hooks.before_run`` out of the WorkflowDef the DAEMON loaded —
+    the WORKFLOW.md at the repo ROOT, on the default branch — never the copy on the PR
+    branch under judgment. So the first fix for CMX-80 (which changed only that hook) was
+    judged by a worktree built with the OLD hook, found jsdom missing, and reported CANNOT
+    VERIFY on the very PR that fixed it. Config cannot fix what runs before it merges.
+    ``provision_suite_env`` is in the JUDGED tree, so it takes effect the moment it is
+    pushed — and it must be CALLED, before the baseline is measured.
+    """
+    src = (ROOT / "chela" / "judge.py").read_text()
+    before_baseline = src.split("baseline = run_suite(", 1)[0]
+    assert "provision_suite_env(worktree)" in before_baseline, (
+        "run_experiments measures the baseline without provisioning the worktree first. A "
+        "missing npm dependency then surfaces as `the suite is NOT GREEN` — an accusation "
+        "against the PR for a fault of the box (CMX-80)."
+    )
+
+
+def test_provision_installs_a_declared_package_that_is_missing(tmp_path):
+    """The real thing, offline: a worktree with a lockfile but no node_modules comes back
+    with node_modules — which is exactly the state every judge worktree launches in."""
+    if not shutil.which("npm"):
+        pytest.skip("npm is not installed")
+    for name in ("package.json", "package-lock.json"):
+        shutil.copy(ROOT / name, tmp_path / name)
+    assert not (tmp_path / "node_modules").exists()
+
+    problem = judge.provision_suite_env(tmp_path)
+
+    assert problem == "", f"provisioning failed: {problem}"
+    for pkg in judge.declared_npm_packages(tmp_path):
+        assert (tmp_path / "node_modules" / pkg).is_dir(), f"{pkg} still missing after npm ci"
+
+
+def test_provision_is_a_no_op_when_there_is_nothing_to_install(tmp_path):
+    """No package.json (most repos) — the judge must not go looking for npm at all."""
+    assert judge.provision_suite_env(tmp_path) == ""
+
+
+def test_provision_names_the_package_and_the_cwd_when_it_cannot_install(tmp_path):
+    """⛔ The message is the deliverable. An unknown that does not name the missing package
+    AND the directory it is missing from is a shrug: for three weeks the judge said only
+    "exited 1" while the suite one pipe away was saying "jsdom is not installed"."""
+    (tmp_path / "package.json").write_text(json.dumps({"devDependencies": {"jsdom": "^29"}}))
+    # no package-lock.json → `npm ci` has nothing to install from, and cannot be run at all
+    problem = judge.provision_suite_env(tmp_path)
+
+    assert "jsdom" in problem
+    assert str(tmp_path) in problem
+
+
+def test_an_unprovisionable_worktree_is_an_environment_unknown_not_a_red_suite(tmp_path, monkeypatch):
+    """CANNOT VERIFY, and the report must blame the BOX, not the PR. The suite is never even
+    run: a baseline nobody could provision measures nothing about the code."""
+    monkeypatch.setattr(judge, "_git_dirty", lambda _wt: False)
+    monkeypatch.setattr(judge, "provision_suite_env", lambda _wt, **_kw: "jsdom is not installed")
+    monkeypatch.setattr(judge, "run_suite", lambda *a, **k: pytest.fail(
+        "the suite was RUN against a worktree the judge knew it could not provision"))
+
+    report = judge.run_experiments(
+        tmp_path, "pytest -q",
+        {"experiments": [{"file": "a.py", "before": "x", "after": "y", "why": "w"}]},
+    )
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert "could not be PROVISIONED" in report.cannot_verify
+    assert "jsdom is not installed" in report.cannot_verify
+    assert "NOT GREEN" not in report.cannot_verify        # ⛔ never blame the PR for the box
 
 
 def test_the_judges_suite_still_makes_an_unrunnable_js_suite_a_failure():
