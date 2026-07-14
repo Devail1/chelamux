@@ -516,8 +516,29 @@ def run_experiments(
             )
         finally:
             # ⛔ ALWAYS. The next experiment's baseline is this file, unmutated.
+            restored = True
             if applied and original is not None:
-                path.write_text(original)
+                try:
+                    path.write_text(original)
+                    restored = path.read_text() == original
+                except OSError:
+                    restored = False
+        if not restored:
+            # ⛔ THE ARTIFACT IS NOW CONTAMINATED. Every experiment after this one would run
+            # against a file still carrying the last mutation, so its "the suite went green"
+            # would be about a codebase nobody wrote. Stop, and take the WHOLE report down
+            # with it — including the findings already in hand, which were measured before
+            # the contamination but are not worth the risk of being wrong about. This is the
+            # one path where `cannot_verify` and `outcomes` are both non-empty, and it is
+            # exactly why `Report.blocking` refuses to block on a cannot-verify report
+            # whatever its outcomes look like.
+            report.cannot_verify = (
+                f"{exp.file} could NOT be restored after its mutation — the judge worktree is "
+                "contaminated and every measurement after this point would be about code "
+                "nobody wrote. ⛔ Nothing was blocked and nothing was cleared."
+            )
+            log.error("judge: could not restore %s — abandoning the whole report", path)
+            break
 
     return report
 

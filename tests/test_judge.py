@@ -265,6 +265,46 @@ def test_the_judges_own_build_artifacts_do_not_make_the_next_run_cannot_verify(t
     assert report.state == judge.J_BLOCKED
 
 
+def test_a_file_that_cannot_be_RESTORED_takes_the_whole_report_down(tmp_path):
+    """⛔ Found by the judge, ON ITS OWN PR. It mutated `Report.blocking`'s cannot-verify
+    short-circuit away and the suite stayed GREEN — the guard was unfalsifiable, because
+    nothing could produce a report that was cannot-verify AND had findings in it.
+
+    This is that path, and it is a real one: a mutation that cannot be reverted leaves the
+    worktree carrying code nobody wrote, so every later measurement is about a phantom. The
+    findings already in hand are thrown away with it — they were taken before the
+    contamination, and "probably still right" is not what a blocking verdict is made of.
+    """
+    root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
+    real_write = Path.write_text
+    calls = {"n": 0}
+
+    def flaky_write(self, data, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 2:                          # the RESTORE of the first experiment
+            return real_write(self, data + "\n# contamination\n", *a, **k)
+        return real_write(self, data, *a, **k)
+
+    with patch.object(Path, "write_text", flaky_write):
+        report = _run(root, _exp(), _exp(guard="a second guard, never measured"))
+
+    assert report.outcomes and report.outcomes[0].verdict == judge.SURVIVED
+    assert report.blocking == []                     # ⛔ a SURVIVED finding, and it BLOCKS NOTHING
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert "could NOT be restored" in report.cannot_verify
+    assert len(report.outcomes) == 1                 # it stopped rather than measure a phantom
+
+
+def test_a_cannot_verify_report_blocks_nothing_whatever_its_findings_say(tmp_path):
+    """The invariant above, pinned directly: the choke point is `Report.blocking`."""
+    survived = judge.Outcome(
+        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+        judge.SURVIVED, "it survived",
+    )
+    assert judge.Report(outcomes=[survived]).blocking == [survived]
+    assert judge.Report(outcomes=[survived], cannot_verify="the baseline was red").blocking == []
+
+
 def test_zero_experiments_is_CANNOT_VERIFY_not_a_clean_bill_of_health(tmp_path):
     root = _project(tmp_path / "repo")
 
