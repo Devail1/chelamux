@@ -1347,12 +1347,21 @@ class StatusRelay:
 class PermissionGateWatcher:
     """Polls panes to surface the live-TUI prompts, and answers them from Telegram.
 
-    Call :meth:`poll` once per outbound cycle (after ``monitor.poll``) with the
-    bound window ids: each window's pane is captured **once** and run through all
-    three detectors, and each newly-detected prompt is relayed exactly once with
-    its keyboard. Wire :meth:`observe` into the monitor's ``on_message`` (alongside
-    the relay) so an answered prompt's ``tool_result`` also clears its tracking,
-    and so an unpaired ``tool_use`` is available as the gate's fallback identity.
+    Call :meth:`poll` on its own cadence with the bound window ids: each window's pane
+    is captured **once** and run through all three detectors, and each newly-detected
+    prompt is relayed exactly once with its keyboard. Wire :meth:`observe` into the
+    monitor's ``on_message`` (alongside the relay) so an answered prompt's
+    ``tool_result`` also clears its tracking, and so an unpaired ``tool_use`` is
+    available as the gate's fallback identity.
+
+    **Never poll this behind the transcript relay** (CMX-74). It used to run in the same
+    tick, right after ``monitor.poll`` — and that relay *sleeps* through Telegram's flood
+    control, so the window whose burst had just earned a 429 was the very window whose
+    pane stopped being read. A gate lives for seconds and then it is answered in the
+    terminal and gone: a poll that arrives after the backlog drains arrives after the
+    gate. It gets its own thread (:func:`chela.main._pane_loop`), and :meth:`observe`
+    (the relay's thread) and :meth:`refresh_mirror` (the PTB tap) take the lock this
+    class already held for the tap-vs-tick race.
     """
 
     def __init__(
@@ -1440,24 +1449,29 @@ class PermissionGateWatcher:
         signal for a pane prompt: an AskUserQuestion / ExitPlanMode result lands at
         answer-time, so it clears (and poofs) that window's tracked prompt even if
         the pane hasn't repainted yet. Non-tool events are ignored.
+
+        This is the TRANSCRIPT relay's thread (:func:`chela.main._outbound_loop`), which
+        since CMX-74 is a *different* thread from the one :meth:`poll` runs on — and it
+        touches the same trackers, so it takes the same lock.
         """
         ct = getattr(msg, "content_type", None)
         uid = getattr(msg, "tool_use_id", None)
-        if ct == "tool_use":
-            if uid:
-                self._pending.setdefault(window_id, {})[uid] = _PendingTool(
-                    tool_name=getattr(msg, "tool_name", None),
-                    tool_input=getattr(msg, "tool_input", None),
-                )
-        elif ct == "tool_result":
-            pend = self._pending.get(window_id)
-            if pend and uid:
-                pend.pop(uid, None)
-            name = getattr(msg, "tool_name", None)
-            if name == "AskUserQuestion":
-                self._resolve(window_id, _ASKUQ)
-            elif name == "ExitPlanMode":
-                self._resolve(window_id, _PLAN)
+        with self._lock:
+            if ct == "tool_use":
+                if uid:
+                    self._pending.setdefault(window_id, {})[uid] = _PendingTool(
+                        tool_name=getattr(msg, "tool_name", None),
+                        tool_input=getattr(msg, "tool_input", None),
+                    )
+            elif ct == "tool_result":
+                pend = self._pending.get(window_id)
+                if pend and uid:
+                    pend.pop(uid, None)
+                name = getattr(msg, "tool_name", None)
+                if name == "AskUserQuestion":
+                    self._resolve(window_id, _ASKUQ)
+                elif name == "ExitPlanMode":
+                    self._resolve(window_id, _PLAN)
 
     def forget(self, window_id: str) -> None:
         """Drop all state for a window (e.g. after it closes)."""
@@ -1850,15 +1864,30 @@ class PermissionGateWatcher:
             self._resolve(window_id, kind)
 
         message_ids: list[int] = []
+        delivered = True
         for card in cards:
             if self._post is not None:
                 message_id = self._post_card(card, thread)
                 if isinstance(message_id, int):
                     message_ids.append(message_id)
+                else:
+                    delivered = False
             else:
                 # No id-returning poster (plain-sender tests) — post via the sender;
                 # without an id we can neither edit nor poof the message.
                 self._sender(card.text, card.parse_mode, thread, reply_markup=card.markup)
+        if not delivered:
+            # Telegram delivered NOTHING (flood control outlived the send's bounded
+            # retries, a payload it refused twice over). Recording the signature anyway
+            # is how a gate goes missing in silence: this tracker is EDGE-triggered, so
+            # a marker written for a message that does not exist means the next tick
+            # sees "already relayed" and returns — forever, because a *pending* gate's
+            # pane holds still by definition (it is waiting for a human). Measured live
+            # (CMX-74): two AskUserQuestion gates raised inside a 429 storm, both on the
+            # pane, neither ever on the phone. So: poof whatever half of the set did
+            # land, leave the window unmarked, and let the next tick post it again.
+            self._poof(message_ids)
+            return
         self._prompts.setdefault(window_id, {})[kind] = _Tracked(
             signature, message_ids, now)
 
@@ -1898,10 +1927,15 @@ class PermissionGateWatcher:
         if kind == _MIRROR:
             self._expanded.discard(window_id)
         tracked = self._prompts.get(window_id, {}).pop(kind, None)
-        if tracked is None or self._delete is None:
+        if tracked is not None:
+            self._poof(tracked.message_ids)
+
+    def _poof(self, message_ids) -> None:
+        """Delete these messages. Never raises — a message we cannot delete is still gone."""
+        if self._delete is None:
             return
-        for message_id in tracked.message_ids:
+        for message_id in message_ids:
             try:
                 self._delete(message_id)
             except Exception:
-                log.exception("failed to delete resolved %s prompt on %s", kind, window_id)
+                log.exception("failed to delete relayed prompt message %s", message_id)
