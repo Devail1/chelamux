@@ -145,6 +145,20 @@ MIRROR_KEYS: list[list[tuple[str, str, str | None]]] = [
 # The key_id that re-renders instead of pressing anything.
 MIRROR_REFRESH_KEY_ID = "ref"
 
+# The 📖 toggle (CMX-57). The mirror is now the ONLY message a gate posts, so the option
+# text the ❓ cards used to carry beside it has to live *behind* a button on this same
+# message instead — every question, every option's label, description and preview, from
+# the hook payload (:func:`~chela.telegram.gatewatch.format_mirror_expansion`).
+#
+# It is a toggle on the ONE message, not a second message, because a second message is
+# exactly the clutter this removes. It presses no key and answers nothing: it swaps what
+# the message's body shows (the live pane ⇄ the full option list) and leaves the answer
+# buttons and the D-pad exactly where they are — a human who expands to *compare* the
+# previews must be able to answer without collapsing first.
+MIRROR_EXPAND_KEY_ID = "doc"
+MIRROR_EXPAND_LABEL = "📖 Compare options"
+MIRROR_COLLAPSE_LABEL = "🎛️ Back to the pane"
+
 # key_id → (tmux key name, toast label), DERIVED from the table above so a button and the
 # key it fires cannot drift apart (the CMX-45 rule). Keyless buttons (🔄) are excluded —
 # a refresh is not a keypress.
@@ -170,7 +184,7 @@ VERTICAL_ONLY_DIALOGS: frozenset[str] = frozenset({"RestoreCheckpoint"})
 MIRROR_SETTLE_S = 0.5
 
 
-def mirror_markup(ui_name: str = "", answer_rows=None) -> dict:
+def mirror_markup(ui_name: str = "", answer_rows=None, expand: str | None = None) -> dict:
     """The mirrored dialog's keyboard: the ANSWER buttons, then the D-pad under them.
 
     ``ui_name`` is the mirrored :class:`~chela.telegram.panescan.Dialog`'s pattern name and
@@ -185,9 +199,21 @@ def mirror_markup(ui_name: str = "", answer_rows=None) -> dict:
     the pane is the only surface that shows you *where you are*, and the buttons are the
     only surface that answers with *no keystrokes*. Watch the cursor, or tap the answer —
     the human's choice, in one message.
+
+    ``expand`` (CMX-57) adds the 📖 / 🎛️ toggle between the two: ``"expand"`` while the
+    body is the pane, ``"collapse"`` while it is the full option list, and ``None`` when
+    there is nothing to expand *to* — a pre-plugin agent has no hook payload, and a button
+    that opened an empty page would be a lie. The toggle sits between the answer buttons and
+    the pad because it belongs to neither: it changes what you READ, not what you ANSWER.
     """
     vertical_only = ui_name in VERTICAL_ONLY_DIALOGS
     rows: list[list[dict]] = [list(row) for row in (answer_rows or [])]
+    if expand in ("expand", "collapse"):
+        label = MIRROR_EXPAND_LABEL if expand == "expand" else MIRROR_COLLAPSE_LABEL
+        rows.append([{
+            "text": label,
+            "callback_data": f"{MIRROR_CB_PREFIX}{MIRROR_EXPAND_KEY_ID}",
+        }])
     for row in MIRROR_KEYS:
         buttons = [
             {"text": label, "callback_data": f"{MIRROR_CB_PREFIX}{key_id}"}
@@ -200,7 +226,13 @@ def mirror_markup(ui_name: str = "", answer_rows=None) -> dict:
 
 
 def is_dpad_row(row) -> bool:
-    """Is this keyboard row part of the mirror's D-pad (rather than an answer button)?"""
+    """Is this row one of the mirror's OWN (an ``m:`` row — the D-pad or the 📖 toggle)?
+
+    Anything else is an answer button, which a redraw replaces. The mirror's own rows are
+    carried across a redraw untouched (:func:`recompose_mirror_markup`) — losing the 📖 to
+    an answer tap would be the same defect as losing the pad: a control that vanishes from
+    under a thumb.
+    """
     return bool(row) and all(
         str(button.get("callback_data", "")).startswith(MIRROR_CB_PREFIX) for button in row
     )
@@ -229,10 +261,12 @@ def recompose_mirror_markup(current_rows, answer_markup: dict | None) -> dict | 
 
 
 def decode_mirror_callback(data: str) -> tuple[str, Any] | None:
-    """Decode an ``m:`` D-pad tap, or None if it isn't ours / isn't a known key.
+    """Decode an ``m:`` mirror tap, or None if it isn't ours / isn't a known key.
 
     * ``("key", (tmux_key, label))`` — press one key, then re-render the mirror;
-    * ``("refresh", None)`` — the 🔄 button: press nothing, just re-render.
+    * ``("refresh", None)`` — the 🔄 button: press nothing, just re-render;
+    * ``("toggle", None)`` — the 📖 / 🎛️ button: press nothing, swap the body between the
+      live pane and the full option list, and re-render the SAME message.
 
     The target window is **not** in the payload and never will be: it is re-resolved from
     the message's own topic at tap time (CMX-8). An unknown key_id returns None and the
@@ -243,6 +277,8 @@ def decode_mirror_callback(data: str) -> tuple[str, Any] | None:
     key_id = data[len(MIRROR_CB_PREFIX):]
     if key_id == MIRROR_REFRESH_KEY_ID:
         return ("refresh", None)
+    if key_id == MIRROR_EXPAND_KEY_ID:
+        return ("toggle", None)
     action = MIRROR_ACTIONS.get(key_id)
     return ("key", action) if action is not None else None
 
@@ -412,16 +448,25 @@ def scraped_reply_markup(labels) -> dict:
     the live selector, so a reordered, filtered or gapped keyboard would answer the
     wrong question.
     """
+    return {"inline_keyboard": [*scraped_option_rows(labels), _esc_row()]}
+
+
+def scraped_option_rows(labels) -> list[list[dict]]:
+    """The numeric ``qa:<i>`` selector rows alone — no escape hatch under them.
+
+    The same buttons :func:`scraped_reply_markup` builds, minus the ⎋ row, so they can
+    also ride on the **mirror** (CMX-57), whose D-pad already has an ⎋ of its own and does
+    not need a second one. Split out rather than sliced off by the caller, so the two
+    surfaces cannot drift into offering different selectors for the same scrape.
+    """
     numbered = [
         {"text": str(i + 1), "callback_data": f"{QA_CB_PREFIX}{i}"}
         for i, _label in enumerate(labels)
     ]
-    rows = [
+    return [
         numbered[i : i + _SELECTORS_PER_ROW]
         for i in range(0, len(numbered), _SELECTORS_PER_ROW)
     ]
-    rows.append(_esc_row())
-    return {"inline_keyboard": rows}
 
 
 def _cb_fits(data: str) -> bool:

@@ -324,6 +324,7 @@ def build_application(
     send_key=None,
     drafts=None,
     refresh_mirror=None,
+    toggle_mirror=None,
 ):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
@@ -383,6 +384,9 @@ def build_application(
     any caller with no watcher); production passes
     :meth:`chela.telegram.gatewatch.PermissionGateWatcher.refresh_mirror`, which owns the
     tracked message id and is therefore the one authority allowed to edit or poof it.
+    ``toggle_mirror`` is the same seam for the mirror's 📖 button (CMX-57), which presses no
+    key at all: it swaps the message's body between the live pane and the gate's full option
+    list and re-draws it in place.
 
     ``on_topic_closed`` (optional) is a callable ``(thread_id) -> None`` invoked on
     a ``StatusUpdate.FORUM_TOPIC_CLOSED`` service message — Slice B's auto-topics
@@ -720,6 +724,12 @@ def build_application(
         fresh screenshot posted below it, which is what the old 🔄 did and which left the
         human scrolling between a picture and the buttons that were supposed to move it.
 
+        ``doc`` (📖 / 🎛️, CMX-57) presses nothing either: it swaps this message's body
+        between the live pane and the gate's full option list — every option's description
+        and preview, together, which is the one thing the pane can never show — and re-draws
+        it **in place**, keeping the answer buttons and the D-pad. It is a toggle on the ONE
+        message a gate posts, because a second message is exactly what it replaced.
+
         The target window is re-resolved from the callback message's OWN topic through
         ``router.resolve`` (never trusted from the payload, CMX-8). Every tap is answered
         so Telegram stops the button's spinner — including one that is gated out, unknown,
@@ -743,6 +753,13 @@ def build_application(
             return
 
         kind, payload = action
+        if kind == "toggle":
+            # 📖 / 🎛️ — no key, no answer: the SAME message re-drawn with the other body.
+            # The watcher owns the toggle state, because it also owns the render.
+            await query.answer("📖")
+            if toggle_mirror is not None:
+                await asyncio.to_thread(toggle_mirror, window_id)
+            return
         if kind == "key":
             tmux_key, label = payload
             ok = send_key(window_id, tmux_key)

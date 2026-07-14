@@ -82,8 +82,10 @@ MULTI_PANE_CURSOR_MOVED = MULTI_PANE.replace("❯ 1. Apple", "  1. Apple").repla
     "  2. Banana", "❯ 2. Banana"
 )
 
-# A single-select selector: every real option already has a numbered button, so this one
-# needs no D-pad and must NOT be mirrored.
+# A single-select selector, as a PRE-PLUGIN agent's gate reaches us: the scraper can read
+# it, and no hook ever announced it. Since CMX-57 the mirror is the only message a gate
+# posts, so this is the shape whose numbered keystroke buttons must ride on the mirror
+# itself — they are the only zero-scroll answer that fleet has.
 SINGLE_PANE = """\
  ☐ Fruit
 
@@ -480,14 +482,24 @@ def test_a_permission_gate_keeps_its_one_tap_card_AND_gains_a_mirror():
 def test_a_single_select_selector_is_mirrored_TOO():
     # CMX-54's inversion. The old rule suppressed the mirror here ("every option is already
     # one tap away") — but the pane is the only surface that shows you WHERE YOU ARE, and
-    # "the answer is easy" was never a reason to take it away. The semantic card keeps its
-    # numbered buttons; the mirror shows the cursor beside them.
+    # "the answer is easy" was never a reason to take it away.
+    #
+    # CMX-57 then took the card away as well: ONE message per gate. So the numbered
+    # keystroke buttons this pre-plugin shape is answered with had to move ONTO the mirror,
+    # or removing the card would have removed the answer — and nothing about ANSWERING was
+    # allowed to change. Same `qa:<i>` callbacks, same cursor-relative injection; a
+    # different message.
     bot = _Bot()
     w = _watcher(bot, {"@1": SINGLE_PANE})
     w.poll(["@1"])
-    assert len(_mirror_sends(bot)) == 1
-    assert "❯ 1. Apple" in _mirror_sends(bot)[0][1]
-    assert len(bot.sent) == 2                  # the semantic card AND the mirror
+    assert len(bot.sent) == 1                  # the mirror, and nothing else
+    mirror = _mirror_sends(bot)[0]
+    assert "❯ 1. Apple" in mirror[1]
+    data = [b["callback_data"] for row in mirror[4]["inline_keyboard"] for b in row]
+    assert data[:2] == ["qa:0", "qa:1"], "the scraped selector, on the mirror"
+    assert "m:up" in data and "m:ent" in data, "above the D-pad"
+    # …and it does NOT claim to be free of the terminal, because it is not.
+    assert "no keystrokes" not in mirror[1]
 
 
 def test_a_hook_HELD_gate_gets_THE_PANE_AND_THE_BUTTONS_ON_ONE_MESSAGE():
@@ -724,8 +736,281 @@ def test_the_callback_decodes_to_a_key_or_a_refresh_and_nothing_else():
     assert decode_mirror_callback("m:up") == ("key", ("Up", "↑"))
     assert decode_mirror_callback("m:spc") == ("key", ("Space", "␣ Space"))
     assert decode_mirror_callback("m:ref") == ("refresh", None)
+    # 📖 / 🎛️ — a view toggle. It presses NO key: the decode is what guarantees that a tap
+    # on it can never reach the terminal a gate is sitting on.
+    assert decode_mirror_callback("m:doc") == ("toggle", None)
     # Not ours, or crafted → inert. The handler answers the tap and does nothing.
     assert decode_mirror_callback("qa:nav:ent") is None
     assert decode_mirror_callback("m:") is None
     assert decode_mirror_callback("m:rm -rf /") is None
     assert decode_mirror_callback("") is None
+
+
+# ── CMX-57 — ONE MESSAGE PER GATE, and the 📖 that keeps the previews reachable ──
+#
+# Liav, from his phone on 2026-07-14, having driven the CMX-54 mirror live: *"i think i
+# prefer the bottom variant with this emoji 🎛️ … it's also the single view where i can do
+# multi select"*. But a 2-question gate posted THREE messages — ❓ Question 1/2, ❓ Question
+# 2/2, and the mirror — so the one surface he uses was buried under two he does not.
+#
+# One gate is one message now. The cards' content is NOT deleted, though: the pane (and so
+# the mirror) can only ever show ONE preview, the one under the ❯, while the cards showed
+# them all TOGETHER — and comparing two previews is what a preview is FOR. So it moves
+# behind a 📖 toggle on the same message, which keeps the D-pad and the answer buttons.
+
+
+def _two_question_gate():
+    """A 2-question gate with previews — the exact shape that posted three messages."""
+    from chela.telegram.hookgate import HookGate, Option, Question
+
+    gate = HookGate(
+        tool_use_id="toolu_02", tool="AskUserQuestion", seq=1,
+        questions=(
+            Question(
+                question="Which fruit do you prefer?", header="Fruit", multi_select=True,
+                options=(
+                    Option(label="Apple", description="Crisp and tart.",
+                           preview="┌───────┐\n│ APPLE │\n└───────┘"),
+                    Option(label="Banana", description="Soft and sweet.",
+                           preview="┌────────┐\n│ BANANA │\n└────────┘"),
+                ),
+            ),
+            Question(
+                question="Which colour suits it?", header="Colour",
+                options=(Option(label="Red", description="Warm."),
+                         Option(label="Yellow", description="Bright.")),
+            ),
+        ),
+    )
+    return {"pending": lambda _wid: gate, "held": _holds("toolu_02")}
+
+
+def _last_body(bot) -> str:
+    """The mirror's body as it stands now — its last edit, or its post if never edited."""
+    return bot.edits[-1][1] if bot.edits else _mirror_sends(bot)[0][1]
+
+
+def _last_keyboard(bot) -> list[list[dict]]:
+    markup = bot.edits[-1][3] if bot.edits else _mirror_sends(bot)[0][4]
+    return markup["inline_keyboard"]
+
+
+def _callbacks(rows) -> list[str]:
+    return [b["callback_data"] for row in rows for b in row]
+
+
+def test_a_TWO_QUESTION_GATE_POSTS_EXACTLY_ONE_MESSAGE():
+    """THE task. Three messages became one — and the one that survives is the mirror."""
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, **_two_question_gate())
+    w.poll(["@1"])
+
+    assert len(bot.sent) == 1, "a gate posts ONE message — not the mirror plus two ❓ cards"
+    assert len(_mirror_sends(bot)) == 1, "and the one it posts is the mirror"
+    body = bot.sent[0][1]
+    assert "Question 1/2" not in body and "Question 2/2" not in body
+    assert "❯ 1. Apple" in body, "the body is the live pane"
+    # The 📖 is offered, because there IS a payload to expand into.
+    assert "m:doc" in _callbacks(bot.sent[0][4]["inline_keyboard"])
+
+
+def test_a_card_left_over_from_an_earlier_tick_is_POOFED_when_the_mirror_takes_over():
+    # The payload can land a tick after the pane does (the log is read per tick). A card
+    # posted in that window must not simply be abandoned in the topic.
+    bot = _Bot()
+    gate = _two_question_gate()
+    w = PermissionGateWatcher(
+        bot.post, _Registry({"@1": "100"}), capture=_capture({"@1": MULTI_PANE}),
+        post=bot.post, edit=bot.edit, delete=bot.delete,
+        # A dialog detector that finds nothing on the first tick → the cards are the
+        # fallback; on the second the mirror takes over and they must go.
+        detect_dialog=_flaky_dialog(),
+        now=_ticking(), **gate,
+    )
+    w.poll(["@1"])
+    cards = list(bot.sent)
+    assert cards and not _mirror_sends(bot), "no mirror yet → the cards are the fallback"
+
+    w.poll(["@1"])
+    assert len(_mirror_sends(bot)) == 1, "the mirror takes over"
+    assert bot.deleted == [c[0] for c in cards], "and the cards it replaces are poofed"
+
+
+def _flaky_dialog():
+    """A dialog detector that sees nothing the first time and the real region after."""
+    seen = {"n": 0}
+
+    def detect(pane):
+        seen["n"] += 1
+        return None if seen["n"] == 1 else detect_dialog(pane)
+
+    return detect
+
+
+def test_the_BOOK_expands_EVERY_option_with_its_DESCRIPTION_and_its_PREVIEW():
+    """The whole reason the cards' content could not simply be deleted.
+
+    The TUI draws one preview at a time — the one under the ❯ — so the pane can never put
+    two side by side. The payload can, and 📖 is where it does it.
+    """
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, **_two_question_gate())
+    w.poll(["@1"])
+    w.toggle_mirror("@1")                       # 📖
+
+    assert len(bot.sent) == 1, "still ONE message — the expansion is an EDIT, not a post"
+    body = _last_body(bot)
+    assert "APPLE" in body and "BANANA" in body, "both previews, TOGETHER"
+    assert "Crisp and tart." in body and "Soft and sweet." in body
+    assert "Question 1/2" in body and "Question 2/2" in body, "every question, not just one"
+    assert "Red" in body and "Yellow" in body, "including the one the pane is NOT showing"
+
+
+def test_the_expansion_KEEPS_the_dpad_AND_the_answer_buttons():
+    # "A human who expands to compare must be able to answer without collapsing first."
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, **_two_question_gate())
+    w.poll(["@1"])
+    w.toggle_mirror("@1")
+
+    data = _callbacks(_last_keyboard(bot))
+    assert "qa:h:toolu_02:0:0" in data, "the zero-keypress option buttons survive the 📖"
+    assert "qa:hs:toolu_02:0" in data, "and so does ✅ Send"
+    assert "m:up" in data and "m:ent" in data and "m:spc" in data, "and the whole D-pad"
+    assert "m:doc" in data, "and the toggle back"
+
+
+def test_the_toggle_COLLAPSES_back_to_the_live_pane():
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, **_two_question_gate())
+    w.poll(["@1"])
+    w.toggle_mirror("@1")                       # 📖 expand
+    w.toggle_mirror("@1")                       # 🎛️ collapse
+
+    assert len(bot.sent) == 1, "one message throughout"
+    body = _last_body(bot)
+    assert "❯ 1. Apple" in body, "the pane is back"
+    assert "APPLE" not in body, "and the expansion is gone with it"
+
+
+def test_a_MULTISELECT_TICK_SURVIVES_an_expand_collapse_round_trip():
+    # Both surfaces read the same draft book, so the ☑ cannot drift — but the toggle must
+    # not drop the keyboard that carries it on the way through, either.
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE},
+                 selected=lambda _tuid, _q: {1}, **_two_question_gate())
+    w.poll(["@1"])
+    ticked = [b["text"] for row in _last_keyboard(bot) for b in row if "☑" in b["text"]]
+    assert ticked == ["☑ 2"], "Banana is toggled"
+
+    w.toggle_mirror("@1")                       # 📖
+    assert [b["text"] for row in _last_keyboard(bot) for b in row if "☑" in b["text"]] \
+        == ["☑ 2"], "the tick is still there in the expansion"
+    w.toggle_mirror("@1")                       # 🎛️
+    assert [b["text"] for row in _last_keyboard(bot) for b in row if "☑" in b["text"]] \
+        == ["☑ 2"], "and after collapsing back"
+
+
+def test_a_PREPLUGIN_window_gets_a_DRIVABLE_MIRROR_and_NO_BOOK():
+    # No plugin → no hook events → no payload. There is nothing to expand into, so there is
+    # no 📖 — a button that opened an empty page would be a lie. The mirror still drives.
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE})       # no `pending`, no `held`
+    w.poll(["@1"])
+
+    assert len(bot.sent) == 1
+    data = _callbacks(bot.sent[0][4]["inline_keyboard"])
+    assert "m:doc" not in data, "no payload → no 📖"
+    assert "m:up" in data and "m:spc" in data, "but every key still works"
+    w.toggle_mirror("@1")                       # a crafted/stale tap must be inert, not fatal
+    assert "m:doc" not in _callbacks(_last_keyboard(bot))
+
+
+def test_an_UNCHANGED_render_still_costs_ZERO_api_calls_with_the_book_in_the_keyboard():
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, **_two_question_gate())
+    w.poll(["@1"])
+    before = bot.calls
+    w.poll(["@1"])
+    w.poll(["@1"])
+    assert bot.calls == before, "an unchanged gate is an unchanged message: no API call"
+
+
+def test_a_TOGGLE_bypasses_the_edit_throttle():
+    # A tap that does not visibly move the message is the bug CMX-52 fixed. The 📖 is a tap.
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, now=lambda: 1000.0, **_two_question_gate())
+    w.poll(["@1"])
+    w.toggle_mirror("@1")
+    assert bot.edits, "the throttle must not swallow a TAP"
+
+
+def test_an_expansion_TOO_LONG_for_one_message_says_so_rather_than_lying():
+    """The 4096 cap applies to an edit too, and there is no second message to spill into.
+
+    So the previews give way — and when even that is not enough, the body SAYS what is
+    missing. A silently truncated expansion is the same lie as the silently dropped preview
+    CMX-49 ended.
+    """
+    from chela.telegram.gatewatch import format_mirror_expansion
+    from chela.telegram.hookgate import HookGate, Option, Question
+
+    huge = HookGate(
+        tool_use_id="toolu_03", tool="AskUserQuestion", seq=1,
+        questions=tuple(
+            Question(question=f"Question {i}?", options=(
+                Option(label=f"Option {i}", description="d" * 800, preview="P" * 4000),
+            ))
+            for i in range(4)
+        ),
+    )
+    body = format_mirror_expansion(huge)
+    assert len(body) <= 4096, "it has to FIT — an edit Telegram rejects shows nothing at all"
+    assert "NOT shown" in body, "and it must say what it could not show"
+
+
+# The pane that exposed the footer trap. A preview-bearing multiSelect selector: the option
+# rows sit BESIDE a preview box, and the footer says "Enter to submit", not "Enter to
+# select". `detect_askuserquestion` demands that literal footer; the mirror's own pattern
+# deliberately does NOT ("its footer varies by tab"). So the scraper reads this pane as no
+# selector at all — and gating the payload on the scraper meant no answer buttons and no 📖
+# on the exact shape this whole line of work is about. Caught by rendering it, not by the
+# suite, which was green throughout.
+PREVIEW_PANE = """\
+←  ☐ Fruit  ☐ Colour  ✔ Submit  →
+
+Which fruit do you prefer?
+
+❯ 1. Apple                ┌───────┐
+  2. Banana               │ APPLE │
+                          └───────┘
+                          ✂ 4 lines hidden
+
+Space to toggle · Tab/Arrows to navigate · Enter to submit · Esc to cancel
+"""
+
+
+def test_the_PAYLOAD_is_reachable_even_when_the_SCRAPER_cannot_read_the_pane():
+    """The corroboration for a payload is "a selector is on screen" — and the DIALOG
+    detector is the one that can answer that reliably, because it parses nothing.
+
+    Asking the option scraper for permission to use the payload re-imports the exact
+    fragility CMX-49 existed to escape: it is measured against one wording, and a shape it
+    was not measured against silently costs the human every button on the message.
+    """
+    from chela.telegram.panescan import detect_askuserquestion
+
+    assert detect_askuserquestion(PREVIEW_PANE) is None, "the scraper is blind to this pane"
+    assert detect_dialog(PREVIEW_PANE).name == "AskUserQuestion", "the mirror is not"
+
+    bot = _Bot()
+    w = _watcher(bot, {"@1": PREVIEW_PANE}, **_two_question_gate())
+    w.poll(["@1"])
+
+    assert len(bot.sent) == 1
+    data = _callbacks(bot.sent[0][4]["inline_keyboard"])
+    assert "qa:h:toolu_02:0:0" in data, "the zero-keypress buttons must still be there"
+    assert "m:doc" in data, "and so must the 📖 — the previews are the point of this shape"
+
+    w.toggle_mirror("@1")
+    assert "APPLE" in _last_body(bot) and "BANANA" in _last_body(bot)

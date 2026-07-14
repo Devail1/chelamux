@@ -78,6 +78,17 @@ the D-pad (:func:`mirror_answer`). Watch the cursor and press ``⏎``, or just t
 The decision, and how the two answer routes interleave without double-answering, is written
 out above :func:`format_mirror_card`.
 
+**And it is the ONLY message a gate posts** (CMX-57). The ❓ cards were still being posted
+*beside* the mirror, so a 2-question gate arrived as **three** messages and the surface Liav
+drives was buried under two he scrolls past. One gate, one message: the cards are not posted
+when the mirror carries the selector, and the content that was uniquely theirs — every
+option's ``description`` and ``preview``, **together**, which is the only way to compare them
+(the TUI, and therefore the pane, draws one preview at a time) — moves *behind* a ``📖``
+button on that same message (:func:`format_mirror_expansion`), toggled in place, keeping the
+answer buttons and the D-pad. The cards survive as the mirror's **fallback** for a selector
+the dialog detector cannot name, because a gate that arrives as nothing is worse than a gate
+that arrives as two messages.
+
 The same per-tick pane capture also feeds a fifth, non-interactive relay — the
 **ephemeral status line** (:class:`StatusRelay`): Claude Code's live working verb
 (``✻ Cerebrating… (2m 45s · ↓ 12.0k tokens) · 2 shells``) posted as one message
@@ -112,6 +123,7 @@ from chela.telegram.interactive import (
     nav_only_markup,
     permission_reply_markup,
     plan_reply_markup,
+    scraped_option_rows,
     scraped_reply_markup,
 )
 from chela.telegram.panescan import (
@@ -451,7 +463,8 @@ def _preview_block(preview: str, cap: int) -> tuple[str, bool]:
 
 
 def _hook_card_text(q: Question, index: int, total: int, preview_cap: int,
-                    answerable: bool, budget: float | None = None) -> tuple[str, bool]:
+                    answerable: bool, budget: float | None = None,
+                    warn: bool = True) -> tuple[str, bool]:
     """One question's card body (HTML), and whether every preview it has is shown.
 
     The heading names the question's place in the run (``Question 2/3``) and its
@@ -464,6 +477,12 @@ def _hook_card_text(q: Question, index: int, total: int, preview_cap: int,
     that tapping answers the agent directly, and that the hold is time-bounded — because
     an agent frozen on a human is the entire risk of this feature, and a human who does not
     know the clock is running cannot make an informed decision about letting it run out.
+
+    ``warn=False`` suppresses this question's own "previews dropped" line — used by
+    :func:`format_mirror_expansion`, which stacks every question into ONE message and says
+    it once at the bottom instead of N times. The *fact* is never suppressed, only its
+    repetition: the flag returns it as the ``complete`` half of the tuple, and the caller
+    that turns it off is the caller that promises to say it itself.
     """
     parts: list[str] = []
     head = "❓"
@@ -488,7 +507,7 @@ def _hook_card_text(q: Question, index: int, total: int, preview_cap: int,
             parts.append(block)
         complete = complete and shown
 
-    if not complete and preview_cap <= 0:
+    if warn and not complete and preview_cap <= 0:
         parts.append("")
         parts.append(_esc(_PREVIEW_DROPPED))
     if budget is not None:
@@ -637,12 +656,34 @@ def hook_askuq_signature(gate: HookGate, answerable: bool,
 #   **Every dialog is mirrored. The only thing that suppresses a mirror is having no pane
 #   region to show** (:func:`mirror_suppressed`).
 #
-# The CMX-49 cards are untouched: they still carry every option's description and preview
-# in full (the pane truncates and mangles both, and a mirror of a side-by-side preview
-# layout is not a substitute for the preview *text*), and they still carry their own answer
-# buttons. They are what you READ; the mirror is what you STEER — and now also a second
-# place you can tap the answer, right under the cursor that shows you what you are
-# answering.
+# **And the mirror is the ONLY message a gate posts** (CMX-57). CMX-54 left the ❓ cards
+# posted *beside* it, so a 2-question gate arrived on the phone as THREE messages — ❓ 1/2,
+# ❓ 2/2, and the mirror — and the surface Liav actually drives was buried under two he
+# scrolls past. One gate is one message now: the cards are not posted at all when the mirror
+# is carrying the selector.
+#
+# ⛔ Their CONTENT is not deleted, it is RELOCATED — deleting it would take back exactly what
+# CMX-49 gave. The mirror renders the pane, and the TUI draws **one** preview at a time (the
+# one under the ``❯``); the cards rendered **every** option's description and preview
+# together, which is the only way to *compare* them — and comparison is what a preview is
+# FOR. So the mirror carries a 📖 button that swaps its body for the full option list, from
+# the payload, at full fidelity (:func:`format_mirror_expansion`), and 🎛️ swaps back. It is
+# an **edit-in-place toggle on the same message**, never a second one — a second message is
+# precisely the clutter being removed — and the expansion keeps the D-pad *and* the answer
+# buttons, because a human who expands to compare must be able to answer without collapsing
+# first.
+#
+# The cards remain wired for one case, and it is a real one: a selector the *dialog* detector
+# does not recognise as an ``AskUserQuestion`` has no mirror to carry it, and a gate that
+# arrives as **nothing** is worse than a gate that arrives as two messages. So
+# :func:`format_hook_askuq_cards` is the mirror's fallback, not its neighbour.
+#
+# The **permission** and **plan** cards keep their own message, deliberately. They are a
+# different shape: their bodies are the notification preview a phone actually shows
+# (``❓ Permission — Bash: rm -rf …`` is legible on a lock screen; a ``<pre>`` of a TUI box is
+# not), and their ✅/❌ buttons *name* what they do, where the mirror can only offer the ⏎ and
+# ⎋ glyphs that happen to mean allow and deny. Neither of those is true of the ❓ question
+# cards, which is why those are the ones that go.
 #
 # **The two answer paths, and how they do not collide.** A held gate can now be resolved
 # two ways: a tap on an option button (the hook returns the answer — no key is sent) or the
@@ -692,6 +733,12 @@ _MIRROR_TITLES: dict[str, str] = {
     "Settings": "Settings",
 }
 _MIRROR_HEAD = "🎛️ {title} — the live pane. Every key below re-draws it here."
+# The 📖 expansion's heading (CMX-57): the same message, showing the payload instead of the
+# pane. It says how to get back, because a body that has replaced itself with something else
+# must never leave the human wondering where the pane went.
+_EXPAND_HEAD = (
+    "📖 {title} — every option in full, side by side. 🎛️ goes back to the live pane."
+)
 # Said on the mirror when the option buttons ride on it: both journeys, one message.
 _MIRROR_ANSWER = (
     "👆 The numbered buttons answer{which} with no keystrokes — or steer the ❯ with the "
@@ -700,6 +747,14 @@ _MIRROR_ANSWER = (
 _MIRROR_ANSWER_MULTI = (
     "👆 Tap to toggle as many as you want{which}, then ✅ Send — no keystrokes. Or steer "
     "the ❯ with the D-pad, ␣ to tick, ⏎ to submit."
+)
+# And the honest version for a gate NO hook is holding (a pre-plugin agent): the numbered
+# buttons here do send keystrokes — they drive the ❯ and press ⏎ for you. Saying "no
+# keystrokes" on that keyboard would be a lie, and the whole point of this surface is that
+# what it shows you is what is really there.
+_MIRROR_ANSWER_KEYS = (
+    "👆 The numbered buttons drive the ❯ to that option and press ⏎ for you — or steer it "
+    "yourself with the D-pad."
 )
 # " question 2/3" reads right after "the buttons answer…", but needs the preposition after
 # "toggle as many as you want…". One question → no suffix at all: there is nothing to
@@ -710,19 +765,26 @@ _WHICH_MULTI = " on question {n}/{total}"
 
 @dataclass(frozen=True)
 class MirrorAnswer:
-    """The zero-keypress option buttons that ride on the mirror, for ONE question.
+    """The option buttons that ride on the mirror, for ONE question.
 
     The mirror shows one question at a time (the TUI walks them), so the buttons on it can
     only be the buttons of the question the pane is **currently** on — and which one that is
     has to be *proven*, never assumed (:func:`mirror_answer`). ``index``/``total`` are what
     the card says out loud, so the human is never left guessing which question a numbered
     button belongs to.
+
+    ``by_hook`` distinguishes the two keyboards that can land here, and it exists so the card
+    cannot *claim* the wrong one: the hook buttons (:func:`mirror_answer`) answer with zero
+    keystrokes, while the legacy scraped selector (:func:`mirror_keystroke_answer`, a
+    pre-plugin agent) drives the ``❯`` and presses ⏎ for you. Both are real answer buttons;
+    only one of them is honest about being free of the terminal.
     """
 
     rows: list[list[dict]]
     index: int
     total: int
     multi_select: bool = False
+    by_hook: bool = True
 
 
 def focused_question(gate: HookGate, dialog: Dialog) -> int | None:
@@ -785,7 +847,88 @@ def mirror_answer(gate: "HookGate | None", held: "OpenGate | None", dialog: Dial
     )
 
 
-def format_mirror_card(dialog: Dialog, answer: "MirrorAnswer | None" = None) -> Card:
+def mirror_keystroke_answer(uq: "AskUQ | None", dialog: Dialog) -> "MirrorAnswer | None":
+    """The LEGACY scraped selector buttons, on the mirror — for a gate no hook is holding.
+
+    The mirror is the only message a gate posts now (CMX-57), so the numeric ``qa:<i>``
+    buttons that used to ride on the ❓ card have to ride here or they are gone — and for a
+    **pre-plugin** agent (hooks are read at agent startup, so a fleet launched before the
+    plugin emits none) they are the only zero-scroll answer that fleet has. Nothing about
+    the answer itself changes: a tap still re-reads the live ``❯`` at tap time and injects
+    the cursor-relative moves + ⏎ (:mod:`chela.telegram.inbound`), exactly as it did on the
+    card. Only the message it sits on is different.
+
+    The eligibility rule is copied verbatim from the card's (:func:`_askuq_markup`) — a
+    single-select selector whose options the scraper actually parsed — so the two surfaces
+    cannot disagree about which shapes get buttons. Everything else (a multi-tab strip, a
+    ``multiSelect``, a layout the scraper cannot read) gets the D-pad alone, which is what
+    the mirror was built for.
+    """
+    if dialog.name != "AskUserQuestion" or uq is None or uq.multi or not uq.options:
+        return None
+    rows = scraped_option_rows(uq.options)
+    if not rows:
+        return None
+    return MirrorAnswer(rows=rows, index=0, total=1, multi_select=False, by_hook=False)
+
+
+# The 📖 expansion is ONE message, and Telegram caps a message — and an *edit* of one — at
+# 4096 characters. There is no splitter to fall back on here (a split would post the second
+# message this task exists to remove), so the expansion is budgeted to fit, previews giving
+# way stage by stage (:data:`_PREVIEW_STAGES`) exactly as a card's do, and whatever cannot
+# fit is dropped **visibly**. The margin is for the heading + the answer line above it.
+_MAX_EXPANSION = _TG_TEXT_LIMIT - 400
+_EXPANSION_CLIPPED = (
+    "\n\n⚠️ Too long for one message — the rest is NOT shown. /screenshot the pane, or read "
+    "the questions in the terminal."
+)
+
+
+def format_mirror_expansion(gate: HookGate, room: int = _MAX_EXPANSION) -> str:
+    """The 📖 body: **every** question, **every** option — label, description, preview.
+
+    This is the CMX-49 cards' content, relocated (CMX-57). It is not a nicety and it is not
+    a duplicate of the pane: the TUI draws **one** preview at a time, the one under the
+    ``❯``, so the pane — and therefore the mirror — can never show two previews together.
+    Comparing by arrowing back and forth and holding the other option in your head is not
+    comparing, and comparing is what a preview is *for*. The payload is the only surface
+    that can put them side by side, so that is what this does.
+
+    Rendered from the **hook payload**, never the pane: full fidelity, all questions at once
+    (the pane can only be on one), and no ``✂ N lines hidden`` — the TUI's own clipping is a
+    thing the payload does not have. Each question reuses the card renderer
+    (:func:`_hook_card_text`), so the two surfaces cannot drift in how they show an option.
+
+    Squeezed to fit one message, in the order that costs least: previews shrink first, and
+    when even that is not enough they are dropped **and said to be dropped**. A silently
+    truncated expansion would be the same lie as the silently dropped preview CMX-49 ended.
+    """
+    total = len(gate.questions)
+    body = ""
+    for cap in _PREVIEW_STAGES:
+        parts: list[str] = []
+        complete = True
+        for i, q in enumerate(gate.questions):
+            text, shown = _hook_card_text(q, i, total, cap, answerable=True, warn=False)
+            parts.append(text)
+            complete = complete and shown
+        body = "\n\n".join(parts)
+        if not complete and cap <= 0:
+            body += "\n\n" + _esc(_PREVIEW_DROPPED)
+        if len(body) <= room:
+            return body
+
+    # Pathological: the labels and descriptions alone overflow a message, with no preview
+    # left to give up. Clip at a line boundary (so a half-written HTML entity cannot make
+    # Telegram reject the whole body) and SAY so.
+    keep = max(0, room - len(_EXPANSION_CLIPPED))
+    clipped = body[:keep]
+    cut = clipped.rfind("\n")
+    return (clipped[:cut] if cut > 0 else clipped) + _EXPANSION_CLIPPED
+
+
+def format_mirror_card(dialog: Dialog, answer: "MirrorAnswer | None" = None, *,
+                       expansion: str | None = None, can_expand: bool = False) -> Card:
     """The pane region, mirrored verbatim into one message, with the D-pad under it.
 
     **The formatting is load-bearing, so it is stated rather than assumed.** ccbot posted
@@ -808,27 +951,76 @@ def format_mirror_card(dialog: Dialog, answer: "MirrorAnswer | None" = None) -> 
     beside a pane that is showing question 2 of 3 is only safe if the human can see that it
     answers question 2; the proof that it does is :func:`focused_question`'s job, and saying
     so out loud is this one's.
+
+    ``expansion`` (CMX-57) is the 📖 state: the same message, with the full option list
+    (:func:`format_mirror_expansion`) in place of the pane. **In place of**, not below it —
+    two full-fidelity renders of the same gate do not fit in 4096 characters, and the pane is
+    one tap away (🎛️) which is precisely what makes replacing it cheap. What the expansion
+    must NOT lose is the ability to act on what you just compared, so the answer buttons and
+    the D-pad ride through the toggle untouched; only the body changes. ``can_expand`` says
+    the payload exists to expand *into* — a pre-plugin agent has none, and gets no 📖 rather
+    than a button that opens an empty page.
     """
     title = _MIRROR_TITLES.get(dialog.name, "Terminal")
-    body = "\n".join(line.rstrip() for line in dialog.text.split("\n")).strip("\n")
-    if len(body) > _MAX_MIRROR:
-        body = _MIRROR_CLIPPED + "\n" + body[-_MAX_MIRROR:]
-    lines = [_MIRROR_HEAD.format(title=title)]
+    lines = [(_EXPAND_HEAD if expansion is not None else _MIRROR_HEAD).format(title=title)]
     if answer is not None:
         which = ""
         if answer.total > 1:
             which = (_WHICH_MULTI if answer.multi_select else _WHICH).format(
                 n=answer.index + 1, total=answer.total)
-        template = _MIRROR_ANSWER_MULTI if answer.multi_select else _MIRROR_ANSWER
-        lines.append(template.format(which=which))
+        if not answer.by_hook:
+            lines.append(_MIRROR_ANSWER_KEYS)
+        else:
+            template = _MIRROR_ANSWER_MULTI if answer.multi_select else _MIRROR_ANSWER
+            lines.append(template.format(which=which))
     head = "\n".join(lines)
-    text = f"{_esc(head)}\n<pre>{_esc(body)}</pre>"
+
+    if expansion is not None:
+        # Already HTML (the payload renderer escapes as it goes) — do not re-escape it.
+        body_html, body_plain = expansion, _strip_html(expansion)
+    else:
+        pane = "\n".join(line.rstrip() for line in dialog.text.split("\n")).strip("\n")
+        if len(pane) > _MAX_MIRROR:
+            pane = _MIRROR_CLIPPED + "\n" + pane[-_MAX_MIRROR:]
+        body_html, body_plain = f"<pre>{_esc(pane)}</pre>", pane
+
     return Card(
-        text=text,
+        text=f"{_esc(head)}\n{body_html}",
         parse_mode="HTML",
-        markup=mirror_markup(dialog.name, answer.rows if answer else None),
-        plain=f"{head}\n{body}",
+        markup=mirror_markup(
+            dialog.name, answer.rows if answer else None,
+            expand=(("collapse" if expansion is not None else "expand")
+                    if can_expand else None),
+        ),
+        plain=f"{head}\n{body_plain}",
     )
+
+
+def _selector_on_screen(uq: "AskUQ | None", dialog: "Dialog | None") -> bool:
+    """Is an AskUserQuestion selector on the pane RIGHT NOW? The payload's corroboration.
+
+    The event log says a gate is *pending*; only the pane can say it is **on screen**, and
+    that check is load-bearing — an unresolved ``pre_tool_use`` could equally mean the agent
+    *died* at the gate (the false-``DIED`` mistake, CMX-35, from the other side). So the
+    payload is only ever rendered for a window whose pane is showing a selector.
+
+    **Either detector may vouch for it, and that matters.**
+    :func:`~chela.telegram.panescan.detect_askuserquestion` demands the literal
+    ``Enter to select`` footer — but the mirror's own pattern deliberately does not, because
+    (its own comment) *the footer varies by tab*. A ``multiSelect`` pane says ``Enter to
+    submit`` instead, and asking the fragile scraper for permission to use the payload would
+    have re-imported exactly the fragility CMX-49 was written to escape: measured live here,
+    a real preview-bearing multi-select selector mirrored correctly and yet got **no** answer
+    buttons and **no** 📖, because the footer was worded differently than the regex expected.
+
+    The dialog detector is the right authority for "a selector is up": it parses nothing, so
+    there is no wording for it to be wrong about. It stays a *corroboration* either way — a
+    region must be on the pane, and it must be named ``AskUserQuestion``, before one byte of
+    payload is drawn.
+    """
+    if uq is not None:
+        return True
+    return dialog is not None and dialog.name == "AskUserQuestion"
 
 
 def mirror_suppressed(dialog: "Dialog | None") -> bool:
@@ -851,7 +1043,8 @@ def mirror_suppressed(dialog: "Dialog | None") -> bool:
     return dialog is None or not dialog.text.strip()
 
 
-def mirror_signature(dialog: Dialog, answer: "MirrorAnswer | None" = None) -> str:
+def mirror_signature(dialog: Dialog, answer: "MirrorAnswer | None" = None, *,
+                     expansion: str | None = None, can_expand: bool = False) -> str:
     """The de-dup / edge-trigger marker for the mirror — **the pane region itself**.
 
     The whole region, byte for byte, which means **the ``❯`` cursor is in the signature**.
@@ -867,6 +1060,13 @@ def mirror_signature(dialog: Dialog, answer: "MirrorAnswer | None" = None) -> st
     next question) must re-render its keyboard rather than keep a stale one. An unchanged
     pane wearing an unchanged keyboard still costs **zero** API calls — that is the rule
     this signature exists to keep, and it is unchanged.
+
+    **And the 📖 body is in here too** (CMX-57), which is not optional: the toggle changes
+    only what the message *shows*, so a signature blind to it would see an unchanged pane,
+    de-dup the edit away, and the button would visibly do nothing — the exact "tapping it
+    changed nothing on screen" defect this whole surface was built to kill. ``can_expand``
+    is in as well, because it decides whether the 📖 button exists at all: a gate whose
+    payload arrives a tick late must grow the button without waiting for the pane to move.
     """
     keyboard = ""
     if answer is not None:
@@ -874,7 +1074,8 @@ def mirror_signature(dialog: Dialog, answer: "MirrorAnswer | None" = None) -> st
             f"{b['text']}\x03{b['callback_data']}" for row in answer.rows for b in row
         )
         keyboard = f"{answer.index}/{answer.total}\x02{buttons}"
-    return f"{dialog.name}\x00{dialog.text}\x00{keyboard}"
+    return (f"{dialog.name}\x00{dialog.text}\x00{keyboard}"
+            f"\x00{can_expand}\x00{expansion or ''}")
 
 
 def format_plan_message(plan: ExitPlan) -> str:
@@ -1223,6 +1424,12 @@ class PermissionGateWatcher:
         # window_id -> {prompt kind: _Tracked} — the edge-trigger markers + the
         # message ids to edit / delete.
         self._prompts: dict[str, dict[str, _Tracked]] = {}
+        # The windows whose mirror is currently showing the 📖 expansion instead of the pane
+        # (CMX-57). It is view state, not gate state, and it dies with the mirror message:
+        # :meth:`_resolve` drops it when the dialog leaves the pane, so the NEXT gate always
+        # opens on the pane — a human who expanded one question does not thereby ask to have
+        # every future gate opened expanded.
+        self._expanded: set[str] = set()
 
     def observe(self, window_id: str, msg) -> None:
         """Track ``tool_use``/``tool_result`` pairing for one parsed message.
@@ -1256,6 +1463,7 @@ class PermissionGateWatcher:
         """Drop all state for a window (e.g. after it closes)."""
         self._pending.pop(window_id, None)
         self._prompts.pop(window_id, None)
+        self._expanded.discard(window_id)
         if self._status is not None:
             self._status.forget(window_id)
 
@@ -1294,21 +1502,34 @@ class PermissionGateWatcher:
         # payload only ever renders for a window whose pane is showing a selector *right
         # now* — an unresolved `pre_tool_use` on its own could equally mean the agent
         # died at the gate (the false-`DIED` mistake, CMX-35, from the other side).
-        hook = self._hook_askuq(window_id) if uq is not None else None
+        dialog = self._dialog(pane, window_id)
+        hook = self._hook_askuq(window_id) if _selector_on_screen(uq, dialog) else None
         held = self._held_gate(hook.tool_use_id) if hook is not None else None
+
+        # ONE MESSAGE PER GATE (CMX-57). When the mirror is carrying this selector — it is
+        # showing the pane, it wears the answer buttons, and its 📖 holds the full option
+        # list — the ❓ cards are not posted at all: they were the two messages Liav had to
+        # scroll past to reach the one he drives. ``None`` here also POOFS a card left over
+        # from an earlier tick (a payload that arrived a beat after the pane did).
+        #
+        # The cards stay wired as the mirror's FALLBACK, for the case where the dialog
+        # detector does not recognise the region as an ``AskUserQuestion`` and there is
+        # therefore no mirror to carry the gate. A gate that arrives as nothing at all would
+        # be a far worse regression than the clutter this removes.
+        carried = dialog is not None and dialog.name == "AskUserQuestion"
         answerable = False
         if hook is not None:
             # Is the agent's own hook blocked on this gate? Then the answer goes back
             # through it and the pane is never touched (CMX-50).
             answerable = self._answerable(hook, uq)
             self._sync(
-                window_id, _ASKUQ, hook,
+                window_id, _ASKUQ, None if carried else hook,
                 lambda h: hook_askuq_signature(h, answerable, held),
                 lambda h: format_hook_askuq_cards(h, answerable, held),
             )
         else:
             self._sync(
-                window_id, _ASKUQ, uq, _askuq_signature,
+                window_id, _ASKUQ, None if carried else uq, _askuq_signature,
                 lambda u: [Card(format_askuq_message(u), None, _askuq_markup(u))],
             )
         self._sync(
@@ -1323,14 +1544,13 @@ class PermissionGateWatcher:
             )],
         )
         # The mirror — the pane itself, the ❯ cursor included, with the gate's zero-keypress
-        # option buttons above a full D-pad on ONE keyboard. Posted for EVERY dialog shape
-        # (the eight, not the three): it is the primary surface now, and the only thing that
-        # suppresses it is having no region to draw (:func:`mirror_suppressed` — the whole
-        # composition rule is written out above ``format_mirror_card``). The hook lookups
-        # this tick already did are reused rather than repeated.
-        self._sync_mirror(
-            window_id, pane, answer_for=lambda d: self._mirror_answer(hook, held, d),
-        )
+        # option buttons above a full D-pad on ONE keyboard, and the whole option list one
+        # 📖 tap away. Posted for EVERY dialog shape (the eight, not the three): it is the
+        # primary surface now, and the only thing that suppresses it is having no region to
+        # draw (:func:`mirror_suppressed` — the whole composition rule is written out above
+        # ``format_mirror_card``). The hook lookups this tick already did are reused rather
+        # than repeated.
+        self._sync_mirror(window_id, dialog, hook=hook, held=held, uq=uq)
         # The fourth read of the same captured text (no extra tmux call). Last, and
         # in its own try: a decoration must never cost us a gate relay.
         if self._status is not None:
@@ -1339,40 +1559,86 @@ class PermissionGateWatcher:
             except Exception:
                 log.exception("status sync failed for %s", window_id)
 
-    def _sync_mirror(self, window_id: str, pane: str, *, answer_for=None,
-                     force: bool = False) -> None:
-        """Reconcile one window's mirror against a freshly captured pane.
+    def _dialog(self, pane: str, window_id: str) -> "Dialog | None":
+        """The mirrorable dialog region on this pane, or None. Never fatal.
 
-        ``answer_for(dialog)`` supplies the zero-keypress option buttons that ride above the
-        D-pad, if this dialog has provable ones (:func:`mirror_answer`). ``force`` skips the
-        edit throttle: it is set for a **tap**, where a delayed re-draw reads as a dead
-        button.
-
-        A dialog with nothing to draw (:func:`mirror_suppressed`) resolves the mirror, which
-        is also the "the dialog is gone" path — the message is deleted rather than left
-        wearing live buttons.
+        ``None`` also means "do not carry a gate on the mirror": it is what tells
+        :meth:`_poll_window` to fall back to posting the ❓ cards, so a scrape failure costs
+        the mirror and not the gate.
         """
         if not self._mirror:
-            return
+            return None
         try:
             dialog = self._detect_dialog(pane)
         except Exception:
             log.exception("dialog scrape failed for %s", window_id)
+            return None
+        return None if mirror_suppressed(dialog) else dialog
+
+    def _sync_mirror(self, window_id: str, dialog: "Dialog | None", *,
+                     hook: "HookGate | None", held: "OpenGate | None",
+                     uq: "AskUQ | None", force: bool = False) -> None:
+        """Reconcile one window's mirror against a freshly detected dialog region.
+
+        ``hook``/``held``/``uq`` are this tick's already-made lookups — passed in rather than
+        re-made here, because :func:`~chela.telegram.hookgate.pending_gate` reads the event
+        log and the poll path has done it once already.
+
+        The body is the pane, or — while this window's 📖 is open — the full option list from
+        the payload (:func:`format_mirror_expansion`). Either way the keyboard is the same:
+        the answer buttons, the toggle, the D-pad. ``force`` skips the edit throttle: it is
+        set for a **tap**, where a delayed re-draw reads as a dead button.
+
+        A dialog with nothing to draw (:func:`mirror_suppressed` → ``None``) resolves the
+        mirror, which is also the "the dialog is gone" path — the message is deleted rather
+        than left wearing live buttons.
+        """
+        if not self._mirror:
             return
-        if mirror_suppressed(dialog):
-            dialog = None
-        answer = None
-        if dialog is not None and answer_for is not None:
-            answer = answer_for(dialog)
+        answer = expansion = None
+        can_expand = False
+        if dialog is not None:
+            answer = self._mirror_answer(hook, held, dialog, uq)
+            # Only an AskUserQuestion region may be expanded, and only when the log actually
+            # holds its payload. That pane corroboration is what keeps a stale pending gate
+            # from being dressed onto a Bash approval (CMX-35, from the other side), and it
+            # is what leaves a pre-plugin window with no 📖 — there is nothing to show.
+            can_expand = hook is not None and dialog.name == "AskUserQuestion"
+            if can_expand and window_id in self._expanded:
+                expansion = self._expansion(hook)
         self._sync(
             window_id, _MIRROR, dialog,
-            lambda d: mirror_signature(d, answer),
-            lambda d: [format_mirror_card(d, answer)], force=force,
+            lambda d: mirror_signature(d, answer, expansion=expansion,
+                                       can_expand=can_expand),
+            lambda d: [format_mirror_card(d, answer, expansion=expansion,
+                                          can_expand=can_expand)],
+            force=force,
         )
 
+    def _expansion(self, hook: HookGate) -> str | None:
+        """The 📖 body for a gate — never fatal.
+
+        A failure here costs the expansion, never the mirror: the pane and the D-pad are the
+        surface's floor. Returning ``None`` collapses the message back to the pane, which is
+        a visible outcome rather than a silent one — the button will look like it did
+        nothing, and that is at least true.
+        """
+        try:
+            return format_mirror_expansion(hook)
+        except Exception:
+            log.exception("mirror expansion failed for %s", hook.tool_use_id)
+            return None
+
     def _mirror_answer(self, hook: "HookGate | None", held: "OpenGate | None",
-                       dialog: Dialog) -> "MirrorAnswer | None":
+                       dialog: Dialog, uq: "AskUQ | None") -> "MirrorAnswer | None":
         """The mirror's option buttons for this dialog — never fatal.
+
+        The hook's zero-keypress buttons when a blocked hook is holding the gate and the
+        focused question can be proven (:func:`mirror_answer`); otherwise the legacy scraped
+        selector (:func:`mirror_keystroke_answer`), which is all a **pre-plugin** agent — or
+        a gate whose hold has expired — can be offered. The mirror is the only message a gate
+        posts now, so a surface that carried only the hook buttons would have taken the
+        pre-plugin fleet's answer buttons away with the cards.
 
         A failure here costs the buttons, never the mirror: the pane render and the D-pad
         are the surface's floor, and they must survive a bad draft lookup or a payload shape
@@ -1385,7 +1651,8 @@ class PermissionGateWatcher:
                     else None
                 if index is not None:
                     selected = self._selected(hook.tool_use_id, index)
-            return mirror_answer(hook, held, dialog, selected)
+            return (mirror_answer(hook, held, dialog, selected)
+                    or mirror_keystroke_answer(uq, dialog))
         except Exception:
             log.exception("mirror answer buttons failed for %s", dialog.name)
             return None
@@ -1408,30 +1675,41 @@ class PermissionGateWatcher:
         handler, where it would surface as a broken button on a gate that was, in fact,
         answered.
         """
+        self._redraw_mirror(window_id)
+
+    def toggle_mirror(self, window_id: str) -> None:
+        """📖 ⇄ 🎛️ — flip this window's mirror between the pane and the full option list.
+
+        The 📖 tap (CMX-57). It presses **no key** and answers nothing: it flips one bit of
+        view state and re-draws the SAME message, so the option list Liav needs in order to
+        *compare* two previews arrives without a second message and without giving up the
+        answer buttons or the D-pad that are sitting right there.
+
+        The flip is recorded before the re-draw so the re-render reads it, and it is dropped
+        when the mirror is poofed (:meth:`_resolve`) — the next gate opens on the pane.
+        """
+        with self._lock:
+            if window_id in self._expanded:
+                self._expanded.discard(window_id)
+            else:
+                self._expanded.add(window_id)
+        self._redraw_mirror(window_id)
+
+    def _redraw_mirror(self, window_id: str) -> None:
+        """Re-capture, re-look-up, re-render this window's mirror in place. Never raises."""
         try:
             with self._lock:
-                self._sync_mirror(
-                    window_id, self._capture(window_id), force=True,
-                    answer_for=lambda d: self._mirror_answer(
-                        *self._hook_for_mirror(window_id, d), d),
-                )
+                pane = self._capture(window_id)
+                uq = self._detect_askuq(pane)
+                dialog = self._dialog(pane, window_id)
+                # Same pane corroboration as the poll path: the payload is only ever read
+                # for a window whose pane is showing a selector RIGHT NOW.
+                hook = (self._hook_askuq(window_id)
+                        if _selector_on_screen(uq, dialog) else None)
+                held = self._held_gate(hook.tool_use_id) if hook is not None else None
+                self._sync_mirror(window_id, dialog, hook=hook, held=held, uq=uq, force=True)
         except Exception:
             log.exception("mirror refresh failed for %s", window_id)
-
-    def _hook_for_mirror(self, window_id: str,
-                         dialog: Dialog) -> "tuple[HookGate | None, OpenGate | None]":
-        """The pending gate + its hold for a mirrored dialog, looked up fresh (the tap path).
-
-        The mirrored dialog's own pattern name is the pane corroboration here: only an
-        ``AskUserQuestion`` region may wear answer buttons, so a stale pending gate can
-        never be dressed onto a Bash approval (the CMX-35 mistake, from the other side).
-        """
-        if dialog.name != "AskUserQuestion":
-            return None, None
-        hook = self._hook_askuq(window_id)
-        if hook is None:
-            return None, None
-        return hook, self._held_gate(hook.tool_use_id)
 
     def _latest_pending(self, window_id: str) -> _PendingTool | None:
         """The most recent unpaired ``tool_use`` for a window, if any."""
@@ -1613,7 +1891,12 @@ class PermissionGateWatcher:
         stale, they are *live* — a later tap would fire Enter/Escape at whatever
         the agent is doing by then. The transcript's ``tool_result`` (relayed
         separately) is the record of what was chosen.
+
+        The mirror's 📖 state dies with its message: view state outliving the view it
+        belonged to is how the *next* gate would arrive mysteriously expanded.
         """
+        if kind == _MIRROR:
+            self._expanded.discard(window_id)
         tracked = self._prompts.get(window_id, {}).pop(kind, None)
         if tracked is None or self._delete is None:
             return
