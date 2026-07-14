@@ -23,6 +23,7 @@ from pathlib import Path
 
 from chela import (
     agent_manager,
+    capabilities,
     config,
     discovery,
     dispatcher,
@@ -128,11 +129,16 @@ def cmd_run(args) -> None:
     event_log.append("daemon_start", f"chela daemon started (session={config.current_session()})",
                      {"session": config.current_session(), "pid": os.getpid()})
     log.info("Event log: %s (boot_id=%s)", event_log.log_path(), boot_id)
-    if DISPATCH_WORKFLOWS:
-        log.info("Dispatcher enabled for %d workflow(s): %s",
-                 len(DISPATCH_WORKFLOWS), ", ".join(str(p) for p in DISPATCH_WORKFLOWS))
-    if notify.enabled():
-        log.info("Needs-input notifications enabled (every %ds)", NOTIFY_INTERVAL)
+    # Say what this daemon can and cannot do — ON *and* OFF, every capability, every
+    # start. The old code logged "Dispatcher enabled for N workflow(s)" on the happy path
+    # and NOTHING when the dispatcher was off, so a dropped CHELA_DISPATCH_WORKFLOWS took
+    # dispatch *and* reconcile down for nine hours with an absent log line as its only
+    # tell. Nobody reads an absence. It is also PUBLISHED (~/.chela/daemon.json), so
+    # `chela doctor` and the dashboard can check what is really running instead of
+    # re-reading the same config that was already wrong.
+    caps = capabilities.effective()
+    capabilities.announce(caps, log)
+    capabilities.publish(caps, boot_id=boot_id)
     # Per-workflow, not global: each WORKFLOW.md carries its own effective poll
     # interval (`polling.interval_ms`, re-read on change), so they no longer share
     # one clock.
@@ -223,6 +229,7 @@ def cmd_run(args) -> None:
             log.exception("Error in daemon loop")
         stop.wait(SCHEDULER_POLL_INTERVAL)
 
+    capabilities.clear()   # nothing is providing these any more; don't let doctor say so
     stop.log_exit()
 
 
