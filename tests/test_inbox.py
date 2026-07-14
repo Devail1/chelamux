@@ -363,10 +363,16 @@ def test_a_run_that_changes_status_fires_again(store_file, windows, sends, monke
 # The Feed groups the log into per-agent LANES, and a lane is only as good as the `wid`
 # on a row. Measured on the real log: every `run_review` row carried `wid: null` while
 # naming its window (`window_name: "cmx-57"`) in its own payload — attributable, and
-# simply never attributed. The window is live at the instant the event is queued, so the
-# id is resolvable exactly then. ⛔ And only then, and only when it is unambiguous: a
-# wrong `wid` files an agent's work under a different agent, which is strictly worse than
-# an event with no owner at all (CMX-48).
+# simply never attributed.
+#
+# The id therefore comes from the RUN ROW, which recorded it at spawn (CMX-62). The
+# live-tmux lookup that came first (CMX-60) never fired for the events it was written
+# for: a dispatched agent finishes by calling `chela task-finished`, which KILLS ITS OWN
+# WINDOW, and only *then* does the run reconcile to awaiting_review and the event get
+# queued — so by lookup time the window is always already gone. The lookup survives as
+# the fallback (an old row has no recorded id; a hand-driven window may still be alive).
+# ⛔ Neither path guesses: a wrong `wid` files an agent's work under a different agent,
+# which is strictly worse than an event with no owner at all (CMX-48).
 
 def test_a_run_event_is_attributed_to_its_agents_window(store_file, sends, monkeypatch):
     _statuses(monkeypatch, {ORCH: inbox.IDLE})
@@ -411,6 +417,54 @@ def test_an_ambiguous_window_name_resolves_to_nothing():
     assert inbox.wid_for_window_name("cmx-9", windows) is None
     assert inbox.wid_for_window_name("cmx-9", {"@2": "cmx-9"}) == "@2"
     assert inbox.wid_for_window_name(None, {"@2": "cmx-9"}) is None
+
+
+def test_a_run_event_is_attributed_even_though_its_window_is_already_gone(
+        store_file, sends, monkeypatch):
+    """THE BUG (measured live at seq 3070, right after CMX-60 shipped). The agent killed
+    its own window on `task-finished`, so the live table no longer holds it — and the run
+    row's recorded id is the only thing left that knows whose work this was."""
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id",
+                        lambda: {ORCH: "orchestrator"})     # the agent's window is REAPED
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_run("awaiting_review", window_id=AGENT,
+                              pr_url="https://x/pull/9")])
+
+    review = [e for e in event_log.read()["events"] if e["type"] == "run_review"]
+    assert len(review) == 1
+    assert review[0]["wid"] == AGENT                        # its agent's lane, not chela's
+    assert review[0]["payload"]["window_id"] == AGENT
+
+
+def test_the_recorded_id_beats_a_live_window_that_reused_the_name():
+    # A retry's window (or a human's) can be sitting on the same name. The row is the
+    # authority precisely so a recycled name cannot re-file a finished agent's work.
+    run = {"task_id": "T9", "window_name": "cmx-9", "window_id": "@2"}
+    assert inbox.run_wid(run, {"@7": "cmx-9"}) == "@2"
+
+
+def test_a_run_with_no_recorded_id_falls_back_to_the_live_name_lookup():
+    # A row that predates CMX-62 has no window_id. If its window is still up and the name
+    # is unambiguous, the lookup still attributes it.
+    run = {"task_id": "T9", "window_name": "cmx-9"}
+    assert inbox.run_wid(run, {"@2": "cmx-9"}) == "@2"
+    # ...and if it is not, the event stays honestly ownerless. No branch, no worktree, no
+    # "closest" window: an unattributed event is visibly ownerless, a misattributed one is
+    # invisibly false.
+    assert inbox.run_wid(run, {}) is None
+    assert inbox.run_wid(run, {"@2": "cmx-9", "@7": "cmx-9"}) is None
+    assert inbox.run_wid({"task_id": "T9"}, {"@2": "cmx-9"}) is None
+
+
+def test_a_junk_recorded_id_is_refused_not_trusted():
+    # window_id must be a tmux @id. Anything else (a name that leaked in, an empty string)
+    # is not an id, and keying a lane on it would invent an agent that never existed.
+    assert inbox.run_wid({"window_name": "cmx-9", "window_id": ""}, {"@2": "cmx-9"}) == "@2"
+    assert inbox.run_wid({"window_name": "cmx-9", "window_id": "cmx-9"}, {}) is None
 
 
 # --- BUG 2 (live): a task shorter than the poll interval was missed ENTIRELY -----

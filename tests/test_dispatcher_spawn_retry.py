@@ -21,18 +21,10 @@ from chela.workflow import WorkflowDef
 
 
 def _conn() -> sqlite3.Connection:
+    # The PRODUCTION schema, not a hand-copy of it (see dispatcher.ensure_schema).
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute(
-        """CREATE TABLE runs (
-            task_id TEXT PRIMARY KEY, workflow_path TEXT, title TEXT, status TEXT,
-            window_name TEXT, worktree_path TEXT, branch_name TEXT,
-            started_at TEXT, ended_at TEXT, attempt INTEGER, last_error TEXT,
-            pr_url TEXT, pr_state TEXT, pr_mergeable TEXT, task_number INTEGER,
-            idle_nudged_at TEXT
-        )"""
-    )
-    return conn
+    return dispatcher.ensure_schema(conn)
 
 
 def _wf(tmp_path: Path) -> WorkflowDef:
@@ -191,6 +183,93 @@ def test_runs_row_stores_human_window_name(tmp_path):
     row = conn.execute("SELECT window_name, status FROM runs WHERE task_id=?", (task.id,)).fetchone()
     assert row["window_name"] == "test-1"
     assert row["status"] == "running"
+
+
+# --- the @id is recorded on the row, at spawn (CMX-62) ---------------------------
+#
+# It is the only lossless moment. A dispatched agent ends by calling `chela
+# task-finished`, which kills its OWN window — and only then does the run reconcile
+# to awaiting_review and its event get queued, so resolving the id against live tmux
+# at event time always came up empty and every `run_review` landed ownerless.
+
+def test_spawn_records_the_window_id_on_the_run_row(tmp_path):
+    wf, task = _wf(tmp_path), _task(tmp_path)
+    fake = _FakeTmux()
+    conn = _conn()
+
+    with patch.object(dispatcher, "ensure_worktree", return_value=(tmp_path / "wt", False)), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run), \
+         patch.object(dispatcher, "send_tmux", return_value=True), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True):
+        dispatcher._spawn(wf, task, attempt=1, conn=conn)
+
+    row = conn.execute("SELECT window_id FROM runs WHERE task_id=?", (task.id,)).fetchone()
+    assert row["window_id"] == "@100"      # the id new-window just handed back
+
+
+def test_a_retry_re_records_the_new_windows_id(tmp_path):
+    """Attempt 2 gets a NEW window; the row must point at it, not at attempt 1's corpse
+    (tmux recycles ids — a stale one could later name a live, unrelated agent)."""
+    wf, task = _wf(tmp_path), _task(tmp_path)
+    fake = _FakeTmux()
+    conn = _conn()
+
+    with patch.object(dispatcher, "ensure_worktree", return_value=(tmp_path / "wt", False)), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run), \
+         patch.object(dispatcher, "send_tmux", return_value=True), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True):
+        dispatcher._spawn(wf, task, attempt=1, conn=conn)
+        first = conn.execute("SELECT window_id FROM runs WHERE task_id=?", (task.id,)).fetchone()[0]
+        dispatcher._spawn(wf, task, attempt=2, conn=conn)
+
+    row = conn.execute("SELECT window_id FROM runs WHERE task_id=?", (task.id,)).fetchone()
+    assert first == "@100"
+    assert row["window_id"] == "@101"
+
+
+def test_an_unparseable_id_is_not_recorded_as_a_name(tmp_path):
+    """_new_window degrades to the bare name when the @id can't be read. A name in the
+    window_id column would be a lie the Feed would then try to key a lane on."""
+    wf, task = _wf(tmp_path), _task(tmp_path)
+    conn = _conn()
+
+    class _R:
+        returncode = 0
+        stdout = ""          # no id back from new-window
+
+    with patch.object(dispatcher, "ensure_worktree", return_value=(tmp_path / "wt", False)), \
+         patch.object(dispatcher.subprocess, "run", return_value=_R()), \
+         patch.object(dispatcher, "send_tmux", return_value=True), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True):
+        dispatcher._spawn(wf, task, attempt=1, conn=conn)
+
+    row = conn.execute("SELECT window_id FROM runs WHERE task_id=?", (task.id,)).fetchone()
+    assert row["window_id"] is None
+
+
+def test_a_legacy_runs_table_is_migrated_and_its_old_rows_read_null(tmp_path):
+    """The daemon runs unattended against a DB written before window_id existed. The
+    column is added in place and the old row reads NULL — it must not crash, and it must
+    not acquire an id it never had."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE runs (
+            task_id TEXT PRIMARY KEY, workflow_path TEXT NOT NULL, title TEXT NOT NULL,
+            status TEXT NOT NULL, window_name TEXT, worktree_path TEXT, branch_name TEXT,
+            started_at TEXT, ended_at TEXT, attempt INTEGER, last_error TEXT
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status, window_name) "
+        "VALUES ('old', 'w', 't', 'awaiting_review', 'test-1')"
+    )
+
+    dispatcher.ensure_schema(conn)
+
+    row = conn.execute("SELECT * FROM runs WHERE task_id='old'").fetchone()
+    assert row["window_id"] is None
+    assert row["status"] == "awaiting_review"
 
 
 def test_kill_windows_named_only_matches_exact_name(tmp_path):

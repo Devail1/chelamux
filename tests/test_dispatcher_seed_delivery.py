@@ -21,18 +21,10 @@ from chela.workflow import WorkflowDef
 
 
 def _conn() -> sqlite3.Connection:
+    # The PRODUCTION schema, not a hand-copy of it (see dispatcher.ensure_schema).
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute(
-        """CREATE TABLE runs (
-            task_id TEXT PRIMARY KEY, workflow_path TEXT, title TEXT, status TEXT,
-            window_name TEXT, worktree_path TEXT, branch_name TEXT,
-            started_at TEXT, ended_at TEXT, attempt INTEGER, last_error TEXT,
-            pr_url TEXT, pr_state TEXT, pr_mergeable TEXT, task_number INTEGER,
-            idle_nudged_at TEXT
-        )"""
-    )
-    return conn
+    return dispatcher.ensure_schema(conn)
 
 
 def _wf(tmp_path: Path) -> WorkflowDef:
