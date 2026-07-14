@@ -165,6 +165,45 @@ said nothing. Run `chela doctor` if you suspect it (see [CONFIG.md](CONFIG.md)).
 
 Restart an agent to pick the hooks up. A running one will not.
 
+## The manifest you render is not the manifest that runs
+
+`/plugin install` **copies** the plugin into Claude Code's own cache
+(`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`), and **that copy is what
+every agent loads at startup**. Re-rendering `~/.chela/plugin` changes nothing until you
+reinstall it — and for a day it changed nothing while every check said otherwise: the
+rendered manifest raised the `PermissionRequest` timeout to 120s, the installed one still
+said `2`, so every gate hook was killed after two seconds, no gate was ever *held*, and the
+phone's answer buttons never appeared. `chela doctor` was green throughout, because it read
+the file chela **writes**.
+
+So both commands now read the copy that runs:
+
+* `chela plugin` renders the manifest, then reads the installed copy back and tells you, by
+  name, if it is stale — with the reinstall commands.
+* `chela doctor` compares the **installed** manifest to the one the code renders. A drift is
+  an **ERROR** (the feature is dead, not degraded). So is an installed copy it cannot find
+  or cannot read: Claude Code's cache is an implementation detail and may change shape
+  between releases, and the only honest answer then is a loud *"I cannot verify this"* — a
+  silent green here is the very bug being caught, one level up.
+
+The install path is **discovered**, never constructed: Claude Code records it in
+`~/.claude/plugins/installed_plugins.json`, and it contains the plugin *version*, so a
+hardcoded path would quietly check a directory that no longer exists the day `plugin.json`
+is bumped. (If that registry is unreadable, chela falls back to scanning the cache.)
+
+chela does **not** write into that cache. It is Claude Code's — keyed by version and
+recorded in Claude Code's own bookkeeping — and a reinstall would overwrite anything chela
+put there, leaving Claude Code describing a copy it never installed. Detect and instruct:
+
+```
+chela plugin                      # re-render (picks up the live port + the current spec)
+/plugin uninstall chela@chela     # in Claude Code — refresh the copy agents read
+/plugin install chela@chela
+```
+
+Then **restart the agents**. Hooks are read at startup; a running fleet keeps the manifest
+it booted with.
+
 ## How an event gets in
 
 Each hook is an **`http`** hook posting to the daemon the dashboard is already running:
