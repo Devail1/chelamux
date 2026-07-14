@@ -394,6 +394,7 @@ the dashboard *publishes* the port it bound.
 | `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind. The hooks plugin POSTs to this port, so set it **here**, not with `chela dashboard --port` (a per-process override nothing else can see) |
 | `CHELA_TERMINALS_ENABLED` | `true` | Embedded ttyd terminal wall (streams live; loopback-guarded — see below) |
 | `CHELA_TERMINALS_EXPOSE` | `false` | Serve the writable wall on a **non-loopback** bind too (RCE risk — opt-in) |
+| `CHELA_WALL_TILE_DISPATCHED` | `false` | The same rule as `CHELA_TELEGRAM_BIND_DISPATCHED`, on the wall: give **dispatcher-spawned** agents a full tile on spawn. Off by default — a worker opens **minimized** (a chip in the dock, terminal live the whole time) and **pops out** the moment it blocks on a human, so five workers grinding through a backlog can't crowd out the session you're actually in |
 | `CHELA_DEFAULT_CONTEXT_WINDOW` | `200000` | Window size assumed by the transcript-based context estimate (fallback only) |
 
 ---
