@@ -33,7 +33,9 @@ from chela import (
     discovery,
     dispatcher,
     doctor,
+    epoch,
     hooks,
+    inbox,
     main,
     runtime_truth,
     sessions,
@@ -43,6 +45,7 @@ from chela.telegram import bindings
 
 PORT = 5005
 SESSION = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"
+EPOCH = "786-1784045825"          # the tmux server that issued every `@N` in this fleet
 
 
 @pytest.fixture
@@ -83,10 +86,23 @@ def fleet(tmp_path, monkeypatch):
     install_plugin(hooks.hooks_spec(PORT))
 
     # tmux: the session exists and no run claims a dead window. tmux is an OWNER, so the
-    # suite hands the code a window table instead of asking the developer's real fleet.
+    # suite hands the code a window table instead of asking the developer's real fleet — and
+    # an EPOCH, because `@1` only means anything inside the server that issued it (CMX-77).
+    # The in-flight run was spawned under that same server, so its recorded id still names
+    # its agent.
     monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "cmx-66"})
-    monkeypatch.setattr(runtime_truth, "_in_flight_runs", lambda: {"CMX-66": "@1"})
+    monkeypatch.setattr(epoch, "current", lambda: EPOCH)
+    monkeypatch.setattr(runtime_truth, "_in_flight_runs",
+                        lambda: {"CMX-66": {"wid": "@1", "epoch": EPOCH}})
+
+    # the decisions inbox: the orchestrator registered @1 under the server that is running,
+    # so the address it would push to is the window it thinks it is.
+    monkeypatch.setenv("CHELA_INBOX_FILE", str(chela_dir / "inbox.json"))
+    monkeypatch.delenv("CHELA_ORCHESTRATOR_WID", raising=False)
+    monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
+    inbox.save({"orchestrator": "@1", "orchestrator_epoch": EPOCH,
+                "orchestrator_name": "cmx-66", "watches": {}, "queue": [], "runs_seen": {}})
 
     # the rework loop: a run is parked in changes_requested, and git still has the branch
     # it must be re-spawned into. git is the OWNER here, for the same reason tmux is above.
@@ -229,6 +245,22 @@ def _break_tmux_windows(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_inbox_address(tmp_path, monkeypatch):
+    """The 2026-07-14 outage, verbatim: tmux was OOM-killed and came back RENUMBERED.
+
+    The inbox is still addressed to the `@1` the orchestrator registered — but that id was
+    issued by a server that is dead, and the one running now has given `@1` to somebody else.
+    Five run_review events queued behind exactly this and NONE were delivered: no error, no
+    log line, and this doctor green 14/14. The address is chela's copy; tmux owns which
+    server is issuing ids, so that is what the corruption changes.
+    """
+    store = inbox.load()
+    store["queue"] = [inbox._event("run_review", "📥 cmx-76 awaiting review", {"task_id": "T1"})]
+    inbox.save(store)
+    monkeypatch.setattr(epoch, "current", lambda: "9001-1784099999")   # a NEW tmux server
+    return doctor.ERROR
+
+
 def _break_tests_js_suites(tmp_path, monkeypatch):
     """The collector executes every JS suite but one — which is CMX-65, exactly: a test
     that exists and is never run, while `pytest -q` reports green."""
@@ -301,6 +333,7 @@ CORRUPTIONS = {
     "dispatch.workflows": _break_dispatch_workflows,
     "dispatch.hold": _break_dispatch_hold,
     "tmux.windows": _break_tmux_windows,
+    "inbox.address": _break_inbox_address,
     "runs.parked_branch": _break_runs_parked_branch,
     "pr.checks": _break_pr_checks,
     "tests.js_suites": _break_tests_js_suites,

@@ -717,8 +717,9 @@ def _run_one_tick(monkeypatch, *, live=None, dispatched=None):
         seen["kwargs"] = kwargs
         return False
 
-    def _fake_dispatched(runs=None, live_windows=None):
-        seen["dispatched_call"] = {"runs": runs, "live_windows": live_windows}
+    def _fake_dispatched(runs=None, live_windows=None, now_epoch=None):
+        seen["dispatched_call"] = {"runs": runs, "live_windows": live_windows,
+                                   "now_epoch": now_epoch}
         return {"@9"} if dispatched is None else dispatched
 
     monkeypatch.setattr(tg, "live_agent_windows", lambda: (live, set(live)))

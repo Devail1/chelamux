@@ -29,6 +29,7 @@ from chela import (
     discovery,
     dispatcher,
     doctor,
+    epoch,
     event_log,
     hold,
     hooks,
@@ -370,12 +371,30 @@ def cmd_watch(args) -> None:
     right after you dispatch: when that agent finishes, blocks, or dies, the event is
     pushed back into your session the moment you are idle, instead of the completion
     being invisible to you (and a human having to relay it).
+
+    With **no window**, it only (re-)registers you — stamped with the tmux epoch you are
+    really in (CMX-77). That is the recovery path after a tmux restart: the addresses in
+    ``inbox.json`` were issued by a server that no longer exists, so the inbox refuses to
+    push to them (they name other agents now) and holds the queue until a real session says
+    "I am here". This is that sentence.
     """
+    self_wid = orchestrator.self_wid()
+    if not args.wid:
+        if not self_wid:
+            print("no window id: run this from inside a tmux window (or pass @N to watch it)",
+                  file=sys.stderr)
+            sys.exit(1)
+        result = inbox.register(self_wid)
+        if not result["ok"]:
+            print(f"register failed: {result['error']}", file=sys.stderr)
+            sys.exit(1)
+        queued = result["queued"]
+        print(f"registered {self_wid} as the orchestrator (tmux epoch {result['epoch'] or '?'})"
+              + (f"; {queued} queued event(s) will be delivered when you are idle"
+                 if queued else "; nothing queued"))
+        return
     wid = _resolve_wid(args.wid)
-    if not wid:
-        print("no window id (pass @N)", file=sys.stderr)
-        sys.exit(1)
-    result = inbox.watch(wid, args.note or "", by=orchestrator.self_wid())
+    result = inbox.watch(wid, args.note or "", by=self_wid)
     if not result["ok"]:
         print(f"watch failed: {result['error']}", file=sys.stderr)
         sys.exit(1)
@@ -392,10 +411,24 @@ def cmd_unwatch(args) -> None:
 
 
 def cmd_watching(args) -> None:
-    """What the inbox is watching, and what is queued for delivery."""
+    """What the inbox is watching, and what is queued for delivery.
+
+    ⛔ And whether the address it would deliver TO is worth anything. A queue behind a dead
+    ``@N`` looks identical to a quiet day — that is exactly how five finished PRs went
+    unreviewed on 2026-07-14 — so the state of the address is the FIRST thing printed, and a
+    rotten one is not something you have to know to go looking for.
+    """
     store = inbox.load()
     orch = inbox.orchestrator_wid(store)
-    print(f"orchestrator: {orch or '(unregistered — the inbox is inert)'}")
+    now_epoch = epoch.current()
+    state, why = inbox.address_state(store, inbox.status_snapshot(), now_epoch)
+    stamp = inbox.orchestrator_epoch(store)
+    print(f"orchestrator: {orch or '(unregistered — the inbox is inert)'}"
+          + (f"  [{epoch.describe(stamp)}]" if orch else ""))
+    if state in inbox.UNDELIVERABLE:
+        print(f"\n⛔ THE INBOX CANNOT DELIVER — the address is {state.upper()}.\n   {why}")
+    elif state == inbox.ADDR_UNSTAMPED:
+        print(f"\n! {why}")
     if not inbox.enabled():
         print("inbox: DISABLED (CHELA_INBOX_ENABLED=false)")
     names = discovery.get_windows_by_id()
@@ -403,7 +436,9 @@ def cmd_watching(args) -> None:
     print(f"\nwatching ({len(watches)}):")
     for wid, meta in sorted(watches.items()):
         note = f' — "{meta.get("note")}"' if meta.get("note") else ""
-        print(f"  {wid:<6} {names.get(wid, '(gone)'):<24}{note}")
+        gone = epoch.is_dangling(meta.get("epoch"), now_epoch)
+        name = "(id reissued by a NEW tmux server)" if gone else names.get(wid, "(gone)")
+        print(f"  {wid:<6} {name:<24}{note}")
     queue = store["queue"]
     print(f"\nqueued, awaiting your next idle ({len(queue)}):")
     for event in queue:
@@ -1099,14 +1134,20 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
     while not stop.is_set():
         try:
             live, agents = tg.live_agent_windows()
+            # The tmux server issuing window ids right now (CMX-77). A binding — and a run
+            # row's window_id — only means anything inside the epoch that issued it; read it
+            # here and hand it to both, so a restart reaps the stale ones instead of relaying
+            # a stranger's pane into a dead agent's topic.
+            now_epoch = epoch.current()
             dispatched = set() if BIND_DISPATCHED else tg.dispatched_window_ids(
-                live_windows=live)
+                live_windows=live, now_epoch=now_epoch)
             if tg.reconcile_bindings(
                 registry, live, agents, topic_api,
                 cwd_for=get_window_cwd_by_id,
                 dispatched=dispatched,
                 gate_for=tg.blocked_on_human,
                 bind_dispatched=BIND_DISPATCHED,
+                now_epoch=now_epoch,
             ):
                 registry.save()
                 log.info("auto-topics: now bridging %s", ", ".join(registry.windows()) or "(none)")
@@ -1617,8 +1658,12 @@ def main() -> None:
     p_peek.add_argument("--json", action="store_true", help="Emit the raw peek dict as JSON")
 
     p_watch = sub.add_parser(
-        "watch", help="Report back when a window you delegated to finishes/blocks/dies")
-    p_watch.add_argument("wid", help="Window you dispatched work to (@N or N)")
+        "watch", help="Report back when a window you delegated to finishes/blocks/dies "
+                      "(no window: (re-)register THIS session as the orchestrator)")
+    p_watch.add_argument("wid", nargs="?",
+                         help="Window you dispatched work to (@N or N). Omit to register "
+                              "this session as the orchestrator and nothing else — the "
+                              "recovery path after tmux restarts and renumbers the fleet.")
     p_watch.add_argument("--note", help="What you asked it to do (echoed back to you)")
 
     p_unwatch = sub.add_parser("unwatch", help="Stop watching a window")
