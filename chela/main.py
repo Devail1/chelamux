@@ -482,6 +482,21 @@ def cmd_room_post(args) -> None:
         sys.exit(1)          # it was aimed at someone and reached nobody — say so in $?
 
 
+def cmd_room_recap(args) -> None:
+    """The recap a restarted agent is handed at ``SessionStart`` — printed by hand.
+
+    Prints NOTHING for a window in no room, exactly as the hook does: that contract is
+    the whole reason the hook is safe to run in front of every session in the fleet.
+    """
+    wid = _resolve_wid(args.wid)
+    if not wid:
+        print("no window id (pass --wid @N, or set $CHELA_WID)", file=sys.stderr)
+        sys.exit(1)
+    text = rooms.recap(wid)
+    if text:
+        print(text)
+
+
 def cmd_room_digest(args) -> None:
     """The room's ledger — read straight out of the event log, not a second store."""
     events = rooms.digest(args.room, limit=args.limit)
@@ -1416,6 +1431,11 @@ def main() -> None:
     p_rpost.add_argument("--reply-to", type=int, default=None, metavar="SEQ",
                          help="The post you are answering — keeps the chain (and its hop cap)")
 
+    p_rrecap = room_sub.add_parser(
+        "recap", help="The bounded room recap a restarted agent is handed at SessionStart")
+    p_rrecap.add_argument("--wid", default=None, metavar="@N",
+                          help="Window to recap for (default: your own, $CHELA_WID)")
+
     p_rdigest = room_sub.add_parser("digest", help="The room's ledger (read from the event log)")
     p_rdigest.add_argument("room")
     p_rdigest.add_argument("--limit", type=int, default=50, metavar="N",
@@ -1618,7 +1638,8 @@ def main() -> None:
     elif args.command == "room":
         room_cmds = {"create": cmd_room_create, "join": cmd_room_join,
                      "leave": cmd_room_leave, "status": cmd_room_status,
-                     "post": cmd_room_post, "digest": cmd_room_digest}
+                     "post": cmd_room_post, "digest": cmd_room_digest,
+                     "recap": cmd_room_recap}
         if args.room_cmd in room_cmds:
             room_cmds[args.room_cmd](args)
         else:

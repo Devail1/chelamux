@@ -86,9 +86,47 @@ HOOK_TIMEOUT = 2
 GATE_TIMEOUT = 120
 
 
+# `SessionStart` is the one event that does NOT ride the http transport: it never fires
+# over it (measured — CMX-41), it fires as a `command` hook, and a command hook's STDOUT is
+# injected into the agent's context. CMX-41 read that as a hazard and declined it. With
+# rooms (CMX-61) it is the delivery mechanism: a restarted agent has forgotten everything
+# its room ever told it, and this is the one moment we can hand it back (`rooms.recap`).
+#
+# The command is a `curl` into the SAME endpoint every other hook POSTs to — NOT a `chela`
+# spawn:
+#
+#   * `chela` is not on an agent's PATH (it is a `uv run` inside the repo), so a
+#     `chela room recap` hook would be `command not found` in most fleets and would fail
+#     INVISIBLY — a hook that prints nothing is indistinguishable from an agent with no
+#     rooms, which is exactly the silent-forgetting bug this fixes;
+#   * the daemon already holds the tmux table, `rooms.json` and the log. A curl is a ~5 ms
+#     spawn against ~90-250 ms for a Python interpreter that would then re-read all three,
+#     and the agent BLOCKS on it;
+#   * it fails open by construction: `--fail` so an HTTP error body can never be injected
+#     as context, stderr to /dev/null, and `|| true` so a missing curl or a dead daemon
+#     exits 0 having printed nothing at all — which is precisely "no recap".
+#
+# The daemon answers with `hookSpecificOutput.additionalContext` (honoured for
+# `SessionStart` — Claude Code 2.1.209 collects `additionalContexts` from its SessionStart
+# hooks), or with an EMPTY body when the session's window is in no room: no bytes out, no
+# boilerplate in the context of every agent in the fleet.
+RECAP_TIMEOUT = 5
+
+
 def hook_timeout(event: str) -> int:
     """The ``timeout`` this event's hook entry declares. See :data:`GATE_TIMEOUT`."""
-    return GATE_TIMEOUT if event == "PermissionRequest" else HOOK_TIMEOUT
+    if event == "PermissionRequest":
+        return GATE_TIMEOUT
+    if event == "SessionStart":
+        return RECAP_TIMEOUT
+    return HOOK_TIMEOUT
+
+
+def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
+    """The ``SessionStart`` command hook: POST the payload, print the recap, fail open."""
+    return ("curl -s --fail --max-time 3 -X POST "
+            "-H 'Content-Type: application/json' --data-binary @- "
+            f"{hook_url('SessionStart', port, host)} 2>/dev/null || true")
 
 # Event types are namespaced: `hook.pre_tool_use` says *an agent told us this*, as
 # against `run_review` / `died` / `daemon_start`, which are chela's own bookkeeping.
@@ -130,7 +168,11 @@ def hook_url(event: str, port: int | None = None, host: str = "127.0.0.1") -> st
 
 
 def hooks_spec(port: int | None = None) -> dict:
-    """The plugin's ``hooks/hooks.json`` — one http hook per event, POSTing to the daemon.
+    """The plugin's ``hooks/hooks.json`` — one hook per event, POSTing to the daemon.
+
+    Every event rides ``http`` (no shell, no spawn per tool call) except ``SessionStart``,
+    which does not fire over that transport at all and whose stdout is the recap — see
+    :data:`RECAP_TIMEOUT`.
 
     Generated rather than hand-written so the committed manifest and the endpoint that
     serves it cannot drift apart (``tests/test_hooks.py`` asserts the file on disk still
@@ -141,11 +183,18 @@ def hooks_spec(port: int | None = None) -> dict:
         entry: dict = {}
         if event in TOOL_EVENTS:
             entry["matcher"] = "*"
-        entry["hooks"] = [{
-            "type": "http",
-            "url": hook_url(event, port),
-            "timeout": hook_timeout(event),
-        }]
+        if event == "SessionStart":
+            entry["hooks"] = [{
+                "type": "command",
+                "command": recap_command(port),
+                "timeout": hook_timeout(event),
+            }]
+        else:
+            entry["hooks"] = [{
+                "type": "http",
+                "url": hook_url(event, port),
+                "timeout": hook_timeout(event),
+            }]
         hooks[event] = [entry]
     return {"hooks": hooks}
 
@@ -332,21 +381,41 @@ def installed_plugins() -> list[InstalledPlugin]:
     return copies
 
 
-def _first_hook(entries) -> dict | None:
-    if not isinstance(entries, list) or not entries or not isinstance(entries[0], dict):
-        return None
-    declared = entries[0].get("hooks")
-    if not isinstance(declared, list) or not declared or not isinstance(declared[0], dict):
-        return None
-    return declared[0]
+# Every field of a hook that decides whether it WORKS. `url` (CMX-41: a port nobody
+# serves) and `timeout` (CMX-56: a gate hook killed after 2s) each killed a feature
+# silently on their own; `type` and `command` are the same trapdoor for the SessionStart
+# recap — an installed copy still declaring the old http SessionStart would inject nothing
+# and say nothing.
+_HOOK_FIELDS = ("type", "url", "command", "timeout")
+
+
+def _declared(entries) -> list[dict]:
+    """EVERY hook an event declares, across its entries — not merely the first.
+
+    A comparison that reads only ``entries[0]["hooks"][0]`` reports green on a manifest
+    that is missing every hook after it. That is the CMX-56 class of bug, one level in.
+    """
+    out: list[dict] = []
+    if not isinstance(entries, list):
+        return out
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("hooks"), list):
+            out.extend(h for h in entry["hooks"] if isinstance(h, dict))
+    return out
+
+
+def _describe(hooks_: list[dict]) -> str:
+    return "; ".join(
+        ", ".join(f"{f}={h[f]!r}" for f in _HOOK_FIELDS if h.get(f) is not None)
+        for h in hooks_) or "(nothing)"
 
 
 def manifest_drift(installed: dict, expected: dict) -> list[str]:
     """What the installed manifest says vs what we render, per event. ``[]`` = they agree.
 
-    Both the ``url`` (CMX-41: a port nobody serves) and the ``timeout`` (CMX-56: a gate
-    hook killed after 2s) are load-bearing, and a drift in either kills the feature
-    silently — so both are compared, and the difference is named rather than summarised.
+    Compares every declared hook, field by field (:data:`_HOOK_FIELDS`), and names the
+    difference rather than summarising it: each of these fields has, on its own, silently
+    killed a feature that every check then reported green.
     """
     got = installed.get("hooks") if isinstance(installed, dict) else None
     if not isinstance(got, dict):
@@ -354,18 +423,21 @@ def manifest_drift(installed: dict, expected: dict) -> list[str]:
     want = expected.get("hooks") or {}
     drift: list[str] = []
     for event, entries in want.items():
-        want_hook = _first_hook(entries) or {}
-        got_hook = _first_hook(got.get(event))
-        if got_hook is None:
-            drift.append(
-                f"{event}: MISSING from the installed manifest (we render "
-                f"{want_hook.get('url')}, timeout {want_hook.get('timeout')}s)")
+        want_hooks = _declared(entries)
+        got_hooks = _declared(got.get(event))
+        if not got_hooks:
+            drift.append(f"{event}: MISSING from the installed manifest (we render "
+                         f"{_describe(want_hooks)})")
             continue
-        for field in ("url", "timeout"):
-            if got_hook.get(field) != want_hook.get(field):
-                drift.append(
-                    f"{event}: {field} is {got_hook.get(field)!r} in the installed "
-                    f"manifest, {want_hook.get(field)!r} in the one we render")
+        if len(got_hooks) != len(want_hooks):
+            drift.append(f"{event}: the installed manifest declares {len(got_hooks)} "
+                         f"hook(s), we render {len(want_hooks)}")
+        for got_hook, want_hook in zip(got_hooks, want_hooks):
+            for field in _HOOK_FIELDS:
+                if got_hook.get(field) != want_hook.get(field):
+                    drift.append(
+                        f"{event}: {field} is {got_hook.get(field)!r} in the installed "
+                        f"manifest, {want_hook.get(field)!r} in the one we render")
     for event in got:
         if event not in want:
             drift.append(f"{event}: the installed manifest hooks an event we no longer do")

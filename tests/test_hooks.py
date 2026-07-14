@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from chela import event_log, hooks, transcripts
+from chela import event_log, hooks, messenger, rooms, transcripts
 from chela.dashboard import app as dash
 
 REPO = Path(__file__).resolve().parent.parent
@@ -414,11 +415,24 @@ def test_hooks_spec_registers_every_event_over_http():
     assert set(spec) == set(hooks.HOOK_EVENTS)
     for event, entries in spec.items():
         hook, = entries[0]["hooks"]
+        assert ("matcher" in entries[0]) == (event in hooks.TOOL_EVENTS)
+        if event == "SessionStart":
+            # The ONE command hook, because SessionStart NEVER fires over http (measured,
+            # CMX-41) and a command hook's stdout IS the injected context — which is how
+            # the room recap reaches a restarted agent. It is a curl into the SAME endpoint
+            # (not a `chela` spawn: chela is not on an agent's PATH), and it fails open —
+            # `--fail` so an HTTP error body can never be injected as context, and `|| true`
+            # so a dead daemon or a missing curl prints nothing and exits 0.
+            assert hook["type"] == "command"
+            assert "url" not in hook
+            assert "http://127.0.0.1:5001/hooks/SessionStart" in hook["command"]
+            assert "--fail" in hook["command"] and hook["command"].endswith("|| true")
+            assert hook["timeout"] == hooks.RECAP_TIMEOUT
+            continue
         # http, not command: no shell, no process spawn per tool call, and no chatty
         # .bashrc able to corrupt the JSON contract with stray stdout.
         assert hook["type"] == "http"
         assert hook["url"] == f"http://127.0.0.1:5001/hooks/{event}"
-        assert ("matcher" in entries[0]) == (event in hooks.TOOL_EVENTS)
         if event == "PermissionRequest":
             # The ONE event allowed to take its time: it is where a gate is answered from
             # a phone, and an answer needs a human to look at it (CMX-50). MEASURED, not
@@ -456,3 +470,73 @@ def test_render_plugin_bakes_in_a_nondefault_port(tmp_path):
     assert (directory / ".claude-plugin" / "plugin.json").exists()
     market = json.loads((directory / ".claude-plugin" / "marketplace.json").read_text())
     assert market["plugins"][0]["source"] == "./"
+
+
+# --- SessionStart: the room recap, handed to a session that cannot remember it -------
+#
+# A hook is read at agent STARTUP and an agent's context does not survive its process, so
+# everything a room ever told an agent dies with the session it was injected into — and a
+# dispatched agent is a fresh session every run. This is the one moment we can hand it
+# back. The response IS the agent's context, so what it must never do is print anything
+# else: an error page, a stack trace, or boilerplate for an agent that is in no room.
+
+@pytest.fixture
+def wired(monkeypatch):
+    """@3 and @5 share a room; @7 is in none. tmux is stubbed; nothing is pasted."""
+    live = {"@3": "cmx-63", "@5": "cmx-64", "@7": "loner"}
+    monkeypatch.setattr(rooms.discovery, "get_windows_by_id", lambda: dict(live))
+    monkeypatch.setattr(messenger, "get_windows_by_id", lambda: dict(live))
+    monkeypatch.setattr(messenger, "send_tmux", lambda *a, **k: True)
+    monkeypatch.setattr(rooms.agent_manager, "status_by_wid",
+                        lambda: {w: "idle" for w in live})
+    rooms.create("wire")
+    rooms.join("wire", "@3")
+    rooms.join("wire", "@5")
+    rooms.post("wire", "question", "does the parser own the retry?",
+               from_wid="@5", targets=["@3"])
+
+
+def _session_start(client, cwd: str):
+    """A SessionStart POST from the session whose ORIGIN is ``cwd`` (`/a` = @3, `/b` = @7)."""
+    panes = _panes({cwd: [("@3", "claude")] if cwd == "/a" else [("@7", "claude")]})
+    with patch.object(hooks, "_panes", panes):
+        slug = transcripts.encode_cwd(cwd)
+        return client.post("/hooks/SessionStart", json=_body(
+            hook_event_name="SessionStart", source="startup",
+            transcript_path=f"/h/.claude/projects/{slug}/s.jsonl"))
+
+
+def test_a_restarted_agent_is_handed_its_rooms_back(client, wired):
+    resp = _session_start(client, "/a")
+    assert resp.status_code == 200
+    out = resp.get_json()["hookSpecificOutput"]
+    assert out["hookEventName"] == "SessionStart"
+    assert "does the parser own the retry?" in out["additionalContext"]
+    assert "→ YOU" in out["additionalContext"]
+
+
+def test_an_agent_in_no_room_gets_an_EMPTY_body(client, wired):
+    """Byte-for-byte nothing. The stdout of this hook is the agent's context, and most
+    agents are in no room — a header for all of them buys nothing for any of them."""
+    resp = _session_start(client, "/b")
+    assert resp.status_code == 200
+    assert resp.data == b""
+
+
+def test_a_session_that_cannot_be_correlated_gets_NOTHING(client, wired):
+    """No window (the autouse stub says: no panes) — never a guess at someone else's rooms."""
+    resp = client.post("/hooks/SessionStart", json=_body(hook_event_name="SessionStart"))
+    assert resp.status_code == 200 and resp.data == b""
+
+
+def test_a_broken_recap_is_silent_and_still_200(client, wired):
+    """A raise here would print a stack trace into a live agent's context window."""
+    with patch.object(rooms, "recap", side_effect=RuntimeError("boom")):
+        resp = _session_start(client, "/a")
+    assert resp.status_code == 200 and resp.data == b""
+
+
+def test_the_session_start_hook_still_lands_in_the_log(client, wired):
+    """It is a curl into the same endpoint, so SessionStart finally ingests too."""
+    _session_start(client, "/a")
+    assert [e["type"] for e in event_log.read()["events"]][-1] == "hook.session_start"

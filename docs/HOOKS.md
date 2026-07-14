@@ -300,12 +300,78 @@ Registered: `PreToolUse`, `PostToolUse`, `PermissionRequest`, `PermissionDenied`
 `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `Stop`, `SubagentStart`, `SubagentStop`,
 `Notification`, `PreCompact`, `PostCompact`, `Elicitation`.
 
-Two of those do not deliver, and are documented rather than quietly missing:
+One of those does not deliver over http, and one barely delivers at all. Both are
+documented rather than quietly missing:
 
 | event | measured behaviour |
 |---|---|
-| `SessionStart` | **Never fires over the `http` transport** — it fires as a `command` hook, and `SessionEnd`/`Stop` fire over http, so this is the transport, not the config. chela does not spawn a `curl` for it: a session announces itself with its first `UserPromptSubmit` or `PreToolUse` anyway, and a `SessionStart` command-hook's **stdout is injected into the agent's context** — a strictly worse failure than a missing marker. It stays registered, so it starts working if Claude Code starts delivering it. |
+| `SessionStart` | **Never fires over the `http` transport** — it fires as a `command` hook, and `SessionEnd`/`Stop` fire over http, so this is the transport, not the config. It is therefore the ONE hook chela ships as a `command`, and a command hook's **stdout is injected into the agent's context** — which is not a hazard here, it is the delivery mechanism. See [The room recap](#the-room-recap-sessionstart). |
 | `PermissionDenied` | Does not fire when a human denies a gate interactively (neither `Esc` nor picking "No"). It appears to be for rule-based denials. Registered; simply rare. |
+
+## The room recap (`SessionStart`)
+
+**Hooks are read at agent startup, and an agent's context does not survive its process.**
+Everything a [room](../README.md#agent-rooms--agents-that-can-actually-talk-to-each-other)
+ever told an agent — the handoff, the question, the blocker — was injected into a
+*session*, and a dispatched agent is a fresh session every run. Restart it and the shared
+context is gone: the ledger still holds every post, and the only reader who needed them
+has forgotten they exist. `SessionStart` is the one moment we can hand them back.
+
+The hook is a `curl` into the same endpoint every other hook POSTs to:
+
+```json
+{"type": "command",
+ "command": "curl -s --fail --max-time 3 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/SessionStart 2>/dev/null || true",
+ "timeout": 5}
+```
+
+Not a `chela` spawn: `chela` is not on an agent's PATH (it is a `uv run` inside the repo),
+so `chela room recap` would be `command not found` in most fleets — and it would fail
+*invisibly*, because a hook that prints nothing is indistinguishable from an agent with no
+rooms. The daemon already holds the tmux table, `rooms.json` and the log; a curl is a ~5 ms
+spawn against ~90–250 ms of Python that would re-read all three, and **the agent blocks on
+it**. It fails open by construction: `--fail` so an HTTP error body can never be injected
+as context, stderr to `/dev/null`, and `|| true` so a missing curl or a dead daemon exits 0
+having printed nothing at all — which is exactly "no recap".
+
+The daemon replies with `hookSpecificOutput.additionalContext` (honoured for `SessionStart`
+— Claude Code collects `additionalContexts` from its SessionStart hooks), built by
+`rooms.recap()`:
+
+```
+[chela room] shared context recap — you are @3. Your room(s) below: …
+room "wire" — peers: @5 (cmx-64)
+  #128 question from @5 (cmx-64) → YOU: does the retry live in the parser or the client?
+  #121 status from @5 (cmx-64): pushed the schema migration
+Answer one: chela room post <room> --kind handoff --from @3 --to @N --reply-to <seq> -- "<your answer>"
+```
+
+Four rules, and each one is load-bearing:
+
+* **An agent in no room gets NOTHING** — not a header, not "no shared context". The stdout
+  of this hook is the agent's context; most agents are in no room; boilerplate in all of
+  them for the benefit of none is a tax on every run in the fleet. The response body is
+  empty, so `curl` prints zero bytes.
+* **It is bounded** — the last `RECAP_POSTS` posts per room, one line each, newest-first,
+  capped at `RECAP_MAX_CHARS`. It rides in every fresh context, forever.
+* **It is sanitised** — those are other agents' words going into a context window, so every
+  line goes back through `rooms.sanitize()`, and the recap opens with the `[chela room]`
+  header, which makes it unpostable: `rooms.is_relay_text()` refuses a body that starts
+  with one (the echo guard, for free).
+* **The window is resolved off the session's ORIGIN, never `cwd`** (the CMX-48 rule, same
+  as every other hook). A session that cannot be correlated gets nothing rather than
+  somebody else's rooms.
+
+`chela room recap [--wid @N]` prints exactly what the hook would inject — including
+printing nothing at all.
+
+> ⚠️ **A new hook means the INSTALLED copy is stale.** The plugin manifest is *copied* into
+> Claude Code's cache at install time, keyed by the plugin version, so a fleet installed
+> before this change still runs a manifest with no recap hook in it. `chela doctor` catches
+> exactly that (it compares every declared hook — `type`, `url`, `command`, `timeout` — not
+> merely the first one), and the fix is the usual one: `chela plugin`, then
+> `/plugin uninstall chela@chela` + `/plugin install chela@chela`. Hooks are read at agent
+> **startup**: a running agent keeps the old set until it restarts.
 
 ## Event types in the log
 
