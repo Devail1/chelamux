@@ -28,17 +28,21 @@ from chela import config, dispatcher, hold
 from chela.sources.markdown import MarkdownSource
 from chela.workflow import WorkflowDef, load_workflow
 
+# `workspace.root` is under the test's own CHELA_DIR on purpose: a workflow that omits it
+# defaults to ~/.chela/worktrees/default — the REAL install — and the workspace fence
+# (tests/test_workspace_fence.py) then refuses to tick at all. Tests own their worktrees.
 WORKFLOW = """---
 project_key: TST
 tracker:
   kind: markdown
   path: TODO.md
 workspace:
+  root: {root}
   base_branch: dev
 concurrency:
   max: 1
 ---
-do {{task_title}}
+do {{{{task_title}}}}
 """
 
 FIRST = "- [ ] first item\n"
@@ -62,7 +66,7 @@ def repo(tmp_path, monkeypatch):
     subprocess.run(["git", "clone", str(origin), str(work)], check=True, capture_output=True)
     for k, v in (("user.email", "t@example.com"), ("user.name", "T"), ("commit.gpgsign", "false")):
         subprocess.run(["git", "-C", str(work), "config", k, v], check=True, capture_output=True)
-    (work / "WORKFLOW.md").write_text(WORKFLOW)
+    (work / "WORKFLOW.md").write_text(WORKFLOW.format(root=state / "worktrees"))
     (work / "TODO.md").write_text(FIRST + SECOND)
     subprocess.run(["git", "-C", str(work), "add", "-A"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(work), "commit", "-m", "seed"], check=True, capture_output=True)
@@ -177,7 +181,7 @@ def test_no_remote_falls_back_to_the_on_disk_queue(tmp_path, monkeypatch, spawns
     solo = tmp_path / "solo"
     solo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "dev", str(solo)], check=True)
-    (solo / "WORKFLOW.md").write_text(WORKFLOW)
+    (solo / "WORKFLOW.md").write_text(WORKFLOW.format(root=state / "worktrees"))
     (solo / "TODO.md").write_text(FIRST + SECOND)
 
     dispatcher.tick(solo / "WORKFLOW.md")

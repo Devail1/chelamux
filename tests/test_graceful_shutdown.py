@@ -108,6 +108,12 @@ def test_the_real_daemon_exits_cleanly_with_no_traceback(tmp_path, sig, name):
         "CHELA_DIR": str(tmp_path),
         "CHELA_TMUX_SESSION": "shutdown-test-scratch",  # read-only; never created
         "CHELA_INBOX_ENABLED": "false",                 # keep the tick cheap
+        # ⛔ NOT COSMETIC. This daemon is REAL: with the developer's CHELA_DISPATCH_WORKFLOWS
+        # inherited it read the real WORKFLOW.md + TODO.md and dispatched real open tasks
+        # into ~/.chela/worktrees (2026-07-14). CHELA_DIR does NOT isolate the workspace.
+        # This test needs a daemon that BOOTS, NAPS and TAKES A SIGNAL — nothing else.
+        # (conftest blanks it suite-wide too; both, because this is the process that proves it.)
+        "CHELA_DISPATCH_WORKFLOWS": "",
         "CHELA_SCHEDULER_POLL_INTERVAL": "30",          # a long nap to be interrupted
         "PYTHONUNBUFFERED": "1",
     }
@@ -135,6 +141,13 @@ def test_the_real_daemon_exits_cleanly_with_no_traceback(tmp_path, sig, name):
         if proc.poll() is None:
             proc.kill()
 
+    # The daemon this test spawns must be INERT. It announces its own capabilities at
+    # startup ("Work dispatcher: ON — 1 workflow: …"), so we read that announcement back
+    # rather than trust the env dict above: ON here means pytest just claimed a real task.
+    assert "Work dispatcher: ON" not in out, (
+        "pytest spawned a daemon that DISPATCHES — it will claim real tasks from the real "
+        f"tracker and spawn real agents:\n{out}"
+    )
     assert "Traceback" not in out, f"traceback on shutdown:\n{out}"
     assert "KeyboardInterrupt" not in out
     assert f"shutting down ({name})" in out, f"no clean shutdown line:\n{out}"

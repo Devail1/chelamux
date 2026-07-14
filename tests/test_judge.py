@@ -392,12 +392,12 @@ def _workflow_repo(tmp_path: Path, task_id: str, guard_test: str) -> Path:
         "---\n"
         "project_key: TEST\n"
         "tracker:\n  kind: markdown\n  path: TODO.md\n"
-        f"workspace:\n  root: {tmp_path / 'wts'}\n  base_branch: dev\n"
+        f"workspace:\n  root: {tmp_path / '.chela' / 'wts'}\n  base_branch: dev\n"
         f"judge:\n  test_cmd: {json.dumps(TEST_CMD)}\n  suite_timeout_seconds: 120\n"
         "---\n\ndo the thing: {{task_title}}\n"
     )
     (repo / "TODO.md").write_text("- [ ] do a thing\n")
-    _project(tmp_path / "wts" / f"judge-{task_id}", guard_test=guard_test)
+    _project(tmp_path / ".chela" / "wts" / f"judge-{task_id}", guard_test=guard_test)
     return repo
 
 
@@ -500,7 +500,7 @@ def _wf(tmp_path, **cfg):
     return WorkflowDef(
         path=tmp_path / "WORKFLOW.md",
         config={"project_key": "TEST", "tracker": {"kind": "markdown", "path": "TODO.md"},
-                "workspace": {"root": str(tmp_path / "wts"), "base_branch": "dev"},
+                "workspace": {"root": str(tmp_path / ".chela" / "wts"), "base_branch": "dev"},
                 "judge": {"test_cmd": "pytest"}, **cfg},
         prompt_template="fresh: {{task_title}}",
     )

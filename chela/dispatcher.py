@@ -23,6 +23,7 @@ from chela.workflow import (
     poll_interval_seconds,
     render_prompt,
     resolve_workspace_root,
+    workspace_escape,
 )
 from chela.worktree import (
     BranchGone,
@@ -1441,6 +1442,29 @@ def poll_interval(workflow_path: str | Path, default: float | None = None) -> fl
     return poll_interval_seconds(load_workflow_cached(workflow_path).workflow, base)
 
 
+def _refused(error: str | None, refused: bool = False) -> dict:
+    """A tick that did NOTHING, and says why. Same shape every caller already reads:
+    `blocked` is what the daemon loop edge-triggers on and what the Settings drawer
+    renders, so a refusal surfaces through the plumbing a broken workflow already uses.
+
+    `refused` distinguishes the two. A BLOCKED workflow (unparseable) still reconciles on
+    its last known-good config; a REFUSED one does not reconcile either — it does nothing
+    at all — and the daemon must not tell the operator otherwise.
+    """
+    return {
+        "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
+        "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
+        "reworked": 0, "escalated": 0, "ci_failed": 0, "judged": 0, "judge_lost": 0,
+        "blocked": True, "error": error, "held": False, "hold_expired": False,
+        "refused": refused,
+    }
+
+
+# Workflows currently refused by the workspace fence — so the ERROR is logged on the
+# EDGE, not once per tick forever (a 60s drumbeat is how an operator learns to skip logs).
+_escaped: set[str] = set()
+
+
 def tick(workflow_path: str | Path) -> dict:
     """One dispatcher pass. Returns a dict summary for logging.
 
@@ -1473,12 +1497,19 @@ def tick(workflow_path: str | Path) -> dict:
     if wf is None:
         # Nothing has ever parsed — there is no last-good config to reconcile
         # against. Report, don't raise: a broken file must not kill the loop.
-        return {
-            "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
-            "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
-            "reworked": 0, "escalated": 0, "ci_failed": 0, "judged": 0, "judge_lost": 0,
-            "blocked": True, "error": status.error, "held": False, "hold_expired": False,
-        }
+        return _refused(status.error)
+    # THE WORKSPACE FENCE, and it comes before EVERYTHING this tick would touch — the
+    # claim, the reconcile, the tracker strike, the spawn. `CHELA_DIR` isolates state,
+    # never the workspace (see workflow.workspace_escape), so a daemon on a scratch state
+    # dir would otherwise git-push, strike the tracker and launch agents in the REAL
+    # install's worktrees. There is nothing this tick can safely do; it does nothing.
+    escape = workspace_escape(wf)
+    if escape:
+        if str(workflow_path) not in _escaped:      # edge-triggered: LOUD once, not a drumbeat
+            _escaped.add(str(workflow_path))
+            log.error("Dispatch REFUSED — %s", escape)
+        return _refused(escape, refused=True)
+    _escaped.discard(str(workflow_path))
     blocked = status.error is not None
     source = get_source(wf)
     open_tasks = source.list_open_tasks()
