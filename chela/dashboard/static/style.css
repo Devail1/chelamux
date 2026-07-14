@@ -2159,10 +2159,10 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .icon-btn svg { width: 20px; height: 20px; display: block; }
 .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-/* Hamburger that opens the sidebar drawer — phone-only (shown in the mobile
-   @media block at the end of this file; the sidebar is a static column on
-   desktop, so the toggle has nothing to do there). */
-.sidebar-toggle { display: none; }
+/* One sidebar control, both breakpoints: on a phone it opens the off-canvas
+   drawer, on desktop it collapses the column to an icon rail (nav.js
+   toggleSidebar). */
+.sidebar-toggle { display: inline-flex; }
 
 /* --- Sidebar --- */
 .sidebar {
@@ -2194,24 +2194,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .side-add:hover {
     border-color: var(--accent); color: var(--accent);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-/* Agent type filter as a segmented control: one inset track, borderless cells,
-   the active cell gets an accent-tinted fill (drawn from whatever theme accent
-   is live). */
-.agent-filter {
-    display: flex; gap: 2px; margin: 2px 12px 10px; padding: 3px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 9px;
-}
-.agent-filter button {
-    flex: 1; background: transparent; border: 0; color: var(--text-dim);
-    border-radius: 6px; padding: 4px 0; font-size: 10px; cursor: pointer;
-    transition: background 0.12s, color 0.12s;
-}
-.agent-filter button:hover { color: var(--text); }
-.agent-filter button.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent); font-weight: 600;
 }
 
 .side-list { display: flex; flex-direction: column; gap: 1px; padding: 0 6px; }
@@ -2299,6 +2281,21 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .agent-row.rich { align-items: flex-start; gap: 8px; }
 .agent-row.rich .term-status-dot { margin-top: 4px; flex: 0 0 auto; }
 .agent-row.rich.active::before { height: 22px; }
+/* Window-type cue: a GLYPH (C / $ / ⚙), never colour alone. The letter carries the
+   type; the tint only reinforces it, and it comes from the Okabe-Ito colourblind-
+   safe palette (sky blue / bluish green / orange) rather than a red-green pairing.
+   Desaturate the whole row and it still reads. */
+.ar-type {
+    flex: 0 0 15px; height: 15px; margin-top: 3px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 9px; font-weight: 700; line-height: 1; border-radius: 4px;
+    color: var(--text-dim); background: var(--surface);
+}
+.ar-type.claude { color: #56B4E9; background: color-mix(in srgb, #56B4E9 16%, transparent); }
+.ar-type.shell  { color: #009E73; background: color-mix(in srgb, #009E73 18%, transparent); }
+.ar-type.server { color: #E69F00; background: color-mix(in srgb, #E69F00 16%, transparent); }
+
 .ar-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .ar-top { display: flex; align-items: center; gap: 6px; }
 .ar-top .agent-row-name { flex: 1; }
@@ -2322,6 +2319,45 @@ input[type="text"]:focus, textarea:focus, select:focus {
     padding: 1px 7px; font-size: 10px; min-width: 18px; text-align: center;
 }
 .badge-pr { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
+
+/* ---- Collapsed sidebar: the desktop icon rail --------------------------------
+   Same DOM, narrower column: labels, section heads and sub-lines drop out and each
+   row keeps its glyph (a nav icon; a session's status dot + type letter). Pure CSS
+   off a body class — nothing re-renders, so collapsing cannot touch the wall's live
+   iframes. Phone-scoped rules own ≤768px, where the sidebar is a drawer instead. */
+@media (min-width: 769px) {
+    /* Snap, don't animate: a transitioned grid column would relayout every live
+       terminal iframe on every frame of the tween. One reflow is the kind thing. */
+    body.sidebar-collapsed .app { grid-template-columns: 60px 1fr; }
+    body.sidebar-collapsed .sidebar { overflow-x: hidden; }
+
+    body.sidebar-collapsed .side-head,
+    body.sidebar-collapsed .side-empty,
+    body.sidebar-collapsed .side-badges,
+    body.sidebar-collapsed .side-item-label,
+    body.sidebar-collapsed .group-head,
+    body.sidebar-collapsed .triage-head,
+    body.sidebar-collapsed .agent-row .ar-main,
+    body.sidebar-collapsed .agent-row .agent-pin { display: none; }
+
+    /* The section heads are gone, so a rule stands in for the section break. */
+    body.sidebar-collapsed .side-section { margin-bottom: 10px; }
+    body.sidebar-collapsed .side-section + .side-section {
+        margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+    }
+    body.sidebar-collapsed .side-list { padding: 0 6px; }
+
+    body.sidebar-collapsed .side-item,
+    body.sidebar-collapsed .agent-row { justify-content: center; gap: 5px; padding: 8px 4px; }
+    body.sidebar-collapsed .side-item-icon { flex: 0 0 auto; font-size: 14px; }
+    body.sidebar-collapsed .agent-row.rich { align-items: center; }
+    body.sidebar-collapsed .agent-row.rich .term-status-dot { margin-top: 0; }
+    body.sidebar-collapsed .ar-type { margin-top: 0; }
+
+    /* Grouped sessions flatten: no header to hang the nesting guide off. */
+    body.sidebar-collapsed .group-rows { margin-left: 0; padding-left: 0; border-left: 0; }
+    body.sidebar-collapsed .side-triage { margin: 2px 0 8px; padding: 3px; }
+}
 
 /* --- Command palette (⌘K) --- */
 .palette-trigger {
@@ -2530,11 +2566,21 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .ss-hd .ss-hd-ic { display: inline-flex; align-items: center; color: var(--accent); }
 .ss-hd .ss-hd-ic svg { display: block; }
 
-/* --- Launcher (Recent + Favorites click-to-launch) --- */
+/* --- Launcher (Recent + Favorites click-to-launch, inside the "+" menu) --- */
+.launch-menu { min-width: 232px; }
+/* Divided sections: FAVORITES ── RECENT. The Favorites head carries the `+` that
+   opens the add-a-project picker (it used to sit on the sidebar section head). */
 .launch-group-label {
-    padding: 6px 10px 3px; font-size: 10px; text-transform: uppercase;
-    letter-spacing: 0.06em; color: var(--text-dim); opacity: 0.75;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 6px 10px 3px; font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-dim); opacity: 0.85;
 }
+.launch-menu .launch-row {
+    display: flex; align-items: center; gap: 9px; padding: 7px 10px;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+}
+.launch-menu .launch-row:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.launch-menu .side-empty { padding: 6px 10px 8px; }
 .launch-row .lr-icon { width: 12px; text-align: center; color: var(--accent); font-size: 10px; }
 .launch-row .lr-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .launch-row .lr-actions { display: inline-flex; gap: 2px; }
@@ -2603,8 +2649,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     /* Single column; the sidebar leaves the grid (goes position:fixed below). */
     .app { grid-template-columns: 1fr; }
 
-    /* Hamburger appears; safe-area pad the topbar for notches (viewport-fit=cover). */
-    .sidebar-toggle { display: inline-flex; }
+    /* Safe-area pad the topbar for notches (viewport-fit=cover). */
     .topbar {
         padding-left: max(10px, env(safe-area-inset-left));
         padding-right: max(10px, env(safe-area-inset-right));

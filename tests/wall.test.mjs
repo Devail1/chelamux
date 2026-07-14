@@ -246,6 +246,47 @@ test('a member whose window is GONE is simply not painted — no tile, no crash'
     assert.equal(iframes().length, 2, 'and the wall is intact');
 });
 
+// --- 1c. 🔴 COLLAPSING THE SIDEBAR RELOADS NO TERMINAL ---------------------------
+//
+// The desktop sidebar collapses to an icon rail by putting `sidebar-collapsed` on
+// `<body>` (nav.js `_setSidebarCollapsed`) — pure CSS, and it then pokes a `resize`
+// so the wall RE-FITS. A re-fit is not a rebuild. But `buildWall` does
+// `stage.innerHTML =` whenever its cache key `_termSig` changes, so the moment any
+// layout/body state leaks into that key, every collapse RELOADS EVERY LIVE TERMINAL
+// IN THE FLEET (the CMX-67 trap).
+//
+// The grep this replaces (`!terminals.js.includes('sidebar-collapsed')`) tested one
+// string literal: fold `document.body.className` into the signature and the grep is
+// still green while the fleet reloads on every toggle. So assert what the browser
+// does — toggle the real class, run the real render, compare iframe NODE IDENTITY.
+
+test('collapsing the sidebar re-fits the wall — it does NOT rebuild it', async () => {
+    const before = { '@1': frameFor('@1'), '@2': frameFor('@2') };
+    assert.equal(iframes().length, 2, 'no iframes on the wall would make this test vacuous');
+    const srcs = { '@1': before['@1'].src, '@2': before['@2'].src };
+    const gridEl = grid();
+    const srcWrites = [];
+    Object.values(before).forEach(f => watchSrcWrites(f, srcWrites));
+
+    // Exactly what the rail does to the document, both ways.
+    for (const collapsed of [true, false]) {
+        document.body.classList.toggle('sidebar-collapsed', collapsed);
+        window.dispatchEvent(new window.Event('resize'));   // the poke nav.js sends
+        await terminals.renderTerminals();                  // the REAL render path
+
+        assert.equal(grid(), gridEl, 'the stage was re-innerHTML-ed — the wall was rebuilt');
+        for (const wid of ['@1', '@2']) {
+            assert.equal(frameFor(wid), before[wid],
+                `${wid}'s iframe is a NEW NODE — collapsing the sidebar reloaded the fleet`);
+            assert.equal(frameFor(wid).src, srcs[wid], `${wid}'s src was rewritten`);
+            assert.ok(frameFor(wid).isConnected, 'and it never left the document');
+        }
+    }
+    assert.deepEqual(srcWrites, [],
+        'nobody so much as ASSIGNED .src — an assignment reloads the terminal even if the URL is identical');
+    assert.equal(document.body.classList.contains('sidebar-collapsed'), false, 'left clean');
+});
+
 // --- 2. 🔴 the wire drag must never leave the wall dead --------------------------
 //
 // `.gs-dragging` on the grid = `pointer-events: none` on every `.term-frame`

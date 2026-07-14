@@ -26,14 +26,44 @@ import { refresh } from './main.js';
 // third hardcoded copy of the view list).
 // ---------------------------------------------------------------------------
 
-let _agentFilter = 'all';   // all | claude | shell | server  (sidebar filter)
 let _detailAgent = null;    // window name focused in the agent-detail view
 
-// --- Mobile sidebar drawer -------------------------------------------------
-// On phone widths the 264px sidebar is off-canvas (see the @media block in
-// style.css); a hamburger in the topbar slides it in over a scrim. No-op on
-// desktop, where the sidebar is a static grid column and `.open` does nothing.
+// --- Sidebar: one control, two behaviours ----------------------------------
+// PHONE (≤768px): the 264px sidebar is off-canvas (see the @media block in
+// style.css); the topbar hamburger slides it in over a scrim.
+// DESKTOP: the sidebar is a static grid column, so there is nothing to slide —
+// the SAME control collapses it to an icon rail instead, handing the width to the
+// canvas. The state is persisted (a collapse that forgets itself on reload is an
+// annoyance, not a feature); the rail is pure CSS off a body class, so no row is
+// re-rendered and nothing the wall caches on can see it.
+const SIDEBAR_COLLAPSED_KEY = 'chela_sidebar_collapsed';
+
+function _isPhoneWidth() { return window.matchMedia('(max-width: 768px)').matches; }
+
+function _setSidebarCollapsed(collapsed) {
+    document.body.classList.toggle('sidebar-collapsed', collapsed);
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
+    const btn = document.getElementById('btn-menu');
+    if (btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    // The canvas just changed width without a window RESIZE, so the listeners that
+    // re-fit the terminal wall never fired — poke them. The rail snaps (there is no
+    // width transition to wait out); the delay is only to let the grid settle after
+    // the reflow, and the wall debounces the event anyway. This is a RE-FIT, not a
+    // rebuild: buildWall's cache key (_termSig) is the live wid set — sidebar state
+    // never enters it — so the iframes stay put and no terminal reloads. That
+    // property is held by a real-DOM test (tests/wall.test.mjs), not by this comment.
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 220);
+}
+
+// force: true = "show the sidebar" (drawer open / rail expanded), false = hide it.
 function toggleSidebar(force) {
+    if (!_isPhoneWidth()) {
+        const collapsed = (force === undefined)
+            ? !document.body.classList.contains('sidebar-collapsed')
+            : !force;
+        _setSidebarCollapsed(collapsed);
+        return;
+    }
     const sb = document.querySelector('.sidebar');
     const scrim = document.getElementById('sidebar-scrim');
     if (!sb) return;
@@ -41,7 +71,19 @@ function toggleSidebar(force) {
     sb.classList.toggle('open', open);
     if (scrim) scrim.classList.toggle('open', open);
 }
-function closeSidebar() { toggleSidebar(false); }
+
+// Navigating dismisses the mobile drawer. It must NOT collapse the desktop rail —
+// selectView() calls this on every click, and a sidebar that folds itself away
+// whenever you use it is not a sidebar.
+function closeSidebar() { if (_isPhoneWidth()) toggleSidebar(false); }
+
+// Restore the persisted desktop state before first paint (mobile CSS ignores the
+// class, so a phone that inherits it from a desktop session is unaffected).
+if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1') {
+    document.body.classList.add('sidebar-collapsed');
+    const _menuBtn = document.getElementById('btn-menu');
+    if (_menuBtn) _menuBtn.setAttribute('aria-expanded', 'false');
+}
 
 // --- The nav, rendered from the registry ------------------------------------
 // One .side-item per registered, enabled, non-virtual view — including its badge
@@ -54,7 +96,10 @@ function _navItemHtml(v) {
     const badges = (v.badges || []).map(b =>
         `<span class="badge ${b.cls || ''}" id="${attrEsc(b.id)}" title="${attrEsc(b.title || '')}">${escHtml(b.text || '')}</span>`
     ).join('');
-    return `<div class="side-item" data-view="${attrEsc(v.id)}" onclick="chela.selectView(this.dataset.view)">
+    // The title is the label — it is the only thing left to read once the sidebar
+    // is collapsed to its icon rail.
+    return `<div class="side-item" data-view="${attrEsc(v.id)}" title="${attrEsc(v.label || v.id)}"
+        onclick="chela.selectView(this.dataset.view)">
         <span class="side-item-icon">${escHtml(v.icon || '')}</span>
         <span class="side-item-label">${escHtml(v.label || v.id)}</span>
         ${badges ? `<span class="side-badges">${badges}</span>` : ''}
@@ -128,19 +173,28 @@ function _syncSidebarActive(view, agentName) {
     $$('.agent-row').forEach(el => el.classList.toggle('active', el.dataset.agent === agentName));
 }
 
-// --- Window type (icon + filter) -------------------------------------------
+// --- Window type (per-row cue) ---------------------------------------------
 // window_type is authoritative once the backend provides it; until then fall
 // back to claude_running.
+//
+// The type used to be a 4-chip filter row above the list. It isn't one any more:
+// a live fleet is a handful of windows that always fit the viewport, so filtering
+// hid nothing and cost a permanent row (and ⌘K is the real jump-to). The type
+// survives as a CUE on the row itself.
+//
+// That cue is a GLYPH first — C / $ / ⚙ — with colour only reinforcing it, from
+// the Okabe-Ito colourblind-safe palette. Three coloured dots would encode the
+// type in hue alone, which is unreadable for a red-weak (deuteranomalous) viewer
+// and invisible in greyscale. Read the row with the colour taken away and it
+// still says which kind of window this is.
 function _agentType(a) {
     return a.window_type || (a.claude_running ? 'claude' : 'shell');
 }
-// --- Sidebar agent list ----------------------------------------------------
 
-function setAgentFilter(f) {
-    _agentFilter = f;
-    $$('#agent-filter button').forEach(b => b.classList.toggle('active', b.dataset.filter === f));
-    renderSidebarAgents(_agentsCache || []);
-}
+const _TYPE_GLYPH = { claude: 'C', shell: '$', server: '⚙' };
+function _typeGlyph(t) { return _TYPE_GLYPH[t] || (t ? t[0].toUpperCase() : '?'); }
+
+// --- Sidebar agent list ----------------------------------------------------
 
 // Per-window context cache (used_pct etc.), fed by both the sidebar refresh and
 // the wall tick so rows can show ctx% even when the wall isn't open.
@@ -217,8 +271,11 @@ function _agentRowHtml(a) {
              onclick="event.stopPropagation(); chela.toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
         : '';
 
+    const type = _agentType(a);
+
     return `<div class="agent-row rich${active}" data-agent="${attrEsc(a.name)}" onclick="chela.selectAgent(this.dataset.agent)">
-        <span class="term-status-dot ${stCls}" title="${attrEsc(_agentType(a))} · ${stWord}"></span>
+        <span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>
+        <span class="ar-type ${attrEsc(type)}" title="${attrEsc(type)} window">${escHtml(_typeGlyph(type))}</span>
         <div class="ar-main">
             <div class="ar-top">
                 <span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span>
@@ -231,13 +288,11 @@ function _agentRowHtml(a) {
 }
 
 function renderSidebarAgents(agents) {
-    // Keep the tab title/favicon in lockstep with the agent list, off the full
-    // set (not the type-filtered rows) so the "needs you" count is global.
+    // Keep the tab title/favicon in lockstep with the agent list.
     updateTabSignal(agents);
     const host = document.getElementById('sidebar-agents');
     if (!host) return;
-    const rows = (agents || [])
-        .filter(a => _agentFilter === 'all' || _agentType(a) === _agentFilter);
+    const rows = agents || [];
     if (!rows.length) {
         host.innerHTML = '<div class="side-empty">No agents</div>';
         return;
@@ -430,8 +485,8 @@ function renderSettings(focus) {
 
         <section class="settings-section">
             <h4>Projects folder</h4>
-            <p class="s-desc">Scanned for git repos to suggest in the <strong>Launch</strong>
-            sidebar. Defaults to <code>~/projects</code> (or the <code>CHELA_PROJECTS_DIR</code>
+            <p class="s-desc">Scanned for git repos to suggest in the <strong>+</strong> launch
+            menu. Defaults to <code>~/projects</code> (or the <code>CHELA_PROJECTS_DIR</code>
             env var). Takes effect immediately — no restart.</p>
             <div class="s-row">
                 <input id="cfg-projects-dir" class="s-input" type="text"
@@ -725,7 +780,7 @@ async function saveProjectsDir() {
     } catch (e) { setMsg('err', 'Save failed.'); return; }
     if (cfg && cfg.projects_dir_effective) inp.placeholder = cfg.projects_dir_effective;
     setMsg('ok', 'Saved · scanning ' + ((cfg && cfg.projects_dir_effective) || inp.value.trim()));
-    // Refresh the Launch sidebar so new suggestions appear right away.
+    // Refresh the launch menu so new suggestions appear right away.
     if (typeof refreshLauncher === 'function') refreshLauncher();
 }
 
@@ -799,15 +854,25 @@ function applyTermPrefsToIframes() {
 
 // --- "+ new" popover -------------------------------------------------------
 
+// The "+" menu is also the LAUNCH menu: Favorites + Recent live in it (launcher.js
+// fills #new-menu-launch). Re-render on open so a pin/launch from anywhere else is
+// already reflected when it appears.
 function openNewMenu(ev) {
     if (ev) ev.stopPropagation();
     const m = document.getElementById('new-menu');
     if (!m) return;
+    if (typeof refreshLauncher === 'function') refreshLauncher();
     const anchor = (ev && ev.currentTarget) || document.getElementById('btn-new');
+    // Show it BEFORE measuring: a display:none element has no offsetWidth.
+    m.style.display = 'block';
     const r = anchor.getBoundingClientRect();
     m.style.top = (r.bottom + 4) + 'px';
-    m.style.left = Math.max(8, r.right - 160) + 'px';
-    m.style.display = 'block';
+    // Right-align to the button off the MEASURED width, and clamp so it never runs
+    // off the left edge. A hardcoded width here (it used to be 160, from the old
+    // popover) silently sends the menu off the RIGHT edge the moment the CSS gets
+    // wider than the guess — which .launch-menu's 232px min-width did, on a button
+    // that sits ~55px from the viewport edge.
+    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
     setTimeout(() => document.addEventListener('click', hideNewMenu, { once: true }), 0);
 }
 
@@ -1043,4 +1108,4 @@ export { openPalette, refreshSidebar, renderAgentDetail, renderNav, renderSideba
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentFilter, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
