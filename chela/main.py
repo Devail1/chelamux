@@ -1018,27 +1018,51 @@ def cmd_install_statusline(args) -> None:
     print(f"Installed chela statusLine into {settings_path}. Restart agents to apply.")
 
 
-def _outbound_loop(monitor, registry, interval: int, stop, gate_watcher=None) -> None:
+def _outbound_loop(monitor, registry, interval: int, stop) -> None:
     """Poll every bound window's transcript and relay new output, until stopped.
 
     ``registry.windows()`` is re-read each tick so the polled set follows the
-    live bindings (Slice B mutates them without restarting this loop). When a
-    ``gate_watcher`` is given, it runs in the SAME tick right after the transcript
-    poll (no new thread): the transcript poll has just updated its per-window
-    pending-tool state, so the gate watcher reads only the panes of windows whose
-    latest ``tool_use`` is still unpaired.
+    live bindings (Slice B mutates them without restarting this loop).
+
+    **This loop blocks on the network, for as long as Telegram says.** Every message
+    it relays is a synchronous ``sendMessage``, and a 429 makes it *sleep* for the
+    advertised ``retry_after`` and re-send (:meth:`chela.telegram.relay.BotSender._call`
+    — bounded, but the bound is ~90s per payload). A chatty agent's burst is a backlog
+    that walks straight into flood control, so a tick here can run for minutes. That is
+    the right trade for a transcript, whose messages keep: they are a *record*, and a
+    late record is still the record. It is the wrong trade for a live TUI prompt, which
+    is why the pane poll no longer rides this thread — see :func:`_pane_loop`.
     """
     while not stop.is_set():
-        wids = registry.windows()
         try:
-            monitor.poll(wids)
+            monitor.poll(registry.windows())
         except Exception:
             log.exception("Telegram relay poll failed")
-        if gate_watcher is not None:
-            try:
-                gate_watcher.poll(wids)
-            except Exception:
-                log.exception("Telegram permission-gate poll failed")
+        stop.wait(interval)
+
+
+def _pane_loop(gate_watcher, registry, interval: int, stop) -> None:
+    """Poll every bound window's PANE and relay the live-TUI prompts, until stopped.
+
+    Its own thread, and that is the whole point (CMX-74). A gate exists only while it is
+    on the pane — an ``AskUserQuestion`` a human answers in the terminal is on screen for
+    *seconds* — and it is the one thing in this bridge that must be read in something
+    like real time. Sharing a thread with :func:`_outbound_loop` meant it was read only
+    once that loop's flood-controlled sends came back, so the window whose burst had just
+    earned the 429 was exactly the window whose pane went unwatched — and the question it
+    asked *after* that burst was the message that never arrived. Measured live on
+    2026-07-14 on the orchestrator: two gates, 5s and 45s on the pane, both inside a
+    flood-control storm, neither ever on the phone.
+
+    So the pump and the watcher are decoupled. A relay stuck in a ``retry_after`` sleep
+    now costs the transcript its latency and nothing else; the pane is still captured
+    every ``interval``, and a gate still reaches the phone while it is still answerable.
+    """
+    while not stop.is_set():
+        try:
+            gate_watcher.poll(registry.windows())
+        except Exception:
+            log.exception("Telegram pane poll failed")
         stop.wait(interval)
 
 
@@ -1233,13 +1257,22 @@ def cmd_telegram(args) -> None:
     from chela.gateanswer import open_gate
     from chela.telegram.gateanswers import DRAFTS
     from chela.telegram.hookgate import pending_gate
+    # Every Telegram call this watcher makes opts OUT of the 429 sleep-and-retry loop
+    # (retry_flood=False), for the reason the pane poll got its own thread at all
+    # (CMX-74): a gate is a live thing that exists for seconds, and the pane loop is
+    # SINGLE-THREADED ACROSS WINDOWS. A send that sleeps out a `retry_after` holds the
+    # reconcile lock (and the loop) for as long as Telegram says — so the chattiest
+    # window's flood control would go on hiding the *next* window's question, which is
+    # the bug, wearing a new hat. Nothing is dropped by not sleeping: an undelivered
+    # prompt is not recorded as delivered, so the next tick posts it again, on a backoff
+    # (`_REPOST_BACKOFF_BASE`) — the retry moved out of the sleep and into the loop.
     gate_watcher = PermissionGateWatcher(
         bot.send,
         registry,
         capture=capture_pane,
-        post=bot.post,
-        edit=bot.edit,
-        delete=bot.delete,
+        post=partial(bot.post, retry_flood=False),
+        edit=partial(bot.edit, retry_flood=False),
+        delete=partial(bot.delete, retry_flood=False),
         status=status,
         pending=pending_gate,
         held=open_gate,
@@ -1262,9 +1295,14 @@ def cmd_telegram(args) -> None:
         return ", ".join(registry.windows()) or "(auto-topics: awaiting agent windows)"
 
     if args.no_inbound:
-        # Outbound-only (no PTB dependency): reconcile (if on) in a daemon thread,
-        # then poll transcripts in the foreground forever.
+        # Outbound-only (no PTB dependency): the pane watch (and reconcile, if on) in
+        # daemon threads, then poll transcripts in the foreground forever.
         stop = threading.Event()
+        threading.Thread(
+            target=_pane_loop,
+            args=(gate_watcher, registry, interval, stop),
+            daemon=True,
+        ).start()
         if topic_api is not None:
             threading.Thread(
                 target=_reconcile_loop,
@@ -1274,7 +1312,7 @@ def cmd_telegram(args) -> None:
             log.info("auto-topics reconcile every %ds", reconcile_interval)
         log.info("Relaying %s -> Telegram topics every %ds", _describe(), interval)
         try:
-            _outbound_loop(monitor, registry, interval, stop, gate_watcher)
+            _outbound_loop(monitor, registry, interval, stop)
         finally:
             stop.set()
         return
@@ -1304,12 +1342,19 @@ def cmd_telegram(args) -> None:
         print(f"{e}\n(or run outbound-only:  chela telegram --no-inbound)", file=sys.stderr)
         sys.exit(1)
 
-    # Outbound polling (and auto-topics reconcile) run in daemon threads; PTB owns
-    # the main thread (it installs signal handlers, so it must run there).
+    # Outbound polling — the transcript relay and the PANE watch, on SEPARATE threads
+    # (CMX-74: the relay sleeps through flood control, and a live gate cannot wait for
+    # it) — and the auto-topics reconcile run in daemon threads; PTB owns the main
+    # thread (it installs signal handlers, so it must run there).
     stop = threading.Event()
     threading.Thread(
         target=_outbound_loop,
-        args=(monitor, registry, interval, stop, gate_watcher),
+        args=(monitor, registry, interval, stop),
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=_pane_loop,
+        args=(gate_watcher, registry, interval, stop),
         daemon=True,
     ).start()
     if topic_api is not None:
