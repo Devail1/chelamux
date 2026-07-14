@@ -94,6 +94,75 @@ def attach_worktree(repo_path: Path, branch: str, wt_path: Path) -> tuple[Path, 
     return wt_path, True
 
 
+def detached_worktree(repo_path: Path, ref: str, wt_path: Path) -> tuple[Path, bool]:
+    """A THROWAWAY checkout of `ref`, DETACHED — for a reader that must not own the branch.
+
+    The judge (see :mod:`chela.judge`) applies deliberate corruptions to files and re-runs
+    the suite. ⛔ It must never do that in the run's OWN worktree: that directory is what a
+    rework agent later commits and pushes from, so a mutation left behind there by a crash
+    would be pushed to the PR by the very loop that spawned the judge. It also cannot simply
+    check the branch out again — git refuses the same branch in two worktrees — which is why
+    this is ``--detach``: the same commits, no claim on the branch.
+
+    Idempotent: an existing directory at ``wt_path`` is reset to ``ref`` and reused (the
+    judge re-runs on a new head sha), and a git record whose directory was deleted is pruned
+    first. Returns ``(path, created)``. Raises :class:`BranchGone` when ``ref`` does not
+    resolve — there is nothing to check out, and inventing something would be a lie.
+    """
+    if not _ref_exists(repo_path, ref):
+        raise BranchGone(f"ref {ref!r} does not exist in {repo_path}")
+
+    if wt_path.is_dir():
+        # Reuse: hard-reset to the ref rather than deleting and re-adding — a `git worktree
+        # add` onto a live directory fails, and a half-removed one is worse than either.
+        reset = subprocess.run(
+            ["git", "-C", str(wt_path), "checkout", "--detach", "--force", ref],
+            capture_output=True, text=True,
+        )
+        if reset.returncode == 0:
+            subprocess.run(
+                ["git", "-C", str(wt_path), "clean", "-fdx", "-e", ".venv"],
+                check=False, capture_output=True,
+            )
+            return wt_path, False
+        log.warning("judge worktree %s could not be reset to %s (%s); re-creating it",
+                    wt_path, ref, (reset.stderr or "").strip())
+        remove_worktree(repo_path, wt_path)
+
+    subprocess.run(
+        ["git", "-C", str(repo_path), "worktree", "prune"], check=False, capture_output=True,
+    )
+    wt_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", str(repo_path), "worktree", "add", "--detach", str(wt_path), ref],
+        check=True, capture_output=True,
+    )
+    return wt_path, True
+
+
+def remove_worktree(repo_path: Path, wt_path: Path) -> bool:
+    """Drop a worktree and its directory. Best-effort — a leftover directory is not fatal."""
+    out = subprocess.run(
+        ["git", "-C", str(repo_path), "worktree", "remove", "--force", str(wt_path)],
+        capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_path), "worktree", "prune"], check=False, capture_output=True,
+    )
+    if out.returncode != 0:
+        log.warning("could not remove worktree %s: %s", wt_path, (out.stderr or "").strip())
+        return False
+    return True
+
+
+def _ref_exists(repo_path: Path, ref: str) -> bool:
+    out = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    return out.returncode == 0
+
+
 def _branch_exists(repo_path: Path, branch: str) -> bool:
     out = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "--verify", "--quiet",

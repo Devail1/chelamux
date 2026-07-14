@@ -36,6 +36,26 @@ agent:
   startup_delay_seconds: 4
   ready_timeout_seconds: 60
 
+# ⚖️ The judge — the adversarial pass CI cannot run (chela/judge.py).
+#
+# A PR reaching awaiting_review gets ONE judge per head commit. It works in a THROWAWAY
+# detached worktree, proposes mutations to the guards the PR claims to add, and chela — not
+# the agent — applies each one, proves the file changed, proves it still parses, re-runs
+# `test_cmd`, and restores it. A guard that survives a live, minimal, valid corruption is a
+# FACT: the PR goes back through the same carrier a human reviewer uses, and it spends a
+# rework round. Opinions can only ever become a PR comment.
+#
+# ⚠️ CHELA_REQUIRE_JS_TESTS=1 IS LOAD-BEARING, NOT DECORATION. Without it a missing `node`
+# or a missing `npm ci` makes the .mjs suites SKIP — silently, and green. The judge would
+# then mutate `terminals.js`, watch the suite pass, and send a GOOD PR back on the strength
+# of a suite that never ran. A judge is only ever as trustworthy as the suite it measures
+# against, so the suite must be the one that CANNOT quietly do nothing.
+#
+# `enabled: false` turns it off for this workflow; CHELA_JUDGE=0 turns it off fleet-wide.
+judge:
+  test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
+  suite_timeout_seconds: 900
+
 hooks:
   # Sync the per-worktree venv with ALL extras before the agent starts, so
   # dashboard/telegram tests don't false-fail on a default-only sync (a `uv run`

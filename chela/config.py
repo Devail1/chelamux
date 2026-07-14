@@ -271,6 +271,15 @@ def max_reworks() -> int:
         return max(0, int(os.environ.get("CHELA_MAX_REWORKS", "2")))
     except ValueError:
         return 2
+# ⚖️ The judge (see chela.judge) — the adversarial pass on a PR that reached
+# awaiting_review. The fleet-wide kill switch; a workflow turns it off for itself with
+# `judge: {enabled: false}`, and it is off anyway for any workflow with no `judge.test_cmd`
+# (there is nothing to run a mutation against). It spawns one extra agent per PR head, so
+# an operator who wants that stopped needs one env var, not an edit to every WORKFLOW.md.
+JUDGE_ENABLED = os.environ.get("CHELA_JUDGE", "true").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+
 _dispatch_raw = os.environ.get("CHELA_DISPATCH_WORKFLOWS", "")
 DISPATCH_WORKFLOWS = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()
