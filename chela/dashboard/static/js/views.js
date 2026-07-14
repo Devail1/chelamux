@@ -15,7 +15,7 @@
 // a virtual drill-in — reachable, no nav item. See viewreg.js for the entry shape.
 // ---------------------------------------------------------------------------
 import { refreshAgents } from './agents.js';
-import { refreshFeed } from './feed.js';
+import { enterFeed, tickFeed } from './feed.js';
 import { _kn, knBackToGlance, refreshKnowledge } from './knowledge.js';
 import { renderAgentDetail } from './nav.js';
 import { renderTerminals, startTermTimer, stopTermTimer } from './terminals.js';
@@ -26,12 +26,12 @@ export const VIEWS = [
         id: 'feed',
         label: 'Feed',
         icon: '≡',
-        // Part 1 registers the view and wires it to /api/log; the timeline LAYOUT
-        // is part 2 (being designed from real data), so the panel renders a plain
-        // list on purpose. The SSE `log` delta accelerates it; this tick is the
-        // fallback that keeps it correct if the stream never connects.
-        enter: () => refreshFeed(),
-        tick: () => refreshFeed(),
+        // AGENT LANES: the log, grouped under the agent that produced each row, with
+        // the agents that need you sorted to the top. Entering re-reads the fleet AND
+        // the log from scratch; the SSE `log` delta accelerates it, and this tick is
+        // the fallback that keeps it correct if the stream never connects.
+        enter: () => enterFeed(),
+        tick: () => tickFeed(),
     },
     {
         id: 'agents',

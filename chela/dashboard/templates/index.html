@@ -92,14 +92,20 @@
   <!-- Main canvas: context-driven by sidebar selection -->
   <main class="canvas" id="canvas">
 
-    <!-- Feed — the event log (chela/event_log.py) read through /api/log.
-         ⚠️ PART 1 wires the plumbing only: the cursor, the gap signal, and the
-         `log` delta on the existing SSE stream. The TIMELINE LAYOUT is part 2 (it
-         is being designed from real data), so this list is deliberately plain. -->
+    <!-- Feed — the event log (chela/event_log.py) read through /api/log, drawn as
+         AGENT LANES: the fleet is the spine, the log is what each agent is saying,
+         and an agent that needs you sorts to the top wearing a ◆ NEEDS YOU badge.
+         The chips and the lanes are rendered by feed.js from feedmodel.js — the one
+         place the row classes are declared. Flat = the same rows, ungrouped. -->
     <div class="panel" id="panel-feed">
-      <div class="canvas-toolbar">
-        <span class="work-toolbar-hint">The event log — one durable, ordered record
-          (<code>chela events</code> reads the same one). The timeline layout lands next.</span>
+      <div class="work-toolbar">
+        <div class="work-seg" id="feed-seg" role="group" aria-label="Feed grouping">
+          <button type="button" class="work-seg-btn" data-seg="lanes" aria-pressed="true"
+                  onclick="chela.feedSetMode('lanes')">Lanes</button>
+          <button type="button" class="work-seg-btn" data-seg="flat" aria-pressed="false"
+                  onclick="chela.feedSetMode('flat')">Flat</button>
+        </div>
+        <div id="feed-filters"></div>
       </div>
       <div class="feed-list" id="feed-list"></div>
     </div>

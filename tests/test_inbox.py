@@ -21,7 +21,7 @@ import time
 
 import pytest
 
-from chela import dispatcher, inbox
+from chela import dispatcher, event_log, inbox
 
 ORCH = "@1"      # the orchestrator's own window
 AGENT = "@2"     # a window it delegated work to
@@ -356,6 +356,61 @@ def test_a_run_that_changes_status_fires_again(store_file, windows, sends, monke
 
     assert len(sends) == 2
     assert "FAILED" in sends[1][1]
+
+
+# --- attribution: a run event belongs to the agent that produced it -------------
+#
+# The Feed groups the log into per-agent LANES, and a lane is only as good as the `wid`
+# on a row. Measured on the real log: every `run_review` row carried `wid: null` while
+# naming its window (`window_name: "cmx-57"`) in its own payload — attributable, and
+# simply never attributed. The window is live at the instant the event is queued, so the
+# id is resolvable exactly then. ⛔ And only then, and only when it is unambiguous: a
+# wrong `wid` files an agent's work under a different agent, which is strictly worse than
+# an event with no owner at all (CMX-48).
+
+def test_a_run_event_is_attributed_to_its_agents_window(store_file, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id",
+                        lambda: {ORCH: "orchestrator", AGENT: "cmx-9"})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_run("awaiting_review", pr_url="https://x/pull/9")])
+
+    logged = event_log.read()["events"]
+    review = [e for e in logged if e["type"] == "run_review"]
+    assert len(review) == 1
+    assert review[0]["wid"] == AGENT              # the lane it belongs in
+    assert review[0]["payload"]["window_name"] == "cmx-9"
+
+
+def test_an_unresolvable_run_event_is_left_ownerless_rather_than_guessed(
+        store_file, sends, monkeypatch):
+    # The window is gone (or was never ours). There is nothing to resolve against, so the
+    # event goes to chela's own lane — it does NOT get pinned on whoever is standing near.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id",
+                        lambda: {ORCH: "orchestrator", AGENT: "some-other-agent"})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_run("failed", last_error="boom")])
+
+    logged = event_log.read()["events"]
+    failed = [e for e in logged if e["type"] == "run_failed"]
+    assert len(failed) == 1
+    assert failed[0]["wid"] is None
+
+
+def test_an_ambiguous_window_name_resolves_to_nothing():
+    # Two live windows share the name (a retry racing its predecessor's exit). Picking
+    # one would be a coin flip that misattributes half the time — refuse instead.
+    windows = {"@2": "cmx-9", "@7": "cmx-9"}
+    assert inbox.wid_for_window_name("cmx-9", windows) is None
+    assert inbox.wid_for_window_name("cmx-9", {"@2": "cmx-9"}) == "@2"
+    assert inbox.wid_for_window_name(None, {"@2": "cmx-9"}) is None
 
 
 # --- BUG 2 (live): a task shorter than the poll interval was missed ENTIRELY -----

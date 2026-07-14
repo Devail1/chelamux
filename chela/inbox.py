@@ -376,8 +376,30 @@ def _window_payload(wid: str, name: str, note: str, run: dict | None = None) -> 
     return payload
 
 
+def wid_for_window_name(name: str | None, windows: dict[str, str]) -> str | None:
+    """The live window called ``name`` — or None. It is NEVER a guess.
+
+    A run event knows its ``window_name`` (the dispatcher names the agent's window after
+    its branch) but was queued with ``wid=None``, so 17 of the log's ``run_review`` rows
+    landed in no agent's lane despite naming their agent in the payload. The window is
+    still live at the instant the event is queued, so the id is resolvable *then* — which
+    is where it must happen: after the window is reaped, nothing can recover it.
+
+    ⛔ Ambiguity resolves to None, not to a plausible pick. Two windows sharing a name
+    (a retry racing its predecessor's exit) is exactly the case where a wrong ``wid``
+    would attribute an agent's events to a different agent — and CMX-48's lesson is that
+    a wrong ``wid`` is worse than no ``wid``: an unattributed event is visibly ownerless,
+    a misattributed one is invisibly false.
+    """
+    if not name:
+        return None
+    matches = [wid for wid, wname in (windows or {}).items() if wname == name]
+    return matches[0] if len(matches) == 1 else None
+
+
 def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
-                 runs: list[dict] | None = None) -> list[dict]:
+                 runs: list[dict] | None = None,
+                 windows: dict[str, str] | None = None) -> list[dict]:
     """Events from agent status transitions, scoped to WATCHED windows only.
 
     Edge-triggered (mirrors :func:`chela.notify.check_waiting`) so a window that sits
@@ -397,9 +419,13 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
 
     The orchestrator's own window is never a source, so the busy→idle its own reply
     produces (including the reply to one of our own pushes) can never become an event.
+
+    ``windows`` is the live ``{wid: name}`` table; the caller passes the one it already
+    fetched (:func:`tick` reads it once, outside the store lock) so a tick costs one
+    ``tmux list-windows``, not two.
     """
     orch = orchestrator_wid(store)
-    names = discovery.get_windows_by_id()
+    names = windows if windows is not None else discovery.get_windows_by_id()
     runs = runs or []
     now_ts = time.time()
     out: list[dict] = []
@@ -459,7 +485,8 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
     return out
 
 
-def run_events(runs: list[dict], seen: dict[str, str]) -> tuple[list[dict], dict[str, str]]:
+def run_events(runs: list[dict], seen: dict[str, str],
+               windows: dict[str, str] | None = None) -> tuple[list[dict], dict[str, str]]:
     """Events from the dispatcher runs DB: → ``awaiting_review`` and → ``failed``.
 
     Edge-triggered on the run's status, against a DURABLE mark: a run parked in
@@ -470,6 +497,13 @@ def run_events(runs: list[dict], seen: dict[str, str]) -> tuple[list[dict], dict
     of the title. The run's ``title`` is the whole tracker line (here: a brief with
     landmines and a verify plan), so putting it in the notification pasted the entire
     task body into the orchestrator's window. It lives in the payload instead.
+
+    **These events are ATTRIBUTED, at write time.** They carried ``wid=None`` while
+    naming their window in the payload, so the Feed's agent lanes had nowhere to put
+    them — the agent that did the work was right there in ``window_name`` and simply was
+    never resolved to an id (:func:`wid_for_window_name`, which refuses to guess). A run
+    whose window is already gone stays ``wid=None`` and belongs to chela itself: that is
+    an honest ownerless event, not a hole.
     """
     out: list[dict] = []
     fresh: dict[str, str] = {}
@@ -480,6 +514,7 @@ def run_events(runs: list[dict], seen: dict[str, str]) -> tuple[list[dict], dict
         fresh[task_id] = status
         if seen.get(task_id) == status:
             continue                      # already announced at this status
+        wid = wid_for_window_name(run.get("window_name"), windows or {})
         title = run.get("title") or ""
         # The branch is the handle a human recognises ("cmx-38"); the id is the handle
         # the dispatcher does. Prefer the branch, fall back to the id.
@@ -495,13 +530,13 @@ def run_events(runs: list[dict], seen: dict[str, str]) -> tuple[list[dict], dict
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
             out.append(_event("run_review",
                               f"📥 {label} awaiting review — {ref}"
-                              f"{' · ' + snippet if snippet else ''}", payload))
+                              f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "failed":
             err = (run.get("last_error") or "").splitlines()
             payload["last_error"] = run.get("last_error")
             out.append(_event("run_failed",
                               f"📥 {label} FAILED{' — ' + err[0][:120] if err else ''}"
-                              f"{' · ' + snippet if snippet else ''}", payload))
+                              f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
     return out, fresh
 
 
@@ -612,10 +647,15 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     if runs is None:
         from chela import dispatcher
         runs = dispatcher.list_runs()
+    # The live window table, read ONCE and outside the lock (tmux is slow-ish). It is
+    # what attributes an event to an agent — both the window events and, since the Feed's
+    # lanes, the run events (see wid_for_window_name).
+    windows = discovery.get_windows_by_id()
 
     with locked_store() as store:
-        events = agent_events(prev, statuses, store, runs)
-        r_events, store["runs_seen"] = run_events(runs, store.get("runs_seen", {}))
+        events = agent_events(prev, statuses, store, runs, windows=windows)
+        r_events, store["runs_seen"] = run_events(runs, store.get("runs_seen", {}),
+                                                  windows=windows)
         events += r_events
 
         for event in events:

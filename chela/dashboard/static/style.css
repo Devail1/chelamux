@@ -724,16 +724,93 @@ body.term-dragging { overflow: hidden; }
 /* Active = fill + weight + text colour, never hue alone (colorblind-safe). */
 .work-seg-btn.active { background: var(--surface-2, var(--surface)); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
 
-/* FEED — a deliberately plain log list. The timeline layout is part 2. */
-.feed-list { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
-.feed-row {
-    display: grid; grid-template-columns: 56px 72px 150px 44px 1fr;
-    gap: 8px; align-items: baseline;
-    padding: 5px 8px; border-bottom: 1px solid var(--border);
+/* FEED — AGENT LANES. The fleet is the spine; the log is what each agent is saying.
+   ⚠️ COLOUR IS NEVER THE SIGNAL (Liav is red-weak): every class and every lane state
+   carries a GLYPH + a WORD in the markup, and the hues below — Okabe-Ito, the
+   colourblind-safe palette — are decoration on a label that already reads without
+   them. Removing every colour rule here must lose no information. */
+:root {
+    --ok-orange: #E69F00;   /* ◆ gate      */
+    --ok-sky: #56B4E9;      /* · other     */
+    --ok-green: #009E73;    /* ● run       */
+    --ok-blue: #0072B2;     /* ■ lifecycle */
+    --ok-vermillion: #D55E00; /* ✕ denied  */
+    --ok-purple: #CC79A7;   /* ▸ prompt    */
 }
+
+.feed-list { display: flex; flex-direction: column; gap: 12px; font-size: 12px; }
+
+/* --- the chips (one per row class, rendered from feedmodel.js) --- */
+.feed-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.feed-chip {
+    border: 1px solid var(--border); background: transparent; color: var(--text-dim);
+    border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.feed-chip:hover { color: var(--text); border-color: var(--accent); }
+/* Active = fill + weight + ring, never hue alone. */
+.feed-chip.active {
+    background: var(--surface); color: var(--text); font-weight: 600;
+    border-color: var(--text-dim); box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* --- a lane --- */
+.feed-lane { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+/* An agent that needs you: a heavy left rule + the ◆ NEEDS YOU badge in the header.
+   The rule is thickness, not hue — it reads in greyscale. */
+.feed-lane.lane-attention { border-left: 4px solid var(--ok-orange); }
+.feed-lane.lane-system { opacity: 0.85; }
+.lane-head {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border);
+}
+.lane-head:hover { background: var(--surface-2, var(--surface)); }
+.lane-fold { color: var(--text-dim); width: 10px; }
+.lane-name { font-weight: 600; color: var(--text); }
+.lane-wid, .lane-count { color: var(--text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.lane-project { color: var(--text-dim); }
+.lane-count { margin-left: auto; }
+.lane-status { font-size: 11px; }
+.lane-status-waiting { color: var(--ok-orange); font-weight: 600; }
+.lane-status-busy { color: var(--ok-blue); }
+.lane-status-idle, .lane-status-gone, .lane-status-system { color: var(--text-dim); }
+.lane-needs {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+    padding: 2px 8px; border-radius: 999px;
+    border: 1px solid var(--ok-orange); color: var(--text);
+    background: rgba(230, 159, 0, 0.16);
+}
+.lane-rows { display: flex; flex-direction: column; }
+
+/* --- a row --- */
+.feed-row {
+    display: grid; grid-template-columns: 56px 72px 108px auto 1fr;
+    gap: 8px; align-items: baseline;
+    padding: 5px 10px; border-bottom: 1px solid var(--border);
+}
+.feed-row:last-child { border-bottom: none; }
 .feed-seq, .feed-ts, .feed-wid { color: var(--text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.feed-type { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.feed-glyph { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
 .feed-summary { color: var(--text); overflow-wrap: anywhere; }
+.feed-cls-gate .feed-glyph { color: var(--ok-orange); }
+.feed-cls-denied .feed-glyph { color: var(--ok-vermillion); }
+.feed-cls-run .feed-glyph { color: var(--ok-green); }
+.feed-cls-lifecycle .feed-glyph { color: var(--ok-blue); }
+.feed-cls-prompt .feed-glyph { color: var(--ok-purple); }
+.feed-cls-other .feed-glyph { color: var(--ok-sky); }
+.feed-cls-tool .feed-glyph { color: var(--text-dim); }
+
+/* What the filter is hiding — counted and named, never swallowed. */
+.feed-hidden {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 6px 10px; color: var(--text-dim); font-size: 11px;
+    border-bottom: 1px solid var(--border);
+}
+.feed-show-btn {
+    border: 1px solid var(--border); background: transparent; color: var(--text);
+    border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;
+}
+.feed-show-btn:hover { border-color: var(--accent); }
+
 .feed-gap {
     padding: 8px 10px; margin-bottom: 8px; border-radius: 6px;
     background: rgba(210, 153, 34, 0.12); border: 1px solid var(--yellow);
@@ -742,6 +819,7 @@ body.term-dragging { overflow: hidden; }
 @media (max-width: 768px) {
     .feed-row { grid-template-columns: 48px 64px 1fr; }
     .feed-wid, .feed-summary { grid-column: 1 / -1; }
+    .lane-count { margin-left: 0; }
 }
 
 .work-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
