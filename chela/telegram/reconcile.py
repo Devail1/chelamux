@@ -28,6 +28,19 @@ The Bot API transport is reused verbatim from :mod:`chela.telegram.relay` (direc
 stdlib ``urllib`` — no new dependency), so ``createForumTopic`` /
 ``closeForumTopic`` go out the same wire as ``sendMessage``.
 
+**Every write here is edge-triggered — a no-op write is a rate-limit leak.** The
+loop ticks every few seconds forever, and it shares one Telegram rate limit with
+the *real* traffic (agent messages, permission gates). So a topic is only created
+when it has no binding, only renamed when its name actually **changed** (diffed
+against :meth:`~chela.telegram.bindings.BindingRegistry.topic_name`, the cache of
+what we last told Telegram), and only closed when its window died: at idle the
+whole loop makes **zero** API calls. Decoration must never spend the budget that
+real messages need — the same rule the status line follows by skipping an unchanged
+edit and by opting out of the 429 retry loop (CMX-43). This module opts out too, by
+construction: it calls the raw transport rather than
+:meth:`~chela.telegram.relay.BotSender._call`, so a flood-controlled rename fails
+fast and is simply retried on the next tick instead of sleeping in the daemon.
+
 **Human prerequisite (landmine):** ``createForumTopic`` requires the bot to be a
 forum admin with the *Manage Topics* permission. That is a one-time manual setup,
 never something the test suite exercises (tests inject a stub API).
@@ -46,6 +59,19 @@ from chela.agent_manager import is_generic_name
 from chela.telegram.relay import Transport, _urllib_transport
 
 log = logging.getLogger(__name__)
+
+
+def _is_not_modified(resp: dict) -> bool:
+    """True for Telegram's ``TOPIC_NOT_MODIFIED`` — "you wrote what was already there".
+
+    A 400 whose description carries this marker means the edit was a no-op: the
+    topic already holds the exact name/icon we sent. It is the API confirming the
+    desired state, so the reconcile loop treats it as an accepted write (and caches
+    the name) instead of retrying the same pointless call every tick.
+    """
+    if resp.get("ok"):
+        return False
+    return "TOPIC_NOT_MODIFIED" in str(resp.get("description") or "")
 
 
 def topic_name_for(cwd: str | None, window_name: str) -> str:
@@ -114,23 +140,34 @@ class TopicManager:
         return str(thread)
 
     def rename_topic(self, thread_id: str | int, name: str) -> bool:
-        """Rename forum topic ``thread_id`` to ``name``. True if Telegram accepted.
+        """Rename forum topic ``thread_id`` to ``name``. True if the topic now has it.
 
         The propagation half of a window rename: ``editForumTopic`` with only ``name``
         set leaves the topic's icon untouched. A failure (missing *Manage Topics*
         permission, deleted topic) is logged and swallowed — the caller then leaves
         the cached name unset, so the next tick simply retries rather than wedging
         the daemon over a cosmetic rename.
+
+        **``TOPIC_NOT_MODIFIED`` is a success, not a failure (landmine).** Telegram
+        answers it when the topic *already carries* the name we just wrote — which is
+        proof the desired state holds, so we return ``True`` and let the caller cache
+        the name. Reading it as a failure is how this leaked a rename per bound topic
+        per tick, forever (a binding written before the name cache existed reads as
+        "unsynced" → rewrite → ``TOPIC_NOT_MODIFIED`` → still unsynced → …), and those
+        no-op writes earned real 429s that then delayed *actual* agent messages.
         """
         resp = self._transport(
             "editForumTopic",
             {"chat_id": self._chat_id, "message_thread_id": thread_id, "name": name},
         )
-        if not resp.get("ok"):
-            log.warning("editForumTopic(%s -> %s) failed: %s",
-                        thread_id, name, resp.get("description", resp))
-            return False
-        return True
+        if resp.get("ok"):
+            return True
+        if _is_not_modified(resp):
+            log.debug("editForumTopic(%s -> %s): already named that; caching", thread_id, name)
+            return True
+        log.warning("editForumTopic(%s -> %s) failed: %s",
+                    thread_id, name, resp.get("description", resp))
+        return False
 
     def close_topic(self, thread_id: str | int) -> bool:
         """Close (archive, not delete) the forum topic ``thread_id``.

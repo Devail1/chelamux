@@ -214,6 +214,81 @@ def test_topic_manager_create_returns_none_without_thread_id():
     assert mgr.create_topic("coder") is None
 
 
+def test_topic_manager_rename_sends_only_the_name():
+    calls: list[tuple[str, dict]] = []
+
+    def transport(method, fields):
+        calls.append((method, fields))
+        return {"ok": True, "result": True}
+
+    mgr = TopicManager("tok", "777", transport=transport)
+    assert mgr.rename_topic(42, "coder") is True
+    # Only `name` — no icon fields, so a rename never clobbers the topic's icon.
+    assert calls == [
+        ("editForumTopic", {"chat_id": "777", "message_thread_id": 42, "name": "coder"})
+    ]
+
+
+def test_topic_manager_rename_treats_topic_not_modified_as_success():
+    # Telegram says "you wrote the name it already had" — that is the desired state,
+    # not a failure. Reading it as one is what leaked a write per topic per tick.
+    def transport(method, fields):
+        return {"ok": False, "error_code": 400, "description": "Bad Request: TOPIC_NOT_MODIFIED"}
+
+    assert TopicManager("tok", "777", transport=transport).rename_topic(976, "chelamux") is True
+
+
+def test_topic_manager_rename_reports_a_real_failure():
+    def transport(method, fields):
+        return {"ok": False, "description": "not enough rights to manage topics"}
+
+    assert TopicManager("tok", "777", transport=transport).rename_topic(42, "coder") is False
+
+
+def test_not_modified_is_cached_so_the_reconcile_loop_goes_quiet():
+    # THE BUG (CMX-51): a binding written before the name cache existed reads as
+    # "unsynced", so tick 1 rewrites the name Telegram already has. Telegram answers
+    # TOPIC_NOT_MODIFIED — and every later tick must make ZERO calls, forever.
+    calls: list[tuple[str, dict]] = []
+
+    def transport(method, fields):
+        calls.append((method, fields))
+        return {"ok": False, "error_code": 400, "description": "Bad Request: TOPIC_NOT_MODIFIED"}
+
+    reg = BindingRegistry("777")
+    reg.bind("@3", "976")                      # bound, but no cached topic name
+    api = TopicManager("tok", "777", transport=transport)
+
+    assert reconcile_bindings(reg, {"@3": "chelamux"}, {"@3"}, api) is True
+    assert len(calls) == 1                     # one resync write...
+    assert reg.topic_name("@3") == "chelamux"  # ...whose no-op answer is cached
+
+    for _ in range(5):
+        assert reconcile_bindings(reg, {"@3": "chelamux"}, {"@3"}, api) is False
+    assert len(calls) == 1                     # ...and never written again
+
+
+def test_a_genuine_rename_still_produces_exactly_one_api_call():
+    # The leak fix must not break the feature: a real tmux rename propagates, once.
+    calls: list[tuple[str, dict]] = []
+
+    def transport(method, fields):
+        calls.append((method, fields))
+        return {"ok": True, "result": True}
+
+    reg = BindingRegistry("777")
+    reg.bind("@3", "976")
+    reg.set_topic_name("@3", "chelamux")
+    api = TopicManager("tok", "777", transport=transport)
+
+    assert reconcile_bindings(reg, {"@3": "chelamux"}, {"@3"}, api) is False
+    assert calls == []                                   # steady state: silent
+    assert reconcile_bindings(reg, {"@3": "cmx-51"}, {"@3"}, api) is True
+    assert [f["name"] for _, f in calls] == ["cmx-51"]   # the rename went out, once
+    assert reconcile_bindings(reg, {"@3": "cmx-51"}, {"@3"}, api) is False
+    assert len(calls) == 1                               # and is not re-sent
+
+
 def test_topic_manager_close_reports_success_and_failure():
     calls: list[tuple[str, dict]] = []
 
