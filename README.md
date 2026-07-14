@@ -297,6 +297,16 @@ To change the launcher/Start default, set the full command, e.g.
 restart the daemon. Prefer `auto` or `acceptEdits` for agents on a wall you don't
 babysit; reserve `bypassPermissions` for repos you fully trust.
 
+### Resource isolation — a known gap
+
+Permission modes bound what an agent may *do*; nothing bounds what it may *consume*. A
+dispatched agent runs `pytest` / `uv sync` / a backtest **unisolated**, and chela's
+supervisor shares a failure domain with the workers it spawns — a job that eats the box
+takes tmux, the daemon and the orchestrator down with it. chela does not put agents in
+cgroups; run heavy work under a **shared** memory slice instead. The failure mode, the
+measured numbers, and why a per-job cap does *not* protect the machine:
+**[docs/RESOURCE_ISOLATION.md](docs/RESOURCE_ISOLATION.md)**.
+
 ---
 
 ## CLI
