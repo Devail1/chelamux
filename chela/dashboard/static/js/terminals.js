@@ -1861,6 +1861,8 @@ function _wireCleanup() {
     document.removeEventListener('mousemove', _wireMove);
     document.removeEventListener('mouseup', _wireDrop);
     document.removeEventListener('keydown', _wireKey);
+    document.removeEventListener('pointercancel', _wireCleanup);
+    window.removeEventListener('blur', _wireCleanup);
     if (svg) svg.remove();
     if (stage) stage.classList.remove('wire-live');
     if (gsEl) gsEl.classList.remove('gs-dragging');
@@ -1905,6 +1907,14 @@ function wireDragStart(e, btn, wid) {
     document.addEventListener('mousemove', _wireMove);
     document.addEventListener('mouseup', _wireDrop);
     document.addEventListener('keydown', _wireKey);
+    // A HELD gesture can end where `document` cannot see it: release the button over
+    // devtools, a second monitor, or the OS desktop and the mouseup never arrives —
+    // `.gs-dragging` would then outlive the drag, and it is what puts
+    // `pointer-events: none` on EVERY .term-frame (style.css). The wall would go dead
+    // to clicks for the whole fleet, with nothing to heal it (buildWall runs only when
+    // the fleet changes). So every way out is wired to the same cleanup.
+    document.addEventListener('pointercancel', _wireCleanup);   // touch stolen, devtools
+    window.addEventListener('blur', _wireCleanup);               // dragged off the window
 }
 
 // The wid of the tile under the pointer (or null — empty stage, or a tile with
@@ -1917,6 +1927,11 @@ function _wireHit(e) {
 
 function _wireMove(e) {
     if (!_wire) return;
+    // The primary button is no longer down, and we never saw it come up: it was
+    // released off-window (blur can lag, or never fire if the window kept focus while
+    // the cursor left it). The gesture is OVER — and it ended on nothing we saw, so it
+    // is a CANCEL, not a drop: a room the user did not aim at is worse than no room.
+    if (e.buttons !== undefined && !(e.buttons & 1)) return _wireCleanup();
     const p = _wirePoint(e);
     _wire.path.setAttribute('d', bezierPath(_wire.x1, _wire.y1, p.x, p.y));
     const hit = _wireHit(e);
@@ -2214,7 +2229,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, renderTerminals, shareBtnClick, startTermTimer, stopTermTimer };
+export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, renderTerminals, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

@@ -1,86 +1,28 @@
-// THE WIRE — the Wall's room gesture, proved without a browser.
-//
-// The properties that decide whether this feature is safe to ship:
+// THE WIRE, THE PURE HALF — the parts of the Wall's room gesture that are decided by
+// arithmetic, not by a DOM: what a drop MEANS, where the cable is DRAWN, and how
+// `/api/rooms` is indexed for the tiles.
 //
 //   1. A DROP THAT MEANS NOTHING CREATES NOTHING — on the source tile itself, on
 //      empty stage, or on a tile with no wid. A "room of one" is a relationship
 //      with nobody in it.
-//   2. 🔴 A ROOM CHANGE DOES NOT RELOAD THE TERMINALS. This is THE regression test.
-//      The wall's render loop early-returns on `_termSig`; if room state ever
-//      reached that signature, `buildWall` would `innerHTML =` the stage and every
-//      live terminal in the fleet would reload because two agents started talking.
-//      So: the iframe NODES must be identity-preserved across a room update (same
-//      object, same `src`), and the rooms path in terminals.js must not touch
-//      `_termSig` / `buildWall` / `innerHTML` at all.
-//   3. THE ACCENT IS NEVER HUE-ONLY (the primary user is red-weak): the badge
-//      carries the room's own NAME and a glyph.
-//   4. The API's shape is `rooms.status()`'s — keyed by wid, which is what the
-//      Wall has (tests/test_api_rooms.py holds the other end of that contract).
+//   2. The API's shape is `rooms.status()`'s — keyed by wid, which is what the Wall
+//      has (tests/test_api_rooms.py holds the other end of that contract).
+//
+// EVERYTHING THAT TOUCHES THE DOM IS IN tests/wall.test.mjs, in a real one (jsdom),
+// running the real `buildWall`. It used to be here, against a hand-written `El` shim,
+// and that was theatre: the shim implemented neither `innerHTML` nor a live `src` —
+// the only two mechanisms that reload a terminal — so the regression test written to
+// catch a reload could not have failed if the code had started reloading. The same
+// went for its companion, a grep over the source text asserting the rooms path never
+// says `buildWall`: non-transitive (one `_repaint()` helper in between defeats it),
+// and its body-slice ran to the first `\n}\n`, so a reformat would have truncated the
+// body to '' — and ''.includes(x) is false, i.e. a grep matching NO TEXT read GREEN.
 //
 // Run: node --test tests/  (tests/test_js_suites.py runs every .test.mjs in pytest)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 
-import { applyRoomAccents, bezierPath, resolveDrop, roomsByWid } from '../chela/dashboard/static/js/wire.js';
-
-const JS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'js');
-const src = f => readFileSync(join(JS_DIR, f), 'utf8');
-
-// --- a DOM small enough to read, big enough for a wall of tiles ---------------
-// applyRoomAccents does four things and no more: toggle a class, set a CSS var,
-// write a badge, and leave everything else — including the iframes — alone. This
-// shim implements exactly the surface it uses, so "it left the iframe alone" is
-// an assertion about object identity, not about a mock.
-class El {
-    constructor(cls = '', attrs = {}) {
-        this.classes = new Set(cls.split(' ').filter(Boolean));
-        this.attrs = { ...attrs };
-        this.children = [];
-        this.styles = {};
-        this.textContent = '';
-        this.hidden = false;
-        this.classList = {
-            toggle: (c, on) => (on ? this.classes.add(c) : this.classes.delete(c)),
-            contains: c => this.classes.has(c),
-        };
-        this.style = {
-            setProperty: (k, v) => { this.styles[k] = v; },
-            removeProperty: k => { delete this.styles[k]; },
-        };
-    }
-    add(child) { this.children.push(child); return child; }
-    getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
-    setAttribute(k, v) { this.attrs[k] = v; }
-    removeAttribute(k) { delete this.attrs[k]; }
-    // Only the two selector shapes wire.js uses: '.cls' and '.cls[attr]'.
-    matches(sel) {
-        const m = /^\.([\w-]+)(?:\[([\w-]+)\])?$/.exec(sel);
-        if (!m) throw new Error(`shim: unsupported selector ${sel}`);
-        return this.classes.has(m[1]) && (!m[2] || this.getAttribute(m[2]) !== null);
-    }
-    descendants() { return this.children.flatMap(c => [c, ...c.descendants()]); }
-    querySelectorAll(sel) { return this.descendants().filter(e => e.matches(sel)); }
-    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
-}
-
-// A wall: two tiles, each with a header badge and a LIVE iframe we must not touch.
-function fakeWall(wids) {
-    const stage = new El('term-stage');
-    const tiles = {};
-    wids.forEach(wid => {
-        const item = stage.add(new El('grid-stack-item', { 'gs-id': wid }));
-        const content = item.add(new El('grid-stack-item-content'));
-        const badge = content.add(new El('gs-room'));
-        badge.hidden = true;
-        const frame = content.add(new El('term-frame'));
-        frame.setAttribute('src', `/term/${wid}/`);
-        tiles[wid] = { item, content, badge, frame };
-    });
-    return { stage, tiles };
-}
+import { bezierPath, resolveDrop, roomsByWid } from '../chela/dashboard/static/js/wire.js';
 
 const STATUS = (...pairs) => ({
     rooms: Object.fromEntries(pairs.map(([room, wids]) => [room, {
@@ -140,79 +82,4 @@ test('rooms are indexed by wid — which is what the Wall has', () => {
 test('an empty payload leaves every tile roomless (and does not throw)', () => {
     assert.deepEqual(roomsByWid({ rooms: {} }), {});
     assert.deepEqual(roomsByWid(null), {});
-});
-
-test('a member whose window is GONE is simply not painted — no tile, no crash', () => {
-    const { stage, tiles } = fakeWall(['@1']);
-    applyRoomAccents(stage, STATUS(['wire-a-b', ['@1', '@ghost']]));
-    assert.ok(tiles['@1'].content.classList.contains('in-room'));
-});
-
-test('the accent is never hue-only: the badge carries the room name and a glyph', () => {
-    const { stage, tiles } = fakeWall(['@1', '@2']);
-    applyRoomAccents(stage, STATUS(['wire-a-b', ['@1', '@2']]));
-    for (const wid of ['@1', '@2']) {
-        const { content, badge } = tiles[wid];
-        assert.ok(content.classList.contains('in-room'));
-        assert.match(badge.textContent, /🔌 wire-a-b/);        // the NON-HUE cue
-        assert.equal(badge.getAttribute('data-room'), 'wire-a-b');
-        assert.equal(badge.hidden, false);
-        assert.ok(content.styles['--room-accent'], 'and a colour, as the second signal');
-    }
-    // Both tiles wear the SAME accent — that is what "shared border" means.
-    assert.equal(tiles['@1'].content.styles['--room-accent'], tiles['@2'].content.styles['--room-accent']);
-});
-
-test('leaving a room clears the tile — accent, badge and all', () => {
-    const { stage, tiles } = fakeWall(['@1', '@2']);
-    applyRoomAccents(stage, STATUS(['wire-a-b', ['@1', '@2']]));
-    applyRoomAccents(stage, STATUS(['wire-a-b', ['@2']]));     // @1 left
-    assert.equal(tiles['@1'].content.classList.contains('in-room'), false);
-    assert.equal(tiles['@1'].badge.hidden, true);
-    assert.equal(tiles['@1'].content.styles['--room-accent'], undefined);
-    assert.ok(tiles['@2'].content.classList.contains('in-room'));
-});
-
-// --- 4. 🔴 THE REGRESSION TEST: a room change must not reload the terminals ----
-
-test('a room change is identity-preserving — the live iframes are NOT recreated', () => {
-    const { stage, tiles } = fakeWall(['@1', '@2', '@3']);
-    const before = ['@1', '@2', '@3'].map(w => tiles[w].frame);
-    const srcs = before.map(f => f.getAttribute('src'));
-
-    applyRoomAccents(stage, STATUS(['wire-a-b', ['@1', '@2']]));   // wired
-    applyRoomAccents(stage, STATUS(['wire-a-b', ['@1', '@2', '@3']]));   // a third joins
-    applyRoomAccents(stage, { rooms: {} });                        // and everyone leaves
-
-    const after = ['@1', '@2', '@3'].map(w => stage.querySelectorAll('.grid-stack-item[gs-id]')
-        .find(it => it.getAttribute('gs-id') === w).querySelector('.term-frame'));
-    after.forEach((frame, i) => {
-        assert.equal(frame, before[i], 'the iframe is the SAME NODE — it was never rebuilt');
-        assert.equal(frame.getAttribute('src'), srcs[i], 'and its src was never rewritten');
-    });
-});
-
-test('the rooms path in terminals.js never touches _termSig, buildWall or innerHTML', () => {
-    // Structural, because the bug is structural: room state that reaches the render
-    // signature reloads the whole fleet. Read the rooms functions, and ONLY those.
-    const text = src('terminals.js');
-    const fns = ['_refreshRooms', '_replayRoomAccents', 'wireRoomClick', '_wireDrop'];
-    for (const fn of fns) {
-        const start = text.indexOf(`function ${fn}(`);
-        assert.ok(start > 0, `${fn} not found in terminals.js`);
-        const body = text.slice(start, text.indexOf('\n}\n', start));
-        for (const forbidden of ['_termSig', 'buildWall', 'innerHTML', 'renderTerminals']) {
-            assert.ok(!body.includes(forbidden),
-                `${fn} references ${forbidden} — a room change must not rebuild the wall`);
-        }
-    }
-});
-
-test('the wire drag reuses .gs-dragging (mouse-through) and NOT .term-dragging (hides the terminals)', () => {
-    const text = src('terminals.js');
-    const start = text.indexOf('function wireDragStart(');
-    const body = text.slice(start, text.indexOf('\n}\n', start));
-    assert.ok(body.includes("classList.add('gs-dragging')"), 'the iframes must stop eating the mouse');
-    assert.ok(!body.includes('term-dragging'), 'the wire must not hide the terminals you are wiring');
-    assert.ok(body.includes('stopPropagation'), 'or gridstack steals the gesture as a tile drag');
 });

@@ -14,7 +14,12 @@
 //      recreates EVERY iframe — i.e. every live terminal in the fleet reloads
 //      because two agents started talking. So `applyRoomAccents` only ever
 //      toggles a class, sets a CSS var and writes a badge's text; it never
-//      touches an iframe, and a test asserts the iframe NODES survive it.
+//      touches an iframe. `tests/wall.test.mjs` holds that line in a REAL DOM:
+//      it runs the real `buildWall`, does a real room update, and asserts the
+//      iframe NODES are the same objects, with no write to `src` — put an
+//      `innerHTML =` or a `frame.src =` in here and it goes red. (It is a real
+//      DOM precisely because the fake one it replaced implemented neither, and
+//      so could not have failed.)
 //
 // The accent is deliberately NOT hue-only (the primary user is red-weak): the
 // colour rides along with a badge carrying the room's own name and a 🔌 glyph, so
