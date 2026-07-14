@@ -33,6 +33,7 @@ from chela import (
     hold,
     hooks,
     inbox,
+    judge,
     messenger,
     notify,
     okf,
@@ -1529,6 +1530,39 @@ def cmd_review(args) -> None:
               "the authority, so the loop still turns, but nothing landed on the PR.")
 
 
+def cmd_judge(args) -> None:
+    """⚖️ Execute the judge's experiments and publish the verdict — the judge agent's last step.
+
+    ⛔ It does NOT take the judge's word for anything. The agent proposes mutations; THIS
+    applies them (in the throwaway judge worktree), reads the files back to prove they
+    changed, parse-checks them, runs the repo's own ``judge.test_cmd``, restores them, and
+    adjudicates. A guard that survives a live, parsing, minimal corruption is a FACT, and it
+    is the only thing allowed to send a PR back — through ``request_changes``, the same
+    carrier a human reviewer and the CI gate use. Opinions go in ``notes`` and are posted as
+    a comment, where they cost nothing.
+
+    ⛔ It never merges and never approves: a clean PR stays ``awaiting_review``.
+    """
+    result = judge.judge_run(args.run, args.experiments, cleanup=not args.no_cleanup)
+    if not result.get("ok") and "task_id" not in result:
+        print(f"judge: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+
+    state = result.get("state")
+    for outcome in result.get("outcomes") or []:
+        print(f"  [{outcome['verdict']:8}] {outcome['file']}: {outcome['guard'][:70]}")
+        print(f"             {outcome['reason']}")
+    if state == judge.J_BLOCKED:
+        print(f"⚖️ {result['task_id']}: {result['blocking']} guard(s) SURVIVED corruption — "
+              f"the PR was SENT BACK (rework round {result.get('round')}).")
+    elif state == judge.J_CANNOT_VERIFY:
+        print(f"⚖️ {result['task_id']}: ⚠ CANNOT VERIFY — {result.get('cannot_verify') or result.get('error')}")
+        print("   Nothing was blocked and nothing was cleared. This PR is a human's.")
+    else:
+        print(f"⚖️ {result['task_id']}: every guard held. The run stays awaiting_review — "
+              "the judge never merges.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="chela",
@@ -1757,6 +1791,28 @@ def main() -> None:
              "branch. Say why in the body",
     )
 
+    # judge — the adversarial pass whose BLOCKING verdicts are facts (chela/judge.py)
+    p_judge = sub.add_parser(
+        "judge",
+        help="⚖️ Run the judge's mutation experiments on a PR and publish the verdict",
+    )
+    judge_sub = p_judge.add_subparsers(dest="judge_cmd")
+    p_jrun = judge_sub.add_parser(
+        "run",
+        help="Apply the proposed mutations, re-run the suite, and publish the verdict. A "
+             "guard that survives corruption sends the PR back; everything else is a comment",
+    )
+    p_jrun.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-75)")
+    p_jrun.add_argument(
+        "--experiments", required=True, metavar="PATH",
+        help="The JSON the judge agent wrote: {\"experiments\": [{guard, file, before, "
+             "after, kind}], \"notes\": [...]}. chela runs them; it does not trust them",
+    )
+    p_jrun.add_argument(
+        "--no-cleanup", action="store_true",
+        help="Keep the judge worktree and the tmux window (debugging a judge run by hand)",
+    )
+
     # knowledge — export the fleet's knowledge as an OKF bundle (local data; see docs/OKF.md)
     p_know = sub.add_parser("knowledge", help="Export fleet knowledge as an OKF bundle")
     know_sub = p_know.add_subparsers(dest="know_cmd")
@@ -1893,6 +1949,11 @@ def main() -> None:
         cmd_task_finished(args)
     elif args.command == "review":
         cmd_review(args)
+    elif args.command == "judge":
+        if args.judge_cmd == "run":
+            cmd_judge(args)
+        else:
+            p_judge.print_help()
     else:
         parser.print_help()
 
