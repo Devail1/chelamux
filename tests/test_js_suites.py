@@ -19,6 +19,10 @@ Two fences, because the failure mode here is a check that *silently* does nothin
 * A missing ``node`` SKIPS LOUDLY, naming every suite that did not run. Set
   ``CHELA_REQUIRE_JS_TESTS=1`` (CI does) and a missing ``node`` is a FAILURE instead —
   CI must never report green on a suite it never executed.
+* Same rule for **jsdom**: ``tests/wall.test.mjs`` runs the real dashboard JS in a real
+  DOM, and jsdom is the repo's only npm dependency (dev-only; nothing is bundled or
+  shipped). No ``npm ci`` -> the suite cannot run -> loud skip, or a FAILURE under
+  ``CHELA_REQUIRE_JS_TESTS``. See :func:`_jsdom_or_skip`.
 """
 
 from __future__ import annotations
@@ -62,9 +66,30 @@ def test_js_suites_are_discovered():
     assert _SUITES, f"no *.test.mjs found under {ROOT} — the JS suites are not being run"
 
 
+def _jsdom_or_skip(suite: Path) -> None:
+    """A DOM suite without jsdom DID NOT RUN — the same rule as a missing ``node``.
+
+    ``tests/wall.test.mjs`` runs the real dashboard JS in a real DOM, which is the only
+    thing in this repo that needs an npm install (``npm ci``; jsdom is the one dep, and
+    it is dev-only). If it is absent the suite cannot run, and a suite that cannot run
+    must never be reported as green — CI sets ``CHELA_REQUIRE_JS_TESTS`` and gets a
+    failure; a laptop gets a skip that says exactly what to type.
+    """
+    if "from 'jsdom'" not in suite.read_text():
+        return
+    if (ROOT / "node_modules" / "jsdom").is_dir():
+        return
+    msg = (f"jsdom is not installed — {suite.relative_to(ROOT)} (the real-DOM suite) "
+           f"DID NOT RUN. Run `npm ci` in {ROOT}.")
+    if os.environ.get("CHELA_REQUIRE_JS_TESTS"):
+        pytest.fail(msg + " (CHELA_REQUIRE_JS_TESTS is set: a silent skip is not green)")
+    pytest.skip(msg)
+
+
 @pytest.mark.parametrize("suite", _SUITES, ids=_IDS)
 def test_js_suite(suite: Path):
     node = _node_or_skip([suite])
+    _jsdom_or_skip(suite)
     proc = subprocess.run(
         [node, "--test", str(suite)], capture_output=True, timeout=120, cwd=str(ROOT)
     )

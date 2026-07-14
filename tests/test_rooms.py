@@ -280,6 +280,18 @@ def test_joining_a_dead_window_is_refused(fleet):
     assert not result["ok"] and "not a live window" in result["error"]
 
 
+def test_join_all_is_ALL_OR_NOTHING__one_dead_window_writes_no_member(fleet):
+    """The wire's write. `join` in a loop writes the members before the dead one."""
+    result = rooms.join_all("wire", ["@1", "@2"])
+    assert result["ok"] and result["wids"] == ["@1", "@2"]
+    assert sorted(rooms.members("wire")) == ["@1", "@2"]
+
+    # @404 is dead: the whole join fails, and @3 — which precedes it — is NOT written.
+    result = rooms.join_all("wire", ["@3", "@404"])
+    assert not result["ok"] and "not a live window" in result["error"]
+    assert sorted(rooms.members("wire")) == ["@1", "@2"], "a partial write survived"
+
+
 def test_a_post_to_a_room_that_does_not_exist_is_refused(fleet):
     result = rooms.post("nope", "question", "hi", from_wid="@1", targets=["@2"])
     assert not result["ok"] and "no such room" in result["error"]

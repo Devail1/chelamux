@@ -216,6 +216,37 @@ def join(room: str, wid: str) -> dict:
     return {"ok": True, "room": room, "wid": target, "name": name}
 
 
+def join_all(room: str, wids: list[str]) -> dict:
+    """Join several windows to one room, ALL OR NOTHING — the wire's write.
+
+    :func:`join` in a loop is not this. It resolves each window immediately before
+    writing it, so a window that dies partway through the loop leaves the windows
+    before it already written and rolls nothing back: the caller reports a failure
+    while the store holds a **room of one** — the exact state the gesture promises is
+    impossible (a room is a relationship; one member is a loop with nobody in it).
+
+    So: every window is resolved FIRST, and only then is a single locked write made.
+    A dead window means no write happened at all.
+    """
+    targets = []
+    for wid in wids:
+        target = messenger.resolve_window(wid)
+        if target is None:
+            return {"ok": False, "error": f"{wid} is not a live window — cannot join"}
+        targets.append(target)
+
+    result = create(room)          # validates the id; creating an empty room is not a member
+    if not result["ok"]:
+        return result
+    names = discovery.get_windows_by_id()
+    now = time.time()
+    with locked_store() as store:
+        members = store["rooms"][room]["members"]
+        for target in targets:
+            members[target] = {"name": names.get(target, target), "joined": now}
+    return {"ok": True, "room": room, "wids": targets}
+
+
 def leave(room: str, wid: str) -> dict:
     """Remove a window from a room. A *gone* window can still leave (by id)."""
     target = messenger.resolve_window(wid) or wid
