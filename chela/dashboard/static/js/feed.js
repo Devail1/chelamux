@@ -32,7 +32,7 @@
 import { $, api, attrEsc, escHtml, setAgentsCache } from './util.js';
 import {
     CLASSES, CLASS_IDS, DEFAULT_CLASSES, LANE_ORDER,
-    buildLanes, classOf, flatRows, goneSummary, hiddenSummary, laneRank, splitGone,
+    buildLanes, classOf, drainLog, flatRows, goneSummary, hiddenSummary, laneRank, splitGone,
 } from './feedmodel.js';
 import { awaitingReviewIds } from './work.js';
 
@@ -85,6 +85,16 @@ function _attentionInBatch(events) {
     return (events || []).some(e => e && ATTENTION.includes(classOf(e.type)));
 }
 
+// One HTTP call: /api/log from a cursor. The DRAIN around it (resume from next_seq,
+// never last_seq; stop at the tail; surface a gap) is pure and lives in feedmodel.js,
+// where it is tested against a fake log — this half is only the wire.
+function _fetchBatch({ after_seq, after_boot, limit }) {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (after_seq != null) qs.set('after_seq', String(after_seq));
+    if (after_boot) qs.set('after_boot', after_boot);
+    return api('/api/log?' + qs.toString());
+}
+
 // Fetch from our cursor and render. `reset` starts over (entering the view).
 async function refreshFeed(reset = false) {
     if (reset) { _cursor = null; _boot = null; _events = []; _gap = null; }
@@ -92,34 +102,15 @@ async function refreshFeed(reset = false) {
     _inflight = true;
     let fresh = [];
     try {
-        for (let i = 0; i < CATCHUP_FETCHES; i++) {
-            const qs = new URLSearchParams({ limit: String(FEED_LIMIT) });
-            if (_cursor != null) qs.set('after_seq', String(_cursor));
-            if (_boot) qs.set('after_boot', _boot);
-            let batch;
-            try {
-                batch = await api('/api/log?' + qs.toString());
-            } catch (e) {
-                break;                       // transient — the next tick retries
-            }
-            if (!batch || !Array.isArray(batch.events)) break;
-            if (batch.gap) {
-                // Told, not guessed. The server has already re-anchored the read for
-                // us; we keep the notice on screen so a hole in the record is never
-                // invisible — a plausible-looking wrong continuation is worse.
-                _gap = batch.gap;
-                _events = [];
-            }
-            _events = _events.concat(batch.events);
-            fresh = fresh.concat(batch.events);
-            // Resume from next_seq — NOT last_seq. With a limit in play they differ,
-            // and last_seq would silently skip every event past the truncation point.
-            _cursor = batch.next_seq;
-            _boot = batch.boot_id;
-            // /api/log hands back the OLDEST events after the cursor, so one call does
-            // not reach the tail of a busy log. Keep pulling until it does (bounded).
-            if (!batch.events.length || batch.next_seq >= batch.last_seq) break;
-        }
+        const drained = await drainLog(_fetchBatch, {
+            cursor: _cursor, boot: _boot, limit: FEED_LIMIT, maxFetches: CATCHUP_FETCHES,
+        });
+        if (drained.cleared) _events = [];   // a gap invalidated what we were holding
+        if (drained.gap) _gap = drained.gap; // and we keep SAYING so, on screen
+        fresh = drained.events;
+        _events = _events.concat(fresh);
+        _cursor = drained.cursor;
+        _boot = drained.boot;
     } finally {
         _inflight = false;
     }

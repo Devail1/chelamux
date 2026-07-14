@@ -12,13 +12,13 @@
 //   4. a lane is keyed on `wid`, never on a name (tmux rename is the truth);
 //   5. the firehose is hidden by DEFAULT but never SILENTLY — the count is stated.
 //
-// Run: node --test tests/  (tests/test_feed_js.py runs this inside pytest)
+// Run: node --test tests/  (tests/test_js_suites.py runs every .test.mjs inside pytest)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
     CLASSES, DEFAULT_CLASSES, SYSTEM_LABEL, SYSTEM_WID,
-    buildLanes, classOf, flatRows, goneSummary, hiddenSummary, splitGone,
+    buildLanes, classOf, drainLog, flatRows, goneSummary, hiddenSummary, splitGone,
 } from '../chela/dashboard/static/js/feedmodel.js';
 
 let _seq = 0;
@@ -247,4 +247,89 @@ test('flat mode is the same rows, ungrouped, newest first', () => {
     assert.deepEqual(rows.map(r => r.type), ['run_review', 'finished']);   // tool filtered
     assert.ok(rows[0].seq > rows[1].seq);                                  // newest first
     assert.equal(rows[0].cls, 'run');
+});
+
+// --- the cursor: a bounded read must RESUME, not skip -------------------------
+//
+// The Feed's contract with the event log, and the one that can lose data silently:
+// resume from `next_seq`, NEVER from `last_seq`. This was previously "asserted" in
+// tests/views.test.mjs by grepping feed.js for the string `batch.last_seq` — which
+// FAILED the correct code (the drain legitimately reads last_seq to know it has hit
+// the tail) and would have PASSED a reader that resumed from `last_seq` under any
+// other spelling. A grep tests spelling. These test behaviour, against a fake log
+// that implements event_log.read()'s actual semantics.
+
+// event_log.read(), in 8 lines: the `limit` OLDEST events after the cursor, plus the
+// cursor (`next_seq`) and the log's tail (`last_seq`) — which DIFFER once truncated.
+function fakeLog(n) {
+    const all = Array.from({ length: n }, (_, i) => ({ seq: i + 1, type: 'finished', wid: '@1' }));
+    const calls = [];
+    return {
+        calls,
+        serve({ after_seq, limit }) {
+            calls.push({ after_seq, limit });
+            const last_seq = all.length ? all[all.length - 1].seq : 0;
+            let out = all.filter(e => after_seq == null || e.seq > after_seq);
+            let next_seq = last_seq;
+            if (limit != null && out.length > limit) {
+                out = out.slice(0, limit);
+                next_seq = out[out.length - 1].seq;      // ← the truncation, made resumable
+            }
+            return Promise.resolve({ boot_id: 'b1', events: out, gap: null, first_seq: 1, last_seq, next_seq });
+        },
+    };
+}
+
+test('a bounded read DRAINS to the tail — every event, exactly once, in order', async () => {
+    const log = fakeLog(25);
+    const r = await drainLog(log.serve, { cursor: null, boot: null, limit: 10, maxFetches: 8 });
+    assert.deepEqual(r.events.map(e => e.seq), Array.from({ length: 25 }, (_, i) => i + 1));
+    assert.equal(r.cursor, 25);              // parked at the tail, resumable
+    assert.equal(log.calls.length, 3);       // 10 + 10 + 5 — it stops, it does not spin
+});
+
+test('a reader that resumed from last_seq would SKIP — this is what the contract buys', async () => {
+    // The discriminator. Same fake log, same limit; the ONLY difference is the cursor
+    // rule. If this ever stops skipping, the fake log has drifted from event_log.read()
+    // and the test above has quietly stopped proving anything.
+    const log = fakeLog(25);
+    let cursor = null, got = [];
+    for (let i = 0; i < 8; i++) {
+        const b = await log.serve({ after_seq: cursor, limit: 10 });
+        got = got.concat(b.events);
+        cursor = b.last_seq;                 // ← the bug, spelled out
+        if (!b.events.length) break;
+    }
+    assert.equal(got.length, 10);            // 15 events silently gone
+    assert.ok(!got.some(e => e.seq === 11));
+
+    const ok = await drainLog(log.serve, { cursor: null, boot: null, limit: 10, maxFetches: 8 });
+    assert.equal(ok.events.length, 25);      // the drain loses none of them
+});
+
+test('the drain is BOUNDED — it yields with a resumable cursor rather than spinning', async () => {
+    const log = fakeLog(100);
+    const r = await drainLog(log.serve, { cursor: null, boot: null, limit: 10, maxFetches: 3 });
+    assert.equal(r.events.length, 30);
+    assert.equal(r.cursor, 30);              // the next tick picks up exactly here — no hole
+});
+
+test('a GAP is handed up and invalidates what we hold — never swallowed', async () => {
+    const gap = { reason: 'the log rotated past your cursor', resume_from_seq: 400 };
+    const serve = () => Promise.resolve({
+        boot_id: 'b2', events: [{ seq: 401, type: 'finished', wid: '@1' }],
+        gap, first_seq: 400, last_seq: 401, next_seq: 401,
+    });
+    const r = await drainLog(serve, { cursor: 12, boot: 'b1', limit: 10, maxFetches: 8 });
+    assert.deepEqual(r.gap, gap);
+    assert.equal(r.cleared, true);           // the caller must drop its stale rows
+    assert.equal(r.boot, 'b2');              // and re-pin to the boot it actually got
+});
+
+test('a failed fetch ends the drain and LEAVES THE CURSOR — the next tick retries', async () => {
+    const r = await drainLog(() => Promise.reject(new Error('offline')),
+        { cursor: 7, boot: 'b1', limit: 10, maxFetches: 8 });
+    assert.deepEqual(r.events, []);
+    assert.equal(r.cursor, 7);               // not advanced past events we never saw
+    assert.equal(r.gap, null);
 });

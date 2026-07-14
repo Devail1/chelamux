@@ -1,7 +1,7 @@
 // Unit tests for the joiner keys-line pure logic (chela/collab-relay/public/
 // keys.js) — the exact escape-byte sequences the on-screen keys emit + the
 // swipe→wheel sign/threshold. Pins the bytes so a typo can't silently ship a
-// key that does the wrong thing on a real terminal. Run: node --test tests/
+// key that does the wrong thing on a real terminal. Run: node --test tests/  (or `uv run pytest -q` — tests/test_js_suites.py runs every .test.mjs)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { KEY_SEQ, ctrlChar, keySeq, swipeWheelDelta, SWIPE_MIN_PX }

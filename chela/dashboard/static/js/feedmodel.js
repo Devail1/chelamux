@@ -261,6 +261,54 @@ export function flatRows(events, classes) {
         .sort((a, b) => (b.seq || 0) - (a.seq || 0));
 }
 
+// --- the cursor: a bounded read that RESUMES, and never SKIPS -----------------
+//
+// /api/log hands back the `limit` OLDEST events after the cursor, so on a busy log one
+// call does not reach the tail — a reader drains until it does. The whole contract is
+// one line of this loop: the cursor advances to `next_seq`, NEVER to `last_seq`.
+//
+// `last_seq` is the LOG's tail. When a read was truncated by `limit` it sits far past
+// the last event we were actually HANDED, so resuming from it drops every event in
+// between — invisibly, which is the exact hole event_log's `next_seq`/`gap` design
+// exists to prevent (`event_log.read()`: "a bounded read is resumable and can never skip
+// an event the caller has not seen"). `last_seq` has one legitimate use, and only one:
+// it says whether we have reached the tail yet, i.e. whether to keep draining.
+//
+// This lives here, DOM-free, because that is what makes the rule provable: the drain is
+// tested against a fake log in tests/feed.test.mjs, where a resume-from-last_seq reader
+// is run over the same log and SHOWN to skip. (It used to be "asserted" by grepping
+// feed.js for the string `batch.last_seq` — which failed the correct code, since the
+// tail test legitimately reads it. A grep tests spelling; this tests behaviour.)
+//
+// `fetchBatch({after_seq, after_boot, limit})` is injected — so no fetch in here either.
+export async function drainLog(fetchBatch, { cursor = null, boot = null, limit, maxFetches }) {
+    let events = [];
+    let gap = null;
+    let cleared = false;                    // did a gap invalidate what the caller holds?
+    for (let i = 0; i < maxFetches; i++) {
+        let batch;
+        try {
+            batch = await fetchBatch({ after_seq: cursor, after_boot: boot, limit });
+        } catch (e) {
+            break;                          // transient — the cursor stands, the next tick retries
+        }
+        if (!batch || !Array.isArray(batch.events)) break;
+        if (batch.gap) {
+            // Told, not guessed. The server has already re-anchored the read; we hand the
+            // notice up so a hole in the record is never invisible — a plausible-looking
+            // wrong continuation is worse than an admitted gap.
+            gap = batch.gap;
+            events = [];
+            cleared = true;
+        }
+        events = events.concat(batch.events);
+        cursor = batch.next_seq;
+        boot = batch.boot_id;
+        if (!batch.events.length || batch.next_seq >= batch.last_seq) break;   // at the tail
+    }
+    return { events, cursor, boot, gap, cleared };
+}
+
 // "212 tool calls · 2 prompts" — what a collapsed row is hiding, said out loud.
 // A hidden count that does not name what it hid is the same silence, one step up.
 export function hiddenSummary(counts) {
