@@ -898,14 +898,34 @@ def _run_age_str(started_at: str | None, *, now: datetime | None = None) -> str:
     return f"{hrs // 24}d"
 
 
+_CI_CHIPS = {
+    dispatcher.CI_PASSING: "ci:green",
+    dispatcher.CI_FAILING: "ci:RED",
+    dispatcher.CI_PENDING: "ci:pending",
+    dispatcher.CI_NONE: "ci:none",
+    dispatcher.CI_UNKNOWN: "ci:UNKNOWN",
+}
+
+
+def _ci_chip(r: dict) -> str:
+    """What GitHub last said about this run's checks — in WORDS, never a colour alone.
+
+    A run with no recorded state (an old row, a PR the tick has not reached yet) reads
+    ``ci:?`` and not ``ci:green``: the whole point of the fact is that not-yet-read is not
+    a pass.
+    """
+    return _CI_CHIPS.get(r.get("pr_checks") or "", "ci:?")
+
+
 def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:
-    """One line for the status-filtered view: task id, status, age, PR URL, title."""
+    """One line for the status-filtered view: task id, status, CI, age, PR URL, title."""
     task_id = r.get("task_id") or "-"
     status = r.get("status") or "-"
     age = _run_age_str(r.get("started_at"), now=now)
     pr = r.get("pr_url") or "-"
     title = (r.get("title") or "")[:50]
-    return f"  {task_id}  {status:<16}  age={age:<5}  {pr:<45}  {title}"
+    return (f"  {task_id}  {status:<16}  {_ci_chip(r):<11}  age={age:<5}  "
+            f"{pr:<45}  {title}")
 
 
 def cmd_dispatch_runs(args) -> None:
@@ -1403,9 +1423,15 @@ def cmd_review(args) -> None:
     argument: a verdict is long-form markdown — backticks, quotes, newlines, a table of
     defects — and shell-quoting one is how it arrives mangled or truncated.
 
-    ⛔ The run row is the authority, NOT GitHub. ``gh pr review --request-changes`` refuses
-    a PR authored by the calling account, and the whole fleet is one account, so GitHub's
-    ``reviewDecision`` can never carry this. The PR comment this posts is the projection.
+    ⛔ The run row is the authority on the VERDICT, NOT GitHub. ``gh pr review
+    --request-changes`` refuses a PR authored by the calling account, and the whole fleet is
+    one account, so GitHub's ``reviewDecision`` can never carry this. The PR comment this
+    posts is the projection.
+
+    ⛔ GitHub IS the authority on the CHECKS, and ``--approve`` reads them back from it: an
+    approval of a PR whose CI is red (or whose checks could not be read) is REFUSED unless
+    ``--force``. A red PR was approved and merged on 2026-07-14 and it broke the base
+    branch — nobody had looked at the artifact that decides whether the thing can ship.
     """
     if args.approve == args.request_changes:      # neither, or both
         print("review: pass exactly one of --approve / --request-changes")
@@ -1419,7 +1445,7 @@ def cmd_review(args) -> None:
         sys.exit(2)
 
     result = (dispatcher.request_changes(args.run, body) if args.request_changes
-              else dispatcher.approve(args.run, body))
+              else dispatcher.approve(args.run, body, force=getattr(args, "force", False)))
     if not result.get("ok"):
         print(f"review: {result.get('error', 'unknown error')}")
         sys.exit(1)
@@ -1433,6 +1459,7 @@ def cmd_review(args) -> None:
     else:
         print(f"Run {task_id} ({result.get('branch_name') or '?'}) approved — still "
               f"{status}; merge is yours to make.")
+        print(f"  CI: {result.get('ci_note') or result.get('pr_checks')}")
     if result.get("comment_posted"):
         print(f"  PR comment posted: {result.get('pr_url') or ''}")
     elif args.request_changes or body.strip():
@@ -1660,6 +1687,12 @@ def main() -> None:
         "--body-file", default=None, metavar="PATH",
         help="Read the verdict from PATH, or from stdin with '-'. A verdict is long-form "
              "markdown and must never be shell-quoted",
+    )
+    p_review.add_argument(
+        "--force", action="store_true",
+        help="Approve a PR whose CI is RED (or whose checks could not be read). Refused "
+             "without this: a red PR was approved and merged once, and it broke the base "
+             "branch. Say why in the body",
     )
 
     # knowledge — export the fleet's knowledge as an OKF bundle (local data; see docs/OKF.md)

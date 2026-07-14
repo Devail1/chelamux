@@ -205,10 +205,25 @@ def test_a_verdict_only_lands_on_a_run_that_is_actually_under_review(tmp_path):
 
 
 def test_approve_changes_nothing_and_never_merges(tmp_path):
-    """This task builds the carrier, not the judge — and merging stays a human's call."""
+    """This task builds the carrier, not the judge — and merging stays a human's call.
+
+    ⛔ The stub must answer the CHECK read too: since CMX-69 an approval reads the PR's
+    checks back from GitHub and REFUSES a red one (and an unreadable one). A `gh` that
+    cannot be run at all is `unknown`, and unknown is not a pass.
+    """
     with dispatcher._db() as conn:
         _row(conn)
-    with patch.object(dispatcher.subprocess, "run", side_effect=FileNotFoundError()):
+
+    def _gh(cmd, *a, **k):
+        class R:
+            returncode = 0
+            stdout = json.dumps({"headRefOid": "abc", "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "test", "status": "COMPLETED",
+                 "conclusion": "SUCCESS"}]})
+            stderr = ""
+        return R()
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh):
         result = dispatcher.approve("abc123", "LGTM")
     assert result["ok"] and result["status"] == "awaiting_review"
     assert dispatcher.resolve_run("abc123")["status"] == "awaiting_review"

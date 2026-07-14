@@ -2319,6 +2319,10 @@ def api_dispatcher():
         for r in (*active, *awaiting, *recent):
             r["project_key"] = project_key
             r.setdefault("pr_mergeable", None)
+            # The CI check state (CMX-69) rides along the same way. A pre-migration row —
+            # or one the tick has not asked GitHub about yet — carries None, and the
+            # frontend renders that as "ci ?", never as green: not-yet-read is not a pass.
+            r.setdefault("pr_checks", None)
         entry["active_runs"] = active
         entry["awaiting_review_runs"] = awaiting
         entry["recent_runs"] = recent
@@ -2527,7 +2531,7 @@ def _pr_mergeable(pr_number: str, repo_dir: str) -> str | None:
             ["gh", "pr", "view", pr_number, "--json", "mergeable", "-q", ".mergeable"],
             cwd=repo_dir, capture_output=True, text=True, timeout=15,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
@@ -2669,7 +2673,7 @@ def _auto_resolve_todo_conflict(
         if push.returncode != 0:
             # Already committed locally; nothing to abort. Surface the push error.
             return {"ok": False, "error": (push.stderr or push.stdout or "git push failed").strip()}
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         return _abort_manual(f"git operation failed during auto-resolve: {e}")
 
     # Wait for GitHub to recompute mergeability after the push.
@@ -2715,6 +2719,35 @@ def _merge_one(row: dict) -> dict:
     if not repo_dir or not repo_dir.is_dir():
         return {"ok": False, "error": f"workflow repo dir not found: {wf_path}", "status": 400}
 
+    # ⛔ THE GATE: a PR whose CI is RED does not merge from this dashboard. On 2026-07-14 one
+    # did — PR #80 was merged with its checks failing, and the base branch was broken until a
+    # hotfix — because nothing in chela knew a CI run existed. The state is read back from
+    # GITHUB right here, at the moment of merging, and not from the run row: the row is a
+    # 60s-old cache, and this is the one call where a stale answer is the whole bug.
+    #
+    # UNKNOWN is refused too. A check state that could not be read is never a pass — that is
+    # the doctor rule, and treating it as green would re-open the exact hole this closes.
+    # PENDING is refused for the same reason it is not a `changes_requested`: the checks have
+    # not settled, so nobody yet knows what merging this means. NONE (a repo with no CI at
+    # all) merges, and says so in the log — no checks is not the same as failing checks.
+    ci = dispatcher._read_pr_checks(pr_url, str(repo_dir))
+    if ci.state == dispatcher.CI_FAILING:
+        return {"ok": False, "status": 409,
+                "error": "CI is RED on this PR — refusing to merge it. Failing: "
+                         f"{', '.join(ci.failing) or 'unnamed check(s)'}. The dispatcher "
+                         "sends it back to its agent on the next tick."}
+    if ci.state == dispatcher.CI_PENDING:
+        return {"ok": False, "status": 409,
+                "error": "the checks on this PR have not settled yet — refusing to merge "
+                         "until GitHub has finished saying whether it passes."}
+    if ci.state == dispatcher.CI_UNKNOWN:
+        return {"ok": False, "status": 409,
+                "error": f"could not read this PR's checks ({ci.detail}) — and a check state "
+                         "nobody could read is NOT a pass. Refusing to merge."}
+    if ci.state == dispatcher.CI_NONE:
+        log.warning("merge: PR %s has NO checks at all — merging it, but no checks is not "
+                    "the same as passing checks", pr_url)
+
     # Pre-merge: if GitHub reports CONFLICTING, attempt a strictly-guarded
     # auto-resolve of a TODO.md-ONLY bookkeeping conflict in the run's
     # worktree. Anything beyond TODO.md (or an ambiguous strike) aborts to
@@ -2736,13 +2769,30 @@ def _merge_one(row: dict) -> dict:
         if not resolved.get("ok"):
             return {"ok": False, "error": resolved.get("error", "auto-resolve failed"), "status": 409}
 
+        # ⛔ THE GATE ABOVE IS NOW STALE, AND IT IS THE ONE THAT MATTERS. The auto-resolve
+        # merged base into the branch AND PUSHED — the head is a NEW commit, and it is the
+        # kind of commit most likely to be red: it carries everything base has moved by since
+        # this branch left it. We verified X and were about to ship Y. That is the PR-#80
+        # hole re-opened INSIDE the feature built to close it, so this path never merges: the
+        # honest answer right after a push is "the checks have not run yet", and the honest
+        # thing to do with it is to stop. The PR is now MERGEABLE and its new head is under
+        # CI; the next Merge (or the dispatcher's next tick, which sends it back if that
+        # merge commit is red) picks it up.
+        after = dispatcher._read_pr_checks(pr_url, str(repo_dir))
+        return {"ok": False, "status": 409, "error": (
+            "the TODO.md conflict was auto-resolved and PUSHED — the head of this PR is now "
+            f"a NEW commit ({(after.head_sha or 'unknown')[:12]}), which the green checks you "
+            f"saw did not cover (its own checks read: {after.state}). Refusing to merge a "
+            "commit nothing has verified. Re-run Merge once CI has finished on the new head."
+        )}
+
     try:
         merge = subprocess.run(
             ["gh", "pr", "merge", pr_number, "--squash"],
             cwd=str(repo_dir), capture_output=True, text=True, timeout=60,
         )
-    except FileNotFoundError:
-        return {"ok": False, "error": "gh CLI not found on PATH", "status": 500}
+    except OSError as e:
+        return {"ok": False, "error": f"gh CLI could not be run: {e}", "status": 500}
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "gh pr merge timed out", "status": 504}
     if merge.returncode != 0:
@@ -2757,7 +2807,7 @@ def _merge_one(row: dict) -> dict:
         )
         if sha_proc.returncode == 0:
             merge_sha = sha_proc.stdout.strip() or None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
     repo_cwd = str(repo_dir)
@@ -2806,10 +2856,11 @@ def api_dispatcher_merge_all():
     Optional ``{workflow_path}`` filter restricts to one workflow — the Kanban
     passes the active filter unless it's "all". A run is eligible only when
     ``status == 'awaiting_review'`` AND ``pr_state in ('open', None)`` AND
-    ``pr_mergeable == 'MERGEABLE'``; anything CONFLICTING / UNKNOWN / non-open
-    lands under ``skipped`` and is never merged. Each eligible run goes through
-    the shared ``_merge_one`` helper, so each merge gets the same cleanup as the
-    single-card button.
+    ``pr_mergeable == 'MERGEABLE'`` AND its checks are green (or the repo has no
+    CI at all); anything CONFLICTING / UNKNOWN / non-open, and anything whose CI
+    is red, pending or unread, lands under ``skipped`` and is never merged. Each
+    eligible run goes through the shared ``_merge_one`` helper, so each merge
+    gets the same cleanup — and the same live CI gate — as the single-card button.
 
     Returns ``{ok, merged: [task_id...], skipped: [{task_id, reason}],
     failed: [{task_id, error}]}``.
@@ -2838,6 +2889,17 @@ def api_dispatcher_merge_all():
             continue
         if row.get("pr_mergeable") != "MERGEABLE":
             skipped.append({"task_id": task_id, "reason": f"mergeable={row.get('pr_mergeable')}"})
+            continue
+        # Cheap pre-filter on the run row's cached check state, so a red PR is SKIPPED
+        # (reported, batch continues) instead of counted as a failure. _merge_one re-reads
+        # the checks from GitHub anyway and is the actual gate — this only keeps the batch's
+        # own report honest. ⛔ Anything that is not a green cache is skipped here, including
+        # a check state nobody has read yet: a batch merge must never be the thing that finds
+        # out what CI thought. A repo with NO CI at all (`none`) is not red and still merges
+        # — no checks is not the same as failing checks — and _merge_one logs that it did.
+        checks = row.get("pr_checks")
+        if checks not in (dispatcher.CI_PASSING, dispatcher.CI_NONE):
+            skipped.append({"task_id": task_id, "reason": f"checks={checks or 'unread'}"})
             continue
         result = _merge_one(row)
         if result.get("ok"):
@@ -3051,6 +3113,7 @@ def _sse_runs_snapshot() -> dict:
                 "status": r.get("status"),
                 "pr_state": r.get("pr_state"),
                 "pr_mergeable": r.get("pr_mergeable"),
+                "pr_checks": r.get("pr_checks"),
                 "pr_url": r.get("pr_url"),
                 "label": _sse_run_label(r),
             }

@@ -39,6 +39,19 @@ const REVIEW_STATE_CHIPS = {
     changes_requested: '🔁 changes requested',
     needs_human: '🛑 needs a human',
 };
+// What GitHub says about a card's checks. Every one of these is a WORD plus a glyph — the
+// colour is a secondary cue and never the signal (Liav is red-weak, and "is this PR red?"
+// is precisely the question a hue-only answer would get wrong). The three non-failing
+// states are the interesting ones and each says something different: `pending` has not
+// settled, `none` has no CI at all (which is NOT the same as passing), and a card with no
+// recorded state at all renders as `ci ?` — not-yet-read is never a pass.
+const CI_CHIPS = {
+    passing: { label: '✓ ci green',   cls: 'ci-passing' },
+    failing: { label: '✗ CI RED',     cls: 'ci-failing' },
+    pending: { label: '● ci pending', cls: 'ci-pending' },
+    none:    { label: '– no ci',      cls: 'ci-none' },
+    unknown: { label: '? ci unknown', cls: 'ci-unknown' },
+};
 // Columns that start collapsed in the mobile "Rows" accordion — low-traffic
 // buckets the user rarely needs open at a glance. Overridden + persisted per
 // user once they tap a caret.
@@ -157,18 +170,30 @@ function _kCard(card) {
     // renderer gates on it: 'open' (or NULL — older rows / transient gh
     // failure) shows the button, 'merged' shows a badge, 'closed' shows nothing.
     const mergeable = (card.status === 'awaiting_review' && card.pr_url && card.task_id);
+    // The CI chip rides on every card that has a PR — including the merged ones, where it
+    // is the receipt: this is what shipped, and this is what its checks said.
+    const ciState = card.pr_url ? (card.pr_checks || 'unread') : '';
+    const ciMeta = CI_CHIPS[ciState] || { label: '? ci', cls: 'ci-unknown' };
+    const ci = card.pr_url
+        ? `<span class="kanban-ci-chip ${ciMeta.cls}" title="GitHub's checks on this PR">${escHtml(ciMeta.label)}</span>`
+        : '';
     let merge = '';
     if (mergeable) {
         if (card.pr_state === 'merged') {
             merge = `<span class="kanban-merged-badge" title="PR already merged">Merged ✓</span>`;
         } else if (card.pr_state === 'closed') {
             merge = '';
-        } else {
+        } else if (ciState === 'passing' || ciState === 'none') {
             merge = `<button class="kanban-merge-btn" type="button"
                    data-task-id="${tid}"
                    data-pr-url="${attrEsc(card.pr_url)}"
                    onclick="chela.kanbanMergePR(this)">Merge</button>`;
         }
+        // ⛔ No button at all while CI is red, pending or unread. The server refuses those
+        // merges too (it re-reads the checks from GitHub at merge time — this button is a
+        // cache and the gate is not), but the orchestrator must not be ABLE to click it by
+        // accident, because on 2026-07-14 it did exactly that and the base branch broke.
+        // The chip beside it says which of the three it is.
     }
     return `
     <div class="kanban-card kanban-card-${card.status}" data-task-id="${tid}">
@@ -180,6 +205,7 @@ function _kCard(card) {
             ${branchOrLine}
             ${stateChip}
             ${pr}
+            ${ci}
             ${merge}
         </div>
         ${err}
@@ -610,8 +636,13 @@ function renderKanban(data) {
     // is load-bearing since the rework loop shares this column: a `changes_requested` PR
     // is perfectly MERGEABLE and must never be counted into a Merge-all — it is the PR a
     // reviewer just REJECTED. (The server refuses it too; this keeps the count honest.)
+    // ⛔ And a PR whose CI is RED (or pending, or never read) is never counted either — the
+    // server skips it in the batch, and a count that included it would be promising a merge
+    // that cannot happen. `none` (a repo with no CI at all) still counts: no checks is not
+    // the same as failing checks.
     const mergeableCount = apply(buckets.awaiting_review)
-        .filter(c => c.status === 'awaiting_review' && c.pr_mergeable === 'MERGEABLE').length;
+        .filter(c => c.status === 'awaiting_review' && c.pr_mergeable === 'MERGEABLE'
+                     && (c.pr_checks === 'passing' || c.pr_checks === 'none')).length;
     _renderKanbanFilters(workflows, mergeableCount);
     _renderKanbanNav(buckets);
     _applyKanbanLayout();

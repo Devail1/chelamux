@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from chela import capabilities, config, discovery, doctor, hooks, main, runtime_truth
+from chela import capabilities, config, discovery, dispatcher, doctor, hooks, main, runtime_truth
 
 PORT = 5005
 
@@ -85,6 +85,16 @@ def fleet(tmp_path, monkeypatch):
                    "waiting": 30.0},
     })
     monkeypatch.setattr(runtime_truth, "_git_branches", lambda repo: {"dev", "cmx-68"})
+
+    # the checks: a PR is under review and GitHub says it is GREEN. GitHub is the OWNER
+    # here for the same reason tmux and git are above — the suite hands the code an answer
+    # rather than the network, and the corruption below changes THAT answer, not our copy.
+    monkeypatch.setattr(runtime_truth, "_reviewed_prs", lambda: {
+        "CMX-69": {"pr": "https://github.com/acme/repo/pull/99", "repo": str(repo),
+                   "checks": "passing"},
+    })
+    monkeypatch.setattr(runtime_truth, "_gh_pr_checks",
+                        lambda pr, repo: dispatcher.CIStatus(dispatcher.CI_PASSING, "abc123"))
 
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
@@ -211,6 +221,29 @@ def _break_runs_parked_branch(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_pr_checks(tmp_path, monkeypatch):
+    """CI is RED on a PR that is sitting in `awaiting_review`, one click from the base branch.
+
+    This is PR #80, verbatim: the run row said the work was done, the reviewer read the
+    code, and the artifact that governs whether it can ship said FAILURE. Nobody asked it,
+    it was merged, and `dev` broke (hotfix 23664e2). Doctor asks it.
+    """
+    monkeypatch.setattr(
+        runtime_truth, "_gh_pr_checks",
+        lambda pr, repo: dispatcher.CIStatus(
+            dispatcher.CI_FAILING, "abc123", ("test (3.11)",), ("42",)))
+    return doctor.ERROR
+
+
+def _unreadable_pr_checks(tmp_path, monkeypatch):
+    """The other half of the fact, and the one that re-opens the hole if it is got wrong:
+    an owner that cannot be READ is CANNOT VERIFY, never a silent pass."""
+    monkeypatch.setattr(
+        runtime_truth, "_gh_pr_checks",
+        lambda pr, repo: dispatcher.CIStatus(dispatcher.CI_UNKNOWN, detail="gh is not installed"))
+    return doctor.ERROR
+
+
 CORRUPTIONS = {
     "env.file": _break_env_file,
     "env.running": _break_env_running,
@@ -223,6 +256,7 @@ CORRUPTIONS = {
     "dispatch.hold": _break_dispatch_hold,
     "tmux.windows": _break_tmux_windows,
     "runs.parked_branch": _break_runs_parked_branch,
+    "pr.checks": _break_pr_checks,
     "tests.js_suites": _break_tests_js_suites,
 }
 
@@ -249,6 +283,21 @@ def test_corrupting_the_owned_value_makes_doctor_say_so(name, fleet, monkeypatch
     assert reported, (
         f"corrupting the value {name} REALLY runs on did not make doctor report it at "
         f"{level}. A check that cannot be seen to go red is not a check.")
+
+
+def test_a_check_state_that_cannot_be_read_is_never_a_pass(fleet, monkeypatch):
+    """⛔ `gh` missing / offline / rate-limited = UNKNOWN, not GREEN.
+
+    The corruption above proves doctor sees a RED CI. This one proves it sees an UNASKED
+    one — which is the failure mode that actually shipped: nothing in chela knew a check
+    existed, so every PR was, in effect, "unread", and unread was silently treated as fine.
+    """
+    _unreadable_pr_checks(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "pr.checks"]
+    assert findings, "an unreadable check state produced no finding at all"
+    assert all(f.level == doctor.ERROR for f in findings)
+    assert "CANNOT VERIFY pr.checks" in findings[0].title
+    assert "gh is not installed" in findings[0].detail
 
 
 def test_a_healthy_fleet_is_green(fleet):
