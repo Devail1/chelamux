@@ -912,7 +912,12 @@ def cmd_telegram(args) -> None:
     # and the only correct way to answer a multi-question / multiSelect picker. With no
     # hook holding the gate (a pre-plugin agent) this reads None and the keyboards fall
     # back to keystroke injection exactly as before.
+    # And the PRIMARY surface (CMX-54): those same answer buttons now ride on the pane
+    # MIRROR, above its D-pad, on one message — so the human can watch the ❯ cursor and
+    # still answer with zero keystrokes. `selected` is the draft book the inbound taps
+    # write to, read here so the ☑ ticks on the mirror and on the card cannot disagree.
     from chela.gateanswer import open_gate
+    from chela.telegram.gateanswers import DRAFTS
     from chela.telegram.hookgate import pending_gate
     gate_watcher = PermissionGateWatcher(
         bot.send,
@@ -924,6 +929,7 @@ def cmd_telegram(args) -> None:
         status=status,
         pending=pending_gate,
         held=open_gate,
+        selected=DRAFTS.selected,
     )
 
     def _on_message(window_id, msg):

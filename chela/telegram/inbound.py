@@ -47,6 +47,7 @@ from chela.telegram.interactive import (
     SELECT_SETTLE_S,
     decode_callback,
     decode_mirror_callback,
+    recompose_mirror_markup,
     select_keystrokes,
     select_keystrokes_relative,
     split_select_keys,
@@ -54,6 +55,26 @@ from chela.telegram.interactive import (
 from chela.telegram.panescan import detect_askuserquestion
 
 log = logging.getLogger(__name__)
+
+
+def _keyboard_rows(markup) -> list[list[dict]]:
+    """A PTB ``InlineKeyboardMarkup`` back to the plain rows the rest of chela speaks.
+
+    :mod:`chela.telegram.interactive` is deliberately PTB-free (the urllib relay attaches
+    the same keyboards), so a live message's keyboard is translated here rather than there.
+    A message with no keyboard, or a shape we do not recognise, yields no rows — which
+    degrades to "redraw exactly what the draft book gave us", the old behaviour.
+    """
+    rows: list[list[dict]] = []
+    for row in getattr(markup, "inline_keyboard", None) or []:
+        buttons = [
+            {"text": b.text, "callback_data": b.callback_data}
+            for b in row
+            if getattr(b, "callback_data", None)
+        ]
+        if buttons:
+            rows.append(buttons)
+    return rows
 
 # A sender delivers text to a tmux window: ``send(window_id, text) -> ok``.
 # Production is ``chela.messenger.send_tmux``; tests inject a recording stub.
@@ -658,10 +679,19 @@ def build_application(
     async def _redraw(query, markup) -> None:
         """Redraw a card's keyboard in place (the ☑ ticks / the ✓ on the chosen option).
 
+        The same option buttons ride on the **mirror** too, above its D-pad (CMX-54), and
+        the draft book knows nothing about a D-pad — so a mirror redrawn with its keyboard
+        verbatim would silently lose the pad the human is steering with. The pad is
+        therefore carried over from the message being redrawn
+        (:func:`~chela.telegram.interactive.recompose_mirror_markup`); a plain card has none
+        and is unaffected.
+
         Best-effort decoration: a keyboard Telegram will not redraw (the message is gone,
         the markup is unchanged) must not cost the human the *answer*, which has already
         been recorded by then.
         """
+        current = getattr(getattr(query, "message", None), "reply_markup", None)
+        markup = recompose_mirror_markup(_keyboard_rows(current), markup)
         if markup is None:
             return
         try:

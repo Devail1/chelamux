@@ -17,6 +17,17 @@ and this file locks in the fix for each:
 
 Plus the two rules that keep it from becoming a rate-limit gun or a liar: an **unchanged**
 pane makes no API call at all, and a dialog that leaves the pane **deletes** its message.
+
+**CMX-54 — the mirror is the PRIMARY journey now, so the composition rule is INVERTED.**
+CMX-52 shipped it as the conditional surface: suppressed whenever "every option is already
+one tap away", which — the moment CMX-50's held-gate buttons work — is every gate a hook
+covers. Liav then drove the mirror from his phone and chose it (*"the cursor moved, and it
+was pretty nice, i like this surface more"*), answering a `multiSelect` from a phone for the
+first time. So the old rule was a live regression: **the better the zero-keypress path
+worked, the more reliably it hid the surface he had picked.** Now every dialog is mirrored
+and the zero-keypress option buttons ride on the SAME message, above the D-pad — the tests
+below lock in both halves, and the proof-guard that refuses a button whose question cannot
+be identified.
 """
 from __future__ import annotations
 
@@ -31,6 +42,7 @@ from chela.telegram.interactive import (
     MIRROR_REFRESH_KEY_ID,
     decode_mirror_callback,
     mirror_markup,
+    recompose_mirror_markup,
 )
 from chela.telegram.panescan import detect_dialog
 
@@ -150,7 +162,7 @@ def _capture(panes):
     return capture
 
 
-def _watcher(bot, panes, *, held=None, pending=None, now=None):
+def _watcher(bot, panes, *, held=None, pending=None, selected=None, now=None):
     clock = now or (lambda: 0.0)
     return PermissionGateWatcher(
         bot.post,
@@ -161,10 +173,42 @@ def _watcher(bot, panes, *, held=None, pending=None, now=None):
         delete=bot.delete,
         pending=pending,
         held=held,
+        selected=selected,
         # A fixed clock would sit permanently inside the mirror's edit floor, so the
         # default here advances past it; the throttle has its own tests below.
         now=clock if now else _ticking(),
     )
+
+
+def _holds(tool_use_id: str):
+    """A daemon holding this gate's PermissionRequest hook open (CMX-50)."""
+    from chela.gateanswer import OpenGate
+
+    def held(tuid):
+        if tuid != tool_use_id:
+            return None
+        return OpenGate(tool_use_id=tuid, wid="@1", questions=[], deadline=9e12,
+                        budget=90.0)
+
+    return held
+
+
+def _held_gate():
+    """The MULTI_PANE selector, as the hook payload behind it, with its hook held open.
+
+    One multiSelect question — the shape that cannot be answered by keystrokes at all, and
+    the one Liav answered from a phone for the first time on 2026-07-14.
+    """
+    from chela.telegram.hookgate import HookGate, Option, Question
+
+    gate = HookGate(
+        tool_use_id="toolu_01", tool="AskUserQuestion", seq=1,
+        questions=(Question(
+            question="Which fruit do you prefer?", header="Fruit", multi_select=True,
+            options=(Option(label="Apple"), Option(label="Banana")),
+        ),),
+    )
+    return {"pending": lambda _wid: gate, "held": _holds("toolu_01")}
 
 
 def _ticking(step: float = 10.0):
@@ -433,39 +477,142 @@ def test_a_permission_gate_keeps_its_one_tap_card_AND_gains_a_mirror():
     assert "2. Yes, and don't ask again" in _mirror_sends(bot)[0][1]
 
 
-def test_a_single_select_selector_is_NOT_mirrored():
-    # Every real option is already a numbered button that lands on it. A D-pad there would
-    # be a second message and a strictly worse way to answer.
+def test_a_single_select_selector_is_mirrored_TOO():
+    # CMX-54's inversion. The old rule suppressed the mirror here ("every option is already
+    # one tap away") — but the pane is the only surface that shows you WHERE YOU ARE, and
+    # "the answer is easy" was never a reason to take it away. The semantic card keeps its
+    # numbered buttons; the mirror shows the cursor beside them.
     bot = _Bot()
     w = _watcher(bot, {"@1": SINGLE_PANE})
     w.poll(["@1"])
-    assert _mirror_sends(bot) == []
-    assert len(bot.sent) == 1                  # the semantic card, and only it
+    assert len(_mirror_sends(bot)) == 1
+    assert "❯ 1. Apple" in _mirror_sends(bot)[0][1]
+    assert len(bot.sent) == 2                  # the semantic card AND the mirror
 
 
-def test_a_hook_HELD_gate_is_NOT_mirrored():
-    # CMX-50: every option of every question is a button that answers the agent directly,
-    # with zero keypresses. There is no cursor to steer, so there is nothing to mirror.
-    from chela.gateanswer import OpenGate
+def test_a_hook_HELD_gate_gets_THE_PANE_AND_THE_BUTTONS_ON_ONE_MESSAGE():
+    """THE task (CMX-54). A held gate used to SUPPRESS the mirror — so the better CMX-50's
+    zero-keypress path worked, the more reliably it hid the surface Liav had just chosen
+    ("the cursor moved, and it was pretty nice, i like this surface more"). The two are
+    complementary: the pane shows where you are, the buttons answer with no keystrokes. So
+    they ride on ONE message — options above the D-pad.
+    """
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, **_held_gate())
+    w.poll(["@1"])
+
+    mirrors = _mirror_sends(bot)
+    assert len(mirrors) == 1, "the mirror must NOT be suppressed by a held gate"
+    text, markup = mirrors[0][1], mirrors[0][4]
+    assert "❯ 1. Apple" in text, "the cursor is still there to steer"
+
+    rows = markup["inline_keyboard"]
+    answers = [b["callback_data"] for row in rows for b in row
+               if b["callback_data"].startswith("qa:")]
+    keys = [b["callback_data"] for row in rows for b in row
+            if b["callback_data"].startswith("m:")]
+    # An option button per option, then the ✅ Send (this question is multiSelect)…
+    assert answers == ["qa:h:toolu_01:0:0", "qa:h:toolu_01:0:1", "qa:hs:toolu_01:0"]
+    # …and the whole D-pad still under them, on the same keyboard.
+    assert "m:up" in keys and "m:spc" in keys and "m:ent" in keys
+    # The answer buttons come FIRST — they are the zero-keypress path, not an afterthought.
+    assert rows[0][0]["callback_data"].startswith("qa:")
+
+
+def test_the_mirrors_answer_buttons_send_NO_KEYSTROKE():
+    # The whole safety property of CMX-50, restated for this surface: an option button on
+    # the mirror carries the `qa:h:` scheme (→ the blocked hook), never an `m:` key (→ tmux).
+    # A button that injected keystrokes for a multiSelect is CMX-32 with a nicer picture.
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, **_held_gate())
+    w.poll(["@1"])
+
+    rows = _mirror_sends(bot)[0][4]["inline_keyboard"]
+    for row in rows:
+        for button in row:
+            data = button["callback_data"]
+            assert data.startswith(("qa:h:", "qa:hs:", "m:")), data
+            # No legacy `qa:<i>` keystroke selectors, and no `qa:nav:` row.
+            assert not data.startswith("qa:nav:")
+
+
+def test_a_multi_question_gate_says_WHICH_question_the_buttons_answer():
+    # The TUI walks the questions one at a time, so a numbered button beside a pane showing
+    # question 2 must answer question 2 — and the human must be able to SEE that it does.
+    # The proof is the question's own text, on the pane (`focused_question`).
     from chela.telegram.hookgate import HookGate, Option, Question
 
     gate = HookGate(
         tool_use_id="toolu_01", tool="AskUserQuestion", seq=1,
-        questions=(Question(
-            question="Which fruit?", header="Fruit", multi_select=True,
-            options=(Option(label="Apple", description="", preview=""),),
-        ),),
+        questions=(
+            Question(question="Which colour do you prefer?", header="Colour",
+                     options=(Option(label="Red"),)),
+            # The one the pane is actually on.
+            Question(question="Which fruit do you prefer?", header="Fruit",
+                     options=(Option(label="Apple"), Option(label="Banana"))),
+        ),
     )
-    held = OpenGate(
-        tool_use_id="toolu_01", wid="@1", questions=[], deadline=9e12, budget=90.0)
-
     bot = _Bot()
-    w = _watcher(
-        bot, {"@1": MULTI_PANE},
-        pending=lambda _wid: gate, held=lambda _tuid: held,
-    )
+    w = _watcher(bot, {"@1": MULTI_PANE}, pending=lambda _w: gate, held=_holds("toolu_01"))
     w.poll(["@1"])
-    assert _mirror_sends(bot) == [], "a one-tap gate needs no D-pad"
+
+    text, markup = _mirror_sends(bot)[0][1], _mirror_sends(bot)[0][4]
+    assert "question 2/2" in text
+    answers = [b["callback_data"] for row in markup["inline_keyboard"] for b in row
+               if b["callback_data"].startswith("qa:")]
+    assert answers == ["qa:h:toolu_01:1:0", "qa:h:toolu_01:1:1"], "question 1, not 0"
+
+
+def test_an_UNPROVABLE_focus_refuses_the_buttons_and_keeps_the_D_PAD():
+    # Neither question's text is on the pane (it clipped them, or the TUI reworded the
+    # heading) — so which question a "1" would answer cannot be proven. A button that
+    # answers the wrong QUESTION is CMX-32 wearing a new keyboard: refuse it, say nothing
+    # false, and leave the D-pad, which is always correct because the human can see it.
+    from chela.telegram.hookgate import HookGate, Option, Question
+
+    gate = HookGate(
+        tool_use_id="toolu_01", tool="AskUserQuestion", seq=1,
+        questions=(
+            Question(question="Which colour?", options=(Option(label="Red"),)),
+            Question(question="Which vegetable?", options=(Option(label="Leek"),)),
+        ),
+    )
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, pending=lambda _w: gate, held=_holds("toolu_01"))
+    w.poll(["@1"])
+
+    markup = _mirror_sends(bot)[0][4]
+    data = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert not any(d.startswith("qa:") for d in data), "an unprovable mapping gets no button"
+    assert "m:up" in data and "m:ent" in data, "…but the pane is still drivable"
+
+
+def test_a_toggled_option_shows_its_TICK_on_the_mirror_too():
+    # The same question is answerable from two messages (the CMX-49 card and the mirror).
+    # If their ☑ ticks disagreed, the human would not know which set they are about to send.
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE}, **_held_gate(),
+                 selected=lambda _tuid, _q: {1})       # "Banana" is toggled on
+    w.poll(["@1"])
+
+    captions = {b["callback_data"]: b["text"]
+                for row in _mirror_sends(bot)[0][4]["inline_keyboard"] for b in row}
+    assert captions["qa:h:toolu_01:0:0"] == "☐ 1"
+    assert captions["qa:h:toolu_01:0:1"] == "☑ 2"
+
+
+def test_a_PRE_PLUGIN_window_still_gets_a_drivable_mirror_with_no_buttons():
+    # Hooks are read at agent STARTUP, so an agent launched before the plugin emits none:
+    # no payload, no hold, no zero-keypress channel. The mirror is that fleet's ONLY way to
+    # answer a multiSelect from a phone, and it must keep working with no hook at all.
+    bot = _Bot()
+    w = _watcher(bot, {"@1": MULTI_PANE})              # pending=None, held=None
+    w.poll(["@1"])
+
+    markup = _mirror_sends(bot)[0][4]
+    data = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert not any(d.startswith("qa:") for d in data), "there is no hook to answer through"
+    assert "m:spc" in data and "m:ent" in data, "…and the D-pad answers it anyway"
 
 
 def test_an_UNHELD_multiselect_gate_IS_mirrored():
@@ -543,6 +690,34 @@ def test_an_unknown_dialog_name_gets_the_FULL_pad():
         for b in row
     ]
     assert "m:lt" in keys and "m:rt" in keys
+
+
+def test_redrawing_a_TAPPED_MIRROR_keeps_its_D_PAD_under_the_new_ticks():
+    """A ☑ tap redraws the tapped message's keyboard from the draft book — which knows only
+    about options. On the mirror that keyboard also carries the D-pad, so redrawing it
+    verbatim would silently strip the pad off the very message the human is steering with.
+    """
+    live = mirror_markup("AskUserQuestion", [
+        [{"text": "☐ 1", "callback_data": "qa:h:t1:0:0"}],
+        [{"text": "✅ Send", "callback_data": "qa:hs:t1:0"}],
+    ])["inline_keyboard"]
+    # What the draft book hands back after the tap: the options, with the tick moved.
+    fresh = {"inline_keyboard": [
+        [{"text": "☑ 1", "callback_data": "qa:h:t1:0:0"}],
+        [{"text": "✅ Send", "callback_data": "qa:hs:t1:0"}],
+    ]}
+
+    redrawn = recompose_mirror_markup(live, fresh)["inline_keyboard"]
+    data = [b["callback_data"] for row in redrawn for b in row]
+    assert redrawn[0][0]["text"] == "☑ 1", "the tick moved"
+    assert "m:up" in data and "m:ent" in data, "and the D-pad survived the redraw"
+
+
+def test_redrawing_a_PLAIN_CARD_is_left_exactly_as_it_was():
+    # A CMX-49 card has no D-pad to preserve; nothing may be invented for it.
+    fresh = {"inline_keyboard": [[{"text": "✓ 1", "callback_data": "qa:h:t1:0:0"}]]}
+    assert recompose_mirror_markup([], fresh) == fresh
+    assert recompose_mirror_markup([], None) is None
 
 
 def test_the_callback_decodes_to_a_key_or_a_refresh_and_nothing_else():

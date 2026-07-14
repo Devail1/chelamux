@@ -170,16 +170,24 @@ VERTICAL_ONLY_DIALOGS: frozenset[str] = frozenset({"RestoreCheckpoint"})
 MIRROR_SETTLE_S = 0.5
 
 
-def mirror_markup(ui_name: str = "") -> dict:
-    """The D-pad for a mirrored dialog — every key the TUI reads, as one keyboard.
+def mirror_markup(ui_name: str = "", answer_rows=None) -> dict:
+    """The mirrored dialog's keyboard: the ANSWER buttons, then the D-pad under them.
 
     ``ui_name`` is the mirrored :class:`~chela.telegram.panescan.Dialog`'s pattern name and
-    only shapes the *layout* (see :data:`VERTICAL_ONLY_DIALOGS`); an unknown name gets the
-    full pad, which is the right default — a mirror exists precisely for the dialogs we do
-    not recognise, and refusing them keys would defeat it.
+    only shapes the *layout* of the pad (see :data:`VERTICAL_ONLY_DIALOGS`); an unknown name
+    gets the full pad, which is the right default — a mirror exists precisely for the
+    dialogs we do not recognise, and refusing them keys would defeat it.
+
+    ``answer_rows`` (CMX-54) are the zero-keypress ``qa:h:`` option buttons for the question
+    the pane is currently on, when the daemon is holding that gate's hook open and the
+    mapping is provable (:func:`~chela.telegram.gatewatch.mirror_answer`). They sit **above**
+    the pad, on the same message, because the two are complementary and not alternatives:
+    the pane is the only surface that shows you *where you are*, and the buttons are the
+    only surface that answers with *no keystrokes*. Watch the cursor, or tap the answer —
+    the human's choice, in one message.
     """
     vertical_only = ui_name in VERTICAL_ONLY_DIALOGS
-    rows: list[list[dict]] = []
+    rows: list[list[dict]] = [list(row) for row in (answer_rows or [])]
     for row in MIRROR_KEYS:
         buttons = [
             {"text": label, "callback_data": f"{MIRROR_CB_PREFIX}{key_id}"}
@@ -189,6 +197,35 @@ def mirror_markup(ui_name: str = "") -> dict:
         if buttons:
             rows.append(buttons)
     return {"inline_keyboard": rows}
+
+
+def is_dpad_row(row) -> bool:
+    """Is this keyboard row part of the mirror's D-pad (rather than an answer button)?"""
+    return bool(row) and all(
+        str(button.get("callback_data", "")).startswith(MIRROR_CB_PREFIX) for button in row
+    )
+
+
+def recompose_mirror_markup(current_rows, answer_markup: dict | None) -> dict | None:
+    """Re-draw a tapped message's answer keyboard **without losing its D-pad**.
+
+    A hook option button is now carried on two surfaces: the CMX-49 card (options only) and
+    the mirror (options **above** the D-pad). After a tap, :mod:`chela.telegram.inbound`
+    redraws the tapped message's keyboard with the fresh one the draft book returns — the
+    ``☑`` ticks, the ``✓`` on the chosen option — and that keyboard knows nothing about a
+    D-pad. Redrawing a *mirror* with it verbatim would silently strip the pad off the
+    message the human is steering with.
+
+    So the pad is taken from the message being redrawn, not rebuilt from a name we would
+    have to re-derive: whichever rows of the live keyboard are D-pad rows are kept, under
+    the new answer rows. A message with no pad (a plain card) is unchanged, and a tap that
+    yields no keyboard returns ``None`` (nothing to redraw).
+    """
+    if answer_markup is None:
+        return None
+    rows = [list(row) for row in answer_markup.get("inline_keyboard") or []]
+    rows.extend([list(row) for row in (current_rows or []) if is_dpad_row(row)])
+    return {"inline_keyboard": rows} if rows else None
 
 
 def decode_mirror_callback(data: str) -> tuple[str, Any] | None:

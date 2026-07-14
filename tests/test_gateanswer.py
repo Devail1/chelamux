@@ -176,6 +176,65 @@ def test_the_gate_is_torn_down_once_it_is_answered(monkeypatch):
     assert not list(gateanswer.gates_dir().glob("*.json"))
 
 
+# --- the OTHER answer route: a ⏎ driven into the pane (CMX-54) ---------------------
+
+def test_a_gate_answered_AT_THE_TERMINAL_releases_the_held_hook_at_once(monkeypatch):
+    """The mirror is now the primary surface, so a held gate can be answered TWO ways.
+
+    A ⏎ on the mirrored pane answers the TUI directly and never comes through the
+    rendezvous — so the hook we are holding would wait out its whole budget for an answer
+    that is never coming, keeping one of the (bounded) wait slots occupied. The gate's
+    ``PostToolUse`` fires whichever way it was answered, and it is the signal that lets go.
+    """
+    monkeypatch.setenv("CHELA_GATE_WAIT_S", "30")   # a budget we must NOT sit out
+    thread, box = _in_thread(_answer)
+    _await_open()
+    started = time.monotonic()
+
+    gateanswer.gate_resolved(TUID)                  # ← the PostToolUse for that call
+
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "the hook sat out its budget on a gate that was over"
+    assert time.monotonic() - started < 3
+    # It gave up FAIL-OPEN, and answered nothing: the tool has already been answered at the
+    # terminal, and a decision here would be chela answering a question a second time.
+    assert box["result"] is None
+    assert not list(gateanswer.gates_dir().glob("*.json"))
+
+
+def test_a_tap_that_arrives_after_the_terminal_answered_is_REFUSED(monkeypatch):
+    # The other half of the interleaving: once the gate is gone, a tap cannot be re-aimed at
+    # whatever the agent is doing by now (CMX-32, from the other direction).
+    monkeypatch.setenv("CHELA_GATE_WAIT_S", "5")
+    thread, _box = _in_thread(_answer)
+    _await_open()
+    gateanswer.gate_resolved(TUID)
+    thread.join(timeout=5)
+
+    ok, reason = gateanswer.submit_answer(TUID, {"Which store?": "SQLite",
+                                                 "Which extras?": ["Metrics"]})
+    assert ok is False and "no longer waiting" in reason
+
+
+def test_a_post_tool_use_for_SOME_OTHER_call_never_releases_our_gate(monkeypatch):
+    # A PostToolUse fires for every tool call an agent makes; only the one bearing THIS
+    # gate's tool_use_id may end its wait. Releasing on someone else's would fail the gate
+    # open the moment the agent ran anything at all.
+    monkeypatch.setenv("CHELA_GATE_WAIT_S", "5")
+    thread, box = _in_thread(_answer)
+    _await_open()
+
+    gateanswer.gate_resolved("toolu_somethingelse")
+    gateanswer.gate_resolved(None)                  # a payload with no id at all
+    gateanswer.gate_resolved("../../etc/passwd")    # and a crafted one
+    assert gateanswer.open_gate(TUID) is not None, "our gate is still being held"
+
+    gateanswer.submit_answer(TUID, {"Which store?": "SQLite",
+                                    "Which extras?": ["Metrics"]})
+    thread.join(timeout=5)
+    assert box["result"] is not None, "the tap still answers the gate"
+
+
 # --- refusing --------------------------------------------------------------------
 
 def test_an_answer_for_a_gate_that_is_not_waiting_is_refused_and_reported():

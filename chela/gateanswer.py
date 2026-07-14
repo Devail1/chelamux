@@ -352,13 +352,48 @@ def submit_answer(tool_use_id: str, answers: dict) -> tuple[bool, str]:
     return True, "answered"
 
 
+def gate_resolved(tool_use_id) -> None:
+    """This gate was answered by SOMEONE ELSE — stop holding the agent. Idempotent.
+
+    The gate is now answerable **two ways at once** (CMX-54): a tap on the Telegram option
+    buttons, which comes back through this rendezvous, or the D-pad + ``⏎`` on the mirrored
+    pane, which answers the TUI directly and never touches these files. In the second case
+    the blocked hook is waiting for an answer that will never arrive, and would otherwise
+    sit out its whole budget holding one of the :func:`max_waits` slots — a corpse in a slot
+    the next gate cannot have.
+
+    So the gate's ``PostToolUse`` — which fires whichever way it was answered, and is the
+    only signal that does — tears the rendezvous down here (the dashboard calls this as it
+    ingests the event). :func:`wait_for_answer` notices the gate file is gone and gives up
+    **immediately**, failing OPEN: it returns no decision, which is exactly right, because
+    the tool has already been answered and there is nothing left to decide. It also makes a
+    later tap refuse itself — :func:`open_gate` finds nothing, and the human is told the
+    question is no longer waiting rather than having it re-aimed at whatever is on screen by
+    now.
+    """
+    if not isinstance(tool_use_id, str) or not _TUID_RE.match(tool_use_id):
+        return
+    path = _gate_path(tool_use_id)
+    if path.exists():
+        log.info("gateanswer: %s was answered at the terminal — releasing the held hook",
+                 tool_use_id)
+        _unlink(path)
+
+
 def wait_for_answer(tool_use_id: str, budget: float,
                     poll: float = POLL_INTERVAL,
-                    now=time.monotonic, sleep=time.sleep) -> dict | None:
+                    now=time.monotonic, sleep=time.sleep,
+                    resolved=None) -> dict | None:
     """Block until an answer lands for this gate, or the budget runs out (→ ``None``).
 
     ``None`` means **fail open**, never deny: the caller returns an empty hook response and
     the picker stays exactly as it was.
+
+    ``resolved()`` (when given) is the early exit for a gate that was answered **at the
+    terminal** while we were holding it (:func:`gate_resolved`): it is checked each poll and
+    a True gives up at once, releasing the wait slot instead of holding it for the rest of
+    the budget. It can only ever make this function return **sooner**, and only ever with
+    the same fail-open ``None`` — no branch here can deny anything, and none was added.
     """
     deadline = now() + budget
     path = _answer_path(tool_use_id)
@@ -366,6 +401,10 @@ def wait_for_answer(tool_use_id: str, budget: float,
         data = _read_json(path)
         if isinstance(data, dict) and isinstance(data.get("answers"), dict):
             return data["answers"]
+        if resolved is not None and resolved():
+            log.info("gateanswer: %s resolved without us — the hook returns now, not in "
+                     "%.0fs", tool_use_id, budget)
+            return None
         if now() >= deadline:
             return None
         sleep(min(poll, max(0.0, deadline - now())))
@@ -489,7 +528,13 @@ def answer_permission_request(body: dict, *, wid_for=None, pending=None,
         })
         log.info("gateanswer: holding %s on %s for up to %.0fs", gate.tool_use_id, wid,
                  budget)
-        answers = wait_for_answer(gate.tool_use_id, budget)
+        # …but only until it is answered, by whichever route. A ⏎ on the mirrored pane
+        # answers the TUI directly and never comes through here; its `PostToolUse` unlinks
+        # the gate file (:func:`gate_resolved`) and this wait ends on the next poll rather
+        # than holding a slot for the rest of the budget.
+        gate_path = _gate_path(gate.tool_use_id)
+        answers = wait_for_answer(
+            gate.tool_use_id, budget, resolved=lambda: not gate_path.exists())
     finally:
         close_gate(gate.tool_use_id)
         _release_slot()
