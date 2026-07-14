@@ -44,7 +44,7 @@
 
   ⚠️ **THE IRONY YOU MUST NOT COMMIT: the judge is itself a guard. CORRUPT IT AND WATCH IT GO RED, or you have built the very thing it exists to catch.** Feed it a PR whose guard you have *deliberately* broken and confirm it BLOCKS; feed it a genuinely good PR and confirm it does NOT.
 
-- [ ] **🚨 THE TEST SUITE RUNS THE PRODUCTION DISPATCHER AGAINST THE PRODUCTION TRACKER — AND IT IS BLOCKING THE JUDGE.** ⛔ **HIGHEST PRIORITY: nothing can be adjudicated until this is fixed.**
+- [x] **🚨 THE TEST SUITE RUNS THE PRODUCTION DISPATCHER AGAINST THE PRODUCTION TRACKER — AND IT IS BLOCKING THE JUDGE.** ⛔ **HIGHEST PRIORITY: nothing can be adjudicated until this is fixed.**
 
   **WHAT IT ACTUALLY DOES.** `tests/test_graceful_shutdown.py` spawns a **REAL daemon** (`python -m chela.main run`) with `CHELA_DIR` pointed at a `tmp_path`. But ⛔ **`CHELA_DIR` does NOT isolate worktrees** — the workspace root comes from **`WORKFLOW.md`'s `workspace.root`** (`workflow.py:235`), which the test daemon reads from the **REAL repo**. So it loads the **real `WORKFLOW.md`**, the **real `TODO.md`**, and **dispatches REAL OPEN TASKS into the REAL `~/.chela/worktrees/`.** Captured 2026-07-14:
   ```
