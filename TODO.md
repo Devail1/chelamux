@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **🧭 THE OUTBOUND RELAY MUST RESOLVE `wid → transcript` BY `session_id`, NOT BY `cwd`.** ⛔ **The transcript monitor is the LAST consumer still correlating on `cwd` — the exact key PR #61 already ripped out of the event log (CMX-48: events "filed against the **wrong window**").** `monitor._default_resolver` does `discovery.get_window_cwd_by_id(wid)` → `transcripts.transcript_for_cwd(cwd)` → *newest `*.jsonl` in `~/.claude/projects/<encoded-cwd>/`*. Its docstring asserts *"tmux is the source of truth"* for this mapping. **That assertion is FALSE, and it failed live on 2026-07-14.**
+- [x] **🧭 THE OUTBOUND RELAY MUST RESOLVE `wid → transcript` BY `session_id`, NOT BY `cwd`.** ⛔ **The transcript monitor is the LAST consumer still correlating on `cwd` — the exact key PR #61 already ripped out of the event log (CMX-48: events "filed against the **wrong window**").** `monitor._default_resolver` does `discovery.get_window_cwd_by_id(wid)` → `transcripts.transcript_for_cwd(cwd)` → *newest `*.jsonl` in `~/.claude/projects/<encoded-cwd>/`*. Its docstring asserts *"tmux is the source of truth"* for this mapping. **That assertion is FALSE, and it failed live on 2026-07-14.**
 
   🔑 **THE FAILURE IS SILENT — that is what makes it worth fixing over merely surviving.** No transcript resolved → resolver returns `None` → **nothing to relay, no error, no warning, no log line.** The bridge looks perfectly healthy: bindings reconcile, topics get created, **inbound works** (it only needs the `wid`). The human just… never hears back. Liav sat in front of a live nautilus topic sending messages that landed, receiving nothing, with every health surface green. ⛔ **Whatever you build, a resolver that finds no transcript must be LOUD.**
 
