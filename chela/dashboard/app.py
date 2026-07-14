@@ -1625,6 +1625,12 @@ def api_hooks(event):
         return jsonify({})
     body = request.get_json(force=True, silent=True)
     hooks.ingest(event, body)
+    if event == "PostToolUse" and isinstance(body, dict):
+        # The gate is over — whoever answered it. A ⏎ driven into the mirrored pane answers
+        # the TUI directly, so a hook we are holding for that same call would otherwise wait
+        # out its whole budget for an answer that is never coming, holding a wait slot the
+        # next gate needs (CMX-54). This is the one signal that fires on BOTH answer routes.
+        gateanswer.gate_resolved(body.get("tool_use_id"))
     if event == "PermissionRequest" and isinstance(body, dict):
         try:
             answer = gateanswer.answer_permission_request(body)

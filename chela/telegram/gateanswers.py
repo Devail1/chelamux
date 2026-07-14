@@ -84,6 +84,22 @@ class Drafts:
     def forget(self, tool_use_id: str) -> None:
         self._drafts.pop(tool_use_id, None)
 
+    def selected(self, tool_use_id: str, question_index: int) -> set[int]:
+        """Which option ordinals of a question are toggled right now — for the OTHER surface.
+
+        A hook option button is carried on two messages: the CMX-49 card and the pane mirror
+        (CMX-54). The tapped one is redrawn from the :class:`Tap` this book returns; the
+        other is re-rendered on the next poll and has to ask, or its ``☑`` ticks would
+        disagree with the card's and the human would not know which set they are about to
+        send.
+        """
+        gate = self._open_gate(tool_use_id)
+        if gate is None or not 0 <= question_index < len(gate.questions):
+            return set()
+        picked = (self._drafts.get(tool_use_id) or _Draft()).picks.get(question_index) or []
+        labels = _labels(gate.questions[question_index])
+        return {i for i, label in enumerate(labels) if label in picked}
+
     def pick(self, tool_use_id: str, question_index: int, option_index: int) -> Tap:
         """Tap option ``option_index`` of question ``question_index``.
 
