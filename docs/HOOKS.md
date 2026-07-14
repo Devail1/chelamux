@@ -29,6 +29,40 @@ they stay: **hooks are read at agent startup**, so a fleet that is already runni
 none, and a fleet member launched without the plugin never will. Hooks are the better
 channel; they are not yet the *only* channel, and nothing here assumes they are.
 
+## The log is what a relayed gate is RENDERED from
+
+Still observe-only — the endpoint answers nothing — but the payload is no longer written
+and forgotten. When the Telegram relay sees an `AskUserQuestion` selector on a window's
+pane, the *content* it posts comes from that window's pending `hook.pre_tool_use`
+(`chela/telegram/hookgate.py`), not from the scrape: every question, every option's
+`label`, `description` **and** `preview`, one Telegram message per question.
+
+That matters because the scrape is lossy in a way that has no fix. Its option patterns
+were measured against *one* selector shape; a **multi-question** selector draws a tab
+strip, and an option carrying a **`preview`** re-lays the TUI out side-by-side so the
+option rows no longer start their line. Either one alone parses as "unparseable", and the
+question lands on the phone with **no options at all** — which is exactly what happened
+live on 2026-07-14, while the log already held the whole payload. The scraper will keep
+meeting shapes it was not measured against; the hook is handed the structure.
+
+The split, then:
+
+* **the hook payload is the CONTENT** — a `pre_tool_use` for an interactive tool
+  (`AskUserQuestion` / `ExitPlanMode`) with no `post_tool_use` bearing the same
+  `tool_use_id` is *pending*. `PreToolUse` and not `PermissionRequest`, because only
+  `PreToolUse` carries a `tool_use_id` — without one there is nothing to pair a resolution
+  against;
+* **the pane is the LIVENESS** — a pending call with no result could equally mean the
+  agent *died* at the gate, so nothing is posted for a window whose pane is not showing a
+  selector right now. It also stays the whole content source for a **pre-plugin** agent,
+  which emits no hooks at all.
+
+Answering is still keystroke injection, so the tap-to-answer buttons are attached only
+where their ordinal mapping can be *proven* (one question, single-select, options the
+scraper could count). For a multi-question or `multiSelect` gate the card renders in full,
+offers the nav keys, and says outright that it must be answered in the terminal — a button
+that silently picks the wrong option is worse than no button.
+
 ## Install
 
 chela ships the hooks as a **plugin**, and never by writing your `settings.json` — that
