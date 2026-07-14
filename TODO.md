@@ -2,7 +2,7 @@
 
 ## Open — retire the bug class
 
-- [ ] **🧭 THE RUNTIME-TRUTH REGISTRY — retire the class, not the tenth instance of it.** **NINE times on 2026-07-13/14, chela checked the artifact it PRODUCED instead of the one that RUNS.** Every one was green everywhere while the feature was dead or the state was being corrupted:
+- [x] **🧭 THE RUNTIME-TRUTH REGISTRY — retire the class, not the tenth instance of it.** **NINE times on 2026-07-13/14, chela checked the artifact it PRODUCED instead of the one that RUNS.** Every one was green everywhere while the feature was dead or the state was being corrupted:
   | | the artifact we wrote | the artifact that actually ran |
   |---|---|---|
   | CMX-41 | `chela plugin` rendered port **5001** | dashboard **bound 5005** → every hook POSTed into a closed socket; the whole feature silently dead |
