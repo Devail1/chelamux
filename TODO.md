@@ -17,6 +17,32 @@
 
   ⚠️ **THE BUG CLASS, AGAIN (see the 07-14 handoff):** *the artifact you WROTE is not the artifact that RUNS.* A fixture that hands the resolver a tidy cwd reproduces the blind spot instead of the bug. **Drive it live: a real `--resume`, from a window whose cwd is NOT the session's origin dir, and watch the message actually arrive in Telegram.**
 
+- [ ] **🪟 THE SIDEBAR: COLLAPSIBLE ON DESKTOP · KILL THE FILTER · FOLD `Launch` INTO ITS DROPDOWN.** Today `index.html` stacks **three** sections — `Navigate` · `Launch` (Favorites + Recent) · `Sessions` (with a **4-chip `All/Claude/Shell/Server` filter row**). **Target: two sections (`Navigate` + `Sessions`), zero filter chips, collapsible.** Liav, 07-14, after living in it.
+
+  1. **COLLAPSIBLE ON DESKTOP.** ⛔ **Do NOT write a second toggle.** `chela.toggleSidebar()` + `#btn-menu` + `.drawer-scrim` **already exist** — they are wired **mobile-drawer-only**. Extend the SAME control to desktop: expanded ⇄ **icon rail** (see the ASCII target below). **Persist the state** (localStorage) — a collapse that forgets itself on reload is an annoyance, not a feature. Keep the scrim/off-canvas behaviour **unchanged on mobile**.
+  2. **DELETE THE `All/Claude/Shell/Server` FILTER.** 🔑 **A filter earns its chrome only when the list outruns the viewport — this one never does** (a live fleet is ~3–6 windows, always fully visible), and it burns a permanent row to filter a list you can already see. **⌘K already does jump-to.** Remove the chips + `chela.setAgentFilter()` and its state. **The TYPE stays as a per-row cue, it just stops being a filter.**
+  3. 🔴 **THE TYPE CUE MUST NOT BE HUE-ALONE — Liav is RED-WEAK (deuteranomaly).** ⛔ **Three coloured dots for `claude`/`shell`/`server` is EXACTLY the failure mode.** Use a **glyph or letter** as the primary channel (e.g. `C` / `$` / `⚙`), with colour as **reinforcement only**, from an **Okabe-Ito** palette. **The row must stay fully readable in greyscale — test it that way.** → [[user_colorblind]]
+  4. **FOLD `Launch` INTO THE LAUNCH DROPDOWN.** 🔑 **Favorites/Recent are LAUNCH affordances, not NAVIGATION — they were never sidebar-shaped.** Move both into the existing `New…`/launch menu (`chela.openNewMenu`) as **divided sections** (`FAVORITES` ── `RECENT`). Keep every behaviour: click-to-launch, the ★ pin/unpin, the `×` forget-a-recent, the `+` add-a-favourite (`chela.openFavAdd`). ⛔ **This DELETES the `#launcher-section` — it does not merely compress it.** `{% if terminals_enabled %}` gating must survive the move.
+  5. **Only then, spacing.** With one section gone and the chips gone, the density problem is mostly solved. **Tighten gaps last, and only if it still reads cramped** — ⛔ do not open with a CSS gap pass; that is treating the symptom.
+
+  **Target shape:**
+  ```
+  BEFORE                  AFTER (expanded)     AFTER (collapsed)   Launch ▾ (dropdown)
+  ┌──────────────┐        ┌──────────────┐     ┌────┐              ┌──────────────┐
+  │ Navigate     │        │ Navigate     │     │ ▤  │              │ FAVORITES    │
+  │  Wall/Feed…  │        │  Wall/Feed…  │     │ ▦  │              │  chelamux    │
+  │──────────────│        │──────────────│     │────│              │  nautilus    │
+  │ Launch    +  │  ───▶  │ Sessions 3/4 │     │ ●  │              │ ──────────── │
+  │  ★ chelamux  │        │  C nautilus  │     │ ●  │              │ RECENT       │
+  │  ⏱ carmel    │        │  S liavedunix│     │ ●  │              │  carmel      │
+  │──────────────│        └──────────────┘     └────┘              │  lea-levy    │
+  │ Sessions 3/4 │                                                 └──────────────┘
+  │ [All][Claude]│         2 sections, 0 chips, collapsible
+  │ [Shell][Srv] │
+  └──────────────┘         3 sections + 4 chips
+  ```
+  ⚠️ **`nav.js` renders `Navigate` from the view REGISTRY (`views.js`) — do NOT hand-write nav rows into `index.html`.** ⛔ **And do not touch `_termSig` / `buildWall` (`terminals.js`): if sidebar state leaks into the wall's render-cache key, `buildWall` does `innerHTML =` and EVERY live terminal in the fleet reloads** (the CMX-67 trap — collapsing the sidebar resizes the canvas, so this is a *live* risk here, not a theoretical one). **Collapse the sidebar with a real fleet running and confirm no terminal reloads.**
+
 - [ ] **📵 AUTO-TOPICS MUST NOT BIND DISPATCHER-SPAWNED AGENTS BY DEFAULT — but a BLOCKED one must still reach the phone.** Today `reconcile_bindings` binds **every** live *agent* window (`live_agent_windows()` — it only skips shells/servers), so **every `cmx-N` worker churns a Telegram topic**: created on spawn, closed on exit. Observed 07-14: topics `4773 (@118 cmx-69)`, `4897 (@122 cmx-69)`, `@8 cmx-70` — created and destroyed within the hour. **The forum is a human's inbox; a fleet of short-lived workers turns it into a changelog.** Liav's call, 07-14: *"I don't think we should bind topics to workflow agents, or at least default to off."*
 
   1. **IDENTIFY A DISPATCHED WINDOW FROM THE RUN ROW, NOT THE NAME.** ⛔ **Do NOT regex the window name for `cmx-\d+`.** The `runs` table **owns** the `wid` of every window the dispatcher spawned — read it back from the owner (the same runtime-truth rule CMX-69 turned into a merge gate). A name is a label; the run row is a fact.
