@@ -14,7 +14,11 @@
 
   <!-- Top bar: brand · usage pills · actions -->
   <header class="topbar">
-    <button class="icon-btn sidebar-toggle" id="btn-menu" title="Menu" aria-label="Open menu" onclick="chela.toggleSidebar()">
+    <!-- ONE sidebar control, two behaviours (nav.js toggleSidebar): a phone slides
+         the off-canvas drawer in over a scrim; a desktop collapses the column to an
+         icon rail (persisted). -->
+    <button class="icon-btn sidebar-toggle" id="btn-menu" title="Toggle sidebar"
+            aria-label="Toggle sidebar" aria-expanded="true" onclick="chela.toggleSidebar()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <div class="brand"><img src="static/img/claw-mark.svg" class="brand-mark" alt=""><span>chela</span></div>
@@ -44,7 +48,9 @@
     </div>
   </header>
 
-  <!-- Left sidebar: Navigate (views) · Launch (projects) · Sessions (live agents) -->
+  <!-- Left sidebar: Navigate (views) · Sessions (live agents). TWO sections, no
+       filter chips. Favorites/Recent are LAUNCH affordances, not navigation — they
+       live in the "+" launch menu (#new-menu) now, not in a third section here. -->
   <aside class="sidebar">
 
     <!-- Primary navigation. NOT written here: nav.js renders these rows from the
@@ -55,32 +61,15 @@
       <div class="side-list" id="side-nav"></div>
     </section>
 
-    {% if terminals_enabled %}
-    <section class="side-section" id="launcher-section">
-      <div class="side-head" title="Launch a Claude agent in a project directory">
-        <span class="side-title">Launch</span>
-        <button class="side-add" title="Add a project to Favorites"
-                onclick="event.stopPropagation(); chela.openFavAdd(event)">+</button>
-      </div>
-      <div class="side-list" id="launcher-list">
-        <div class="side-empty">No projects yet</div>
-      </div>
-    </section>
-    {% endif %}
-
     <!-- Live tmux sessions. The header is a plain label; click a row to land on
-         its pane (selectAgent → focusPaneByWid). -->
+         its pane (selectAgent → focusPaneByWid). A live fleet is a handful of
+         windows and always fits the viewport, so there is no type filter — the
+         window type is a per-row cue (glyph + colour), not a way to hide rows. -->
     <section class="side-section">
       <div class="side-head">
         <span class="side-title">Sessions</span>
         <span class="side-count" id="hdr-agents">-/-</span>
         <button class="side-add" title="New window" onclick="event.stopPropagation(); chela.openNewMenu(event)">+</button>
-      </div>
-      <div class="agent-filter" id="agent-filter">
-        <button data-filter="all" class="active" onclick="chela.setAgentFilter('all')">All</button>
-        <button data-filter="claude" onclick="chela.setAgentFilter('claude')">Claude</button>
-        <button data-filter="shell" onclick="chela.setAgentFilter('shell')">Shell</button>
-        <button data-filter="server" onclick="chela.setAgentFilter('server')">Server</button>
       </div>
       <div class="side-list" id="sidebar-agents">
         <div class="side-empty">No agents</div>
@@ -395,8 +384,16 @@
   </div>
 </aside>
 
-<!-- "+ new" popover -->
-<div class="popover" id="new-menu" style="display:none;">
+<!-- "+ new" popover — the LAUNCH surface. Favorites + Recent used to be a third
+     sidebar section; they are launch affordances, so they live here, above the
+     other "new…" actions. launcher.js renders #new-menu-launch (click-to-launch,
+     ★ pin/unpin, × forget, + add-a-favourite); it stays empty when terminals are
+     off, and the whole block is gated on that flag. -->
+<div class="popover launch-menu" id="new-menu" style="display:none;">
+  {% if terminals_enabled %}
+  <div id="new-menu-launch"></div>
+  <div class="popover-sep"></div>
+  {% endif %}
   <div class="popover-item" onclick="chela.hideNewMenu(); chela.openInitRepo()">Init a repo</div>
   <div class="popover-item" onclick="chela.hideNewMenu(); chela.showAddSchedule()">Scheduled task</div>
   <div class="popover-item" id="new-shell-item" onclick="chela.hideNewMenu(); chela.newShellWindow()">Shell window</div>
