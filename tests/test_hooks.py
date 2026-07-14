@@ -10,7 +10,9 @@ What these lock in, in the order an agent's safety depends on it:
   * an AskUserQuestion's per-option ``label`` and ``description`` survive into the log —
     the whole reason hooks beat the transcript is that they carry the full ``tool_input``
     *before* the answer, and clipping a huge payload must not take them out;
-  * correlation to a window is off ``cwd``, and AMBIGUITY RESOLVES TO NONE — a wrongly
+  * correlation to a window is off the session's ORIGIN directory — never off ``cwd``,
+    which moves the moment an agent ``cd``s (CMX-48: that filed the orchestrator's every
+    event against another agent's window) — and AMBIGUITY RESOLVES TO NONE: a wrongly
     filed event is worse than an unfiled one;
   * the committed plugin manifest still matches the spec the code generates.
 
@@ -23,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from chela import event_log, hooks
+from chela import event_log, hooks, transcripts
 from chela.dashboard import app as dash
 
 REPO = Path(__file__).resolve().parent.parent
@@ -197,50 +199,117 @@ def test_ingest_swallows_an_append_failure(monkeypatch):
     assert hooks.ingest("PreToolUse", _body()) is None
 
 
-# --- correlation: cwd -> window, with no pane read -------------------------------
+# --- correlation: session -> window, with no pane read ----------------------------
+#
+# CMX-48. Correlation used to match the payload's `cwd` against `#{pane_current_path}`,
+# and `cwd` is not an identity: the orchestrator (window @0, launched in ~) `cd`-ed into
+# the chelamux repo, and every one of its events was then filed against @1 — the window
+# of a DIFFERENT agent, which genuinely lives there. The key is now the session's ORIGIN
+# directory, encoded as the project slug Claude Code writes its transcript under, which
+# is fixed at session start and survives any `cd`.
 
 def _panes(mapping):
-    return lambda force=False: mapping
+    """``{origin cwd: [(wid, command), …]}`` — keyed as the pane table really is."""
+    return lambda force=False: {
+        transcripts.encode_cwd(cwd): panes for cwd, panes in mapping.items()
+    }
 
 
-def test_correlates_a_cwd_to_its_window(monkeypatch, tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    monkeypatch.setattr(hooks, "_panes", _panes({str(repo): [("@3", "claude")]}))
-    assert hooks.wid_for_cwd(str(repo)) == "@3"
+def _slugless():
+    """Clear the process-lifetime session→slug cache between tests."""
+    hooks._slug_cache.clear()
 
 
-def test_two_agents_in_one_cwd_correlate_to_nothing(monkeypatch, tmp_path):
+@pytest.fixture(autouse=True)
+def clean_slug_cache():
+    _slugless()
+    yield
+    _slugless()
+
+
+def test_correlates_a_session_to_its_window(monkeypatch):
+    monkeypatch.setattr(hooks, "_panes", _panes({"/repo": [("@3", "claude")]}))
+    assert hooks.wid_for_session("s1", "/p/projects/-repo/s1.jsonl") == "@3"
+
+
+def test_a_cd_ed_agent_is_filed_against_its_OWN_window(monkeypatch):
+    """THE bug. @0 was launched in ~ and `cd`-ed into the repo where @1 lives.
+
+    Its payload `cwd` is now @1's directory — and it must STILL resolve to @0. This is
+    the exact event that was filed against the wrong agent.
+    """
+    monkeypatch.setattr(hooks, "_panes", _panes({
+        "/home/u": [("@0", "claude")],          # the orchestrator, launched in ~
+        "/home/u/repo": [("@1", "claude")],     # a different agent, living in the repo
+    }))
+    record = hooks.ingest("PreToolUse", _body(
+        session_id="cf19ca61-ffbb-4dbf-a8c7-66b74294fa69",
+        transcript_path="/p/projects/-home-u/cf19ca61-ffbb-4dbf-a8c7-66b74294fa69.jsonl",
+        cwd="/home/u/repo",                     # the mutable thing — a red herring now
+    ))
+    assert record["wid"] == "@0"
+
+
+def test_a_worktree_agent_still_correlates(monkeypatch):
+    """The dispatcher's agents are launched IN their worktree — don't break them."""
+    wt = "/home/u/.chela/worktrees/proj/958d67d435b2"
+    monkeypatch.setattr(hooks, "_panes", _panes({wt: [("@43", "claude")]}))
+    slug = transcripts.encode_cwd(wt)
+    assert hooks.wid_for_session("s9", f"/p/projects/{slug}/s9.jsonl") == "@43"
+
+
+def test_two_agents_in_one_origin_correlate_to_nothing(monkeypatch):
     """A wrongly filed event is worse than an unfiled one — never guess."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
     monkeypatch.setattr(
-        hooks, "_panes", _panes({str(repo): [("@3", "claude"), ("@7", "claude")]}))
-    assert hooks.wid_for_cwd(str(repo)) is None
+        hooks, "_panes", _panes({"/repo": [("@3", "claude"), ("@7", "claude")]}))
+    assert hooks.wid_for_session("s1", "/p/projects/-repo/s1.jsonl") is None
 
 
-def test_a_shell_pane_does_not_shadow_the_agent(monkeypatch, tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def test_a_shell_pane_does_not_shadow_the_agent(monkeypatch):
     monkeypatch.setattr(
-        hooks, "_panes", _panes({str(repo): [("@2", "bash"), ("@3", "claude")]}))
-    assert hooks.wid_for_cwd(str(repo)) == "@3"
+        hooks, "_panes", _panes({"/repo": [("@2", "bash"), ("@3", "claude")]}))
+    assert hooks.wid_for_session("s1", "/p/projects/-repo/s1.jsonl") == "@3"
 
 
-def test_an_unknown_cwd_correlates_to_nothing(monkeypatch):
-    monkeypatch.setattr(hooks, "_panes", _panes({"/elsewhere": [("@3", "claude")]}))
-    assert hooks.wid_for_cwd("/repo") is None
-    assert hooks.wid_for_cwd(None) is None
+def test_an_unknown_session_correlates_to_nothing_not_to_a_cwd_guess(monkeypatch):
+    """An unresolvable session is None. It is NEVER the window whose cwd happens to
+    match — that fallback is the bug, and it does not exist any more."""
+    monkeypatch.setattr(hooks, "_panes", _panes({"/repo": [("@3", "claude")]}))
+    monkeypatch.setattr(hooks, "_slug_from_disk", lambda session_id: None)
+    # cwd IS /repo, and /repo IS @3 — and the answer is still None.
+    assert hooks.wid_for_session("unknown", None) is None
+    assert hooks.ingest("PreToolUse", _body(
+        session_id="unknown", transcript_path=None, cwd="/repo"))["wid"] is None
+    assert hooks.wid_for_session(None, None) is None
+
+
+def test_a_session_with_no_transcript_path_is_found_on_disk(monkeypatch, tmp_path):
+    """The fallback for a payload that carries no `transcript_path`."""
+    session = "e2b61683-9f3a-4c30-bff0-f4fc487a4e77"
+    projects = tmp_path / "projects"
+    (projects / "-repo").mkdir(parents=True)
+    (projects / "-repo" / f"{session}.jsonl").write_text("{}\n")
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", projects)
+    monkeypatch.setattr(hooks, "_panes", _panes({"/repo": [("@3", "claude")]}))
+    assert hooks.wid_for_session(session, None) == "@3"
+
+
+def test_a_session_id_cannot_walk_out_of_the_projects_dir(monkeypatch, tmp_path):
+    """It is pasted into a glob. It is validated, not trusted."""
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    assert hooks.session_slug("../../etc/passwd", None) is None
 
 
 def test_the_event_still_lands_when_the_window_is_unknown():
     record = hooks.ingest("PreToolUse", _body())
     assert record["wid"] is None
     assert record["payload"]["cwd"] == "/repo"      # nothing is lost but the shortcut
+    assert record["session_id"] == _body()["session_id"]
 
 
 def test_correlation_reads_tmux_once_not_the_pane(monkeypatch):
-    """One `tmux list-windows`, no pgrep, no capture-pane — an agent is blocked on this."""
+    """One `tmux list-windows`, no pgrep, no capture-pane, no /proc walk — an agent is
+    BLOCKED on this, at PreToolUse volume."""
     calls = []
 
     class Result:
@@ -254,17 +323,32 @@ def test_correlation_reads_tmux_once_not_the_pane(monkeypatch):
     monkeypatch.setenv("CHELA_TMUX_SESSION", "chela")      # as PM2 pins it
     monkeypatch.setattr(hooks, "_panes", _REAL_PANES)      # undo the autouse stub
     monkeypatch.setattr(hooks.subprocess, "run", fake_run)
-    monkeypatch.setattr(hooks, "_panes_cache", {"ts": 0.0, "by_cwd": {}})
+    monkeypatch.setattr(hooks, "_panes_cache", {"ts": 0.0, "by_slug": {}})
 
-    assert hooks.wid_for_cwd("/repo") == "@3"
+    assert hooks.wid_for_session("s1", "/p/projects/-repo/s1.jsonl") == "@3"
     assert len(calls) == 1
     assert calls[0][:2] == ["tmux", "list-windows"]
 
     # A second event inside the TTL costs nothing at all.
-    assert hooks.wid_for_cwd("/repo") == "@3"
+    assert hooks.wid_for_session("s1", "/p/projects/-repo/s1.jsonl") == "@3"
     assert len(calls) == 1
     flat = [arg for call in calls for arg in call]
     assert not any("capture-pane" in a or "pgrep" in a for a in flat)
+
+
+def test_the_slug_is_resolved_once_and_cached(monkeypatch):
+    """The session→slug half must not hit the disk per event either."""
+    globs = []
+
+    def counting_glob(session_id):
+        globs.append(session_id)
+        return "-repo"
+
+    monkeypatch.setattr(hooks, "_slug_from_disk", counting_glob)
+    monkeypatch.setattr(hooks, "_panes", _panes({"/repo": [("@3", "claude")]}))
+    for _ in range(20):
+        assert hooks.wid_for_session("s1", None) == "@3"      # no transcript_path
+    assert len(globs) == 1
 
 
 # --- the endpoint ----------------------------------------------------------------

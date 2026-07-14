@@ -87,15 +87,53 @@ one constraint: *a slow or crashing hook stalls or breaks somebody's session.*
 
 ## Correlating an event to a window, without the pane
 
-A hook payload carries `cwd` and `session_id`. It does not carry a tmux window, and going
-back to the pane to find one would reinvent the thing this replaces. So `cwd` is matched
-against `#{pane_current_path}` in a single `tmux list-windows` call (~5 ms, cached ~1 s) —
-a Claude Code agent *is* its pane's process, so the two are the same directory.
+A hook payload carries `cwd`, `session_id` and `transcript_path`. It does not carry a tmux
+window, and going back to the pane to find one would reinvent the thing this replaces.
 
-**Ambiguity resolves to `None`, never to a guess.** Two agents in one cwd cannot be told
-apart, and an event filed against the *wrong* window is worse than one filed against no
-window — the `cwd` and `session_id` are in the payload regardless, so nothing is lost but
-the shortcut.
+**The key is the session's ORIGIN directory — the directory `claude` was launched in.**
+⛔ **It is emphatically not `cwd`.** `cwd` is the session's *current* directory: it moves
+the moment an agent `cd`s, which is completely normal, and the pane's `#{pane_current_path}`
+moves too. Keying on it produced not ambiguity but a **confidently wrong answer** — the
+orchestrator (window `@0`, launched in `~`) `cd`-ed into the chelamux repo to work, and
+every one of its events was then filed against `@1`, the window of a *different* agent who
+genuinely lives there. A per-window timeline built on that key would simply lie.
+
+The origin directory is immutable on both sides, and three measured facts (Claude Code
+2.1.207) make it free to read:
+
+1. a session's transcript lives at `~/.claude/projects/<slug>/<session_id>.jsonl`, and
+   `<slug>` is derived from the origin directory **once, at session start**. It does not
+   follow a `cd` — the orchestrator's session still writes to the `~` slug while its
+   payloads report the repo;
+2. **every payload carries `transcript_path`**, so the slug is already in the event — no
+   filesystem access, no `/proc` walk, no `pgrep`;
+3. Claude Code **never `chdir`s its own process** (it tracks the working directory
+   internally — which is exactly why the payload `cwd` and the process cwd disagree). So
+   `#{pane_current_path}` of a `claude` pane *is* that pane's origin directory, and
+   encoding it yields the same slug.
+
+So the lookup stays a single `tmux list-windows` call (~5 ms, cached ~1 s, keyed by slug)
+plus a dict hit. The session→slug half is cached for the life of the process — a session's
+origin never changes. A payload with no `transcript_path` falls back to one glob of
+`~/.claude/projects/*/<session_id>.jsonl`, on a cache miss only.
+
+**Ambiguity resolves to `None`, never to a guess.** Two agents launched in one directory
+cannot be told apart, and an unknown session resolves to `None` — **never** to the window
+whose `cwd` happens to match, because that fallback *is* the bug. An event filed against
+the *wrong* window is worse than one filed against no window; the `session_id`, `cwd` and
+`transcript_path` are in the payload regardless, so nothing is lost but the shortcut.
+
+A **subagent**'s hooks carry its parent's `session_id`, so they resolve to the parent's
+window. That is the right answer rather than a near-miss: the subagent runs inside that
+agent, in that window, and has no window of its own.
+
+> ⚠️ **`hook.*` records written before this fix (CMX-48) have unreliable `wid`s** — any
+> event from an agent that had `cd`-ed away from its origin was filed against whichever
+> window happened to sit in that directory. They are left in `events.jsonl` as written:
+> the log is append-only, and the pane table that produced them is gone, so a rewrite
+> would only be a *different* guess. Their `session_id` and `transcript_path` are intact,
+> so a reader can re-derive the truth — but if you are about to build a per-window UI on
+> the log, drop the old hook lines rather than render them.
 
 ## What actually fires (measured on Claude Code 2.1.207)
 
