@@ -27,9 +27,22 @@ from pathlib import Path
 
 import pytest
 
-from chela import capabilities, config, discovery, dispatcher, doctor, hooks, main, runtime_truth
+from chela import (
+    capabilities,
+    config,
+    discovery,
+    dispatcher,
+    doctor,
+    hooks,
+    main,
+    runtime_truth,
+    sessions,
+    transcripts,
+)
+from chela.telegram import bindings
 
 PORT = 5005
+SESSION = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"
 
 
 @pytest.fixture
@@ -101,6 +114,23 @@ def fleet(tmp_path, monkeypatch):
         runtime_truth, "collected_js_suites",
         lambda root: runtime_truth.observed(set(runtime_truth._js_suites_on_disk())))
     monkeypatch.setattr(runtime_truth, "_collector_applies", lambda: True)
+
+    # the relay: @1 is bound to a Telegram topic, and the agent in it is really writing the
+    # transcript chela would relay. The OWNER here is that file on disk — the corruption
+    # below deletes it, which is the 2026-07-14 outage exactly (a bound window whose
+    # transcript cannot be found relays NOTHING, in silence).
+    projects = tmp_path / "projects"
+    agent_cwd = str(tmp_path / "agent")
+    (projects / transcripts.encode_cwd(agent_cwd)).mkdir(parents=True)
+    (projects / transcripts.encode_cwd(agent_cwd) / f"{SESSION}.jsonl").write_text(
+        '{"type":"assistant","timestamp":"2026-07-14T12:00:00Z"}\n')
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", projects)
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {"@1": sessions.Pane(
+        wid="@1", path=agent_cwd, command="claude", claude_pid=1, launched_in=agent_cwd)})
+    registry = bindings.BindingRegistry(chat_id="-100")
+    registry.bind("@1", 42)
+    registry.set_topic_name("@1", "cmx-66")
+    registry.save(bindings.default_bindings_path())
     return tmp_path
 
 
@@ -244,7 +274,23 @@ def _unreadable_pr_checks(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_relay_transcripts(tmp_path, monkeypatch):
+    """The bound window's transcript is not where chela looks — the 2026-07-14 outage.
+
+    Live, the cause was a `claude --resume` whose transcript stayed in the project dir the
+    session was BORN in while the monitor searched the pane's cwd; here it is simply gone.
+    Either way the window is bound to a topic and relays NOTHING, and every other surface
+    stays green: the binding reconciles, the topic exists, inbound still works. The relay
+    was dead for an hour and the only thing that ever noticed was a human wondering why the
+    agent had gone quiet.
+    """
+    for path in (tmp_path / "projects").rglob("*.jsonl"):
+        path.unlink()
+    return doctor.ERROR
+
+
 CORRUPTIONS = {
+    "relay.transcripts": _break_relay_transcripts,
     "env.file": _break_env_file,
     "env.running": _break_env_running,
     "tmux.session": _break_tmux_session,

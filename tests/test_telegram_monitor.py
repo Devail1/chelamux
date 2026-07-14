@@ -327,3 +327,144 @@ def test_parse_entries_returns_unmatched_pending():
     assert events2[0].content_type == "tool_result"
     assert events2[0].tool_name == "Grep"
     assert pending2 == {}
+
+
+# --------------------------------------------------------------------------
+# resolution: by session id, NOT by cwd (CMX-70)
+#
+# The monitor used to resolve a window through `discovery.get_window_cwd_by_id` →
+# `transcripts.transcript_for_cwd`, and asserted in its own docstring that "tmux is the
+# source of truth" for that mapping. It is not: a window rebuilt in one directory running
+# `claude --resume` of a session born in another keeps writing to the ORIGINAL project
+# dir. On 2026-07-14 the resolver searched an empty directory, returned None, and the
+# relay was dead for an hour WITHOUT A SINGLE LOG LINE.
+# --------------------------------------------------------------------------
+
+def _projects(tmp_path, monkeypatch):
+    from chela import transcripts
+
+    root = tmp_path / "projects"
+    root.mkdir()
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", root)
+    return root
+
+
+def _session_transcript(projects, cwd, session_id, body=""):
+    from chela import transcripts
+
+    proj = projects / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True, exist_ok=True)
+    path = proj / f"{session_id}.jsonl"
+    path.write_text(body)
+    return path
+
+
+SID = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"
+
+
+def test_the_default_resolver_follows_a_resumed_session_not_the_cwd(
+        tmp_path, monkeypatch, collected):
+    """THE OUTAGE. The window sits in `data_prep`; its session was born in `analytics` and
+    is still writing there. The cwd names a project dir with zero transcripts in it."""
+    from chela import sessions, transcripts
+    from chela.telegram.monitor import _default_resolver
+
+    projects = _projects(tmp_path, monkeypatch)
+    live = _session_transcript(projects, "/home/u/projects/analytics", SID)
+    (projects / transcripts.encode_cwd("/home/u/projects/analytics/data_prep")).mkdir()
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {"@2": sessions.Pane(
+        wid="@2", path="/home/u/projects/analytics/data_prep", command="claude",
+        claude_pid=1, launched_in="/home/u/projects/analytics/data_prep", resumed=SID)})
+
+    assert _default_resolver(None)("@2") == live
+
+    mon = TranscriptMonitor(on_message=lambda w, m: collected.append((w, m)),
+                            start_at_eof=True)
+    mon.poll(["@2"])                                   # binds at EOF (empty file)
+    _append(live, _assistant_text("the agent answers"))
+    mon.poll(["@2"])
+    assert [(w, m.text) for w, m in collected] == [("@2", "the agent answers")]
+
+
+def test_a_resumed_session_with_a_BIG_history_is_not_replayed_into_the_topic(
+        tmp_path, monkeypatch, collected):
+    """The `_FRESH_MAX_BYTES` guard, under the case it exists for — and the fix makes it
+    MORE load-bearing, not less: resolution by session id is what finally hands the monitor
+    a `--resume`'s fat back-history, on a window it has already polled (so the file is
+    "fresh" and would otherwise be read from byte 0 — the whole session, into the topic)."""
+    from chela import sessions
+    from chela.telegram import monitor as monitor_mod
+
+    projects = _projects(tmp_path, monkeypatch)
+    panes = {}
+    monkeypatch.setattr(sessions, "panes", lambda force=False: dict(panes))
+
+    mon = TranscriptMonitor(on_message=lambda w, m: collected.append((w, m)),
+                            start_at_eof=True)
+    mon.poll(["@2"])                                   # the window exists; no session yet
+    assert collected == []
+
+    # `claude --resume` starts, and the session's whole prior history is already on disk.
+    history = _assistant_text("x" * (monitor_mod._FRESH_MAX_BYTES + 1))
+    live = _session_transcript(projects, "/home/u/analytics", SID, body=history)
+    panes["@2"] = sessions.Pane(wid="@2", path="/home/u/data_prep", command="claude",
+                                claude_pid=1, launched_in="/home/u/data_prep", resumed=SID)
+
+    mon.poll(["@2"])
+    assert collected == []                             # NOT the whole session, into Telegram
+    assert mon._tracked["@2"].offset == live.stat().st_size
+
+    _append(live, _assistant_text("the first live turn after the resume"))
+    mon.poll(["@2"])
+    assert [m.text for _, m in collected] == ["the first live turn after the resume"]
+
+
+# --------------------------------------------------------------------------
+# and when it resolves to NOTHING, it is LOUD (the whole point of CMX-70)
+# --------------------------------------------------------------------------
+
+def test_a_window_with_no_transcript_is_LOUD(tmp_path, monkeypatch, caplog):
+    """It used to be silent — `return`, no error, no warning, no log line — while every
+    health surface stayed green and the human got nothing back."""
+    from chela import event_log, sessions
+
+    monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {"@2": sessions.Pane(
+        wid="@2", path="/home/u/empty", command="claude", claude_pid=1,
+        launched_in="/home/u/empty")})
+    _projects(tmp_path, monkeypatch)
+
+    mon = TranscriptMonitor(on_message=lambda w, m: None, start_at_eof=True)
+    with caplog.at_level("WARNING"):
+        mon.poll(["@2"])
+    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("@2" in m and "NO transcript" in m for m in said), said
+    events = [e for e in event_log.ring() if e["type"] == "relay.transcript_missing"]
+    assert len(events) == 1
+    assert events[0]["wid"] == "@2"
+    assert "/home/u/empty" in events[0]["payload"]["why"]
+
+    # It complains once per outage, not once per poll (this runs every few seconds).
+    for _ in range(5):
+        mon.poll(["@2"])
+    assert len([e for e in event_log.ring()
+                if e["type"] == "relay.transcript_missing"]) == 1
+
+
+def test_an_outage_that_ENDS_says_so_too(tmp_path, monkeypatch):
+    """A complaint with no all-clear is an alert nobody can act on."""
+    from chela import event_log, sessions
+
+    monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
+    projects = _projects(tmp_path, monkeypatch)
+    panes = {"@2": sessions.Pane(wid="@2", path="/home/u/repo", command="claude",
+                                 claude_pid=1, launched_in="/home/u/repo")}
+    monkeypatch.setattr(sessions, "panes", lambda force=False: dict(panes))
+
+    mon = TranscriptMonitor(on_message=lambda w, m: None, start_at_eof=True)
+    mon.poll(["@2"])                                   # nothing on disk yet → LOUD
+    _session_transcript(projects, "/home/u/repo", SID)
+    mon.poll(["@2"])                                   # …and now it resolves
+
+    types = [e["type"] for e in event_log.ring() if e["type"].startswith("relay.")]
+    assert types == ["relay.transcript_missing", "relay.transcript_found"]

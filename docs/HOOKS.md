@@ -263,19 +263,45 @@ The origin directory is immutable on both sides, and three measured facts (Claud
    filesystem access, no `/proc` walk, no `pgrep`;
 3. Claude Code **never `chdir`s its own process** (it tracks the working directory
    internally — which is exactly why the payload `cwd` and the process cwd disagree). So
-   `#{pane_current_path}` of a `claude` pane *is* that pane's origin directory, and
-   encoding it yields the same slug.
+   the *process* cwd of a pane's `claude` **is** that pane's origin directory, and encoding
+   it yields the same slug.
 
-So the lookup stays a single `tmux list-windows` call (~5 ms, cached ~1 s, keyed by slug)
-plus a dict hit. The session→slug half is cached for the life of the process — a session's
-origin never changes. A payload with no `transcript_path` falls back to one glob of
+So the lookup stays a single `tmux list-windows` call (~5 ms, cached ~1 s) plus a couple of
+`/proc` reads and a dict hit — still no `pgrep`, no `capture-pane`, no `claude agents
+--json`. The session→slug half is cached for the life of the process — a session's origin
+never changes. A payload with no `transcript_path` falls back to one glob of
 `~/.claude/projects/*/<session_id>.jsonl`, on a cache miss only.
+
+### `--resume` is the exception, and it is checked first (CMX-70)
+
+A session **resumed from a different directory** breaks fact 1's *other* half: the
+transcript stays in the project dir the session was **born** in, so its slug names a
+directory no pane is sitting in. Origin matching then resolves it to `None` — or, worse, to
+an unrelated agent who genuinely lives in that birth directory.
+
+The pane's own command line settles it outright: **`claude --resume <session-id>` is that
+window claiming that session, by construction**, and it is consulted *before* the slug.
+`chela/sessions.py` owns both signals (and is also what the outbound relay resolves a
+window's transcript through — same question, one answer).
 
 **Ambiguity resolves to `None`, never to a guess.** Two agents launched in one directory
 cannot be told apart, and an unknown session resolves to `None` — **never** to the window
 whose `cwd` happens to match, because that fallback *is* the bug. An event filed against
 the *wrong* window is worse than one filed against no window; the `session_id`, `cwd` and
 `transcript_path` are in the payload regardless, so nothing is lost but the shortcut.
+
+The same rule binds the **outbound relay**, which resolves through the same module: when a
+window has no hook event and was not resumed, the cwd is all that is left — and if a second
+window shares that origin, the newest transcript under it could belong to either, so the
+resolution is `None`, loudly. (This is not exotic. The event log is a bounded ring, so on a
+busy fleet a quiet window's last hook event ages out and resolution drops back to the cwd.)
+A relay that posts one agent's output into another agent's topic is worse than silence.
+
+And every signal that cannot be **bounded** is refused rather than believed: the event log
+is only read against the claude process's start time, because tmux reuses window ids across
+a server restart. If that start time cannot be read — no `/proc`, or a wrapper deeper than
+`sessions._MAX_DEPTH` — a recycled `wid` would inherit a **dead** agent's session, so the
+log is refused for that window and `sessions.explain()` says why. Unknown is never a pass.
 
 A **subagent**'s hooks carry its parent's `session_id`, so they resolve to the parent's
 window. That is the right answer rather than a near-miss: the subagent runs inside that

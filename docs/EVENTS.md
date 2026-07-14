@@ -165,5 +165,13 @@ counts. A room is therefore **membership + a filter over this log**, and only th
 membership (mutable, and the log rotates) gets a file of its own. Read one with
 `chela room digest <room>`, or `chela events --type room_question`.
 
+And the **outbound Telegram relay**, which reports its own silence: a bound window whose
+transcript cannot be resolved relays *nothing*, and used to do so with no error, no warning
+and every health surface green (CMX-70 — an hour of dead outbound while inbound kept
+working, because inbound only needs the `wid`). It now appends `relay.transcript_missing`
+when a window stops resolving and `relay.transcript_found` when it resolves again, so an
+outage that is invisible by nature has a record you can read back. `chela doctor` asserts
+the same fact from the other side (`relay.transcripts`).
+
 This log is the one authority all of them append to, and the one the dashboard timeline
 and the inbox both read — there is deliberately no second event source alongside it.

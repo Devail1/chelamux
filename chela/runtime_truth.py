@@ -58,13 +58,14 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chela import capabilities, config, discovery, hold, hooks
+from chela import capabilities, config, discovery, hold, hooks, sessions
 from chela.sources import get_source
 from chela.workflow import load_workflow
 
@@ -1034,6 +1035,78 @@ def _collector_applies() -> bool:
     return repo_root() is not None and "PYTEST_CURRENT_TEST" not in os.environ
 
 
+# --- fact: every bridged window resolves to a transcript ------------------------------
+#
+# The outbound relay of a window with no transcript is not slow, not erroring and not
+# retrying: it is DOING NOTHING, in complete silence, while every other surface stays
+# green (bindings reconcile, topics exist, INBOUND still works — it only needs the wid).
+# That is exactly how the relay stayed dead for an hour on 2026-07-14 with a human sitting
+# in front of a live topic. Nothing ever asserted it, so nothing ever noticed. This does.
+
+def _bound_windows() -> dict[str, str]:
+    """``{wid: topic name}`` — the windows the Telegram bridge has promised to relay."""
+    from chela.telegram import bindings                # lazy: doctor must import cheaply
+
+    path = bindings.default_bindings_path()
+    if not path.exists():
+        return {}
+    try:
+        registry = bindings.BindingRegistry.load(path)
+    except (OSError, ValueError):
+        return {}
+    return {wid: registry.topic_name(wid) or "" for wid in registry.windows()}
+
+
+def _relay_read() -> Observation:
+    if _tmux_or_unverifiable() is None:
+        return cannot_verify("tmux is not on PATH, so chela cannot ask which window is "
+                             "running which session — and a window it cannot resolve is a "
+                             "topic that silently relays nothing.")
+    bound = _bound_windows()
+    if not bound:
+        return absent("no window is bound to a Telegram topic")
+    live = set(discovery.get_windows_by_id())
+    return observed({wid: sessions.resolve_window(wid) for wid in bound if wid in live})
+
+
+def _relay_report(bound: dict[str, str], obs: Observation) -> list[Finding]:
+    if obs.missing:
+        return []                                      # the bridge is not in use here
+    resolved: dict[str, sessions.Resolution] = obs.value
+    out: list[Finding] = []
+    for wid, res in sorted(resolved.items()):
+        topic = bound.get(wid) or wid
+        if not res.ok:
+            out.append(Finding(
+                ERROR, f"{wid} ({topic}) is bound to a topic but resolves to NO transcript",
+                f"{res.detail}\n"
+                "    Outbound is DEAD for this window — and it fails silently: the binding "
+                "reconciles, the topic exists, inbound still works, and nothing is ever "
+                "relayed back. Check whether the agent is running, and whether its session "
+                "is one chela can name (a hook event, or `claude --resume <id>`).",
+            ))
+            continue
+        age = time.time() - res.path.stat().st_mtime
+        out.append(Finding(
+            OK, f"{wid} ({topic}) → {res.path.name} (via {res.source}, "
+                f"last written {_ago(age)})",
+            "" if res.source != "cwd" else
+            "Resolved by the CWD FALLBACK: no hook has ever named this window's session "
+            "and it was not resumed, so this is the newest transcript in the project dir "
+            "of its cwd — a guess, and the one that broke on 2026-07-14. It becomes a fact "
+            "as soon as the agent fires one hook.",
+        ))
+    return out
+
+
+def _ago(seconds: float) -> str:
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds / 60)}m ago"
+    return f"{seconds / 3600:.1f}h ago"
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -1153,6 +1226,18 @@ def facts() -> list[Fact]:
             declare=_reviewed_prs,
             read_back=_checks_read,
             report=_checks_report,
+        ),
+        Fact(
+            name="relay.transcripts",
+            declared_by="the Telegram bindings — every window that has been PROMISED a "
+                        "topic",
+            owned_by="the transcript the window's agent is really writing (chela.sessions "
+                     "resolves it by session id — the event log, then `claude --resume`, "
+                     "then, only then, the cwd)",
+            declare=_bound_windows,
+            read_back=_relay_read,
+            report=_relay_report,
+            unverifiable_level=WARN,      # same reason as tmux.session
         ),
         Fact(
             name="tests.js_suites",

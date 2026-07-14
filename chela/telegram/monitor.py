@@ -7,11 +7,19 @@ poll (tracked by byte offset per transcript), parses the new records — pairing
 a callback. This slice does NOT send to Telegram and does NOT import
 ``python-telegram-bot``; it just turns JSONL into parsed :class:`Message` events.
 
-**Window → transcript resolution goes through chela's own layer**
-(``discovery.get_window_cwd_by_id`` → ``transcripts.transcript_for_cwd``): the
-tmux pane's cwd names the ``~/.claude/projects/<encoded-cwd>/`` directory and the
-most-recently-written ``*.jsonl`` in it is the live session. There is no
-``session_map.json`` / ``SessionStart`` hook here — tmux is the source of truth.
+**Window → transcript resolution goes through** :mod:`chela.sessions` **— by
+``session_id``, NOT by ``cwd``.** It used to be
+``discovery.get_window_cwd_by_id`` → ``transcripts.transcript_for_cwd`` (the newest
+``*.jsonl`` under ``~/.claude/projects/<encoded-cwd>/``), and this docstring used to
+assert that "tmux is the source of truth" for that mapping. **It is not**, and the
+assertion failed live on 2026-07-14: a window rebuilt at one directory running
+``claude --resume`` of a session born in another kept its transcript in the ORIGINAL
+project dir, the resolver searched an empty one, and the relay went dead for an hour
+**without a single log line** — bindings reconciled, topics existed, inbound still
+worked. The cwd is now the LAST resort, behind the event log (hook-borne session ids)
+and the pane's own ``claude --resume`` command line; see :mod:`chela.sessions` for the
+three ways a cwd lies. **A window that resolves to nothing is now LOUD** — a warning
+and a ``relay.transcript_missing`` event, not silence.
 
 Adapted from six-ddc/ccbot's ``session_monitor.py``
 (https://github.com/six-ddc/ccbot, MIT) — reworked onto chela's discovery layer
@@ -21,10 +29,11 @@ upstream attribution.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Callable
 
-from chela import discovery, transcripts
+from chela import event_log, sessions
 from chela.telegram.parser import Message, _Pending, parse_entries, parse_line
 
 log = logging.getLogger(__name__)
@@ -42,13 +51,18 @@ Resolver = Callable[[str], "Path | None"]
 # turns comfortably while catching repopulated history.
 _FRESH_MAX_BYTES = 64 * 1024
 
+# A window that resolves to no transcript is relaying NOTHING, so it is complained about
+# on the transition and then re-complained about on this interval — a bound window with no
+# transcript is not a passing state, and an outage that only logged once at 03:00 is an
+# outage nobody sees at 09:00.
+_UNRESOLVED_REPEAT_S = 600
+
 
 def _default_resolver(base: Path | None) -> Resolver:
-    """Resolve window id → transcript via chela's discovery/transcripts layer."""
+    """Resolve window id → transcript by ``session_id`` (see :mod:`chela.sessions`)."""
 
     def resolve(window_id: str) -> Path | None:
-        cwd = discovery.get_window_cwd_by_id(window_id)
-        return transcripts.transcript_for_cwd(cwd, base=base)
+        return sessions.transcript_for_window(window_id, base=base)
 
     return resolve
 
@@ -93,12 +107,16 @@ class TranscriptMonitor:
     ):
         self._on_message = on_message
         self._start_at_eof = start_at_eof
+        self._base = base
         self._resolver = resolver or _default_resolver(base)
         # window_id (@N) -> tracked read state
         self._tracked: dict[str, _Tracked] = {}
         # windows polled while they had NO transcript yet; when one finally
         # resolves, the file that appeared is fresh (read from 0, not EOF).
         self._seen_empty: set[str] = set()
+        # window_id -> when we last SAID SO. A window with no transcript relays nothing,
+        # and the whole of CMX-70 is that this used to happen in total silence.
+        self._complained: dict[str, float] = {}
 
     def poll(self, window_ids) -> None:
         """Read new transcript lines for each window id and emit their events."""
@@ -112,6 +130,7 @@ class TranscriptMonitor:
         """Drop tracking for a window (e.g. after it closes)."""
         self._tracked.pop(window_id, None)
         self._seen_empty.discard(window_id)
+        self._complained.pop(window_id, None)
 
     # -- internals ---------------------------------------------------------
 
@@ -121,7 +140,9 @@ class TranscriptMonitor:
             # No transcript yet — remember it so that when one finally appears we
             # know its whole content is fresh (this session) and read from 0.
             self._seen_empty.add(window_id)
+            self._unresolved(window_id, path)
             return
+        self._resolved(window_id)
 
         tracked = self._tracked.get(window_id)
         if tracked is None or tracked.path != path:
@@ -138,6 +159,48 @@ class TranscriptMonitor:
         events, tracked.pending = parse_entries(entries, tracked.pending)
         for msg in events:
             self._on_message(window_id, msg)
+
+    def _unresolved(self, window_id: str, path: Path | None) -> None:
+        """A bound window with no transcript relays NOTHING. Say so — every time, for as
+        long as it lasts.
+
+        This is the whole point of CMX-70. The 2026-07-14 outage was not a crash: the
+        resolver returned None, the poll returned, and every health surface stayed green
+        while a human sat in front of a live topic getting nothing back. So the failure
+        goes to the log AND to the event log (where a UI, the inbox and ``chela doctor``'s
+        ``relay.transcripts`` fact can all see it), on the transition and then every
+        :data:`_UNRESOLVED_REPEAT_S`.
+        """
+        now = time.time()
+        last = self._complained.get(window_id)
+        if last is not None and now - last < _UNRESOLVED_REPEAT_S:
+            return
+        self._complained[window_id] = now
+        why = (f"the resolved transcript {path} does not exist" if path is not None
+               else sessions.explain(window_id, base=self._base))
+        log.warning(
+            "transcript monitor: %s resolves to NO transcript — nothing can be relayed "
+            "for it (inbound still works, which is exactly why this is invisible): %s",
+            window_id, why,
+        )
+        event_log.append(
+            "relay.transcript_missing",
+            f"{window_id} resolves to no transcript — outbound is dead for this window",
+            {"wid": window_id, "why": why},
+            wid=window_id,
+        )
+
+    def _resolved(self, window_id: str) -> None:
+        """Close the loop on a complaint: an outage that ends must say that too."""
+        if self._complained.pop(window_id, None) is None:
+            return
+        log.info("transcript monitor: %s resolves to a transcript again", window_id)
+        event_log.append(
+            "relay.transcript_found",
+            f"{window_id} resolves to a transcript again — outbound is live",
+            {"wid": window_id},
+            wid=window_id,
+        )
 
     def _initial_offset(self, window_id: str, path: Path, *, rotated: bool) -> int:
         """Byte offset to start reading a window's transcript for the first time.
