@@ -2531,7 +2531,7 @@ def _pr_mergeable(pr_number: str, repo_dir: str) -> str | None:
             ["gh", "pr", "view", pr_number, "--json", "mergeable", "-q", ".mergeable"],
             cwd=repo_dir, capture_output=True, text=True, timeout=15,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
@@ -2673,7 +2673,7 @@ def _auto_resolve_todo_conflict(
         if push.returncode != 0:
             # Already committed locally; nothing to abort. Surface the push error.
             return {"ok": False, "error": (push.stderr or push.stdout or "git push failed").strip()}
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         return _abort_manual(f"git operation failed during auto-resolve: {e}")
 
     # Wait for GitHub to recompute mergeability after the push.
@@ -2769,13 +2769,30 @@ def _merge_one(row: dict) -> dict:
         if not resolved.get("ok"):
             return {"ok": False, "error": resolved.get("error", "auto-resolve failed"), "status": 409}
 
+        # ⛔ THE GATE ABOVE IS NOW STALE, AND IT IS THE ONE THAT MATTERS. The auto-resolve
+        # merged base into the branch AND PUSHED — the head is a NEW commit, and it is the
+        # kind of commit most likely to be red: it carries everything base has moved by since
+        # this branch left it. We verified X and were about to ship Y. That is the PR-#80
+        # hole re-opened INSIDE the feature built to close it, so this path never merges: the
+        # honest answer right after a push is "the checks have not run yet", and the honest
+        # thing to do with it is to stop. The PR is now MERGEABLE and its new head is under
+        # CI; the next Merge (or the dispatcher's next tick, which sends it back if that
+        # merge commit is red) picks it up.
+        after = dispatcher._read_pr_checks(pr_url, str(repo_dir))
+        return {"ok": False, "status": 409, "error": (
+            "the TODO.md conflict was auto-resolved and PUSHED — the head of this PR is now "
+            f"a NEW commit ({(after.head_sha or 'unknown')[:12]}), which the green checks you "
+            f"saw did not cover (its own checks read: {after.state}). Refusing to merge a "
+            "commit nothing has verified. Re-run Merge once CI has finished on the new head."
+        )}
+
     try:
         merge = subprocess.run(
             ["gh", "pr", "merge", pr_number, "--squash"],
             cwd=str(repo_dir), capture_output=True, text=True, timeout=60,
         )
-    except FileNotFoundError:
-        return {"ok": False, "error": "gh CLI not found on PATH", "status": 500}
+    except OSError as e:
+        return {"ok": False, "error": f"gh CLI could not be run: {e}", "status": 500}
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "gh pr merge timed out", "status": 504}
     if merge.returncode != 0:
@@ -2790,7 +2807,7 @@ def _merge_one(row: dict) -> dict:
         )
         if sha_proc.returncode == 0:
             merge_sha = sha_proc.stdout.strip() or None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
     repo_cwd = str(repo_dir)

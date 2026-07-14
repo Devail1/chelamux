@@ -100,12 +100,15 @@ class _FakeGh:
     """`gh` and `tmux`, at the argv boundary. Records what was asked and what it answered."""
 
     def __init__(self, rollup=None, sha="deadbee1", log="E   assert 1 == 2\nFAILED test_x\n",
-                 gh_missing=False):
+                 gh_missing=False, mergeable="MERGEABLE", on_check_read=None):
         self.rollup = rollup if rollup is not None else [_check_run("test (3.12)")]
         self.sha = sha
         self.log = log
         self.gh_missing = gh_missing
+        self.mergeable = mergeable
+        self.on_check_read = on_check_read     # a hook that runs WHILE gh is "on the network"
         self.calls: list[list[str]] = []
+        self.kwargs: list[dict] = []
         self.comments: list[str] = []
         self.log_fetches = 0
         self.check_reads = 0
@@ -114,6 +117,7 @@ class _FakeGh:
 
     def run(self, cmd, *a, **k):
         self.calls.append(cmd if isinstance(cmd, list) else [str(cmd)])
+        self.kwargs.append(dict(k))
 
         class R:
             returncode = 0
@@ -127,8 +131,12 @@ class _FakeGh:
                 raise FileNotFoundError("no gh on PATH")
             if cmd[:3] == ["gh", "pr", "view"] and "statusCheckRollup,headRefOid" in cmd:
                 self.check_reads += 1
+                if self.on_check_read:
+                    self.on_check_read(self)
                 R.stdout = json.dumps({"headRefOid": self.sha,
                                        "statusCheckRollup": self.rollup})
+            elif cmd[:3] == ["gh", "pr", "view"] and ".mergeable" in cmd:
+                R.stdout = self.mergeable + "\n"     # `-q .mergeable`: a bare string, as gh does
             elif cmd[:3] == ["gh", "pr", "view"]:
                 R.stdout = json.dumps({"state": "OPEN", "mergeable": "MERGEABLE"})
             elif cmd[:3] == ["gh", "run", "view"]:
@@ -536,3 +544,334 @@ def test_the_dashboard_refuses_to_merge_a_pr_whose_checks_it_could_not_read(tmp_
     assert result["ok"] is False and result["status"] == 409
     assert "NOT a pass" in result["error"]
     assert not [c for c in fake.calls if c[:3] == ["gh", "pr", "merge"]]
+
+
+def test_the_auto_resolve_of_a_conflict_moves_the_head_and_the_merge_must_re_verify(tmp_path):
+    """⛔ THE GATE MUST NOT VERIFY ONE COMMIT AND SHIP ANOTHER.
+
+    The single-card Merge on a CONFLICTING PR auto-resolves the TODO.md conflict — which
+    MERGES BASE INTO THE BRANCH AND PUSHES. The head is now a different commit, and it is
+    precisely the commit most likely to be red (it carries everything base moved by). The
+    first cut read the checks BEFORE that push and merged AFTER it: the PR-#80 hole, re-cut
+    inside the feature built to close it. Nothing merges on the strength of a check that
+    covered a commit that no longer exists.
+    """
+    from chela.dashboard import app as dash
+
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")],  # green, pre-push
+                   sha="oldhead1", mergeable="CONFLICTING")
+
+    def _resolved_and_pushed(*a, **k):
+        # What the real thing does: a merge commit lands on the branch and is pushed. The
+        # PR's head is a NEW commit, whose checks have not even started.
+        fake.sha = "newhead2"
+        fake.rollup = [_check_run("test", status="QUEUED", conclusion=None)]
+        return {"ok": True, "struck": ["do a thing"]}
+
+    with patch.object(dash.subprocess, "run", side_effect=fake.run), \
+         patch.object(dash, "_auto_resolve_todo_conflict", side_effect=_resolved_and_pushed):
+        result = dash._merge_one(_merge_row(tmp_path))
+
+    assert result["ok"] is False and result["status"] == 409
+    assert "newhead2" in result["error"]             # it says WHICH commit it refused to ship
+    assert "pending" in result["error"]              # and what that commit's checks say
+    # ⛔ And it did not merge. The green it saw belonged to `oldhead1`, which is not what
+    # `gh pr merge` would have shipped.
+    assert not [c for c in fake.calls if c[:3] == ["gh", "pr", "merge"]]
+
+
+# --- the log tail is not text until we MAKE it text -----------------------------------
+
+def test_the_log_tail_never_carries_a_keypress_into_the_agents_terminal(tmp_path):
+    """⛔ The verdict is PASTED into the agent's tmux pane. `gh run view --log-failed` returns
+    the RAW Actions log — ANSI colour from any job that forces it, and whatever control bytes
+    the failing process printed. To a terminal those are not characters, they are KEYPRESSES:
+    a `\\x03` is a Ctrl-C aimed at that agent's prompt, and a half-eaten seed costs a whole
+    rework round for nothing. `rooms.sanitize` was written for exactly this hazard, on
+    exactly this paste path (it is `tui_text.sanitize` now, so both callers share it).
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(
+        rollup=[_check_run("test", conclusion="FAILURE")],
+        log="\x1b[31mE   assert 1 == 2\x1b[0m\n\x03\x07##[error]\x1b]0;title\x07FAILED test_x\n",
+    )
+
+    _tick(wf, fake)
+
+    verdict = dispatcher.latest_verdict(dispatcher.resolve_run("abc123"))
+    assert "FAILED test_x" in verdict            # the content survives...
+    assert "\x1b" not in verdict                 # ...and not one escape does
+    assert "\x03" not in verdict and "\x07" not in verdict
+    assert "[31m" not in verdict                 # nor the payload of a stripped escape
+    # And the same body is what went to the PR comment.
+    assert "\x1b" not in fake.comments[0]
+
+
+def test_a_code_fence_inside_the_log_cannot_break_out_of_the_verdicts_code_block(tmp_path):
+    """A CI log that prints ``` would close the fence early and spill the rest of itself into
+    the comment as markdown. The fence is widened past the longest run of backticks in it."""
+    tail = "E   assert x == '```'\n``` and more\n"
+    body = dispatcher._ci_verdict_body(
+        dispatcher.CIStatus(dispatcher.CI_FAILING, "abc", ("CI / test",)), tail, "u")
+
+    fence = "````"
+    assert f"\n{fence}\n{tail}\n{fence}\n" in body
+    # The log's own fences are strictly shorter than the one holding them.
+    assert "\n`````" not in body
+
+
+def test_the_log_is_read_with_errors_replace_so_one_bad_byte_cannot_kill_the_tick(tmp_path):
+    """`text=True` alone is a STRICT utf-8 decode: a CI log with one invalid byte (a test that
+    prints raw bytes is enough) raises UnicodeDecodeError out of a function whose contract is
+    to be best-effort — and out of `tick`, which does not catch it."""
+    fake = _FakeGh()
+    with patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        dispatcher._failing_log_tail(str(tmp_path), ("42",))
+    assert fake.kwargs[-1]["errors"] == "replace"
+
+
+def test_a_log_fetch_that_blows_up_does_not_burn_the_red_forever(tmp_path):
+    """⛔ THE SHA IS THE RIGHT TO FIRE THE VERDICT — do not spend it before the verdict exists.
+
+    The first cut committed `ci_failed_sha` BEFORE fetching the log. Anything that went wrong
+    in the fetch (and it decodes a stranger's bytes) escaped the tick with the red already
+    marked delivered: that red never fired again, and the run sat in awaiting_review, un-sent
+    -back, until a human noticed. The sha is now burned only once the tail is in hand.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")], sha="redsha01")
+
+    boom = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    with patch.object(dispatcher, "_failing_log_tail", side_effect=boom), \
+         pytest.raises(UnicodeDecodeError):
+        _tick(wf, fake)
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["ci_failed_sha"] is None          # ⛔ un-burned: this red has NOT been delivered
+    assert not dispatcher.reviews_of(run)
+
+    # So the very next tick still fires it — the failure cost a tick, not the verdict.
+    assert _tick(wf, fake)["ci_failed"] == 1
+    assert dispatcher.resolve_run("abc123")["ci_failed_sha"] == "redsha01"
+
+
+def test_a_locked_db_under_the_verdict_neither_kills_the_tick_nor_eats_the_red(tmp_path):
+    """`request_changes` opens its own connection and a busy DB can refuse it. The once-per
+    -sha guard exists to stop a red firing TWICE; it is not a licence to fire it zero times."""
+    import sqlite3
+
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
+
+    locked = sqlite3.OperationalError("database is locked")
+    with patch.object(dispatcher, "request_changes", side_effect=locked):
+        summary = _tick(wf, fake)               # ⛔ does not raise: the tick still has work
+
+    assert summary["ci_failed"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"
+    assert run["ci_failed_sha"] is None         # un-burned — the red is retried, not lost
+
+    assert _tick(wf, fake)["ci_failed"] == 1
+
+
+# --- ⛔ nothing reaches `passing` that was not SEEN to pass ----------------------------
+
+def test_a_rollup_node_we_cannot_recognise_is_not_a_pass():
+    """The reducer's own docstring promised this and the code did the opposite: a node with
+    none of status/conclusion/state fell through every branch and came out GREEN. A shape
+    GitHub adds tomorrow would have merged itself."""
+    state, failing, _ = dispatcher._rollup_state([{"__typename": "SomethingNew", "id": "x"}])
+    assert state == dispatcher.CI_PENDING and not failing
+
+    # A conclusion we have never heard of is not one we may call green either.
+    state, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="MOON_PHASE")])
+    assert state == dispatcher.CI_PENDING
+
+    # Nor is a node that is not even a JSON object.
+    assert dispatcher._rollup_state(["not a node"])[0] == dispatcher.CI_PENDING
+
+
+def test_a_rollup_of_only_skipped_checks_is_NONE_and_never_PASSING():
+    """SKIPPED/NEUTRAL means the check did not run — a `paths-ignore` filter, a skipped
+    required job. Zero checks is `none`, said out loud; all-skipped is the SAME fact, and it
+    was silently green. Both mean *nothing evaluated this code*."""
+    state, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
+                                            _check_run("lint", conclusion="NEUTRAL")])
+    assert state == dispatcher.CI_NONE
+
+    # One check that really ran and really passed is still a pass, skipped siblings and all.
+    state, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
+                                            _check_run("lint", conclusion="SUCCESS")])
+    assert state == dispatcher.CI_PASSING
+
+
+def test_gh_returning_json_that_is_not_an_object_is_UNKNOWN_not_a_crash(tmp_path):
+    class _Weird(_FakeGh):
+        def run(self, cmd, *a, **k):
+            r = super().run(cmd, *a, **k)
+            if isinstance(cmd, list) and "statusCheckRollup,headRefOid" in cmd:
+                r.stdout = "[1, 2, 3]"     # valid JSON, wrong shape — `.get` would explode
+            return r
+
+    fake = _Weird()
+    with patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        ci = dispatcher._read_pr_checks("https://github.com/o/r/pull/80", str(tmp_path))
+    assert ci.state == dispatcher.CI_UNKNOWN
+
+
+def test_a_gh_that_cannot_be_EXECUTED_is_UNKNOWN_not_a_crash(tmp_path):
+    """FileNotFoundError was caught; PermissionError (a `gh` on PATH that is not executable)
+    was not — and it took the whole tick with it, when the honest answer is CANNOT VERIFY."""
+    with patch.object(dispatcher.subprocess, "run", side_effect=PermissionError("denied")):
+        ci = dispatcher._read_pr_checks("https://github.com/o/r/pull/80", str(tmp_path))
+    assert ci.state == dispatcher.CI_UNKNOWN and "could not be run" in ci.detail
+
+
+# --- the poll: scoped, bounded, and NOT holding the write lock over the network --------
+
+def test_the_poll_only_asks_about_THIS_workflows_prs(tmp_path):
+    """`tick` runs once per workflow. An unscoped poll asked GitHub about every PR in the
+    fleet once PER WORKFLOW — W×P `gh` spawns a cycle, and the prize for hitting the rate
+    limit is CI_UNKNOWN on everything, which correctly (and catastrophically) refuses every
+    merge at once."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, task_id="other1", workflow_path="/some/other/WORKFLOW.md")
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
+
+    _tick(wf, fake, source=_Source("other1"))
+
+    assert fake.check_reads == 0
+    assert not [c for c in fake.calls if c[0] == "gh"]
+    assert dispatcher.resolve_run("other1")["pr_checks"] is None
+
+
+def test_a_run_that_escalated_to_needs_human_is_not_polled_forever(tmp_path):
+    """`needs_human` is TERMINAL — a human owns that run now. Polling it adds a permanent gh
+    call per tick, for every run that ever escalated, forever."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="needs_human")
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
+
+    summary = _tick(wf, fake)
+
+    assert fake.check_reads == 0
+    assert summary["ci_failed"] == 0
+    assert dispatcher.resolve_run("abc123")["status"] == "needs_human"
+
+
+def test_the_poll_does_not_hold_the_sqlite_WRITE_LOCK_across_the_network(tmp_path):
+    """⛔ The gh calls used to run INSIDE an open write transaction (the first UPDATE takes
+    the lock; the commit was after the loop). Twenty PRs × a network round-trip each of held
+    lock, and every concurrent writer — a `chela review`, a dashboard merge, a
+    `task-finished` — got `database is locked` back. The probe below IS that writer."""
+    import sqlite3
+
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, task_id="abc123", workflow_path=str(wf.path))
+        _row(conn, task_id="def456", workflow_path=str(wf.path), window_name="test-2")
+    refusals: list[str] = []
+
+    def _a_concurrent_writer(_fake):
+        # Someone else's write, landing WHILE we are "on the network" talking to gh.
+        probe = sqlite3.connect(str(dispatcher.DB_PATH))
+        probe.execute("PRAGMA busy_timeout=200")   # fail fast rather than sit out the 5s
+        try:
+            probe.execute("UPDATE runs SET title='a concurrent writer got in' "
+                          "WHERE task_id='abc123'")
+            probe.commit()
+        except sqlite3.OperationalError as e:
+            refusals.append(str(e))
+        finally:
+            probe.close()
+
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")],
+                   on_check_read=_a_concurrent_writer)
+
+    _tick(wf, fake, source=_Source("abc123", "def456"))
+
+    assert fake.check_reads == 2      # both PRs were really asked about
+    assert refusals == []             # and nobody was locked out while we asked
+
+
+# --- a check that never settles is not one we are still waiting for -------------------
+
+def test_a_pending_check_that_never_settles_ages_out_into_needs_human(tmp_path):
+    """`pending` is the state with no exit of its own: no verdict fires on it, no merge gate
+    passes it, and the Kanban renders no Merge button. A `WAITING` deployment gate, or a check
+    an app registered and never reported, parks the run there FOREVER — silently. The loop is
+    allowed to give up. It is not allowed to go quiet."""
+    from datetime import datetime, timedelta, timezone
+
+    wf = _wf(tmp_path)
+    stale = (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat()
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), pr_checks=dispatcher.CI_PENDING,
+             pr_head_sha="deadbee1", ci_pending_since=stale)
+    fake = _FakeGh(rollup=[_check_run("deploy", status="WAITING", conclusion=None)])
+
+    summary = _tick(wf, fake)
+
+    assert summary["escalated"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert "not settled in 9h" in run["last_error"] and "STUCK" in run["last_error"]
+
+
+def test_a_pending_check_that_is_merely_SLOW_is_left_alone(tmp_path):
+    """The escape hatch must not become the thing it escapes: a normal CI run is pending for
+    minutes, and nothing about that is stuck."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", status="IN_PROGRESS", conclusion=None)])
+
+    summary = _tick(wf, fake)          # first sight of the pending spell: the clock starts
+
+    assert summary["escalated"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"
+    assert run["ci_pending_since"]     # ...and it is now being timed
+
+    # The checks settle green: the clock is CLEARED, not left running against the next spell.
+    fake.rollup = [_check_run("test", conclusion="SUCCESS")]
+    _tick(wf, fake)
+    assert dispatcher.resolve_run("abc123")["ci_pending_since"] is None
+
+
+# --- the ordering invariant: a red at the cap escalates, it does not get a free round --
+
+def test_a_red_ci_at_the_rework_cap_escalates_on_the_SAME_tick_and_is_not_respawned(
+    tmp_path, monkeypatch,
+):
+    """⛔ THE ORDERING IS THE INVARIANT. 1c (the CI verdict) sits ABOVE 1d (escalate) because
+    3b re-spawns every `changes_requested` row WITHOUT re-checking the cap — it trusts 1d to
+    have taken the spent ones out of that state first. A verdict written after 1d would be
+    re-spawned this same tick, one round OVER budget, and every red-at-cap run would get a
+    free extra round forever. That justification was defended only by a comment. It is a test
+    now, and any reorder turns it red.
+    """
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "1")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), rework_count=1)   # the budget is spent
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1      # the verdict still fires — the red is a FACT
+    assert summary["escalated"] == 1
+    assert summary["reworked"] == 0       # ⛔ and nothing gave it a round it had not got
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert (run["rework_count"] or 0) == 1
+    assert len(dispatcher.reviews_of(run)) == 1

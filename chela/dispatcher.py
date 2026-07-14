@@ -15,6 +15,7 @@ from chela.config import CHELA_DIR, DISPATCH_TICK_INTERVAL, TMUX_SESSION, max_re
 from chela.messenger import send_tmux
 from chela.sources import Task, get_source
 from chela.transcripts import agent_transcript_summary
+from chela.tui_text import sanitize as tui_sanitize
 from chela.workflow import (
     WorkflowDef,
     load_workflow,
@@ -125,8 +126,28 @@ CI_UNKNOWN = "unknown"
 CI_FAILED_CONCLUSIONS = (
     "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED",
 )
-# A check that has NOT finished. NEUTRAL/SKIPPED/SUCCESS are finished-and-not-failing.
+# A check that has NOT finished.
 CI_UNSETTLED_STATUSES = ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED")
+# The ONLY conclusions that are a pass. Everything conclusive that is not here and not in
+# CI_FAILED_CONCLUSIONS DID NOT RUN — see below.
+CI_PASSED_CONCLUSIONS = ("SUCCESS",)
+# ⛔ A check that finished WITHOUT RUNNING is not a pass. A `paths-ignore` filter, a skipped
+# required job, an advisory NEUTRAL — none of them evaluated the code, and a rollup of
+# nothing but these is `none` ("nothing ran, said out loud"), never `passing`. The doctor
+# rule again: a thing you could not evaluate is never a pass.
+CI_DID_NOT_RUN_CONCLUSIONS = ("SKIPPED", "NEUTRAL")
+
+# The statuses whose checks we poll. ⛔ NOT `needs_human`: it is TERMINAL — a human owns
+# that run now — so polling it would add a permanent `gh` call per tick, forever, for every
+# run that ever escalated.
+CI_POLL_STATUSES = ("awaiting_review", "changes_requested")
+
+# A rollup that NEVER settles (a `WAITING` deployment gate with required reviewers, an app
+# that registered a check and never reported) parks the PR forever: no verdict fires, the
+# merge gate refuses, and nothing says why. It ages out into `needs_human` — the loop is
+# allowed to give up, but never allowed to go quiet. Six hours is GitHub's own job ceiling,
+# so anything past it is not "still running", it is stuck.
+CI_PENDING_STALE_SECONDS = 6 * 3600
 
 # A whole CI log does not fit in a prompt. The tail is where the failure is.
 CI_LOG_TAIL_CHARS = 4000
@@ -465,9 +486,14 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # ⛔ Without it a run that fails CI, gets reworked, and comes back on an unchanged
         # SHA would burn the entire CHELA_MAX_REWORKS budget in three ticks having done
         # nothing. A NEW push that is also red is a new SHA, and a new verdict.
+        # `ci_pending_since` is when the CURRENT unsettled spell began (cleared the moment
+        # the checks settle, restarted by a new head sha). A rollup that never settles would
+        # otherwise park the run forever — no verdict, no merge, no exit; it ages out into
+        # needs_human instead. The loop may give up. It may not go quiet.
         ("pr_checks", "ALTER TABLE runs ADD COLUMN pr_checks TEXT"),
         ("pr_head_sha", "ALTER TABLE runs ADD COLUMN pr_head_sha TEXT"),
         ("ci_failed_sha", "ALTER TABLE runs ADD COLUMN ci_failed_sha TEXT"),
+        ("ci_pending_since", "ALTER TABLE runs ADD COLUMN ci_pending_since TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -741,8 +767,18 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
 
     Two node shapes ride in that field and both must be handled: a **CheckRun** (Actions,
     with ``status`` + ``conclusion`` + ``name``) and a **StatusContext** (the legacy commit
-    -status API, with a single ``state`` + ``context``). A rollup we cannot recognise at all
-    is not a pass — it is simply not failing, and the caller says so.
+    -status API, with a single ``state`` + ``context``).
+
+    ⛔ A NODE WE CANNOT RECOGNISE IS UNSETTLED, NOT GREEN. The first cut of this said in its
+    docstring that an unrecognised rollup "is not a pass" and then returned exactly that: a
+    node with none of status/conclusion/state fell through every branch, left `failing`
+    empty, and came out ``passing``. A shape GitHub adds tomorrow would have read as green
+    and merged. Nothing reaches ``passing`` here that was not SEEN to succeed.
+
+    ⛔ AND A CHECK THAT DID NOT RUN IS NOT A CHECK THAT PASSED. A rollup of nothing but
+    SKIPPED/NEUTRAL nodes (a `paths-ignore` filter, a skipped required job) is ``none`` —
+    the same "nothing ran" as an empty rollup, and said just as loudly. It is only a pass
+    when at least one check actually ran and succeeded.
 
     ⛔ UNSETTLED WINS OVER FAILING, deliberately. A rollup with one red job and one still
     running is ``pending``, not ``failing``: acting on it would send the agent back into a
@@ -753,10 +789,12 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     if not nodes:
         return CI_NONE, (), ()
     unsettled = False
+    passed = 0
     failing: list[str] = []
     run_ids: list[str] = []
     for node in nodes:
         if not isinstance(node, dict):
+            unsettled = True       # a node we cannot even read is not a node that passed
             continue
         status = str(node.get("status") or "").upper()
         conclusion = str(node.get("conclusion") or "").upper()
@@ -770,6 +808,10 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
                 unsettled = True
             elif context_state in CI_FAILED_CONCLUSIONS:
                 failing.append(name)
+            elif context_state in CI_PASSED_CONCLUSIONS:
+                passed += 1
+            elif context_state not in CI_DID_NOT_RUN_CONCLUSIONS:
+                unsettled = True   # a state we do not know is not one we may call green
             continue
         if status and status != "COMPLETED":
             unsettled = True
@@ -780,12 +822,20 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
             m = _CI_RUN_ID_RE.search(str(node.get("detailsUrl") or ""))
             if m:
                 run_ids.append(m.group(1))
+        elif conclusion in CI_PASSED_CONCLUSIONS:
+            passed += 1
+        elif conclusion not in CI_DID_NOT_RUN_CONCLUSIONS:
+            # No conclusion at all (a node carrying none of the three fields lands here), or
+            # one GitHub has not taught us yet. Either way: not evaluated ⇒ not a pass.
+            unsettled = True
     if unsettled:
         return CI_PENDING, (), ()
     if failing:
         # dict.fromkeys: dedupe, keep order — a matrix job can fail in several shards.
         return CI_FAILING, tuple(dict.fromkeys(failing)), tuple(dict.fromkeys(run_ids))
-    return CI_PASSING, (), ()
+    if passed:
+        return CI_PASSING, (), ()
+    return CI_NONE, (), ()   # every node skipped: nothing ran, and nothing passed
 
 
 def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
@@ -802,10 +852,13 @@ def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
     try:
         out = subprocess.run(
             ["gh", "pr", "view", number, "--json", "statusCheckRollup,headRefOid"],
-            cwd=repo_dir, capture_output=True, text=True, timeout=20,
+            cwd=repo_dir, capture_output=True, text=True, errors="replace", timeout=20,
         )
-    except FileNotFoundError:
-        return CIStatus(CI_UNKNOWN, detail="gh is not installed — nothing can read the checks")
+    # OSError, not FileNotFoundError: a gh that is present but not executable raises
+    # PermissionError, and THIS function's whole contract is that it never raises — a tick
+    # that dies here stops the loop, when the honest answer was CANNOT VERIFY.
+    except OSError as e:
+        return CIStatus(CI_UNKNOWN, detail=f"gh could not be run ({e}) — nothing read the checks")
     except subprocess.TimeoutExpired:
         return CIStatus(CI_UNKNOWN, detail="gh timed out reading the checks")
     if out.returncode != 0:
@@ -814,6 +867,10 @@ def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
         data = json.loads(out.stdout)
     except (json.JSONDecodeError, ValueError):
         return CIStatus(CI_UNKNOWN, detail="gh returned something that is not JSON")
+    if not isinstance(data, dict):
+        # Valid JSON, wrong shape (`null`, a list, a bare string). `.get` on it would be an
+        # AttributeError out of a function that must only ever return.
+        return CIStatus(CI_UNKNOWN, detail="gh returned JSON that is not an object")
     sha = (data.get("headRefOid") or "").strip() or None
     rollup = data.get("statusCheckRollup")
     state, failing, run_ids = _rollup_state(rollup if isinstance(rollup, list) else [])
@@ -830,19 +887,31 @@ def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
 
     Best-effort: a log we cannot fetch costs the agent the tail, not the verdict — the
     failing job NAMES came from the rollup and are already in hand.
+
+    ⛔ THE LOG IS NOT TEXT UNTIL WE MAKE IT TEXT. Two things about it are hostile:
+
+    * It is RAW. `--log-failed` keeps whatever the job printed, ANSI and all (`##[group]`
+      markers, the `\\x1b[36;1m` of the setup actions, anything running under FORCE_COLOR or
+      `pytest --color=yes`). This string ends up inside the rework prompt, which chela PASTES
+      into the agent's tmux pane — where an escape is a keypress, not a character, and a
+      `\\x03` is a Ctrl-C. So it goes through the same sanitizer a room body does.
+    * It is BYTES. A test that prints an invalid UTF-8 byte would make `text=True` raise
+      ``UnicodeDecodeError`` — an exception this function never promised and `tick` does not
+      catch, killing the whole pass. ``errors="replace"`` makes a mangled byte cost a
+      character, not the loop.
     """
     if not repo_dir or not run_ids:
         return ""
     try:
         out = subprocess.run(
             ["gh", "run", "view", run_ids[0], "--log-failed"],
-            cwd=repo_dir, capture_output=True, text=True, timeout=60,
+            cwd=repo_dir, capture_output=True, text=True, errors="replace", timeout=60,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         return f"(could not fetch the CI log: {e})"
     if out.returncode != 0:
         return f"(could not fetch the CI log: {(out.stderr or out.stdout or '').strip()[:200]})"
-    text = (out.stdout or "").strip()
+    text = tui_sanitize(out.stdout or "")
     if len(text) <= CI_LOG_TAIL_CHARS:
         return text
     return "… (log truncated — this is the tail)\n" + text[-CI_LOG_TAIL_CHARS:]
@@ -854,9 +923,19 @@ def _ci_verdict_body(ci: CIStatus, log_tail: str, pr_url: str | None) -> str:
     It is deliberately not a review: it makes no judgment about the code, it reports what
     GitHub said. That is why this loop needs no reviewer and no LLM, and why a wrong verdict
     is not a risk here the way it would be for a judge.
+
+    The body is BOTH a PR comment and (through the rework prompt) something pasted into an
+    agent's terminal. `_failing_log_tail` already stripped the escapes for the terminal; the
+    fence below is widened past the longest backtick run in the log for the markdown — a CI
+    log that prints ``` would otherwise close the block early and spill the rest of itself
+    into the comment as prose.
     """
     jobs = "\n".join(f"- `{name}`" for name in ci.failing) or "- (the rollup named no job)"
-    log_block = f"\n```\n{log_tail}\n```\n" if log_tail else "\n_(no log tail available)_\n"
+    longest_run = max((len(m) for m in re.findall(r"`+", log_tail)), default=0)
+    fence = "`" * max(3, longest_run + 1)
+    log_block = (
+        f"\n{fence}\n{log_tail}\n{fence}\n" if log_tail else "\n_(no log tail available)_\n"
+    )
     return f"""## 🚦 CI is RED on this PR — sent back automatically
 
 GitHub's checks are the authority on whether this can ship, and they are **failing** on
@@ -1378,30 +1457,43 @@ def tick(workflow_path: str | Path) -> dict:
         # every tick (for still-open PRs) keeps the Merge-all count honest.
         # Runs against rows of any status that carry a pr_url (done cards still
         # surface a Merge button in the UI).
+        #
+        # ⛔ SCOPED TO THIS WORKFLOW. `tick` runs once per workflow, so an unscoped query
+        # here asked GitHub about every PR in the fleet, once per workflow — W×P `gh` spawns
+        # a cycle, and the reward for hitting the rate limit is CI_UNKNOWN on everything,
+        # which (correctly, and catastrophically) refuses every merge at once.
         pr_rows = conn.execute(
-            "SELECT task_id, status, pr_url, workflow_path FROM runs "
-            "WHERE pr_url IS NOT NULL AND (pr_state IS NULL OR pr_state='open')"
+            "SELECT task_id, status, pr_url, workflow_path, pr_head_sha, ci_pending_since "
+            "FROM runs WHERE workflow_path=? AND pr_url IS NOT NULL "
+            "AND (pr_state IS NULL OR pr_state='open')",
+            (str(wf.path),),
         ).fetchall()
+
+        # ⛔ EVERY `gh` CALL HAPPENS HERE, WITH NO WRITE TRANSACTION OPEN. The first UPDATE
+        # takes SQLite's write lock and holds it until the commit — so doing the network
+        # inside that loop meant 20 PRs × a couple of gh round-trips of lock, and every
+        # concurrent writer (a `chela review`, a dashboard merge, a `task-finished`) got
+        # `database is locked` back. Read first, write second: the loop below touches
+        # nothing but memory.
         ci_now: dict[str, CIStatus] = {}   # task_id → what GitHub said THIS tick
+        reads: list[tuple] = []
         for pr_row in pr_rows:
             wf_path = pr_row["workflow_path"]
             repo_dir = str(Path(wf_path).parent) if wf_path else None
             state, mergeable = _read_pr_status(pr_row["pr_url"], repo_dir)
             # 0b. THE CHECKS — read from their owner, for the runs parked in review.
             #
-            # Only those: they are the ones a merge gate protects and the only ones a red CI
-            # can send back. A `running` row's PR is still being pushed to, and asking GitHub
-            # about a moving target every 60s buys nothing. ⛔ Rows whose pr_state is already
-            # terminal never reach here at all (the WHERE above) — which is also the
-            # "no resurrection" rule holding: a merged run's red CI does NOTHING.
-            if pr_row["status"] in REVIEW_STATUSES:
+            # Only the LIVE review states (CI_POLL_STATUSES): they are the ones a merge gate
+            # protects and the only ones a red CI can send back. A `running` row's PR is
+            # still being pushed to, and asking GitHub about a moving target every 60s buys
+            # nothing; a `needs_human` row is terminal, and polling it forever buys less.
+            # ⛔ Rows whose pr_state is already terminal never reach here at all (the WHERE
+            # above) — which is also the "no resurrection" rule holding: a merged run's red
+            # CI does NOTHING.
+            ci = None
+            if pr_row["status"] in CI_POLL_STATUSES:
                 ci = _read_pr_checks(pr_row["pr_url"], repo_dir)
                 ci_now[pr_row["task_id"]] = ci
-                conn.execute(
-                    "UPDATE runs SET pr_checks=?, pr_head_sha=COALESCE(?, pr_head_sha) "
-                    "WHERE task_id=?",
-                    (ci.state, ci.head_sha, pr_row["task_id"]),
-                )
                 if ci.state == CI_UNKNOWN:
                     # ⛔ Loud, and never a pass: a check state nobody could read is the
                     # doctor rule's CANNOT VERIFY. The merge gate refuses it downstream.
@@ -1411,6 +1503,22 @@ def tick(workflow_path: str | Path) -> dict:
                         "back until GitHub can be asked.",
                         pr_row["task_id"], ci.detail,
                     )
+            reads.append((pr_row, state, mergeable, ci))
+
+        for pr_row, state, mergeable, ci in reads:
+            if ci is not None:
+                # The unsettled clock: started when a pending spell begins, restarted when a
+                # new head sha begins its own, cleared the moment the checks settle. Only a
+                # spell that outlives CI_PENDING_STALE_SECONDS is stuck (see 1c′).
+                pending_since = None
+                if ci.state == CI_PENDING:
+                    same_sha = ci.head_sha is None or ci.head_sha == pr_row["pr_head_sha"]
+                    pending_since = (pr_row["ci_pending_since"] if same_sha else None) or _now()
+                conn.execute(
+                    "UPDATE runs SET pr_checks=?, pr_head_sha=COALESCE(?, pr_head_sha), "
+                    "ci_pending_since=? WHERE task_id=?",
+                    (ci.state, ci.head_sha, pending_since, pr_row["task_id"]),
+                )
             if state is None and mergeable is None:
                 continue
             # COALESCE so a partial read (e.g. mergeable still UNKNOWN right
@@ -1620,21 +1728,40 @@ def tick(workflow_path: str | Path) -> dict:
                 continue
             if row["ci_failed_sha"] == sha:
                 continue        # this red has already been delivered. Each red fires ONCE.
-            # ⛔ Record the fired sha BEFORE firing. The failure modes are not symmetric: a
-            # crash after this line costs at most ONE missed verdict (a human still sees the
-            # red PR), while a crash before it would re-fire the same red every tick and burn
-            # the whole rework budget on a single commit — which is the bug this guard exists
-            # to prevent, arriving by the back door.
-            conn.execute("UPDATE runs SET ci_failed_sha=? WHERE task_id=?", (sha, task_id))
-            conn.commit()
             wf_dir = str(wf.path.parent)
             # The heavy read (a whole log archive) happens HERE and nowhere else: once, on
-            # the transition into red — never on the poll.
+            # the transition into red — never on the poll. ⛔ BEFORE the sha is burned: the
+            # first cut committed `ci_failed_sha` first, so anything that went wrong while
+            # FETCHING the log (and the fetch is a subprocess reading a stranger's bytes)
+            # took the verdict with it — the red was marked delivered and never fired again,
+            # and the run sat red in awaiting_review until a human happened to look.
             log_tail = _failing_log_tail(wf_dir, ci.run_ids if ci else ())
-            result = request_changes(
-                task_id,
-                _ci_verdict_body(ci or CIStatus(CI_FAILING, sha), log_tail, row["pr_url"]),
-            )
+            body = _ci_verdict_body(ci or CIStatus(CI_FAILING, sha), log_tail, row["pr_url"])
+            # ⛔ NOW record the fired sha — after the tail is in hand, before the one step
+            # that cannot be taken back. The failure modes are not symmetric: a crash after
+            # this line costs at most ONE missed verdict (a human still sees the red PR),
+            # while a crash before it would re-fire the same red every tick and burn the
+            # whole rework budget on a single commit — the very bug this guard exists for.
+            conn.execute("UPDATE runs SET ci_failed_sha=? WHERE task_id=?", (sha, task_id))
+            conn.commit()
+            try:
+                result = request_changes(task_id, body)
+            except sqlite3.Error as e:
+                # request_changes opens its OWN connection, and a busy DB can refuse it. Two
+                # things must not happen: the tick must not die (it still has merges to
+                # reconcile and a queue to dispatch), and the red must not be lost. A refused
+                # write wrote NOTHING, so the sha it was about is un-burned and this red fires
+                # again next tick — the once-per-sha guard is a guard against DOUBLE firing,
+                # never a licence to fire zero times.
+                log.error("CI: %s is red but the verdict could not be written: %s — the sha is "
+                          "un-burned and this red will be retried next tick", task_id, e)
+                try:
+                    conn.execute("UPDATE runs SET ci_failed_sha=? WHERE task_id=?",
+                                 (row["ci_failed_sha"], task_id))
+                    conn.commit()
+                except sqlite3.Error:
+                    pass   # the DB is the thing that is broken; next tick re-reads the red
+                continue
             if not result.get("ok"):
                 # The CAS refused it — the row moved (a human merged it, or a reviewer got
                 # there first). Nothing was written, and nothing should be.
@@ -1647,6 +1774,35 @@ def tick(workflow_path: str | Path) -> dict:
                 row["pr_url"] or "?", sha[:12], task_id, result.get("round"),
                 result.get("max_reworks"), ", ".join(ci.failing) if ci else "?",
             )
+
+        # 1c′. A CHECK THAT NEVER SETTLES IS NOT A CHECK WE ARE STILL WAITING FOR.
+        #
+        # `pending` is the state with no exit of its own: no verdict fires on it (correctly —
+        # unsettled is not red), every merge gate refuses it (correctly — nobody knows yet
+        # what merging it means), and the Kanban card does not even render a Merge button.
+        # A rollup that stays there — a `WAITING` deployment gate with required reviewers, a
+        # check an app registered and never reported — parks the run FOREVER, silently. That
+        # is the one thing the loop is not allowed to do. Past GitHub's own job ceiling it is
+        # not running any more, it is stuck, and it goes to a human WITH THE REASON.
+        now = _parse_ts(_now())
+        for row in conn.execute(
+            "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
+            "AND pr_checks=? AND ci_pending_since IS NOT NULL",
+            (str(wf.path), CI_PENDING),
+        ).fetchall():
+            since = _parse_ts(row["ci_pending_since"])
+            if not since or not now or (now - since).total_seconds() < CI_PENDING_STALE_SECONDS:
+                continue
+            hours = int((now - since).total_seconds() // 3600)
+            _escalate(
+                conn, row,
+                f"the checks on this PR have not settled in {hours}h — they are not running, "
+                "they are STUCK (a deployment gate awaiting approval, or a check an app "
+                "registered and never reported). Nothing can merge a PR whose checks never "
+                "answer, and nothing can send it back either: pending is not red. Branch, "
+                "worktree and PR are preserved.",
+            )
+            summary["escalated"] += 1
 
         # 1d. ESCALATE the runs that have spent their rework budget.
         #

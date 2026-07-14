@@ -74,6 +74,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chela import agent_manager, discovery, event_log, messenger
+from chela.tui_text import sanitize as tui_sanitize
 
 log = logging.getLogger(__name__)
 
@@ -127,12 +128,6 @@ PENDING_TTL_SECONDS = 3600.0
 MAX_PENDING_PER_WID = 20
 
 _ROOM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$", re.IGNORECASE)
-# ANSI/OSC escape sequences first (they start with ESC, which the control-char pass
-# below would otherwise strip, leaving the payload `[31m` as visible garbage).
-_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
-# Every C0 control except \n and \t, plus DEL and the C1 block. These are keystrokes,
-# not text: a raw \x03 in a body is a Ctrl-C aimed at the recipient's TUI.
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
 # --- the membership table (rooms.json — NO events live here) ---------------------
@@ -276,17 +271,11 @@ def sanitize(text: str) -> str:
     """Strip ANSI escapes and control characters; collapse CRLF; cap the length.
 
     A room body is typed into someone else's TUI. A raw ``\\x1b`` or ``\\x03`` in it is
-    not text — it is a keypress aimed at that agent's Claude Code prompt. Newlines and
-    tabs survive (real content has them; the paste path handles newlines); everything
-    else in the control range does not.
+    not text — it is a keypress aimed at that agent's Claude Code prompt. The rule itself
+    now lives in :mod:`chela.tui_text`, because rooms are no longer its only caller: the CI
+    verdict pastes a raw Actions log down the same path.
     """
-    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-    text = _ANSI_RE.sub("", text)
-    text = _CONTROL_RE.sub("", text)
-    text = text.strip()
-    if len(text) > MAX_TEXT_CHARS:
-        text = text[:MAX_TEXT_CHARS].rstrip() + "…"
-    return text
+    return tui_sanitize(text, MAX_TEXT_CHARS)
 
 
 def is_relay_text(text: str) -> bool:
