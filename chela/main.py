@@ -961,7 +961,15 @@ def cmd_telegram(args) -> None:
             if auto_topics
             else None
         )
-        application = build_application(token, router, on_topic_closed=on_topic_closed)
+        # The mirror's D-pad (CMX-52): a tap sends its key, then asks the pane watcher to
+        # re-draw the mirrored dialog IN PLACE, so the ❯ cursor moves in the chat. The
+        # watcher owns that message's id and its de-dup signature, so the re-render must
+        # go through it — a second writer would double-post the mirror.
+        application = build_application(
+            token, router,
+            on_topic_closed=on_topic_closed,
+            refresh_mirror=gate_watcher.refresh_mirror,
+        )
     except ImportError as e:
         print(f"{e}\n(or run outbound-only:  chela telegram --no-inbound)", file=sys.stderr)
         sys.exit(1)

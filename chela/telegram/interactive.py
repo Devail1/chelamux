@@ -116,6 +116,100 @@ NAV_ACTIONS: dict[str, tuple[str, str]] = {
 }
 
 
+# ── The MIRROR's D-pad (CMX-52) ──────────────────────────────────────────────
+#
+# The nav row above has ↑ ↓ ⎋ ⏎ 🔄 and nothing else, which makes a ``multiSelect``
+# question literally undrivable from a phone: there is no ``Space`` to toggle an option,
+# no ``Tab``, and no ``←``/``→`` to walk between the questions of a multi-question run.
+# So the mirror carries ccbot's full nine-key D-pad instead — every key the TUI reads:
+#
+#     ␣ Space   ↑   ⇥ Tab
+#     ←         ↓   →
+#     ⎋ Esc     🔄  ⏎ Enter
+#
+# ``ref`` fires no key: it re-captures the pane and **re-renders the same message**. (The
+# old 🔄 posted a fresh screenshot *below* the card, which the human then had to scroll to
+# and mentally align against the buttons — the mirror's whole point is that the picture
+# and the buttons are one message.)
+#
+# Ported from ccbot's ``_build_interactive_keyboard`` (handlers/interactive_ui.py:81-141),
+# MIT; see the top-level NOTICE.
+MIRROR_CB_PREFIX = "m:"
+
+MIRROR_KEYS: list[list[tuple[str, str, str | None]]] = [
+    [("␣ Space", "spc", "Space"), ("↑", "up", "Up"), ("⇥ Tab", "tab", "Tab")],
+    [("←", "lt", "Left"), ("↓", "dn", "Down"), ("→", "rt", "Right")],
+    [("⎋ Esc", "esc", "Escape"), ("🔄", "ref", None), ("⏎ Enter", "ent", "Enter")],
+]
+
+# The key_id that re-renders instead of pressing anything.
+MIRROR_REFRESH_KEY_ID = "ref"
+
+# key_id → (tmux key name, toast label), DERIVED from the table above so a button and the
+# key it fires cannot drift apart (the CMX-45 rule). Keyless buttons (🔄) are excluded —
+# a refresh is not a keypress.
+MIRROR_ACTIONS: dict[str, tuple[str, str]] = {
+    key_id: (tmux_key, label)
+    for row in MIRROR_KEYS
+    for (label, key_id, tmux_key) in row
+    if tmux_key is not None
+}
+
+# A dialog with **no horizontal axis** drops ←/→ rather than showing two keys that do
+# nothing. ccbot special-cased ``RestoreCheckpoint`` for exactly this reason: it is a
+# plain vertical list of checkpoints, so ← and → are inert there — and an inert button is
+# how a human learns to distrust the whole keyboard. ↑/↓ stay (the list is navigable) and
+# so does Tab. This is a *display* rule keyed on the mirrored dialog's pattern name; it
+# never changes what a key does, so :data:`MIRROR_ACTIONS` stays the one key table.
+VERTICAL_ONLY_DIALOGS: frozenset[str] = frozenset({"RestoreCheckpoint"})
+
+# After a key is sent, how long to let the TUI repaint before re-capturing the pane for
+# the edit-in-place. ccbot used 0.5s in production (bot.py:1594-1697) and the cursor moved
+# visibly in the chat; a shorter wait races the repaint and mirrors the PREVIOUS frame,
+# which would look exactly like the "nothing happened" bug this replaces.
+MIRROR_SETTLE_S = 0.5
+
+
+def mirror_markup(ui_name: str = "") -> dict:
+    """The D-pad for a mirrored dialog — every key the TUI reads, as one keyboard.
+
+    ``ui_name`` is the mirrored :class:`~chela.telegram.panescan.Dialog`'s pattern name and
+    only shapes the *layout* (see :data:`VERTICAL_ONLY_DIALOGS`); an unknown name gets the
+    full pad, which is the right default — a mirror exists precisely for the dialogs we do
+    not recognise, and refusing them keys would defeat it.
+    """
+    vertical_only = ui_name in VERTICAL_ONLY_DIALOGS
+    rows: list[list[dict]] = []
+    for row in MIRROR_KEYS:
+        buttons = [
+            {"text": label, "callback_data": f"{MIRROR_CB_PREFIX}{key_id}"}
+            for (label, key_id, _tmux) in row
+            if not (vertical_only and key_id in ("lt", "rt"))
+        ]
+        if buttons:
+            rows.append(buttons)
+    return {"inline_keyboard": rows}
+
+
+def decode_mirror_callback(data: str) -> tuple[str, Any] | None:
+    """Decode an ``m:`` D-pad tap, or None if it isn't ours / isn't a known key.
+
+    * ``("key", (tmux_key, label))`` — press one key, then re-render the mirror;
+    * ``("refresh", None)`` — the 🔄 button: press nothing, just re-render.
+
+    The target window is **not** in the payload and never will be: it is re-resolved from
+    the message's own topic at tap time (CMX-8). An unknown key_id returns None and the
+    handler answers the tap and does nothing, so a stale or crafted payload is inert.
+    """
+    if not data.startswith(MIRROR_CB_PREFIX):
+        return None
+    key_id = data[len(MIRROR_CB_PREFIX):]
+    if key_id == MIRROR_REFRESH_KEY_ID:
+        return ("refresh", None)
+    action = MIRROR_ACTIONS.get(key_id)
+    return ("key", action) if action is not None else None
+
+
 def select_keystrokes(index: int) -> list[str]:
     """Blind fallback: assume the cursor is on option 0 and submit option ``index``.
 

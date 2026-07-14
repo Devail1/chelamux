@@ -689,3 +689,102 @@ def test_a_refused_tap_says_so_loudly_and_still_sends_no_keystroke():
 
     assert keys == []
     assert update.callback_query.answers == ["⌛ Too late — answer it in the terminal."]
+
+
+# ── CMX-52: the mirror's D-pad — a key, then a RE-DRAW of the same message ───
+
+def _mirror_handler(*, send_key, refresh_mirror):
+    """The real _on_mirror callback from a real build_application."""
+    from telegram.ext import CallbackQueryHandler
+
+    from chela.telegram.inbound import build_application
+
+    app = build_application(
+        "123:fake-token",
+        TopicRouter("777", "@3", "4", sender=_StubSender()),
+        send_key=send_key,
+        refresh_mirror=refresh_mirror,
+    )
+    handlers = [h for group in app.handlers.values() for h in group]
+    cbs = [h for h in handlers if isinstance(h, CallbackQueryHandler)]
+    return cbs[1].callback  # ^qa: is first, ^m: second, the pattern-less _on_key last
+
+
+def test_a_dpad_tap_sends_the_key_then_redraws_the_SAME_message():
+    """The whole feature: press ↓, watch the ❯ cursor move IN THE MESSAGE YOU TAPPED.
+
+    The old nav row sent the key and stopped there — nothing on screen changed, so from a
+    phone it was indistinguishable from a dead button. The re-draw is what closes the loop.
+    """
+    import asyncio
+
+    keys: list[str] = []
+    redrawn: list[str] = []
+    on_mirror = _mirror_handler(
+        send_key=lambda _w, k: keys.append(k) or True,
+        refresh_mirror=redrawn.append,
+    )
+    update = _FakeCallbackUpdate("m:dn")
+
+    asyncio.run(on_mirror(update, None))
+
+    assert keys == ["Down"]
+    assert redrawn == ["@3"], "the mirror is re-drawn, for the window the TOPIC resolves to"
+    assert update.callback_query.answers == ["↓"]
+    # A re-draw is an EDIT of the tracked message (the watcher owns it) — never a fresh
+    # screenshot posted below, which is what the old 🔄 did and what left the human
+    # scrolling between a picture and the buttons meant to move it.
+    assert not update.callback_query.message.photos
+
+
+def test_the_mirror_refresh_types_nothing_and_still_redraws():
+    import asyncio
+
+    keys: list[str] = []
+    redrawn: list[str] = []
+    on_mirror = _mirror_handler(
+        send_key=lambda _w, k: keys.append(k) or True,
+        refresh_mirror=redrawn.append,
+    )
+    update = _FakeCallbackUpdate("m:ref")
+
+    asyncio.run(on_mirror(update, None))
+
+    assert keys == [], "🔄 must not type anything into the session"
+    assert redrawn == ["@3"]
+    assert update.callback_query.answers == ["🔄"]
+
+
+def test_a_dpad_tap_from_the_wrong_chat_touches_nothing():
+    """The window is re-resolved from the message's TOPIC — never trusted off the wire."""
+    import asyncio
+
+    keys: list[str] = []
+    redrawn: list[str] = []
+    on_mirror = _mirror_handler(
+        send_key=lambda _w, k: keys.append(k) or True,
+        refresh_mirror=redrawn.append,
+    )
+    update = _FakeCallbackUpdate("m:ent", chat_id=999)   # not the bound chat
+
+    asyncio.run(on_mirror(update, None))
+
+    assert keys == [] and redrawn == []
+    assert update.callback_query.answers == [None], "the spinner is still stopped"
+
+
+def test_a_failed_key_send_does_not_redraw():
+    """A key that never landed must not be reported as a moved cursor."""
+    import asyncio
+
+    redrawn: list[str] = []
+    on_mirror = _mirror_handler(
+        send_key=lambda _w, _k: False,
+        refresh_mirror=redrawn.append,
+    )
+    update = _FakeCallbackUpdate("m:up")
+
+    asyncio.run(on_mirror(update, None))
+
+    assert redrawn == []
+    assert update.callback_query.answers == ["❌ send failed"]

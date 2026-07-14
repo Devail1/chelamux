@@ -44,9 +44,11 @@ from chela.telegram.gatewatch import PermissionGateWatcher, StatusRelay
 from chela.telegram.monitor import TranscriptMonitor
 from chela.telegram.panescan import (
     AskUQ,
+    Dialog,
     Gate,
     Status,
     detect_askuserquestion,
+    detect_dialog,
     detect_permission_gate,
     detect_status,
 )
@@ -68,6 +70,8 @@ __all__ = [
     "detect_permission_gate",
     "AskUQ",
     "detect_askuserquestion",
+    "Dialog",
+    "detect_dialog",
     "Status",
     "detect_status",
     "Message",

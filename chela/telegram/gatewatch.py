@@ -54,7 +54,23 @@ posts. The gate's identity therefore comes from the **pane** too
 <cmd>" header the dialog is drawn with); a transcript ``tool_use``, if one happens
 to be unpaired, is only a fallback.
 
-The same per-tick pane capture also feeds a fourth, non-interactive relay — the
+**And a surface you can SEE yourself driving** (CMX-52). The cards above are a *static*
+render: they say what the gate asks, but not what it currently looks like — so tapping an
+arrow on the nav row changed nothing on screen, and the human was driving a selector they
+could not see. Worse, the nav row has no ``Space``, no ``Tab`` and no ``←``/``→``, so a
+``multiSelect`` question could not be answered from a phone at all; and the three
+detectors above cover three dialog shapes out of eight, so a Bash approval, a checkpoint
+restore, ``/model`` or Settings relayed as *nothing*. The **mirror** (``_MIRROR``,
+:func:`format_mirror_card`) fixes all three the way ccbot did — by not parsing anything:
+it re-draws the pane region verbatim (:func:`~chela.telegram.panescan.detect_dialog`) into
+ONE message with a full nine-key D-pad under it, **edits that same message in place after
+every keypress** (:meth:`PermissionGateWatcher.refresh_mirror`, called from the tap
+handler), and deletes it when the dialog leaves the pane. The ``❯`` cursor is *in the
+render signature*, which is precisely why the edit fires and you watch the cursor move in
+the chat. It does not replace the hook cards — see the decision written out above
+:func:`format_mirror_card` — it is what you steer with while they are what you read.
+
+The same per-tick pane capture also feeds a fifth, non-interactive relay — the
 **ephemeral status line** (:class:`StatusRelay`): Claude Code's live working verb
 (``✻ Cerebrating… (2m 45s · ↓ 12.0k tokens) · 2 shells``) posted as one message
 that edits in place while the agent works and **deletes itself** when the turn
@@ -75,6 +91,7 @@ from __future__ import annotations
 
 import html
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -83,6 +100,7 @@ from chela.gateanswer import OpenGate
 from chela.telegram.hookgate import HookGate, Question
 from chela.telegram.interactive import (
     hook_reply_markup,
+    mirror_markup,
     nav_only_markup,
     permission_reply_markup,
     plan_reply_markup,
@@ -90,10 +108,12 @@ from chela.telegram.interactive import (
 )
 from chela.telegram.panescan import (
     AskUQ,
+    Dialog,
     ExitPlan,
     Gate,
     Status,
     detect_askuserquestion,
+    detect_dialog,
     detect_exitplanmode,
     detect_permission_gate,
     detect_status,
@@ -145,6 +165,25 @@ _OPTION_PREFIX = 6
 _GATE = "permission"
 _ASKUQ = "askuserquestion"
 _PLAN = "exitplanmode"
+_MIRROR = "mirror"
+
+# Every tap on the mirror's D-pad is a tmux capture AND a Telegram edit, so a fast thumb
+# is a rate-limit gun. Three things hold it down, and only the third is a clock:
+#
+#   1. the render is DE-DUPED on its signature — an unchanged pane makes no API call at
+#      all (:meth:`PermissionGateWatcher._sync` returns before it touches Telegram);
+#   2. the tap path sleeps :data:`~chela.telegram.interactive.MIRROR_SETTLE_S` before it
+#      re-captures, so a human thumb cannot outrun it by much;
+#   3. this floor, on the poll-driven edits, which is what a *repainting* pane (a spinner
+#      inside a dialog region) would otherwise walk straight into the flood limit.
+#
+# A throttled edit is **skipped, not lost**: the tracked signature is left stale on
+# purpose, so the very next poll renders the newest pane. And a TAP bypasses the floor
+# entirely (``force=True``) — a keypress that does not visibly move the cursor is the
+# exact bug this whole surface exists to kill, and no rate budget is worth reintroducing
+# it.
+MIRROR_EDIT_MIN_INTERVAL = 1.0
+_MIN_EDIT_INTERVAL: dict[str, float] = {_MIRROR: MIRROR_EDIT_MIN_INTERVAL}
 
 # Claude Code repaints its status line several times a second (the elapsed timer
 # ticks even when the verb doesn't), so the ephemeral status message is edited at
@@ -201,10 +240,14 @@ class _Tracked:
     marker); ``message_ids`` are the Telegram messages to edit as the prompt re-renders
     and to delete once it resolves (empty when no id-returning poster is wired). It is a
     *list* because a multi-question AskUserQuestion posts one message per question.
+
+    ``last_edit`` is the throttle clock for the kinds that have one (:data:`_MIN_EDIT_
+    INTERVAL` — the mirror). It advances only on an edit that actually went out.
     """
 
     signature: str
     message_ids: list[int] = field(default_factory=list)
+    last_edit: float = 0.0
 
 
 def _clip(text: str, limit: int = _MAX_DETAIL) -> str:
@@ -553,6 +596,150 @@ def hook_askuq_signature(gate: HookGate, answerable: bool,
     return f"{gate.tool_use_id}\x00{answerable}\x00{held is not None}\x00{body}"
 
 
+# ── The MIRROR — the pane itself, with a D-pad under it (CMX-52) ─────────────
+#
+# **How this composes with the hook cards above — the decision, written down.**
+#
+# The two surfaces answer two different questions and neither subsumes the other:
+#
+#   * the HOOK payload is what the gate *says* — every option's label, description and
+#     ``preview``, in full, losslessly (CMX-49). The pane truncates and mangles all of
+#     that, and ccbot — which had no hooks — could never have had it. It is what makes
+#     the question READABLE.
+#   * the PANE is what the gate *looks like right now* — where the ``❯`` cursor is, which
+#     boxes are ticked, which tab is focused. No hook carries a cursor, because a cursor
+#     is not an input, it is a render. It is what makes the question DRIVABLE.
+#
+# So they coexist, and the rule — :func:`mirror_suppressed`, one predicate, so it is one
+# line to change once Liav has driven it — is:
+#
+#   **The mirror is posted for every dialog EXCEPT one whose every option is already a
+#   single tap away.**
+#
+# Suppressed, because a D-pad there would be strictly worse than the buttons already on
+# screen (and a second message, and a second edit on every repaint):
+#
+#   * a gate whose ``PermissionRequest`` hook the daemon is HOLDING OPEN (CMX-50) — every
+#     option is a button, every shape, zero keypresses, no cursor to steer;
+#   * a single-select AskUserQuestion with its semantic option buttons attached — every
+#     real option is a numbered button.
+#
+# Posted, because in each of these the human is being asked to answer something they
+# cannot fully reach:
+#
+#   * a **permission gate** and a **plan approval**. Their cards bind only the two
+#     option-count-independent keys (Enter / Escape → ✅ Allow once / ❌ Deny, ✅ Approve /
+#     📝 Keep planning). Option 2 — "don't ask again", "manually approve edits" — is
+#     deliberately left unbound (a mis-tap must not widen a session's permissions for
+#     good), so today it is reachable from a phone only by *guessing* at a selector you
+#     cannot see. With the mirror you can see it, arrow to it, and press Enter. The
+#     one-tap card stays exactly as it is: this adds a way to answer, it removes none.
+#   * an AskUserQuestion that fell back to the **nav row** — a multi-tab / ``multiSelect``
+#     / unparseable selector that no hook is holding. The nav row has no ``Space``, no
+#     ``Tab``, no ``←``/``→``, so this shape was not merely awkward from a phone, it was
+#     **unanswerable**. The D-pad has all of them.
+#   * **any dialog none of the three detectors recognises** — a checkpoint restore,
+#     ``/model``, Settings, a reworded prompt. These relayed as *nothing at all*. This is
+#     the mirror's enduring value and the reason it is not a fallback: hooks will never
+#     cover a dialog Claude Code has not told anyone about, and the mirror needs no
+#     telling.
+#
+# The hook cards are never replaced, never suppressed, and never lose their previews —
+# deleting them to make room would take back the exact thing Liav verified live in CMX-49.
+
+# The mirrored region, budgeted against Telegram's 4096-char cap. A dialog region is
+# small (it is one TUI box), so this only ever bites on a pathological one — and then it
+# keeps the TAIL, because the cursor, the options and the footer hint all live at the
+# bottom and the top of a long dialog is prose you can /screenshot.
+_MAX_MIRROR = 3200
+_MIRROR_CLIPPED = "… [top of the dialog clipped — /screenshot for all of it]"
+
+# The pattern name → what to call it on the card. An unrecognised name (a shape added to
+# the table later) falls back to a generic heading rather than to nothing — the mirror's
+# whole promise is that it renders what it cannot name.
+_MIRROR_TITLES: dict[str, str] = {
+    "AskUserQuestion": "Question",
+    "ExitPlanMode": "Plan review",
+    "ToolApproval": "Approval",
+    "PermissionPrompt": "Permission",
+    "BashApproval": "Bash approval",
+    "RestoreCheckpoint": "Restore checkpoint",
+    "Settings": "Settings",
+}
+_MIRROR_HEAD = "🎛️ {title} — the live pane. Every key below re-draws it here."
+
+
+def format_mirror_card(dialog: Dialog) -> Card:
+    """The pane region, mirrored verbatim into one message, with the D-pad under it.
+
+    **The formatting is load-bearing, so it is stated rather than assumed.** ccbot posted
+    this region as *plain text with no parse mode* (``interactive_ui.py``:225-236), which
+    hands box drawing and a ``❯`` cursor to Telegram's proportional font: the rows do not
+    line up, and a wide row wraps and shears the dialog in half. chela has a strictly
+    better surface and has already proven it on Liav's phone — the ``<pre>`` block CMX-49
+    ships previews in, which renders **monospaced** and **scrolls horizontally instead of
+    wrapping**. So the mirror goes in a ``<pre>``: the columns align, the cursor sits where
+    the terminal put it, and a wide dialog scrolls rather than shatters. ccbot's one
+    genuinely useful trick is kept — its ``─────`` rule-shortening
+    (:func:`~chela.telegram.panescan._shorten_separators`, applied at extraction), which
+    stops a full-width horizontal rule from setting the scroll width for the whole box.
+
+    ``Card.plain`` carries the same region with the markup stripped, so a body Telegram
+    refuses to parse degrades to ccbot's exact rendering rather than to silence.
+    """
+    title = _MIRROR_TITLES.get(dialog.name, "Terminal")
+    body = "\n".join(line.rstrip() for line in dialog.text.split("\n")).strip("\n")
+    if len(body) > _MAX_MIRROR:
+        body = _MIRROR_CLIPPED + "\n" + body[-_MAX_MIRROR:]
+    head = _MIRROR_HEAD.format(title=title)
+    text = f"{_esc(head)}\n<pre>{_esc(body)}</pre>"
+    return Card(
+        text=text,
+        parse_mode="HTML",
+        markup=mirror_markup(dialog.name),
+        plain=f"{head}\n{body}",
+    )
+
+
+def mirror_suppressed(uq: "AskUQ | None", *, held: "OpenGate | None",
+                      answerable: bool) -> bool:
+    """Is this dialog's every option ALREADY one tap away? Then it needs no D-pad.
+
+    The whole composition rule, in one predicate — see the section comment above. Two
+    shapes qualify, and only two:
+
+    * ``held`` — a blocked ``PermissionRequest`` hook is waiting on this gate, so every
+      option of every question is a button that answers the agent directly (CMX-50);
+    * a scraped single-select selector with semantic option buttons attached — every real
+      option is a numbered button that lands on it (``answerable``, or a pane-only
+      selector that parsed cleanly).
+
+    Everything else is mirrored: a permission gate and a plan approval (whose cards
+    deliberately bind only two of their menu's options), a nav-row-only selector (which
+    has no ``Space``/``Tab``/``←``/``→`` and is therefore not answerable at all), and every
+    dialog no detector recognises (which relays nothing at all today).
+    """
+    if held is not None:
+        return True
+    if answerable:                      # a hook-rendered card wearing keystroke buttons
+        return True
+    return uq is not None and not uq.multi and bool(uq.options)
+
+
+def mirror_signature(dialog: Dialog) -> str:
+    """The de-dup / edge-trigger marker for the mirror — **the pane region itself**.
+
+    The whole region, byte for byte, which means **the ``❯`` cursor is in the signature**.
+    That is the entire fix for the complaint that started this task. The hook-payload
+    signature (:func:`hook_askuq_signature`) is keyed on the gate's *content*, and content
+    does not change when you press ↑ — so the edit never fired, the message never moved,
+    and tapping an arrow did visibly nothing. Here, moving the cursor moves the render,
+    the signature changes, and the message is re-drawn in place. Do not "optimise" this
+    into a hash of the semantic fields: the pixels **are** the semantics for this surface.
+    """
+    return f"{dialog.name}\x00{dialog.text}"
+
+
 def format_plan_message(plan: ExitPlan) -> str:
     """The plain-text relay body for a detected ExitPlanMode plan approval.
 
@@ -839,12 +1026,15 @@ class PermissionGateWatcher:
         detect: Callable[[str], Gate | None] = detect_permission_gate,
         detect_askuq: Callable[[str], AskUQ | None] = detect_askuserquestion,
         detect_plan: Callable[[str], ExitPlan | None] = detect_exitplanmode,
+        detect_dialog: Callable[[str], Dialog | None] = detect_dialog,
         post: Poster | None = None,
         edit: Editor | None = None,
         delete: Deleter | None = None,
         status: "StatusRelay | None" = None,
         pending: "Callable[[str], HookGate | None] | None" = None,
         held: "Callable[[str], OpenGate | None] | None" = None,
+        mirror: bool = True,
+        now: Callable[[], float] = time.monotonic,
     ):
         self._sender = sender
         self._registry = registry
@@ -852,6 +1042,16 @@ class PermissionGateWatcher:
         self._detect = detect
         self._detect_askuq = detect_askuq
         self._detect_plan = detect_plan
+        # The universal dialog detector (CMX-52) — the one that parses nothing and
+        # therefore relays the shapes the three above have never heard of.
+        self._detect_dialog = detect_dialog
+        self._mirror = mirror
+        self._now = now
+        # :meth:`refresh_mirror` is called from the PTB event loop (a D-pad tap) while
+        # :meth:`poll` runs in the outbound thread, and both mutate ``_prompts``. One lock
+        # over the whole reconcile keeps a tap and a tick from interleaving into a
+        # half-updated tracker (two posted mirrors, or an orphaned message id).
+        self._lock = threading.RLock()
         # The event log's view of what this window is blocked on
         # (:func:`~chela.telegram.hookgate.pending_gate`) — the CONTENT authority for an
         # AskUserQuestion. ``None`` (the default) means pane-only: that is the correct
@@ -922,7 +1122,10 @@ class PermissionGateWatcher:
         window_ids = list(window_ids)
         for wid in window_ids:
             try:
-                self._poll_window(wid)
+                # Held against a concurrent D-pad tap (:meth:`refresh_mirror`), which
+                # runs on the PTB loop and reconciles the same tracker.
+                with self._lock:
+                    self._poll_window(wid)
             except Exception:
                 log.exception("pane-watch poll failed for %s", wid)
         if self._status is not None:
@@ -936,7 +1139,7 @@ class PermissionGateWatcher:
     # -- internals ---------------------------------------------------------
 
     def _poll_window(self, window_id: str) -> None:
-        # One capture per window per tick, shared by all three detectors.
+        # One capture per window per tick, shared by every detector.
         pane = self._capture(window_id)
         uq = self._detect_askuq(pane)
         plan = self._detect_plan(pane)
@@ -950,10 +1153,11 @@ class PermissionGateWatcher:
         # now* — an unresolved `pre_tool_use` on its own could equally mean the agent
         # died at the gate (the false-`DIED` mistake, CMX-35, from the other side).
         hook = self._hook_askuq(window_id) if uq is not None else None
+        held = self._held_gate(hook.tool_use_id) if hook is not None else None
+        answerable = False
         if hook is not None:
             # Is the agent's own hook blocked on this gate? Then the answer goes back
             # through it and the pane is never touched (CMX-50).
-            held = self._held_gate(hook.tool_use_id)
             answerable = self._answerable(hook, uq)
             self._sync(
                 window_id, _ASKUQ, hook,
@@ -976,6 +1180,14 @@ class PermissionGateWatcher:
                 None, permission_reply_markup(),
             )],
         )
+        # The mirror — the pane itself, the ❯ cursor included, under a full D-pad. Posted
+        # for EVERY dialog shape (the eight, not the three) except one whose every option
+        # is already a single tap away (:func:`mirror_suppressed` — the whole composition
+        # rule, and the reasoning behind it, are written out above ``format_mirror_card``).
+        self._sync_mirror(
+            window_id, pane,
+            suppressed=mirror_suppressed(uq, held=held, answerable=answerable),
+        )
         # The fourth read of the same captured text (no extra tmux call). Last, and
         # in its own try: a decoration must never cost us a gate relay.
         if self._status is not None:
@@ -983,6 +1195,54 @@ class PermissionGateWatcher:
                 self._status.sync(window_id, pane)
             except Exception:
                 log.exception("status sync failed for %s", window_id)
+
+    def _sync_mirror(self, window_id: str, pane: str, *, suppressed: bool,
+                     force: bool = False) -> None:
+        """Reconcile one window's mirror against a freshly captured pane.
+
+        ``suppressed`` poofs the mirror (and posts none) — a gate whose hook is held open
+        needs no D-pad. ``force`` skips the edit throttle: it is set for a **tap**, where a
+        delayed re-draw reads as a dead button.
+        """
+        if not self._mirror:
+            return
+        dialog = None
+        if not suppressed:
+            try:
+                dialog = self._detect_dialog(pane)
+            except Exception:
+                log.exception("dialog scrape failed for %s", window_id)
+                return
+        self._sync(
+            window_id, _MIRROR, dialog, mirror_signature,
+            lambda d: [format_mirror_card(d)], force=force,
+        )
+
+    def refresh_mirror(self, window_id: str) -> None:
+        """Re-capture the pane and re-draw this window's mirror **in place**. Never raises.
+
+        This is what a D-pad tap calls after its key lands (:mod:`chela.telegram.inbound`),
+        and it is the whole feature: one message, edited, so the human watches the ``❯``
+        cursor move *in the chat*. It runs on the PTB event loop's worker thread while
+        :meth:`poll` runs in the outbound thread, so it takes the same lock.
+
+        Unlike the poll, this does **not** re-consult the hook: if a mirror is on screen
+        with a live D-pad under it, a tap must always re-draw it. (Were a hook to take the
+        gate over between the tick and the tap, the next tick applies the suppression rule
+        and poofs the message — the authority stays in one place.) A dialog that has left
+        the pane — the key just answered it — resolves the mirror, which deletes it.
+
+        Failures are swallowed. This is a redraw: it must never propagate into the tap
+        handler, where it would surface as a broken button on a gate that was, in fact,
+        answered.
+        """
+        try:
+            with self._lock:
+                self._sync_mirror(
+                    window_id, self._capture(window_id), suppressed=False, force=True,
+                )
+        except Exception:
+            log.exception("mirror refresh failed for %s", window_id)
 
     def _latest_pending(self, window_id: str) -> _PendingTool | None:
         """The most recent unpaired ``tool_use`` for a window, if any."""
@@ -1057,20 +1317,27 @@ class PermissionGateWatcher:
             and len(uq.options) == len(q.options) > 0
         )
 
-    def _sync(self, window_id, kind, detected, sig_fn, cards_fn) -> None:
+    def _sync(self, window_id, kind, detected, sig_fn, cards_fn, *,
+              force: bool = False) -> None:
         """Post / edit / poof the tracked message(s) for one prompt kind.
 
         The single relay path every prompt shares. ``detected is None`` means the prompt
         is no longer on the pane (answered / dismissed) → resolve it. Otherwise: an
         unchanged render is a no-op (edge-triggered — a still-open prompt is never
-        re-posted), a changed one edits the tracked message(s) in place (so a mid-render
-        partial and the settled prompt are ONE message), and a first render posts them. An
-        edit that fails (the message was deleted) falls back to a fresh post.
+        re-posted, and this is the de-dup that keeps a repainting mirror off the wire), a
+        changed one edits the tracked message(s) in place (so a mid-render partial and the
+        settled prompt are ONE message), and a first render posts them. An edit that fails
+        (the message was deleted) falls back to a fresh post.
 
         A prompt renders to a *list* of cards — one per question for a payload-rendered
         AskUserQuestion, one for every other prompt. A render whose card COUNT changed
         cannot be edited into the old messages, so those are poofed and the new set
         posted.
+
+        A kind with an edit floor (:data:`_MIN_EDIT_INTERVAL` — the mirror) SKIPS an edit
+        that lands inside it, leaving the signature stale so the next poll re-renders the
+        newest pane; nothing is dropped, only deferred. ``force`` (a D-pad tap) bypasses
+        the floor.
         """
         if detected is None:
             self._resolve(window_id, kind)
@@ -1080,6 +1347,16 @@ class PermissionGateWatcher:
         tracked = self._prompts.get(window_id, {}).get(kind)
         if tracked is not None and tracked.signature == signature:
             return
+
+        now = self._now()
+        interval = _MIN_EDIT_INTERVAL.get(kind, 0.0)
+        if (
+            tracked is not None
+            and not force
+            and interval
+            and now - tracked.last_edit < interval
+        ):
+            return  # throttled — the signature stays stale, so the next poll re-renders
 
         thread = self._registry.thread_for_window(window_id)
         if thread is None:
@@ -1097,6 +1374,7 @@ class PermissionGateWatcher:
             if all(self._edit_card(mid, card)
                    for mid, card in zip(tracked.message_ids, cards)):
                 tracked.signature = signature
+                tracked.last_edit = now
                 return
         if tracked is not None:
             # Either the card count changed, or a message is gone from Telegram (deleted,
@@ -1114,7 +1392,8 @@ class PermissionGateWatcher:
                 # No id-returning poster (plain-sender tests) — post via the sender;
                 # without an id we can neither edit nor poof the message.
                 self._sender(card.text, card.parse_mode, thread, reply_markup=card.markup)
-        self._prompts.setdefault(window_id, {})[kind] = _Tracked(signature, message_ids)
+        self._prompts.setdefault(window_id, {})[kind] = _Tracked(
+            signature, message_ids, now)
 
     def _post_card(self, card: Card, thread) -> int | None:
         """Post one card, falling back to plain text if Telegram rejects the markup.

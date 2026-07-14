@@ -17,6 +17,13 @@ Locks in the load-bearing behaviour of :class:`PermissionGateWatcher`:
     changed scrape edits it in place — and **poofs** (the message is deleted) when
     the prompt leaves the pane or its ``tool_result`` lands, so no live keyboard is
     left behind on an answered prompt.
+
+Every watcher here is built with ``mirror=False``. These tests are about the SEMANTIC
+cards — what each prompt renders and what its keyboard answers — and a permission gate or
+a plan approval now also posts a pane **mirror** alongside its card (CMX-52), which would
+show up here only as an off-by-one in every ``len(sender.calls)``. The mirror, and the
+fact that it coexists with these cards rather than replacing them, is covered on its own
+in ``tests/test_telegram_mirror.py``.
 """
 from __future__ import annotations
 
@@ -91,7 +98,8 @@ def _tool_result(name, tuid):
 
 
 def _watcher(sender, registry, panes):
-    return PermissionGateWatcher(sender, registry, capture=_capture(panes))
+    return PermissionGateWatcher(
+        sender, registry, capture=_capture(panes), mirror=False)
 
 
 # ── ungated pane detection (the C1 bug C2 fixes) ──────────────────────────
@@ -444,6 +452,7 @@ def _editing_watcher(bot, registry, panes):
         capture=_capture(panes),
         post=bot.post,
         edit=bot.edit,
+        mirror=False,
     )
 
 
@@ -678,7 +687,7 @@ class _DeletingBot(_Bot):
 def _poofing_watcher(bot, registry, panes):
     return PermissionGateWatcher(
         bot.post, registry, capture=_capture(panes),
-        post=bot.post, edit=bot.edit, delete=bot.delete,
+        post=bot.post, edit=bot.edit, delete=bot.delete, mirror=False,
     )
 
 
@@ -780,7 +789,7 @@ def _hook_watcher(bot, panes, gate, registry=None):
     return PermissionGateWatcher(
         bot.post, registry or _Registry({"@1": "100"}), capture=_capture(panes),
         post=bot.post, edit=bot.edit, delete=bot.delete,
-        pending=lambda _wid: gate,
+        pending=lambda _wid: gate, mirror=False,
     )
 
 
@@ -1003,7 +1012,7 @@ def _held_watcher(bot, panes, gate, held):
     return PermissionGateWatcher(
         bot.post, _Registry({"@1": "100"}), capture=_capture(panes),
         post=bot.post, edit=bot.edit, delete=bot.delete,
-        pending=lambda _wid: gate, held=lambda _tuid: held,
+        pending=lambda _wid: gate, held=lambda _tuid: held, mirror=False,
     )
 
 
@@ -1076,7 +1085,7 @@ def test_a_gate_that_becomes_held_re_renders_with_answer_buttons():
     w = PermissionGateWatcher(
         bot.post, _Registry({"@1": "100"}), capture=_capture({"@1": ASKUQ_MULTI_PANE}),
         post=bot.post, edit=bot.edit, delete=bot.delete,
-        pending=lambda _wid: gate, held=lambda _tuid: held[0],
+        pending=lambda _wid: gate, held=lambda _tuid: held[0], mirror=False,
     )
 
     w.poll(["@1"])
