@@ -379,6 +379,7 @@ the dashboard *publishes* the port it bound.
 | `CHELA_DISPATCH_WORKFLOWS` | — | Colon-separated WORKFLOW.md paths the daemon dispatches |
 | `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick interval in the daemon (s) |
 | `CHELA_MAX_REWORKS` | `2` | How many times a PR that fails review is sent back to its agent before the run stops at `needs_human`. `0` = no rework at all |
+| `CHELA_JUDGE` | `true` | The **judge** — the adversarial pass on a green PR (corrupt each guard, re-run the suite, block only on one that survives). One extra agent per PR head, so this is the fleet-wide off switch; a workflow turns it off for itself with `judge: {enabled: false}`, and it is off anyway without a `judge.test_cmd` |
 | `CHELA_AGENT_CMD` | `claude` | Launch command for the dashboard Start button |
 | `CHELA_PROJECTS_DIR` | `~/projects` | Folder scanned for git repos to suggest in the Launch sidebar (also settable in dashboard **Settings → Projects folder**, which wins) |
 | `CHELA_NOTIFY_URL` | — | Needs-input notification target (ntfy / Telegram / webhook) |
@@ -592,6 +593,28 @@ literal Escape.
   — telling an agent to branch and open a PR that is already open. Before downgrading, drain
   the loop: `chela dispatch-runs --awaiting` lists every parked run; merge, close or
   `chela runs delete` each one first.
+- **⚖️ The judge: every guard is corrupted, and one that survives sends the PR back.** CI
+  proves the suite passes. It cannot prove the suite *can fail* — it runs the tests, and the
+  tests are the thing that is broken. Measured here on 2026-07-14: of five CI-green PRs,
+  **four had a guard that survived deliberate corruption** — a "sidebar state must never
+  reach the render key" test that still passed with that state folded back in, a colourblind
+  cue whose glyph could be emptied with `0 failures`, a feature whose entire production
+  wiring could be **reverted** with `1112 passed`. Every feature worked; the proof that they
+  worked could not fail. So a PR reaching `awaiting_review` green gets one judge per head
+  commit. ⛔ **It is not "spawn a reviewer and trust it."** The agent proposes *experiments* —
+  `(file, before, after)` — and **chela** applies each one in a throwaway detached worktree,
+  reads the file back to prove it changed, parse-checks it, re-runs the repo's own
+  `judge.test_cmd`, restores it, and adjudicates. A guard that survives a **live, minimal,
+  syntactically valid** corruption is a **fact**, and it is the only thing allowed to block —
+  through the same carrier a human uses, spending a rework round like any other verdict.
+  Style, taste and "I'd have done it differently" go in `notes`: posted as a PR comment,
+  never blocking. **The judge is allowed to be useless; it is not allowed to be wrong.**
+  ⚠️ An unapplied mutation (the suite stays green — it would block a *good* PR) and one that
+  breaks the parse (red for the wrong reason — it would wave a *bad* PR through) are both
+  thrown out as `INVALID`; a red baseline, a dirty worktree or zero experiments is **CANNOT
+  VERIFY**, which blocks nothing and approves nothing. ⛔ **The judge never merges** — a clean
+  PR stays exactly where it was, in your inbox. Off with `CHELA_JUDGE=0`, or for a workflow
+  that sets no `judge.test_cmd` (no suite ⇒ no facts ⇒ nothing that may block).
 - **The queue belongs to whoever holds it, not to whoever is faster.** The tracker
   has two writers — you reorder it, the dispatcher claims from it — and you lose
   that race every time: a merge frees the slot, and the next tick fires long before
