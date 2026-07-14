@@ -62,7 +62,7 @@
 
   ⚠️ **DRIVE IT LIVE, AND THE TEST MUST BE A REAL SERVER RESTART.** ⛔ **A fixture that hands you a tidy wid reproduces the blind spot, not the bug** — three agents have now shipped green tests that asserted the artifact they WROTE rather than the one that RUNS. **Use an isolated `tmux -L <socket>` server** (⛔ **a bare `kill-server` has killed the real fleet 3×** — `conftest.py` pins `CHELA_TMUX_SESSION=chela-tests-no-such-session`), **kill it, bring it back renumbered, and prove a queued notification still finds the orchestrator — or LOUDLY says it cannot.**
 
-- [ ] **📄 `docs/RESOURCE_ISOLATION.md` — why a runaway job can kill the whole fleet, and how not to let it.** ⛔ **DOCS ONLY. This task writes NO code and changes NO behaviour** — do not "helpfully" wire cgroups into the dispatcher; that was considered and **explicitly deferred** by Liav on 07-14.
+- [x] **📄 `docs/RESOURCE_ISOLATION.md` — why a runaway job can kill the whole fleet, and how not to let it.** ⛔ **DOCS ONLY. This task writes NO code and changes NO behaviour** — do not "helpfully" wire cgroups into the dispatcher; that was considered and **explicitly deferred** by Liav on 07-14.
 
   **THE FACT THE PAGE EXISTS TO CARRY — lead with it, do not bury it:**
   > **A per-job memory ceiling does not bound the box. Only a shared one does.**
