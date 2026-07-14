@@ -900,6 +900,12 @@ def cmd_telegram(args) -> None:
     # scrape of a multi-question / preview-bearing selector holds none of them. The pane
     # stays the liveness signal (and the whole content source for a pre-plugin agent that
     # emits no hooks), so this is an enrichment, never a replacement.
+    # And the ANSWER channel (CMX-50): while the dashboard holds a gate's
+    # `PermissionRequest` hook open, a tap is handed back through it — zero keystrokes,
+    # and the only correct way to answer a multi-question / multiSelect picker. With no
+    # hook holding the gate (a pre-plugin agent) this reads None and the keyboards fall
+    # back to keystroke injection exactly as before.
+    from chela.gateanswer import open_gate
     from chela.telegram.hookgate import pending_gate
     gate_watcher = PermissionGateWatcher(
         bot.send,
@@ -910,6 +916,7 @@ def cmd_telegram(args) -> None:
         delete=bot.delete,
         status=status,
         pending=pending_gate,
+        held=open_gate,
     )
 
     def _on_message(window_id, msg):

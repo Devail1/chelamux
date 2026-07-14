@@ -582,3 +582,110 @@ def test_refresh_tap_recaptures_the_pane_and_sends_no_key():
     assert query.answers == ["🔄"]
     # A snapshot came back — a PNG, or the text block when Pillow is absent.
     assert query.message.photos or query.message.texts
+
+
+# ── CMX-50: a gate answered from Telegram sends NOTHING to the pane ──────────
+
+def _qa_handler(*, drafts, send_key):
+    """The real _on_qa callback from a real build_application."""
+    from telegram.ext import CallbackQueryHandler
+
+    from chela.telegram.inbound import build_application
+
+    app = build_application(
+        "123:fake-token",
+        TopicRouter("777", "@3", "4", sender=_StubSender()),
+        send_key=send_key,
+        drafts=drafts,
+    )
+    handlers = [h for group in app.handlers.values() for h in group]
+    cbs = [h for h in handlers if isinstance(h, CallbackQueryHandler)]
+    return cbs[0].callback  # the ^qa: handler, registered first
+
+
+class _FakeAnswerQuery(_FakeCallbackQuery):
+    """A tap on an answer button: it may redraw its own keyboard, never a screenshot."""
+
+    def __init__(self, data, msg):
+        super().__init__(data, msg)
+        self.markups: list = []
+
+    async def edit_message_reply_markup(self, reply_markup=None, **_kw):
+        self.markups.append(reply_markup)
+
+
+class _FakeAnswerUpdate(_FakeCallbackUpdate):
+    def __init__(self, data, chat_id=777, thread_id=4):
+        super().__init__(data, chat_id, thread_id)
+        self.callback_query = _FakeAnswerQuery(data, _FakeCallbackMessage(thread_id))
+
+
+class _StubDrafts:
+    """Stands in for the draft book — records what the tap asked it to do."""
+
+    def __init__(self, tap):
+        self.tap = tap
+        self.picked: list = []
+        self.sent: list = []
+
+    def pick(self, tool_use_id, question_index, option_index):
+        self.picked.append((tool_use_id, question_index, option_index))
+        return self.tap
+
+    def send(self, tool_use_id, question_index):
+        self.sent.append((tool_use_id, question_index))
+        return self.tap
+
+
+def test_an_answer_tap_goes_through_the_hook_and_types_nothing_at_the_terminal():
+    """THE point of CMX-50. A tap on a held gate must not put a key anywhere near tmux:
+    keystrokes are the substrate that silently answered option 2 for a tap on 3 (CMX-32),
+    and for a multi-question / multiSelect picker they cannot express the answer at all."""
+    import asyncio
+
+    from chela.telegram.gateanswers import Tap
+
+    keys: list[str] = []
+    drafts = _StubDrafts(Tap(True, "✅ Answered", markup={"inline_keyboard": [
+        [{"text": "✓ 1", "callback_data": "qa:h:toolu_1:0:0"}]]}, done=True))
+    on_qa = _qa_handler(drafts=drafts, send_key=lambda _w, k: keys.append(k) or True)
+    update = _FakeAnswerUpdate("qa:h:toolu_1:0:1")
+
+    asyncio.run(on_qa(update, None))
+
+    assert keys == [], "the answer path must not send a keystroke — that is the feature"
+    assert drafts.picked == [("toolu_1", 0, 1)]
+    assert update.callback_query.answers == ["✅ Answered"]
+    assert update.callback_query.markups, "the tapped option is ticked back to the human"
+
+
+def test_a_send_tap_commits_a_multiselect_question_without_a_keystroke():
+    import asyncio
+
+    from chela.telegram.gateanswers import Tap
+
+    keys: list[str] = []
+    drafts = _StubDrafts(Tap(True, "✓ 2 selected"))
+    on_qa = _qa_handler(drafts=drafts, send_key=lambda _w, k: keys.append(k) or True)
+
+    asyncio.run(on_qa(_FakeAnswerUpdate("qa:hs:toolu_1:2"), None))
+
+    assert keys == []
+    assert drafts.sent == [("toolu_1", 2)]
+
+
+def test_a_refused_tap_says_so_loudly_and_still_sends_no_keystroke():
+    """A gate that has resolved must not be re-aimed at whatever is on the pane now."""
+    import asyncio
+
+    from chela.telegram.gateanswers import Tap
+
+    keys: list[str] = []
+    drafts = _StubDrafts(Tap(False, "⌛ Too late — answer it in the terminal."))
+    on_qa = _qa_handler(drafts=drafts, send_key=lambda _w, k: keys.append(k) or True)
+    update = _FakeAnswerUpdate("qa:h:toolu_1:0:0")
+
+    asyncio.run(on_qa(update, None))
+
+    assert keys == []
+    assert update.callback_query.answers == ["⌛ Too late — answer it in the terminal."]

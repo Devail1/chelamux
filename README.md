@@ -517,10 +517,12 @@ agent is waiting for you right now.
 [Claude Code hooks](docs/HOOKS.md) — shipped as a plugin, POSTing into the daemon — close
 that gap from the other side: a permission request or an `AskUserQuestion` lands in the
 [event log](docs/EVENTS.md) **while the agent is still blocked on it**, typed, with every
-option's label and description attached. Ingestion is observe-only today and the
-pane-scraped gates remain the fallback (hooks are read at agent startup, so a running
-fleet has none) — but the structure a protocol would have handed us is arriving anyway,
-without giving up the terminal.
+option's label and description attached. And the answer goes back the same way: chela
+holds that hook open (briefly, boundedly) while you tap the answer on your phone, so a
+question — even a multi-question, multi-select one — is answered with **zero keystrokes**
+at the terminal. The pane-scraped gates remain the fallback (hooks are read at agent
+startup, so a running fleet has none) — but the structure a protocol would have handed us
+is arriving anyway, without giving up the terminal.
 
 ---
 

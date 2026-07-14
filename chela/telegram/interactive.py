@@ -64,6 +64,29 @@ from typing import Any
 QA_CB_PREFIX = "qa:"
 QA_NAV_PREFIX = "qa:nav:"
 
+# The ZERO-KEYPRESS answer scheme (CMX-50). A tap on one of these does not touch the
+# terminal at all: the answer is handed back through the blocked ``PermissionRequest``
+# hook (:mod:`chela.gateanswer`), so it cannot race the selector, cannot land on the wrong
+# row, and works for the shapes keystrokes can never answer — a multi-question run and a
+# ``multiSelect`` question.
+#
+# ``qa:h:<tool_use_id>:<q>:<o>``  — pick (or, when multiSelect, TOGGLE) option ``o`` of
+#                                  question ``q`` of the gate ``tool_use_id``;
+# ``qa:hs:<tool_use_id>:<q>``     — commit a multiSelect question's toggled set.
+#
+# The ``tool_use_id`` is in the payload on purpose. It is the gate's identity, and a tap
+# that arrives after that gate resolved must be REFUSED, not applied to whatever is on
+# screen by then (CMX-32, from the other direction). Resolving the gate from the topic at
+# tap time would do exactly that.
+QA_HOOK_PREFIX = "qa:h:"
+QA_HOOK_SEND_PREFIX = "qa:hs:"
+
+# Telegram's hard cap on callback_data. A button whose data would exceed it is not built
+# at all (:func:`hook_reply_markup` returns None and the card says to answer in the
+# terminal) — a keyboard Telegram rejects is a gate that arrives unanswerable, and a
+# silently-missing button is the failure this whole line of work exists to end.
+CALLBACK_DATA_MAX = 64
+
 # AskUserQuestion option buttons are bare numeric selectors ("1", "2", …), so
 # several fit one row at any phone width. The option text they select is in the
 # message body, which — unlike a button caption — wraps instead of truncating.
@@ -270,6 +293,58 @@ def scraped_reply_markup(labels) -> dict:
     return {"inline_keyboard": rows}
 
 
+def _cb_fits(data: str) -> bool:
+    return len(data.encode("utf-8")) <= CALLBACK_DATA_MAX
+
+
+def hook_reply_markup(labels, tool_use_id: str, question_index: int,
+                      *, multi_select: bool = False, selected=()) -> dict | None:
+    """The ZERO-KEYPRESS answer keyboard for one question of a hook-blocked gate.
+
+    One button per option, captioned with its **1-based number** (the option text lives in
+    the message body, the only Telegram surface that wraps rather than truncating — the
+    lesson of CMX-32). Unlike :func:`scraped_reply_markup`, button *N* here does not move
+    a cursor: it names option *N* of *this* question of *this* ``tool_use_id``, and the
+    answer is handed to the agent through its own blocked hook. There is no selector to
+    race and no ordinal to get wrong, which is why this keyboard is safe for the shapes
+    the keystroke path must refuse.
+
+    A ``multiSelect`` question toggles: each tapped option shows ``☑``, and a ``✅ Send``
+    button commits the set (a question that takes *several* answers cannot be answered by
+    one tap — that is exactly the shape the old path had no way to express).
+
+    Returns **None** if a button's ``callback_data`` would exceed Telegram's 64-byte cap
+    (a pathological ``tool_use_id``). The caller then renders the nav row and says plainly
+    that this one has to be answered in the terminal — never a keyboard whose buttons
+    Telegram would silently drop.
+    """
+    chosen = set(selected or ())
+    buttons: list[dict] = []
+    for i, label in enumerate(labels):
+        data = f"{QA_HOOK_PREFIX}{tool_use_id}:{question_index}:{i}"
+        if not _cb_fits(data):
+            return None
+        text = str(i + 1)
+        if multi_select:
+            text = f"{'☑' if i in chosen else '☐'} {text}"
+        elif i in chosen:
+            text = f"✓ {text}"
+        buttons.append({"text": text, "callback_data": data})
+    if not buttons:
+        return None
+
+    rows = [
+        buttons[i : i + _SELECTORS_PER_ROW]
+        for i in range(0, len(buttons), _SELECTORS_PER_ROW)
+    ]
+    if multi_select:
+        send = f"{QA_HOOK_SEND_PREFIX}{tool_use_id}:{question_index}"
+        if not _cb_fits(send):
+            return None
+        rows.append([{"text": "✅ Send", "callback_data": send}])
+    return {"inline_keyboard": rows}
+
+
 def nav_only_markup() -> dict:
     """The nav-fallback row alone — for the multi-tab / multi-select shapes.
 
@@ -329,12 +404,60 @@ def ask_reply_markup(msg) -> dict | None:
     return None
 
 
+def _decode_hook_pick(rest: str) -> tuple[str, Any] | None:
+    """``<tool_use_id>:<q>:<o>`` → ``("pick", (tuid, q, o))``.
+
+    The ``tool_use_id`` is only ever used to *look up* an open gate, and a lookup miss is a
+    refusal — so a crafted payload buys nothing. It is still bounded and character-checked
+    here, because it also becomes a filename in the rendezvous directory.
+    """
+    parts = rest.rsplit(":", 2)
+    if len(parts) != 3:
+        return None
+    tuid, q, o = parts
+    if not _valid_tuid(tuid):
+        return None
+    try:
+        question_index, option_index = int(q), int(o)
+    except ValueError:
+        return None
+    if not (0 <= question_index <= 50 and 0 <= option_index <= 50):
+        return None
+    return ("pick", (tuid, question_index, option_index))
+
+
+def _decode_hook_send(rest: str) -> tuple[str, Any] | None:
+    """``<tool_use_id>:<q>`` → ``("send", (tuid, q))`` — commit a multiSelect question."""
+    tuid, _, q = rest.rpartition(":")
+    if not _valid_tuid(tuid):
+        return None
+    try:
+        question_index = int(q)
+    except ValueError:
+        return None
+    if not 0 <= question_index <= 50:
+        return None
+    return ("send", (tuid, question_index))
+
+
+def _valid_tuid(tuid: str) -> bool:
+    return bool(tuid) and len(tuid) <= 128 and all(
+        c.isalnum() or c in "_-" for c in tuid
+    )
+
+
 def decode_callback(data: str) -> tuple[str, Any] | None:
     """Decode a ``qa:`` callback into an action, or None if not ours / invalid.
 
     Returns one of:
 
-    * ``("select", index)`` — a semantic option pick (``qa:<index>``);
+    * ``("pick", (tool_use_id, question_index, option_index))`` — a ZERO-KEYPRESS answer
+      tap (``qa:h:…``): the answer goes back through the agent's own blocked hook, and
+      **no key is ever sent to the pane**;
+    * ``("send", (tool_use_id, question_index))`` — commit a ``multiSelect`` question
+      (``qa:hs:…``);
+    * ``("select", index)`` — a keystroke-injected option pick (``qa:<index>``), the
+      legacy path kept for a pre-plugin agent whose gate no hook ever announced;
     * ``("key", (tmux_key, label))`` — a navigation key (``qa:nav:<key_id>``);
     * ``("refresh", None)`` — the 🔄 button (``qa:nav:ref``).
 
@@ -344,6 +467,10 @@ def decode_callback(data: str) -> tuple[str, Any] | None:
     """
     if not data.startswith(QA_CB_PREFIX):
         return None
+    if data.startswith(QA_HOOK_PREFIX):
+        return _decode_hook_pick(data[len(QA_HOOK_PREFIX):])
+    if data.startswith(QA_HOOK_SEND_PREFIX):
+        return _decode_hook_send(data[len(QA_HOOK_SEND_PREFIX):])
     rest = data[len(QA_CB_PREFIX):]
     if rest.startswith("nav:"):
         key_id = rest[len("nav:"):]

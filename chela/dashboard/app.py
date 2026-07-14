@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, collab, collab_stream, context, discovery, dispatcher, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, collab, collab_stream, context, discovery, dispatcher, gateanswer, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -1584,37 +1584,55 @@ def api_agents_kill():
 
 
 # ---------------------------------------------------------------------------
-# Hook ingestion — Claude Code hooks -> the event log. OBSERVE-ONLY.
+# Hooks — Claude Code hooks -> the event log, and (for a question) back again.
 # ---------------------------------------------------------------------------
 
 @app.route("/hooks/<event>", methods=["POST"])
 @require_auth
 def api_hooks(event):
-    """Receive one Claude Code hook and append it to the event log. Nothing else.
+    """Receive one Claude Code hook: append it to the event log, and — for exactly one
+    event — hand the agent an answer back.
 
     The plugin (``plugin/hooks/hooks.json``, rendered by :func:`chela.hooks.hooks_spec`)
     POSTs each event here as an ``http`` hook, so there is no shell script and no process
-    spawn per tool call. Correlation to a window happens off ``cwd`` — no pane is read.
+    spawn per tool call. Correlation to a window is off the session's origin, not the pane.
 
-    **OBSERVE-ONLY, and the response is the reason it stays that way.** An agent is
-    *blocked* on this request, and Claude Code reads what comes back: a
-    ``permissionDecision`` or a ``hookSpecificOutput`` in this body would silently start
-    answering the user's permission prompts on their behalf. So the body is ``{}``,
-    always — the only thing that can block a tool call is a command hook exiting 2, and
-    this is not one. If a future slice ever answers a gate from here, that is a decision
-    to make out loud, not a field to add quietly.
+    **Every event but one returns ``{}``.** An agent is *blocked* on this request and
+    Claude Code reads what comes back, so a ``permissionDecision`` or a
+    ``hookSpecificOutput`` here is chela answering a prompt on the human's behalf. That is
+    now a thing chela deliberately does — for ``PermissionRequest`` on an
+    ``AskUserQuestion``, and only when a human has actually tapped an answer on the bound
+    Telegram topic within the wait budget (:func:`chela.gateanswer.answer_permission_request`).
+    It is the ONLY safe way to answer a multi-question / ``multiSelect`` picker: the
+    keystroke path has no cursor to read for those shapes, and the one time it guessed it
+    silently answered the wrong option (CMX-32). Nothing else here decides anything.
 
-    It also never fails the caller. A malformed payload, an unparseable body, a full
-    disk: 200 and an empty object, every time. The agent's tool call is not ours to
-    break, and the daemon being down at all is already a fail-OPEN path (the connection
-    is refused, the agent proceeds, the event is lost).
+    **A blocked request is bounded and fails OPEN.** The wait is at most
+    ``CHELA_GATE_WAIT_S`` and the number of simultaneously-held gates is capped; past
+    either, the response is ``{}`` — which is not a deny, it is *no answer*: the picker is
+    still on the pane, still answerable in tmux, and the run is no worse off than it was
+    before this feature existed.
+
+    It never fails the caller. A malformed payload, an unparseable body, a full disk: 200
+    and an empty object, every time. The agent's tool call is not ours to break, and the
+    daemon being down at all is already a fail-OPEN path (the connection is refused, the
+    agent proceeds, the event is lost).
     """
     if event not in hooks.HOOK_EVENTS:
         abort(404)
     if (request.content_length or 0) > hooks.MAX_BODY:
         log.warning("hooks: %s body over %d bytes — not read", event, hooks.MAX_BODY)
         return jsonify({})
-    hooks.ingest(event, request.get_json(force=True, silent=True))
+    body = request.get_json(force=True, silent=True)
+    hooks.ingest(event, body)
+    if event == "PermissionRequest" and isinstance(body, dict):
+        try:
+            answer = gateanswer.answer_permission_request(body)
+        except Exception:  # noqa: BLE001 — a bug in OUR code must not wedge a live agent
+            log.exception("gateanswer: answering %s failed — failing open", event)
+            answer = None
+        if answer is not None:
+            return jsonify(answer)
     return jsonify({})
 
 

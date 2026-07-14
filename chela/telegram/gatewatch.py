@@ -33,6 +33,14 @@ demoted to what it is uniquely good for: saying the gate is on screen *right now
 no hook events for the window (a **pre-plugin** agent — hooks are read at agent startup),
 the pane-scraped render below is unchanged and remains the fallback.
 
+**And the answer goes back the same way it came** (CMX-50). While the daemon holds an
+agent's ``PermissionRequest`` hook open (:mod:`chela.gateanswer`), a tap is handed straight
+back through it: **zero keystrokes**, no ``❯`` cursor to find, no Enter racing an arrow
+move. That is what makes the multi-question and ``multiSelect`` shapes answerable at all —
+they have no cursor semantics to inject against — and it retires the substrate that
+silently answered option 2 when the human tapped 3 (CMX-32). Keystroke injection survives
+for exactly one case: a pre-plugin agent, whose gate no hook ever announced.
+
 **All three are detected from the pane, with no transcript precondition.** Slice
 C1 originally gated the permission pane-read on the window having an *unpaired*
 ``tool_use`` in the transcript, on the theory that the transcript says a call is
@@ -71,8 +79,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from chela.gateanswer import OpenGate
 from chela.telegram.hookgate import HookGate, Question
 from chela.telegram.interactive import (
+    hook_reply_markup,
     nav_only_markup,
     permission_reply_markup,
     plan_reply_markup,
@@ -338,6 +348,20 @@ _MAX_HOOK_DESC = 900
 _PREVIEW_STAGES = (2400, 1200, 600, 250, 0)
 
 _PREVIEW_CLIPPED = "… [preview clipped — /screenshot for the full box]"
+# The zero-keypress promise, said on the card (CMX-50). A tap goes back through the
+# agent's own blocked `PermissionRequest` hook, so no key is sent to the pane at all —
+# which is why these buttons are safe for the shapes the keystroke path has to refuse.
+_ANSWER_BY_HOOK = "👆 Tap an option — chela hands it straight to the agent, no keystrokes."
+_ANSWER_BY_HOOK_MULTI = (
+    "👆 Tap to toggle as many as you want, then ✅ Send — chela hands them straight to the "
+    "agent, no keystrokes."
+)
+# And the honest half of it: the agent is FROZEN while it waits, so the wait is bounded.
+# On expiry nothing is denied — the picker is simply still there, in the terminal.
+_ANSWER_DEADLINE = (
+    "⏳ The agent is held for up to {budget:.0f}s. Miss that and nothing is lost — the "
+    "question is still on the pane, answerable in the terminal."
+)
 _PREVIEW_DROPPED = (
     "⚠️ Previews were too long for one message and are NOT shown — /screenshot the pane "
     "to read them."
@@ -376,13 +400,19 @@ def _preview_block(preview: str, cap: int) -> tuple[str, bool]:
 
 
 def _hook_card_text(q: Question, index: int, total: int, preview_cap: int,
-                    answerable: bool) -> tuple[str, bool]:
+                    answerable: bool, budget: float | None = None) -> tuple[str, bool]:
     """One question's card body (HTML), and whether every preview it has is shown.
 
     The heading names the question's place in the run (``Question 2/3``) and its
     ``header``, because on a phone three messages land back to back and "which one is
     this?" is otherwise unanswerable. Options are numbered 1..N **in payload order** —
     the same order the TUI draws them, and the order any selector button must select in.
+
+    ``budget`` (not None) means the agent's hook is **blocked on this question right now**
+    and a tap will answer it with no keystrokes at all. The card says both halves of that:
+    that tapping answers the agent directly, and that the hold is time-bounded — because
+    an agent frozen on a human is the entire risk of this feature, and a human who does not
+    know the clock is running cannot make an informed decision about letting it run out.
     """
     parts: list[str] = []
     head = "❓"
@@ -410,7 +440,11 @@ def _hook_card_text(q: Question, index: int, total: int, preview_cap: int,
     if not complete and preview_cap <= 0:
         parts.append("")
         parts.append(_esc(_PREVIEW_DROPPED))
-    if not answerable:
+    if budget is not None:
+        parts.append("")
+        parts.append(_esc(_ANSWER_BY_HOOK_MULTI if q.multi_select else _ANSWER_BY_HOOK))
+        parts.append(_esc(_ANSWER_DEADLINE.format(budget=budget)))
+    elif not answerable:
         parts.append("")
         parts.append(_esc(_ANSWER_IN_TERMINAL))
     return "\n".join(parts), complete
@@ -425,7 +459,43 @@ def _strip_html(text: str) -> str:
     return html.unescape(text.replace("<pre>", "").replace("</pre>", ""))
 
 
-def format_hook_askuq_cards(gate: HookGate, answerable: bool) -> list[Card]:
+def _hook_markup(gate: HookGate, index: int, answerable: bool,
+                 held: bool) -> tuple[dict, bool]:
+    """The keyboard for question ``index``, and whether it can actually ANSWER the gate.
+
+    Three keyboards, in descending order of what we can prove:
+
+    1. **held** — the agent's ``PermissionRequest`` hook is blocked on this very gate, so a
+       tap is handed back through it (:func:`~chela.telegram.interactive.hook_reply_markup`):
+       zero keypresses, no cursor to race, and it works for **every** shape — multi-question
+       and ``multiSelect`` included, which keystrokes cannot answer at all.
+    2. **answerable** — no hook is holding it (a pre-plugin agent), but the scrape found a
+       cursor and the shape is the one keystroke injection can hit: the legacy numeric
+       selector.
+    3. neither — the nav row, and a card that says outright to answer this one in the
+       terminal. A button whose ordinal mapping cannot be proven is CMX-32 waiting to
+       happen, and no button is better than a wrong one.
+    """
+    if held:
+        q = gate.questions[index]
+        markup = hook_reply_markup(
+            [o.label for o in q.options], gate.tool_use_id, index,
+            multi_select=q.multi_select,
+        )
+        if markup is not None:
+            return markup, True
+        # Telegram's 64-byte callback_data cap could not fit this gate's id. Degrade
+        # loudly (nav row + "answer in the terminal"), never to a keyboard whose buttons
+        # Telegram would drop.
+        log.warning("gate %s does not fit a callback payload — falling back to the nav row",
+                    gate.tool_use_id)
+    if answerable:
+        return scraped_reply_markup([o.label for o in gate.questions[0].options]), False
+    return nav_only_markup(), False
+
+
+def format_hook_askuq_cards(gate: HookGate, answerable: bool,
+                            held: "OpenGate | None" = None) -> list[Card]:
     """An AskUserQuestion rendered from its hook payload — **one card per question**.
 
     Full fidelity, because full fidelity is *what the log already had*: every question,
@@ -438,21 +508,21 @@ def format_hook_askuq_cards(gate: HookGate, answerable: bool) -> list[Card]:
     the questions one at a time — so a question per message is also the only shape in
     which the multi-question case is *readable* at all.
 
-    ``answerable`` says whether a tap's ordinal mapping can be PROVEN (see
-    :meth:`PermissionGateWatcher._answerable`); when it cannot, the card carries the nav
-    row and says outright that this shape must be answered in the terminal for now. A
-    selector we cannot prove is a silent mis-answer waiting to happen (CMX-32).
+    ``held`` (a :class:`chela.gateanswer.OpenGate`) means the agent's own hook is blocked on
+    this gate right now, so every question gets real answer buttons and a tap sends **no
+    keystroke at all** — the shapes the keystroke path had to refuse are now answerable, and
+    the card stops apologising. ``answerable`` is the fallback question (can a *keystroke*
+    land on the right row?) for an agent whose gate no hook announced.
     """
-    markup = (
-        scraped_reply_markup([o.label for o in gate.questions[0].options])
-        if answerable else nav_only_markup()
-    )
     cards: list[Card] = []
     total = len(gate.questions)
     for i, q in enumerate(gate.questions):
+        markup, by_hook = _hook_markup(gate, i, answerable, held is not None)
+        budget = held.budget if (held is not None and by_hook) else None
         text = ""
         for cap in _PREVIEW_STAGES:
-            text, _complete = _hook_card_text(q, i, total, cap, answerable)
+            text, _complete = _hook_card_text(
+                q, i, total, cap, answerable or by_hook, budget)
             if len(text) <= _TG_TEXT_LIMIT:
                 break
         if len(text) > _TG_TEXT_LIMIT:      # a pathological label/description set
@@ -462,11 +532,16 @@ def format_hook_askuq_cards(gate: HookGate, answerable: bool) -> list[Card]:
     return cards
 
 
-def hook_askuq_signature(gate: HookGate, answerable: bool) -> str:
+def hook_askuq_signature(gate: HookGate, answerable: bool,
+                         held: "OpenGate | None" = None) -> str:
     """The de-dup / edge-trigger marker for a payload-rendered selector.
 
     Keyed on the gate's ``tool_use_id`` (its identity) plus everything the cards render,
-    so a *different* gate re-posts and an unchanged one is a no-op.
+    so a *different* gate re-posts and an unchanged one is a no-op. The hook's *hold* is in
+    here too: a gate that was posted with keystroke buttons and is now being held open by a
+    blocked hook must re-render with real answer buttons, not keep the old ones. The hold's
+    **budget** is what the card prints (never a live countdown), so an unchanged gate keeps
+    an unchanged signature and the message is not edited on every tick.
     """
     body = "\x00".join(
         "\x01".join([
@@ -475,7 +550,7 @@ def hook_askuq_signature(gate: HookGate, answerable: bool) -> str:
         ])
         for q in gate.questions
     )
-    return f"{gate.tool_use_id}\x00{answerable}\x00{body}"
+    return f"{gate.tool_use_id}\x00{answerable}\x00{held is not None}\x00{body}"
 
 
 def format_plan_message(plan: ExitPlan) -> str:
@@ -769,6 +844,7 @@ class PermissionGateWatcher:
         delete: Deleter | None = None,
         status: "StatusRelay | None" = None,
         pending: "Callable[[str], HookGate | None] | None" = None,
+        held: "Callable[[str], OpenGate | None] | None" = None,
     ):
         self._sender = sender
         self._registry = registry
@@ -782,6 +858,11 @@ class PermissionGateWatcher:
         # behaviour for a fleet with no hook events, and it keeps this class free of a
         # hard dependency on the log.
         self._pending_gate = pending
+        # Is a blocked `PermissionRequest` hook waiting on this gate right now
+        # (:func:`chela.gateanswer.open_gate`)? If so the gate can be answered with ZERO
+        # keypresses and every shape gets real buttons. ``None`` (the default) means no
+        # answer channel — keystrokes or nothing, exactly as before.
+        self._held = held
         # The ephemeral status line, when enabled: it reads the SAME pane text this
         # watcher already captured (no extra tmux calls) but keeps its own tracked
         # message and its own lifecycle — see :class:`StatusRelay`.
@@ -870,11 +951,14 @@ class PermissionGateWatcher:
         # died at the gate (the false-`DIED` mistake, CMX-35, from the other side).
         hook = self._hook_askuq(window_id) if uq is not None else None
         if hook is not None:
+            # Is the agent's own hook blocked on this gate? Then the answer goes back
+            # through it and the pane is never touched (CMX-50).
+            held = self._held_gate(hook.tool_use_id)
             answerable = self._answerable(hook, uq)
             self._sync(
                 window_id, _ASKUQ, hook,
-                lambda h: hook_askuq_signature(h, answerable),
-                lambda h: format_hook_askuq_cards(h, answerable),
+                lambda h: hook_askuq_signature(h, answerable, held),
+                lambda h: format_hook_askuq_cards(h, answerable, held),
             )
         else:
             self._sync(
@@ -928,11 +1012,28 @@ class PermissionGateWatcher:
             return None
         return gate
 
+    def _held_gate(self, tool_use_id: str) -> "OpenGate | None":
+        """The blocked hook waiting on this gate, if there is one. Never fatal.
+
+        An expired hold reads as None (:func:`chela.gateanswer.open_gate` enforces the
+        deadline on read), so a gate whose hook has already given up loses its answer
+        buttons and the card falls back to saying "answer it in the terminal" — which is
+        the truth at that point. A button that would be refused is worse than no button.
+        """
+        if self._held is None:
+            return None
+        try:
+            return self._held(tool_use_id)
+        except Exception:
+            log.exception("held-gate lookup failed for %s", tool_use_id)
+            return None
+
     @staticmethod
     def _answerable(gate: HookGate, uq: "AskUQ | None") -> bool:
         """Can a tap's ordinal mapping be PROVEN for this gate? If not: no buttons.
 
-        Answering still goes through keystroke injection in this slice, and that path can
+        This is the FALLBACK path — a gate no hook is holding open (a pre-plugin agent).
+        Answering it goes through keystroke injection, and that path can
         only land on the right row when the scraper can see the ``❯`` cursor and the rows
         it counted are the options we numbered. That holds for exactly one shape: a
         **single question**, **single select**, whose pane scrape parsed the same number
