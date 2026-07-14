@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { $, $$, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal } from './util.js';
+import { $, $$, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util.js';
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
@@ -301,9 +301,9 @@ function renderSidebarAgents(agents) {
     // Triage: agents waiting on input float into a "Needs you" cluster above the
     // project groups. Each agent shows in exactly one place — lifted out of its
     // group while it's blocked, like a starred item.
-    const waiting = rows.filter(a => a.session_status === 'waiting')
+    const waiting = rows.filter(wantsHuman)
         .sort((a, b) => a.name.localeCompare(b.name));
-    const rest = rows.filter(a => a.session_status !== 'waiting');
+    const rest = rows.filter(a => !wantsHuman(a));
 
     let html = '';
     if (waiting.length) {

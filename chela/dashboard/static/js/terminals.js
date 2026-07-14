@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, TERMINALS_ON, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal } from './util.js';
+import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util.js';
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { PORT_GLYPH, applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 
@@ -844,6 +844,96 @@ function toggleDockChip(wid) {
     else minimizePane(wid);
 }
 
+// ---- Lazy tiles: a DISPATCHED worker opens MINIMIZED, and POPS OUT when it blocks --
+//
+// ⛔ THE RULE, and it is one rule across two surfaces: a dispatched worker must not
+// occupy human attention surface — a Telegram topic (CMX-73) OR a Wall tile (this) —
+// until it needs a human. The wall is where you WATCH the fleet; five workers grinding
+// through a backlog tile it edge to edge and crowd out the one session you are in, and
+// none of them wanted watching. So a worker the dispatcher owns opens as a chip in the
+// dock (its ttyd iframe live and scrollable the whole time — minimize never detaches
+// it) and takes a tile the moment it BLOCKS on you. The wall stops being a wall of
+// noise and becomes what the topic list already is: the agents that want a human.
+//
+// The two facts come from /api/agents, both server-derived (see app.py):
+//   `dispatched`  — the RUN ROW owns the window id (never a guess from the name);
+//   `needs_human` — blocked on a human NOW: claude's own `waiting`, OR the hook log,
+//                   OR the pane (a Bash/Edit PERMISSION gate lives only as pixels).
+//
+// Per-wid state is a persisted 3-value machine — absent → 'docked' → 'popped' — and
+// the reason it exists rather than "just re-read the flags each tick" is that this must
+// NEVER FIGHT THE HUMAN. Re-deriving would re-minimize a pane the moment you pulled it
+// out of the dock, forever. So each decision is taken exactly ONCE per window:
+//   * absent  — never decided. Working → dock it ('docked'). Already blocked → leave it
+//               on the wall ('popped'): it was born wanting you.
+//   * 'docked'— we hid it, and we are the only one who may un-hide it: when it blocks,
+//               pop it out. Then 'popped', permanently.
+//   * 'popped'— hands off. Minimize it, restore it, ignore it — the wall never touches
+//               that window again, whatever it does next.
+// It is keyed by wid and persisted for the same reason `pc_wall_minimized` is: a reload
+// must not re-litigate a decision (which, mid-gate, would re-dock the very pane you were
+// answering). It is pruned in dropTerminalPane when the window dies, and disowned below
+// the moment a wid stops being dispatched — tmux recycles `@N` after a server restart,
+// and a stale 'docked' must never leave a HUMAN's window hidden.
+let _autoDock = _loadAutoDock();
+
+function _loadAutoDock() {
+    try { return JSON.parse(localStorage.getItem('pc_wall_autodock') || '{}') || {}; }
+    catch (e) { return {}; }
+}
+function _saveAutoDock() {
+    localStorage.setItem('pc_wall_autodock', JSON.stringify(_autoDock));
+}
+function _forgetAutoDock(wid) {
+    if (!(wid in _autoDock)) return;
+    delete _autoDock[wid];
+    _saveAutoDock();
+}
+
+// Run the machine over one poll's worth of agents. Called from _applyTermStatus, which
+// runs AFTER the tiles exist on both paths in (renderTerminals → buildWall, and
+// termTick → _absorbFreshTerminals) — a tile we cannot see yet is simply decided on the
+// next tick (4s), never dropped.
+function _lazyDock(agents) {
+    if (WALL_TILE_DISPATCHED) return;              // opt-out: tile every worker like a human's
+    if (!Array.isArray(agents)) return;
+    if (_termMode !== 'wall' || !_grid) return;    // the dock is a wall affordance
+    let dirty = false;
+    for (const a of agents) {
+        const wid = a && a.window_id;
+        if (!wid) continue;
+        const state = _autoDock[wid];
+
+        // Not (or no longer) the dispatcher's. A tile we docked on a worker's behalf
+        // must not stay hidden once that wid is someone else's — tmux hands `@N` out
+        // afresh after a server restart, and hiding a human's terminal is the one
+        // failure this feature is not allowed to have.
+        if (!a.dispatched) {
+            if (state === 'docked' && _minimized.has(wid)) restoreFromDock(wid);
+            if (state) { delete _autoDock[wid]; dirty = true; }
+            continue;
+        }
+
+        if (!state) {
+            if (wantsHuman(a)) {
+                _autoDock[wid] = 'popped';         // born blocked — it keeps its tile
+            } else if (_renderedWids.includes(wid)) {
+                minimizePane(wid);                 // working quietly — off the attention surface
+                _autoDock[wid] = 'docked';
+            } else {
+                continue;                          // no tile yet — decide on the next tick
+            }
+            dirty = true;
+        } else if (state === 'docked' && wantsHuman(a)) {
+            // 🗜️ THE POP-OUT. It wants a human, so it has earned the wall.
+            if (_minimized.has(wid)) restoreFromDock(wid);
+            _autoDock[wid] = 'popped';             // one pop, ever — from here it is yours
+            dirty = true;
+        }
+    }
+    if (dirty) _saveAutoDock();
+}
+
 // ---- Taskbar drag-reorder (order drives the wall layout) -------------------
 // pc_pane_order is the user's manual ordering (list of wids); _orderedWids
 // sorts the live panes by it (unknowns keep discovery order at the end), and
@@ -902,6 +992,10 @@ const _STATUS_CLASS = { busy: 'working', waiting: 'waiting', idle: 'idle' };
 const _STATUS_TITLE = { busy: 'Working', waiting: 'Waiting for input', idle: 'Idle' };
 
 // Colour the live status dots (pane headers + taskbar chips) from /api/agents.
+// "Waiting" is the shared wantsHuman() predicate, NOT session_status alone: a
+// dispatched worker stopped at a Bash PERMISSION gate is `busy` to `claude agents
+// --json` and blocked in fact, and it is the pane probe (needs_human) that says so.
+// Amber it — it is the same agent the wall is about to pop out of the dock.
 function _colorTermDots(agents) {
     if (!agents) return;
     const by = {};
@@ -909,13 +1003,15 @@ function _colorTermDots(agents) {
     document.querySelectorAll('#panel-terminals .term-status-dot').forEach(dot => {
         const a = by[dot.dataset.statusFor];
         const st = a ? a.session_status : null;
+        const wants = wantsHuman(a);
         dot.classList.remove('working', 'waiting', 'idle');
-        dot.classList.add(_STATUS_CLASS[st] || 'idle');
-        dot.title = _STATUS_TITLE[st] || (a && a.claude_running ? 'Idle' : 'No Claude session');
+        dot.classList.add(wants ? 'waiting' : (_STATUS_CLASS[st] || 'idle'));
+        dot.title = wants ? _STATUS_TITLE.waiting
+            : (_STATUS_TITLE[st] || (a && a.claude_running ? 'Idle' : 'No Claude session'));
         // Flag the host surface (live pane OR taskbar chip) so a "waiting for
         // input" pane gets a yellow border even when minimized to the dock.
         const host = dot.closest('.grid-stack-item-content, .term-pane, .min-chip');
-        if (host) host.classList.toggle('term-waiting', st === 'waiting');
+        if (host) host.classList.toggle('term-waiting', wants);
     });
 }
 
@@ -932,6 +1028,7 @@ function _applyTermStatus(agents) {
         if (st === 'busy' && _paneStatus[a.window_id] !== 'busy') _paneActivity[a.window_id] = now;  // rising edge
         _paneStatus[a.window_id] = st;
     });
+    _lazyDock(agents);   // dock the dispatcher's quiet workers; pop out the ones that block
     _colorTermDots(agents);
     // Wall tick is the fast path (4s) — refresh the tab signal here too so the
     // title/favicon update promptly on the flagship view, not just on the 30s
@@ -1444,6 +1541,7 @@ function dropTerminalPane(wid) {
     }
     _renderedWids = _renderedWids.filter(w => w !== wid);
     if (_minimized.has(wid)) { _minimized.delete(wid); _saveMinimized(); }
+    _forgetAutoDock(wid);   // the window is gone: its lazy-dock decision dies with it
     renderMinDock();        // taskbar lists every pane → refresh whenever one drops
     _refitWallForDock();    // taskbar may have shrunk a row → re-fit the wall above it
     _syncTermSig();

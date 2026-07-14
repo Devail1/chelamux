@@ -107,18 +107,79 @@ def _require_terminals() -> None:
 @app.route("/")
 @require_auth
 def index():
-    return render_template("index.html", terminals_enabled=config.TERMINALS_ENABLED)
+    return render_template(
+        "index.html",
+        terminals_enabled=config.TERMINALS_ENABLED,
+        wall_tile_dispatched=config.WALL_TILE_DISPATCHED,
+    )
 
 
 # ---------------------------------------------------------------------------
 # API: Agents
 # ---------------------------------------------------------------------------
 
+def _dispatched_wids(windows: dict[str, str]) -> set[str]:
+    """The window ids the DISPATCHER owns — the SAME authority the Telegram bridge uses.
+
+    :func:`chela.telegram.reconcile.dispatched_window_ids` reads the ``runs`` table (the
+    row owns the ``window_id``, recorded at spawn; a window's *name* is only a label a
+    human is free to change). It is deliberately reused verbatim rather than re-derived
+    here: two surfaces now decide "is this a dispatched worker?" — the forum topic
+    (CMX-73) and the Wall tile (CMX-76) — and a second implementation is a second answer.
+
+    It lives in the telegram package only because that is where it was first needed; it
+    reads sqlite, not Telegram, and imports no optional dependency. Imported lazily all
+    the same, so the dashboard's import graph does not grow a bridge-shaped branch.
+
+    ``windows`` is discovery's ``{name: window_id}``; the helper wants the inverse (it
+    compares each run row's recorded window *name* against what tmux calls that id now,
+    which is what stops a recycled ``@N`` from disowning a human's window).
+    """
+    from chela.telegram.reconcile import dispatched_window_ids
+
+    live = {wid: name for name, wid in windows.items()}
+    return dispatched_window_ids(live_windows=live)
+
+
+def _needs_human(wid: str, sess_status: str | None, dispatched: bool) -> bool:
+    """Is this window BLOCKED on a human right now — i.e. does it want your attention?
+
+    Two sources, cheapest first, and the second one is why this is not just
+    ``session_status == "waiting"``:
+
+    * **Claude's own view** (``claude agents --json``, already read once per request and
+      cached) — free, and true for the gates it knows about;
+    * **the hook log OR the pane** (:func:`chela.telegram.reconcile.blocked_on_human`) —
+      one tmux capture. It exists because a **permission gate** on a Bash/Edit (the
+      likeliest thing to stop a worktree worker: one non-allowlisted command and it sits
+      there) is not in the transcript at all and is visible *only* as pixels.
+
+    Over-reporting here is cheap — a tile pops onto the Wall that did not strictly need
+    to, and a human glances at it. Under-reporting is the failure this whole feature must
+    not have: a dispatched worker frozen behind a gate, minimized, forever, with nobody
+    told. So the two sources are OR'd, never traded off.
+
+    The pane probe runs **only for dispatched windows**, which is what bounds its cost to
+    the fleet's concurrency cap (a handful of captures per poll, not one per window):
+    they are the only windows the Wall ever hides, so they are the only ones whose answer
+    is load-bearing. Every other window is on the Wall unconditionally and reports
+    Claude's free view.
+    """
+    if sess_status == "waiting":
+        return True
+    if not dispatched:
+        return False
+    from chela.telegram.reconcile import blocked_on_human
+
+    return blocked_on_human(wid) is not None
+
+
 @app.route("/api/agents")
 @require_auth
 def api_agents():
     windows = discovery.get_all_windows()
     tasks = scheduler.list_tasks()
+    dispatched = _dispatched_wids(windows)
 
     # Build set of agents with enabled schedules + schedule summary
     scheduled_agents = {t.agent_name for t in tasks if t.enabled}
@@ -152,6 +213,7 @@ def api_agents():
 
         liveness, health = _liveness(claude_running, sess_status)
         win_type = agent_manager.window_type(window_id, claude_running)
+        is_dispatched = window_id in dispatched
 
         agents.append({
             "name": name,
@@ -162,6 +224,13 @@ def api_agents():
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
             "session_status": sess_status,
+            # The Wall's lazy-tile pair (CMX-76). `dispatched` = the dispatcher owns this
+            # window (run-row derived); `needs_human` = it is blocked on you right now.
+            # Together they are the whole rule: a dispatched worker opens MINIMIZED and
+            # pops out the moment it wants a human. Both are facts about the window, so
+            # they ship on every row — the *behaviour* they drive is the client's.
+            "dispatched": is_dispatched,
+            "needs_human": _needs_human(window_id, sess_status, is_dispatched),
             "liveness": liveness,
             "health": health,
             "status": sess_status,

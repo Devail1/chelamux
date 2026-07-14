@@ -340,6 +340,20 @@ STATUS_LINE = os.environ.get("CHELA_STATUS_LINE", "true").strip().lower() not in
 # the wall off entirely.
 TERMINALS_ENABLED = os.environ.get("CHELA_TERMINALS_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 
+# The Wall's half of the same rule as BIND_DISPATCHED above, on the second surface a
+# dispatched worker can occupy: give it a full-size TILE on spawn, like a human's
+# session. OFF by default — a dispatched worker opens MINIMIZED (a chip in the dock,
+# its terminal live and scrollable, just not holding a slot on the wall) and POPS OUT
+# the moment it blocks on a human. ⛔ The principle is one principle: a worker should
+# not occupy human attention surface — a topic OR a tile — until it needs a human.
+# The wall is where you WATCH the fleet; five workers grinding through a backlog crowd
+# out the one session you are actually in. Set CHELA_WALL_TILE_DISPATCHED=true for the
+# old tile-everything behaviour. (This gates the BEHAVIOUR only: /api/agents always
+# reports `dispatched` + `needs_human` honestly — they are facts about the window.)
+WALL_TILE_DISPATCHED = os.environ.get("CHELA_WALL_TILE_DISPATCHED", "false").strip().lower() in (
+    "true", "1", "yes", "on",
+)
+
 # Decisions inbox (chela/inbox.py): push agent/run events into the orchestrator's
 # session when it is idle, so a finished agent stops being invisible to it. Inert
 # until a session registers itself as the orchestrator (`chela watch`), so this

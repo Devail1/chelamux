@@ -32,9 +32,27 @@ let _agentsCache = [];  // cache for populating schedule dropdown
 // bootstrap is somehow absent, preserving prior behavior.
 const TERMINALS_ON = window.TERMINALS_ENABLED !== false;
 
+// Wall lazy-tiles opt-out (CHELA_WALL_TILE_DISPATCHED), bootstrapped the same way:
+// true = a dispatched worker gets a full tile on spawn, like a human's session.
+// Default false = it opens minimized and pops out when it blocks. See terminals.js.
+const WALL_TILE_DISPATCHED = window.WALL_TILE_DISPATCHED === true;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// THE fleet-wide "this agent is blocked on YOU" predicate. Every attention surface
+// reads it — the wall's pane dot, the dock chip, the tab title/favicon, the sidebar's
+// "Needs you" cluster — so a gated agent can never be amber on one and calm on another.
+//
+// It is two sources OR'd, because `session_status` alone cannot see a **permission
+// gate** on a Bash/Edit: that prompt is never in the transcript, only on the pane, and
+// the server probes for it (`needs_human` from /api/agents — see app.py::_needs_human).
+// `session_status === 'waiting'` stays in the predicate because it is free and it is
+// the answer for every window the server does not pane-probe.
+function wantsHuman(a) {
+    return !!a && (a.needs_human === true || a.session_status === 'waiting');
+}
 
 function $(sel) { return document.querySelector(sel); }
 function $$(sel) { return document.querySelectorAll(sel); }
@@ -90,18 +108,17 @@ function attrEsc(s) {
 // busy+idle+running all into green and so disagreed with the wall's grey "idle"
 // dot for an agent that's running but not actively working.
 function agentDotColor(a) {
-    const st = a && a.session_status;
-    if (st === 'busy') return 'green';
-    if (st === 'waiting') return 'yellow';
+    if (wantsHuman(a)) return 'yellow';   // blocked on you — incl. a pane-only permission gate
+    if (a && a.session_status === 'busy') return 'green';
     return 'grey';   // idle, or no Claude in the window — matches the wall
 }
 
 // --- Tab signal: surface "agents waiting on input" in the title + favicon ----
 // Ambient at-a-glance for a backgrounded/pinned tab: when one or more Claude
-// panes block on a prompt (session_status === 'waiting'), prefix the title with
-// a count and paint a badged favicon so the tab itself shows it needs you — the
-// same `waiting` signal the sidebar's "Needs you" triage and the daemon's
-// push notification fire on. Idempotent and driven off the existing polls
+// panes block on a prompt (wantsHuman), prefix the title with a count and paint
+// a badged favicon so the tab itself shows it needs you — the same signal the
+// sidebar's "Needs you" triage, the wall's amber pane, and the daemon's push
+// notification fire on. Idempotent and driven off the existing polls
 // (renderSidebarAgents every 30s + SSE; _applyTermStatus every 4s on the wall),
 // so it only touches the DOM / redraws the favicon when the count changes.
 const _TAB_BASE_TITLE = document.title;   // captured before any prefix is applied
@@ -112,7 +129,7 @@ const _FAVICON_DEFAULT = _favLink0 ? _favLink0.getAttribute('href') : 'static/im
 let _tabWaiting = -1;   // last applied count; -1 forces the first paint
 
 function updateTabSignal(agents) {
-    const n = (agents || []).filter(a => a && a.session_status === 'waiting').length;
+    const n = (agents || []).filter(wantsHuman).length;
     if (n === _tabWaiting) return;   // unchanged → no title churn, no favicon redraw
     _tabWaiting = n;
     document.title = n > 0 ? `(${n}) Needs you · ${_TAB_BASE_TITLE}` : _TAB_BASE_TITLE;
@@ -218,7 +235,7 @@ function setMsgTarget(v) { msgTargetAgent = v; }
 function setAgentsCache(v) { _agentsCache = v; }
 
 // --- Stage 0: ES-module exports ---
-export { $, $$, BASE_PATH, REFRESH_MS, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, lucideIcon, msgTargetAgent, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, updateTabSignal };
+export { $, $$, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, lucideIcon, msgTargetAgent, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, updateTabSignal, wantsHuman };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
