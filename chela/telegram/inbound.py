@@ -42,8 +42,11 @@ from chela import config, messenger
 from chela.telegram import gateanswers, media
 from chela.telegram.format import to_code_block
 from chela.telegram.interactive import (
+    MIRROR_CB_PREFIX,
+    MIRROR_SETTLE_S,
     SELECT_SETTLE_S,
     decode_callback,
+    decode_mirror_callback,
     select_keystrokes,
     select_keystrokes_relative,
     split_select_keys,
@@ -299,6 +302,7 @@ def build_application(
     send_escape=None,
     send_key=None,
     drafts=None,
+    refresh_mirror=None,
 ):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
@@ -349,6 +353,15 @@ def build_application(
     the nav-fallback keys drive the selector by hand. Like the control-key handler,
     it re-resolves the window from the message's own topic through ``router.resolve``
     and never trusts a window id off the wire.
+
+    Taps on the **pane mirror's D-pad** (the ``m:`` callbacks, CMX-52) route to a third
+    handler, ``_on_mirror``: it sends the key, waits for the TUI to repaint, and calls
+    ``refresh_mirror(window_id)`` — the pane watcher's re-render — so the mirrored dialog
+    is **edited in place** and the ``❯`` cursor moves in the chat. ``refresh_mirror``
+    defaults to ``None``, which leaves the keys working but the message static (tests, and
+    any caller with no watcher); production passes
+    :meth:`chela.telegram.gatewatch.PermissionGateWatcher.refresh_mirror`, which owns the
+    tracked message id and is therefore the one authority allowed to edit or poof it.
 
     ``on_topic_closed`` (optional) is a callable ``(thread_id) -> None`` invoked on
     a ``StatusUpdate.FORUM_TOPIC_CLOSED`` service message — Slice B's auto-topics
@@ -662,6 +675,63 @@ def build_application(
         except Exception:  # noqa: BLE001 — unchanged markup, deleted message, 429…
             log.debug("could not redraw the answer keyboard", exc_info=True)
 
+    async def _on_mirror(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Drive the mirrored dialog: press one key, then RE-DRAW the same message.
+
+        The D-pad under a pane mirror (:func:`chela.telegram.gatewatch.format_mirror_card`).
+        A tap sends its key to the window, waits
+        :data:`~chela.telegram.interactive.MIRROR_SETTLE_S` for the TUI to repaint, and
+        asks the pane watcher to re-render the mirror **in place** — so the ``❯`` cursor
+        moves *in the chat*, in the message you just tapped. That feedback loop is the
+        entire feature: without it (the old nav row) you were driving a selector you could
+        not see, and a tap looked like it did nothing at all.
+
+        ``ref`` (🔄) presses nothing and re-draws the same message — deliberately NOT a
+        fresh screenshot posted below it, which is what the old 🔄 did and which left the
+        human scrolling between a picture and the buttons that were supposed to move it.
+
+        The target window is re-resolved from the callback message's OWN topic through
+        ``router.resolve`` (never trusted from the payload, CMX-8). Every tap is answered
+        so Telegram stops the button's spinner — including one that is gated out, unknown,
+        or lands on a dialog that has since resolved. A re-draw failure is swallowed by
+        ``refresh_mirror`` itself: the key still went in, and a decoration must never
+        report a real keypress as a failure.
+        """
+        query = update.callback_query
+        if query is None:
+            return
+        action = decode_mirror_callback(query.data or "")
+        if action is None:
+            return  # not ours (or an unknown key) — inert
+        msg = query.message
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        thread_id = getattr(msg, "message_thread_id", None) if msg else None
+        window_id = router.resolve(chat_id, thread_id)
+        if window_id is None:  # wrong chat / unbound topic — stay silent
+            await query.answer()
+            return
+
+        kind, payload = action
+        if kind == "key":
+            tmux_key, label = payload
+            ok = send_key(window_id, tmux_key)
+            await query.answer(label if ok else "❌ send failed")
+            if not ok:
+                return
+            # Let the TUI commit the key and repaint before we mirror it, or we would
+            # re-draw the frame BEFORE the cursor moved — indistinguishable from a dead
+            # button, which is the bug being fixed.
+            await asyncio.sleep(MIRROR_SETTLE_S)
+        else:  # "refresh" — press nothing, just re-draw
+            await query.answer("🔄")
+
+        if refresh_mirror is not None:
+            # The watcher owns the tracked message id and the de-dup signature, so the
+            # re-draw goes through it (one authority for post/edit/poof). It captures a
+            # pane and calls Telegram, so it runs off the event loop.
+            await asyncio.to_thread(refresh_mirror, window_id)
+
     async def _on_qa(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
         """Answer an AskUserQuestion tap — through the agent's hook, or (legacy) by keys.
 
@@ -768,10 +838,14 @@ def build_application(
     # catch-all text handler forwards every other message (and /command) onward.
     application.add_handler(CommandHandler("screenshot", _on_screenshot))
     application.add_handler(CommandHandler("esc", _on_esc))
-    # AskUserQuestion taps (``qa:``) are matched FIRST via a pattern so they route
-    # to _on_qa; PTB runs one handler per group, and the pattern-less _on_key
-    # below picks up the /screenshot ``k:`` taps (and ignores anything else).
+    # AskUserQuestion taps (``qa:``) and mirror D-pad taps (``m:``) are matched FIRST
+    # via patterns so they route to their own handlers; PTB runs one handler per group,
+    # and the pattern-less _on_key below picks up the /screenshot ``k:`` taps (and
+    # ignores anything else).
     application.add_handler(CallbackQueryHandler(_on_qa, pattern=r"^qa:"))
+    application.add_handler(
+        CallbackQueryHandler(_on_mirror, pattern="^" + re.escape(MIRROR_CB_PREFIX))
+    )
     application.add_handler(CallbackQueryHandler(_on_key))
     # Media handlers BEFORE the text catch-all (PTB runs one handler per group):
     # a photo/document pasted into a bound topic is downloaded and its path

@@ -524,6 +524,17 @@ at the terminal. The pane-scraped gates remain the fallback (hooks are read at a
 startup, so a running fleet has none) — but the structure a protocol would have handed us
 is arriving anyway, without giving up the terminal.
 
+**And for everything hooks can't reach: a mirror of the pane you can actually drive.** A
+hook only ever describes a tool it knows about, so a checkpoint restore, a `/model` picker
+or a reworded dialog reaches it as nothing at all — and a card rendered from a payload
+can't show you a **cursor**, because a cursor isn't an input, it's a render. So a blocked
+dialog also arrives as the terminal region itself, verbatim — box drawing, the `❯` cursor,
+the checkboxes — in **one message with a nine-key D-pad under it** (`␣ ↑ ⇥ / ← ↓ → / ⎋ 🔄
+⏎`). Every tap re-draws that same message in place, so you watch the cursor move in the
+chat. It needs no parser, which is why it works on dialogs chela has never heard of; it
+sits *alongside* the rich hook-rendered cards rather than replacing them, and it stands
+down for a gate whose every option is already one tap away.
+
 ---
 
 ## Roadmap

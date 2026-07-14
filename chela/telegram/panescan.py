@@ -26,20 +26,34 @@ there is no ``Boondoggling`` hook and there never will be, so unlike the gates
 (which hooks may eventually supersede) the pane is the correct source here
 permanently (:func:`detect_status`).
 
+And a fifth, which is the odd one out because it **parses nothing at all**: the
+**dialog mirror** (:func:`detect_dialog`). Each of the three detectors above reads a
+dialog *in order to answer it*, so each is only as good as the shape it was measured
+against — and a shape they were not measured against arrives on the phone as an
+unanswerable stub. The mirror inverts that: it finds only where a dialog *starts and
+ends* and hands the region back **verbatim** — box drawing, the ``❯`` cursor, the
+``☐``/``✔`` checkboxes, the tab strip — for a human to read and steer with a D-pad. It
+therefore recognises **eight** dialog shapes to the semantic detectors' three (a Bash
+approval, a checkpoint restore, ``/model``, Settings, a multi-select selector with a
+side-by-side preview box — none of which the others see at all), because mirroring a
+pane needs no per-shape parser. It is not a fallback: it is the surface you *drive*,
+while the hook payload remains the one you *read* (:mod:`chela.telegram.hookgate`).
+
 This module is the **sole home** for the Claude-Code TUI regexes — the "signatures
 table". Keeping every such pattern here means a Claude Code version bump that
-reworded a prompt is a one-file edit. The permission/bash-approval, AskUserQuestion
-**and status-line** patterns are ported from six-ddc/ccbot's ``terminal_parser.py``
-(https://github.com/six-ddc/ccbot, MIT). See the top-level NOTICE file for upstream
-attribution.
+reworded a prompt is a one-file edit. The permission/bash-approval, AskUserQuestion,
+**status-line and dialog-mirror** patterns are ported from six-ddc/ccbot's
+``terminal_parser.py`` (https://github.com/six-ddc/ccbot, MIT). See the top-level
+NOTICE file for upstream attribution.
 
 Public API: :func:`detect_permission_gate` returns a :class:`Gate` when the pane
 shows a permission/bash-approval prompt; :func:`detect_askuserquestion` returns an
 :class:`AskUQ` when the pane shows an AskUserQuestion selector;
 :func:`detect_exitplanmode` returns an :class:`ExitPlan` when the pane shows a
-plan-approval selector — all return ``None`` for a normal / working pane; and
-:func:`detect_status` returns a :class:`Status` when the pane shows a *working*
-agent, ``None`` when it is idle.
+plan-approval selector; :func:`detect_dialog` returns a :class:`Dialog` — the region
+to mirror — for **any** of them and for five more besides; all return ``None`` for a
+normal / working pane. :func:`detect_status` returns a :class:`Status` when the pane
+shows a *working* agent, ``None`` when it is idle.
 """
 from __future__ import annotations
 
@@ -164,6 +178,147 @@ def _try_extract(lines: list[str], pattern: _UIPattern) -> str | None:
 
     region = "\n".join(lines[top_idx : bottom_idx + 1]).rstrip()
     return _shorten_separators(region)
+
+
+# ── The MIRROR's signature table — every dialog shape, parsed by NONE of them ─
+#
+# The three detectors above each parse a dialog *in order to answer it*, so each one
+# needs a shape it was measured against. The mirror does not: it re-draws the pane
+# region verbatim and lets a human read it, so it needs only to know **where the dialog
+# starts and ends** — never what it means. That is why one table covers eight shapes
+# where the semantic detectors cover three, and why a reworded dialog still arrives
+# (:func:`detect_dialog`).
+#
+# Ported from ccbot's ``UI_PATTERNS`` (terminal_parser.py:49-118) — the same eight
+# entries, in the same order (first match wins), reusing the gate table above verbatim
+# for the three it already holds rather than restating their regexes.
+_PLAN_UI = _UIPattern(
+    name="ExitPlanMode",
+    top=(
+        re.compile(r"^\s*Would you like to proceed\?"),
+        # v2.1.29+: a longer prefix that may wrap across lines.
+        re.compile(r"^\s*Claude has written up a plan"),
+    ),
+    bottom=(
+        re.compile(r"^\s*ctrl-g to edit in "),
+        re.compile(r"^\s*Esc to (cancel|exit)"),
+    ),
+)
+_ASKUQ_MULTI_UI = _UIPattern(
+    name="AskUserQuestion",
+    top=(re.compile(r"^\s*←\s+[☐✔☒]"),),   # the multi-tab strip — its footer varies by tab
+    bottom=(),
+    min_gap=1,
+)
+_ASKUQ_SINGLE_UI = _UIPattern(
+    name="AskUserQuestion",
+    top=(re.compile(r"^\s*[☐✔☒]"),),
+    bottom=(re.compile(r"^\s*Enter to select"),),
+    min_gap=1,
+)
+# ⚠️ THE MIRROR MUST SHOW WHAT IS BEING APPROVED, and this is the entry that makes it.
+#
+# Claude Code heads a tool-approval dialog with the CALL it wants to make, and only then
+# asks::
+#
+#      Bash command
+#        grep -r "<div>" src/ && rm -rf build/     <- the thing you are approving
+#        Remove the build directory
+#
+#      Do you want to proceed?                     <- ← ccbot's PermissionPrompt starts HERE
+#      ❯ 1. Yes
+#        2. No
+#
+# ccbot's table tries ``Do you want to proceed?`` **before** ``Bash command``, so the
+# region it mirrors begins at the prompt and the command is left OFF THE TOP. On a phone
+# that is a dialog asking you to approve *nothing in particular* — strictly worse than the
+# one-line semantic card, which does scrape the command
+# (:func:`scrape_gate_identity`). So the mirror anchors on the HEADER first and only falls
+# back to the prompt patterns for a dialog that has none. The file tools head their dialog
+# the same way ("Edit file" / "Create file" / …), so they are here too.
+_TOOL_APPROVAL_UI = _UIPattern(
+    name="ToolApproval",
+    top=(
+        re.compile(r"^\s*Bash command\s*$"),
+        re.compile(r"^\s*This command requires approval"),
+        re.compile(r"^\s*(Edit|Create|Write|Read|MultiEdit|NotebookEdit) file\s*$"),
+    ),
+    bottom=(re.compile(r"^\s*Esc to cancel"),),
+)
+_RESTORE_UI = _UIPattern(
+    name="RestoreCheckpoint",
+    top=(re.compile(r"^\s*Restore the code"),),
+    bottom=(re.compile(r"^\s*Enter to continue"),),
+)
+_SETTINGS_UI = _UIPattern(
+    name="Settings",
+    top=(
+        re.compile(r"^\s*Settings:.*tab to cycle"),
+        re.compile(r"^\s*Select model"),      # /model
+    ),
+    bottom=(
+        re.compile(r"Esc to cancel"),
+        re.compile(r"Esc to exit"),
+        re.compile(r"Enter to confirm"),
+        re.compile(r"^\s*Type to filter"),
+    ),
+)
+
+DIALOG_PATTERNS: list[_UIPattern] = [
+    _PLAN_UI,
+    _ASKUQ_MULTI_UI,
+    _ASKUQ_SINGLE_UI,
+    _TOOL_APPROVAL_UI,       # BEFORE the prompt patterns — it is what carries the command
+    *GATE_PATTERNS,          # PermissionPrompt ×2 + BashApproval — already measured above
+    _RESTORE_UI,
+    _SETTINGS_UI,
+]
+
+
+@dataclass(frozen=True)
+class Dialog:
+    """A blocked-agent dialog on the pane, as a region to MIRROR — not to parse.
+
+    ``text`` is the pane region verbatim (top→bottom marker, inclusive): the box drawing,
+    the ``❯`` cursor, the ``☐``/``✔`` checkboxes, the descriptions, the tab strip. Nothing
+    in it is interpreted, which is exactly why it survives a layout the semantic scrapers
+    were never measured against. ``name`` is the matching pattern's tag — used only to
+    shape the D-pad (a ``RestoreCheckpoint`` has no horizontal axis), never to decide what
+    the dialog *asks*.
+
+    **The ``❯`` cursor is part of ``text``, so it is part of the render signature.** That
+    is not an incidental detail: without it an arrow keypress changes nothing on screen,
+    the edit-in-place is a no-op, and the human is left driving a selector they cannot
+    see — which is the single thing that made the old nav row feel dead.
+    """
+
+    text: str
+    name: str
+
+
+def detect_dialog(pane_text: str) -> Dialog | None:
+    """The dialog region on the pane, for a **verbatim** mirror. Never parses it.
+
+    Tries :data:`DIALOG_PATTERNS` in order; first match wins. Returns ``None`` for a
+    normal / working pane.
+
+    This is the universal detector, and it is deliberately the *dumbest* one in the
+    module: it finds a top marker and a bottom marker and hands back everything between
+    them. A permission gate, a Bash approval, a checkpoint restore, ``/model``, a Settings
+    picker, a multi-select AskUserQuestion with a side-by-side preview box — all of them
+    mirror identically, because mirroring a pane needs no per-shape parser. The semantic
+    detectors above will keep meeting shapes they were not measured against; this one
+    only stops working if Claude Code stops drawing a dialog at all.
+    """
+    if not pane_text:
+        return None
+
+    lines = pane_text.strip().split("\n")
+    for pattern in DIALOG_PATTERNS:
+        region = _try_extract(lines, pattern)
+        if region is not None:
+            return Dialog(text=region, name=pattern.name)
+    return None
 
 
 # ── The gate's identity (what is it asking permission FOR) ───────────────
