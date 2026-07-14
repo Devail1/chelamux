@@ -49,15 +49,27 @@ their **sum**:
 ```ini
 # ~/.config/systemd/user/memcap.slice   (survives reboot)
 [Unit]
-Description=Memory-capped batch jobs
+Description=memcap — the SHARED memory ceiling for heavy jobs (backtests, test fans, agent workers)
 
 [Slice]
+# THE POINT: this bounds the SUM of every memcap job at once.
+# A per-job ceiling does NOT bound the box -- 4 agents x 6G authorises 24G on a 19G
+# machine, which is exactly how the 2026-07-14 global OOM happened: all four workers
+# sat UNDER their own caps (4.4-4.7G) while the box ran out and the kernel went global,
+# taking tmux and two Claude sessions with it.
+#
+# Sized for a 19G box: ~4G fleet/baseline + ~2G for the agents' own Claude processes.
 MemoryMax=12G
+MemorySwapMax=16G
 ```
 
 ```bash
 systemctl --user daemon-reload
-systemd-run --user --slice=memcap.slice --scope -p MemoryMax=6G -- python heavy_thing.py
+systemd-run --user --scope -q \
+    --slice=memcap.slice \
+    -p MemoryMax=6G \
+    -p MemorySwapMax=16G \
+    -- choom -n 800 -- python heavy_thing.py
 ```
 
 Four jobs in that slice cannot exceed 12 G between them. Not 4 × 6 G. **12 G, total.**
@@ -94,7 +106,7 @@ So:
 concurrency × working-set < SLICECAP
 ```
 
-Four agents at a measured 4.5 GB each is 18 GB. Under a 12 G slice that does not crash —
+Four agents at 4.4-4.7 GB each is ~18 GB. Under a 12 G slice that does not crash —
 it swaps, and you will wonder why everything got slow. The answer is that you planned for
 the net.
 
