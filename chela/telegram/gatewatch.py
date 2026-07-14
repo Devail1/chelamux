@@ -112,6 +112,7 @@ import html
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -217,6 +218,24 @@ STATUS_EDIT_MIN_INTERVAL = 4.0
 # permanent message — it poofs. Tunable: see :func:`should_keep`.
 STATUS_KEEP_MIN_SECONDS = 30
 
+# A gate Telegram would not take is re-posted by the next pane tick — but a gate is
+# *pending on a human*, so "the next tick" can mean every tick for hours, and that
+# traffic is fed straight back into the flood control it is trying to escape. So the
+# first retry is immediate (the common case is one 429 in a burst, gone a second
+# later), and every failure after that doubles the wait, up to this ceiling.
+#
+# The gate is never abandoned. A ceiling, not a try-count, is the bound: a live gate
+# that has failed nine times is still a human waiting for a question, and a watcher
+# that gives up on it is the very silence this file exists to end (CMX-74). What is
+# bounded is the *rate* — worst case one post per window per gate per five minutes.
+_REPOST_BACKOFF_BASE = 5.0    # seconds, after the first (immediate) retry
+_REPOST_BACKOFF_MAX = 300.0   # seconds — the ceiling the doubling walks up to
+
+# A poof that Telegram refuses is re-tried on a later drain, this many times, and then
+# dropped with a loud log. Unlike a gate, a delete has a natural expiry: the message it
+# would remove is already answered, so retrying it forever buys nothing.
+_MAX_POOF_TRIES = 5
+
 # The status is one line; a pathological verb is clipped rather than wrapped.
 _MAX_STATUS = 200
 
@@ -268,6 +287,20 @@ class _Tracked:
     signature: str
     message_ids: list[int] = field(default_factory=list)
     last_edit: float = 0.0
+
+
+@dataclass
+class _Undelivered:
+    """A prompt Telegram refused, and the clock that decides when to try it again.
+
+    ``attempts`` counts the posts that delivered nothing; ``next_at`` is the earliest
+    :meth:`PermissionGateWatcher._sync` may post this window+kind again (see
+    :data:`_REPOST_BACKOFF_BASE`). It is dropped the moment a post lands — or the gate
+    leaves the pane, whichever comes first.
+    """
+
+    attempts: int = 0
+    next_at: float = 0.0
 
 
 def _clip(text: str, limit: int = _MAX_DETAIL) -> str:
@@ -1433,6 +1466,21 @@ class PermissionGateWatcher:
         # window_id -> {prompt kind: _Tracked} — the edge-trigger markers + the
         # message ids to edit / delete.
         self._prompts: dict[str, dict[str, _Tracked]] = {}
+        # (window_id, kind) -> _Undelivered — the re-post backoff for a prompt Telegram
+        # would not take. Written under ``_lock`` with the tracker it stands in for.
+        self._undelivered: dict[tuple[str, str], _Undelivered] = {}
+        # Messages waiting to be deleted, as (message_id, attempts). NOTHING in this
+        # class calls Telegram to delete: :meth:`_poof` only appends here — it is called
+        # from deep inside the locked reconcile — and :meth:`_drain_poofs` does the
+        # network, always OUTSIDE the lock. That split is the whole point (CMX-74): a
+        # delete is a Bot API call like any other, so a flood-controlled one used to hold
+        # this lock while it retried, and the pane poll — which takes the same lock for
+        # every window — stopped for the duration. A gate-relaying loop that can be
+        # stalled fleet-wide by one answered gate is the bug this file just fixed,
+        # re-entering through its own cleanup path. ``deque`` is used for its atomic
+        # ``append``/``popleft``: the relay thread, the pane thread and the PTB loop all
+        # touch it, and none of them may block on the others to do so.
+        self._poofq: deque[tuple[int, int]] = deque()
         # The windows whose mirror is currently showing the 📖 expansion instead of the pane
         # (CMX-57). It is view state, not gate state, and it dies with the mirror message:
         # :meth:`_resolve` drops it when the dialog leaves the pane, so the NEXT gate always
@@ -1452,7 +1500,12 @@ class PermissionGateWatcher:
 
         This is the TRANSCRIPT relay's thread (:func:`chela.main._outbound_loop`), which
         since CMX-74 is a *different* thread from the one :meth:`poll` runs on — and it
-        touches the same trackers, so it takes the same lock.
+        touches the same trackers, so it takes the same lock. It holds that lock for
+        BOOKKEEPING ONLY: the resolve it triggers *queues* the answered gate's messages
+        for deletion and the deletes go out after the lock is dropped
+        (:meth:`_drain_poofs`). This thread is the flood-controlled one — that is this
+        ticket's whole thesis — so a Telegram call it makes under the lock is a Telegram
+        call the pane poll waits behind, and the starvation is back with a new door.
         """
         ct = getattr(msg, "content_type", None)
         uid = getattr(msg, "tool_use_id", None)
@@ -1472,12 +1525,16 @@ class PermissionGateWatcher:
                     self._resolve(window_id, _ASKUQ)
                 elif name == "ExitPlanMode":
                     self._resolve(window_id, _PLAN)
+        self._drain_poofs()
 
     def forget(self, window_id: str) -> None:
         """Drop all state for a window (e.g. after it closes)."""
-        self._pending.pop(window_id, None)
-        self._prompts.pop(window_id, None)
-        self._expanded.discard(window_id)
+        with self._lock:
+            self._pending.pop(window_id, None)
+            self._prompts.pop(window_id, None)
+            self._expanded.discard(window_id)
+            for key in [k for k in self._undelivered if k[0] == window_id]:
+                self._undelivered.pop(key, None)
         if self._status is not None:
             self._status.forget(window_id)
 
@@ -1492,6 +1549,8 @@ class PermissionGateWatcher:
                     self._poll_window(wid)
             except Exception:
                 log.exception("pane-watch poll failed for %s", wid)
+        # Outside the lock, on purpose — see :meth:`_drain_poofs`.
+        self._drain_poofs()
         if self._status is not None:
             # A window that died or was unbound has just vanished from the polled
             # set — poof its status message rather than leave it in the topic.
@@ -1724,6 +1783,10 @@ class PermissionGateWatcher:
                 self._sync_mirror(window_id, dialog, hook=hook, held=held, uq=uq, force=True)
         except Exception:
             log.exception("mirror refresh failed for %s", window_id)
+        # A tap that answered the dialog just queued the mirror for poofing — send the
+        # delete now that the lock is dropped, so the live buttons die at tap speed
+        # rather than at tick speed.
+        self._drain_poofs()
 
     def _latest_pending(self, window_id: str) -> _PendingTool | None:
         """The most recent unpaired ``tool_use`` for a window, if any."""
@@ -1819,6 +1882,10 @@ class PermissionGateWatcher:
         that lands inside it, leaving the signature stale so the next poll re-renders the
         newest pane; nothing is dropped, only deferred. ``force`` (a D-pad tap) bypasses
         the floor.
+
+        A post Telegram would not take is NOT recorded (that is how a gate went missing
+        in silence) — it is re-posted, on a backoff (:data:`_REPOST_BACKOFF_BASE`), until
+        it lands or the gate leaves the pane.
         """
         if detected is None:
             self._resolve(window_id, kind)
@@ -1839,6 +1906,14 @@ class PermissionGateWatcher:
         ):
             return  # throttled — the signature stays stale, so the next poll re-renders
 
+        # A prompt whose last post Telegram refused waits out its backoff before asking
+        # again. A tap (``force``) does not wait: a human with a thumb on the screen is a
+        # better reason to spend a request than any backoff is to save one.
+        key = (window_id, kind)
+        failed = self._undelivered.get(key)
+        if failed is not None and not force and now < failed.next_at:
+            return
+
         thread = self._registry.thread_for_window(window_id)
         if thread is None:
             log.debug("%s prompt on %s but no bound topic; skipping", kind, window_id)
@@ -1856,12 +1931,20 @@ class PermissionGateWatcher:
                    for mid, card in zip(tracked.message_ids, cards)):
                 tracked.signature = signature
                 tracked.last_edit = now
+                self._undelivered.pop(key, None)
                 return
+        replaced: list[int] = []
         if tracked is not None:
             # Either the card count changed, or a message is gone from Telegram (deleted,
-            # too old). Poof whatever survives and post a fresh set — a half-updated
-            # prompt on a phone is a prompt that lies about what it is asking.
-            self._resolve(window_id, kind)
+            # too old, or refused right now). Post a fresh set — a half-updated prompt on
+            # a phone is a prompt that lies about what it is asking — and poof the old
+            # messages, but only AFTER the new ones are up (below). Poofing first would,
+            # on a post Telegram then refuses, take a live gate off the human's phone to
+            # replace it with nothing.
+            if kind == _MIRROR:
+                self._expanded.discard(window_id)
+            gone = self._prompts.get(window_id, {}).pop(kind, None)
+            replaced = list(gone.message_ids) if gone is not None else []
 
         message_ids: list[int] = []
         delivered = True
@@ -1877,17 +1960,44 @@ class PermissionGateWatcher:
                 # without an id we can neither edit nor poof the message.
                 self._sender(card.text, card.parse_mode, thread, reply_markup=card.markup)
         if not delivered:
-            # Telegram delivered NOTHING (flood control outlived the send's bounded
-            # retries, a payload it refused twice over). Recording the signature anyway
-            # is how a gate goes missing in silence: this tracker is EDGE-triggered, so
-            # a marker written for a message that does not exist means the next tick
-            # sees "already relayed" and returns — forever, because a *pending* gate's
-            # pane holds still by definition (it is waiting for a human). Measured live
-            # (CMX-74): two AskUserQuestion gates raised inside a 429 storm, both on the
-            # pane, neither ever on the phone. So: poof whatever half of the set did
-            # land, leave the window unmarked, and let the next tick post it again.
+            # Telegram delivered NOTHING (flood control, or a payload it refused).
+            # Recording the signature anyway is how a gate goes missing in silence: this
+            # tracker is EDGE-triggered, so a marker written for a message that does not
+            # exist means the next tick sees "already relayed" and returns — forever,
+            # because a *pending* gate's pane holds still by definition (it is waiting for
+            # a human). Reconstructed from the 07-14 artifacts (CMX-74): two
+            # AskUserQuestion gates raised inside a 429 storm, both on the pane, neither
+            # ever on the phone. So: poof whatever half of the set did land, leave the
+            # window unmarked, and post it again — but on a BACKOFF, because the failure
+            # mode we are retrying into is *a rate limit*, and a gate can be pending on a
+            # human for hours. Every-tick-forever would be this daemon DDoSing itself with
+            # the very traffic that hid the gate.
+            attempts = (failed.attempts if failed is not None else 0) + 1
+            wait = (
+                0.0 if attempts == 1
+                else min(_REPOST_BACKOFF_BASE * 2 ** (attempts - 2), _REPOST_BACKOFF_MAX)
+            )
+            self._undelivered[key] = _Undelivered(attempts, now + wait)
+            log.warning(
+                "telegram took none of the %s prompt on %s (attempt %d) — "
+                "re-posting in %.0fs", kind, window_id, attempts, wait)
             self._poof(message_ids)
+            if replaced:
+                # The old messages are still on the phone and still the best thing there
+                # — keep owning them (a stale signature, so the next tick re-renders
+                # them; and their ids, so they can still be poofed when the gate is
+                # answered). An untracked live keyboard is one nobody can ever take away.
+                self._prompts.setdefault(window_id, {})[kind] = _Tracked(
+                    "", replaced, tracked.last_edit if tracked is not None else 0.0)
             return
+        self._undelivered.pop(key, None)
+        self._poof(replaced)
+        # A delivered gate says so, with the ids Telegram gave back. The 07-14 incident was
+        # invisible in the log — a gate on the pane, nothing on the phone, and not one line
+        # either way — so the delivery of a thing a human is *blocked on* is worth a line.
+        if message_ids:
+            log.info("relayed %s prompt on %s to topic %s as %s",
+                     kind, window_id, thread, message_ids)
         self._prompts.setdefault(window_id, {})[kind] = _Tracked(
             signature, message_ids, now)
 
@@ -1926,16 +2036,57 @@ class PermissionGateWatcher:
         """
         if kind == _MIRROR:
             self._expanded.discard(window_id)
+        self._undelivered.pop((window_id, kind), None)
         tracked = self._prompts.get(window_id, {}).pop(kind, None)
         if tracked is not None:
             self._poof(tracked.message_ids)
 
     def _poof(self, message_ids) -> None:
-        """Delete these messages. Never raises — a message we cannot delete is still gone."""
+        """QUEUE these messages for deletion. No network, no blocking — safe under the lock.
+
+        Every caller of this is inside the reconcile lock, and a delete is a Bot API call
+        that Telegram can make wait (flood control). So this one does not make it: it
+        hands the ids to :meth:`_drain_poofs`, which runs after the lock is dropped.
+        """
         if self._delete is None:
             return
         for message_id in message_ids:
+            self._poofq.append((message_id, 0))
+
+    def _drain_poofs(self) -> None:
+        """Delete the queued messages. Call OUTSIDE the lock. Never raises.
+
+        Deleting is the point of poofing: the buttons on an answered prompt are not just
+        stale, they are *live* — a later tap would fire Enter/Escape at whatever the agent
+        is doing by then. So a delete Telegram refuses goes back on the queue for the next
+        drain rather than being dropped on the floor (:data:`_MAX_POOF_TRIES`), and every
+        entry point drains — the pane tick, the transcript relay's :meth:`observe`, a
+        D-pad tap — so in practice a poof still goes out within milliseconds of the
+        resolve that queued it. What it may NOT do is go out while holding the lock the
+        pane poll needs.
+
+        Only one pass over what is queued *now*: a re-queued id is left for the next
+        drain, so a permanently-refused delete can never spin this loop.
+        """
+        if self._delete is None:
+            return
+        for _ in range(len(self._poofq)):
             try:
-                self._delete(message_id)
+                message_id, tries = self._poofq.popleft()
+            except IndexError:  # another thread drained it first
+                return
+            try:
+                # ``False`` is BotSender reporting a refusal; a poster that returns
+                # nothing (the plain-callable tests) is taken at its word.
+                refused = self._delete(message_id) is False
             except Exception:
                 log.exception("failed to delete relayed prompt message %s", message_id)
+                refused = True
+            if not refused:
+                continue
+            if tries + 1 < _MAX_POOF_TRIES:
+                self._poofq.append((message_id, tries + 1))
+            else:
+                log.error(
+                    "gave up deleting prompt message %s after %d tries — its buttons are "
+                    "still live", message_id, _MAX_POOF_TRIES)

@@ -1240,13 +1240,22 @@ def cmd_telegram(args) -> None:
     from chela.gateanswer import open_gate
     from chela.telegram.gateanswers import DRAFTS
     from chela.telegram.hookgate import pending_gate
+    # Every Telegram call this watcher makes opts OUT of the 429 sleep-and-retry loop
+    # (retry_flood=False), for the reason the pane poll got its own thread at all
+    # (CMX-74): a gate is a live thing that exists for seconds, and the pane loop is
+    # SINGLE-THREADED ACROSS WINDOWS. A send that sleeps out a `retry_after` holds the
+    # reconcile lock (and the loop) for as long as Telegram says — so the chattiest
+    # window's flood control would go on hiding the *next* window's question, which is
+    # the bug, wearing a new hat. Nothing is dropped by not sleeping: an undelivered
+    # prompt is not recorded as delivered, so the next tick posts it again, on a backoff
+    # (`_REPOST_BACKOFF_BASE`) — the retry moved out of the sleep and into the loop.
     gate_watcher = PermissionGateWatcher(
         bot.send,
         registry,
         capture=capture_pane,
-        post=bot.post,
-        edit=bot.edit,
-        delete=bot.delete,
+        post=partial(bot.post, retry_flood=False),
+        edit=partial(bot.edit, retry_flood=False),
+        delete=partial(bot.delete, retry_flood=False),
         status=status,
         pending=pending_gate,
         held=open_gate,
