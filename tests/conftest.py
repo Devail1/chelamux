@@ -88,6 +88,14 @@ atexit.register(shutil.rmtree, SANDBOX_CHELA_DIR, ignore_errors=True)
 for _var in ("CHELA_EVENTS_FILE", "CHELA_INBOX_FILE"):
     os.environ.pop(_var, None)
 
+# tmux is live state too, and it is not a file, so the fence below cannot catch it.
+# ``chela doctor`` now READS BACK from tmux (does the session exist? is the window a run
+# claims still alive? — the runtime-truth registry), so on this machine the suite would be
+# asking the developer's REAL fleet, and its answers would change with whatever happens to
+# be running. Every test gets a session name nothing can have; a test that wants a window
+# table hands the code one (see tests/test_runtime_truth.py).
+os.environ["CHELA_TMUX_SESSION"] = "chela-tests-no-such-session"
+
 
 class LiveStateEscape(BaseException):
     """A test reached the developer's real ``~/.chela`` / ``~/.claude``.

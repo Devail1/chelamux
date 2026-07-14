@@ -32,6 +32,10 @@ def env(tmp_path, monkeypatch):
     claude = tmp_path / "claude"
     (claude / "plugins").mkdir(parents=True)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+    # A dashboard IS listening on PORT — published, pid-checked, the way the real one does
+    # it. The plugin facts render their expected manifest against the port that is really
+    # bound (CMX-41), so the fixture has to bind one.
+    config.publish_dashboard_port(PORT)
     return tmp_path
 
 
@@ -65,9 +69,17 @@ def _stale(port: int = PORT) -> dict:
 
 
 def _check(port: int = PORT) -> list[doctor.Finding]:
-    out: list[doctor.Finding] = []
-    doctor._check_plugin(out, port)
-    return out
+    """The two plugin facts, audited exactly as `chela doctor` audits them — through the
+    registry, with no check of their own. `port` is what the dashboard has BOUND (the
+    fixture publishes it), because that is the port the manifest must carry."""
+    assert config.live_dashboard_port() == port
+    return [
+        finding
+        for name in ("plugin.rendered", "plugin.installed")
+        for f in [doctor.fact(name)]
+        if f.applies()
+        for finding in doctor.audit(f)
+    ]
 
 
 def _levels(findings, level):
