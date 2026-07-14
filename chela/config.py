@@ -297,6 +297,21 @@ SHOW_TOOL_CALLS = os.environ.get("CHELA_SHOW_TOOL_CALLS", "false").strip().lower
     "false", "0", "no", "off",
 )
 
+# Auto-topics: give a DISPATCHER-SPAWNED agent (a worktree worker the dispatcher
+# owns — identified from the `runs` table, never from its window name) a Telegram
+# topic like any other agent. OFF by default: a fleet of short-lived workers, each
+# churning a topic on spawn and archiving it on exit, turns a human's forum inbox
+# into a changelog. With it off, a dispatched agent is bound LAZILY — no topic while
+# it works, a topic the moment it BLOCKS on a permission gate / question (see
+# chela.telegram.reconcile.blocked_on_human — the hook log OR the pane, because a
+# PERMISSION gate is never in the log at all), so the forum shows only the agents
+# that want a human. Human-driven sessions (orchestrator, project sessions) are
+# unaffected either way. Set CHELA_TELEGRAM_BIND_DISPATCHED=true for the old
+# bind-everything behaviour.
+BIND_DISPATCHED = os.environ.get("CHELA_TELEGRAM_BIND_DISPATCHED", "false").strip().lower() in (
+    "true", "1", "yes", "on",
+)
+
 # Ephemeral status line: relay Claude Code's live "working" verb (and background
 # shell count) to each bound topic as a single self-deleting message that edits in
 # place while the agent works and is poofed when the turn ends. It is what lets a

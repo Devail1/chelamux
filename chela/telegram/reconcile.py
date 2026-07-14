@@ -191,10 +191,13 @@ def reconcile_bindings(
     agent_ids,
     topic_api,
     cwd_for: Callable[[str], str | None] | None = None,
+    dispatched: set[str] | frozenset[str] | None = None,
+    gate_for: Callable[[str], object | None] | None = None,
+    bind_dispatched: bool = False,
 ) -> bool:
     """Diff the registry against the live fleet; provision + reap. Return changed.
 
-    Pure (no live tmux/Telegram of its own) so it unit-tests against stubs:
+    Pure (no live tmux/Telegram/sqlite of its own) so it unit-tests against stubs:
 
     * ``registry``    — a :class:`~chela.telegram.bindings.BindingRegistry`.
     * ``live_windows``— ``{window_id: display_name}`` of *every* live window.
@@ -206,6 +209,14 @@ def reconcile_bindings(
       :func:`chela.discovery.get_window_cwd_by_id`); injected so this stays pure.
       When given, a provisioned topic is named after the agent's *project* (its cwd
       basename) via :func:`topic_name_for` instead of the raw tmux window name.
+    * ``dispatched``  — the window ids the DISPATCHER owns, read off the ``runs``
+      table (:func:`dispatched_window_ids`), not guessed from a window name.
+    * ``gate_for``    — ``window_id -> blocked-on-a-human evidence | None`` probe (in
+      production :func:`blocked_on_human`); what makes a dispatched agent's binding LAZY
+      (below). ⛔ It must cover **permission gates**, which live only on the pane — see
+      the warning below.
+    * ``bind_dispatched`` — ``True`` restores the old behaviour: a dispatched agent
+      gets a topic like any other (``CHELA_TELEGRAM_BIND_DISPATCHED``).
 
     **Provision** every agent window with no binding: create a topic named after
     the agent's project (:func:`topic_name_for`, falling back to the window name)
@@ -215,14 +226,61 @@ def reconcile_bindings(
     unbound to retry next tick. **Reap** every *bound* window that is no longer
     live: ``close_topic`` its thread, then ``unbind``. Returns ``True`` if any
     binding changed, so the caller knows to ``registry.save()``.
+
+    **A dispatched agent is bound LAZILY — only once it BLOCKS (the default).** The
+    forum is a human's inbox, and a fleet of short-lived worktree workers each
+    creating a topic on spawn and archiving it on exit turns that inbox into a
+    changelog. So a window the dispatcher owns gets **no topic while it is working**,
+    and one **the moment it blocks on a human** (``gate_for`` — in production
+    :func:`blocked_on_human`). The result is the feature, not a compromise: **the forum
+    shows only agents that want a human**, and the phone-gate surface — an agent blocking
+    reaches Liav with zero keypresses — is fully preserved for exactly the agents most
+    likely to need it.
+
+    ⛔ **``gate_for`` MUST see a permission gate, not just an interactive tool call.**
+    :func:`~chela.telegram.hookgate.pending_gate` alone is **not** that probe, and
+    believing it was is the bug this contract exists to prevent: it only reports
+    :data:`~chela.telegram.hookgate.INTERACTIVE_TOOLS` (``AskUserQuestion`` /
+    ``ExitPlanMode``). A blocked **Bash/Edit permission prompt** — by far the likeliest
+    thing to stop a worktree agent — is *never in the transcript at all* and is visible
+    **only on the pane**. Probe with pending_gate alone and a dispatched agent that hits
+    one is never bound, so its pane is never polled by
+    :class:`~chela.telegram.gatewatch.PermissionGateWatcher` (which only scrapes *bound*
+    windows) and it blocks **forever, silently**. Hence :func:`blocked_on_human`: the hook
+    payload **or** the pane.
+
+    ⚠️ **The lazy binding is dropped when the WINDOW exits, not when the gate closes.**
+    Un-binding on gate-resolve would archive the topic mid-conversation and then
+    ``createForumTopic`` a *brand-new* one on the agent's next gate — topic churn per
+    gate, which is the very disease this fixes. Once an agent has asked for a human it
+    keeps its one topic (so the human can answer, follow up, and read the reply) until
+    it dies, and the normal reap archives it then.
+
+    ⛔ A binding is a **VIEW**, not the agent's identity: an unbound dispatched window
+    is still on the Wall, still in the decisions inbox, still in the event log.
     """
     changed = False
+    dispatched = set(dispatched or ())
+
+    def _wants_topic(wid: str) -> bool:
+        """A dispatched agent earns a topic only when it is BLOCKED on a human."""
+        if bind_dispatched or wid not in dispatched:
+            return True
+        if gate_for is None:
+            return False
+        try:
+            return gate_for(wid) is not None
+        except Exception:  # noqa: BLE001 — a gate probe must never wedge the loop
+            log.debug("auto-topics: gate probe failed for %s", wid, exc_info=True)
+            return False
 
     # Provision: an agent window with no binding gets a fresh topic. Idempotent —
     # a window that already has a binding (by id) is skipped, so no double-create.
     for wid in agent_ids:
         if registry.thread_for_window(wid) is not None:
             continue
+        if not _wants_topic(wid):
+            continue  # dispatcher-owned and working away quietly — not the forum's problem
         window_name = live_windows.get(wid, wid)
         cwd = cwd_for(wid) if cwd_for is not None else None
         name = topic_name_for(cwd, window_name)
@@ -267,6 +325,126 @@ def reconcile_bindings(
         changed = True
 
     return changed
+
+
+def blocked_on_human(wid: str, *, gate=None, capture=None, detect=None):
+    """Is this window BLOCKED on a human right now? The hook log **OR** the pane.
+
+    The production ``gate_for`` probe (:func:`reconcile_bindings`), and it is two sources
+    on purpose, because **neither one alone can see every gate**:
+
+    * the **hook log** (:func:`~chela.telegram.hookgate.pending_gate`) sees an unresolved
+      ``AskUserQuestion`` / ``ExitPlanMode`` — the only tools it tracks
+      (:data:`~chela.telegram.hookgate.INTERACTIVE_TOOLS`);
+    * the **pane** (:func:`~chela.telegram.panescan.detect_dialog`) sees *any* dialog on
+      screen, whatever its shape.
+
+    ⛔ **The pane half is not a nicety — it is the whole point.** A **permission gate** on
+    a Bash/Edit (the likeliest thing to stop a worktree agent: one non-allowlisted command
+    and it sits there) emits a ``PreToolUse`` for a tool ``pending_gate`` does not track,
+    so the log says *nothing is pending* while the agent is frozen. The gate exists
+    **only** as pixels. Probe with the log alone and that agent is never bound → its pane
+    is never scraped by :class:`~chela.telegram.gatewatch.PermissionGateWatcher` (which
+    polls *bound* windows only) → **nobody is ever told, and it blocks forever.** The pane
+    covers the second door too: ``pending_gate`` is ``boot_id``-scoped, so a gate raised
+    before a daemon restart, or by an agent started with no hooks plugin at all, is
+    likewise invisible in the log and visible only here.
+
+    :func:`~chela.telegram.panescan.detect_dialog` is the right pane probe precisely
+    because it **parses nothing** — a top marker, a bottom marker, and the region between
+    them — so a dialog shape no semantic scraper was measured against still reads as "this
+    agent is waiting on a human", which is the only question being asked here.
+
+    Each source is guarded separately: a failing hook read must not cost us the pane (and
+    vice versa), because either one alone still catches gates the other cannot see. Both
+    failing returns ``None`` — no topic this tick, retried the next.
+
+    One tmux capture per **unbound dispatched** window per tick, and that set is small
+    (the fleet's concurrency cap) and shrinks to nothing the moment a window binds.
+    """
+    from chela.messenger import capture_pane
+    from chela.telegram.hookgate import pending_gate
+    from chela.telegram.panescan import detect_dialog
+
+    gate = pending_gate if gate is None else gate
+    capture = capture_pane if capture is None else capture
+    detect = detect_dialog if detect is None else detect
+
+    try:
+        hooked = gate(wid)
+        if hooked is not None:
+            return hooked
+    except Exception:  # noqa: BLE001 — a log hiccup must not cost us the pane probe
+        log.debug("auto-topics: hook-gate probe failed for %s", wid, exc_info=True)
+
+    try:
+        return detect(capture(wid))
+    except Exception:  # noqa: BLE001 — nor a tmux hiccup the whole reconcile
+        log.debug("auto-topics: pane gate probe failed for %s", wid, exc_info=True)
+        return None
+
+
+def dispatched_window_ids(runs: list[dict] | None = None,
+                          live_windows: dict[str, str] | None = None) -> set[str]:
+    """The windows the DISPATCHER owns — read off the ``runs`` table.
+
+    The run row **owns** the ``window_id`` of every window the dispatcher spawned
+    (recorded at spawn — the only lossless moment; see
+    :func:`chela.inbox.run_wid`). That row is the *fact*; the window's name is only a
+    *label*. ⛔ So this never regexes ``cmx-\\d+`` out of a window name: a human can
+    rename a window, and a human window can be *called* anything.
+
+    **Two kinds of row qualify, and the second one is a bug fix.**
+
+    * **In flight** (:data:`chela.dispatcher.ACTIVE_STATUSES`) — its window is supposed to
+      exist *now*, so its recorded id is honoured unconditionally.
+    * **Any other status whose window is STILL ALIVE under the name the row recorded.**
+      A run does not stop being dispatcher-owned the instant its status changes:
+      :func:`chela.dispatcher.mark_awaiting_review` commits ``awaiting_review`` and only
+      *then* kills the window, and a ``failed`` / ``needs_human`` run's window can linger
+      indefinitely. In that gap the window is live and no longer "in flight", so scoping to
+      ACTIVE alone makes it look like a *human's* window — and the reconcile eagerly
+      creates it a topic that the reap archives seconds later. That is exactly the churn
+      this whole feature exists to kill, arriving through the back door.
+
+    The **recorded name** is what makes the second case safe, and it is not a name *guess*:
+    it is the row's own ``window_name``, compared against what tmux currently calls that
+    id. tmux hands out ``@N`` ids afresh after a server restart, so a finished run's
+    recorded id can be a **human's** window in this boot — and honouring that blindly would
+    silently strip the orchestrator of its topic. A recycled id is a window with a
+    *different* name, so it fails this check and stays a human's window. (An in-flight row
+    is exempt because a human is free to *rename* a live worker's window without
+    disowning it.)
+
+    ``live_windows`` (``{window_id: name}``, the reconcile's own live fleet) is what that
+    check reads; omit it and only the in-flight rows qualify. ``runs`` is injectable so
+    this unit-tests with no sqlite; in production it is :func:`chela.dispatcher.list_runs`.
+    A failure to read the DB returns an empty set — i.e. "nothing is dispatched", the
+    pre-CMX-73 behaviour — rather than wedging the reconcile loop over a locked database.
+    """
+    from chela import dispatcher
+
+    try:
+        rows = dispatcher.list_runs() if runs is None else runs
+    except Exception:  # noqa: BLE001 — a DB hiccup must never stop the bridge reconciling
+        log.debug("auto-topics: could not read runs for dispatched windows", exc_info=True)
+        return set()
+
+    live = live_windows or {}
+    owned: set[str] = set()
+    for row in rows:
+        wid = str(row.get("window_id") or "").strip()
+        if not wid:
+            continue                                # a pre-CMX-69 row: no id was recorded
+        if row.get("status") in dispatcher.ACTIVE_STATUSES:
+            owned.add(wid)
+            continue
+        # Settled/parked, but its window may not be reaped yet. Only the row's OWN
+        # recorded name can prove the live @N is still that window and not a recycled id.
+        name = str(row.get("window_name") or "").strip()
+        if name and live.get(wid) == name:
+            owned.add(wid)
+    return owned
 
 
 def live_agent_windows() -> tuple[dict[str, str], set[str]]:
