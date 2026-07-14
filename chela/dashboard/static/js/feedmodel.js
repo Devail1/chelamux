@@ -18,7 +18,10 @@
 //      still has a lane), never used as the filter.
 //   3. NOTHING IS EVER HIDDEN SILENTLY. `pre/post_tool_use` is ~86% of the log's
 //      volume, so it is filtered out by default — and the lane says exactly how
-//      many rows that is, with a button to show them.
+//      many rows that is, with a button to show them. Same rule, one level up:
+//      after a day of dispatch the feed was 8 lanes, 5 of them corpses, so the GONE
+//      lanes fold into ONE row that states what it is holding (`▸ 5 finished agents
+//      · 47 events`) — collapsed, never DROPPED, and never silent (`splitGone`).
 //
 // ⚠️ COLOUR IS NEVER THE SIGNAL. Every class carries a GLYPH and a WORD (`◆ gate`,
 // `■ lifecycle`, `● run`, `✕ denied`, `▸ prompt`); the hue (Okabe-Ito, in the CSS)
@@ -138,6 +141,11 @@ export function buildLanes(events, agents, classes) {
                 hiddenTotal: 0,
                 total: 0,
                 lastTs: 0,
+                // The task ids this lane handed you a PR for. Collected from EVERY
+                // event, not from `events` — turning the `run` chip off must not bury
+                // a review that is still open (splitGone reads this, not the rows).
+                reviewTasks: [],
+                openReview: false, // set by splitGone: it is still awaiting YOU
             });
         }
         return lanes.get(wid);
@@ -163,6 +171,13 @@ export function buildLanes(events, agents, classes) {
         const cls = classOf(e.type);
         lane.total += 1;
         lane.lastTs = Math.max(lane.lastTs, e.ts || 0);
+        if (e.type === 'run_review') {
+            // The TASK id, never the wid: tmux recycles `@72`, a task id is minted once.
+            // A review with no task id cannot be matched against the runs, so it is not
+            // claimed as open — a legacy row must not pin the graveyard open forever.
+            const tid = ((e.payload || {}).task_id || '').trim();
+            if (tid && !lane.reviewTasks.includes(tid)) lane.reviewTasks.push(tid);
+        }
         // A gone window's name is whatever the log last called it — the only handle
         // left once tmux has reaped the id.
         if (lane.status === 'gone') lane.name = _nameFromEvent(e) || lane.name;
@@ -178,6 +193,62 @@ export function buildLanes(events, agents, classes) {
     const out = [...lanes.values()].sort((a, b) =>
         laneRank(a) - laneRank(b) || b.lastTs - a.lastTs || a.wid.localeCompare(b.wid));
     return { lanes: out, hidden };
+}
+
+/**
+ * Fold the GONE lanes into one group — the default view is the LIVE fleet.
+ *
+ * Every dispatched agent that finishes leaves its lane behind forever (the lane list
+ * comes from the LOG, on purpose — key it on the live fleet and a dead agent's whole
+ * history evaporates the moment tmux reaps its window). So after ONE day the feed was
+ * 8 lanes, 2 live, 5 corpses, and the lanes you actually care about were buried under
+ * a graveyard that only ever grows. The data is right; the default VIEW was wrong.
+ *
+ * This is PRESENTATION, not a second model: nothing is dropped, nothing is cached, and
+ * "gone" is not a flag — it is simply `lane.status`, which comes from the live tmux
+ * table (agent_manager.status_by_wid, the one liveness authority) at every render. A
+ * recycled `@72` therefore cannot resurrect a dead agent: whatever the table says NOW
+ * is what the lane is now.
+ *
+ * ⚠️ ONE exception, and it is CMX-62's: a run can be `awaiting_review` — wanting you,
+ * badly — while its window is ALREADY REAPED, because a dispatched agent kills its own
+ * window before the run reconciles. "Window gone" is emphatically not "finished, ignore
+ * me". Such a lane is kept OUT of the graveyard and wears a `◆ REVIEW WAITING` badge.
+ * It is not hoisted to the top: the lane sort is attention-ordered and a PR waiting on
+ * you is not the same interrupt as an agent blocked on a prompt — it keeps its place in
+ * the `gone` bucket, visible rather than urgent.
+ *
+ * @param lanes        buildLanes(...).lanes — sorted, untouched
+ * @param openReviews  task ids currently `awaiting_review` (the runs DB, via
+ *                     /api/dispatcher). `null` = NOT KNOWN — and an unknown review
+ *                     is treated as OPEN, because the failure we refuse is burying one.
+ * @returns {lanes, buried, agents, events} — `lanes` to render, `buried` behind the
+ *          collapsed row (in the same order), and the counts that row must SAY.
+ */
+export function splitGone(lanes, openReviews) {
+    const known = openReviews == null ? null : new Set(openReviews);
+    const shown = [];
+    const buried = [];
+    (lanes || []).forEach(lane => {
+        if (!lane || lane.status !== 'gone') { if (lane) shown.push(lane); return; }
+        lane.openReview = known
+            ? lane.reviewTasks.some(t => known.has(t))
+            : lane.reviewTasks.length > 0;
+        (lane.openReview ? shown : buried).push(lane);
+    });
+    return {
+        lanes: shown,
+        buried,
+        agents: buried.length,
+        events: buried.reduce((n, l) => n + l.total, 0),
+    };
+}
+
+// "5 finished agents · 47 events" — what the collapsed graveyard row is holding, said
+// out loud. A row that folds away five agents without naming them is a lie, not a filter.
+export function goneSummary(agents, events) {
+    return `${agents} finished agent${agents === 1 ? '' : 's'}`
+        + ` · ${events} event${events === 1 ? '' : 's'}`;
 }
 
 // The flat/chronological escape hatch: the same rows, ungrouped, NEWEST first.

@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 
 import {
     CLASSES, DEFAULT_CLASSES, SYSTEM_LABEL, SYSTEM_WID,
-    buildLanes, classOf, flatRows, hiddenSummary,
+    buildLanes, classOf, flatRows, goneSummary, hiddenSummary, splitGone,
 } from '../chela/dashboard/static/js/feedmodel.js';
 
 let _seq = 0;
@@ -139,7 +139,107 @@ test('turning the firehose chip on shows exactly the rows it was hiding', () => 
     assert.equal(lanes[0].hiddenTotal, 0);
 });
 
+// --- the graveyard: gone lanes COLLAPSE, they do not disappear ---------------
+
+test('a gone lane is COLLAPSED into the graveyard, not dropped', () => {
+    const agents = [{ window_id: '@2', name: 'live', status: 'busy', claude_running: true }];
+    const events = [
+        ev('hook.session_start', '@2'),
+        ev('finished', '@7', { payload: { window_name: 'cmx-58' } }),
+        ev('finished', '@8', { payload: { window_name: 'cmx-59' } }),
+        ev('daemon_start', null),
+    ];
+    const { lanes } = buildLanes(events, agents, DEFAULT_CLASSES);
+    const group = splitGone(lanes, []);          // nothing awaiting review
+    // The default view is the LIVE fleet + chela itself. The corpses are still here —
+    // in `buried`, one click away — not deleted.
+    assert.deepEqual(group.lanes.map(l => l.wid), ['@2', SYSTEM_WID]);
+    assert.deepEqual(group.buried.map(l => l.wid), ['@8', '@7']);   // newest corpse first
+    assert.equal(group.agents, 2);
+    assert.equal(group.events, 2);
+    // Expanding restores them, in the order the sort gave them.
+    assert.deepEqual(group.buried.map(l => l.name), ['cmx-59', 'cmx-58']);
+    assert.equal(group.buried[0].events.length, 1);
+});
+
+test('the collapsed row STATES what it is holding — agents AND events', () => {
+    assert.equal(goneSummary(5, 47), '5 finished agents · 47 events');
+    assert.equal(goneSummary(1, 1), '1 finished agent · 1 event');
+});
+
+test('the graveyard counts EVERY event of a buried lane, filtered or not', () => {
+    const events = [
+        ev('finished', '@7'),
+        ...Array.from({ length: 4 }, () => ev('hook.pre_tool_use', '@7')),
+    ];
+    const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);
+    const group = splitGone(lanes, []);
+    assert.equal(group.agents, 1);
+    assert.equal(group.events, 5);               // the lane's own header says 5 too
+});
+
+test('a gone lane holding an UNANSWERED review is NOT buried (CMX-62)', () => {
+    // A dispatched agent kills its own window and only THEN does the run reconcile to
+    // awaiting_review: "window gone" is not "finished, ignore me".
+    const events = [
+        ev('run_review', '@7', { payload: { task_id: 't-open', window_name: 'cmx-63' } }),
+        ev('run_review', '@8', { payload: { task_id: 't-merged', window_name: 'cmx-62' } }),
+    ];
+    const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);
+    const group = splitGone(lanes, ['t-open']);
+    assert.deepEqual(group.lanes.map(l => l.wid), ['@7']);
+    assert.equal(group.lanes[0].openReview, true);      // and it wears the badge
+    assert.deepEqual(group.buried.map(l => l.wid), ['@8']);   // merged → the graveyard
+});
+
+test('the review survives the class filter — turning `run` off must not bury it', () => {
+    // The run_review row itself is filtered out of the lane, but the lane still knows it
+    // is owed a review: reviewTasks is collected from EVERY event, not from the shown rows.
+    const events = [ev('run_review', '@7', { payload: { task_id: 't-open' } })];
+    const { lanes } = buildLanes(events, [], ['lifecycle']);
+    assert.equal(lanes[0].events.length, 0);
+    assert.deepEqual(lanes[0].reviewTasks, ['t-open']);
+    assert.deepEqual(splitGone(lanes, ['t-open']).lanes.map(l => l.wid), ['@7']);
+});
+
+test('reviews UNKNOWN (the runs read failed) shows them — it never buries them', () => {
+    const events = [ev('run_review', '@7', { payload: { task_id: 't-open' } }),
+        ev('finished', '@8')];
+    const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);
+    const group = splitGone(lanes, null);        // null = we do not know
+    assert.deepEqual(group.lanes.map(l => l.wid), ['@7']);   // fail loud…
+    assert.deepEqual(group.buried.map(l => l.wid), ['@8']);  // …but only for reviews
+});
+
+test('a review with no task_id cannot pin the graveyard open forever', () => {
+    // Unmatchable against the runs — so it is not claimed as open.
+    const events = [ev('run_review', '@7', { payload: {} })];
+    const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);
+    assert.deepEqual(lanes[0].reviewTasks, []);
+    assert.deepEqual(splitGone(lanes, ['t-open']).buried.map(l => l.wid), ['@7']);
+});
+
+test('liveness is re-derived per render — a recycled wid never resurrects a corpse', () => {
+    // @7 died; tmux later hands @7 to a NEW agent. Nothing persists a "gone" flag, so the
+    // lane is whatever the LIVE table says it is now — and the graveyard is empty.
+    const events = [ev('finished', '@7', { payload: { window_name: 'cmx-58' } })];
+    const dead = splitGone(buildLanes(events, [], DEFAULT_CLASSES).lanes, []);
+    assert.deepEqual(dead.buried.map(l => l.wid), ['@7']);
+
+    const live = [{ window_id: '@7', name: 'brand-new', status: 'busy', claude_running: true }];
+    const back = splitGone(buildLanes(events, live, DEFAULT_CLASSES).lanes, []);
+    assert.equal(back.buried.length, 0);
+    assert.equal(back.lanes[0].status, 'busy');
+    assert.equal(back.lanes[0].name, 'brand-new');
+});
+
 // --- the flat/chronological escape hatch ------------------------------------
+
+test('the flat view is UNAFFECTED by the graveyard — it is the escape hatch', () => {
+    // Collapsing the gone lanes is a LANE-view default. Flat is every row, gone or not.
+    const events = [ev('finished', '@7'), ev('run_review', '@8'), ev('daemon_start', null)];
+    assert.equal(flatRows(events, DEFAULT_CLASSES).length, 3);
+});
 
 test('flat mode is the same rows, ungrouped, newest first', () => {
     const events = [ev('finished', '@2'), ev('hook.pre_tool_use', '@3'), ev('run_review', '@4')];

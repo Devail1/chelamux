@@ -54,6 +54,27 @@ function workBadgeCounts(data) {
     return { runs, prs };
 }
 
+// The runs still awaiting YOUR review, by TASK id. `null` until the first poll lands —
+// "not known yet" is not "there are none", and the Feed's graveyard leans on that
+// difference (an unknown review is shown, never buried).
+//
+// This is a READ of the payload the badges already fetched, not a second poll: the Feed
+// needs run STATUS (a dead window can still owe you a PR — CMX-62) and the log cannot
+// tell it, so it reads it here. The one-poller rule (this module) stands.
+let _awaiting = null;
+
+export function awaitingReviewIds() { return _awaiting; }
+
+function _readAwaiting(data) {
+    const ids = [];
+    for (const wf of ((data && data.workflows) || [])) {
+        for (const r of (wf.awaiting_review_runs || [])) {
+            if (r && r.task_id) ids.push(r.task_id);
+        }
+    }
+    _awaiting = ids;
+}
+
 function _renderWorkBadges(data) {
     const { runs, prs } = workBadgeCounts(data);
     const runsEl = document.getElementById('side-runs-count');
@@ -97,6 +118,7 @@ async function pollWork() {
         return;
     }
     _lastData = data;
+    _readAwaiting(data);                // the Feed reads this — see awaitingReviewIds()
     _renderWorkBadges(data);            // sidebar — visible from every view
     if (currentTab !== 'work') return;  // nothing else on screen to draw
     _applySegment();
