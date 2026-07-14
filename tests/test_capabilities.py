@@ -110,3 +110,22 @@ def test_no_state_file_means_unknown_not_off(chela_dir):
     """`None` is "we cannot see the daemon" — a caller must never read it as "off"."""
     assert capabilities.live() is None
     assert capabilities.live_capability("dispatch") is None
+
+
+def test_a_daemon_that_boots_into_a_held_queue_announces_the_hold(chela_dir, monkeypatch, caplog):
+    """A dispatcher that is ON and claiming nothing is a disabled subsystem wearing a
+    green badge. Booting into a held queue and logging only "ON" is the nine-hour silence
+    all over again."""
+    from chela import hold
+
+    hold.take(reason="rewriting the queue", ttl_seconds=600, by="@0")
+    caps = list(_caps(monkeypatch, [Path("/tmp/WORKFLOW.md")]).values())
+    dispatch = next(c for c in caps if c.key == "dispatch")
+    assert dispatch.on is True                       # the capability exists...
+    assert dispatch.extra["hold"]["reason"] == "rewriting the queue"   # ...and is HELD
+
+    log = logging.getLogger("caps-hold-test")
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        capabilities.announce(caps, log)
+    assert "HELD" in caplog.text
+    assert "--resume" in caplog.text

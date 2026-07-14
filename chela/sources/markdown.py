@@ -20,8 +20,21 @@ class MarkdownSource:
     def list_open_tasks(self) -> list[Task]:
         if not self.path.exists():
             return []
+        return self.tasks_from_text(self.path.read_text())
+
+    def tasks_from_text(self, text: str) -> list[Task]:
+        """The open tasks in `text`, as if it were this tracker's contents.
+
+        Same parse as :meth:`list_open_tasks`, but sourced from a string — which is what
+        lets the dispatcher read the tracker straight out of ``origin/<base_branch>`` at
+        claim time (``git show``) without touching, or waiting on, the working tree. Task
+        ids are unchanged by the detour: an id is the hash of (tracker FILENAME, title),
+        so the same line yields the same id whatever blob it came from — and, for the same
+        reason, MOVING a line does not re-key it. Reordering the queue can therefore never
+        orphan an in-flight run.
+        """
         tasks: list[Task] = []
-        for i, raw in enumerate(self.path.read_text().splitlines(), start=1):
+        for i, raw in enumerate(text.splitlines(), start=1):
             m = OPEN_RE.match(raw)
             if not m:
                 continue
@@ -37,6 +50,21 @@ class MarkdownSource:
                 raw=raw,
             ))
         return tasks
+
+    def closed_ids_from_text(self, text: str) -> set[str]:
+        """Ids of the `- [x]` lines in `text` — the tasks that text considers DONE.
+
+        The counterpart of :meth:`tasks_from_text`: when the dispatcher claims from
+        ``origin``'s copy of the tracker it must also honour what ``origin`` has already
+        struck, or a task struck on the remote (and not yet pulled into this checkout)
+        would look like fresh work.
+        """
+        ids: set[str] = set()
+        for raw in text.splitlines():
+            m = DONE_RE.match(raw)
+            if m:
+                ids.add(_task_id(self.path, m.group(1).strip()))
+        return ids
 
     def close_tasks(self, task_ids: list[str]) -> dict[str, str]:
         """Flip the `- [ ]` lines for `task_ids` to `- [x]`. Returns id → outcome.

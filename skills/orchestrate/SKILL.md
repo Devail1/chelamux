@@ -24,6 +24,7 @@ All of these are zero-config — the session is auto-derived from your own pane.
 | `chela peek <wid>` | **Filtered** status of one agent: `session_status` (busy/idle/waiting) + recap + cwd + health + context usage. The cheap default — call it often. Add `--json` for programmatic use. |
 | `chela read <wid> [--tail N \| --query Q \| --all]` | **Distilled** read of a sibling's transcript. `--tail N` = recent turns; `--query Q` = turns matching terms; `--all` = full. Escalate to this only when `peek` isn't enough. |
 | `chela drive <wid> <message>` | Send a message/instruction to a sibling window. |
+| `chela dispatch --pause` / `--resume` | **HOLD the queue** while you reorder the tracker — the dispatcher claims nothing until you release. See the gotcha below. |
 
 `peek` and `read` are the **two observation tiers**: filtered by default, full-detail on
 demand. `drive` is how you act.
@@ -60,6 +61,33 @@ demand. `drive` is how you act.
    (via `peek`) before you drive it.
 9. **Trust authoritative signals over scrapes** — `chela peek`'s native `session_status` beats
    reading the terminal screen.
+
+## Gotcha: you lose every race for the queue — hold it before you reorder
+
+If a dispatcher is claiming tasks from a tracker you also write, **you will not win a
+race against it, ever.** The sequence is structural, not unlucky: a PR merges → the run
+reconciles and **frees the slot** → you start *writing* the next task, which takes
+**minutes** because you are reviewing what just merged → the dispatcher's tick fires long
+before your edit lands and claims whatever was top of the **old** queue. With
+`concurrency.max: 1` that wrong claim occupies the only slot for a full agent run.
+
+So do not race it. Say what you intend, then edit:
+
+```bash
+chela dispatch --pause --reason "reprioritising after #66"   # claim nothing
+# ...reorder the tracker, commit, PUSH to the base branch...
+chela dispatch --resume                                      # next tick claims the new top
+```
+
+Three things worth knowing:
+
+- The hold pauses **claims only**. Reconciliation keeps running, so a merged PR still
+  closes out its run and frees its slot while you rewrite — which is exactly the state you
+  want when you release.
+- It **expires** (30m by default, `--ttl 2h` to extend). A hold cannot strand the fleet if
+  you crash mid-rewrite; it self-releases and says so loudly.
+- The dispatcher claims from **`origin/<base_branch>`**, not from a working tree. An edit
+  you have not pushed is an edit it cannot see — so **push before you resume**.
 
 ## Gotcha: ghost text is not intent
 

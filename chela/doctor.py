@@ -36,7 +36,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from chela import capabilities, config
+from chela import capabilities, config, hold
 from chela.sources import get_source
 from chela.workflow import load_workflow
 
@@ -82,7 +82,39 @@ def check() -> list[Finding]:
     port = _check_dashboard_port(findings)
     _check_plugin(findings, port)
     _check_daemon(findings)
+    _check_hold(findings)
     return findings
+
+
+def _check_hold(findings: list[Finding]) -> None:
+    """A HELD queue claims nothing — say so, because "no runs started today" looks exactly
+    like a quiet day. Read from the hold FILE, not from the daemon's published
+    capabilities: a hold taken after the daemon booted is not in that snapshot, and the
+    file is the shared truth precisely because the two live in different processes.
+
+    No hold is the normal state and gets no line — but an EXPIRED hold does, because it
+    means somebody paused the queue and never came back, and whatever they were going to
+    reorder, they didn't.
+    """
+    held = hold.read()
+    if held is None:
+        return
+    if held.expired():
+        findings.append(Finding(
+            WARN, f"the dispatch hold EXPIRED — {held.summary()}",
+            "Dispatch has RESUMED (an expired hold self-releases on the next tick, and "
+            "says so). Whoever took it did not come back: the queue may never have been "
+            "rewritten, so the top item may not be the one that was intended. "
+            f"File: {hold.path()}",
+        ))
+        return
+    findings.append(Finding(
+        WARN, f"the queue is HELD — dispatch is claiming NOTHING ({held.summary()})",
+        "This is deliberate: someone is rewriting the queue and does not want a task "
+        "claimed out from under the reorder. Reconciliation still runs (merged PRs close "
+        "out and free their slot). Release with `chela dispatch --resume`; it also "
+        "self-releases at its expiry, loudly.",
+    ))
 
 
 def _check_env_file(findings: list[Finding]) -> dict[str, str]:

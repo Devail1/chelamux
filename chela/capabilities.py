@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, inbox, notify
+from chela import config, hold, inbox, notify
 
 # The state file is written once at startup and deleted on a clean exit. A crash leaves
 # it behind; the pid check in live() is what makes a stale file harmless — same contract
@@ -71,6 +71,14 @@ def effective() -> list[Capability]:
         "set CHELA_DISPATCH_WORKFLOWS=/path/to/repo/WORKFLOW.md (colon-separated) in "
         f"{config.env_file_path() or '$CHELA_DIR/chela.env'} and restart the daemon"
     )
+    # A HELD queue is a dispatcher that claims nothing — a disabled subsystem by any
+    # honest reading, and this module's whole point is that one announces itself. It is
+    # still `on` (the capability exists; reconciliation still rides it, and the hold is
+    # a *transient* state a startup snapshot cannot track), so the hold is carried
+    # alongside rather than folded into the flag: announce() warns about it, and the LIVE
+    # surfaces — `chela doctor`, /api/settings — re-read the hold FILE rather than trust
+    # this snapshot, because a hold taken after startup would never show up in it.
+    held = hold.active()
     dispatch = Capability(
         key="dispatch",
         label="Work dispatcher",
@@ -81,7 +89,10 @@ def effective() -> list[Capability]:
                 "tracker"),
         fix=dispatch_fix,
         warn_when_off=True,
-        extra={"workflows": [str(p) for p in workflows]},
+        extra={
+            "workflows": [str(p) for p in workflows],
+            "hold": held.as_dict() if held else None,
+        },
     )
     reconcile = Capability(
         key="reconcile",
@@ -138,7 +149,16 @@ def announce(caps: list[Capability], log: logging.Logger) -> None:
     log.info("Capabilities: %s", " ".join(
         f"{c.key}={'ON' if c.on else 'OFF'}" for c in caps))
     for cap in caps:
-        if cap.on:
+        held = cap.extra.get("hold")
+        if cap.on and held:
+            # ON, and claiming nothing anyway. A daemon that boots into a held queue and
+            # says only "ON" is the nine-hour silence all over again, one layer in.
+            log.warning(
+                "%s: ON but the queue is HELD — %s. No task will be claimed until it is "
+                "released (`chela dispatch --resume`); reconciliation continues.",
+                cap.label, held.get("summary", "held"),
+            )
+        elif cap.on:
             log.info("%s: ON — %s", cap.label, cap.detail)
         elif cap.warn_when_off:
             log.warning("%s: OFF — %s%s", cap.label, cap.detail,

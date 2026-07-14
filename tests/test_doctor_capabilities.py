@@ -123,3 +123,49 @@ def test_the_shipped_env_template_carries_the_var_that_went_missing(chela_dir):
     assert "\nCHELA_DISPATCH_WORKFLOWS=" in text        # declared, not merely commented
     block = text.split("CHELA_DISPATCH_WORKFLOWS")[0].rsplit("\n\n", 1)[-1].lower()
     assert "reconcil" in block and "dispatch" in block  # both, or the comment is a trap
+
+
+# --- the queue hold: a paused dispatcher is a DISABLED SUBSYSTEM ------------
+
+
+def test_a_held_queue_is_a_WARN_never_a_silent_pass(chela_dir, monkeypatch):
+    """"No runs started today" looks exactly like a quiet day. Doctor must say the queue
+    is held, or the CMX-53 silence is back one layer in."""
+    from chela import hold
+
+    hold.take(reason="rewriting the queue", ttl_seconds=600, by="@0")
+    out: list[doctor.Finding] = []
+    doctor._check_hold(out)
+
+    warns = _by_level(out, doctor.WARN)
+    assert warns and "HELD" in warns[0].title
+    assert "rewriting the queue" in warns[0].title
+    assert "--resume" in warns[0].detail                 # how to end it
+    assert "Reconciliation still runs" in warns[0].detail
+
+
+def test_an_expired_hold_is_reported_loudly_too(chela_dir):
+    # Somebody paused the queue and never came back — so whatever they meant to reorder,
+    # they didn't, and the top item may not be the one that was intended.
+    import json
+    import time
+
+    from chela import hold
+
+    now = time.time()
+    hold.path().write_text(json.dumps({
+        "reason": "crashed mid-rewrite", "by": "@0", "pid": 1,
+        "created_at": now - 7200, "expires_at": now - 3600,
+    }))
+    out: list[doctor.Finding] = []
+    doctor._check_hold(out)
+
+    warns = _by_level(out, doctor.WARN)
+    assert warns and "EXPIRED" in warns[0].title
+    assert "RESUMED" in warns[0].detail
+
+
+def test_no_hold_is_the_normal_state_and_says_nothing(chela_dir):
+    out: list[doctor.Finding] = []
+    doctor._check_hold(out)
+    assert out == []

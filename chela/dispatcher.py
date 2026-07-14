@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from chela import hold
 from chela.config import CHELA_DIR, DISPATCH_TICK_INTERVAL, TMUX_SESSION
 from chela.messenger import send_tmux
 from chela.sources import Task, get_source
@@ -158,6 +159,73 @@ def _git_ok(cp) -> bool:
 
 def _git_out(cp) -> str:
     return cp.stdout.strip() if _git_ok(cp) else ""
+
+
+def _claim_order(wf: WorkflowDef, source, on_disk: list[Task]) -> list[Task]:
+    """The queue AS OF THE INSTANT OF CLAIMING — re-read from ``origin/<base_branch>``.
+
+    FETCH-THEN-CLAIM. The tick's own parse happens before reconciliation, PR polling and
+    the tracker strike, all of which touch the network; by the time a slot is actually
+    free that parse can be seconds to minutes old, and the orchestrator may have pushed a
+    reordered queue in the meantime. So the queue is re-read here, at the last possible
+    moment, from the branch the orchestrator actually pushes to — not from a parse we made
+    earlier in the tick, and not from a working tree that may be mid-edit.
+
+    ⛔ **This is necessary and it is NOT sufficient. It does not fix the race.** The race
+    that hurts is: a PR merges → reconciliation frees the only slot → the orchestrator
+    starts *writing* the next task, which takes MINUTES → our tick fires long before the
+    push lands and claims the old top item. The edit genuinely does not exist yet at claim
+    time, and no amount of freshness can read a file that has not been written. The fix
+    for that is the queue HOLD (see :mod:`chela.hold`), which the orchestrator takes
+    *before* it starts rewriting. Fetch-then-claim closes the tail of the window for
+    free — an edit pushed while this tick was busy IS honoured — and nothing more.
+
+    Degrades, never blocks: no remote, no network, a tracker that is not a file
+    (``gh_issues`` reads the live API on every call, so it is already claim-fresh), or any
+    git failure → the on-disk order stands, exactly as before. A dispatcher that refuses
+    to work offline is a worse bug than the one being fixed here.
+
+    Tasks that exist on disk but not on ``origin`` (an item the orchestrator has written
+    but not yet pushed) are kept, appended AFTER origin's — they are real work and must
+    not vanish from a local-only checkout — but they never outrank what was actually
+    pushed. Tasks ``origin`` has already STRUCK are dropped, even if this checkout has not
+    pulled the strike yet.
+    """
+    tasks_from_text = getattr(source, "tasks_from_text", None)
+    closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
+    tracker = getattr(source, "path", None)
+    if tasks_from_text is None or closed_ids_from_text is None or tracker is None:
+        return on_disk
+
+    repo = wf.path.parent
+    base = wf.get("workspace", "base_branch", default="master")
+    try:
+        rel = str(Path(tracker).relative_to(repo))
+    except ValueError:
+        return on_disk
+    if not _git_out(_git(repo, "remote")):
+        return on_disk
+    if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
+        log.warning(
+            "claim: could not fetch origin/%s — claiming from the on-disk tracker, which "
+            "may be stale", base,
+        )
+        return on_disk
+    show = _git(repo, "show", f"FETCH_HEAD:{rel}")
+    if not _git_ok(show):
+        log.warning("claim: %s is not on origin/%s — claiming from the on-disk tracker", rel, base)
+        return on_disk
+
+    text = show.stdout
+    remote_tasks = tasks_from_text(text)
+    known = {t.id for t in remote_tasks} | closed_ids_from_text(text)
+    unpushed = [t for t in on_disk if t.id not in known]
+    if unpushed:
+        log.debug(
+            "claim: %d task(s) on disk are not on origin/%s yet; queued after the pushed ones",
+            len(unpushed), base,
+        )
+    return remote_tasks + unpushed
 
 
 def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
@@ -757,6 +825,15 @@ def tick(workflow_path: str | Path) -> dict:
     running, but new dispatches are BLOCKED until it parses again, and the
     summary carries ``blocked`` + ``error`` so the daemon and the Settings
     drawer can say why (Symphony SPEC 6.2/6.3).
+
+    Two things gate the CLAIM specifically, and neither touches reconciliation:
+
+    * a **queue hold** (:mod:`chela.hold`) — the orchestrator's "claim nothing, I
+      am rewriting the queue". Taken and released at this tick boundary, never
+      mid-``_spawn``. ``held`` in the summary.
+    * **fetch-then-claim** (:func:`_claim_order`) — the queue is re-read from
+      ``origin/<base_branch>`` at the instant of claiming, not from the parse at
+      the top of this tick.
     """
     status = load_workflow_cached(workflow_path)
     wf = status.workflow
@@ -766,7 +843,7 @@ def tick(workflow_path: str | Path) -> dict:
         return {
             "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
             "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
-            "blocked": True, "error": status.error,
+            "blocked": True, "error": status.error, "held": False, "hold_expired": False,
         }
     blocked = status.error is not None
     source = get_source(wf)
@@ -784,6 +861,8 @@ def tick(workflow_path: str | Path) -> dict:
         "tracker_struck": 0,
         "blocked": blocked,
         "error": status.error,
+        "held": False,
+        "hold_expired": False,
     }
     merged_in_tick = 0  # awaiting_review → done transitions; fires hooks.after_done
 
@@ -983,12 +1062,48 @@ def tick(workflow_path: str | Path) -> dict:
                         "the last known-good config.", wf.path, status.error)
             return summary
 
+        # 3a. The queue HOLD — "claim nothing, I am rewriting the queue" (chela.hold).
+        # Taken at this tick boundary and nowhere else: a hold must never land in the
+        # middle of a _spawn, exactly as the hot-reloaded config is applied here and not
+        # mid-dispatch. Everything above this line has already run — the hold pauses
+        # CLAIMS, not reconciliation, because a hold that stopped merged PRs from freeing
+        # their slots would jam the very slot the orchestrator is holding the queue to
+        # fill.
+        expired = hold.expire_if_stale()
+        if expired:
+            summary["hold_expired"] = True
+            # Loud, unconditionally: somebody paused the queue and never came back, so
+            # the queue we are about to claim from is probably not the one they meant.
+            log.warning(
+                "Dispatch hold EXPIRED and was released automatically — it was taken %s "
+                "ago by %s%s. Dispatch RESUMES now; if the queue was never rewritten, the "
+                "top item may not be the one that was intended.",
+                hold.human_duration(expired.age()), expired.by or "?",
+                f" ({expired.reason})" if expired.reason else "",
+            )
+        held = hold.active()
+        if held:
+            summary["held"] = True
+            summary["hold"] = held.as_dict()
+            # Not logged per tick here — a 60s drumbeat is how an operator learns to
+            # ignore a log. The daemon loop edge-triggers it (cmd_run), `chela doctor`
+            # and /api/settings show it live, and the startup capability line announces
+            # it: a paused dispatcher is a disabled subsystem, and CMX-53's rule applies.
+            return summary
+
         max_concurrent = wf.get("concurrency", "max", default=1) or 1
         active = conn.execute(
             "SELECT COUNT(*) FROM runs WHERE status IN ('claimed', 'running')"
         ).fetchone()[0]
 
-        for task in open_tasks:
+        # 3b. FETCH-THEN-CLAIM: re-read the queue from origin/<base_branch> right now,
+        # rather than trusting the parse made at the top of this tick (before the PR
+        # polling and the tracker strike, both of which touch the network). Necessary,
+        # NOT sufficient — see _claim_order. Skipped entirely when every slot is busy:
+        # there is nothing to claim, and a network fetch to learn that is a waste.
+        queue = _claim_order(wf, source, open_tasks) if active < max_concurrent else []
+
+        for task in queue:
             if active >= max_concurrent:
                 break
             existing = conn.execute(
