@@ -3,11 +3,10 @@ import { $, $$, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc,
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
-import { _kn, knBackToGlance } from './knowledge.js';
-import { refreshDispatcher, startDispatcherTimer, stopDispatcherTimer } from './dispatcher.js';
-import { refreshKanban, startKanbanTimer, stopKanbanTimer } from './kanban.js';
-import { _displayLabel, _sharedWids, _stopShare, focusPaneByWid, shareBtnClick, startTermTimer, stopTermTimer } from './terminals.js';
+import { _displayLabel, _sharedWids, _stopShare, focusPaneByWid, shareBtnClick } from './terminals.js';
 import { _isFav, _launcherData, launchProject, refreshLauncher } from './launcher.js';
+import { VIEWS } from './views.js';
+import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
 import { refresh } from './main.js';
 
 // ---------------------------------------------------------------------------
@@ -15,10 +14,16 @@ import { refresh } from './main.js';
 //
 // The canvas is a set of .panel elements (one per view) kept from the tab
 // layout, so every existing renderer (refreshAgents -> #agent-grid,
-// refreshDispatcher -> #dispatcher-content, ...) works unchanged. `currentTab`
-// (declared in util.js) is still the active-view variable, so main.js and
-// sse.js keep dispatching on it; only the *chrome* that sets it changed from a
-// tab bar to this sidebar.
+// renderKanban -> #kanban-board, ...) works unchanged. `currentTab` (declared in
+// util.js) is still the active-view variable, so main.js and sse.js keep
+// dispatching on it; only the *chrome* that sets it changed from a tab bar to
+// this sidebar.
+//
+// The set of views is NOT declared here. It is views.js — the registry — and this
+// file reads it: renderNav() builds the .side-item rows from it, and selectView
+// takes each view's enter/exit hooks from it instead of the per-view if/else
+// chain that used to live below. Same for the command palette (which carried a
+// third hardcoded copy of the view list).
 // ---------------------------------------------------------------------------
 
 let _agentFilter = 'all';   // all | claude | shell | server  (sidebar filter)
@@ -38,28 +43,48 @@ function toggleSidebar(force) {
 }
 function closeSidebar() { toggleSidebar(false); }
 
+// --- The nav, rendered from the registry ------------------------------------
+// One .side-item per registered, enabled, non-virtual view — including its badge
+// slots. Adding a view to views.js puts it here; deleting it from views.js takes
+// it out of here. There is no second list.
+
+function _viewCtx() { return { terminalsOn: TERMINALS_ON }; }
+
+function _navItemHtml(v) {
+    const badges = (v.badges || []).map(b =>
+        `<span class="badge ${b.cls || ''}" id="${attrEsc(b.id)}" title="${attrEsc(b.title || '')}">${escHtml(b.text || '')}</span>`
+    ).join('');
+    return `<div class="side-item" data-view="${attrEsc(v.id)}" onclick="chela.selectView(this.dataset.view)">
+        <span class="side-item-icon">${escHtml(v.icon || '')}</span>
+        <span class="side-item-label">${escHtml(v.label || v.id)}</span>
+        ${badges ? `<span class="side-badges">${badges}</span>` : ''}
+    </div>`;
+}
+
+function renderNav() {
+    const host = document.getElementById('side-nav');
+    if (!host) return;
+    host.innerHTML = navViews(VIEWS, _viewCtx()).map(_navItemHtml).join('');
+}
+
 // --- View switching --------------------------------------------------------
 
 function selectView(view) {
+    const v = findView(VIEWS, view);
     setCurrentTab(view);
     _detailAgent = null;
 
     $$('.panel').forEach(p => p.classList.remove('active'));
-    const panel = document.getElementById('panel-' + view);
+    const panel = document.getElementById(panelId(view));
     if (panel) panel.classList.add('active');
 
     _syncSidebarActive(view, null);
 
-    // Per-view poll timers (dispatcher / kanban own their own cadence).
-    if (view === 'dispatcher') { refreshDispatcher(); startDispatcherTimer(); }
-    else { stopDispatcherTimer(); }
-    if (view === 'kanban') { refreshKanban(); startKanbanTimer(); }
-    else { stopKanbanTimer(); }
-    if (TERMINALS_ON && view === 'terminals') startTermTimer();
-    else if (TERMINALS_ON) stopTermTimer();
-    // Entering Knowledge from the nav lands on the glance overview, not whatever
-    // concept was last open.
-    if (view === 'knowledge' && typeof knBackToGlance === 'function' && _kn.tree) knBackToGlance();
+    // Per-view lifecycle, from the registry. Every OTHER view is told to let go
+    // (stop its timer) and the one being entered gets its enter hook — so a new
+    // view is one registry entry, not an extra branch in an if/else chain here.
+    otherViews(VIEWS, view).forEach(o => { if (o.exit) o.exit(); });
+    if (v && v.enter) v.enter();
 
     closeSidebar();   // navigating dismisses the mobile drawer (no-op on desktop)
     refresh();
@@ -82,12 +107,12 @@ function showAgentDetail(name) {
     setCurrentTab('agent-detail');
     _detailAgent = name;
     $$('.panel').forEach(p => p.classList.remove('active'));
-    const panel = document.getElementById('panel-agent-detail');
+    const panel = document.getElementById(panelId('agent-detail'));
     if (panel) panel.classList.add('active');
     _syncSidebarActive('agent-detail', name);
-    stopDispatcherTimer();
-    stopKanbanTimer();
-    if (TERMINALS_ON) stopTermTimer();
+    // Drilling in is leaving every other view — same registry-driven teardown as
+    // selectView (agent-detail is a registered, virtual view).
+    otherViews(VIEWS, 'agent-detail').forEach(o => { if (o.exit) o.exit(); });
     renderAgentDetail();
     refreshSummary();
     checkContext();   // fills the detail context bar via ctx-<name>
@@ -300,23 +325,10 @@ async function refreshSidebar() {
     }
 }
 
-// WORK badges: in-flight runs + open PRs (awaiting review), across workflows.
-async function updateWorkBadges() {
-    const runsEl = document.getElementById('side-runs-count');
-    const prEl = document.getElementById('side-pr-count');
-    if (!runsEl && !prEl) return;
-    try {
-        const d = await api('/api/dispatcher');
-        const wfs = (d && d.workflows) || [];
-        let runs = 0, prs = 0;
-        for (const wf of wfs) {
-            runs += (wf.active_runs || []).length;
-            prs += (wf.awaiting_review_runs || []).length;
-        }
-        if (runsEl) runsEl.textContent = runs;
-        if (prEl) prEl.textContent = prs + ' PR';
-    } catch (e) { /* leave prior values */ }
-}
+// The WORK badges used to be a THIRD independent poller of /api/dispatcher, right
+// here — fetching the same payload the Dispatch and Kanban views were each already
+// fetching on their own timers. They are now filled by work.js's single poll (the
+// slots themselves are declared on the Work view in views.js).
 
 // --- Agent detail view -----------------------------------------------------
 
@@ -898,10 +910,11 @@ let _palItems = [], _palSel = 0;
 
 function _paletteItems() {
     const items = [];
-    const views = [];
-    if (TERMINALS_ON) views.push(['terminals', 'Wall']);
-    views.push(['agents', 'Agents'], ['dispatcher', 'Dispatch'], ['kanban', 'Kanban'], ['schedules', 'Schedules'], ['knowledge', 'Knowledge']);
-    views.forEach(([v, label]) => items.push({ icon: lucideIcon('layout-grid'), title: label, sub: 'view', run: () => selectView(v) }));
+    // The palette's own hardcoded copy of the view list is gone — it reads the
+    // registry, so a view added or removed there is added or removed here.
+    paletteViews(VIEWS, _viewCtx()).forEach(v => items.push({
+        icon: lucideIcon('layout-grid'), title: v.label, sub: 'view', run: () => selectView(v.id),
+    }));
 
     (_agentsCache || []).forEach(a => {
         const word = _AGENT_STATUS_WORD[agentDotColor(a)] || 'idle';
@@ -1026,7 +1039,7 @@ document.addEventListener('keydown', e => {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { openPalette, refreshSidebar, renderAgentDetail, renderSidebarAgents, selectView, updateCtxCache, updateWorkBadges };
+export { openPalette, refreshSidebar, renderAgentDetail, renderNav, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

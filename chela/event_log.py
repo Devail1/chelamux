@@ -144,6 +144,51 @@ def current_boot() -> str:
     return _read_state()["boot_id"]
 
 
+def tip() -> dict:
+    """``{"boot_id", "seq"}`` — the log's position, read from the sidecar alone.
+
+    The cheap poll a change-detector wants (the dashboard's SSE loop diffs this every
+    second): one small file read, no parse of the log, no ring refresh. A reader that
+    sees ``seq`` move then fetches the events themselves from :func:`read`.
+    """
+    state = _read_state()
+    return {"boot_id": state["boot_id"], "seq": state["seq"]}
+
+
+def rotate() -> dict:
+    """Retire the current log to a ``.bak`` and start a fresh ``boot_id``. OPERATOR STEP.
+
+    Deliberately NOT called at boot. A log that silently wipes itself when a process
+    starts is a log you cannot trust; this is a thing a human does, on purpose, and the
+    old file is kept (renamed, never unlinked) so the decision is reversible.
+
+    Why it exists: rows can be known-wrong rather than merely old — every event written
+    before PR #61 carries the WRONG ``wid`` (the correlation key was ``cwd``, which moves
+    the moment an agent ``cd``s), and a UI must never render known-wrong rows.
+
+    ``seq`` stays monotonic (see :func:`new_boot` — restarting it would make two
+    different events share a number); what moves is the ``boot_id``, so every reader
+    holding a cursor into the retired file is told about the gap instead of resuming
+    into an empty log as though nothing had happened.
+    """
+    path = log_path()
+    with _append_lock():
+        backup: Path | None = None
+        if path.exists():
+            backup = path.with_name(path.name + ".bak")
+            if backup.exists():
+                # Never clobber an earlier retirement — a second wipe gets its own file.
+                backup = path.with_name(f"{path.name}.bak.{int(time.time())}")
+            path.rename(backup)
+        state = _read_state()
+        state["boot_id"] = _new_boot_id()
+        _write_state(state)
+    # The ring is keyed on (path, size, mtime), so the rename invalidates it on the next
+    # read by itself — an in-process reader cannot keep serving the retired file.
+    return {"backup": str(backup) if backup else None,
+            "boot_id": state["boot_id"], "seq": state["seq"]}
+
+
 def new_boot() -> str:
     """Mint a fresh ``boot_id``, keeping ``seq`` monotonic. Called once at daemon startup.
 

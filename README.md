@@ -260,6 +260,7 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | `chela dashboard [--host] [--port]` | Launch the dashboard + live terminal wall (needs the `[dashboard]` install) |
 | `chela knowledge export [--out DIR] [--since DATE]` | Write an [OKF](docs/OKF.md) bundle of runs / schedules / agents / projects |
 | `chela events [--after-seq N] [--type T] [--wid @N] [--follow]` | Replay / filter / tail the [event log](docs/EVENTS.md) — the durable record of what happened |
+| `chela events rotate [--yes]` | Retire the log to a `.bak` and start a fresh `boot_id` (an operator step — never silent) |
 | `chela plugin [--dir PATH] [--port N]` | Render the [Claude Code hooks plugin](docs/HOOKS.md) that feeds the event log |
 | `chela doctor` | Check the running config against `~/.chela/chela.env` — [drift is silent otherwise](docs/CONFIG.md) |
 
@@ -427,10 +428,13 @@ you'd hand the keyboard to.
 
 A first-class feature, shipped as a separate install to keep the core lean.
 `uv sync --extra dashboard && uv run chela dashboard` serves a web UI on
-`127.0.0.1:5001` with tabs for **agents** (liveness from `claude agents --json`:
-alive / waiting / offline), **schedules**, the **dispatcher**, and a **Kanban**
-of runs. Liveness is derived live from the native session status — no heartbeat
-daemon. An embedded ttyd **terminal wall** (a multi-pane view that streams the
+`127.0.0.1:5001` with five views — **Feed** (the [event log](docs/EVENTS.md)),
+**Agents** (liveness from `claude agents --json`: alive / waiting / offline),
+**Wall**, **Work** (the dispatcher, a Kanban of runs, and schedules, over one
+poll), and **Knowledge**. Every view is one entry in a registry
+(`static/js/views.js`), so a view is as cheap to delete as it is to add.
+Liveness is derived live from the native session status — no heartbeat daemon.
+An embedded ttyd **terminal wall** (a multi-pane view that streams the
 live panes) is **on by default**, but **loopback-guarded**: because it serves
 writable shells, the dashboard only serves it on a `127.0.0.1` bind. Bind to a
 non-loopback interface (e.g. `--host 0.0.0.0`) and the wall is refused — its

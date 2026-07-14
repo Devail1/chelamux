@@ -1,22 +1,25 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, api, attrEsc, escHtml } from './util.js';
+import { $, BASE_PATH, attrEsc, escHtml } from './util.js';
 import { _runDisplayId, _runPrCell } from './dispatcher.js';
+import { pollWork, postWorkDelete } from './work.js';
 
 // ---------------------------------------------------------------------------
-// Render: Kanban (global cross-workflow board)
+// Render: the Board segment of WORK (the global cross-workflow kanban)
 //
-// Reuses /api/dispatcher and flattens its per-workflow payload into a single
-// board: Open (open_tasks), Claimed / Running / Failed / Done (runs). The
+// Flattens the /api/dispatcher payload into a single board: Backlog, Open
+// (open_tasks), Claimed / Running / Awaiting Review / Failed / Done (runs). The
 // workflow chip + filter chips let one board surface state across every
-// configured workflow. Self-polls every KANBAN_REFRESH_MS, same pattern as
-// the Dispatcher tab.
+// configured workflow.
+//
+// It no longer FETCHES: work.js owns the one poll of /api/dispatcher and hands the
+// same payload here and to the runs tables (this module used to run a second timer
+// against that endpoint, and the sidebar badges a third).
 //
 // Note: dispatcher.tick() currently deletes done rows on reconcile, so the
 // Done column is typically empty — recent_runs surfaces failed runs instead
 // (tracked in BACKLOG; see TODO comment for the underlying limitation).
 // ---------------------------------------------------------------------------
 
-const KANBAN_REFRESH_MS = 30000;
 const KANBAN_DONE_LIMIT = 20;
 const KANBAN_COLS = ['backlog', 'open', 'claimed', 'running', 'awaiting_review', 'failed', 'done'];
 const KANBAN_COL_LABELS = {
@@ -33,7 +36,6 @@ const KANBAN_COL_LABELS = {
 // user once they tap a caret.
 const KANBAN_DEFAULT_COLLAPSED = ['backlog', 'failed', 'done'];
 
-let _kanbanTimer = null;
 let _kanbanFilter = 'all';    // workflow path or 'all'
 
 // Mobile-only layout: 'swipe' (default, scroll-snap carousel) or 'rows'
@@ -208,25 +210,9 @@ async function kanbanDeleteConfirm(actionBtn, ok) {
         payload.text = confirmEl.dataset.text;
     }
     confirmEl.innerHTML = '<span class="kanban-confirm-msg">Deleting…</span>';
-    let resp, data = {};
-    try {
-        resp = await fetch(BASE_PATH + '/api/dispatcher/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        try { data = await resp.json(); } catch (_) { data = {}; }
-    } catch (e) {
-        _kanbanDeleteShowError(confirmEl, xBtn, String(e));
-        return;
-    }
-    if (!resp.ok || !data.ok) {
-        _kanbanDeleteShowError(confirmEl, xBtn, data.error || `HTTP ${resp.status}`);
-        return;
-    }
-    // Idempotent on the server, so we don't distinguish "no match" / "already
-    // gone" from a real delete here — let the next poll redraw the board.
-    refreshKanban();
+    // Shared with the runs table's × (work.js) — one delete action, two confirm UIs.
+    const err = await postWorkDelete(payload);
+    if (err) _kanbanDeleteShowError(confirmEl, xBtn, err);
 }
 
 function _kanbanDeleteShowError(confirmEl, xBtn, msg) {
@@ -266,7 +252,7 @@ async function kanbanMergePR(btn) {
         return;
     }
     // Don't optimistically mutate UI state — let the next poll move the card.
-    refreshKanban();
+    pollWork();
 }
 
 function _kanbanMergeToast(btn, msg) {
@@ -325,7 +311,7 @@ async function kanbanMergeAll(btn) {
     if (detail.length) msg += '\n' + detail.join('\n');
     _kanbanToast(msg);
     // Don't optimistically mutate cards — let the next poll redraw the board.
-    refreshKanban();
+    pollWork();
 }
 
 function _kanbanToast(msg) {
@@ -370,7 +356,7 @@ async function kanbanPromoteBacklog(btn) {
     }
     // Don't optimistically mutate — let the next /api/dispatcher poll move the
     // card from Backlog → Open once the daemon re-reads BACKLOG.md + TODO.md.
-    refreshKanban();
+    pollWork();
 }
 
 function _kanbanPromoteToast(btn, msg) {
@@ -495,19 +481,19 @@ function _renderKanbanFilters(workflows, mergeableCount = 0) {
 
 function setKanbanFilter(wf) {
     _kanbanFilter = wf || 'all';
-    // Re-render against the last fetched payload via a fresh fetch — keeps
-    // the filter responsive without caching the prior response shape.
-    refreshKanban();
+    // Re-render through the one poll — the filter is a client-side view of the
+    // payload, so this is a redraw, not a second data source.
+    pollWork();
 }
 
 // --- Mobile layout: Swipe carousel vs. Rows accordion ---
 //
 // The mobile board offers two layouts, gated entirely behind the ≤768px media
 // query; desktop (≥769px) keeps its 7-column grid untouched. The active layout
-// is a class on #panel-kanban so both the board and the nav strip react to it.
+// is a class on #work-board so both the board and the nav strip react to it.
 
 function _applyKanbanLayout() {
-    const panel = $('#panel-kanban');
+    const panel = $('#work-board');
     if (panel) {
         panel.classList.toggle('kanban-mobile-swipe', _kanbanLayout === 'swipe');
         panel.classList.toggle('kanban-mobile-rows', _kanbanLayout === 'rows');
@@ -579,18 +565,14 @@ function kanbanNavTo(col) {
     });
 }
 
-async function refreshKanban() {
-    let data;
-    try {
-        data = await api('/api/dispatcher');
-    } catch (e) {
-        console.error('refreshKanban', e);
-        return;
-    }
+// Render the board from a payload work.js already fetched — the SAME object the
+// runs tables render and the sidebar badges count.
+function renderKanban(data) {
     const board = $('#kanban-board');
     const empty = $('#kanban-empty');
     const filters = $('#kanban-filters');
-    if (!data.configured || !data.workflows || !data.workflows.length) {
+    if (!board || !empty || !filters) return;
+    if (!data || !data.configured || !data.workflows || !data.workflows.length) {
         board.innerHTML = '';
         filters.innerHTML = '';
         empty.style.display = 'block';
@@ -622,18 +604,9 @@ async function refreshKanban() {
     ].join('');
 }
 
-function startKanbanTimer() {
-    stopKanbanTimer();
-    _kanbanTimer = setInterval(refreshKanban, KANBAN_REFRESH_MS);
-}
-
-function stopKanbanTimer() {
-    if (_kanbanTimer) { clearInterval(_kanbanTimer); _kanbanTimer = null; }
-}
-
 
 // --- Stage 0: ES-module exports ---
-export { refreshKanban, startKanbanTimer, stopKanbanTimer };
+export { renderKanban };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

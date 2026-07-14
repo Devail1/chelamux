@@ -47,36 +47,12 @@
   <!-- Left sidebar: Navigate (views) · Launch (projects) · Sessions (live agents) -->
   <aside class="sidebar">
 
-    <!-- Primary navigation: every view in one consistent block. -->
+    <!-- Primary navigation. NOT written here: nav.js renders these rows from the
+         view REGISTRY (static/js/views.js) — one declaration per view, so adding
+         or deleting a view is one entry there and nothing here. -->
     <section class="side-section">
       <div class="side-head"><span class="side-title">Navigate</span></div>
-      <div class="side-list">
-        {% if terminals_enabled %}
-        <div class="side-item" data-view="terminals" onclick="chela.selectView('terminals')">
-          <span class="side-item-icon">▦</span><span class="side-item-label">Wall</span>
-        </div>
-        {% endif %}
-        <div class="side-item" data-view="agents" onclick="chela.selectView('agents')">
-          <span class="side-item-icon">▢</span><span class="side-item-label">Agents</span>
-        </div>
-        <div class="side-item" data-view="dispatcher" onclick="chela.selectView('dispatcher')">
-          <span class="side-item-icon">▤</span><span class="side-item-label">Dispatch</span>
-          <span class="side-badges">
-            <span class="badge" id="side-runs-count" title="Active runs">0</span>
-            <span class="badge badge-pr" id="side-pr-count" title="Open PRs">0 PR</span>
-          </span>
-        </div>
-        <div class="side-item" data-view="kanban" onclick="chela.selectView('kanban')">
-          <span class="side-item-icon">▥</span><span class="side-item-label">Kanban</span>
-        </div>
-        <div class="side-item" data-view="schedules" onclick="chela.selectView('schedules')">
-          <span class="side-item-icon">◷</span><span class="side-item-label">Schedules</span>
-          <span class="side-badges"><span class="badge" id="hdr-schedules">-</span></span>
-        </div>
-        <div class="side-item" data-view="knowledge" onclick="chela.selectView('knowledge')">
-          <span class="side-item-icon">◆</span><span class="side-item-label">Knowledge</span>
-        </div>
-      </div>
+      <div class="side-list" id="side-nav"></div>
     </section>
 
     {% if terminals_enabled %}
@@ -116,6 +92,18 @@
   <!-- Main canvas: context-driven by sidebar selection -->
   <main class="canvas" id="canvas">
 
+    <!-- Feed — the event log (chela/event_log.py) read through /api/log.
+         ⚠️ PART 1 wires the plumbing only: the cursor, the gap signal, and the
+         `log` delta on the existing SSE stream. The TIMELINE LAYOUT is part 2 (it
+         is being designed from real data), so this list is deliberately plain. -->
+    <div class="panel" id="panel-feed">
+      <div class="canvas-toolbar">
+        <span class="work-toolbar-hint">The event log — one durable, ordered record
+          (<code>chela events</code> reads the same one). The timeline layout lands next.</span>
+      </div>
+      <div class="feed-list" id="feed-list"></div>
+    </div>
+
     <!-- Agents grid (default view) -->
     <div class="panel active" id="panel-agents">
       <div class="canvas-toolbar">
@@ -132,8 +120,81 @@
       <div id="agent-detail"></div>
     </div>
 
+    <!-- WORK — Dispatch + Kanban + Schedules, one view over one poll.
+         Dispatch and Kanban were never two datasets: both rendered /api/dispatcher.
+         They are two SEGMENTS of the same view now, drawn from one fetch (work.js),
+         and Schedules — the other half of "work in flight" — rides along. Every id
+         inside is unchanged, so the renderers are untouched. -->
+    <div class="panel" id="panel-work">
+      <div class="work-toolbar">
+        <div class="work-seg" id="work-seg" role="group" aria-label="Work view">
+          <button type="button" class="work-seg-btn" data-seg="board" aria-pressed="true"
+                  onclick="chela.setWorkSegment('board')">Board</button>
+          <button type="button" class="work-seg-btn" data-seg="runs" aria-pressed="false"
+                  onclick="chela.setWorkSegment('runs')">Runs</button>
+          <button type="button" class="work-seg-btn" data-seg="schedules" aria-pressed="false"
+                  onclick="chela.setWorkSegment('schedules')">Schedules</button>
+        </div>
+        <button class="btn-accent" onclick="chela.openInitRepo()">+ Init a repo</button>
+        <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
+      </div>
+
+    <!-- Board (kanban) -->
+    <div class="work-pane active" id="work-board" data-seg="board">
+      <div class="kanban-filters" id="kanban-filters"></div>
+      <!-- Mobile-only layout controls (≤768px). Swipe = scroll-snap carousel
+           (default), Rows = collapsible accordion. Hidden on desktop, which
+           keeps its 7-column grid. -->
+      <div class="kanban-mobile-controls" id="kanban-mobile-controls">
+        <div class="kanban-layout-toggle" role="group" aria-label="Mobile board layout">
+          <button type="button" class="kanban-layout-btn" data-layout="swipe"
+                  aria-pressed="true" onclick="chela.setKanbanLayout('swipe')">Swipe</button>
+          <button type="button" class="kanban-layout-btn" data-layout="rows"
+                  aria-pressed="false" onclick="chela.setKanbanLayout('rows')">Rows</button>
+        </div>
+        <!-- Swipe-layout quick-nav: one chip per column (label + live count),
+             tap to snap-scroll. Populated + shown only in the swipe layout. -->
+        <div class="kanban-nav-strip" id="kanban-nav-strip" aria-label="Jump to column"></div>
+      </div>
+      <div class="kanban-board" id="kanban-board"></div>
+      <div id="kanban-empty" class="work-empty" style="display:none;">
+        <div class="work-empty-icon">▤</div>
+        <div class="work-empty-title">A board for work in flight</div>
+        <div class="work-empty-body">
+          The Kanban board tracks dispatched work across all your <code>WORKFLOW.md</code> files —
+          open tasks, agents running now, PRs awaiting review, and done — in one place. It fills in
+          once the dispatcher has workflows to watch.
+        </div>
+        <div class="work-empty-hint">
+          Enable it: set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
+          <code>WORKFLOW.md</code> paths, then restart the daemon.
+        </div>
+      </div>
+    </div>
+
+    <!-- Runs (per-workflow dispatch tables) -->
+    <div class="work-pane" id="work-runs" data-seg="runs">
+      <div id="dispatcher-empty" class="work-empty" style="display:none;">
+        <div class="work-empty-icon">⇶</div>
+        <div class="work-empty-title">Turn a TODO list into pull requests</div>
+        <div class="work-empty-body">
+          Point chela at a <code>WORKFLOW.md</code> — a plain markdown checklist. For every open
+          <code>- [ ]</code> item it spins up a git worktree, launches a Claude agent in a fresh
+          tmux window with that task as its prompt, and opens a PR when the agent finishes. Merge
+          the PR and the line checks itself off on the next tick. This is what makes chela an
+          orchestrator, not just a viewer.
+        </div>
+        <div class="work-empty-hint">
+          Use <strong>+ Init a repo</strong> above to seed the files, then set
+          <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
+          <code>WORKFLOW.md</code> paths and restart the daemon.
+        </div>
+      </div>
+      <div id="dispatcher-list"></div>
+    </div>
+
     <!-- Schedules -->
-    <div class="panel" id="panel-schedules">
+    <div class="work-pane" id="work-schedules" data-seg="schedules">
       <div class="canvas-toolbar">
         <button class="btn-accent" onclick="chela.showAddSchedule()">+ Add Task</button>
       </div>
@@ -178,6 +239,8 @@
       </div>
     </div>
 
+    </div><!-- /panel-work -->
+
     <!-- Knowledge (OKF viewer) -->
     <div class="panel" id="panel-knowledge">
       <div class="canvas-toolbar">
@@ -187,68 +250,6 @@
         <button onclick="chela.knRefresh(this)" title="Re-export the bundle from current fleet state">Refresh</button>
       </div>
       <div id="kn-content"></div>
-    </div>
-
-    <!-- Dispatcher -->
-    <div class="panel" id="panel-dispatcher">
-      <div class="work-toolbar">
-        <button class="btn-accent" onclick="chela.openInitRepo()">+ Init a repo</button>
-        <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
-      </div>
-      <div id="dispatcher-empty" class="work-empty" style="display:none;">
-        <div class="work-empty-icon">⇶</div>
-        <div class="work-empty-title">Turn a TODO list into pull requests</div>
-        <div class="work-empty-body">
-          Point chela at a <code>WORKFLOW.md</code> — a plain markdown checklist. For every open
-          <code>- [ ]</code> item it spins up a git worktree, launches a Claude agent in a fresh
-          tmux window with that task as its prompt, and opens a PR when the agent finishes. Merge
-          the PR and the line checks itself off on the next tick. This is what makes chela an
-          orchestrator, not just a viewer.
-        </div>
-        <div class="work-empty-hint">
-          Use <strong>+ Init a repo</strong> above to seed the files, then set
-          <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
-          <code>WORKFLOW.md</code> paths and restart the daemon.
-        </div>
-      </div>
-      <div id="dispatcher-list"></div>
-    </div>
-
-    <!-- Kanban -->
-    <div class="panel" id="panel-kanban">
-      <div class="work-toolbar">
-        <button class="btn-accent" onclick="chela.openInitRepo()">+ Init a repo</button>
-        <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
-      </div>
-      <div class="kanban-filters" id="kanban-filters"></div>
-      <!-- Mobile-only layout controls (≤768px). Swipe = scroll-snap carousel
-           (default), Rows = collapsible accordion. Hidden on desktop, which
-           keeps its 7-column grid. -->
-      <div class="kanban-mobile-controls" id="kanban-mobile-controls">
-        <div class="kanban-layout-toggle" role="group" aria-label="Mobile board layout">
-          <button type="button" class="kanban-layout-btn" data-layout="swipe"
-                  aria-pressed="true" onclick="chela.setKanbanLayout('swipe')">Swipe</button>
-          <button type="button" class="kanban-layout-btn" data-layout="rows"
-                  aria-pressed="false" onclick="chela.setKanbanLayout('rows')">Rows</button>
-        </div>
-        <!-- Swipe-layout quick-nav: one chip per column (label + live count),
-             tap to snap-scroll. Populated + shown only in the swipe layout. -->
-        <div class="kanban-nav-strip" id="kanban-nav-strip" aria-label="Jump to column"></div>
-      </div>
-      <div class="kanban-board" id="kanban-board"></div>
-      <div id="kanban-empty" class="work-empty" style="display:none;">
-        <div class="work-empty-icon">▤</div>
-        <div class="work-empty-title">A board for work in flight</div>
-        <div class="work-empty-body">
-          The Kanban board tracks dispatched work across all your <code>WORKFLOW.md</code> files —
-          open tasks, agents running now, PRs awaiting review, and done — in one place. It fills in
-          once the dispatcher has workflows to watch.
-        </div>
-        <div class="work-empty-hint">
-          Enable it: set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
-          <code>WORKFLOW.md</code> paths, then restart the daemon.
-        </div>
-      </div>
     </div>
 
     {% if terminals_enabled %}
@@ -419,6 +420,11 @@
   </div>
   <div class="ov-stat" id="hdr-weekly-rl-pill" style="display:none" title="7-day usage">
     <span class="ov-lbl">7d usage</span><span class="value" id="hdr-weekly-rl">-</span>
+  </div>
+  <!-- Schedules moved into WORK (its own nav item is gone), so its active/total
+       readout lives here with the other ambient stats. header.js fills it. -->
+  <div class="ov-stat" title="Enabled / total scheduled tasks">
+    <span class="ov-lbl">Schedules</span><span class="value" id="hdr-schedules">-</span>
   </div>
   <div class="ov-stat" id="hdr-next-pill" title="Soonest scheduled run">
     <span class="ov-lbl">Next run</span><span class="value ts" id="hdr-next">-</span>

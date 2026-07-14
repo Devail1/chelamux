@@ -16,7 +16,8 @@ async function refreshSummary() {
         agentsEl.className = 'value';
     }
 
-    $('#hdr-schedules').textContent = d.schedules_active + '/' + d.schedules_total;
+    const schedEl = $('#hdr-schedules');
+    if (schedEl) schedEl.textContent = d.schedules_active + '/' + d.schedules_total;
 
     const nextRuns = d.next_runs || {};
     const soonest = Object.entries(nextRuns).sort((a, b) => a[1].localeCompare(b[1]))[0];
