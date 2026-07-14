@@ -212,6 +212,56 @@ Kill it entirely with `CHELA_INBOX_ENABLED=false`.
 
 ---
 
+## Agent rooms — agents that can actually talk to each other
+
+`chela msg` fires a string into a pane and vanishes: no record, no kind, no reply
+path. A **room** is the relationship that message never had — a typed, durable
+ledger two or more windows are members of, plus **active dispatch**: a *targeted*
+`handoff` / `question` / `blocker` is injected into the peer's terminal, so it wakes,
+answers, and the answer routes back to the asker **with no human in the middle**.
+
+```bash
+chela room create wire
+chela room join wire --wid @3            # no --wid: your own window
+chela room join wire --wid @4
+chela room post wire --kind question --from @3 --to @4 \
+  -- "Does the retry live in the parser or the client?"
+chela room digest wire                   # the ledger — read from the event log
+```
+
+`@4` finds this typed into its prompt, and the command it needs to answer with:
+
+```
+[chela room] question from @3 (parser) in room "wire" (post #128):
+> Does the retry live in the parser or the client?
+
+Answer by posting back to the asker — this wakes them, with no human in the middle:
+  chela room post wire --kind handoff --from @4 --to @3 --reply-to 128 -- "<your answer>"
+```
+
+- **A room is membership + a filter over the [event log](docs/EVENTS.md)** — every
+  post is one event (`room_<kind>`), so there is no second event store to drift.
+  Only the *membership* gets a file of its own (`$CHELA_DIR/rooms.json`): it is
+  mutable, and the log is append-only and rotates.
+- **Only a targeted `handoff`/`question`/`blocker` may interrupt.** Every other kind
+  (`status`, `finding`, `summary`, `task`, …) is recorded and never injected, and an
+  untargeted post is never injected at all — a fleet where any post can paste into
+  any pane is an interrupt storm.
+- **The inbox's rails, reused.** A `waiting` agent is *never* pasted into (that paste
+  would answer its gate) — the delivery is **parked** and goes out when the gate
+  clears. A dead or unknown recipient fails loudly, exit 1. Messaging yourself is
+  refused.
+- **The loop guard is structural, not advisory** — an echo between two live agents
+  burns a real machine. A relayed prompt can never be re-posted (every injected
+  prompt opens with a fixed `[chela room]` header), a reply chain is capped at 6
+  hops, and no window may be injected into by the same peer more than 6 times in 5
+  minutes. A tripped guard still *records* the post; it just wakes nobody.
+- **A body is untrusted input on its way into a terminal.** ANSI escapes and control
+  characters are stripped, the body is capped and **quoted**, so a `/slash-command`,
+  an `Escape` or a `Ctrl-C` in a message can't drive the recipient's TUI.
+
+---
+
 ## Agent autonomy (permission modes)
 
 chela never manages permissions itself — it just launches `claude`, so the
@@ -276,6 +326,12 @@ window (it knows itself via `$CHELA_WID`, injected at spawn):
 | `chela watch <wid> [--note "..."]` | Delegated work to `<wid>`: tell me when it finishes / blocks / dies, and register me as the orchestrator |
 | `chela watching` | What's being watched, and what's queued for delivery |
 | `chela unwatch <wid>` | Stop watching a window |
+| `chela room create <room>` | Create a room (a shared, typed ledger some windows are members of) |
+| `chela room join <room> [--wid]` | Put a window in a room (default: your own) |
+| `chela room post <room> --kind K [--to @N] [--reply-to SEQ] <text>` | Post to a room — a *targeted* `handoff`/`question`/`blocker` **wakes** the peer; every other kind is recorded only |
+| `chela room digest <room>` | The room's ledger, read from the event log |
+| `chela room status [room]` | Rooms, their members, and any delivery parked at a gate |
+| `chela room leave <room> [--wid]` | Remove a window from a room |
 
 ---
 

@@ -36,6 +36,7 @@ from chela import (
     notify,
     okf,
     orchestrator,
+    rooms,
     scheduler,
 )
 from chela.config import (
@@ -241,6 +242,18 @@ def cmd_run(args) -> None:
                     inbox_statuses = inbox.tick(inbox_statuses)
                 except Exception:
                     log.exception("Decisions-inbox tick failed")
+
+            # Agent rooms: a targeted handoff/question/blocker whose recipient was sitting
+            # at a gate is PARKED, never pasted (that paste would answer the gate). This is
+            # what finally sends it — the moment that window is at its prompt again. Gated
+            # on `has_pending()` (one small file read) so the common case costs nothing.
+            try:
+                if rooms.has_pending():
+                    flushed = rooms.flush_pending(inbox_statuses or None)
+                    if flushed:
+                        log.info("Rooms: delivered %d parked post(s)", len(flushed))
+            except Exception:
+                log.exception("Room pending-delivery flush failed")
         except Exception:
             log.exception("Error in daemon loop")
         stop.wait(SCHEDULER_POLL_INTERVAL)
@@ -384,6 +397,99 @@ def cmd_watching(args) -> None:
     print(f"\nqueued, awaiting your next idle ({len(queue)}):")
     for event in queue:
         print(f"  {inbox.render(event)}")
+
+
+# --- agent rooms: the relationship a message finally has ------------------------
+
+def _room_fail(result: dict) -> None:
+    """A room refusal is LOUD and non-zero — a dropped message must never look like a send."""
+    print(f"room: {result['error']}", file=sys.stderr)
+    sys.exit(1)
+
+
+def cmd_room_create(args) -> None:
+    result = rooms.create(args.room)
+    if not result["ok"]:
+        _room_fail(result)
+    print(f"room {result['room']} "
+          f"{'created' if result['created'] else 'already exists'}")
+
+
+def cmd_room_join(args) -> None:
+    """Put a window in a room. Defaults to your own — an agent wires itself in."""
+    wid = _resolve_wid(args.wid)
+    if not wid:
+        print("no window id (pass --wid @N)", file=sys.stderr)
+        sys.exit(1)
+    result = rooms.join(args.room, wid)
+    if not result["ok"]:
+        _room_fail(result)
+    print(f"{result['wid']} ({result['name']}) joined room {result['room']}")
+
+
+def cmd_room_leave(args) -> None:
+    wid = _resolve_wid(args.wid)
+    result = rooms.leave(args.room, wid)
+    print(f"{result['wid']} left room {result['room']}" if result["ok"]
+          else f"{result['wid']} was not in room {result['room']}")
+
+
+def cmd_room_status(args) -> None:
+    """Who is wired to whom, and what is parked at a gate."""
+    state = rooms.status(args.room)
+    if not state["rooms"]:
+        print("no rooms" if not args.room else f"no such room: {args.room}")
+        return
+    for name, meta in state["rooms"].items():
+        print(f"\nroom {name} ({len(meta['members'])} members)")
+        for wid, info in meta["members"].items():
+            mark = "●" if info["live"] else "○ gone"
+            print(f"  {mark} {wid:<6} {info['name']}")
+    parked = {wid: q for wid, q in state["pending"].items() if q}
+    if parked:
+        print("\nparked (recipient is at a gate — never pasted into `waiting`):")
+        for wid, queue in sorted(parked.items()):
+            for entry in queue:
+                print(f"  {wid:<6} {entry['kind']} #{entry['post_seq']} "
+                      f"from {entry['from_wid']} in {entry['room']}")
+
+
+def cmd_room_post(args) -> None:
+    """Post to a room — recorded always; injected only if it targets someone and may interrupt.
+
+    A refusal (dead recipient, non-member, a relayed body, self-target) exits NON-ZERO:
+    a message that did not arrive must never read like one that did. A loop guard that
+    trips is not a refusal — the post IS in the ledger — but it is still said out loud.
+    """
+    from_wid = _resolve_wid(args.from_wid)
+    result = rooms.post(args.room, args.kind, args.message, from_wid=from_wid,
+                        targets=args.to, reply_to=args.reply_to)
+    if not result["ok"]:
+        _room_fail(result)
+    where = f" -> {', '.join(result['delivered'])}" if result["delivered"] else ""
+    print(f"posted {result['kind']} #{result['seq']} to room {result['room']}{where} "
+          f"(chain {result['chain_id']}, hop {result['hop']})")
+    for wid in result["deferred"]:
+        print(f"  {wid} is at a gate (waiting) — delivery PARKED until it clears "
+              f"(never pasted into a prompt)")
+    for blocked in result["blocked"]:
+        print(f"  {blocked['wid']}: NOT delivered — {blocked['reason']}", file=sys.stderr)
+    if result["failed"]:
+        print(f"  tmux send FAILED for: {', '.join(result['failed'])} — not delivered",
+              file=sys.stderr)
+        sys.exit(1)
+    if not result["delivered"] and not result["deferred"] and args.to:
+        sys.exit(1)          # it was aimed at someone and reached nobody — say so in $?
+
+
+def cmd_room_digest(args) -> None:
+    """The room's ledger — read straight out of the event log, not a second store."""
+    events = rooms.digest(args.room, limit=args.limit)
+    if not events:
+        print(f"room {args.room}: no events yet")
+        return
+    for event in events:
+        print(_fmt_event(event))
 
 
 def _fmt_event(event: dict) -> str:
@@ -1275,6 +1381,46 @@ def main() -> None:
 
     sub.add_parser("watching", help="Show inbox watches + the queued events")
 
+    # rooms — a typed, durable ledger two windows are members of, plus ACTIVE DISPATCH:
+    # a targeted handoff/question/blocker is injected into the peer's terminal, and the
+    # answer routes back to the asker with no human in the middle.
+    p_room = sub.add_parser(
+        "room", help="Agent rooms: a shared ledger + active dispatch between agents")
+    room_sub = p_room.add_subparsers(dest="room_cmd")
+
+    p_rcreate = room_sub.add_parser("create", help="Create a room")
+    p_rcreate.add_argument("room", help="Room id (letters, digits, . _ -)")
+
+    p_rjoin = room_sub.add_parser("join", help="Put a window in a room (default: your own)")
+    p_rjoin.add_argument("room")
+    p_rjoin.add_argument("--wid", default=None, help="Window to add (@N, N, or 'self')")
+
+    p_rleave = room_sub.add_parser("leave", help="Remove a window from a room")
+    p_rleave.add_argument("room")
+    p_rleave.add_argument("--wid", default=None, help="Window to remove (@N, N, or 'self')")
+
+    p_rstatus = room_sub.add_parser("status", help="Rooms, their members, and parked deliveries")
+    p_rstatus.add_argument("room", nargs="?", default=None)
+
+    p_rpost = room_sub.add_parser(
+        "post", help="Post to a room; a targeted handoff/question/blocker WAKES the peer")
+    p_rpost.add_argument("room")
+    p_rpost.add_argument("message", help="Message body (control chars are stripped)")
+    p_rpost.add_argument("--kind", required=True, metavar="K",
+                         help=f"One of: {', '.join(rooms.KINDS)} "
+                              f"(only {', '.join(sorted(rooms.DISPATCH_KINDS))} may interrupt)")
+    p_rpost.add_argument("--to", action="append", metavar="@N",
+                         help="Recipient window (repeatable). No --to = recorded, never injected")
+    p_rpost.add_argument("--from", dest="from_wid", default=None, metavar="@N",
+                         help="Sender window (default: your own, $CHELA_WID)")
+    p_rpost.add_argument("--reply-to", type=int, default=None, metavar="SEQ",
+                         help="The post you are answering — keeps the chain (and its hop cap)")
+
+    p_rdigest = room_sub.add_parser("digest", help="The room's ledger (read from the event log)")
+    p_rdigest.add_argument("room")
+    p_rdigest.add_argument("--limit", type=int, default=50, metavar="N",
+                           help="Show the last N events (default: 50)")
+
     # events — the durable log: replay from a cursor, filter, tail. `emit` is the
     # programmatic append, exposed to the shell (and to N concurrent writers).
     p_ev = sub.add_parser("events", help="Replay / filter / follow the event log")
@@ -1469,6 +1615,14 @@ def main() -> None:
         cmd_unwatch(args)
     elif args.command == "watching":
         cmd_watching(args)
+    elif args.command == "room":
+        room_cmds = {"create": cmd_room_create, "join": cmd_room_join,
+                     "leave": cmd_room_leave, "status": cmd_room_status,
+                     "post": cmd_room_post, "digest": cmd_room_digest}
+        if args.room_cmd in room_cmds:
+            room_cmds[args.room_cmd](args)
+        else:
+            p_room.print_help()
     elif args.command == "events":
         if args.events_cmd == "emit":
             cmd_events_emit(args)
