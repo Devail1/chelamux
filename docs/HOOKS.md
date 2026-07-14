@@ -85,10 +85,20 @@ against a real 3-question `AskUserQuestion` whose options carried previews:
 
 The agent's transcript then reads: *Your questions have been answered: "Which store?"=
 "Postgres", "Which extras?"="Metrics,Profiling", "Deploy when?"="Later"* — and **not one
-keystroke went near the pane**. It works in every permission mode, `auto` included. So the
-Telegram card for a held gate carries real answer buttons for **every** shape: one tap for
-a single-select, `☐`/`☑` toggles plus **✅ Send** for a `multiSelect`, and a card per
-question for a multi-question run.
+keystroke went near the pane**. It works in every permission mode, `auto` included. So a
+held gate carries real answer buttons for **every** shape: one tap for a single-select,
+`☐`/`☑` toggles plus **✅ Send** for a `multiSelect`, and a multi-question run answered
+question by question.
+
+**A gate is ONE Telegram message.** The mirrored pane is the body — the `❯` cursor, the
+ticked boxes, the tab strip, re-drawn in place after every key — with the answer buttons
+above a nine-key D-pad on the same keyboard. Watch the cursor and press `⏎`, or just tap the
+answer. What the pane cannot show is a *comparison*: the TUI draws one option's `preview` at
+a time (the one under the cursor), and it clips a long one. So the message also carries a
+**📖** button that swaps its body for the whole payload — every question, every option's
+`label`, `description` and `preview`, together — and **🎛️** swaps back. It is a toggle on
+the one message, and the answer buttons stay put while it is open: expanding to compare must
+never mean collapsing to answer.
 
 The mechanics, and the three things that make them safe to run at a live fleet:
 
@@ -125,13 +135,14 @@ never shown the question.
 
 **The answers map must be complete.** Measured: Claude Code accepts a *partial* map without
 complaint and silently drops the unanswered question — the agent proceeds believing it
-asked, and never re-asks. So chela holds the answer until every question has one (the cards
-tell you how many are outstanding) and refuses anything less, along with any label the asker
+asked, and never re-asks. So chela holds the answer until every question has one (each tap
+toasts how many are outstanding) and refuses anything less, along with any label the asker
 never offered.
 
 Keystroke injection survives for exactly one case: a **pre-plugin** agent, whose gate no
 hook ever announced. There the old rules still apply — buttons only where their ordinal
-mapping can be *proven*, and a card that says outright to answer in the terminal otherwise.
+mapping can be *proven*, the D-pad otherwise, and no 📖 at all: with no payload there is
+nothing to expand into, and a button that opened an empty page would be a lie.
 
 ## Install
 

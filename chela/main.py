@@ -1063,11 +1063,14 @@ def cmd_telegram(args) -> None:
         # The mirror's D-pad (CMX-52): a tap sends its key, then asks the pane watcher to
         # re-draw the mirrored dialog IN PLACE, so the ❯ cursor moves in the chat. The
         # watcher owns that message's id and its de-dup signature, so the re-render must
-        # go through it — a second writer would double-post the mirror.
+        # go through it — a second writer would double-post the mirror. Its 📖 toggle
+        # (CMX-57) goes through the watcher for the same reason: it re-draws that one
+        # message with the gate's full option list instead of the pane.
         application = build_application(
             token, router,
             on_topic_closed=on_topic_closed,
             refresh_mirror=gate_watcher.refresh_mirror,
+            toggle_mirror=gate_watcher.toggle_mirror,
         )
     except ImportError as e:
         print(f"{e}\n(or run outbound-only:  chela telegram --no-inbound)", file=sys.stderr)

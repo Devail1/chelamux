@@ -693,7 +693,7 @@ def test_a_refused_tap_says_so_loudly_and_still_sends_no_keystroke():
 
 # ── CMX-52: the mirror's D-pad — a key, then a RE-DRAW of the same message ───
 
-def _mirror_handler(*, send_key, refresh_mirror):
+def _mirror_handler(*, send_key, refresh_mirror, toggle_mirror=None):
     """The real _on_mirror callback from a real build_application."""
     from telegram.ext import CallbackQueryHandler
 
@@ -704,6 +704,7 @@ def _mirror_handler(*, send_key, refresh_mirror):
         TopicRouter("777", "@3", "4", sender=_StubSender()),
         send_key=send_key,
         refresh_mirror=refresh_mirror,
+        toggle_mirror=toggle_mirror,
     )
     handlers = [h for group in app.handlers.values() for h in group]
     cbs = [h for h in handlers if isinstance(h, CallbackQueryHandler)]
@@ -753,6 +754,34 @@ def test_the_mirror_refresh_types_nothing_and_still_redraws():
     assert keys == [], "🔄 must not type anything into the session"
     assert redrawn == ["@3"]
     assert update.callback_query.answers == ["🔄"]
+
+
+def test_the_BOOK_tap_types_nothing_and_swaps_the_body_of_the_SAME_message():
+    """CMX-57. 📖 is not a key and not an answer — it is a view toggle on the one message.
+
+    It must never reach the terminal: a gate is on screen, and a stray keystroke there
+    answers it. And it must not post anything: a second message is exactly the clutter this
+    button exists to have replaced.
+    """
+    import asyncio
+
+    keys: list[str] = []
+    redrawn: list[str] = []
+    toggled: list[str] = []
+    on_mirror = _mirror_handler(
+        send_key=lambda _w, k: keys.append(k) or True,
+        refresh_mirror=redrawn.append,
+        toggle_mirror=toggled.append,
+    )
+    update = _FakeCallbackUpdate("m:doc")
+
+    asyncio.run(on_mirror(update, None))
+
+    assert keys == [], "📖 must not type anything into a session that is sitting on a gate"
+    assert toggled == ["@3"], "the watcher — which owns the message — re-draws it"
+    assert redrawn == [], "and it is NOT also refreshed: one re-render, not two"
+    assert update.callback_query.answers == ["📖"]
+    assert not update.callback_query.message.photos
 
 
 def test_a_dpad_tap_from_the_wrong_chat_touches_nothing():
