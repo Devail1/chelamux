@@ -45,11 +45,13 @@ function _setSidebarCollapsed(collapsed) {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
     const btn = document.getElementById('btn-menu');
     if (btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    // The canvas just changed width without a window resize, so the listeners that
-    // re-fit the terminal wall never fired. Poke them once the 0.16s width
-    // transition has landed. This is a RE-FIT, not a rebuild: buildWall's cache key
-    // (_termSig) is the live wid set — sidebar state never enters it — so the
-    // iframes stay put and no terminal reloads.
+    // The canvas just changed width without a window RESIZE, so the listeners that
+    // re-fit the terminal wall never fired — poke them. The rail snaps (there is no
+    // width transition to wait out); the delay is only to let the grid settle after
+    // the reflow, and the wall debounces the event anyway. This is a RE-FIT, not a
+    // rebuild: buildWall's cache key (_termSig) is the live wid set — sidebar state
+    // never enters it — so the iframes stay put and no terminal reloads. That
+    // property is held by a real-DOM test (tests/wall.test.mjs), not by this comment.
     setTimeout(() => window.dispatchEvent(new Event('resize')), 220);
 }
 
@@ -861,10 +863,16 @@ function openNewMenu(ev) {
     if (!m) return;
     if (typeof refreshLauncher === 'function') refreshLauncher();
     const anchor = (ev && ev.currentTarget) || document.getElementById('btn-new');
+    // Show it BEFORE measuring: a display:none element has no offsetWidth.
+    m.style.display = 'block';
     const r = anchor.getBoundingClientRect();
     m.style.top = (r.bottom + 4) + 'px';
-    m.style.left = Math.max(8, r.right - 160) + 'px';
-    m.style.display = 'block';
+    // Right-align to the button off the MEASURED width, and clamp so it never runs
+    // off the left edge. A hardcoded width here (it used to be 160, from the old
+    // popover) silently sends the menu off the RIGHT edge the moment the CSS gets
+    // wider than the guess — which .launch-menu's 232px min-width did, on a button
+    // that sits ~55px from the viewport edge.
+    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
     setTimeout(() => document.addEventListener('click', hideNewMenu, { once: true }), 0);
 }
 
