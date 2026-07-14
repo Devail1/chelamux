@@ -1065,6 +1065,92 @@ def api_agents_broadcast():
 
 
 # ---------------------------------------------------------------------------
+# API: Rooms — the HTTP half of the Wall's wire gesture
+#
+# `chela/rooms.py` owns rooms: membership, the typed ledger, the loop guard. This
+# is a THIN transport over it — the wall drags a wire between two tiles, and these
+# two routes are what that drag calls. There is no second membership store here
+# (there must never be one): the read is `rooms.status()`, verbatim — the exact
+# dict `chela room status` prints, so the API and the CLI cannot disagree — and the
+# write is `rooms.create` + `rooms.join`, the same calls `chela room join` makes.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/rooms")
+@require_auth
+def api_rooms():
+    """Rooms and their members, keyed by tmux window id — which is what the Wall has."""
+    return jsonify(rooms.status())
+
+
+def _auto_room_name(wids: list[str]) -> str:
+    """Name a room from the agents being wired — a DROP MUST COMPLETE IN ONE MOTION.
+
+    A modal text prompt on drop would make the gesture two acts and kill it, so the
+    name is derived (``wire-researcher-executor``) and the room can be renamed later
+    by whoever cares. Slugged to `rooms._ROOM_RE`'s alphabet and capped at its 40.
+    """
+    live = discovery.get_windows_by_id()
+    parts = []
+    for wid in wids[:2]:
+        slug = re.sub(r"[^a-z0-9]+", "-", live.get(wid, wid).lower()).strip("-")
+        parts.append(slug or wid.lstrip("@") or "x")
+    return ("wire-" + "-".join(parts))[:40].rstrip("-.")
+
+
+@app.route("/api/rooms/join", methods=["POST"])
+@require_auth
+def api_rooms_join():
+    """Put two (or more) live windows in a room. `{"wids": ["@1", "@2"], "room"?: "..."}`
+
+    Idempotent: re-wiring a pair that is already roomed re-joins the same room and
+    changes nothing. Wiring onto a tile that is ALREADY in a room JOINS THAT ROOM —
+    a third agent joins the conversation rather than forking a second one beside it.
+
+    Every window is resolved BEFORE anything is written, so a wire onto a window that
+    died mid-drag fails whole (404) rather than leaving a room of one behind.
+    """
+    data = request.get_json(force=True) or {}
+    wids = [w for w in dict.fromkeys(data.get("wids") or []) if w]   # dedupe, order kept
+    if len(wids) < 2:
+        return jsonify({"error": "two distinct windows required"}), 400
+    resolved = []
+    for wid in wids:
+        target = messenger.resolve_window(wid)
+        if target is None:
+            return jsonify({"error": f"{wid} is not a live window — cannot join"}), 404
+        resolved.append(target)
+
+    room = (data.get("room") or "").strip()
+    if not room:
+        # The DROP TARGET is the last wid: its room wins (drag a third agent onto a
+        # roomed peer -> it joins that room), then the source's, else a fresh name.
+        for wid in reversed(resolved):
+            existing = rooms.rooms_for(wid)
+            if existing:
+                room = existing[0]
+                break
+    if not room:
+        room = _auto_room_name(resolved)
+
+    results = [rooms.join(room, wid) for wid in resolved]
+    bad = next((r for r in results if not r.get("ok")), None)
+    if bad:
+        return jsonify({"error": bad.get("error", "join failed"), "room": room}), 400
+    return jsonify({"ok": True, "room": room, "wids": [r["wid"] for r in results]})
+
+
+@app.route("/api/rooms/leave", methods=["POST"])
+@require_auth
+def api_rooms_leave():
+    """Drop one window out of one room — the click on a tile's room badge."""
+    data = request.get_json(force=True) or {}
+    wid, room = (data.get("wid") or "").strip(), (data.get("room") or "").strip()
+    if not wid or not room:
+        return jsonify({"error": "wid and room required"}), 400
+    return jsonify(rooms.leave(room, wid))
+
+
+# ---------------------------------------------------------------------------
 # API: Agent lifecycle
 # ---------------------------------------------------------------------------
 

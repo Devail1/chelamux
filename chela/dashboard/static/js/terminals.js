@@ -1,6 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal } from './util.js';
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
+import { PORT_GLYPH, applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -686,14 +687,25 @@ function paneHead(wid, draggable) {
     // No PgUp/PgDn/scroll/Esc/^C here: with focus in the pane those keys reach the
     // terminal natively (wheel/keys scroll, Esc and Ctrl-C pass through), so the
     // header carries only the window controls (minimize / maximize / kill).
+    // The wire's port + the room badge are WALL chrome: single-pane mode has a
+    // header but no gs-id (nothing to wire to, nothing to resolve a drop against),
+    // so it simply gets neither — degrade, don't crash.
+    const port = draggable
+        ? `<button class="gs-port" onmousedown="chela.wireDragStart(event, this, '${j}')"
+             title="Wire this agent to another — drag onto a peer"
+             aria-label="Wire this agent to another">${PORT_GLYPH}</button>` : '';
+    const roomBadge = draggable
+        ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden></button>` : '';
     return `<div class="gs-head">
       ${_statusDot(wid)}
       ${label}
+      ${roomBadge}
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
       <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
       <span class="gs-keys">
         <span class="gs-win-ctl">
+          ${port}
           ${_shareBtnHTML(wid)}
           ${min}
           <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
@@ -1159,6 +1171,7 @@ async function renderTerminals() {
 
     renderMobileSwitcher();   // phone single-mode agent pills (no-op on desktop)
     _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
+    _refreshRooms();          // paint room accents on the first render, not 4s later
 }
 
 // ---- Reactive pane lifecycle ----------------------------------------------
@@ -1340,6 +1353,7 @@ async function termTick() {
     // in case a rename changed a pane's friendly name.
     _applyTermStatus(agents);
     _refreshPaneLabels();
+    _refreshRooms();   // rooms can also be made from the CLI/hooks — the wall follows
     try {
         const ctx = await api('/api/agents/context');
         _applyTermContext(ctx);
@@ -1541,6 +1555,7 @@ function buildWall(wids) {
     });
     _applyWallLock();   // restore the locked (swap-on-drag) feel across reloads
     renderMinDock();
+    _replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
 }
 
 // Surgically append new tiles to an existing wall WITHOUT touching the live
@@ -1583,6 +1598,7 @@ async function addWallTiles(wids) {
     _applyWallLock();           // a tile added while locked must inherit no-resize
     renderMinDock();            // taskbar lists every pane → add the new chip(s)
     _refitWallForDock();        // taskbar may have grown a row → re-fit the wall above it
+    _replayRoomAccents();       // a fresh tile already in a room wears its accent at once
     _syncTermSig();
     return true;
 }
@@ -1814,6 +1830,159 @@ function _doSwap(el) {
     } finally {
         _grid.batchUpdate(false);   // commit (this gridstack has no commit())
     }
+}
+
+// ---- THE WIRE: drag a line between two tiles to put their agents in a room ---
+//
+// The relationship is chela/rooms.py's (typed ledger, active dispatch, loop
+// guards); this is the gesture that CREATES one, and nothing more.
+//
+// Three things make it work on a wall of live iframes:
+//
+//   1. THE IFRAMES MUST NOT EAT THE MOUSE. Same idiom the tile drag already uses:
+//      `.gs-dragging` on the grid → CSS drops `pointer-events` on every
+//      `.term-frame`, so mousemove/elementFromPoint see the TILES. (NOT
+//      `.term-dragging`, which HIDES the terminals — watching them is the point.)
+//   2. THE PORT MUST STEAL THE MOUSEDOWN, or gridstack starts a tile drag under
+//      us (`renamePane` does exactly this).
+//   3. EVERY OTHER TILE SPROUTS A SOCKET while a wire is in flight (`.wire-live`
+//      on the stage). Without that nobody discovers the gesture exists.
+//
+// Room state NEVER reaches `_termSig` — the accent is patched per tile
+// (applyRoomAccents), so wiring two agents together reloads no terminal.
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+let _wire = null;         // in-flight drag: {fromWid, svg, path, stage, gsEl, hoverWid, x1, y1}
+let _roomsCache = null;   // last /api/rooms payload, replayed onto freshly built tiles
+
+function _wireCleanup() {
+    if (!_wire) return;
+    const { svg, stage, gsEl, hoverWid } = _wire;
+    document.removeEventListener('mousemove', _wireMove);
+    document.removeEventListener('mouseup', _wireDrop);
+    document.removeEventListener('keydown', _wireKey);
+    if (svg) svg.remove();
+    if (stage) stage.classList.remove('wire-live');
+    if (gsEl) gsEl.classList.remove('gs-dragging');
+    if (hoverWid) { const el = _gridItemEl(hoverWid); if (el) el.classList.remove('wire-target'); }
+    const src = _gridItemEl(_wire.fromWid);
+    if (src) src.classList.remove('wire-source');
+    _wire = null;
+}
+
+// Where the pointer is, in #term-stage coordinates (the SVG overlay's box).
+function _wirePoint(e) {
+    const r = _wire.stage.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+function wireDragStart(e, btn, wid) {
+    e.preventDefault();
+    e.stopPropagation();          // or gridstack takes the gesture as a tile drag
+    if (!TERMINALS_ON || _termMode !== 'wall') return;
+    const stage = $('#term-stage');
+    const gsEl = stage && stage.querySelector('.grid-stack');
+    if (!stage || !gsEl) return;
+    _wireCleanup();               // never two wires at once
+
+    gsEl.classList.add('gs-dragging');   // iframes stop swallowing the mouse
+    stage.classList.add('wire-live');    // every tile sprouts a drop socket
+    const src = _gridItemEl(wid);
+    if (src) src.classList.add('wire-source');
+
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'wire-overlay');
+    const path = document.createElementNS(SVG_NS, 'path');
+    svg.appendChild(path);
+    stage.appendChild(svg);
+
+    const b = btn.getBoundingClientRect(), s = stage.getBoundingClientRect();
+    _wire = {
+        fromWid: wid, svg, path, stage, gsEl, hoverWid: null,
+        x1: b.left + b.width / 2 - s.left, y1: b.top + b.height / 2 - s.top,
+    };
+    _wireMove(e);
+    document.addEventListener('mousemove', _wireMove);
+    document.addEventListener('mouseup', _wireDrop);
+    document.addEventListener('keydown', _wireKey);
+}
+
+// The wid of the tile under the pointer (or null — empty stage, or a tile with
+// no gs-id, both of which are a CANCEL, not a room).
+function _wireHit(e) {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const item = el && el.closest && el.closest('#term-stage .grid-stack-item');
+    return (item && item.getAttribute('gs-id')) || null;
+}
+
+function _wireMove(e) {
+    if (!_wire) return;
+    const p = _wirePoint(e);
+    _wire.path.setAttribute('d', bezierPath(_wire.x1, _wire.y1, p.x, p.y));
+    const hit = _wireHit(e);
+    const next = resolveDrop(_wire.fromWid, hit).ok ? hit : null;
+    if (next === _wire.hoverWid) return;
+    if (_wire.hoverWid) { const prev = _gridItemEl(_wire.hoverWid); if (prev) prev.classList.remove('wire-target'); }
+    _wire.hoverWid = next;
+    if (next) { const el = _gridItemEl(next); if (el) el.classList.add('wire-target'); }
+}
+
+function _wireKey(e) { if (e.key === 'Escape') _wireCleanup(); }
+
+async function _wireDrop(e) {
+    if (!_wire) return;
+    const fromWid = _wire.fromWid;
+    const drop = resolveDrop(fromWid, _wireHit(e));
+    const anchor = _gridItemEl(fromWid);
+    _wireCleanup();
+    if (!drop.ok) return;         // self / empty stage / no wid → nothing created
+    const head = anchor && anchor.querySelector('.gs-head');
+    try {
+        const res = await api('/api/rooms/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ wids: drop.wids }),
+        });
+        if (!res || res.error) { _termShareToast(head, res && res.error ? res.error : 'wire failed'); return; }
+        _termShareToast(head, `🔌 ${_displayLabel(_nameOfWid(drop.wids[1]))} joined ${res.room}`);
+    } catch (err) {
+        _termShareToast(head, 'wire failed — could not reach the dashboard');
+        return;
+    }
+    await _refreshRooms();
+}
+
+// Click a tile's room badge → leave that room. (The only room *un*-wiring in the
+// UI; the ledger itself is untouched — leaving is a membership edit, not a purge.)
+async function wireRoomClick(btn, wid) {
+    const room = btn && btn.getAttribute('data-room');
+    if (!room) return;
+    try {
+        await api('/api/rooms/leave', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ wid, room }),
+        });
+    } catch (e) { /* transient — the next poll re-reads the truth */ }
+    await _refreshRooms();
+}
+
+// Read the rooms (the SAME dict `chela room status` prints) and PATCH the tiles.
+// Never re-renders the wall: `_termSig` is not consulted and not touched, so no
+// iframe is recreated when membership changes.
+async function _refreshRooms() {
+    if (!TERMINALS_ON || _termMode !== 'wall') return;
+    let status;
+    try { status = await api('/api/rooms'); } catch (e) { return; }   // transient — next tick
+    _roomsCache = status;
+    applyRoomAccents($('#term-stage'), status);
+}
+
+// Repaint accents from cache onto tiles that were just (re)built — a full
+// buildWall or a surgical addWallTiles produces bare tiles, and the room state is
+// already known, so there's no reason to make them wait for the next poll.
+function _replayRoomAccents() {
+    if (_roomsCache) applyRoomAccents($('#term-stage'), _roomsCache);
 }
 
 // Apply a layout to the current wall panes, sized to fill the viewport height
@@ -2049,4 +2218,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabe
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termScrollToggle, toggleDockChip, toggleWallLock });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termScrollToggle, toggleDockChip, toggleWallLock, wireDragStart, wireRoomClick });
