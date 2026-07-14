@@ -56,6 +56,11 @@ const TYPE_CLASS = {
     'hook.permission_denied': 'denied',
     run_review: 'run',
     run_failed: 'run',
+    // The rework loop's two states (CMX-68). Without these they fall through to `other`,
+    // which renders the ONE event that means "a human must look at this run" as an
+    // anonymous `·` — and drops it out of the Runs filter, where a run event belongs.
+    run_changes_requested: 'run',
+    run_needs_human: 'run',
     'hook.user_prompt_submit': 'prompt',
     'hook.pre_tool_use': 'tool',
     'hook.post_tool_use': 'tool',

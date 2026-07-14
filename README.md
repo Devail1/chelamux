@@ -574,6 +574,13 @@ literal Escape.
   ⚠️ **The run row is the authority, not GitHub**: `gh pr review --request-changes` is
   refused on a PR your own account authored, and a fleet is one account — so the verdict
   lives on the run and the PR comment is its human-readable copy.
+  ⚠️ **Rolling the daemon back is a ONE-WAY door while a run is parked.** `changes_requested`
+  and `needs_human` are new statuses, and an older dispatcher's claim filter has never heard
+  of them: it sees a parked run's task still open in the tracker, claims it as a **fresh**
+  one, forks a **second** worktree off the base branch and dispatches the *original* prompt
+  — telling an agent to branch and open a PR that is already open. Before downgrading, drain
+  the loop: `chela dispatch-runs --awaiting` lists every parked run; merge, close or
+  `chela runs delete` each one first.
 - **The queue belongs to whoever holds it, not to whoever is faster.** The tracker
   has two writers — you reorder it, the dispatcher claims from it — and you lose
   that race every time: a merge frees the slot, and the next tick fires long before

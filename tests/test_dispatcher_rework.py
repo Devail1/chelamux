@@ -16,15 +16,17 @@ three real defects, and no mechanism to send them back). These tests pin the car
 """
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from chela import dispatcher, inbox, worktree
+from chela import dispatcher, hold, inbox, worktree
 from chela.sources import Task
 from chela.workflow import WorkflowDef
 
@@ -40,6 +42,18 @@ def _own_runs_db(tmp_path, monkeypatch):
 
 
 def _wf(tmp_path: Path, **cfg) -> WorkflowDef:
+    """The workflow these tests dispatch — WITH HOOKS, and that is the point.
+
+    🔴 The first cut of this fixture had no `hooks:` key at all, and that is exactly why its
+    suite could not see the blocker: `_respawn_rework` called `_launch_agent` directly, so
+    NEITHER hook ran on the rework path, and a fixture with no hooks cannot notice. This
+    repo's real WORKFLOW.md runs `uv sync --all-extras` as before_run (the CMX-21 trap), so
+    the reworking agent — ordered by its own prompt to re-run the CI gates and believe them
+    — was being launched into a worktree whose venv was never synced.
+
+    Every workflow this suite dispatches now carries both hooks. A future refactor that
+    drops one goes red here.
+    """
     (tmp_path / "TODO.md").write_text("- [ ] do a thing\n")
     return WorkflowDef(
         path=tmp_path / "WORKFLOW.md",
@@ -47,10 +61,16 @@ def _wf(tmp_path: Path, **cfg) -> WorkflowDef:
             "project_key": "TEST",
             "tracker": {"kind": "markdown", "path": "TODO.md"},
             "workspace": {"root": str(tmp_path / "wts"), "base_branch": "dev"},
+            "hooks": {
+                "after_create": "seed-settings {{workspace_path}}",   # the permission file
+                "before_run": "uv sync --all-extras",                 # the venv
+            },
             **cfg,
         },
         prompt_template="fresh dispatch: {{task_title}}",
     )
+
+
 
 
 def _row(conn, task_id="abc123", **over) -> sqlite3.Row:
@@ -94,9 +114,15 @@ class _FakeTmux:
         self.windows: list[tuple[str, str]] = []
         self._next_id = 100
         self.calls: list[list[str]] = []
+        # Every hook the dispatcher ran: (command, cwd). A hook is a shell=True call — the
+        # ONE thing that distinguishes it from tmux argv, and the thing the rework path was
+        # missing entirely.
+        self.hooks: list[tuple[str, str]] = []
 
     def run(self, cmd, *args, **kwargs):
         self.calls.append(cmd)
+        if kwargs.get("shell"):
+            self.hooks.append((cmd, str(kwargs.get("cwd"))))
 
         class R:
             returncode = 0
@@ -490,6 +516,403 @@ def test_a_vanished_window_in_a_review_state_is_completion_not_death(tmp_path):
         assert status in inbox.SETTLED_RUN_STATES
     event = inbox._gone_event("@7", "test-1", "", {"status": "changes_requested"})
     assert event["kind"] == "completed_gone" and event.get("silent") is True
+
+
+# --- (f) 🔴 THE ENVIRONMENT HALF: a rework is launched into a PREPARED worktree ---------
+#
+# The review of PR #81 found the seam: `_respawn_rework` called `_launch_agent` directly, and
+# `_launch_agent` was only the TMUX half of a spawn. The hooks — the half that makes the
+# worktree usable — stayed behind in `_spawn`, so the rework ran NONE of them. This repo's
+# before_run is `uv sync --all-extras` (the CMX-21 trap), and the rework prompt orders the
+# agent to "re-run the SAME validation ... the CI gates are not optional". It would have been
+# obeying that order in a worktree whose venv was never synced: phantom failures, and an
+# agent that either "fixes" breakage that was never real or calls the verdict unfixable.
+
+def _rework_tick(tmp_path, *, attached: bool, **kw):
+    """One tick that re-spawns a sent-back run. Returns (summary, fake, prompts)."""
+    wf = kw.pop("wf", None) or _wf(tmp_path)
+    wt = tmp_path / "wts" / "abc123"
+    wt.mkdir(parents=True, exist_ok=True)
+    fake = _FakeTmux()
+    prompts: list[str] = []
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested",
+             worktree_path=str(wt),
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "the wire is loose"}]),
+             **kw)
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source("abc123")), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "attach_worktree", return_value=(wt, attached)), \
+         patch.object(dispatcher, "ensure_worktree") as fresh_fork, \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run), \
+         patch.object(dispatcher, "send_tmux", side_effect=lambda w, p: prompts.append(p) or True), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")):
+        summary = dispatcher.tick(wf.path)
+    assert fresh_fork.call_count == 0
+    return summary, fake, prompts
+
+
+def test_a_rework_runs_before_run_LIKE_EVERY_OTHER_LAUNCH(tmp_path):
+    """🔴 The blocker. `before_run` is what makes the venv real (`uv sync --all-extras`).
+    Skip it and the reworking agent — under orders to re-run the CI gates and believe them —
+    reads phantom failures out of a worktree that was never synced.
+
+    Seen to go red: reverting `_respawn_rework` to call `_launch_agent` without the hooks
+    leaves `fake.hooks == []` here."""
+    wt = tmp_path / "wts" / "abc123"
+    summary, fake, _ = _rework_tick(tmp_path, attached=False)
+
+    assert summary["reworked"] == 1
+    assert ("uv sync --all-extras", str(wt)) in fake.hooks     # IN THE WORKTREE, not the repo
+
+    # ...and BEFORE the agent was launched into it. A venv synced after the prompt lands is
+    # a race the agent loses.
+    first_window = next(i for i, c in enumerate(fake.calls)
+                        if isinstance(c, list) and c[:2] == ["tmux", "new-window"])
+    first_hook = next(i for i, c in enumerate(fake.calls) if isinstance(c, str))
+    assert first_hook < first_window
+
+
+def test_a_RE_CREATED_worktree_gets_after_create_too(tmp_path):
+    """`attach_worktree` had to re-create the directory: it holds the branch's tracked files
+    and NOTHING else — no `.claude/settings.local.json`. _spawn's own comment calls a missing
+    one a hard dispatch abort, because the agent hangs on its first permission prompt. A
+    re-created worktree IS a fresh worktree."""
+    wt = tmp_path / "wts" / "abc123"
+    _, fake, _ = _rework_tick(tmp_path, attached=True)
+
+    assert fake.hooks == [
+        (f"seed-settings {wt}", str(wt)),        # after_create, rendered with the worktree
+        ("uv sync --all-extras", str(wt)),       # then before_run — in that order
+    ]
+
+
+def test_a_REUSED_worktree_skips_after_create_but_still_syncs(tmp_path):
+    """The worktree survived, so its settings file did too — seeding it again is the one
+    thing after_create must not do. `before_run` still runs: it is per-LAUNCH, not
+    per-worktree (the branch moved on, and so did the lockfile)."""
+    wt = tmp_path / "wts" / "abc123"
+    _, fake, _ = _rework_tick(tmp_path, attached=False)
+
+    assert fake.hooks == [("uv sync --all-extras", str(wt))]
+
+
+def test_a_hook_that_fails_does_not_launch_an_agent_into_a_broken_worktree(tmp_path):
+    """A hard abort on the rework path too — and the run goes BACK to changes_requested (it
+    is not a fresh dispatch to retry), one round poorer, so a hook that always fails walks
+    the run to needs_human instead of spinning."""
+    wf = _wf(tmp_path)
+    wt = tmp_path / "wts" / "abc123"
+    wt.mkdir(parents=True)
+    fake = _FakeTmux()
+
+    def _run(cmd, *a, **kw):
+        if kw.get("shell"):
+            raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+        return fake.run(cmd, *a, **kw)
+
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested",
+             worktree_path=str(wt),
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "v1"}]))
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source("abc123")), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "attach_worktree", return_value=(wt, False)), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_run), \
+         patch.object(dispatcher, "send_tmux") as send, \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["reworked"] == 0
+    send.assert_not_called()                                   # no agent in a broken worktree
+    assert fake.new_window_cwds() == []
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "changes_requested"                # NOT 'failed' — see (g)
+    assert run["rework_count"] == 1                            # the attempt cost a round
+
+
+# --- (g) 🔴 a rework that DIES re-enters the rework loop — it is never a fresh dispatch ---
+
+def test_a_rework_that_cannot_launch_is_NEVER_re_claimed_as_a_FRESH_task(tmp_path, monkeypatch):
+    """⛔ THE HOLE. `failed` is not in NOT_CLAIMABLE — deliberately, it is the retry state for
+    a first dispatch. A rework dropped into it gets picked up by the claim loop as ordinary
+    work: `_spawn` renders the ORIGINAL first-dispatch prompt ("branch, then open a PR") at an
+    agent whose PR is already open, bumps `attempt`, and never looks at `rework_count`. The
+    verdict is lost and the cap is bypassed.
+
+    Three ticks with a launch that can never land: the run walks changes_requested → rounds
+    spent → needs_human. It is never dispatched fresh, and it never spins.
+
+    Seen to go red: restoring `UPDATE runs SET status='failed'` in the tick's rework
+    exception handler makes tick 2 re-dispatch it with the fresh prompt.
+    """
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
+    wf = _wf(tmp_path)
+    wt = tmp_path / "wts" / "abc123"
+    wt.mkdir(parents=True)
+    task = _Source("abc123").list_open_tasks()[0]
+    prompts: list[str] = []
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested",
+             worktree_path=str(wt), attempt=1,
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "the wire is loose"}]))
+
+    statuses = []
+    for _ in range(3):
+        with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+             patch.object(dispatcher, "get_source", return_value=_Source("abc123")), \
+             patch.object(dispatcher, "_claim_order", return_value=[task]), \
+             patch.object(dispatcher, "attach_worktree", return_value=(wt, False)), \
+             patch.object(dispatcher, "ensure_worktree") as fresh_fork, \
+             patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run), \
+             patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+             patch.object(dispatcher, "_send_seed", return_value=False), \
+             patch.object(dispatcher, "send_tmux", side_effect=lambda w, p: prompts.append(p)), \
+             patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")):
+            dispatcher.tick(wf.path)
+        # ⛔ NOT ONCE, on any tick: a fresh worktree off the base branch would abandon the
+        # PR's commits — and the fresh prompt would tell the agent to open a second PR.
+        assert fresh_fork.call_count == 0
+        statuses.append(dispatcher.resolve_run("abc123")["status"])
+
+    # Round 1 fails → back to changes_requested. Round 2 fails → cap spent. Then it SURFACES.
+    assert statuses == ["changes_requested", "changes_requested", "needs_human"]
+    run = dispatcher.resolve_run("abc123")
+    assert run["rework_count"] == 2                # every round accounted for; none bypassed
+    assert run["attempt"] == 1                     # it was never re-dispatched as a new task
+    assert dispatcher.latest_verdict(dict(run)) == "the wire is loose"   # the verdict SURVIVED
+    assert all("fresh dispatch" not in p for p in prompts)
+
+
+def test_a_dead_rework_WINDOW_returns_to_the_rework_loop_too(tmp_path):
+    """The other route into `failed`: the watchdog. A running rework whose tmux window
+    disappeared must go back to `changes_requested` — same reason, same hole.
+
+    The one free slot is held by an unrelated run, so the tick cannot immediately re-spawn
+    the rework it just reclaimed — which is what makes the intermediate state observable
+    here. (It would be re-spawned on the next tick with a slot, and that is correct.)"""
+    wf = _wf(tmp_path, concurrency={"max": 1})
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="running", rework_count=1,
+             window_name="test-1",
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "v1"}]))
+        _row(conn, task_id="busy", workflow_path=str(wf.path), status="running",
+             window_name="test-2", branch_name="test-2", pr_url=None, pr_state=None)
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source("abc123", "busy")), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_tmux_windows", return_value={"test-2"}), \
+         patch.object(dispatcher, "_pane_idle_empty_prompt", return_value=False), \
+         patch.object(dispatcher, "attach_worktree") as attach, \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        dispatcher.tick(wf.path)
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "changes_requested"      # ⛔ NOT 'failed'
+    assert attach.call_count == 0                    # the slot was taken; it waits its turn
+    # The round it was already working on is spent — and NOT double-charged. One dead window
+    # must not burn the whole budget.
+    assert run["rework_count"] == 1
+    assert dispatcher.latest_verdict(dict(run)) == "v1"
+
+
+def test_a_stuck_rework_is_re_nudged_with_its_REWORK_prompt_not_the_first_dispatch_one(tmp_path):
+    """The watchdog re-sends the prompt to an agent idle at an empty prompt. For a rework
+    that is the REWORK prompt: the two say opposite things ("branch and open a PR" vs "you
+    are on your branch, your PR is open, here is the verdict"). Re-seeding the wrong one is
+    the same lost verdict, delivered by hand."""
+    wf = _wf(tmp_path)
+    sent: list[str] = []
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="running", rework_count=1,
+             window_name="test-1", started_at="2020-01-01T00:00:00+00:00",
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "the wire is loose"}]))
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source("abc123")), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_tmux_windows", return_value={"test-1"}), \
+         patch.object(dispatcher, "_capture_pane", return_value=""), \
+         patch.object(dispatcher, "_pane_idle_empty_prompt", return_value=True), \
+         patch.object(dispatcher, "_agent_status", return_value="idle"), \
+         patch.object(dispatcher, "_send_seed",
+                      side_effect=lambda w, p, t: sent.append(p) or True), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["watchdog_renudged"] == 1
+    assert sent and "REWORK" in sent[0] and "the wire is loose" in sent[0]
+    assert "fresh dispatch" not in sent[0]
+
+
+# --- (h) 🔴 changes_requested is not a silent state, and a HOLD must not freeze the exit ---
+
+def test_a_HOLD_pauses_the_rework_but_NEVER_the_escalation(tmp_path, monkeypatch):
+    """A hold pauses CLAIMS, and a re-spawn is a claim — that part is right. But escalation is
+    not a claim: it takes no slot and starts no agent. Freezing it behind a hold means a
+    forgotten hold also silences the ONE transition that says "the loop gave up, come look".
+
+    Seen to go red: moving the cap check back below the `hold.active()` early-return leaves
+    the over-cap run in changes_requested with `escalated == 0`."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "1")
+    wf = _wf(tmp_path)
+    now = time.time()
+    held = hold.Hold(reason="rewriting the queue", by="liav", pid=1,
+                     created_at=now, expires_at=now + 3600)
+    with dispatcher._db() as conn:
+        _row(conn, task_id="over-cap", workflow_path=str(wf.path),
+             status="changes_requested", rework_count=1)
+        _row(conn, task_id="under-cap", workflow_path=str(wf.path),
+             status="changes_requested", rework_count=0, branch_name="test-2",
+             window_name="test-2")
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source("over-cap", "under-cap")), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher.hold, "expire_if_stale", return_value=None), \
+         patch.object(dispatcher.hold, "active", return_value=held), \
+         patch.object(dispatcher, "attach_worktree") as attach, \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["held"] is True
+    assert summary["escalated"] == 1                  # the exit is NOT frozen
+    assert summary["reworked"] == 0                   # the claim IS
+    assert attach.call_count == 0
+    assert dispatcher.resolve_run("over-cap")["status"] == "needs_human"
+    assert dispatcher.resolve_run("under-cap")["status"] == "changes_requested"
+
+
+def test_changes_requested_ANNOUNCES_ITSELF(tmp_path):
+    """It used to emit nothing at all: inbox.run_events fired for awaiting_review, needs_human
+    and failed, and a run sent back for rework passed through in silence. If the tick that was
+    supposed to pick it up never comes (a hold, a broken WORKFLOW.md, a workflow dropped from
+    CHELA_DISPATCH_WORKFLOWS), the run parks there forever and NOTHING says so."""
+    with dispatcher._db() as conn:
+        _row(conn, status="changes_requested", rework_count=0,
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "the wire is loose"}]))
+    run = dispatcher.resolve_run("abc123")
+
+    events, seen = inbox.run_events([dict(run)], {})
+
+    sent_back = [e for e in events if e["kind"] == "run_changes_requested"]
+    assert len(sent_back) == 1
+    assert "sent back for rework" in sent_back[0]["summary"]
+    assert sent_back[0]["payload"]["reviews"][0]["body"] == "the wire is loose"
+
+    # Edge-triggered, exactly like the others: it announces once, not once per 30s tick.
+    assert inbox.run_events([dict(run)], seen)[0] == []
+
+    # ...and it is dropped at DELIVERY once the loop has actually turned — which is the
+    # normal case (the next tick re-spawns it), and saying so then would be noise.
+    assert inbox.stale_reason(sent_back[0], [{"task_id": "abc123", "status": "running"}])
+    assert inbox.stale_reason(sent_back[0], [dict(run)]) is None
+
+
+# --- (i) 🔴 the verdict cannot resurrect a run that MOVED ------------------------------
+
+def test_request_changes_will_not_resurrect_a_MERGED_run(tmp_path):
+    """A dispatcher tick reconciles the row to `done` (the human merged the PR) in the window
+    between the CLI's read and its write. With no compare-and-swap the UPDATE lands anyway:
+    a merged run is dragged back to changes_requested, and the next tick re-spawns an agent
+    onto a branch whose PR is closed.
+
+    The stale read is simulated exactly: resolve_run answers with the row as it was, while
+    the DB has already moved on.
+
+    Seen to go red: dropping `AND status='awaiting_review'` from the UPDATE."""
+    with dispatcher._db() as conn:
+        _row(conn)
+    stale = dict(dispatcher.resolve_run("abc123"))        # read: awaiting_review
+    with dispatcher._db() as conn:                        # ...and the world moves on
+        conn.execute("UPDATE runs SET status='done' WHERE task_id='abc123'")
+        conn.commit()
+
+    with patch.object(dispatcher, "resolve_run", return_value=stale), \
+         patch.object(dispatcher.subprocess, "run", side_effect=FileNotFoundError()):
+        result = dispatcher.request_changes("abc123", "the wire is loose")
+
+    assert result["ok"] is False
+    assert "done" in result["error"]
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "done"                        # NOT resurrected
+    assert dispatcher.reviews_of(dict(run)) == []         # and nothing was written
+
+
+class _ReviewArgs:
+    """`chela review <run> --request-changes --body-file -`."""
+    run = "abc123"
+    approve = False
+    request_changes = True
+    body_file = None
+
+
+def _review_output(capsys, monkeypatch, body="the wire is loose") -> str:
+    from chela import main
+
+    monkeypatch.setattr(main.sys, "stdin", io.StringIO(body))
+    args = _ReviewArgs()
+    args.body_file = "-"
+    with patch.object(dispatcher.subprocess, "run", side_effect=FileNotFoundError()):
+        main.cmd_review(args)
+    return capsys.readouterr().out
+
+
+def test_the_CLI_does_not_PROMISE_a_re_spawn_it_never_CHECKED(tmp_path, monkeypatch, capsys):
+    """`chela review --request-changes` printed "The dispatcher re-spawns it in its own
+    worktree on the next tick." UNCONDITIONALLY — a promise nothing verified. If the workflow
+    is not in CHELA_DISPATCH_WORKFLOWS, no tick will ever come for that run: it parks in
+    `changes_requested` forever while the reviewer walks away believing the loop is turning.
+    The reviewer is the one person who can fix that, and this is the moment they are looking.
+
+    Seen to go red: the old unconditional print promises the re-spawn for a workflow that
+    nothing dispatches.
+    """
+    from chela import main
+
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+
+    # (a) NOTHING ticks this workflow → say so, and say what to do about it instead.
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    out = _review_output(capsys, monkeypatch)
+    assert "changes_requested" in out                      # the verdict still landed
+    assert "NOT in CHELA_DISPATCH_WORKFLOWS" in out
+    assert f"chela dispatch {wf.path}" in out
+    assert "re-spawns it" not in out                       # ⛔ never both
+
+    # (b) the daemon does tick it, and nothing is in the way → the promise is TRUE.
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET status='awaiting_review' WHERE task_id='abc123'")
+        conn.commit()
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [wf.path.resolve()])
+    with patch.object(main.workflow, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(main.hold, "active", return_value=None):
+        out = _review_output(capsys, monkeypatch)
+    assert "The dispatcher re-spawns it in its own worktree on the next tick." in out
+
+    # (c) the queue is HELD → a re-spawn is a claim, and claims are what a hold pauses.
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET status='awaiting_review' WHERE task_id='abc123'")
+        conn.commit()
+    now = time.time()
+    held = hold.Hold(reason="rewriting the queue", by="liav", pid=1,
+                     created_at=now, expires_at=now + 3600)
+    with patch.object(main.workflow, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(main.hold, "active", return_value=held):
+        out = _review_output(capsys, monkeypatch)
+    assert "HELD" in out and "rewriting the queue" in out
+    assert "re-spawns it" not in out
 
 
 # --- schema: an old DB must keep working ----------------------------------------------

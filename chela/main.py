@@ -39,6 +39,7 @@ from chela import (
     orchestrator,
     rooms,
     scheduler,
+    workflow,
 )
 from chela.config import (
     SCHEDULER_POLL_INTERVAL,
@@ -1347,6 +1348,49 @@ def cmd_task_finished(args) -> None:
     print(f"Task {result['task_id']} awaiting review (pr_url={result.get('pr_url') or 'unknown'})")
 
 
+def _rework_prospects(workflow_path: str | None) -> list[str]:
+    """Will anything ACTUALLY re-spawn this run? Say what is true, not what is intended.
+
+    The first cut of this command printed "The dispatcher re-spawns it in its own worktree
+    on the next tick." unconditionally — a promise it never checked. Three ordinary
+    conditions make it a lie, and in all three the run parks in ``changes_requested``
+    indefinitely: the workflow is not one the daemon ticks, its WORKFLOW.md does not parse,
+    or the queue is on hold. The reviewer is the person who can fix all three, and this is
+    the moment they are looking.
+    """
+    lines: list[str] = []
+    wf_path = Path(workflow_path).resolve() if workflow_path else None
+
+    if wf_path is None or wf_path not in DISPATCH_WORKFLOWS:
+        shown = str(wf_path or "?")
+        lines.append(
+            f"⚠ {shown} is NOT in CHELA_DISPATCH_WORKFLOWS — the daemon ticks nothing for "
+            "it, so NOTHING will re-spawn this run. Add it (and restart the daemon), or "
+            f"turn the loop by hand: chela dispatch {shown}"
+        )
+    else:
+        status = workflow.load_workflow_cached(wf_path)
+        if status.error:
+            lines.append(
+                f"⚠ {wf_path} does not parse ({status.error}) — dispatch is BLOCKED for it "
+                "and the re-spawn waits until the file is valid again."
+            )
+
+    held = hold.active()
+    if held:
+        lines.append(
+            f"⚠ the queue is HELD ({hold.human_duration(held.age())} ago"
+            f"{', ' + held.by if held.by else ''}"
+            f"{': ' + held.reason if held.reason else ''}) — a hold pauses CLAIMS, and a "
+            "rework re-spawn is a claim. It waits until the hold is released "
+            "(chela hold --release)."
+        )
+
+    if not lines:
+        lines.append("The dispatcher re-spawns it in its own worktree on the next tick.")
+    return lines
+
+
 def cmd_review(args) -> None:
     """Record the verdict on a PR under review — the carrier of the rework loop.
 
@@ -1384,7 +1428,8 @@ def cmd_review(args) -> None:
     if args.request_changes:
         print(f"Run {task_id} ({result.get('branch_name') or '?'}) → changes_requested "
               f"(verdict {result['round']}, rework {result['rework_count']}/{result['max_reworks']})")
-        print("  The dispatcher re-spawns it in its own worktree on the next tick.")
+        for line in _rework_prospects(result.get("workflow_path")):
+            print(f"  {line}")
     else:
         print(f"Run {task_id} ({result.get('branch_name') or '?'}) approved — still "
               f"{status}; merge is yours to make.")

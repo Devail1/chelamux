@@ -580,6 +580,27 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"📥 {label} NEEDS A HUMAN — {payload['rework_count']} rework(s) and the PR "
                 f"still fails review ({len(reviews)} verdict(s) on the row) — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif status == "changes_requested":
+            # ⛔ NOT a silent state (CMX-68 review). A run sits here waiting for a dispatcher
+            # tick to re-spawn it — and if the queue is HELD, the WORKFLOW.md does not parse,
+            # or the workflow was dropped from CHELA_DISPATCH_WORKFLOWS, that tick never
+            # comes and the run parks here forever. Announcing the edge is what makes the
+            # silence audible: the verdict landed, and the loop is supposed to turn. If it
+            # doesn't, `chela doctor` says so (runtime_truth._parked_report) — but the
+            # orchestrator hears about the state at all only because of this line.
+            payload["rework_count"] = run.get("rework_count") or 0
+            payload["reviews"] = _reviews(run)
+            payload["last_error"] = run.get("last_error")
+            payload["worktree_path"] = run.get("worktree_path")
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            nxt = (f"rework {payload['rework_count'] + 1}" if not run.get("last_error")
+                   else f"RETRY after: {str(run['last_error'])[:60]}")
+            out.append(_event(
+                "run_changes_requested",
+                f"📥 {label} sent back for rework ({nxt}) — the next dispatcher tick "
+                f"re-spawns it in its own worktree — {ref}"
+                f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "failed":
             err = (run.get("last_error") or "").splitlines()
             payload["last_error"] = run.get("last_error")
@@ -626,7 +647,7 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
     that already happened and are left alone.
     """
     kind = event.get("kind")
-    if kind not in ("run_review", "run_failed", "run_needs_human"):
+    if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested"):
         return None
     task_id = (event.get("payload") or {}).get("task_id")
     if not task_id:
@@ -652,6 +673,15 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
             return f"run is now {status!r}, not needs_human"
         if pr_state in ("merged", "closed"):
             return f"PR is {pr_state}"      # a human merged it anyway — nothing to escalate
+    elif kind == "run_changes_requested":
+        # This one rots FAST and by design: the dispatcher re-spawns a sent-back run on the
+        # very next tick, so an event that waited for an idle orchestrator usually finds the
+        # run already `running` again. That is the loop working, and saying so would be
+        # noise. It is delivered only while the run is still waiting.
+        if status != "changes_requested":
+            return f"run is now {status!r}, not changes_requested"
+        if pr_state in ("merged", "closed"):
+            return f"PR is {pr_state}"      # merged despite the verdict — the loop is moot
     return None
 
 

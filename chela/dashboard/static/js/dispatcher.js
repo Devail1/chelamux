@@ -1,6 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, api, attrEsc, escHtml, shortTime, showModal } from './util.js';
 import { _launcherData } from './launcher.js';
+import { runStatusBadgeClass } from './runstate.js';
 import { pollWork, postWorkDelete } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -58,12 +59,12 @@ async function doInitRepo() {
     pollWork();
 }
 
+// The class table lives in runstate.js — pure, and therefore TESTED (node --test). This
+// used to be an inline ternary chain, which is how CMX-68's two new run states shipped
+// without badges: `needs_human`, the one state that means a human must look at this run,
+// rendered in the same grey as an unknown status.
 function _runStatusBadge(status) {
-    const cls = (status === 'running' || status === 'claimed') ? 'badge-on'
-              : (status === 'failed') ? 'badge-off'
-              : (status === 'awaiting_review') ? 'badge-awaiting'
-              : 'badge-priority-low';
-    return `<span class="badge ${cls}">${escHtml(status || '?')}</span>`;
+    return `<span class="badge ${runStatusBadgeClass(status)}">${escHtml(status || '?')}</span>`;
 }
 
 function _runPrCell(prUrl) {

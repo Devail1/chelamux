@@ -60,6 +60,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -388,8 +389,33 @@ def _windows_report(claimed: dict[str, str], obs: Observation) -> list[Finding]:
 # tries. Rule (b): read back from the owner.
 
 
+# How long a run may sit in `changes_requested` before the doctor says so. A sent-back run
+# is normally re-spawned within ONE tick (60s); it legitimately waits longer only while every
+# concurrency slot is busy. An hour of waiting is either a very long queue or — the case this
+# exists for — a run nothing will EVER come back for: its workflow was dropped from
+# CHELA_DISPATCH_WORKFLOWS, or a hold was taken and forgotten. Neither says anything today.
+PARKED_STALL_SECONDS = 3600
+
+
+def _seconds_since(stamp: str | None) -> float | None:
+    if not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds()
+
+
 def _parked_runs() -> dict[str, dict]:
-    """``{task_id: {branch, worktree, repo}}`` for every run parked in the review loop."""
+    """Every run parked in the review loop — the branch it claims, and how long it has sat.
+
+    ``{task_id: {branch, worktree, repo, workflow, status, waiting}}``. ``waiting`` is the
+    age of the last verdict (``review_history[-1].at`` — the moment the reviewer sent it
+    back), or None when it cannot be read; it is what turns "parked" into "STUCK".
+    """
     from chela import dispatcher                    # lazy: doctor must import cheaply
 
     if not Path(dispatcher.DB_PATH).exists():
@@ -401,10 +427,15 @@ def _parked_runs() -> dict[str, dict]:
         branch, wf_path = run.get("branch_name"), run.get("workflow_path")
         if not branch or not wf_path:
             continue                               # nothing claimed — nothing to check
+        reviews = dispatcher.reviews_of(run)
+        sent_back_at = reviews[-1].get("at") if reviews else run.get("ended_at")
         parked[str(run["task_id"])] = {
             "branch": str(branch),
             "worktree": str(run.get("worktree_path") or ""),
             "repo": str(Path(wf_path).parent),
+            "workflow": str(wf_path),
+            "status": str(run.get("status")),
+            "waiting": _seconds_since(sent_back_at),
         }
     return parked
 
@@ -439,6 +470,49 @@ def _parked_read() -> Observation:
     return observed(by_repo)
 
 
+def _stalled_report(parked: dict[str, dict]) -> list[Finding]:
+    """Is anything ever going to COME for these runs? (The other half of "parked".)
+
+    A `changes_requested` run is a promise: the next tick re-spawns it. Three ordinary
+    conditions break that promise silently — the workflow is not in the daemon's
+    CHELA_DISPATCH_WORKFLOWS, the queue is on hold, or the run has simply been sitting far
+    longer than a tick — and in all three the run waits forever with a verdict against it
+    and no agent coming. `changes_requested` emits no event of its own once it is parked
+    (only on the edge), so without this the silence is total.
+    """
+    waiting = {t: c for t, c in parked.items() if c.get("status") == "changes_requested"}
+    if not waiting:
+        return []
+    dispatched = {str(p) for p in config.DISPATCH_WORKFLOWS}
+    out: list[Finding] = []
+    for task, claim in sorted(waiting.items()):
+        wf_path = claim.get("workflow") or ""
+        if str(Path(wf_path).resolve()) not in dispatched:
+            out.append(Finding(
+                ERROR,
+                f"run {task} is sent back for rework, but NOTHING dispatches {wf_path}",
+                "The reviewer failed its PR and the run is waiting to be re-spawned — and "
+                "this workflow is not in CHELA_DISPATCH_WORKFLOWS, so no tick will ever "
+                "come for it. It will sit in `changes_requested` forever, holding its "
+                "branch, its worktree and an open PR. Add the workflow to the daemon's env "
+                f"and restart it, or turn the loop by hand: chela dispatch {wf_path}",
+            ))
+            continue
+        age = claim.get("waiting")
+        if age is not None and age >= PARKED_STALL_SECONDS:
+            out.append(Finding(
+                WARN,
+                f"run {task} has been sent back for rework for {int(age // 3600)}h and "
+                "still has not been re-spawned",
+                "Legitimate only while every concurrency slot is busy — a rework normally "
+                "restarts on the NEXT tick. Otherwise the daemon is not ticking this "
+                "workflow (check it is running), its WORKFLOW.md does not parse (dispatch "
+                "is blocked until it does), or a hold was taken and forgotten (`chela hold "
+                "--release`): a hold pauses claims, and a re-spawn is a claim.",
+            ))
+    return out
+
+
 def _parked_report(parked: dict[str, dict], obs: Observation) -> list[Finding]:
     by_repo: dict[str, set[str]] = obs.value or {}
     if not parked:
@@ -447,10 +521,7 @@ def _parked_report(parked: dict[str, dict], obs: Observation) -> list[Finding]:
         (task, claim) for task, claim in sorted(parked.items())
         if claim["branch"] not in by_repo.get(claim["repo"], set())
     ]
-    if not gone:
-        return [Finding(OK, f"{len(parked)} run(s) parked in review: every branch git has "
-                            "to hand back still exists")]
-    return [
+    out = [
         Finding(
             ERROR,
             f"run {task} is parked on branch {claim['branch']!r} — git has no such branch",
@@ -463,6 +534,11 @@ def _parked_report(parked: dict[str, dict], obs: Observation) -> list[Finding]:
         )
         for task, claim in gone
     ]
+    if not gone:
+        out.append(Finding(OK, f"{len(parked)} run(s) parked in review: every branch git "
+                               "has to hand back still exists"))
+    # The branch existing is not enough — something has to COME for it.
+    return out + _stalled_report(parked)
 
 
 # --- fact: the port the dashboard actually BOUND -------------------------------------
