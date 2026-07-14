@@ -95,7 +95,13 @@ before(async () => {
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        globalThis[k] = dom.window[k];
+        // defineProperty, NOT assignment: from node 21 `globalThis.navigator` is an
+        // accessor with only a getter, so `globalThis.navigator = x` THROWS. Plain
+        // assignment passed on node 20 (a dev laptop) and failed on the CI runner —
+        // the local runtime is not the one that governs.
+        Object.defineProperty(globalThis, k, {
+            value: dom.window[k], writable: true, configurable: true,
+        });
     }
     globalThis.GridStack = fakeGridStack();
     globalThis.fetch = fakeFetch;
