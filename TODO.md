@@ -61,7 +61,7 @@
   3. **THE SUITE MUST BE GREEN ON THIS MACHINE, not just in CI.** ⚖️ The judge's **first verdict was `cannot_verify`**: *"the suite is NOT GREEN before any mutation … a suite that is already red measures nothing."* It refused to block **and** refused to clear — correct — **but the judge is INERT until `uv run pytest -q` is green locally.** ⛔ **Do NOT "fix" this by skipping or xfailing the test.** That re-arms the landmine and lies to the judge.
   4. **Guard it:** a test asserting a daemon under a non-default `CHELA_DIR` **cannot** touch the default workspace. ⚠️ **Corrupt it and watch it go RED — the judge will do exactly that to you.**
 
-- [ ] **🚨🔓 THE DECISIONS INBOX CAN EXECUTE AGENT-AUTHORED TEXT AS A SHELL COMMAND IN THE ORCHESTRATOR'S SESSION.** ⛔ **A LIVE INJECTION PATH INTO THE ONE SESSION THAT HOLDS MERGE AUTHORITY AND AN UNSANDBOXED SHELL. Observed 2026-07-15, by accident.**
+- [x] **🚨🔓 THE DECISIONS INBOX CAN EXECUTE AGENT-AUTHORED TEXT AS A SHELL COMMAND IN THE ORCHESTRATOR'S SESSION.** ⛔ **A LIVE INJECTION PATH INTO THE ONE SESSION THAT HOLDS MERGE AUTHORITY AND AN UNSANDBOXED SHELL. Observed 2026-07-15, by accident.**
 
   **WHAT HAPPENED.** The orchestrator's pane was in **`!` bash-input mode** (Claude Code's run-a-shell-command prompt). The inbox pasted a notification into it, and the pane **RAN IT AS A SHELL COMMAND**:
   ```
