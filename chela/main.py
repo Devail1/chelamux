@@ -42,6 +42,7 @@ from chela import (
     workflow,
 )
 from chela.config import (
+    BIND_DISPATCHED,
     SCHEDULER_POLL_INTERVAL,
     DISPATCH_WORKFLOWS,
     NOTIFY_INTERVAL,
@@ -1051,14 +1052,29 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
     monitor and the inbound PTB app; the first tick fires immediately so a restart
     reconciles before we advertise. Idempotent, so a missed/duplicated tick is
     harmless.
+
+    A DISPATCHER-spawned agent is the exception (CMX-73): it is identified from the
+    ``runs`` table (:func:`~chela.telegram.reconcile.dispatched_window_ids` — the row
+    owns the wid; the window's name is only a label) and, unless
+    ``CHELA_TELEGRAM_BIND_DISPATCHED`` says otherwise, gets a topic **only once it
+    blocks on a human** (:func:`~chela.telegram.hookgate.pending_gate`), so a fleet of
+    short-lived workers can't turn the forum into a changelog.
     """
     from chela.discovery import get_window_cwd_by_id
-    from chela.telegram import live_agent_windows, reconcile_bindings
+    from chela.telegram import dispatched_window_ids, live_agent_windows, reconcile_bindings
+    from chela.telegram.hookgate import pending_gate
 
     while not stop.is_set():
         try:
             live, agents = live_agent_windows()
-            if reconcile_bindings(registry, live, agents, topic_api, cwd_for=get_window_cwd_by_id):
+            dispatched = set() if BIND_DISPATCHED else dispatched_window_ids()
+            if reconcile_bindings(
+                registry, live, agents, topic_api,
+                cwd_for=get_window_cwd_by_id,
+                dispatched=dispatched,
+                gate_for=pending_gate,
+                bind_dispatched=BIND_DISPATCHED,
+            ):
                 registry.save()
                 log.info("auto-topics: now bridging %s", ", ".join(registry.windows()) or "(none)")
         except Exception:

@@ -56,6 +56,7 @@ from chela.telegram.parser import Message, parse_entries, parse_line
 from chela.telegram.reconcile import (
     TopicClosedHandler,
     TopicManager,
+    dispatched_window_ids,
     live_agent_windows,
     reconcile_bindings,
     topic_name_for,
@@ -95,6 +96,7 @@ __all__ = [
     "TopicManager",
     "TopicClosedHandler",
     "reconcile_bindings",
+    "dispatched_window_ids",
     "live_agent_windows",
     "topic_name_for",
 ]

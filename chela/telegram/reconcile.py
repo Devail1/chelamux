@@ -191,10 +191,13 @@ def reconcile_bindings(
     agent_ids,
     topic_api,
     cwd_for: Callable[[str], str | None] | None = None,
+    dispatched: set[str] | frozenset[str] | None = None,
+    gate_for: Callable[[str], object | None] | None = None,
+    bind_dispatched: bool = False,
 ) -> bool:
     """Diff the registry against the live fleet; provision + reap. Return changed.
 
-    Pure (no live tmux/Telegram of its own) so it unit-tests against stubs:
+    Pure (no live tmux/Telegram/sqlite of its own) so it unit-tests against stubs:
 
     * ``registry``    — a :class:`~chela.telegram.bindings.BindingRegistry`.
     * ``live_windows``— ``{window_id: display_name}`` of *every* live window.
@@ -206,6 +209,13 @@ def reconcile_bindings(
       :func:`chela.discovery.get_window_cwd_by_id`); injected so this stays pure.
       When given, a provisioned topic is named after the agent's *project* (its cwd
       basename) via :func:`topic_name_for` instead of the raw tmux window name.
+    * ``dispatched``  — the window ids the DISPATCHER owns, read off the ``runs``
+      table (:func:`dispatched_window_ids`), not guessed from a window name.
+    * ``gate_for``    — optional ``window_id -> pending gate | None`` probe (in
+      production :func:`chela.telegram.hookgate.pending_gate`); what makes a
+      dispatched agent's binding LAZY (below).
+    * ``bind_dispatched`` — ``True`` restores the old behaviour: a dispatched agent
+      gets a topic like any other (``CHELA_TELEGRAM_BIND_DISPATCHED``).
 
     **Provision** every agent window with no binding: create a topic named after
     the agent's project (:func:`topic_name_for`, falling back to the window name)
@@ -215,14 +225,51 @@ def reconcile_bindings(
     unbound to retry next tick. **Reap** every *bound* window that is no longer
     live: ``close_topic`` its thread, then ``unbind``. Returns ``True`` if any
     binding changed, so the caller knows to ``registry.save()``.
+
+    **A dispatched agent is bound LAZILY — only once it BLOCKS (the default).** The
+    forum is a human's inbox, and a fleet of short-lived worktree workers each
+    creating a topic on spawn and archiving it on exit turns that inbox into a
+    changelog. So a window the dispatcher owns gets **no topic while it is working**,
+    and one **the moment it has a pending gate** — a permission prompt or an
+    ``AskUserQuestion`` that wants an answer (``gate_for``, i.e.
+    :func:`~chela.telegram.hookgate.pending_gate`, the same signal
+    :class:`~chela.telegram.gatewatch.PermissionGateWatcher` polls). The result is the
+    feature, not a compromise: **the forum shows only agents that want a human**, and
+    the phone-gate surface — an agent blocking reaches Liav with zero keypresses — is
+    fully preserved for exactly the agents most likely to need it.
+
+    ⚠️ **The lazy binding is dropped when the WINDOW exits, not when the gate closes.**
+    Un-binding on gate-resolve would archive the topic mid-conversation and then
+    ``createForumTopic`` a *brand-new* one on the agent's next gate — topic churn per
+    gate, which is the very disease this fixes. Once an agent has asked for a human it
+    keeps its one topic (so the human can answer, follow up, and read the reply) until
+    it dies, and the normal reap archives it then.
+
+    ⛔ A binding is a **VIEW**, not the agent's identity: an unbound dispatched window
+    is still on the Wall, still in the decisions inbox, still in the event log.
     """
     changed = False
+    dispatched = set(dispatched or ())
+
+    def _wants_topic(wid: str) -> bool:
+        """A dispatched agent earns a topic only when it is BLOCKED on a human."""
+        if bind_dispatched or wid not in dispatched:
+            return True
+        if gate_for is None:
+            return False
+        try:
+            return gate_for(wid) is not None
+        except Exception:  # noqa: BLE001 — a gate probe must never wedge the loop
+            log.debug("auto-topics: gate probe failed for %s", wid, exc_info=True)
+            return False
 
     # Provision: an agent window with no binding gets a fresh topic. Idempotent —
     # a window that already has a binding (by id) is skipped, so no double-create.
     for wid in agent_ids:
         if registry.thread_for_window(wid) is not None:
             continue
+        if not _wants_topic(wid):
+            continue  # dispatcher-owned and working away quietly — not the forum's problem
         window_name = live_windows.get(wid, wid)
         cwd = cwd_for(wid) if cwd_for is not None else None
         name = topic_name_for(cwd, window_name)
@@ -267,6 +314,42 @@ def reconcile_bindings(
         changed = True
 
     return changed
+
+
+def dispatched_window_ids(runs: list[dict] | None = None) -> set[str]:
+    """The windows the DISPATCHER currently owns — read off the ``runs`` table.
+
+    The run row **owns** the ``window_id`` of every window the dispatcher spawned
+    (recorded at spawn — the only lossless moment; see
+    :func:`chela.inbox.run_wid`). That row is the *fact*; the window's name is only a
+    *label*. ⛔ So this never regexes ``cmx-\\d+`` out of a window name: a human can
+    rename a window, and a human window can be *called* anything.
+
+    Scoped to the runs that are **in flight** (:data:`chela.dispatcher.ACTIVE_STATUSES`)
+    on purpose — those are the only rows whose window is supposed to exist *now*. tmux
+    hands out ``@N`` ids afresh after a server restart, so a finished run's recorded id
+    can be a *human's* window in this boot; honouring a stale row would silently strip
+    the orchestrator of its topic. An id that names no live window is harmless (the
+    caller only ever intersects it with the live fleet).
+
+    ``runs`` is injectable so this unit-tests with no sqlite; in production it is
+    :func:`chela.dispatcher.list_runs`. A failure to read the DB returns an empty set —
+    i.e. "nothing is dispatched", the pre-CMX-73 behaviour — rather than wedging the
+    reconcile loop over a locked database.
+    """
+    from chela import dispatcher
+
+    try:
+        rows = dispatcher.list_runs() if runs is None else runs
+    except Exception:  # noqa: BLE001 — a DB hiccup must never stop the bridge reconciling
+        log.debug("auto-topics: could not read runs for dispatched windows", exc_info=True)
+        return set()
+    return {
+        wid
+        for row in rows
+        if (row.get("status") in dispatcher.ACTIVE_STATUSES)
+        and (wid := str(row.get("window_id") or "").strip())
+    }
 
 
 def live_agent_windows() -> tuple[dict[str, str], set[str]]:

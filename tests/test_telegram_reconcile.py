@@ -21,6 +21,7 @@ from chela.telegram.bindings import BindingRegistry
 from chela.telegram.reconcile import (
     TopicClosedHandler,
     TopicManager,
+    dispatched_window_ids,
     reconcile_bindings,
     topic_name_for,
 )
@@ -361,3 +362,116 @@ def test_reconcile_without_cwd_for_uses_window_name():
     api = _StubTopicApi(threads=["42"])
     reconcile_bindings(reg, {"@3": "coder"}, {"@3"}, api)
     assert api.created == ["coder"]
+
+
+# --------------------------------------------------------------------------
+# Dispatcher-spawned agents (CMX-73) — no topic while working, one when BLOCKED
+# --------------------------------------------------------------------------
+
+def test_dispatched_agent_gets_no_topic_while_working():
+    # The whole point: a fleet of short-lived cmx-N workers must not churn topics.
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42"])
+    changed = reconcile_bindings(
+        reg, {"@9": "cmx-73"}, {"@9"}, api,
+        dispatched={"@9"}, gate_for=lambda wid: None,
+    )
+    assert changed is False
+    assert api.created == []
+    assert reg.thread_for_window("@9") is None
+
+
+def test_dispatched_agent_gets_a_topic_the_moment_it_blocks():
+    # The trade-off this must not eat: a BLOCKED agent still reaches the phone.
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42"])
+    gates = {}
+    changed = reconcile_bindings(
+        reg, {"@9": "cmx-73"}, {"@9"}, api,
+        dispatched={"@9"}, gate_for=gates.get,
+    )
+    assert changed is False and api.created == []   # working away — no topic
+
+    gates["@9"] = object()                          # ...now it wants a human
+    changed = reconcile_bindings(
+        reg, {"@9": "cmx-73"}, {"@9"}, api,
+        dispatched={"@9"}, gate_for=gates.get,
+    )
+    assert changed is True
+    assert api.created == ["cmx-73"]
+    assert reg.thread_for_window("@9") == "42"
+
+
+def test_dispatched_binding_survives_the_gate_resolving():
+    # Unbinding on gate-resolve would archive the topic mid-conversation and create a
+    # BRAND-NEW one on the next gate — topic churn per gate, the very disease. The
+    # binding is dropped by the normal reap, when the window dies.
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42", "43"])
+    gates = {"@9": object()}
+    reconcile_bindings(reg, {"@9": "cmx-73"}, {"@9"}, api,
+                       dispatched={"@9"}, gate_for=gates.get)
+    gates.clear()                                   # the human answered
+    changed = reconcile_bindings(reg, {"@9": "cmx-73"}, {"@9"}, api,
+                                 dispatched={"@9"}, gate_for=gates.get)
+    assert changed is False
+    assert api.closed == []
+    assert reg.thread_for_window("@9") == "42"
+
+    # ...and when the window exits, the topic is archived exactly once.
+    changed = reconcile_bindings(reg, {}, set(), api, dispatched=set(), gate_for=gates.get)
+    assert changed is True
+    assert api.closed == ["42"]
+    assert reg.thread_for_window("@9") is None
+
+
+def test_human_windows_are_unaffected_by_the_dispatched_filter():
+    # The orchestrator / a project session keeps its topic exactly as before.
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42"])
+    changed = reconcile_bindings(
+        reg, {"@6": "orchestrator", "@9": "cmx-73"}, {"@6", "@9"}, api,
+        dispatched={"@9"}, gate_for=lambda wid: None,
+    )
+    assert changed is True
+    assert api.created == ["orchestrator"]
+    assert reg.thread_for_window("@6") == "42"
+    assert reg.thread_for_window("@9") is None
+
+
+def test_bind_dispatched_true_restores_bind_everything():
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42"])
+    changed = reconcile_bindings(
+        reg, {"@9": "cmx-73"}, {"@9"}, api,
+        dispatched={"@9"}, gate_for=lambda wid: None, bind_dispatched=True,
+    )
+    assert changed is True
+    assert api.created == ["cmx-73"]
+
+
+def test_a_failing_gate_probe_leaves_the_window_unbound():
+    # A gate probe that raises must never wedge the reconcile loop.
+    def boom(wid):
+        raise RuntimeError("event log unreadable")
+
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42"])
+    changed = reconcile_bindings(
+        reg, {"@9": "cmx-73"}, {"@9"}, api, dispatched={"@9"}, gate_for=boom,
+    )
+    assert changed is False
+    assert api.created == []
+
+
+def test_dispatched_window_ids_reads_the_run_row_not_the_name():
+    # The run row OWNS the wid. A live human window named like a worker is NOT
+    # dispatched, and a dispatched worker renamed by a human still is.
+    runs = [
+        {"status": "running", "window_id": "@9", "window_name": "cmx-73"},
+        {"status": "claimed", "window_id": "@10", "window_name": "renamed-by-a-human"},
+        {"status": "done", "window_id": "@6", "window_name": "cmx-12"},      # stale boot
+        {"status": "awaiting_review", "window_id": "@7", "window_name": "cmx-13"},
+        {"status": "running", "window_id": None, "window_name": "cmx-14"},   # pre-CMX-69 row
+    ]
+    assert dispatched_window_ids(runs) == {"@9", "@10"}
