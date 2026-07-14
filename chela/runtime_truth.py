@@ -541,6 +541,101 @@ def _parked_report(parked: dict[str, dict], obs: Observation) -> list[Finding]:
     return out + _stalled_report(parked)
 
 
+# --- fact: the CHECKS on a PR that is waiting to be merged ----------------------------
+#
+# Rule (b), and the most expensive instance of it so far. On 2026-07-14 chela did not know a
+# CI run existed: `_pr_state` read `state,mergeable` — and `mergeable` is GitHub's
+# MERGE-CONFLICT field, not its checks. PR #80 was red, was reviewed, was merged, and `dev`
+# was broken until a hotfix. The agent had said "tests pass" (true, on ITS machine); nobody
+# asked the system that owns the answer. This fact asks it.
+
+
+def _reviewed_prs() -> dict[str, dict]:
+    """Every run parked in ``awaiting_review`` with a live PR — and what OUR row says its
+    checks are (``pr_checks``, the cache the tick refreshes and the merge buttons read)."""
+    from chela import dispatcher                    # lazy: doctor must import cheaply
+
+    if not Path(dispatcher.DB_PATH).exists():
+        return {}
+    out: dict[str, dict] = {}
+    for run in dispatcher.list_runs():
+        if run.get("status") != "awaiting_review":
+            continue
+        pr, wf_path = run.get("pr_url"), run.get("workflow_path")
+        if not pr or not wf_path or run.get("pr_state") not in (None, "open"):
+            continue                               # nothing to ask about, or already shipped
+        out[str(run["task_id"])] = {
+            "pr": str(pr),
+            "repo": str(Path(wf_path).parent),
+            "checks": str(run.get("pr_checks") or "unread"),
+        }
+    return out
+
+
+def _gh_pr_checks(pr_url: str, repo: str):
+    """Ask GitHub. A seam, so the suite can hand this an ANSWER instead of a network."""
+    from chela import dispatcher
+
+    return dispatcher._read_pr_checks(pr_url, repo)
+
+
+def _checks_read() -> Observation:
+    from chela import dispatcher
+
+    parked = _reviewed_prs()
+    if not parked:
+        return observed({})                        # nothing under review — nothing to ask
+    live: dict[str, str] = {}
+    for task, claim in sorted(parked.items()):
+        ci = _gh_pr_checks(claim["pr"], claim["repo"])
+        if ci.state == dispatcher.CI_UNKNOWN:
+            return cannot_verify(
+                f"GitHub could not be asked about the checks on {claim['pr']} ({ci.detail}). "
+                "⛔ That is NOT a pass: an unread check state is exactly what let a red PR "
+                "merge and break the base branch, and chela will refuse to merge this one "
+                "until the answer can be read.")
+        live[task] = ci.state
+    return observed(live)
+
+
+def _checks_report(declared: dict[str, dict], obs: Observation) -> list[Finding]:
+    from chela import dispatcher
+
+    live: dict[str, str] = obs.value or {}
+    if not declared:
+        return []
+    out: list[Finding] = []
+    for task, claim in sorted(declared.items()):
+        state = live.get(task)
+        if state is None:
+            continue
+        if state == dispatcher.CI_FAILING:
+            out.append(Finding(
+                ERROR,
+                f"run {task} is waiting to be merged and its CI is RED",
+                "GitHub says this PR's checks are failing, and the run is sitting in "
+                "`awaiting_review` — which is where a human (or the Merge button) picks it "
+                "up. The dispatcher sends a red PR back to its agent on the next tick, so "
+                "this normally clears itself within one poll. If it does NOT: nothing is "
+                "ticking this workflow, and the PR is one click away from breaking the base "
+                f"branch. Look: {claim['pr']}",
+            ))
+        elif claim["checks"] != state:
+            out.append(Finding(
+                WARN,
+                f"run {task}: chela's copy of the check state is stale "
+                f"({claim['checks']!r}; GitHub says {state!r})",
+                "Harmless in itself — the tick refreshes it — but the Kanban's Merge button "
+                "and the batch merge read that copy. A stale copy that says `passing` is the "
+                "shape of the original bug. If it does not correct itself on the next tick, "
+                "the dispatcher is not polling this PR.",
+            ))
+    if not out:
+        out.append(Finding(OK, f"{len(declared)} PR(s) awaiting review: GitHub's checks "
+                               "agree with what chela recorded, and none are red"))
+    return out
+
+
 # --- fact: the port the dashboard actually BOUND -------------------------------------
 
 def _port_read() -> Observation:
@@ -1048,6 +1143,16 @@ def facts() -> list[Fact]:
             declare=_parked_runs,
             read_back=_parked_read,
             report=_parked_report,
+        ),
+        Fact(
+            name="pr.checks",
+            declared_by="the run row's pr_checks — chela's cache of GitHub's rollup, which "
+                        "is what the Merge button and the batch merge actually gate on",
+            owned_by="GitHub — it runs the checks, and whether a PR can ship is not chela's "
+                     "to say (nor the agent's: 'my tests passed' is not the same claim)",
+            declare=_reviewed_prs,
+            read_back=_checks_read,
+            report=_checks_report,
         ),
         Fact(
             name="tests.js_suites",

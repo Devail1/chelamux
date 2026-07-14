@@ -2319,6 +2319,10 @@ def api_dispatcher():
         for r in (*active, *awaiting, *recent):
             r["project_key"] = project_key
             r.setdefault("pr_mergeable", None)
+            # The CI check state (CMX-69) rides along the same way. A pre-migration row —
+            # or one the tick has not asked GitHub about yet — carries None, and the
+            # frontend renders that as "ci ?", never as green: not-yet-read is not a pass.
+            r.setdefault("pr_checks", None)
         entry["active_runs"] = active
         entry["awaiting_review_runs"] = awaiting
         entry["recent_runs"] = recent
@@ -2715,6 +2719,35 @@ def _merge_one(row: dict) -> dict:
     if not repo_dir or not repo_dir.is_dir():
         return {"ok": False, "error": f"workflow repo dir not found: {wf_path}", "status": 400}
 
+    # ⛔ THE GATE: a PR whose CI is RED does not merge from this dashboard. On 2026-07-14 one
+    # did — PR #80 was merged with its checks failing, and the base branch was broken until a
+    # hotfix — because nothing in chela knew a CI run existed. The state is read back from
+    # GITHUB right here, at the moment of merging, and not from the run row: the row is a
+    # 60s-old cache, and this is the one call where a stale answer is the whole bug.
+    #
+    # UNKNOWN is refused too. A check state that could not be read is never a pass — that is
+    # the doctor rule, and treating it as green would re-open the exact hole this closes.
+    # PENDING is refused for the same reason it is not a `changes_requested`: the checks have
+    # not settled, so nobody yet knows what merging this means. NONE (a repo with no CI at
+    # all) merges, and says so in the log — no checks is not the same as failing checks.
+    ci = dispatcher._read_pr_checks(pr_url, str(repo_dir))
+    if ci.state == dispatcher.CI_FAILING:
+        return {"ok": False, "status": 409,
+                "error": "CI is RED on this PR — refusing to merge it. Failing: "
+                         f"{', '.join(ci.failing) or 'unnamed check(s)'}. The dispatcher "
+                         "sends it back to its agent on the next tick."}
+    if ci.state == dispatcher.CI_PENDING:
+        return {"ok": False, "status": 409,
+                "error": "the checks on this PR have not settled yet — refusing to merge "
+                         "until GitHub has finished saying whether it passes."}
+    if ci.state == dispatcher.CI_UNKNOWN:
+        return {"ok": False, "status": 409,
+                "error": f"could not read this PR's checks ({ci.detail}) — and a check state "
+                         "nobody could read is NOT a pass. Refusing to merge."}
+    if ci.state == dispatcher.CI_NONE:
+        log.warning("merge: PR %s has NO checks at all — merging it, but no checks is not "
+                    "the same as passing checks", pr_url)
+
     # Pre-merge: if GitHub reports CONFLICTING, attempt a strictly-guarded
     # auto-resolve of a TODO.md-ONLY bookkeeping conflict in the run's
     # worktree. Anything beyond TODO.md (or an ambiguous strike) aborts to
@@ -2806,10 +2839,11 @@ def api_dispatcher_merge_all():
     Optional ``{workflow_path}`` filter restricts to one workflow — the Kanban
     passes the active filter unless it's "all". A run is eligible only when
     ``status == 'awaiting_review'`` AND ``pr_state in ('open', None)`` AND
-    ``pr_mergeable == 'MERGEABLE'``; anything CONFLICTING / UNKNOWN / non-open
-    lands under ``skipped`` and is never merged. Each eligible run goes through
-    the shared ``_merge_one`` helper, so each merge gets the same cleanup as the
-    single-card button.
+    ``pr_mergeable == 'MERGEABLE'`` AND its checks are green (or the repo has no
+    CI at all); anything CONFLICTING / UNKNOWN / non-open, and anything whose CI
+    is red, pending or unread, lands under ``skipped`` and is never merged. Each
+    eligible run goes through the shared ``_merge_one`` helper, so each merge
+    gets the same cleanup — and the same live CI gate — as the single-card button.
 
     Returns ``{ok, merged: [task_id...], skipped: [{task_id, reason}],
     failed: [{task_id, error}]}``.
@@ -2838,6 +2872,17 @@ def api_dispatcher_merge_all():
             continue
         if row.get("pr_mergeable") != "MERGEABLE":
             skipped.append({"task_id": task_id, "reason": f"mergeable={row.get('pr_mergeable')}"})
+            continue
+        # Cheap pre-filter on the run row's cached check state, so a red PR is SKIPPED
+        # (reported, batch continues) instead of counted as a failure. _merge_one re-reads
+        # the checks from GitHub anyway and is the actual gate — this only keeps the batch's
+        # own report honest. ⛔ Anything that is not a green cache is skipped here, including
+        # a check state nobody has read yet: a batch merge must never be the thing that finds
+        # out what CI thought. A repo with NO CI at all (`none`) is not red and still merges
+        # — no checks is not the same as failing checks — and _merge_one logs that it did.
+        checks = row.get("pr_checks")
+        if checks not in (dispatcher.CI_PASSING, dispatcher.CI_NONE):
+            skipped.append({"task_id": task_id, "reason": f"checks={checks or 'unread'}"})
             continue
         result = _merge_one(row)
         if result.get("ok"):
@@ -3051,6 +3096,7 @@ def _sse_runs_snapshot() -> dict:
                 "status": r.get("status"),
                 "pr_state": r.get("pr_state"),
                 "pr_mergeable": r.get("pr_mergeable"),
+                "pr_checks": r.get("pr_checks"),
                 "pr_url": r.get("pr_url"),
                 "label": _sse_run_label(r),
             }
