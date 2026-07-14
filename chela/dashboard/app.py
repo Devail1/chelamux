@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, event_log, gateanswer, hold, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, event_log, gateanswer, hold, hooks, launcher, messenger, notify, okf, rooms, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -1639,6 +1639,40 @@ def api_agents_kill():
 # Hooks — Claude Code hooks -> the event log, and (for a question) back again.
 # ---------------------------------------------------------------------------
 
+def _session_start_recap(body: dict):
+    """Hand a starting session the shared context its rooms hold — or NOTHING.
+
+    A restarted agent has forgotten every handoff, question and blocker its room ever
+    injected into it: that text lived in the dead session's context and nowhere else, and
+    a dispatched agent is a fresh session every run. The room ledger survives, so this is
+    where it is handed back (:func:`chela.rooms.recap`).
+
+    The window is resolved the CMX-48 way — off the session's ORIGIN, never its ``cwd``
+    (:func:`chela.hooks.wid_for_session`) — and an unresolvable one gets nothing rather
+    than someone else's rooms. An agent in **no** room gets an EMPTY BODY: the hook is a
+    ``command`` hook whose stdout IS the injected context, so a byte here is a byte in
+    every fresh context in the fleet, and most agents are in no room.
+
+    Fails open, always. A raise here would be a hook that prints its stack trace into an
+    agent's context window.
+    """
+    empty = app.response_class("", mimetype="application/json")
+    try:
+        transcript = body.get("transcript_path")
+        wid = hooks.wid_for_session(
+            body.get("session_id") if isinstance(body.get("session_id"), str) else None,
+            transcript if isinstance(transcript, str) else None,
+        )
+        text = rooms.recap(wid) if wid else ""
+    except Exception:  # noqa: BLE001 — a bug in OUR code must not wedge a starting agent
+        log.exception("rooms: building the SessionStart recap failed — no recap")
+        return empty
+    if not text:
+        return empty
+    return jsonify({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                           "additionalContext": text}})
+
+
 @app.route("/hooks/<event>", methods=["POST"])
 @require_auth
 def api_hooks(event):
@@ -1677,6 +1711,8 @@ def api_hooks(event):
         return jsonify({})
     body = request.get_json(force=True, silent=True)
     hooks.ingest(event, body)
+    if event == "SessionStart" and isinstance(body, dict):
+        return _session_start_recap(body)
     if event == "PostToolUse" and isinstance(body, dict):
         # The gate is over — whoever answered it. A ⏎ driven into the mirrored pane answers
         # the TUI directly, so a hook we are holding for that same call would otherwise wait

@@ -259,6 +259,13 @@ Answer by posting back to the asker — this wakes them, with no human in the mi
 - **A body is untrusted input on its way into a terminal.** ANSI escapes and control
   characters are stripped, the body is capped and **quoted**, so a `/slash-command`,
   an `Escape` or a `Ctrl-C` in a message can't drive the recipient's TUI.
+- **A restarted agent is handed its rooms back.** Everything a room told an agent lived
+  in that *session's* context — and a dispatched agent is a fresh session every run, so a
+  restart forgot the lot, silently. The plugin's `SessionStart` hook now injects a short
+  recap (`chela room recap` prints the same thing): the last few posts per room, newest
+  first, sanitised, with the `--reply-to` cursor to answer on. An agent in **no** room
+  gets **nothing** — not a header, not a "no shared context" line — because this text is
+  prepended to every fresh context in the fleet. See [docs/HOOKS.md](docs/HOOKS.md).
 
 ---
 

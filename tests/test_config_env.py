@@ -159,7 +159,12 @@ def test_an_explicit_port_still_renders(chela_dir):
     """`chela plugin --port N` keeps working — it just isn't the source of truth."""
     config.publish_dashboard_port(5005)
     spec = hooks.hooks_spec(port=6001)["hooks"]
-    assert spec["SessionStart"][0]["hooks"][0]["url"] == "http://127.0.0.1:6001/hooks/SessionStart"
+    assert spec["Stop"][0]["hooks"][0]["url"] == "http://127.0.0.1:6001/hooks/Stop"
+    # SessionStart is the one COMMAND hook (it never fires over http) — the port is baked
+    # into the curl it shells, and a manifest whose recap posts to a dead port is CMX-41
+    # again, one transport over.
+    assert ("http://127.0.0.1:6001/hooks/SessionStart"
+            in spec["SessionStart"][0]["hooks"][0]["command"])
 
     rendered = hooks.render_plugin(chela_dir / "plugin", port=6001)
     manifest = json.loads((rendered / "hooks" / "hooks.json").read_text())

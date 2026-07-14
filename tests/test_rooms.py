@@ -318,3 +318,74 @@ def test_cli_says_out_loud_when_a_delivery_is_parked(wired, capsys):
     assert _run_post(_cli(to=["@3"])) is None          # parked is not a failure…
     out = capsys.readouterr().out
     assert "PARKED" in out and "waiting" in out        # …but it is never silent
+
+
+# --- the SessionStart recap: a restarted agent forgot everything the room told it -----
+#
+# Everything a room ever said to an agent was injected into a SESSION's context, and a
+# dispatched agent is a fresh session every run. Restart it and the shared context is gone
+# — silently, because the ledger still has every post and the only reader who needed them
+# has forgotten they exist. The recap is that ledger, handed back at startup, and its whole
+# safety rests on being SHORT, SANITISED, and ABSENT for an agent that is in no room.
+
+def test_an_agent_in_a_room_gets_its_rooms_recapped(wired):
+    seq = _post("question")["seq"]
+    text = rooms.recap("@2")
+    assert f"#{seq} question from @1" in text          # the cursor it replies with
+    assert "does the parser own the retry?" in text
+    assert "→ YOU" in text                             # aimed at it, not merely near it
+    assert "@1 (asker)" in text                        # who else is on the wire
+
+
+def test_an_agent_in_NO_room_gets_NOTHING(wired):
+    """Not an empty header, not "no shared context" — NOTHING.
+
+    Most agents are in no room, and this text is prepended to a fresh context on every
+    start in the fleet: boilerplate in all of them for the benefit of none is a tax.
+    """
+    rooms.leave("wire", "@9")
+    assert rooms.recap("@9") == ""
+    assert rooms.recap("@404") == ""
+
+
+def test_the_recap_is_bounded(wired):
+    """It rides in EVERY agent's context, forever. An unbounded ledger is a tax on the fleet."""
+    for i in range(rooms.RECAP_POSTS * 3):
+        _post("status", f"line {i} " + "x" * 400, to=None)
+    text = rooms.recap("@2")
+    assert len(text) <= rooms.RECAP_MAX_CHARS + len("\n… (recap truncated)")
+    posts = [ln for ln in text.splitlines() if ln.strip().startswith("#")]
+    assert len(posts) <= rooms.RECAP_POSTS
+    assert all(len(ln) < rooms.RECAP_LINE_CHARS + 80 for ln in posts)
+
+
+def test_the_recap_is_newest_first(wired):
+    first, second = _post("status", "older", to=None)["seq"], _post("status", "newer", to=None)["seq"]
+    text = rooms.recap("@2")
+    assert text.index(f"#{second}") < text.index(f"#{first}")
+
+
+def test_the_recap_sanitises_what_it_injects(wired):
+    """Other agents' words, going into a context window — and the log can also be written
+    by `chela events emit`, so a payload is only ever as clean as whoever wrote it."""
+    event_log.append("room_status", "hostile", {
+        "room": "wire", "kind": "status", "from_wid": "@1", "from_name": "asker",
+        "text": "\x1b[31mred\x1b[0m\x03 and a bell \x07", "targets": [],
+    }, wid="@1")
+    text = rooms.recap("@2")
+    assert "\x1b" not in text and "\x03" not in text and "\x07" not in text
+    assert "red" in text
+
+
+def test_the_recap_cannot_be_POSTED_back_into_the_room(wired):
+    """It opens with RELAY_HEADER, so the echo guard refuses it — for free."""
+    _post("question")
+    text = rooms.recap("@2")
+    assert rooms.is_relay_text(text)
+    assert rooms.post("wire", "handoff", text, from_wid="@2", targets=["@1"])["ok"] is False
+
+
+def test_cli_recap_prints_nothing_for_a_roomless_window(wired, capsys):
+    rooms.leave("wire", "@9")
+    main.cmd_room_recap(Namespace(wid="@9"))
+    assert capsys.readouterr().out == ""

@@ -206,3 +206,43 @@ def test_chela_plugin_says_so_when_nothing_is_installed(env, capsys):
     out = capsys.readouterr().out
     assert "cannot find an INSTALLED copy" in out
     assert "/plugin marketplace add" in out
+
+
+# --- the recap hook: a NEW hook is the version trapdoor, one turn on ------------------
+#
+# The installed copy is a COPY, made at install time and keyed on the plugin version. Add a
+# hook and every already-installed fleet keeps a manifest that simply does not have it —
+# and the old drift check read only the FIRST hook of each event, so a SessionStart that
+# still said `http` (the transport it never fires over) would have compared green while the
+# recap reached nobody. That is CMX-56's bug with a new face; it is checked here.
+
+def _http_session_start(port: int = PORT) -> dict:
+    """The manifest as it was BEFORE the recap: SessionStart over http, which never fires."""
+    spec = hooks.hooks_spec(port)
+    spec["hooks"]["SessionStart"] = [{"hooks": [{
+        "type": "http",
+        "url": f"http://127.0.0.1:{port}/hooks/SessionStart",
+        "timeout": 2,
+    }]}]
+    return spec
+
+
+def test_drift_catches_an_installed_copy_with_no_recap_hook(env):
+    drift = hooks.manifest_drift(_http_session_start(), hooks.hooks_spec(PORT))
+    assert any("SessionStart" in d and "command" in d for d in drift)
+
+
+def test_doctor_ERRORs_when_the_installed_copy_predates_the_recap(env):
+    _render()
+    _install(_http_session_start())
+    body = _text(_levels(_check(), doctor.ERROR))
+    assert "SessionStart" in body and "curl" in body
+
+
+def test_drift_sees_a_hook_dropped_from_an_entry_that_declares_two(env):
+    """The old check read entries[0]["hooks"][0] and nothing else."""
+    expected = hooks.hooks_spec(PORT)
+    expected["hooks"]["Stop"][0]["hooks"].append({"type": "command", "command": "x",
+                                                  "timeout": 1})
+    drift = hooks.manifest_drift(hooks.hooks_spec(PORT), expected)
+    assert any("Stop" in d and "1 hook(s)" in d for d in drift)
