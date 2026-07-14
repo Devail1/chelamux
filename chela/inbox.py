@@ -397,6 +397,30 @@ def wid_for_window_name(name: str | None, windows: dict[str, str]) -> str | None
     return matches[0] if len(matches) == 1 else None
 
 
+def run_wid(run: dict, windows: dict[str, str] | None = None) -> str | None:
+    """The window a run was dispatched into — from the RUN ROW, not from live tmux.
+
+    The row records ``window_id`` at spawn (``dispatcher._spawn``), which is the only
+    lossless moment: a dispatched agent ends by calling ``chela task-finished``, which
+    KILLS ITS OWN WINDOW, and only *then* does the run reconcile to ``awaiting_review``
+    and this event get queued. So by the time :func:`wid_for_window_name` looks, the
+    window is already reaped — that was not the edge case, it was every case, and every
+    ``run_review`` (the "your agent finished, go review the PR" row — the single most
+    important one in the Feed) landed in the ``chela itself`` lane.
+
+    The name lookup remains the FALLBACK: it is still right for a run that predates the
+    recorded id, or one whose window is somehow still alive. Neither path guesses — a run
+    with no recorded id and no unambiguous live window stays ``None`` and belongs to
+    chela itself. ⛔ An id is never inferred from a branch, a worktree, or a reused
+    window: tmux recycles ids, and filing a dead agent's work under a *live* agent is the
+    worst version of this bug (CMX-48 — a wrong wid is worse than no wid).
+    """
+    recorded = (run.get("window_id") or "").strip()
+    if re.fullmatch(r"@\d+", recorded):
+        return recorded
+    return wid_for_window_name(run.get("window_name"), windows or {})
+
+
 def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
                  runs: list[dict] | None = None,
                  windows: dict[str, str] | None = None) -> list[dict]:
@@ -498,12 +522,13 @@ def run_events(runs: list[dict], seen: dict[str, str],
     landmines and a verify plan), so putting it in the notification pasted the entire
     task body into the orchestrator's window. It lives in the payload instead.
 
-    **These events are ATTRIBUTED, at write time.** They carried ``wid=None`` while
-    naming their window in the payload, so the Feed's agent lanes had nowhere to put
-    them — the agent that did the work was right there in ``window_name`` and simply was
-    never resolved to an id (:func:`wid_for_window_name`, which refuses to guess). A run
-    whose window is already gone stays ``wid=None`` and belongs to chela itself: that is
-    an honest ownerless event, not a hole.
+    **These events are ATTRIBUTED from the run row** (:func:`run_wid`), which recorded
+    the window's ``@id`` at spawn. That is what makes attribution survive the window's
+    death — and the window is ALWAYS dead by now, because a dispatched agent finishes by
+    killing its own window. Resolving the id against live tmux at this point (which is
+    what this used to do) never fired. A run with no recorded id and no unambiguous live
+    window stays ``wid=None`` and belongs to chela itself: an honest ownerless event, not
+    a hole.
     """
     out: list[dict] = []
     fresh: dict[str, str] = {}
@@ -514,7 +539,7 @@ def run_events(runs: list[dict], seen: dict[str, str],
         fresh[task_id] = status
         if seen.get(task_id) == status:
             continue                      # already announced at this status
-        wid = wid_for_window_name(run.get("window_name"), windows or {})
+        wid = run_wid(run, windows)
         title = run.get("title") or ""
         # The branch is the handle a human recognises ("cmx-38"); the id is the handle
         # the dispatcher does. Prefer the branch, fall back to the id.
@@ -522,7 +547,8 @@ def run_events(runs: list[dict], seen: dict[str, str],
         snippet = _short_title(title)
         payload = {"task_id": task_id, "run_status": status, "title": title,
                    "branch_name": run.get("branch_name"),
-                   "window_name": run.get("window_name"), "pr_url": run.get("pr_url"),
+                   "window_name": run.get("window_name"),
+                   "window_id": run.get("window_id"), "pr_url": run.get("pr_url"),
                    "pr_state": run.get("pr_state"), "attempt": run.get("attempt"),
                    "started_at": run.get("started_at"), "ended_at": run.get("ended_at")}
         if status == "awaiting_review":

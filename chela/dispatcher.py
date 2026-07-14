@@ -343,6 +343,56 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
     return len(struck)
 
 
+def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Create/migrate the ``runs`` table on ``conn``. Idempotent.
+
+    Public because the tests build their run rows against it: three test modules
+    each carried a hand-copied CREATE TABLE, and every new column had to be added
+    to all four by hand — which is how a schema change turns into four failing
+    tests instead of one. One definition, no drift.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            task_id TEXT PRIMARY KEY,
+            workflow_path TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            window_name TEXT,
+            window_id TEXT,
+            worktree_path TEXT,
+            branch_name TEXT,
+            started_at TEXT,
+            ended_at TEXT,
+            attempt INTEGER NOT NULL DEFAULT 1,
+            last_error TEXT,
+            pr_url TEXT,
+            pr_state TEXT
+        )
+    """)
+    # Idempotent migrations for pre-existing DBs. A row written before a column
+    # existed simply reads NULL there — never a crash: this runs unattended.
+    for _column, ddl in (
+        ("pr_url", "ALTER TABLE runs ADD COLUMN pr_url TEXT"),
+        ("pr_state", "ALTER TABLE runs ADD COLUMN pr_state TEXT"),
+        ("pr_mergeable", "ALTER TABLE runs ADD COLUMN pr_mergeable TEXT"),
+        ("task_number", "ALTER TABLE runs ADD COLUMN task_number INTEGER"),
+        ("idle_nudged_at", "ALTER TABLE runs ADD COLUMN idle_nudged_at TEXT"),
+        # The tmux @id of the window this run was spawned into. Recorded at spawn
+        # because that is the only lossless moment: the agent kills its own window
+        # (`chela task-finished`) BEFORE the run reconciles to awaiting_review, so a
+        # live-tmux lookup at event time is always too late and every run_review
+        # landed ownerless. A pre-existing row simply has NULL here and falls back
+        # to the by-name lookup (inbox.run_wid).
+        ("window_id", "ALTER TABLE runs ADD COLUMN window_id TEXT"),
+    ):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
+    return conn
+
+
 @contextmanager
 def _db():
     """Open a WAL-mode connection, ensure schema, and ALWAYS close it.
@@ -358,36 +408,7 @@ def _db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS runs (
-            task_id TEXT PRIMARY KEY,
-            workflow_path TEXT NOT NULL,
-            title TEXT NOT NULL,
-            status TEXT NOT NULL,
-            window_name TEXT,
-            worktree_path TEXT,
-            branch_name TEXT,
-            started_at TEXT,
-            ended_at TEXT,
-            attempt INTEGER NOT NULL DEFAULT 1,
-            last_error TEXT,
-            pr_url TEXT,
-            pr_state TEXT
-        )
-    """)
-    # Idempotent migrations for pre-existing DBs.
-    for column, ddl in (
-        ("pr_url", "ALTER TABLE runs ADD COLUMN pr_url TEXT"),
-        ("pr_state", "ALTER TABLE runs ADD COLUMN pr_state TEXT"),
-        ("pr_mergeable", "ALTER TABLE runs ADD COLUMN pr_mergeable TEXT"),
-        ("task_number", "ALTER TABLE runs ADD COLUMN task_number INTEGER"),
-        ("idle_nudged_at", "ALTER TABLE runs ADD COLUMN idle_nudged_at TEXT"),
-    ):
-        try:
-            conn.execute(ddl)
-        except sqlite3.OperationalError:
-            pass  # column already exists
-    conn.commit()
+    ensure_schema(conn)
     try:
         yield conn
         conn.commit()
@@ -1204,7 +1225,10 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
         log.info("Running before_run hook for %s", task.id)
         subprocess.run(before, shell=True, cwd=worktree, check=True)
 
-    # Claim the row before touching tmux so failure leaves a trace.
+    # Claim the row before touching tmux so failure leaves a trace. A retry re-enters
+    # here with the same task_id and gets a NEW window, so window_id is cleared on
+    # conflict: leaving attempt 1's id would point the next run_review at a corpse
+    # (or, worse, at whatever window tmux later recycled that id onto).
     conn.execute(
         """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number)
            VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?)
@@ -1212,7 +1236,7 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
-             task_number=excluded.task_number, idle_nudged_at=NULL""",
+             task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL""",
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number),
     )
     conn.commit()
@@ -1226,6 +1250,19 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # for the agent-cmd, readiness poll, and prompt send so no residual same-name
     # window can make send-keys ambiguous and exit non-zero.
     target_id = _new_window(window_name, str(worktree))
+
+    # Record the @id on the run row NOW — the window is alive and its id is free and
+    # unambiguous exactly here, and nowhere later. The agent kills its own window on
+    # `chela task-finished`, and only then does the run reconcile to awaiting_review,
+    # so inbox.run_events resolving the id against the live tmux table always missed
+    # (every run_review event landed in the `chela itself` lane instead of its
+    # agent's). Only a real @id is stored — _new_window degrades to the bare name when
+    # the id can't be parsed, and a name in this column would be a lie.
+    if re.fullmatch(r"@\d+", target_id):
+        conn.execute(
+            "UPDATE runs SET window_id=? WHERE task_id=?", (target_id, task.id)
+        )
+        conn.commit()
 
     # WORKFLOW.md's agent.cmd → the Settings permission mode → the built-in
     # default (see resolve_agent_cmd). The mode is fixed at spawn: changing it in
