@@ -119,16 +119,52 @@ So chela treats "what the daemon can DO" as a first-class, observable thing:
 with the coupling written down next to it. A variable you can see and left empty is a
 choice; a variable that is simply gone is a bug waiting for nine hours.
 
+## The runtime-truth registry
+
+The same bug landed nine times: **a fact lives in two places across a process boundary, and
+the checker reads the copy it OWNS instead of the copy that GOVERNS BEHAVIOUR.** The plugin
+we rendered said port 5001 while the dashboard had *bound* 5005; the env file said dispatch
+ON while the *daemon* had come up OFF; the rendered manifest said `timeout: 120` while the
+*installed* one — the only one agents load — still said `2`; `pytest -q` said 980 green
+while three JS suites were executed by nothing and one of them was red. Every one of them
+was green everywhere while the feature was dead.
+
+`chela/runtime_truth.py` is the answer: **one entry per fact chela depends on**, naming both
+halves — `declared_by` (where *we* write it) and `owned_by` (who actually governs the
+behaviour: the bound socket, the running daemon, Claude Code's plugin cache, tmux, the
+pytest collector) — plus a `read_back` that asks the owner. Two rules, in code:
+
+* **A fact chela owns: the process that ACTS publishes what it actually DID.** Not what it
+  was configured to do (`dashboard.port`, `daemon.json`, the run row's `window_id`). Every
+  reader reads that publication, never the config.
+* **A fact another system owns: read back from the owner.** You cannot infer the installed
+  plugin manifest, or whether a tmux window is still alive, from your own copy. You ask.
+
+**`chela doctor` is generated from it** — for every fact: read the declared value, read back
+the owned value, compare, report. There is no hand-written check left, because every
+hand-written check acquires a private blind spot (the drift check that compared only the
+*first* hook read green on a stale manifest; the test wrapper that named *one* `.mjs` file
+left three suites unrun). An enumerated check structurally cannot. **An owner that cannot be
+read is reported LOUDLY as `CANNOT VERIFY` — never as a silent pass:** a doctor that goes
+green because it could not look is the bug, one level up.
+
+The registry is an artifact too, so it is fenced by the bar it exists to enforce: every
+entry must have a test in `tests/test_runtime_truth.py` that **corrupts the owned value and
+asserts doctor goes red, naming the fact**. A check that has never been seen to go red is
+not a check.
+
 ## `chela doctor`
 
 ```
 $ chela doctor
 ✓ env file /home/you/.chela/chela.env (5 vars)
 ✓ the running environment agrees with the env file
-✓ tmux session 'chela' (CHELA_TMUX_SESSION)
+✓ tmux session 'chela' exists (CHELA_TMUX_SESSION)
 ✗ dashboard is LISTENING on 5098, but the config says 5099
     A --port flag beats the env, and the env is supposed to be the source of truth. …
 ✓ rendered plugin posts to port 5098
+✗ the INSTALLED plugin disagrees with the one chela renders — THE HOOKS THAT RUN ARE STALE
+    Agents do not read the manifest chela renders. They read: …
 ✓ daemon running (pid 4242, session chela) — capabilities read from it, not from config
 ✓ Scheduler: ON
 ! Work dispatcher: OFF
@@ -136,18 +172,23 @@ $ chela doctor
 ! Run reconciliation: OFF
     OFF FOR THE SAME REASON — reconciliation rides the dispatch tick, so a merged PR's run
     sits in `awaiting_review` forever, holding its concurrency slot
+! run CMX-70 claims window @31, but tmux has no such window
+✓ pytest executes all 6 JS suite(s)
 
-1 problem(s) — see above.
+2 problem(s) — see above.
 ```
 
-It compares the *running* config against the file: stale environment variables (the
-`--update-env` merge), a dashboard on a port the config does not know about, a rendered
-plugin baked against a port that has since moved, a session name derived from a leaked
-tmux pane, and an env file that tries to set its own `CHELA_DIR`. Then it checks what the
-running daemon can actually **do** (above) — because the file agreeing with the
-environment is no evidence at all when both are wrong. Exit code `1` means something is
-broken **right now**; warnings are differences worth knowing about — including a
+Every line is one registry fact, asked of its owner: the env file vs the environment the
+processes really carry, the configured port vs the socket really bound, the manifest chela
+renders vs **the one Claude Code installed and agents load**, this shell's config vs the
+capabilities the **running** daemon published, each `WORKFLOW.md` and the tracker it claims
+to read, the dispatch hold, the tmux session and the windows in-flight runs claim, and the
+`.test.mjs` suites the **pytest collector** actually executes. Exit code `1` means something
+is broken **right now**; warnings are differences worth knowing about — including a
 subsystem that is off, which is never reported as green.
+
+Adding a fact is one entry in `runtime_truth.facts()` (plus its red test). No new doctor
+code, and — the point — no way to forget the check.
 
 ## Secrets
 

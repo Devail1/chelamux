@@ -42,11 +42,14 @@ def _repo(tmp_path, workflow_text=WF, tracker=True):
     return repo / "WORKFLOW.md"
 
 
+def _audit(*names) -> list[doctor.Finding]:
+    """The named registry facts, audited exactly as `chela doctor` audits them."""
+    return [f for name in names for f in doctor.audit(doctor.fact(name))]
+
+
 def _findings(monkeypatch, workflows):
     monkeypatch.setattr(config, "DISPATCH_WORKFLOWS", workflows)
-    out: list[doctor.Finding] = []
-    doctor._check_daemon(out)
-    return out
+    return _audit("daemon.capabilities", "dispatch.workflows")
 
 
 def _by_level(findings, level):
@@ -134,8 +137,7 @@ def test_a_held_queue_is_a_WARN_never_a_silent_pass(chela_dir, monkeypatch):
     from chela import hold
 
     hold.take(reason="rewriting the queue", ttl_seconds=600, by="@0")
-    out: list[doctor.Finding] = []
-    doctor._check_hold(out)
+    out = _audit("dispatch.hold")
 
     warns = _by_level(out, doctor.WARN)
     assert warns and "HELD" in warns[0].title
@@ -157,8 +159,7 @@ def test_an_expired_hold_is_reported_loudly_too(chela_dir):
         "reason": "crashed mid-rewrite", "by": "@0", "pid": 1,
         "created_at": now - 7200, "expires_at": now - 3600,
     }))
-    out: list[doctor.Finding] = []
-    doctor._check_hold(out)
+    out = _audit("dispatch.hold")
 
     warns = _by_level(out, doctor.WARN)
     assert warns and "EXPIRED" in warns[0].title
@@ -166,6 +167,4 @@ def test_an_expired_hold_is_reported_loudly_too(chela_dir):
 
 
 def test_no_hold_is_the_normal_state_and_says_nothing(chela_dir):
-    out: list[doctor.Finding] = []
-    doctor._check_hold(out)
-    assert out == []
+    assert _audit("dispatch.hold") == []
