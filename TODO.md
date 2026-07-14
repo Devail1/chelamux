@@ -79,7 +79,7 @@
   3. **⛔ AGENT-AUTHORED TEXT MUST NEVER BE INDISTINGUISHABLE FROM SOMETHING THE HUMAN TYPED.** That is the general defect, and this is its third instance: the Wall's `--writable` ttyd into `@0` (logged, unfixed) and the inbox paste (here). **Say so in the PR body** — the next one of these is coming.
   4. **Guard it:** a test that an inbox item whose summary contains `$(…)`, a backtick, and a control byte is **either refused or neutralised**, and that a pane in bash-input mode is **NOT pushed into**. ⚠️ **Corrupt each guard and watch it go RED — the judge will.**
 
-- [ ] **🚨⚖️ THE JUDGE IS INERT — it returns `cannot_verify` on EVERY PR because its worktree never installs jsdom.** ⛔ **The centerpiece we shipped 07-15 has NEVER verified a single PR.** Measured 07-15.
+- [x] **🚨⚖️ THE JUDGE IS INERT — it returns `cannot_verify` on EVERY PR because its worktree never installs jsdom.** ⛔ **The centerpiece we shipped 07-15 has NEVER verified a single PR.** Measured 07-15.
 
   **ROOT CAUSE — two individually-correct decisions that deadlock:**
   1. `judge.test_cmd = CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (WORKFLOW.md). The flag is **deliberate and correct** (WORKFLOW.md:48): without it, missing node/jsdom makes the `.mjs` DOM suites **SKIP silently and green**, and the judge would mutate `terminals.js`, watch a suite that never ran pass, and send a GOOD PR back / pass a BAD one. So it **fails LOUD** on missing JS deps.
