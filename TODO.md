@@ -17,7 +17,7 @@
 
   ⚠️ **THE BUG CLASS, AGAIN (see the 07-14 handoff):** *the artifact you WROTE is not the artifact that RUNS.* A fixture that hands the resolver a tidy cwd reproduces the blind spot instead of the bug. **Drive it live: a real `--resume`, from a window whose cwd is NOT the session's origin dir, and watch the message actually arrive in Telegram.**
 
-- [ ] **⚖️ THE JUDGE — auto-adversarial review on `awaiting_review`. ⛔ ITS BLOCKING VERDICTS MUST BE FACTS, NOT OPINIONS.** The carrier is **proven** (CMX-68 rework loop + CMX-69 CI gate). This is the deferred half. 🔑 **THE DESIGN IS NOT "spawn a reviewer and trust it" — read the next paragraph before anything else.**
+- [x] **⚖️ THE JUDGE — auto-adversarial review on `awaiting_review`. ⛔ ITS BLOCKING VERDICTS MUST BE FACTS, NOT OPINIONS.** The carrier is **proven** (CMX-68 rework loop + CMX-69 CI gate). This is the deferred half. 🔑 **THE DESIGN IS NOT "spawn a reviewer and trust it" — read the next paragraph before anything else.**
 
   **THE EVIDENCE THAT MAKES THIS URGENT (2026-07-14, measured).** Five dispatched PRs reached `awaiting_review`, **all five CI-green**. I hand-spawned five adversarial reviewers. **FOUR were sent back — and NOT ONE for a broken feature.** Every feature worked. They were sent back because **the thing meant to PROVE the feature works could not fail**:
   | PR | the guard | the corruption that left the suite GREEN |
