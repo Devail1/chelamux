@@ -44,6 +44,23 @@
 
   ⚠️ **THE IRONY YOU MUST NOT COMMIT: the judge is itself a guard. CORRUPT IT AND WATCH IT GO RED, or you have built the very thing it exists to catch.** Feed it a PR whose guard you have *deliberately* broken and confirm it BLOCKS; feed it a genuinely good PR and confirm it does NOT.
 
+- [ ] **🚨 THE TEST SUITE RUNS THE PRODUCTION DISPATCHER AGAINST THE PRODUCTION TRACKER — AND IT IS BLOCKING THE JUDGE.** ⛔ **HIGHEST PRIORITY: nothing can be adjudicated until this is fixed.**
+
+  **WHAT IT ACTUALLY DOES.** `tests/test_graceful_shutdown.py` spawns a **REAL daemon** (`python -m chela.main run`) with `CHELA_DIR` pointed at a `tmp_path`. But ⛔ **`CHELA_DIR` does NOT isolate worktrees** — the workspace root comes from **`WORKFLOW.md`'s `workspace.root`** (`workflow.py:235`), which the test daemon reads from the **REAL repo**. So it loads the **real `WORKFLOW.md`**, the **real `TODO.md`**, and **dispatches REAL OPEN TASKS into the REAL `~/.chela/worktrees/`.** Captured 2026-07-14:
+  ```
+  Work dispatcher: ON — 1 workflow: /home/liavedunix/projects/chelamux/WORKFLOW.md
+  WARNING chela.worktree: Worktree path ~/.chela/worktrees/chelamux/24d60c64fe21 exists but git has no record
+  ERROR   chela.dispatcher: Dispatch failed for task 24d60c64fe21     <-- THE LIVE WALL RUN'S WORKTREE
+  ```
+  🔴 **On this box it merely collided with a live run and threw. ON A CLEAN BOX IT WOULD HAVE SPAWNED REAL AGENTS.** ⛔ **`pytest` must never be able to do that.**
+
+  ⚠️ **AND IT WAS MISDIAGNOSED FOR HOURS — BY ME.** The assertion is `assert "Traceback" not in out`. I read the *line number*, called it *"a timing flake, env-only, CI is green — do not touch"*, and **told four agents exactly that.** It is not a flake and never was; **the traceback is not a shutdown bug at all.** 🔑 **READ THE ASSERTION, NOT THE LINE NUMBER.**
+
+  1. **STOP THE TEST DAEMON DISPATCHING.** Set `CHELA_DISPATCH_WORKFLOWS` to empty in the test env — the shutdown test only needs the daemon to **boot, nap, and take a signal**. ⛔ It has no business loading the real tracker.
+  2. 🔴 **THEN FIX THE FOOTGUN BEHIND IT — a test-only patch leaves the landmine armed.** `CHELA_DIR` isolates the DB but **NOT the workspace**: *any* daemon a human or a test starts with a custom `CHELA_DIR` still writes to the REAL worktrees and can spawn REAL agents. Either **confine the workspace root to `CHELA_DIR`**, or make a daemon with a non-default `CHELA_DIR` **REFUSE, LOUDLY, to dispatch into a workspace outside it.** **Pick one and justify it in the PR body.**
+  3. **THE SUITE MUST BE GREEN ON THIS MACHINE, not just in CI.** ⚖️ The judge's **first verdict was `cannot_verify`**: *"the suite is NOT GREEN before any mutation … a suite that is already red measures nothing."* It refused to block **and** refused to clear — correct — **but the judge is INERT until `uv run pytest -q` is green locally.** ⛔ **Do NOT "fix" this by skipping or xfailing the test.** That re-arms the landmine and lies to the judge.
+  4. **Guard it:** a test asserting a daemon under a non-default `CHELA_DIR` **cannot** touch the default workspace. ⚠️ **Corrupt it and watch it go RED — the judge will do exactly that to you.**
+
 - [ ] **🗜️ THE WALL: A DISPATCHED AGENT'S PANE OPENS MINIMIZED — and POPS OUT when it wants a human.** Same principle as the Telegram lazy-bind (`CHELA_TELEGRAM_BIND_DISPATCHED`), second surface: ⛔ **a dispatched worker should not occupy human attention surface — a topic OR a Wall tile — until it needs a human.** Liav, 07-14. **⚠️ DEPENDS ON the lazy-bind task's `dispatched_window_ids()` helper (run-row-derived) — reuse it, do not re-derive.**
 
   ✅ **The machinery EXISTS — do not build a new one.** `terminals.js` already has `_minimized` (a Set), `_minimizeItem`, and a **dock**, persisted to `localStorage` `pc_wall_minimized` (`terminals.js:801-817`).
