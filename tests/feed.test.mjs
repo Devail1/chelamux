@@ -39,6 +39,10 @@ test('a gate is a gate, a tool call is the firehose, an unknown type is shown', 
     assert.equal(classOf('hook.pre_tool_use'), 'tool');
     assert.equal(classOf('run_review'), 'run');
     assert.equal(classOf('daemon_start'), 'lifecycle');
+    // An inbox that cannot deliver is a GATE: work is stuck until a human acts, and it
+    // stayed invisible for a whole outage (CMX-77). `other` would render it as a `·`.
+    assert.equal(classOf('inbox_undeliverable'), 'gate');
+    assert.ok(DEFAULT_CLASSES.includes('gate'));
     // An unknown type is `other` — and `other` is ON by default. The safe default for
     // "I have never heard of this" is to show it, not to swallow it.
     assert.equal(classOf('note'), 'other');

@@ -61,6 +61,13 @@ const TYPE_CLASS = {
     // anonymous `·` — and drops it out of the Runs filter, where a run event belongs.
     run_changes_requested: 'run',
     run_needs_human: 'run',
+    // The inbox cannot reach the orchestrator (CMX-77): its queue is addressed to a window
+    // id a dead tmux server issued, or to a session that has exited. It is a `gate` because
+    // that is exactly what it is — work is stuck until a HUMAN (or the orchestrator's next
+    // `chela watch`) acts, and the whole cost of the 2026-07-14 outage was that this state
+    // had no surface at all. It must not fall through to an anonymous `·`.
+    inbox_undeliverable: 'gate',
+    watch_epoch_lost: 'lifecycle',          // the watched agent died with the tmux server
     'hook.user_prompt_submit': 'prompt',
     'hook.pre_tool_use': 'tool',
     'hook.post_tool_use': 'tool',
