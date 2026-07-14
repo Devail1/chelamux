@@ -895,6 +895,12 @@ def cmd_telegram(args) -> None:
             delete=partial(bot.delete, retry_flood=False),
             typing=lambda thread: bot.chat_action("typing", thread),
         )
+    # The AskUserQuestion CONTENT authority (CMX-49): the hook payload in the event log,
+    # which holds every question, option, description and preview verbatim — where a
+    # scrape of a multi-question / preview-bearing selector holds none of them. The pane
+    # stays the liveness signal (and the whole content source for a pre-plugin agent that
+    # emits no hooks), so this is an enrichment, never a replacement.
+    from chela.telegram.hookgate import pending_gate
     gate_watcher = PermissionGateWatcher(
         bot.send,
         registry,
@@ -903,6 +909,7 @@ def cmd_telegram(args) -> None:
         edit=bot.edit,
         delete=bot.delete,
         status=status,
+        pending=pending_gate,
     )
 
     def _on_message(window_id, msg):
