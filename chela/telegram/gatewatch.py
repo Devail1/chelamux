@@ -18,6 +18,21 @@ window's topic with a tap-to-answer keyboard:
   * an **ExitPlanMode** plan approval — posts the scraped plan with
     ✅ Approve / 📝 Keep planning (:func:`~chela.telegram.interactive.plan_reply_markup`).
 
+**For an AskUserQuestion, the pane is no longer the CONTENT authority — the HOOK
+payload is** (CMX-49). The scrape's option regexes were measured against one selector
+shape, and a **multi-question** selector (which draws a tab strip) or one whose options
+carry a **``preview``** (which re-lays the TUI out side-by-side) parses as *unparseable*:
+live, a 3-question preview-bearing question reached the phone as its question text and a
+bare nav row — zero options, nothing to tap — while ``hook.pre_tool_use`` already held
+every option's ``label``, ``description`` and ``preview`` in the event log. So when the
+pane says a selector is up **and** the log holds an unresolved ``AskUserQuestion``
+``PreToolUse`` for that window (:func:`~chela.telegram.hookgate.pending_gate`), the body
+is rendered from the payload — **one message per question** (the TUI walks them one at a
+time, and three questions × previews is a wall of text on a phone) — and the pane is
+demoted to what it is uniquely good for: saying the gate is on screen *right now*. With
+no hook events for the window (a **pre-plugin** agent — hooks are read at agent startup),
+the pane-scraped render below is unchanged and remains the fallback.
+
 **All three are detected from the pane, with no transcript precondition.** Slice
 C1 originally gated the permission pane-read on the window having an *unpaired*
 ``tool_use`` in the transcript, on the theory that the transcript says a call is
@@ -50,11 +65,13 @@ matching ``tool_result`` clears the tracking too, as belt-and-suspenders.
 """
 from __future__ import annotations
 
+import html
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
+from chela.telegram.hookgate import HookGate, Question
 from chela.telegram.interactive import (
     nav_only_markup,
     permission_reply_markup,
@@ -143,18 +160,41 @@ class _PendingTool:
     tool_input: dict | None
 
 
+@dataclass(frozen=True)
+class Card:
+    """One Telegram message a prompt renders into — body, parse mode, keyboard.
+
+    A prompt is a *list* of these, not a string, because an AskUserQuestion rendered
+    from its hook payload is **one message per question** (see
+    :func:`format_hook_askuq_cards`). Every other prompt renders to exactly one card, so
+    the list is a generalisation, not a redesign.
+
+    ``plain`` is the same body with no markup at all. A card that carries a ``preview``
+    goes out as ``parse_mode="HTML"`` (a ``<pre>`` block scrolls horizontally on a phone
+    instead of wrapping, which is what keeps box-drawing ASCII legible), and Telegram
+    *rejects* a message whose entities it cannot parse — so a rejected HTML body falls
+    back to this rather than to silence. A dropped preview would be exactly the silent
+    degrade this whole change exists to end.
+    """
+
+    text: str
+    parse_mode: str | None = None
+    markup: dict | None = None
+    plain: str | None = None
+
+
 @dataclass
 class _Tracked:
-    """The prompt message currently posted for one window + prompt kind.
+    """The prompt message(s) currently posted for one window + prompt kind.
 
-    ``signature`` is the scraped content it was last rendered from (the
-    edge-trigger / de-dup marker); ``message_id`` is the Telegram message to edit
-    as the prompt re-renders and to delete once it resolves (None when no
-    id-returning poster is wired).
+    ``signature`` is the content it was last rendered from (the edge-trigger / de-dup
+    marker); ``message_ids`` are the Telegram messages to edit as the prompt re-renders
+    and to delete once it resolves (empty when no id-returning poster is wired). It is a
+    *list* because a multi-question AskUserQuestion posts one message per question.
     """
 
     signature: str
-    message_id: int | None
+    message_ids: list[int] = field(default_factory=list)
 
 
 def _clip(text: str, limit: int = _MAX_DETAIL) -> str:
@@ -278,6 +318,164 @@ def _askuq_markup(uq: AskUQ) -> dict:
     if uq.multi or not uq.options:
         return nav_only_markup()
     return scraped_reply_markup(uq.options)
+
+
+# ── AskUserQuestion, rendered from the HOOK payload (CMX-49) ─────────────────
+#
+# The scrape gives us a lossy render of the selector; the hook gives us the selector's
+# INPUT. Everything below reads the payload — nothing here is inferred from pixels.
+
+# Per-question budget. Telegram hard-rejects a body over 4096 chars and ``BotSender.post``
+# does not split (these messages carry keyboards), so a card is squeezed in this order:
+# the LABELS are never dropped (an option nobody can read is an option nobody can pick),
+# then descriptions, and the previews give way first — but never SILENTLY (see
+# :func:`_preview_block` / :data:`_PREVIEW_CLIPPED`).
+_MAX_HOOK_QUESTION = 900
+_MAX_HOOK_LABEL = 300
+_MAX_HOOK_DESC = 900
+# The preview budget, squeezed stage by stage until the card fits. 0 = previews dropped,
+# which costs an explicit warning line on the card.
+_PREVIEW_STAGES = (2400, 1200, 600, 250, 0)
+
+_PREVIEW_CLIPPED = "… [preview clipped — /screenshot for the full box]"
+_PREVIEW_DROPPED = (
+    "⚠️ Previews were too long for one message and are NOT shown — /screenshot the pane "
+    "to read them."
+)
+# Said plainly, on the card, whenever chela cannot prove which option a tap would land
+# on. A button whose ordinal mapping we cannot prove is CMX-32 (the human taps 3, the
+# agent is told 2) and is strictly worse than no button — so for these shapes there are
+# none, and the message says why rather than looking merely unhelpful.
+_ANSWER_IN_TERMINAL = (
+    "⌨️ Answer this one in the terminal (or with the keys below) — chela can't yet map a "
+    "tap to the right option for this shape, and a button that picks the wrong one is "
+    "worse than no button."
+)
+
+
+def _esc(text: str) -> str:
+    return html.escape(text or "", quote=False)
+
+
+def _preview_block(preview: str, cap: int) -> tuple[str, bool]:
+    """The ``<pre>`` block for an option's preview, and whether it is COMPLETE.
+
+    ``<pre>`` is the one Telegram surface that scrolls horizontally instead of wrapping,
+    so box-drawing ASCII survives a phone screen. An **absent** preview renders nothing —
+    never an empty block. A preview that does not fit is clipped *visibly*
+    (:data:`_PREVIEW_CLIPPED`); the caller reports a dropped one on the card itself.
+    """
+    body = (preview or "").strip("\n")
+    if not body.strip():
+        return "", True
+    if cap <= 0:
+        return "", False
+    if len(body) > cap:
+        return f"<pre>{_esc(body[:cap].rstrip())}\n{_esc(_PREVIEW_CLIPPED)}</pre>", False
+    return f"<pre>{_esc(body)}</pre>", True
+
+
+def _hook_card_text(q: Question, index: int, total: int, preview_cap: int,
+                    answerable: bool) -> tuple[str, bool]:
+    """One question's card body (HTML), and whether every preview it has is shown.
+
+    The heading names the question's place in the run (``Question 2/3``) and its
+    ``header``, because on a phone three messages land back to back and "which one is
+    this?" is otherwise unanswerable. Options are numbered 1..N **in payload order** —
+    the same order the TUI draws them, and the order any selector button must select in.
+    """
+    parts: list[str] = []
+    head = "❓"
+    if total > 1:
+        head += f" Question {index + 1}/{total}"
+    if q.header:
+        head += f" · {_esc(_clip(q.header, 80))}" if total > 1 else f" {_esc(_clip(q.header, 80))}"
+    question = _clip(q.question, _MAX_HOOK_QUESTION)
+    parts.append(head)
+    parts.append(_esc(question) if question else _esc("(the asker left the question blank)"))
+    if q.multi_select:
+        parts.append("(multi-select — more than one option may be chosen)")
+
+    complete = True
+    for i, opt in enumerate(q.options, start=1):
+        parts.append("")
+        parts.append(f"{i}. {_esc(_clip(opt.label, _MAX_HOOK_LABEL))}")
+        if opt.description:
+            parts.append(_esc(_clip(opt.description, _MAX_HOOK_DESC)))
+        block, shown = _preview_block(opt.preview, preview_cap)
+        if block:
+            parts.append(block)
+        complete = complete and shown
+
+    if not complete and preview_cap <= 0:
+        parts.append("")
+        parts.append(_esc(_PREVIEW_DROPPED))
+    if not answerable:
+        parts.append("")
+        parts.append(_esc(_ANSWER_IN_TERMINAL))
+    return "\n".join(parts), complete
+
+
+def _strip_html(text: str) -> str:
+    """The card body with its ``<pre>`` markup removed — the plain-text fallback.
+
+    Only ever applied to text WE built, so this is a fixed reverse of a fixed encoding,
+    not a general HTML parser.
+    """
+    return html.unescape(text.replace("<pre>", "").replace("</pre>", ""))
+
+
+def format_hook_askuq_cards(gate: HookGate, answerable: bool) -> list[Card]:
+    """An AskUserQuestion rendered from its hook payload — **one card per question**.
+
+    Full fidelity, because full fidelity is *what the log already had*: every question,
+    every option's ``label`` **and** ``description`` **and** ``preview``, the ``header``,
+    and the ``multiSelect`` flag. Nothing is scraped, so nothing is lost to a TUI layout
+    the scraper was never measured against.
+
+    One message per question, because the alternative is a wall of text on a phone (three
+    questions × three options × a dozen preview lines) and because the TUI itself walks
+    the questions one at a time — so a question per message is also the only shape in
+    which the multi-question case is *readable* at all.
+
+    ``answerable`` says whether a tap's ordinal mapping can be PROVEN (see
+    :meth:`PermissionGateWatcher._answerable`); when it cannot, the card carries the nav
+    row and says outright that this shape must be answered in the terminal for now. A
+    selector we cannot prove is a silent mis-answer waiting to happen (CMX-32).
+    """
+    markup = (
+        scraped_reply_markup([o.label for o in gate.questions[0].options])
+        if answerable else nav_only_markup()
+    )
+    cards: list[Card] = []
+    total = len(gate.questions)
+    for i, q in enumerate(gate.questions):
+        text = ""
+        for cap in _PREVIEW_STAGES:
+            text, _complete = _hook_card_text(q, i, total, cap, answerable)
+            if len(text) <= _TG_TEXT_LIMIT:
+                break
+        if len(text) > _TG_TEXT_LIMIT:      # a pathological label/description set
+            text = text[: _TG_TEXT_LIMIT - 1] + "…"
+        cards.append(Card(text=text, parse_mode="HTML", markup=markup,
+                          plain=_strip_html(text)))
+    return cards
+
+
+def hook_askuq_signature(gate: HookGate, answerable: bool) -> str:
+    """The de-dup / edge-trigger marker for a payload-rendered selector.
+
+    Keyed on the gate's ``tool_use_id`` (its identity) plus everything the cards render,
+    so a *different* gate re-posts and an unchanged one is a no-op.
+    """
+    body = "\x00".join(
+        "\x01".join([
+            q.question, q.header, str(q.multi_select),
+            *[f"{o.label}\x02{o.description}\x02{o.preview}" for o in q.options],
+        ])
+        for q in gate.questions
+    )
+    return f"{gate.tool_use_id}\x00{answerable}\x00{body}"
 
 
 def format_plan_message(plan: ExitPlan) -> str:
@@ -570,6 +768,7 @@ class PermissionGateWatcher:
         edit: Editor | None = None,
         delete: Deleter | None = None,
         status: "StatusRelay | None" = None,
+        pending: "Callable[[str], HookGate | None] | None" = None,
     ):
         self._sender = sender
         self._registry = registry
@@ -577,6 +776,12 @@ class PermissionGateWatcher:
         self._detect = detect
         self._detect_askuq = detect_askuq
         self._detect_plan = detect_plan
+        # The event log's view of what this window is blocked on
+        # (:func:`~chela.telegram.hookgate.pending_gate`) — the CONTENT authority for an
+        # AskUserQuestion. ``None`` (the default) means pane-only: that is the correct
+        # behaviour for a fleet with no hook events, and it keeps this class free of a
+        # hard dependency on the log.
+        self._pending_gate = pending
         # The ephemeral status line, when enabled: it reads the SAME pane text this
         # watcher already captured (no extra tmux calls) but keeps its own tracked
         # message and its own lifecycle — see :class:`StatusRelay`.
@@ -659,15 +864,33 @@ class PermissionGateWatcher:
         # neither selector is up — otherwise one pane would relay two prompts.
         gate = None if (uq is not None or plan is not None) else self._detect(pane)
 
-        self._sync(window_id, _ASKUQ, uq, _askuq_signature, format_askuq_message, _askuq_markup)
+        # The pane says a selector is on screen; the LOG says what it actually asks. The
+        # payload only ever renders for a window whose pane is showing a selector *right
+        # now* — an unresolved `pre_tool_use` on its own could equally mean the agent
+        # died at the gate (the false-`DIED` mistake, CMX-35, from the other side).
+        hook = self._hook_askuq(window_id) if uq is not None else None
+        if hook is not None:
+            answerable = self._answerable(hook, uq)
+            self._sync(
+                window_id, _ASKUQ, hook,
+                lambda h: hook_askuq_signature(h, answerable),
+                lambda h: format_hook_askuq_cards(h, answerable),
+            )
+        else:
+            self._sync(
+                window_id, _ASKUQ, uq, _askuq_signature,
+                lambda u: [Card(format_askuq_message(u), None, _askuq_markup(u))],
+            )
         self._sync(
-            window_id, _PLAN, plan, _plan_signature, format_plan_message,
-            lambda _p: plan_reply_markup(),
+            window_id, _PLAN, plan, _plan_signature,
+            lambda p: [Card(format_plan_message(p), None, plan_reply_markup())],
         )
         self._sync(
             window_id, _GATE, gate, _gate_signature,
-            lambda g: format_gate_message(self._latest_pending(window_id), g),
-            lambda _g: permission_reply_markup(),
+            lambda g: [Card(
+                format_gate_message(self._latest_pending(window_id), g),
+                None, permission_reply_markup(),
+            )],
         )
         # The fourth read of the same captured text (no extra tmux call). Last, and
         # in its own try: a decoration must never cost us a gate relay.
@@ -684,16 +907,69 @@ class PermissionGateWatcher:
             return None
         return pend[next(reversed(pend))]
 
-    def _sync(self, window_id, kind, detected, sig_fn, text_fn, markup_fn) -> None:
-        """Post / edit / poof the tracked message for one prompt kind.
+    def _hook_askuq(self, window_id: str) -> HookGate | None:
+        """The window's pending ``AskUserQuestion`` from the event log, if any.
 
-        The single relay path all three prompts share. ``detected is None`` means
-        the prompt is no longer on the pane (answered / dismissed) → resolve it.
-        Otherwise: an unchanged scrape is a no-op (edge-triggered — a still-open
-        prompt is never re-posted), a changed scrape edits the tracked message in
-        place (so a mid-render partial and the settled prompt are ONE message), and
-        a first scrape posts it. An edit that fails (the message was deleted) falls
-        back to a fresh post.
+        Only an ``AskUserQuestion``: a pending ``ExitPlanMode`` (the other interactive
+        tool) is not what an AskUserQuestion pane is showing, and a **subagent's** hook
+        events carry its *parent's* ``session_id`` — so they resolve to the parent's
+        window, and matching the tool name is what keeps a subagent's ordinary tool call
+        from being dressed up as the gate on the parent's screen. A lookup failure is
+        never fatal: the pane render is right there.
+        """
+        if self._pending_gate is None:
+            return None
+        try:
+            gate = self._pending_gate(window_id)
+        except Exception:
+            log.exception("hook gate lookup failed for %s", window_id)
+            return None
+        if gate is None or gate.tool != "AskUserQuestion" or not gate.questions:
+            return None
+        return gate
+
+    @staticmethod
+    def _answerable(gate: HookGate, uq: "AskUQ | None") -> bool:
+        """Can a tap's ordinal mapping be PROVEN for this gate? If not: no buttons.
+
+        Answering still goes through keystroke injection in this slice, and that path can
+        only land on the right row when the scraper can see the ``❯`` cursor and the rows
+        it counted are the options we numbered. That holds for exactly one shape: a
+        **single question**, **single select**, whose pane scrape parsed the same number
+        of options the payload declares.
+
+        Everything else — a multi-question selector (the TUI walks the questions, so
+        option *i* means a different thing depending which one is on screen), a
+        ``multiSelect`` question (an answer is a *set*), or a preview-bearing layout the
+        scraper cannot read a cursor out of — gets the nav row and a card that says so.
+        Synthesising a selector whose mapping we cannot prove is CMX-32 (tap 3 → answer
+        2): a button that silently picks the wrong option is worse than no button.
+        """
+        if len(gate.questions) != 1:
+            return False
+        q = gate.questions[0]
+        return (
+            not q.multi_select
+            and uq is not None
+            and not uq.multi
+            and uq.cursor >= 0
+            and len(uq.options) == len(q.options) > 0
+        )
+
+    def _sync(self, window_id, kind, detected, sig_fn, cards_fn) -> None:
+        """Post / edit / poof the tracked message(s) for one prompt kind.
+
+        The single relay path every prompt shares. ``detected is None`` means the prompt
+        is no longer on the pane (answered / dismissed) → resolve it. Otherwise: an
+        unchanged render is a no-op (edge-triggered — a still-open prompt is never
+        re-posted), a changed one edits the tracked message(s) in place (so a mid-render
+        partial and the settled prompt are ONE message), and a first render posts them. An
+        edit that fails (the message was deleted) falls back to a fresh post.
+
+        A prompt renders to a *list* of cards — one per question for a payload-rendered
+        AskUserQuestion, one for every other prompt. A render whose card COUNT changed
+        cannot be edited into the old messages, so those are poofed and the new set
+        posted.
         """
         if detected is None:
             self._resolve(window_id, kind)
@@ -709,26 +985,60 @@ class PermissionGateWatcher:
             log.debug("%s prompt on %s but no bound topic; skipping", kind, window_id)
             return
 
-        text = text_fn(detected)
-        markup = markup_fn(detected)
+        cards = cards_fn(detected)
 
-        if tracked is not None and tracked.message_id is not None and self._edit is not None:
-            if self._edit(tracked.message_id, text, None, markup):
+        if (
+            tracked is not None
+            and tracked.message_ids
+            and self._edit is not None
+            and len(tracked.message_ids) == len(cards)
+        ):
+            if all(self._edit_card(mid, card)
+                   for mid, card in zip(tracked.message_ids, cards)):
                 tracked.signature = signature
                 return
-            tracked.message_id = None  # gone from Telegram → post a fresh one
+        if tracked is not None:
+            # Either the card count changed, or a message is gone from Telegram (deleted,
+            # too old). Poof whatever survives and post a fresh set — a half-updated
+            # prompt on a phone is a prompt that lies about what it is asking.
+            self._resolve(window_id, kind)
 
-        message_id = None
-        if self._post is not None:
-            message_id = self._post(text, None, thread, markup)
-        else:
-            # No id-returning poster (plain-sender tests) — post via the sender;
-            # without an id we can neither edit nor poof the message.
-            self._sender(text, None, thread, reply_markup=markup)
-        self._prompts.setdefault(window_id, {})[kind] = _Tracked(signature, message_id)
+        message_ids: list[int] = []
+        for card in cards:
+            if self._post is not None:
+                message_id = self._post_card(card, thread)
+                if isinstance(message_id, int):
+                    message_ids.append(message_id)
+            else:
+                # No id-returning poster (plain-sender tests) — post via the sender;
+                # without an id we can neither edit nor poof the message.
+                self._sender(card.text, card.parse_mode, thread, reply_markup=card.markup)
+        self._prompts.setdefault(window_id, {})[kind] = _Tracked(signature, message_ids)
+
+    def _post_card(self, card: Card, thread) -> int | None:
+        """Post one card, falling back to plain text if Telegram rejects the markup.
+
+        A ``<pre>``-bearing body is the only formatted thing this watcher sends, and a
+        formatting rejection must never cost the human the *content*: a gate that arrives
+        with its options missing is the exact silent degrade this change exists to end.
+        """
+        message_id = self._post(card.text, card.parse_mode, thread, card.markup)
+        if message_id is None and card.plain and card.parse_mode:
+            log.warning("gate card rejected with parse_mode=%s — re-posting it plain",
+                        card.parse_mode)
+            message_id = self._post(card.plain, None, thread, card.markup)
+        return message_id
+
+    def _edit_card(self, message_id: int, card: Card) -> bool:
+        """Edit one tracked message to this card, plain-text fallback and all."""
+        if self._edit(message_id, card.text, card.parse_mode, card.markup):
+            return True
+        if card.plain and card.parse_mode:
+            return bool(self._edit(message_id, card.plain, None, card.markup))
+        return False
 
     def _resolve(self, window_id: str, kind: str) -> None:
-        """The prompt is answered — drop its marker and poof its message.
+        """The prompt is answered — drop its marker and poof its message(s).
 
         Deleting is the point: the buttons on an answered prompt are not just
         stale, they are *live* — a later tap would fire Enter/Escape at whatever
@@ -736,9 +1046,10 @@ class PermissionGateWatcher:
         separately) is the record of what was chosen.
         """
         tracked = self._prompts.get(window_id, {}).pop(kind, None)
-        if tracked is None or tracked.message_id is None or self._delete is None:
+        if tracked is None or self._delete is None:
             return
-        try:
-            self._delete(tracked.message_id)
-        except Exception:
-            log.exception("failed to delete resolved %s prompt on %s", kind, window_id)
+        for message_id in tracked.message_ids:
+            try:
+                self._delete(message_id)
+            except Exception:
+                log.exception("failed to delete resolved %s prompt on %s", kind, window_id)

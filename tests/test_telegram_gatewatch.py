@@ -719,3 +719,252 @@ def test_a_still_open_prompt_is_never_deleted():
     w.poll(["@1"])
     w.poll(["@1"])
     assert bot.deleted == []
+
+
+# ── the gate rendered from its HOOK PAYLOAD, not from the pane (CMX-49) ──────
+#
+# The live bug (2026-07-14): a 3-question AskUserQuestion whose options carried
+# `preview` boxes arrived on the phone as its question text and a bare nav row —
+# zero options, zero descriptions, zero previews, nothing to tap — while
+# `hook.pre_tool_use` in the event log already held every one of them. The pane
+# scrape parses that shape as "multi / unparseable" (a multi-question selector
+# draws a tab strip; a preview re-lays the TUI out side-by-side), and always will:
+# the scraper keeps meeting shapes it was not measured against. The hook does not.
+
+from chela.telegram.gatewatch import Card, format_hook_askuq_cards  # noqa: E402
+from chela.telegram.hookgate import HookGate, Option, Question  # noqa: E402
+
+
+def _gate(*questions, tuid="toolu_01"):
+    return HookGate(tool_use_id=tuid, tool="AskUserQuestion",
+                    questions=tuple(questions), seq=184)
+
+
+# The real shape, trimmed: three questions, each option carrying a box-drawing preview.
+SIDEBAR = Question(
+    question="How aggressive should the sidebar consolidation be?",
+    header="Sidebar",
+    options=(
+        Option("Spine: 5 views, Feed is home", "Feed becomes the default landing view.",
+               "BEFORE (6)      AFTER (5)\n  Wall            Feed"),
+        Option("Conservative: add Feed", "Lower risk, less payoff.",
+               "BEFORE (6)      AFTER (6)"),
+    ),
+)
+ACT_PATH = Question(
+    question="Scope of the Feed: read-only, or can you ACT on a row?",
+    header="Act path",
+    options=(Option("Read-only", "Ship the render first."),
+             Option("Actionable", "Answer a gate from the row.")),
+)
+BACKFILL = Question(
+    question="The events in the live log are test traffic. Keep them?",
+    header="Backfill",
+    options=(Option("Keep"), Option("Wipe")),
+)
+
+
+class _HookBot(_DeletingBot):
+    """Records the parse_mode too — a preview rides in an HTML ``<pre>`` block."""
+
+    def __init__(self):
+        super().__init__()
+        self.sent = []      # (text, parse_mode, thread, markup)
+
+    def post(self, text, parse_mode=None, thread=None, reply_markup=None):
+        self.sent.append((text, parse_mode, thread, reply_markup))
+        return super().post(text, parse_mode, thread, reply_markup)
+
+
+def _hook_watcher(bot, panes, gate, registry=None):
+    return PermissionGateWatcher(
+        bot.post, registry or _Registry({"@1": "100"}), capture=_capture(panes),
+        post=bot.post, edit=bot.edit, delete=bot.delete,
+        pending=lambda _wid: gate,
+    )
+
+
+def test_a_multi_question_gate_renders_from_the_payload_one_message_per_question():
+    bot = _HookBot()
+    # The pane is the shape that BROKE: the scraper reads it as unparseable (no options).
+    w = _hook_watcher(bot, {"@1": ASKUQ_MULTI_PANE}, _gate(SIDEBAR, ACT_PATH, BACKFILL))
+    w.poll(["@1"])
+
+    # One message PER QUESTION — three questions × previews is a wall of text otherwise,
+    # and the TUI itself walks the questions one at a time.
+    assert len(bot.sent) == 3
+    first, second, third = bot.sent
+    assert "Question 1/3" in first[0] and "Sidebar" in first[0]
+    assert "Question 2/3" in second[0] and "Question 3/3" in third[0]
+
+    # Everything the scrape threw away: the options, their descriptions, and the previews
+    # (in a <pre> block, which scrolls horizontally on a phone instead of wrapping the
+    # box-drawing into soup).
+    body, parse_mode, thread, markup = first
+    assert parse_mode == "HTML" and thread == "100"
+    assert "1. Spine: 5 views, Feed is home" in body
+    assert "2. Conservative: add Feed" in body
+    assert "Feed becomes the default landing view." in body
+    assert "<pre>BEFORE (6)      AFTER (5)\n  Wall            Feed</pre>" in body
+    assert "AFTER (6)</pre>" in body
+    # Not one word of it came from the pane: the scrape of this shape has no options.
+    assert "Which fruit" not in body
+
+    # A multi-question shape cannot be answered by ordinal (option i means a different
+    # thing per question), so: nav row only, and the card SAYS it must be answered in the
+    # terminal — rather than looking merely unhelpful.
+    callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert all(c.startswith("qa:nav:") for c in callbacks)
+    assert "terminal" in body
+
+
+def test_a_window_with_no_hook_events_still_renders_from_the_pane():
+    # The pre-plugin fleet: hooks are read at agent STARTUP, so an agent launched before
+    # the plugin was installed emits none. The pane scrape must not regress.
+    bot = _HookBot()
+    w = _hook_watcher(bot, {"@1": ASKUQ_SINGLE_PANE}, None)
+    w.poll(["@1"])
+    assert len(bot.sent) == 1
+    body, parse_mode, _thread, markup = bot.sent[0]
+    assert parse_mode is None                       # the plain scraped render, unchanged
+    assert body.startswith("❓ Which fruit do you prefer?")
+    callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert [c for c in callbacks if not c.startswith("qa:nav:")] == ["qa:0", "qa:1", "qa:2"]
+
+
+def test_a_gate_is_only_rendered_while_the_pane_shows_a_selector():
+    # An unresolved pre_tool_use also describes an agent that DIED at the gate. The pane
+    # is what says the selector is on screen right now — corroborate, never assume.
+    bot = _HookBot()
+    w = _hook_watcher(bot, {"@1": WORKING_PANE}, _gate(SIDEBAR, ACT_PATH))
+    w.poll(["@1"])
+    assert bot.sent == []
+
+
+def test_a_single_select_gate_keeps_its_semantic_option_buttons():
+    # The one shape whose ordinal mapping can be PROVEN: one question, single-select, and
+    # the pane scrape found the same number of options the payload declares. It keeps the
+    # working 1 2 3 selector — the zero-keypress answer path is the NEXT task.
+    bot = _HookBot()
+    fruit = Question(
+        question="Which fruit do you prefer?",
+        header="Fruit",
+        options=(Option("Apple", "A crisp red fruit"),
+                 Option("Banana", "A soft yellow fruit"),
+                 Option("Cherry", "A small red fruit")),
+    )
+    w = _hook_watcher(bot, {"@1": ASKUQ_SINGLE_PANE}, _gate(fruit))
+    w.poll(["@1"])
+    assert len(bot.sent) == 1
+    body, parse_mode, _thread, markup = bot.sent[0]
+    assert parse_mode == "HTML"
+    callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert [c for c in callbacks if not c.startswith("qa:nav:")] == ["qa:0", "qa:1", "qa:2"]
+    assert "terminal" not in body                   # it IS answerable — claim nothing else
+    assert "Question 1/1" not in body               # a lone question needs no counter
+
+
+def test_a_multiselect_question_is_never_given_ordinal_buttons():
+    bot = _HookBot()
+    multi = Question(question="Pick some", header="Fruit", multi_select=True,
+                     options=(Option("Apple"), Option("Banana"), Option("Cherry")))
+    w = _hook_watcher(bot, {"@1": ASKUQ_SINGLE_PANE}, _gate(multi))
+    w.poll(["@1"])
+    body, _pm, _thread, markup = bot.sent[0]
+    callbacks = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert all(c.startswith("qa:nav:") for c in callbacks)   # an answer is a SET, not an i
+    assert "multi-select" in body and "terminal" in body
+
+
+def test_an_option_with_no_preview_renders_no_empty_code_block():
+    bot = _HookBot()
+    w = _hook_watcher(bot, {"@1": ASKUQ_MULTI_PANE}, _gate(ACT_PATH))   # no previews
+    w.poll(["@1"])
+    body = bot.sent[0][0]
+    assert "<pre>" not in body
+    assert "1. Read-only" in body and "2. Actionable" in body
+
+
+def test_a_preview_that_does_not_fit_is_reported_never_silently_dropped():
+    # A card that renders as though it were complete when it is not is the same silent
+    # degrade as the wrong wid (CMX-48) and the silent mis-answer (CMX-32).
+    bot = _HookBot()
+    huge = Question(
+        question="Pick one",
+        header="Huge",
+        options=tuple(Option(f"Option {i}", "d" * 200, "P" * 4000) for i in range(4)),
+    )
+    w = _hook_watcher(bot, {"@1": ASKUQ_MULTI_PANE}, _gate(huge))
+    w.poll(["@1"])
+    body = bot.sent[0][0]
+    assert len(body) <= 4096                         # Telegram's hard cap
+    for i in range(4):
+        assert f"{i + 1}. Option {i}" in body        # a dropped option is unpickable
+    assert "preview" in body.lower() and ("clipped" in body or "NOT shown" in body)
+
+
+def test_every_question_message_is_poofed_when_the_selector_leaves_the_pane():
+    bot = _HookBot()
+    panes = {"@1": ASKUQ_MULTI_PANE}
+    w = _hook_watcher(bot, panes, _gate(SIDEBAR, ACT_PATH, BACKFILL))
+    w.poll(["@1"])
+    assert len(bot.posts) == 3
+    panes["@1"] = WORKING_PANE                       # answered
+    w.poll(["@1"])
+    # All three, not just the first: a live keyboard left on an answered question fires
+    # keystrokes at whatever the agent went on to do.
+    assert bot.deleted == [mid for mid, *_rest in bot.posts]
+
+
+def test_an_unchanged_gate_is_not_reposted_and_a_changed_one_edits_in_place():
+    bot = _HookBot()
+    gate = _gate(SIDEBAR, ACT_PATH)
+    w = _hook_watcher(bot, {"@1": ASKUQ_MULTI_PANE}, gate)
+    w.poll(["@1"])
+    w.poll(["@1"])
+    assert len(bot.posts) == 2 and bot.edits == []   # edge-triggered, 2 questions
+    # The same gate, re-rendered (a repaint changed a description) → edit, don't re-post.
+    w._pending_gate = lambda _wid: _gate(
+        Question(question=SIDEBAR.question, header=SIDEBAR.header,
+                 options=(Option("Spine: 5 views, Feed is home", "Reworded."),
+                          Option("Conservative: add Feed", "Lower risk."))),
+        ACT_PATH,
+    )
+    w.poll(["@1"])
+    assert len(bot.posts) == 2 and len(bot.edits) == 2
+
+
+def test_a_rejected_html_body_falls_back_to_plain_text_never_to_silence():
+    # Telegram rejects a message whose entities it cannot parse. A formatting failure must
+    # cost us the formatting, not the content — the options are the whole message.
+    bot = _HookBot()
+    posts: list = []
+
+    def flaky_post(text, parse_mode=None, thread=None, reply_markup=None):
+        posts.append((text, parse_mode))
+        return None if parse_mode == "HTML" else 42
+
+    bot.post = flaky_post
+    w = _hook_watcher(bot, {"@1": ASKUQ_MULTI_PANE}, _gate(SIDEBAR))
+    w.poll(["@1"])
+    assert [pm for _t, pm in posts] == ["HTML", None]
+    plain = posts[1][0]
+    assert "<pre>" not in plain
+    assert "1. Spine: 5 views, Feed is home" in plain and "BEFORE (6)" in plain
+
+
+def test_format_hook_askuq_cards_escapes_html_in_the_payload():
+    # The payload is agent-authored text: a `<b>` in a label must not become markup, and
+    # must not make Telegram reject the whole card.
+    cards = format_hook_askuq_cards(
+        _gate(Question(question="A & B <or> C?", header="H",
+                       options=(Option("<b>bold</b>", "a & b", "x < y"),))),
+        answerable=False,
+    )
+    assert len(cards) == 1
+    card = cards[0]
+    assert isinstance(card, Card) and card.parse_mode == "HTML"
+    assert "&lt;b&gt;bold&lt;/b&gt;" in card.text and "A &amp; B" in card.text
+    assert "<pre>x &lt; y</pre>" in card.text
+    # The plain fallback is the same body with our markup undone — never HTML-escaped soup.
+    assert "<b>bold</b>" in (card.plain or "") and "x < y" in (card.plain or "")
