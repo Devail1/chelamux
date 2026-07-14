@@ -162,3 +162,34 @@ def test_notify_host_redacts_telegram_token():
     assert host == "api.telegram.org"
     assert "SECRET-TOKEN" not in host
     assert "123456" not in host
+
+
+def test_work_dispatcher_row_reports_a_HELD_queue(client, monkeypatch, tmp_path):
+    # A held queue is the third way this row can lie about work getting done: configured,
+    # daemon up — and claiming nothing, deliberately. Read from the hold FILE, because a
+    # hold taken after the daemon booted is not in its startup snapshot.
+    _daemon(monkeypatch, dispatch_on=True)
+    monkeypatch.setattr(dash.config, "CHELA_DIR", tmp_path)
+    monkeypatch.setattr(dash.hold.config, "CHELA_DIR", tmp_path)
+    dash.hold.take(reason="rewriting the queue", ttl_seconds=600, by="@0")
+
+    data = client.get("/api/settings").get_json()
+    row = _items(data)["Work dispatcher"]
+
+    assert row["on"] is False and row["state"] == "Held"
+    assert "rewriting the queue" in row["detail"]
+    assert "Reconciliation continues" in row["detail"]   # the hold pauses CLAIMS only
+    # ...and a machine-readable twin, so a UI can act on it rather than parse a sentence.
+    assert data["dispatch_hold"]["reason"] == "rewriting the queue"
+
+
+def test_a_released_queue_leaves_no_trace_on_the_row(client, monkeypatch, tmp_path):
+    _daemon(monkeypatch, dispatch_on=True)
+    monkeypatch.setattr(dash.config, "CHELA_DIR", tmp_path)
+    monkeypatch.setattr(dash.hold.config, "CHELA_DIR", tmp_path)
+    dash.hold.take(ttl_seconds=600)
+    dash.hold.release()
+
+    data = client.get("/api/settings").get_json()
+    assert _items(data)["Work dispatcher"]["state"] != "Held"
+    assert data["dispatch_hold"] is None

@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, gateanswer, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, gateanswer, hold, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -1499,13 +1499,29 @@ def _settings_status() -> dict:
          if c.get("key") == "dispatch"),
         None,
     )
-    if daemon_dispatch is not None and not daemon_dispatch.get("on"):
+    daemon_dispatch_off = daemon_dispatch is not None and not daemon_dispatch.get("on")
+    if daemon_dispatch_off:
         dispatch_on = False
         dispatch_state = "Off"
         dispatch_detail = ("the RUNNING daemon has dispatch AND reconcile off — "
                            "CHELA_DISPATCH_WORKFLOWS is empty in its environment")
     elif daemon_live is None and n_wf:
         dispatch_detail += " · no daemon running (`chela run`)"
+
+    # A HELD queue (chela.hold) is the third way this row can be lying about work getting
+    # done: everything is configured, the daemon is up — and it is claiming nothing,
+    # deliberately, because someone is rewriting the queue. Read the hold FILE, not the
+    # daemon's startup snapshot: a hold taken since it booted is not in there, and the
+    # file is the shared truth between the two processes on purpose. A daemon that is off
+    # entirely is the worse fault, so it keeps the row.
+    dispatch_hold = None if daemon_dispatch_off else hold.active()
+    if dispatch_hold is not None:
+        dispatch_on = False
+        dispatch_state = "Held"
+        dispatch_detail = (
+            f"queue hold — {dispatch_hold.summary()}; NO task will be claimed until it is "
+            "released (`chela dispatch --resume`). Reconciliation continues."
+        )
 
     try:
         n_tasks = len(scheduler.list_tasks())
@@ -1529,9 +1545,11 @@ def _settings_status() -> dict:
             {"title": "Connections", "items": connections},
             {"title": "Features", "items": features},
         ],
-        # Machine-readable twin of the "Work dispatcher" row above, for anything
-        # that wants to act on a broken workflow rather than render a sentence.
+        # Machine-readable twins of the "Work dispatcher" row above, for anything that
+        # wants to act on a broken workflow (or a held queue) rather than render a
+        # sentence.
         "workflow_errors": wf_errors,
+        "dispatch_hold": dispatch_hold.as_dict() if dispatch_hold else None,
     }
 
 

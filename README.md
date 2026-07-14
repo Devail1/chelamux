@@ -250,6 +250,7 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | `chela schedule add <agent> --every/--cron/--once --prompt ...` | Add a scheduled poke |
 | `chela schedule list` / `remove <id>` | Manage scheduled tasks |
 | `chela dispatch <WORKFLOW.md> [--once] [--interval N] [--dry-run]` | Run the work-item dispatcher |
+| `chela dispatch --pause [--reason R] [--ttl 30m]` / `--resume` / `--hold-status` | **Hold the queue** while you reorder the tracker: claims stop, reconciliation continues, and the hold self-releases at its expiry |
 | `chela dispatch-runs` | List dispatcher runs and their status |
 | `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
 | `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux (by window id `@32` or name; non-zero exit if not delivered) |
@@ -489,6 +490,16 @@ literal Escape.
   `claude --permission-mode auto` (a classifier auto-approves safe ops and gates
   dangerous ones); set `agent.cmd: claude --permission-mode bypassPermissions`
   in `WORKFLOW.md` for zero-hang autonomy on a repo you trust.
+- **The queue belongs to whoever holds it, not to whoever is faster.** The tracker
+  has two writers — you reorder it, the dispatcher claims from it — and you lose
+  that race every time: a merge frees the slot, and the next tick fires long before
+  you have finished writing the item you meant to put on top. So say it instead of
+  racing it: `chela dispatch --pause` stops **claims** (never reconciliation — a
+  merged PR still closes out and frees its slot), you rewrite and **push**, and
+  `--resume` lets the next tick claim the new top item. A hold expires on its own
+  (30m default), so a crash mid-rewrite can't strand the fleet. Claims are read from
+  `origin/<base_branch>` at the instant of claiming, so an unpushed edit is one the
+  dispatcher cannot see.
 - **Agent state is read on two channels — correlated, not screen-scraped.** chela
   reads each agent's **transcript** (`~/.claude/projects/…jsonl`) as the
   *structured* channel — tool calls, questions, plans and results arrive as typed

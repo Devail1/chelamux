@@ -29,6 +29,7 @@ from chela import (
     dispatcher,
     doctor,
     event_log,
+    hold,
     hooks,
     inbox,
     messenger,
@@ -144,6 +145,11 @@ def cmd_run(args) -> None:
     # one clock.
     last_dispatch_check: dict[Path, float] = {}
     dispatch_blocked: set[Path] = set()   # workflows whose file currently doesn't parse
+    # The queue hold is GLOBAL (one file, honoured by every tick), so this edge-trigger is
+    # too: say it once when the queue is held and once when it is released, never every
+    # tick. A paused dispatcher is a DISABLED SUBSYSTEM — CMX-53's rule — so it announces
+    # itself here, in the startup capability line, in `chela doctor`, and in /api/settings.
+    dispatch_held = False
     last_notify_check = 0.0
     waiting_seen: set[str] = set()
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
@@ -201,6 +207,16 @@ def cmd_run(args) -> None:
                     elif not summary.get("blocked") and wf_path in dispatch_blocked:
                         dispatch_blocked.discard(wf_path)
                         log.info("Dispatch resumed for %s — workflow parses again", wf_path.name)
+                    if summary.get("held") and not dispatch_held:
+                        dispatch_held = True
+                        log.warning(
+                            "Work dispatcher HELD — claiming nothing (%s). Reconciliation "
+                            "continues. Release with `chela dispatch --resume`.",
+                            (summary.get("hold") or {}).get("summary", "queue hold"),
+                        )
+                    elif not summary.get("held") and dispatch_held:
+                        dispatch_held = False
+                        log.info("Work dispatcher resumed — the queue hold was released")
                     if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
                         log.info("Dispatch %s: %s", wf_path.name, summary)
                 except Exception:
@@ -550,10 +566,80 @@ def cmd_drive(args) -> None:
         sys.exit(1)
 
 
+def _print_hold(held, prefix: str = "") -> None:
+    print(f"{prefix}Dispatch is HELD — no task will be claimed until it is released.")
+    print(f"  {held.summary()}")
+    print("  Reconciliation keeps running: a merged PR still closes out its run and "
+          "frees its slot.")
+    print("  Release: chela dispatch --resume")
+
+
+def cmd_dispatch_hold(args) -> bool:
+    """``chela dispatch --pause / --resume / --hold-status``. True if it handled the call.
+
+    The hold is the orchestrator's answer to a race it always loses (see :mod:`chela.hold`):
+    it says "claim nothing, I am rewriting the queue" BEFORE it starts writing, so the
+    order is decided by intent rather than by whoever is faster. It is GLOBAL — every
+    workflow, every dispatcher process — which is why it takes no WORKFLOW.md argument:
+    the queue you are rewriting is the one being claimed from, wherever that claim runs.
+    """
+    if args.resume:
+        released = hold.release()
+        if released is None:
+            print("Dispatch was not held. Nothing to resume.")
+        else:
+            print(f"Dispatch RESUMED — released a hold {hold.human_duration(released.age())} "
+                  f"old ({released.by}{': ' + released.reason if released.reason else ''}).")
+            print("The next tick claims the top of the queue as it now stands.")
+        return True
+
+    if args.pause:
+        try:
+            ttl = hold.parse_ttl(args.ttl)
+        except ValueError as e:
+            print(f"error: --ttl {e}", file=sys.stderr)
+            raise SystemExit(2) from None
+        try:
+            held = hold.take(reason=args.reason or "", ttl_seconds=ttl)
+        except OSError as e:
+            # A hold the daemon will never see is worse than no hold: the caller would
+            # rewrite the queue believing it was protected. Fail loudly, exit non-zero.
+            print(f"error: could not take the hold ({e}) — dispatch is NOT paused",
+                  file=sys.stderr)
+            raise SystemExit(1) from None
+        _print_hold(held)
+        return True
+
+    if args.hold_status:
+        held = hold.read()
+        if held is None:
+            print("No dispatch hold. Tasks are claimed as normal.")
+        elif held.expired():
+            print(f"Dispatch hold EXPIRED ({held.summary()}) — the next dispatch tick "
+                  "releases it and resumes, loudly.")
+        else:
+            _print_hold(held)
+        return True
+
+    return False
+
+
 def cmd_dispatch(args) -> None:
     """Run the work-item dispatcher against a WORKFLOW.md."""
+    if cmd_dispatch_hold(args):
+        return
+    if not args.workflow:
+        print("error: the path to a WORKFLOW.md is required "
+              "(or use --pause / --resume / --hold-status)", file=sys.stderr)
+        raise SystemExit(2)
     if args.dry_run:
         plans = dispatcher.dry_run(args.workflow)
+        # A dry run that previews a claim while the queue is HELD is telling a half-truth:
+        # a live tick right now would claim nothing at all. Say so before the plans.
+        held = hold.active()
+        if held:
+            print(f"NOTE: the queue is HELD ({held.summary()}) — a live tick would claim "
+                  "NOTHING. Below is what it would dispatch once released.\n")
         if not plans:
             print("No open tasks")
             return
@@ -1167,12 +1253,37 @@ def main() -> None:
 
     # dispatch
     p_disp = sub.add_parser("dispatch", help="Run the work-item dispatcher")
-    p_disp.add_argument("workflow", help="Path to WORKFLOW.md")
+    p_disp.add_argument(
+        "workflow", nargs="?", default=None,
+        help="Path to WORKFLOW.md (not needed for --pause/--resume/--hold-status)",
+    )
     p_disp.add_argument("--once", action="store_true", help="Run one tick and exit")
     p_disp.add_argument("--interval", type=int, default=60, help="Poll interval in seconds (default 60)")
     p_disp.add_argument(
         "--dry-run", action="store_true",
         help="Print rendered prompt and worktree path for each open task; do not spawn windows or run hooks",
+    )
+    # The queue hold (chela.hold): claim nothing while the queue is being rewritten.
+    # Global (every workflow, every dispatcher process) and persisted to a file, because
+    # the daemon that honours it is not the process that takes it.
+    p_disp.add_argument(
+        "--pause", action="store_true",
+        help="HOLD the queue: claim no new task until --resume (reconciliation continues). "
+             "Take this BEFORE reordering the tracker.",
+    )
+    p_disp.add_argument("--resume", action="store_true", help="Release the queue hold")
+    p_disp.add_argument(
+        "--hold-status", action="store_true", help="Print the current queue hold, if any",
+    )
+    p_disp.add_argument(
+        "--reason", default="", help="Why the queue is held (shown to anyone who looks)",
+    )
+    p_disp.add_argument(
+        "--ttl", default=str(hold.DEFAULT_TTL_SECONDS),
+        help=f"How long a --pause lasts before it self-releases, loudly — 900, 30m, 2h "
+             f"(default {hold.human_duration(hold.DEFAULT_TTL_SECONDS)}, max "
+             f"{hold.human_duration(hold.MAX_TTL_SECONDS)}). A hold can never strand the "
+             f"fleet.",
     )
 
     # dispatch-runs (inspection)
