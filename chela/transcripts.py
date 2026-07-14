@@ -41,11 +41,18 @@ _READ_BLOCK = 64 * 1024
 def encode_cwd(cwd: str) -> str:
     """Encode a cwd into Claude Code's `~/.claude/projects/<dir>` name.
 
-    Claude Code replaces both `/` and `.` with `-`, so
-    `/home/alice/.chela/worktrees/myproj/abc` becomes
-    `-home-alice--chela-worktrees-myproj-abc`.
+    Claude Code replaces `/`, `.` **and `_`** with `-`, so
+    `/home/alice/.chela/worktrees/my_proj/abc` becomes
+    `-home-alice--chela-worktrees-my-proj-abc`.
+
+    The `_` was missing until CMX-70, and it was not cosmetic: a directory with an
+    underscore in its name (`~/projects/analytics/data_prep`) encoded to a project dir
+    that CANNOT EXIST, so every cwd-keyed lookup for that agent — the transcript, and the
+    hook correlation that compares this encoding against the slug in a payload's
+    `transcript_path` — silently found nothing. Measured against Claude Code 2.1.209, not
+    inferred: a headless session run from `…/enc_probe` writes to `…-enc-probe`.
     """
-    return cwd.replace("/", "-").replace(".", "-")
+    return cwd.replace("/", "-").replace(".", "-").replace("_", "-")
 
 
 def transcript_path(cwd: str, session_id: str, base: Path | None = None) -> Path:
@@ -189,14 +196,22 @@ def _last_record_ts(path: Path) -> datetime | None:
 
 
 def transcript_for_cwd(cwd: str | None, base: Path | None = None) -> Path | None:
-    """Resolve a working directory → its active transcript path, tmux-natively.
+    """Resolve a working directory → its active transcript path — the LAST RESORT.
 
-    Claude Code does not surface its session id over tmux, so rather than rely
-    on any external session-id map we derive the transcript directory from the
-    cwd (``~/.claude/projects/<encoded-cwd>/``) and pick the ``*.jsonl`` in it
-    whose newest *record* is latest — that is the session actively writing from
-    that directory. Returns None if cwd is empty, the project dir is absent, or
-    it holds no transcripts yet.
+    ⚠️ **A cwd is not a session id, and this function cannot be more right than that.**
+    :mod:`chela.sessions` is the authority for "which transcript is this window writing":
+    it resolves by ``session_id`` (from the event log's hook-borne records, or the pane's
+    own ``claude --resume``) and only falls back to here for a window that has fired no
+    hook and was not resumed. This is kept for that case, and for callers that genuinely
+    have nothing but a directory. It answers the wrong question in three others — a
+    ``--resume`` from a different directory, an agent that ``cd``s, and two windows sharing
+    one cwd — see that module for what each of them cost.
+
+    Within its limits: derive the transcript directory from the cwd
+    (``~/.claude/projects/<encoded-cwd>/``) and pick the ``*.jsonl`` in it whose newest
+    *record* is latest — that is the session most recently writing from that directory.
+    Returns None if cwd is empty, the project dir is absent, or it holds no transcripts
+    yet.
 
     We rank by newest-record timestamp rather than file mtime because a
     ``/clear`` starts a new session (new jsonl) while writing a marker into the
@@ -206,9 +221,6 @@ def transcript_for_cwd(cwd: str | None, base: Path | None = None) -> Path | None
     as soon as the new session writes. A candidate with no timestamped record
     yet (e.g. a just-created session) sorts below any that has one, with mtime
     only breaking genuine ties.
-
-    Keyed by cwd (not window name) so a caller holding a window *id* can resolve
-    collision-free: ``discovery.get_window_cwd_by_id(wid)`` → here.
     """
     if not cwd:
         return None

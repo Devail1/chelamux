@@ -263,13 +263,26 @@ The origin directory is immutable on both sides, and three measured facts (Claud
    filesystem access, no `/proc` walk, no `pgrep`;
 3. Claude Code **never `chdir`s its own process** (it tracks the working directory
    internally — which is exactly why the payload `cwd` and the process cwd disagree). So
-   `#{pane_current_path}` of a `claude` pane *is* that pane's origin directory, and
-   encoding it yields the same slug.
+   the *process* cwd of a pane's `claude` **is** that pane's origin directory, and encoding
+   it yields the same slug.
 
-So the lookup stays a single `tmux list-windows` call (~5 ms, cached ~1 s, keyed by slug)
-plus a dict hit. The session→slug half is cached for the life of the process — a session's
-origin never changes. A payload with no `transcript_path` falls back to one glob of
+So the lookup stays a single `tmux list-windows` call (~5 ms, cached ~1 s) plus a couple of
+`/proc` reads and a dict hit — still no `pgrep`, no `capture-pane`, no `claude agents
+--json`. The session→slug half is cached for the life of the process — a session's origin
+never changes. A payload with no `transcript_path` falls back to one glob of
 `~/.claude/projects/*/<session_id>.jsonl`, on a cache miss only.
+
+### `--resume` is the exception, and it is checked first (CMX-70)
+
+A session **resumed from a different directory** breaks fact 1's *other* half: the
+transcript stays in the project dir the session was **born** in, so its slug names a
+directory no pane is sitting in. Origin matching then resolves it to `None` — or, worse, to
+an unrelated agent who genuinely lives in that birth directory.
+
+The pane's own command line settles it outright: **`claude --resume <session-id>` is that
+window claiming that session, by construction**, and it is consulted *before* the slug.
+`chela/sessions.py` owns both signals (and is also what the outbound relay resolves a
+window's transcript through — same question, one answer).
 
 **Ambiguity resolves to `None`, never to a guess.** Two agents launched in one directory
 cannot be told apart, and an unknown session resolves to `None` — **never** to the window

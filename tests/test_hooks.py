@@ -30,7 +30,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chela import event_log, hooks, messenger, rooms, transcripts
+from chela import event_log, hooks, messenger, rooms, sessions, transcripts
 from chela.dashboard import app as dash
 
 REPO = Path(__file__).resolve().parent.parent
@@ -214,10 +214,24 @@ def test_ingest_swallows_an_append_failure(monkeypatch):
 # is fixed at session start and survives any `cd`.
 
 def _panes(mapping):
-    """``{origin cwd: [(wid, command), …]}`` — keyed as the pane table really is."""
-    return lambda force=False: {
-        transcripts.encode_cwd(cwd): panes for cwd, panes in mapping.items()
+    """``{origin cwd: [(wid, command), …]}`` → the ``{wid: Pane}`` map correlation reads.
+
+    ``launched_in`` is the claude PROCESS's cwd, which is the origin directory and does
+    not move; the pane path is deliberately set to something else in the ``cd`` test.
+    """
+    panes = {
+        wid: sessions.Pane(wid=wid, path=cwd, command=command, claude_pid=1,
+                           launched_in=cwd)
+        for cwd, entries in mapping.items()
+        for wid, command in entries
     }
+    return lambda force=False: panes
+
+
+def _resumed(wid: str, session_id: str, cwd: str = "/elsewhere") -> sessions.Pane:
+    """A pane whose claude was launched with ``--resume`` — the CMX-70 case."""
+    return sessions.Pane(wid=wid, path=cwd, command="claude", claude_pid=1,
+                         launched_in=cwd, resumed=session_id)
 
 
 def _slugless():
@@ -312,14 +326,37 @@ def test_the_event_still_lands_when_the_window_is_unknown():
     assert record["session_id"] == _body()["session_id"]
 
 
-def test_correlation_reads_tmux_once_not_the_pane(monkeypatch):
-    """One `tmux list-windows`, no pgrep, no capture-pane, no /proc walk — an agent is
-    BLOCKED on this, at PreToolUse volume."""
+def test_a_resumed_session_is_filed_against_the_window_RUNNING_it(monkeypatch):
+    """CMX-70. A session resumed from another directory keeps its transcript in the project
+    dir it was BORN in — so its slug names a directory no pane is sitting in, and origin
+    matching resolves it to None (or, worse, to the unrelated agent that genuinely lives
+    there). The pane's own command line settles it: `claude --resume <sid>` IS that window
+    claiming that session."""
+    session = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"
+    origin = "/home/u/projects/analytics"                    # where the session was born
+    slug = transcripts.encode_cwd(origin)
+    panes = {
+        # @2 was rebuilt in a DIFFERENT directory and resumed the session:
+        "@2": _resumed("@2", session, cwd="/home/u/projects/analytics/data_prep"),
+        # …and an unrelated agent genuinely lives in the birth directory:
+        "@5": sessions.Pane(wid="@5", path=origin, command="claude", claude_pid=2,
+                            launched_in=origin),
+    }
+    monkeypatch.setattr(hooks, "_panes", lambda force=False: panes)
+
+    assert hooks.wid_for_session(session, f"/p/projects/{slug}/{session}.jsonl") == "@2"
+    # …and @5's own events still go to @5.
+    assert hooks.wid_for_session("s9", f"/p/projects/{slug}/s9.jsonl") == "@5"
+
+
+def test_correlation_reads_tmux_once_not_the_pane(monkeypatch, tmp_path):
+    """One `tmux list-windows` (+ a couple of small /proc reads), no pgrep, no capture-pane,
+    no `claude agents --json` — an agent is BLOCKED on this, at PreToolUse volume."""
     calls = []
 
     class Result:
         returncode = 0
-        stdout = "@3\tclaude\t/repo\n@4\tbash\t/other\n"
+        stdout = "@3\tclaude\t/repo\t100\n@4\tbash\t/other\t200\n"
 
     def fake_run(argv, **kw):
         calls.append(argv)
@@ -327,8 +364,9 @@ def test_correlation_reads_tmux_once_not_the_pane(monkeypatch):
 
     monkeypatch.setenv("CHELA_TMUX_SESSION", "chela")      # as PM2 pins it
     monkeypatch.setattr(hooks, "_panes", _REAL_PANES)      # undo the autouse stub
-    monkeypatch.setattr(hooks.subprocess, "run", fake_run)
-    monkeypatch.setattr(hooks, "_panes_cache", {"ts": 0.0, "by_slug": {}})
+    monkeypatch.setattr(sessions, "PROC", tmp_path)        # no claude process to find
+    monkeypatch.setattr(sessions.subprocess, "run", fake_run)
+    monkeypatch.setattr(sessions, "_panes_cache", {"ts": 0.0, "panes": {}})
 
     assert hooks.wid_for_session("s1", "/p/projects/-repo/s1.jsonl") == "@3"
     assert len(calls) == 1
@@ -338,7 +376,7 @@ def test_correlation_reads_tmux_once_not_the_pane(monkeypatch):
     assert hooks.wid_for_session("s1", "/p/projects/-repo/s1.jsonl") == "@3"
     assert len(calls) == 1
     flat = [arg for call in calls for arg in call]
-    assert not any("capture-pane" in a or "pgrep" in a for a in flat)
+    assert not any("capture-pane" in a or "pgrep" in a or "agents" in a for a in flat)
 
 
 def test_the_slug_is_resolved_once_and_cached(monkeypatch):

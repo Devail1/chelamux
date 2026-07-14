@@ -42,13 +42,10 @@ import json
 import logging
 import os
 import re
-import subprocess
-import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from chela import config, event_log, transcripts
+from chela import config, event_log, sessions, transcripts
 
 log = logging.getLogger(__name__)
 
@@ -447,8 +444,8 @@ def manifest_drift(installed: dict, expected: dict) -> list[str]:
 # --- correlation: session → window, without touching a pane ------------------------
 #
 # The correlation key is the session's ORIGIN DIRECTORY — the directory the `claude`
-# process was launched in — because it is the one thing about a session that does not
-# move. Three facts, each measured on Claude Code 2.1.207, make it work:
+# process was launched in — because it is *almost* the one thing about a session that does
+# not move. Three facts, each measured on Claude Code 2.1.207, make it work:
 #
 #   1. a session's transcript lives at `~/.claude/projects/<slug>/<session_id>.jsonl`,
 #      and `<slug>` is derived from the origin directory ONCE, at session start. It does
@@ -458,68 +455,44 @@ def manifest_drift(installed: dict, expected: dict) -> list[str]:
 #      the event, for free, with NO filesystem access and no /proc walk at all.
 #   3. Claude Code never `chdir`s its own process — it tracks the working directory
 #      internally (that is exactly why the payload `cwd` and the process cwd disagree).
-#      So `#{pane_current_path}` of a `claude` pane IS that pane's origin directory,
-#      and encoding it with the same `encode_cwd` yields the same slug.
+#      So the *process* cwd of a pane's `claude` IS that pane's origin directory, and
+#      encoding it with the same `encode_cwd` yields the same slug.
 #
-# Both sides of the comparison are now immutable for the life of the session. `cwd` —
-# mutable on both sides, and the whole of CMX-48 — is not consulted, not even as a hint:
-# the only thing a cwd fallback can add is the confidently-wrong answer this replaced.
-
-_PANE_TTL = 1.0
-_panes_cache: dict = {"ts": 0.0, "by_slug": {}}
-_panes_lock = threading.Lock()
+# Both sides of that comparison are immutable for the life of the session. `cwd` — mutable
+# on both sides, and the whole of CMX-48 — is not consulted, not even as a hint: the only
+# thing a cwd fallback can add is the confidently-wrong answer this replaced.
+#
+# `--resume` IS THE EXCEPTION, and it is checked FIRST (CMX-70). A session resumed from a
+# different directory keeps its transcript in the project dir it was BORN in, so its slug
+# names a directory no pane is sitting in — origin-matching then resolves it to None (or,
+# worse, to an unrelated agent that happens to live in that birth directory). The pane's
+# own command line settles it outright: `claude --resume <sid>` is that window claiming
+# that session, by construction. See `chela/sessions.py`, which owns both signals.
 
 # session_id → slug. A session's origin never changes, so a hit is cached for the life of
 # the process; only misses re-resolve. Bounded — a long-lived daemon sees many sessions.
 _SLUG_CACHE_MAX = 1024
 _slug_cache: dict[str, str] = {}
 
-# A session id is pasted into a glob, so it is validated as the uuid Claude Code emits
-# rather than trusted (`../../` in a payload must not walk the filesystem).
-_SESSION_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{7,63}$")
 
+def _panes(force: bool = False) -> dict[str, sessions.Pane]:
+    """The live pane map — ONE tmux call plus a few /proc reads, TTL-cached upstream.
 
-def _load_panes() -> dict[str, list[tuple[str, str]]]:
-    """``{slug: [(window_id, pane_command), …]}`` — ONE tmux call, no pgrep, no pane read.
-
-    Keyed by the *project slug* of each pane's path, so the lookup is a dict hit against
-    the slug the payload already carries. Correlation stays a single ~5 ms subprocess
-    (cached), rather than the pid→cwd dance ``/api/agents`` does (a per-window ``pgrep``
-    plus ``claude agents --json``, which can take seconds — far too slow for something an
-    agent is blocked on).
+    Correlation stays a single ~5 ms subprocess (cached), rather than the pid→cwd dance
+    ``/api/agents`` does (a per-window ``pgrep`` plus ``claude agents --json``, which can
+    take seconds — far too slow for something an agent is blocked on).
     """
-    try:
-        result = subprocess.run(
-            ["tmux", "list-windows", "-t", config.current_session(), "-F",
-             "#{window_id}\t#{pane_current_command}\t#{pane_current_path}"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return {}
-    if result.returncode != 0:
-        return {}
-    by_slug: dict[str, list[tuple[str, str]]] = {}
-    for line in result.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        wid, command, cwd = (p.strip() for p in parts)
-        if wid and cwd:
-            by_slug.setdefault(transcripts.encode_cwd(_norm(cwd)), []).append(
-                (wid, command))
-    return by_slug
+    return sessions.panes(force)
 
 
-def _panes(force: bool = False) -> dict[str, list[tuple[str, str]]]:
-    now = time.time()
-    if not force and now - _panes_cache["ts"] < _PANE_TTL:
-        return _panes_cache["by_slug"]
-    with _panes_lock:
-        if not force and time.time() - _panes_cache["ts"] < _PANE_TTL:
-            return _panes_cache["by_slug"]    # a concurrent caller refreshed it
-        _panes_cache["by_slug"] = _load_panes()
-        _panes_cache["ts"] = time.time()
-    return _panes_cache["by_slug"]
+def _by_slug(panes: dict[str, sessions.Pane]) -> dict[str, list[sessions.Pane]]:
+    """``{project slug of the pane's ORIGIN: [pane, …]}`` — the lookup the slug hits."""
+    out: dict[str, list[sessions.Pane]] = {}
+    for pane in panes.values():
+        origin = pane.origin
+        if origin:
+            out.setdefault(transcripts.encode_cwd(_norm(origin)), []).append(pane)
+    return out
 
 
 def _norm(path: str) -> str:
@@ -544,14 +517,8 @@ def _slug_from_transcript(transcript_path: str | None) -> str | None:
 def _slug_from_disk(session_id: str) -> str | None:
     """Find the session's project directory on disk — the fallback for a payload with no
     ``transcript_path``. One glob, and only ever on a cache miss."""
-    if not _SESSION_RE.match(session_id):
-        return None
-    try:
-        for path in transcripts.CLAUDE_PROJECTS_DIR.glob(f"*/{session_id}.jsonl"):
-            return path.parent.name
-    except OSError:
-        return None
-    return None
+    path = sessions.transcript_for_session(session_id)
+    return path.parent.name if path is not None else None
 
 
 def session_slug(session_id: str | None, transcript_path: str | None = None) -> str | None:
@@ -582,24 +549,36 @@ def wid_for_session(session_id: str | None,
     parent's window. That is the right answer, not a near-miss: the subagent runs inside
     that agent, in that window, and there is no window of its own to file it against.
     """
+    wid = _wid_in(session_id, transcript_path, _panes())
+    if wid:
+        return wid
+    # A window that appeared since the last refresh — a freshly spawned agent's
+    # SessionStart is exactly this case. One forced tmux call, only on a miss.
+    return _wid_in(session_id, transcript_path, _panes(force=True))
+
+
+def _wid_in(session_id: str | None, transcript_path: str | None,
+            panes: dict[str, sessions.Pane]) -> str | None:
+    """The window a session runs in, against one snapshot of the panes."""
+    # A pane running `claude --resume <sid>` IS that session's window, whatever directory
+    # it was resumed from — the one signal a `--resume` cannot invalidate (CMX-70).
+    claimed = sessions.wid_claiming_session(session_id, panes)
+    if claimed:
+        return claimed
     slug = session_slug(session_id, transcript_path)
     if not slug:
         return None
-    candidates = _panes().get(slug)
-    if not candidates:
-        # A window that appeared since the last refresh — a freshly spawned agent's
-        # SessionStart is exactly this case. One forced tmux call, only on a miss.
-        candidates = _panes(force=True).get(slug)
+    candidates = _by_slug(panes).get(slug)
     if not candidates:
         return None
-    claude = [wid for wid, command in candidates if command == "claude"]
+    claude = [p.wid for p in candidates if p.command == "claude"]
     if len(claude) == 1:
         return claude[0]
     if claude:
         return None                            # two agents, one origin: cannot say which
     # No pane reports `claude` as its command (a wrapper, a different launcher). Fall
     # back to the origin being unique among windows — still an unambiguous answer.
-    return candidates[0][0] if len(candidates) == 1 else None
+    return candidates[0].wid if len(candidates) == 1 else None
 
 
 # --- clipping ---------------------------------------------------------------------
