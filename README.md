@@ -188,10 +188,10 @@ The daemon then reports, once, when `@3` **finishes**, **blocks** on a prompt, o
 as one line typed into the orchestrator's session:
 
 ```
-📥 @3 (chelamux) finished the task you dispatched — verify + commit. — note: "parser bug"
+📥 @3 · chelamux finished the task you dispatched — verify + commit. — note: “parser bug”
 ```
 
-Three rules make pushing into a live session safe:
+Four rules make pushing into a live session safe:
 
 - **Delivery is gated on `idle`, strictly.** A `busy` session is mid-thought and is
   never interrupted — the event queues durably and goes out on the next idle tick.
@@ -208,6 +208,14 @@ Three rules make pushing into a live session safe:
   `CHELA_ORCHESTRATOR_WID=@0`. Until something registers, the inbox is **inert** —
   it can't push into a random agent's session. It never reports on the
   orchestrator's own window either, so it can't notify itself in a loop.
+- **An idle prompt is not necessarily a *prose* prompt.** Claude Code's input line
+  has modes: `!` runs a shell command, `#` writes to memory. A session in `!` mode is
+  perfectly `idle` — and it will **execute** the next line it receives. (It did:
+  a notification built from an agent-authored PR title was run by `/bin/bash`.) So the
+  mode is read off the pane and an unsafe one is **refused** — the event is *held* in
+  the queue, never dropped — and, independently, every summary is **neutralised** of
+  shell metacharacters, control bytes and mode-switching prefixes before it is typed.
+  Agent-authored text must never be indistinguishable from something you typed.
 
 Kill it entirely with `CHELA_INBOX_ENABLED=false`.
 
