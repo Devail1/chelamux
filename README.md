@@ -179,7 +179,10 @@ inbox closes that: completion is pushed back into the orchestrator's session.
 # in the orchestrator's session, after dispatching work to window @3:
 chela drive @3 "Fix the parser bug in src/lex.rs; commit when tests pass."
 chela watch @3 --note "parser bug"     # register interest — you'll be told
-chela watching                         # what's watched + what's queued
+chela watching                         # what's watched, what's queued, and whether
+                                       #   the address it delivers to is still real
+chela watch                            # no window: (re-)register THIS session as the
+                                       #   orchestrator — the fix after tmux restarts
 ```
 
 The daemon then reports, once, when `@3` **finishes**, **blocks** on a prompt, or
@@ -208,6 +211,17 @@ Four rules make pushing into a live session safe:
   `CHELA_ORCHESTRATOR_WID=@0`. Until something registers, the inbox is **inert** —
   it can't push into a random agent's session. It never reports on the
   orchestrator's own window either, so it can't notify itself in a loop.
+- **`@3` is an address, not an identity — so every stored one carries its tmux
+  epoch.** tmux issues window ids *per server*: restart it and the fleet comes back
+  renumbered from `@0`. On 2026-07-14 an OOM did exactly that, and the inbox spent the
+  day pushing at a `@0` that no longer existed — five finished PRs went unreviewed, in
+  total silence, with `chela doctor` green. Every persisted id (the orchestrator's
+  address, each watch, each run row, each Telegram binding) is now stamped with the
+  server that issued it; one from a dead server is **never acted on** — it names a
+  different agent now, and a wrong wid is worse than no wid — and being undeliverable
+  is **loud**: an ERROR every tick, an `inbox_undeliverable` event in the Feed, a phone
+  push, and a red `chela doctor` (`inbox.address`). Nothing is lost: the queue waits,
+  and `chela watch` (no arguments) re-registers the session that is really there.
 - **An idle prompt is not necessarily a *prose* prompt.** Claude Code's input line
   has modes: `!` runs a shell command, `#` writes to memory. A session in `!` mode is
   perfectly `idle` — and it will **execute** the next line it receives. (It did:

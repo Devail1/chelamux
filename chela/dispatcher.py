@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from chela import hold, judge
+from chela import epoch, hold, judge
 from chela.config import CHELA_DIR, DISPATCH_TICK_INTERVAL, TMUX_SESSION, max_reworks
 from chela.messenger import send_tmux
 from chela.sources import Task, get_source
@@ -499,6 +499,15 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # landed ownerless. A pre-existing row simply has NULL here and falls back
         # to the by-name lookup (inbox.run_wid).
         ("window_id", "ALTER TABLE runs ADD COLUMN window_id TEXT"),
+        # ...and the tmux server that ISSUED that id (CMX-77). `@3` is an ADDRESS, not an
+        # identity: tmux numbers windows per server, so after a restart (an OOM took ours on
+        # 2026-07-14) the same `@3` names a different agent entirely. A recorded id with no
+        # epoch beside it cannot be told apart from one that is still good, and acting on it
+        # files a dead run's events under a LIVE agent's lane — a wrong wid is worse than no
+        # wid (CMX-48). Readers (inbox.run_wid, runtime_truth) drop the id when this stamp is
+        # not the epoch running now. A pre-existing row reads NULL and is treated as
+        # unverifiable, not as current.
+        ("window_epoch", "ALTER TABLE runs ADD COLUMN window_epoch TEXT"),
         # The rework loop (CMX-68). `rework_count` is the bounded-loop counter — it is
         # incremented when a rework is actually SPAWNED, not when the verdict is written,
         # so a verdict that never gets a slot cannot burn a round. `review_history` is
@@ -2150,7 +2159,8 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
-             task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL""",
+             task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
+             window_epoch=NULL""",
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number),
     )
     conn.commit()
@@ -2244,9 +2254,12 @@ def _launch_agent(
     target_id = _new_window(window_name, str(worktree))
 
     # Only a real @id is stored — _new_window degrades to the bare name when the id can't
-    # be parsed, and a name in this column would be a lie the Feed keys a lane on.
+    # be parsed, and a name in this column would be a lie the Feed keys a lane on. The id is
+    # stamped with the tmux epoch that ISSUED it (CMX-77): this is the same lossless moment,
+    # and the id is worthless to a later reader without it.
     if record_window and re.fullmatch(r"@\d+", target_id):
-        conn.execute("UPDATE runs SET window_id=? WHERE task_id=?", (target_id, task_id))
+        conn.execute("UPDATE runs SET window_id=?, window_epoch=? WHERE task_id=?",
+                     (target_id, epoch.current(), task_id))
         conn.commit()
 
     # WORKFLOW.md's agent.cmd → the Settings permission mode → the built-in default (see
@@ -2437,7 +2450,7 @@ def _rework_failed(conn: sqlite3.Connection, row: sqlite3.Row, error: str) -> No
         spent += 1
     conn.execute(
         "UPDATE runs SET status='changes_requested', rework_count=?, last_error=?, "
-        "window_id=NULL WHERE task_id=?",
+        "window_id=NULL, window_epoch=NULL WHERE task_id=?",
         (spent, error, task_id),
     )
     conn.commit()
@@ -2503,7 +2516,8 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
     # forever. A launch that then fails reconciles like any other running run.
     conn.execute(
         "UPDATE runs SET status='running', rework_count=?, started_at=?, ended_at=NULL, "
-        "last_error=NULL, idle_nudged_at=NULL, window_id=NULL, worktree_path=? "
+        "last_error=NULL, idle_nudged_at=NULL, window_id=NULL, window_epoch=NULL, "
+        "worktree_path=? "
         "WHERE task_id=?",
         (rework_round, _now(), str(worktree), task_id),
     )

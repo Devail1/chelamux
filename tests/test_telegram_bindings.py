@@ -102,9 +102,14 @@ def test_save_load_round_trip(tmp_path):
     # every window on every tick. It is a cache, never a source of truth — the tmux
     # window name is.
     data = json.loads(path.read_text())
+    # `epochs` stamps each bound `@N` with the tmux SERVER that issued it (CMX-77): the id
+    # is an address, not an identity, and a binding that outlives its server would relay a
+    # stranger's pane into the topic a human opened for a dead agent. Unstamped here — bind()
+    # was given no epoch, which is exactly what a pre-CMX-77 file reads as.
     assert data == {"chat_id": "777",
                     "bindings": {"@3": "42", "@7": "88"},
-                    "topic_names": {}}
+                    "topic_names": {},
+                    "epochs": {}}
 
     loaded = BindingRegistry.load(path)
     assert loaded.chat_id == "777"
