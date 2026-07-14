@@ -93,7 +93,7 @@
   3. **Add a `chela doctor` fact: the judge's `test_cmd` passes in a freshly-set-up judge worktree.** ⛔ A judge that cannot verify anything must not read as healthy. Doctor was green through this entire outage.
   4. ⚠️ **CHECK before_run renders/runs in BOTH the fresh-worktree and attached-worktree paths** (dispatcher.py:2347 notes this constraint). `npm ci` needs `package-lock.json` present in the worktree — confirm it is.
 
-- [ ] **🗜️ THE WALL: A DISPATCHED AGENT'S PANE OPENS MINIMIZED — and POPS OUT when it wants a human.** Same principle as the Telegram lazy-bind (`CHELA_TELEGRAM_BIND_DISPATCHED`), second surface: ⛔ **a dispatched worker should not occupy human attention surface — a topic OR a Wall tile — until it needs a human.** Liav, 07-14. **⚠️ DEPENDS ON the lazy-bind task's `dispatched_window_ids()` helper (run-row-derived) — reuse it, do not re-derive.**
+- [x] **🗜️ THE WALL: A DISPATCHED AGENT'S PANE OPENS MINIMIZED — and POPS OUT when it wants a human.** Same principle as the Telegram lazy-bind (`CHELA_TELEGRAM_BIND_DISPATCHED`), second surface: ⛔ **a dispatched worker should not occupy human attention surface — a topic OR a Wall tile — until it needs a human.** Liav, 07-14. **⚠️ DEPENDS ON the lazy-bind task's `dispatched_window_ids()` helper (run-row-derived) — reuse it, do not re-derive.**
 
   ✅ **The machinery EXISTS — do not build a new one.** `terminals.js` already has `_minimized` (a Set), `_minimizeItem`, and a **dock**, persisted to `localStorage` `pc_wall_minimized` (`terminals.js:801-817`).
 
