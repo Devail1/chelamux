@@ -968,3 +968,124 @@ def test_format_hook_askuq_cards_escapes_html_in_the_payload():
     assert "<pre>x &lt; y</pre>" in card.text
     # The plain fallback is the same body with our markup undone — never HTML-escaped soup.
     assert "<b>bold</b>" in (card.plain or "") and "x < y" in (card.plain or "")
+
+
+# ── CMX-50: a HELD gate is answerable — with zero keypresses ─────────────────
+#
+# While the daemon holds an agent's `PermissionRequest` hook open (chela.gateanswer), a
+# tap is handed straight back through it. So the card stops apologising and grows real
+# buttons — for EVERY shape, including the multi-question and multiSelect pickers the
+# keystroke path had to refuse (there is no `❯` cursor to inject against, and the one time
+# it guessed it silently answered option 2 for a tap on option 3 — CMX-32).
+
+from chela.gateanswer import OpenGate  # noqa: E402
+
+FRUIT = Question(
+    question="Which fruit do you prefer?",
+    header="Fruit",
+    options=(Option("Apple", "A crisp red fruit"),
+             Option("Banana", "A soft yellow fruit"),
+             Option("Cherry", "A small red fruit")),
+)
+MULTI_SELECT = Question(
+    question="Which extras?",
+    header="Extras",
+    multi_select=True,
+    options=(Option("Metrics"), Option("Tracing")),
+)
+
+
+def _held(tuid="toolu_01", budget=90.0):
+    return OpenGate(tool_use_id=tuid, wid="@1", questions=[], deadline=9e18, budget=budget)
+
+
+def _held_watcher(bot, panes, gate, held):
+    return PermissionGateWatcher(
+        bot.post, _Registry({"@1": "100"}), capture=_capture(panes),
+        post=bot.post, edit=bot.edit, delete=bot.delete,
+        pending=lambda _wid: gate, held=lambda _tuid: held,
+    )
+
+
+def test_a_held_multi_question_gate_gets_real_answer_buttons_on_every_question():
+    bot = _HookBot()
+    gate = _gate(SIDEBAR, ACT_PATH, BACKFILL)
+    w = _held_watcher(bot, {"@1": ASKUQ_MULTI_PANE}, gate, _held())
+
+    w.poll(["@1"])
+
+    assert len(bot.sent) == 3
+    for i, (text, _pm, _thread, markup) in enumerate(bot.sent):
+        data = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+        # Each card's buttons name THIS gate and THIS question — never a cursor move.
+        assert data == [f"qa:h:toolu_01:{i}:0", f"qa:h:toolu_01:{i}:1"]
+        assert "no keystrokes" in text
+        # And the human is told the agent is being held, and for how long: an agent frozen
+        # on a human is the whole risk of the feature, so it is not hidden from them.
+        assert "held for up to 90s" in text
+        assert "can't yet map a tap" not in text     # the apology is gone
+
+
+def test_a_held_multiselect_question_toggles_and_offers_send():
+    bot = _HookBot()
+    w = _held_watcher(bot, {"@1": ASKUQ_MULTI_PANE}, _gate(MULTI_SELECT), _held())
+
+    w.poll(["@1"])
+
+    text, _pm, _thread, markup = bot.sent[0]
+    rows = markup["inline_keyboard"]
+    assert [b["text"] for b in rows[0]] == ["☐ 1", "☐ 2"]
+    assert rows[-1][0]["callback_data"] == "qa:hs:toolu_01:0"
+    assert "toggle" in text and "✅ Send" in text
+
+
+def test_a_gate_nobody_is_holding_still_falls_back_to_the_keystroke_path():
+    # The pre-plugin agent: no hook is blocked on it, so there is nothing to answer
+    # through. The scraped single-select keyboard (and its cursor arithmetic) remains.
+    bot = _HookBot()
+    w = _held_watcher(bot, {"@1": ASKUQ_SINGLE_PANE}, _gate(FRUIT), None)
+
+    w.poll(["@1"])
+
+    _text, _pm, _thread, markup = bot.sent[0]
+    data = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert data[:2] == ["qa:0", "qa:1"]             # the legacy keystroke selector
+
+
+def test_a_gate_whose_hold_EXPIRES_loses_its_answer_buttons():
+    # The hook gave up and the agent is no longer listening. A button that would be
+    # refused is worse than no button: the card must say "answer it in the terminal".
+    bot = _HookBot()
+    w = _held_watcher(bot, {"@1": ASKUQ_MULTI_PANE}, _gate(SIDEBAR, ACT_PATH), None)
+
+    w.poll(["@1"])
+
+    text, _pm, _thread, markup = bot.sent[0]
+    data = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert all(d.startswith("qa:nav:") for d in data)
+    assert "Answer this one in the terminal" in text
+
+
+def test_a_gate_that_becomes_held_re_renders_with_answer_buttons():
+    # The pane relay can post a gate a tick before the hook's POST lands. That message
+    # must GROW its buttons, not sit there un-answerable — so the hold is in the de-dup
+    # signature.
+    bot = _HookBot()
+    gate = _gate(SIDEBAR)
+    held: list = [None]
+    w = PermissionGateWatcher(
+        bot.post, _Registry({"@1": "100"}), capture=_capture({"@1": ASKUQ_MULTI_PANE}),
+        post=bot.post, edit=bot.edit, delete=bot.delete,
+        pending=lambda _wid: gate, held=lambda _tuid: held[0],
+    )
+
+    w.poll(["@1"])
+    assert bot.edits == []
+    held[0] = _held()
+    w.poll(["@1"])
+
+    assert len(bot.sent) == 1, "the same message is edited, never double-posted"
+    assert len(bot.edits) == 1
+    _mid, text, markup = bot.edits[0]
+    assert markup["inline_keyboard"][0][0]["callback_data"] == "qa:h:toolu_01:0:0"
+    assert "no keystrokes" in text

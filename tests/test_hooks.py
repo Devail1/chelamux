@@ -1,10 +1,14 @@
-"""Claude Code hooks → the event log. Ingestion only, and observe-only.
+"""Claude Code hooks → the event log. Ingestion only; one event may answer.
 
 What these lock in, in the order an agent's safety depends on it:
 
-  * the endpoint NEVER answers a gate — no ``permissionDecision``, no
-    ``hookSpecificOutput``, ever. A field in that response silently starts deciding the
-    user's permission prompts for them, so it is asserted on, not assumed;
+  * the endpoint answers **nothing but a question a human actually tapped** (CMX-50). It
+    used to answer nothing at all, and that was asserted here — a ``hookSpecificOutput``
+    in this response silently decides the user's prompts for them, so it may never appear
+    by accident. It now appears for exactly one event (``PermissionRequest`` on an
+    ``AskUserQuestion``) and only when :mod:`chela.gateanswer` has a human's answer in
+    hand; every other event, and every un-answered question, still returns ``{}``. The
+    contract that changed is stated where it lives — see :mod:`tests.test_gateanswer`;
   * the endpoint never fails its caller — a malformed body, a garbage payload and an
     oversized POST all return 200. An agent is *blocked* on this request;
   * an AskUserQuestion's per-option ``label`` and ``description`` survive into the log —
@@ -353,11 +357,20 @@ def test_the_slug_is_resolved_once_and_cached(monkeypatch):
 
 # --- the endpoint ----------------------------------------------------------------
 
-def test_endpoint_appends_and_answers_nothing(client):
+def test_endpoint_appends_and_answers_nothing_that_nobody_answered(client):
+    """A question nobody has tapped is a question the endpoint does NOT decide.
+
+    This assertion used to be unconditional — the endpoint answered nothing, ever. CMX-50
+    changed that deliberately: a ``PermissionRequest`` for an ``AskUserQuestion`` is now
+    held (briefly, boundedly) so a human can answer it from Telegram with no keystrokes.
+    Everything that makes that safe is asserted in ``tests/test_gateanswer.py``. What is
+    asserted *here* is the floor beneath it: with no window, no bound topic and no human
+    (this client has none of them), the body is still ``{}`` — no decision, no deny, and no
+    delay. A gate is never answered on a human's behalf just because it arrived.
+    """
     resp = client.post("/hooks/PermissionRequest", json=ASKUQ)
 
     assert resp.status_code == 200
-    # OBSERVE-ONLY. A decision in this body silently answers the user's prompts for them.
     body = resp.get_json()
     assert body == {}
     assert "hookSpecificOutput" not in body
@@ -405,8 +418,17 @@ def test_hooks_spec_registers_every_event_over_http():
         # .bashrc able to corrupt the JSON contract with stray stdout.
         assert hook["type"] == "http"
         assert hook["url"] == f"http://127.0.0.1:5001/hooks/{event}"
-        assert hook["timeout"] == hooks.HOOK_TIMEOUT <= 2   # the agent BLOCKS on this
         assert ("matcher" in entries[0]) == (event in hooks.TOOL_EVENTS)
+        if event == "PermissionRequest":
+            # The ONE event allowed to take its time: it is where a gate is answered from
+            # a phone, and an answer needs a human to look at it (CMX-50). MEASURED, not
+            # assumed: Claude Code honours a declared http-hook timeout verbatim (10s →
+            # 10.2s blocked, 65 → 66, 130 → 133 — no 60s clamp) and fails open on expiry.
+            assert hook["timeout"] == hooks.GATE_TIMEOUT > 60
+        else:
+            # Everything else appends and returns. The agent BLOCKS on this request, and
+            # PreToolUse/PostToolUse alone are ~78% of the log's volume.
+            assert hook["timeout"] == hooks.HOOK_TIMEOUT <= 2
 
 
 def test_the_committed_plugin_still_matches_the_code():

@@ -39,7 +39,7 @@ import re
 from typing import Callable
 
 from chela import config, messenger
-from chela.telegram import media
+from chela.telegram import gateanswers, media
 from chela.telegram.format import to_code_block
 from chela.telegram.interactive import (
     SELECT_SETTLE_S,
@@ -298,6 +298,7 @@ def build_application(
     capture=None,
     send_escape=None,
     send_key=None,
+    drafts=None,
 ):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
@@ -380,6 +381,10 @@ def build_application(
     capture = capture or messenger.capture_pane
     send_escape = send_escape or messenger.send_escape
     send_key = send_key or messenger.send_key
+    # The zero-keypress answer book (CMX-50) — the taps for the gates whose hooks the
+    # daemon is holding open. This process is the only one that sees a tap, so this is the
+    # only place the half-answered map for a multi-question gate can live.
+    drafts = drafts or gateanswers.DRAFTS
 
     def _screenshot_keyboard() -> "InlineKeyboardMarkup":
         """The control-key keyboard attached to every ``/screenshot`` reply."""
@@ -637,18 +642,47 @@ def build_application(
             return select_keystrokes_relative(target, uq.cursor)
         return select_keystrokes(target)
 
+    async def _redraw(query, markup) -> None:
+        """Redraw a card's keyboard in place (the ☑ ticks / the ✓ on the chosen option).
+
+        Best-effort decoration: a keyboard Telegram will not redraw (the message is gone,
+        the markup is unchanged) must not cost the human the *answer*, which has already
+        been recorded by then.
+        """
+        if markup is None:
+            return
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])
+                     for b in row]
+                    for row in markup["inline_keyboard"]
+                ])
+            )
+        except Exception:  # noqa: BLE001 — unchanged markup, deleted message, 429…
+            log.debug("could not redraw the answer keyboard", exc_info=True)
+
     async def _on_qa(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
-        """Answer an AskUserQuestion tap (semantic option or navigation key).
+        """Answer an AskUserQuestion tap — through the agent's hook, or (legacy) by keys.
 
         Mirrors :func:`_on_key`: the target window is re-resolved from the
         callback message's OWN topic via ``router.resolve`` (never trusted from
         the payload, CMX-8), so a tap honours the same chat/topic gate as the
-        prompt it rides on. A semantic ``qa:<i>`` tap re-reads the live ``❯``
-        cursor and injects the cursor-relative Down/Up presses + Enter
-        (:func:`_select_keys_for`) to select and submit option ``i``; a
-        ``qa:nav:<key>`` tap sends one key so the human can drive the selector by
-        hand; ``qa:nav:ref`` re-screenshots. Every tap is answered so Telegram
-        stops the button's spinner, even when gated out or unrecognised.
+        prompt it rides on.
+
+        **The ``qa:h:`` taps send no keystrokes at all** (CMX-50). The daemon is holding
+        that gate's ``PermissionRequest`` hook open, so the answer is handed straight back
+        through it (:mod:`chela.telegram.gateanswers`) — which is the only way a
+        multi-question or ``multiSelect`` picker can be answered correctly, and the end of
+        the race that once made a tap on option 3 answer option 2 (CMX-32). A tap for a
+        gate that is no longer waiting is **refused and said so**, never re-aimed at
+        whatever is on the pane now.
+
+        The keystroke paths remain for an agent whose gate no hook announced (one launched
+        before the plugin): a ``qa:<i>`` tap re-reads the live ``❯`` cursor and injects the
+        cursor-relative Down/Up presses + Enter (:func:`_select_keys_for`); a
+        ``qa:nav:<key>`` tap sends one key; ``qa:nav:ref`` re-screenshots. Every tap is
+        answered so Telegram stops the button's spinner, even when gated out or unrecognised.
         """
         query = update.callback_query
         if query is None:
@@ -665,6 +699,18 @@ def build_application(
             await query.answer()
             return
         kind, payload = action
+        if kind in ("pick", "send"):
+            # Zero keypresses: nothing below this branch touches tmux.
+            if kind == "pick":
+                tool_use_id, question_index, option_index = payload
+                tap = await asyncio.to_thread(
+                    drafts.pick, tool_use_id, question_index, option_index)
+            else:
+                tool_use_id, question_index = payload
+                tap = await asyncio.to_thread(drafts.send, tool_use_id, question_index)
+            await query.answer(tap.toast, show_alert=not tap.ok)
+            await _redraw(query, tap.markup)
+            return
         if kind == "refresh":
             await query.answer("🔄")
             if msg is not None:

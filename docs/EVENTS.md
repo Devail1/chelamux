@@ -119,8 +119,9 @@ And **[Claude Code hooks](HOOKS.md)**, shipped as a plugin: typed events POSTed 
 into the daemon by the agents themselves, namespaced `hook.*` (`hook.permission_request`,
 `hook.pre_tool_use`, …). They arrive *before* the fact — a gate lands in the log while the
 agent is still blocked on it, with the full `tool_input` attached — which the transcript
-cannot do and a pane scrape can only approximate. Ingestion is **observe-only**: it feeds
-the log and answers nothing.
+cannot do and a pane scrape can only approximate. Ingestion answers nothing; the one hook
+that *does* answer — an `AskUserQuestion`, and only with a human's tap — is
+[documented where it lives](HOOKS.md#answering-a-question-with-zero-keypresses).
 
 This log is the one authority all of them append to, and the one the dashboard timeline
 and the inbox both read — there is deliberately no second event source alongside it.

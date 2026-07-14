@@ -19,20 +19,25 @@ truncated button caption, a hook gives you this, while the agent is still waitin
                  {"label": "Postgres", "description": "A server to run, but concurrent writers"}]}]}}}
 ```
 
-## This slice is OBSERVE-ONLY
+## What the endpoint answers — and everything it does not
 
-It **ingests**. It answers nothing. The endpoint returns `{}` — no `permissionDecision`,
-no `hookSpecificOutput`, ever — because a decision in that response would silently start
-answering the user's permission prompts on their behalf. The pane-scraped gates
-(`chela/telegram/{panescan,gatewatch,interactive}.py`) are still what answers a gate, and
-they stay: **hooks are read at agent startup**, so a fleet that is already running has
-none, and a fleet member launched without the plugin never will. Hooks are the better
-channel; they are not yet the *only* channel, and nothing here assumes they are.
+It **ingests**, and it returns `{}`. One event is the exception, deliberately: a
+`PermissionRequest` for an **`AskUserQuestion`** can come back carrying the human's answer
+(see [Answering a question with zero keypresses](#answering-a-question-with-zero-keypresses)),
+and only ever an answer a human actually tapped. Nothing else in this response decides
+anything — no `permissionDecision`, no `hookSpecificOutput` on any other event — because a
+decision in that body is chela answering someone's prompts on their behalf, and that is a
+thing you should have to read about, not discover.
+
+The pane-scraped gates (`chela/telegram/{panescan,gatewatch,interactive}.py`) stay:
+**hooks are read at agent startup**, so a fleet that is already running has none, and a
+fleet member launched without the plugin never will. Hooks are the better channel; they
+are not the *only* channel, and nothing here assumes they are.
 
 ## The log is what a relayed gate is RENDERED from
 
-Still observe-only — the endpoint answers nothing — but the payload is no longer written
-and forgotten. When the Telegram relay sees an `AskUserQuestion` selector on a window's
+The payload is not written and forgotten. When the Telegram relay sees an
+`AskUserQuestion` selector on a window's
 pane, the *content* it posts comes from that window's pending `hook.pre_tool_use`
 (`chela/telegram/hookgate.py`), not from the scrape: every question, every option's
 `label`, `description` **and** `preview`, one Telegram message per question.
@@ -57,11 +62,76 @@ The split, then:
   selector right now. It also stays the whole content source for a **pre-plugin** agent,
   which emits no hooks at all.
 
-Answering is still keystroke injection, so the tap-to-answer buttons are attached only
-where their ordinal mapping can be *proven* (one question, single-select, options the
-scraper could count). For a multi-question or `multiSelect` gate the card renders in full,
-offers the nav keys, and says outright that it must be answered in the terminal — a button
-that silently picks the wrong option is worse than no button.
+## Answering a question with zero keypresses
+
+Every gate chela ever answered, it answered by *typing at the terminal*: find the `❯`
+cursor, inject that many arrow presses, wait, send Enter. That substrate cannot be made
+safe for the shapes we actually send. It has already produced a **silent mis-answer** — a
+tap on option 3 selected option 2, because Enter raced the arrow moves (CMX-32) — and a
+multi-question or `multiSelect` picker has no cursor semantics to inject against at all: an
+answer to "which extras?" is a *set*, and "press Down twice" cannot express one.
+
+**A `PermissionRequest` hook can just return the answer.** Measured on Claude Code 2.1.209,
+against a real 3-question `AskUserQuestion` whose options carried previews:
+
+```json
+{"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+  "decision": {"behavior": "allow",
+    "updatedInput": {"questions": [...],
+      "answers": {"Which store?": "Postgres",
+                  "Which extras?": ["Metrics", "Profiling"],
+                  "Deploy when?": "Later"}}}}}
+```
+
+The agent's transcript then reads: *Your questions have been answered: "Which store?"=
+"Postgres", "Which extras?"="Metrics,Profiling", "Deploy when?"="Later"* — and **not one
+keystroke went near the pane**. It works in every permission mode, `auto` included. So the
+Telegram card for a held gate carries real answer buttons for **every** shape: one tap for
+a single-select, `☐`/`☑` toggles plus **✅ Send** for a `multiSelect`, and a card per
+question for a multi-question run.
+
+The mechanics, and the three things that make them safe to run at a live fleet:
+
+**The wait is bounded, and it fails OPEN.** The hook runs *synchronously inside the agent's
+process*: the moment this endpoint blocks on a human, a live agent is frozen. So it waits
+at most `CHELA_GATE_WAIT_S` (default 90s) and then gives up and answers nothing. Giving up
+is **not a deny** — the picker is exactly where it was, still on the pane, still answerable
+in tmux, and the run is no worse off than before the feature existed. (An auto-deny would
+destroy work because a human was slow. Do not "harden" it into one.) `CHELA_GATE_MAX_WAITS`
+caps how many gates may be held at once; past the bound the next one is not held at all.
+
+**The budget can never outlive the hook that would deliver it.** `PermissionRequest` alone
+declares a long `timeout` (120s) in the plugin manifest; every other event keeps the 2s one,
+because `PreToolUse`/`PostToolUse` are ~78% of the log's volume. That ceiling is *measured*,
+not taken from the docs — a hook that never replies, timed against a 4.5s baseline:
+
+| declared `timeout` | how long the turn actually blocked |
+|---|---|
+| 10s | 10.2s |
+| 65s | ~66s |
+| 130s | ~133s |
+
+Honoured **verbatim — there is no 60s clamp** — and on expiry Claude Code fails open by
+itself. So a wait longer than the timeout is a wait that can never deliver, and the budget
+is clamped strictly below it.
+
+**A stale answer is refused.** A gate is identified by its `tool_use_id` — which
+`PermissionRequest` does not carry, so it is correlated to the `PreToolUse` that fired for
+the same call — and every button names it. A tap that lands after the gate resolved, timed
+out, or belongs to a different question finds no open gate and is **dropped and reported**,
+never applied to whatever is on screen by then. And a gate is only held for a window with a
+**bound Telegram topic**: an agent nobody is watching is never frozen on a human who was
+never shown the question.
+
+**The answers map must be complete.** Measured: Claude Code accepts a *partial* map without
+complaint and silently drops the unanswered question — the agent proceeds believing it
+asked, and never re-asks. So chela holds the answer until every question has one (the cards
+tell you how many are outstanding) and refuses anything less, along with any label the asker
+never offered.
+
+Keystroke injection survives for exactly one case: a **pre-plugin** agent, whose gate no
+hook ever announced. There the old rules still apply — buttons only where their ordinal
+mapping can be *proven*, and a card that says outright to answer in the terminal otherwise.
 
 ## Install
 

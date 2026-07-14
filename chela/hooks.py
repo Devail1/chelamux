@@ -1,4 +1,4 @@
-"""Claude Code hooks → the event log. **Ingestion only, and OBSERVE-ONLY.**
+"""Claude Code hooks → the event log. **Ingestion only** — this module never decides.
 
 The transcript only lands an interactive record at *resolution* — the `tool_use` for an
 `AskUserQuestion` or a gated `Bash` is appended to the JSONL when the human answers, not
@@ -7,12 +7,16 @@ scraped off a tmux pane: at the moment the agent is *blocked*, the structured ch
 empty. **Hooks are the missing channel** — typed, structured, and delivered *before* the
 fact, with the full `tool_input` attached.
 
-This module turns a hook POST into an :mod:`chela.event_log` record. It does nothing
-else. It answers no gate, decides no permission, and returns no verdict to the agent —
-see :func:`chela.dashboard.app.api_hooks`. The pane-scraped gates
-(``chela/telegram/{panescan,gatewatch,interactive}.py``) stay exactly as they are, and
-must: hooks are read at agent **startup**, so an already-running fleet has none, and a
-fleet member launched without the plugin never will.
+This module turns a hook POST into an :mod:`chela.event_log` record. It does nothing else:
+it answers no gate and decides no permission. **One hook does now answer** — a
+``PermissionRequest`` for an ``AskUserQuestion`` can be answered from Telegram with zero
+keystrokes — but that decision is made in :mod:`chela.gateanswer` and returned by
+:func:`chela.dashboard.app.api_hooks`, deliberately in a module of its own, so that
+"chela can answer a prompt on your behalf" stays a thing you have to go and *read*, not a
+field that quietly appeared in an ingestion path. Every other event still returns ``{}``.
+The pane-scraped gates (``chela/telegram/{panescan,gatewatch,interactive}.py``) stay
+exactly as they are, and must: hooks are read at agent **startup**, so an already-running
+fleet has none, and a fleet member launched without the plugin never will.
 
 **A hook runs synchronously inside a live agent.** Everything here is written to that
 constraint:
@@ -66,6 +70,25 @@ TOOL_EVENTS: frozenset[str] = frozenset(
 # daemon that is briefly busy, not for anything slow to happen inside the request.
 HOOK_TIMEOUT = 2
 
+# `PermissionRequest` is the one event whose handler may deliberately take its time: it is
+# where a gate is ANSWERED from Telegram (:mod:`chela.gateanswer`), and an answer needs a
+# human to look at their phone. It gets its own, far longer timeout — and it alone, because
+# PreToolUse/PostToolUse are ~78% of the log's volume and must stay fast.
+#
+# MEASURED, not taken from the docs (Claude Code 2.1.209, against a hook that never
+# replies; `claude -p` baseline 4.5s): declared 10s → the turn blocked 10.2s; declared 65s
+# → 66s; declared 130s → 133s. The declared timeout is honoured VERBATIM — there is no 60s
+# clamp — and when it expires the harness fails open and the turn proceeds unharmed. So
+# this ceiling is real, and `CHELA_GATE_WAIT_S` (the human's budget) is clamped strictly
+# below it: an answer that arrives after Claude Code has killed the hook is an answer
+# nobody receives.
+GATE_TIMEOUT = 120
+
+
+def hook_timeout(event: str) -> int:
+    """The ``timeout`` this event's hook entry declares. See :data:`GATE_TIMEOUT`."""
+    return GATE_TIMEOUT if event == "PermissionRequest" else HOOK_TIMEOUT
+
 # Event types are namespaced: `hook.pre_tool_use` says *an agent told us this*, as
 # against `run_review` / `died` / `daemon_start`, which are chela's own bookkeeping.
 TYPE_PREFIX = "hook."
@@ -95,7 +118,8 @@ def event_type(hook_event_name: str) -> str:
 # Shipped as a PLUGIN, and never by writing the user's settings.json: that file holds
 # hundreds of hand-curated permission entries, and chela has no business opening it.
 # Plugin hooks MERGE additively with the user's own (and fire last, at the lowest
-# precedence) — which is exactly right for something that only observes.
+# precedence) — so chela's hooks ride alongside whatever the user already runs rather
+# than overriding any of it.
 
 def hook_url(event: str, port: int | None = None, host: str = "127.0.0.1") -> str:
     """The URL a hook POSTs to. The port defaults to the one the running dashboard
@@ -119,7 +143,7 @@ def hooks_spec(port: int | None = None) -> dict:
         entry["hooks"] = [{
             "type": "http",
             "url": hook_url(event, port),
-            "timeout": HOOK_TIMEOUT,
+            "timeout": hook_timeout(event),
         }]
         hooks[event] = [entry]
     return {"hooks": hooks}
@@ -130,8 +154,8 @@ def plugin_manifest() -> dict:
     return {
         "name": "chela",
         "version": __version__,
-        "description": "Feed a chela fleet's event log from Claude Code hooks "
-                       "(observe-only — it never answers a prompt).",
+        "description": "Feed a chela fleet's event log from Claude Code hooks, and "
+                       "answer an AskUserQuestion from Telegram with no keystrokes.",
         "author": {"name": "chela"},
         "homepage": "https://github.com/Devail1/chelamux",
         "license": "MIT",

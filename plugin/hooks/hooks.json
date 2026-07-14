@@ -31,7 +31,7 @@
           {
             "type": "http",
             "url": "http://127.0.0.1:5001/hooks/PermissionRequest",
-            "timeout": 2
+            "timeout": 120
           }
         ]
       }
