@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -276,6 +277,65 @@ def test_rotation_keeps_a_bounded_number_of_generations(log_file, monkeypatch):
     assert (log_file.parent / (log_file.name + ".1")).exists()
     assert (log_file.parent / (log_file.name + ".2")).exists()
     assert not (log_file.parent / (log_file.name + ".3")).exists()
+
+
+# --- retirement (the operator's wipe) ------------------------------------------------
+
+def test_rotate_retires_the_log_to_a_bak_and_mints_a_fresh_boot(log_file):
+    """An operator step, not a boot-time unlink: the old file is KEPT, renamed."""
+    event_log.append("hook", "a row written when the wid was still wrong")
+    old_boot = event_log.current_boot()
+
+    result = event_log.rotate()
+
+    assert result["backup"] == str(log_file) + ".bak"
+    assert (log_file.parent / (log_file.name + ".bak")).exists()   # kept, never unlinked
+    assert not log_file.exists()
+    assert result["boot_id"] != old_boot
+    assert result["seq"] == 1                                      # seq stays monotonic
+
+
+def test_after_a_rotate_the_log_reads_empty_and_a_stale_cursor_is_a_gap(log_file):
+    event_log.append("hook", "old")
+    old = event_log.read()
+    event_log.rotate()
+
+    fresh = event_log.read()
+    assert fresh["events"] == []                                   # the retired rows are gone…
+    assert fresh["gap"] is None
+
+    # …and a reader still holding a cursor into them is TOLD, not silently resumed:
+    # its events were never in this epoch.
+    stale = event_log.read(old["next_seq"], after_boot=old["boot_id"])
+    assert stale["gap"] is not None
+    assert "boot_id changed" in stale["gap"]["reason"]
+
+
+def test_rotate_never_clobbers_an_earlier_retirement(log_file):
+    event_log.append("hook", "first life")
+    first = event_log.rotate()
+    event_log.append("hook", "second life")
+    second = event_log.rotate()
+
+    assert second["backup"] != first["backup"]
+    assert Path(first["backup"]).exists()
+    assert Path(second["backup"]).exists()
+
+
+def test_rotate_on_a_missing_log_is_not_an_error(log_file):
+    result = event_log.rotate()
+    assert result["backup"] is None
+    assert result["boot_id"]
+
+
+def test_appends_after_a_rotate_carry_the_new_boot(log_file):
+    event_log.append("hook", "old")
+    boot = event_log.rotate()["boot_id"]
+
+    rec = event_log.append("hook", "new")
+    assert rec["boot_id"] == boot
+    assert rec["seq"] == 2                                         # NOT reset — one seq space
+    assert _seqs(event_log.read()["events"]) == [2]
 
 
 # --- follow ------------------------------------------------------------------------

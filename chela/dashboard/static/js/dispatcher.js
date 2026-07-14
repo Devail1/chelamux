@@ -1,18 +1,17 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, api, attrEsc, escHtml, shortTime, showModal } from './util.js';
+import { $, api, attrEsc, escHtml, shortTime, showModal } from './util.js';
 import { _launcherData } from './launcher.js';
+import { pollWork, postWorkDelete } from './work.js';
 
 // ---------------------------------------------------------------------------
-// Render: Dispatcher (work-item dispatcher per-workflow view)
+// Render: the Runs segment of WORK (the per-workflow dispatch tables)
 //
-// Polls /api/dispatcher every DISPATCHER_REFRESH_MS on its own timer so the
-// panel updates even when the global refresh loop fires another tab. The
-// timer is owned here, not by the tab switch — flipping back into the
-// Dispatcher tab does a one-shot fetch; the interval keeps it fresh after.
+// This module no longer FETCHES: work.js owns the single /api/dispatcher poll for
+// the whole app and hands the payload here (renderDispatcher) and to the board
+// (renderKanban). It used to run its own 30s timer against that endpoint while
+// kanban.js ran a second one and the sidebar badges a third — three pollers, one
+// dataset. Rendering is all that is left here, which is all it ever was.
 // ---------------------------------------------------------------------------
-
-const DISPATCHER_REFRESH_MS = 30000;
-let _dispatcherTimer = null;
 
 // --- Init a repo -----------------------------------------------------------
 // Seed a starter WORKFLOW.md + TODO.md into a repo via POST /api/dispatcher/init
@@ -56,7 +55,7 @@ async function doInitRepo() {
     lines.push('Next: add ' + res.path + '/WORKFLOW.md to CHELA_DISPATCH_WORKFLOWS and restart the'
         + ' daemon, or run:  chela dispatch ' + res.path + '/WORKFLOW.md');
     setMsg('ok', lines.join('\n'));
-    if (typeof refreshDispatcher === 'function') refreshDispatcher();
+    pollWork();
 }
 
 function _runStatusBadge(status) {
@@ -196,23 +195,10 @@ async function dispatcherDeleteConfirm(actionBtn, ok) {
         payload.text = td.dataset.text;
     }
     td.querySelector('.kanban-confirm').innerHTML = '<span class="kanban-confirm-msg">Deleting…</span>';
-    let resp, data = {};
-    try {
-        resp = await fetch(BASE_PATH + '/api/dispatcher/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        try { data = await resp.json(); } catch (_) { data = {}; }
-    } catch (e) {
-        _dispatcherDeleteShowError(td, String(e));
-        return;
-    }
-    if (!resp.ok || !data.ok) {
-        _dispatcherDeleteShowError(td, data.error || `HTTP ${resp.status}`);
-        return;
-    }
-    refreshDispatcher();
+    // The POST + redraw is shared with the board's × (work.js) — one delete action,
+    // two confirm UIs (a table row here, a card there).
+    const err = await postWorkDelete(payload);
+    if (err) _dispatcherDeleteShowError(td, err);
 }
 
 function _dispatcherDeleteShowError(td, msg) {
@@ -251,17 +237,14 @@ function _renderWorkflowCard(wf) {
     </div>`;
 }
 
-async function refreshDispatcher() {
-    let data;
-    try {
-        data = await api('/api/dispatcher');
-    } catch (e) {
-        console.error('refreshDispatcher', e);
-        return;
-    }
+// Render the Runs segment from a payload work.js already fetched. No fetch here:
+// the same object is what the board renders, which is why the two can no longer
+// drift apart or double-poll.
+function renderDispatcher(data) {
     const list = $('#dispatcher-list');
     const empty = $('#dispatcher-empty');
-    if (!data.configured || !data.workflows || !data.workflows.length) {
+    if (!list || !empty) return;
+    if (!data || !data.configured || !data.workflows || !data.workflows.length) {
         list.innerHTML = '';
         empty.style.display = 'block';
         return;
@@ -270,18 +253,9 @@ async function refreshDispatcher() {
     list.innerHTML = data.workflows.map(_renderWorkflowCard).join('');
 }
 
-function startDispatcherTimer() {
-    stopDispatcherTimer();
-    _dispatcherTimer = setInterval(refreshDispatcher, DISPATCHER_REFRESH_MS);
-}
-
-function stopDispatcherTimer() {
-    if (_dispatcherTimer) { clearInterval(_dispatcherTimer); _dispatcherTimer = null; }
-}
-
 
 // --- Stage 0: ES-module exports ---
-export { _runDisplayId, _runPrCell, refreshDispatcher, startDispatcherTimer, stopDispatcherTimer };
+export { _runDisplayId, _runPrCell, renderDispatcher };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

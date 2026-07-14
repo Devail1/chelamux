@@ -461,6 +461,27 @@ def cmd_events_emit(args) -> None:
     print(f"seq={record['seq']} boot_id={record['boot_id']} {record['type']}")
 
 
+def cmd_events_rotate(args) -> None:
+    """Retire the current event log to a ``.bak`` and start a fresh boot epoch.
+
+    An OPERATOR step, never a silent unlink at boot: the file is renamed (kept), and the
+    ``boot_id`` moves so every reader holding a cursor into the retired log is told about
+    the gap rather than resuming into an empty one.
+    """
+    path = event_log.log_path()
+    if not args.yes:
+        print(f"This retires {path} to a .bak and starts a fresh boot_id.")
+        print("Readers holding a cursor will be told about the gap (they will not resume silently).")
+        print("Re-run with --yes to do it.")
+        return
+    result = event_log.rotate()
+    if result["backup"]:
+        print(f"retired {path} -> {result['backup']}")
+    else:
+        print(f"no log at {path} — nothing to retire")
+    print(f"fresh boot_id={result['boot_id']} (seq stays monotonic at {result['seq']})")
+
+
 def cmd_plugin(args) -> None:
     """Render the Claude Code hooks plugin with THIS install's dashboard port baked in.
 
@@ -1279,6 +1300,10 @@ def main() -> None:
     p_emit.add_argument("--wid", default=None, help="Window this event is about (@N or N)")
     p_emit.add_argument("--session-id", default=None, help="Claude Code session id, if known")
 
+    p_rot = ev_sub.add_parser(
+        "rotate", help="Retire the log to a .bak and start a fresh boot_id (operator step)")
+    p_rot.add_argument("--yes", action="store_true", help="Actually do it (without this: a dry run)")
+
     # plugin — the Claude Code hooks plugin, with this install's dashboard port in it.
     p_plugin = sub.add_parser(
         "plugin", help="Render the Claude Code hooks plugin (feeds the event log)")
@@ -1447,6 +1472,8 @@ def main() -> None:
     elif args.command == "events":
         if args.events_cmd == "emit":
             cmd_events_emit(args)
+        elif args.events_cmd == "rotate":
+            cmd_events_rotate(args)
         else:
             cmd_events(args)
     elif args.command == "doctor":

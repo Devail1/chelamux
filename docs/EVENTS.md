@@ -49,6 +49,40 @@ resumable and cannot skip an event you have not seen. A filtered read still adva
 `next_seq` past the events it dropped, so a reader following one `type` does not re-scan
 the log forever.
 
+### …and over HTTP: `GET /api/log`
+
+The dashboard reads the log through **`/api/log`** — a thin wrapper over the same
+`event_log.read()` the CLI calls, with the same cursor, the same filters, and `gap` +
+`next_seq` passed straight through. One reader, two front ends; two readers would be two
+truths.
+
+```
+GET /api/log?after_seq=41&after_boot=9f2a&type=run_review&wid=@3&limit=200
+```
+
+⛔ **Not `/api/events`** — that path is the dashboard's SSE *delta-notification* stream,
+which carries no data at all. When the log's `seq` moves, that stream pushes a small
+`log` frame carrying **only the new seq**, and the client fetches `/api/log` from its own
+cursor. So a dropped frame loses nothing, and there is no second event source: if the
+stream never connects, the view's poll timer covers the gap exactly as it did before.
+
+## Retiring the log (an operator step)
+
+```bash
+chela events rotate          # dry run — says what it would do
+chela events rotate --yes    # renames events.jsonl → events.jsonl.bak, mints a new boot_id
+```
+
+Rows can be *known-wrong* rather than merely old — everything written before the `wid`
+correlation fix carries the wrong window id — and a UI must never render known-wrong rows.
+This is how you retire them: the file is **renamed, never unlinked** (the decision is
+reversible), `seq` stays monotonic, and the `boot_id` moves so every reader holding a
+cursor into the retired file is told about the **gap** instead of resuming into an empty
+log as though nothing had happened.
+
+It is deliberately **not** something a process does at boot. A log that silently wipes
+itself when a daemon starts is a log you cannot trust.
+
 ## A stale cursor is detectable, not silently wrong
 
 `boot_id` names the epoch a `seq` belongs to. It lives in the state file, shared by every

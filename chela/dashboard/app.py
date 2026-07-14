@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, gateanswer, hold, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, event_log, gateanswer, hold, hooks, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -2805,6 +2805,41 @@ def api_summary():
 
 
 # ---------------------------------------------------------------------------
+# API: the event log (READ)
+# ---------------------------------------------------------------------------
+#
+# ⛔ NOT /api/events — that path is TAKEN, and it is not this. /api/events is the
+# SSE delta-notification stream below: a notify-then-refetch pipe that carries no
+# data. The log is a different thing (durable, ordered, replayable), so it gets a
+# different path, and there is exactly ONE reader behind it: event_log.read(), the
+# same call `chela events` makes. Two readers would be two truths.
+
+LOG_DEFAULT_LIMIT = 200          # a cursorless read must not hand back the whole ring
+
+
+@app.route("/api/log")
+@require_auth
+def api_log():
+    """Replay the event log from a cursor. A thin wrapper over ``event_log.read``.
+
+    ``gap`` and ``next_seq`` are passed straight through, unflattened: a client resumes
+    from ``next_seq`` (never ``last_seq`` — a bounded read truncates), and a cursor that
+    cannot be honoured comes back as a ``gap`` object rather than a plausible-looking
+    wrong continuation.
+    """
+    limit = request.args.get("limit", type=int)
+    if limit is None:
+        limit = LOG_DEFAULT_LIMIT
+    return jsonify(event_log.read(
+        request.args.get("after_seq", type=int),
+        after_boot=request.args.get("after_boot") or None,
+        types=request.args.getlist("type") or None,
+        wid=request.args.get("wid") or None,
+        limit=max(0, limit),
+    ))
+
+
+# ---------------------------------------------------------------------------
 # API: Server-Sent Events (reactive UI accelerator)
 # ---------------------------------------------------------------------------
 #
@@ -2880,6 +2915,21 @@ def _sse_terms_snapshot() -> set:
         return set()
 
 
+def _sse_log_snapshot() -> dict:
+    """``{"boot_id", "seq"}`` — the event log's position. Diffed to push a `log` delta.
+
+    Deliberately the sidecar read (``event_log.tip``), not a read of the events: the SSE
+    frame is a NOTIFICATION, not a payload — it carries the new ``seq`` and the client
+    fetches ``/api/log?after_seq=…`` for the events themselves, from its OWN cursor. A
+    client that missed a frame therefore misses nothing; the delta is an accelerator over
+    its poll, exactly like every other frame on this stream."""
+    try:
+        return event_log.tip()
+    except Exception:
+        log.exception("SSE: event-log tip failed")
+        return {}
+
+
 def _sse_stream():
     """Generator yielding SSE frames on relevant state change. Never raises out;
     a disconnected client surfaces as GeneratorExit on the next yield, which
@@ -2890,6 +2940,7 @@ def _sse_stream():
     prev_windows = _sse_windows_snapshot()
     prev_runs = _sse_runs_snapshot()
     prev_terms = _sse_terms_snapshot()
+    prev_log = _sse_log_snapshot()
 
     # An initial 'hello' lets the client confirm the stream is live (it may
     # optionally lengthen its poll timers; default behavior leaves them as-is).
@@ -2935,6 +2986,14 @@ def _sse_stream():
             yield f"event: runs\ndata: {payload}\n\n"
             last_sent = time.monotonic()
         prev_runs = cur_runs
+
+        cur_log = _sse_log_snapshot()
+        if cur_log and cur_log != prev_log:
+            # The seq the log is AT — not the events. The client resumes from its own
+            # cursor via /api/log, so a dropped frame costs it nothing.
+            yield f"event: log\ndata: {json.dumps(cur_log)}\n\n"
+            last_sent = time.monotonic()
+        prev_log = cur_log or prev_log
 
         cur_terms = _sse_terms_snapshot()
         newly_ready = sorted(cur_terms - prev_terms)

@@ -1,23 +1,25 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, _agentsCache, api, attrEsc, currentTab, escHtml, setAgentsCache } from './util.js';
 import { refreshAgents } from './agents.js';
-import { refreshDispatcher } from './dispatcher.js';
-import { refreshKanban } from './kanban.js';
+import { pollWork } from './work.js';
+import { onLogDelta } from './feed.js';
 import { RUN_TOAST_KINDS, runToastKind } from './runtoast.js';
 import { _absorbFreshTerminals, _cssEsc, _refreshPaneLabels, _renderedWids, _stopReadyPoll, _swapToFrame, _termReady, dropTerminalPane } from './terminals.js';
 
 // ---------------------------------------------------------------------------
 // Reactive updates via Server-Sent Events (accelerator over the poll timers)
 //
-// One EventSource opened on load. Each delta event re-runs the EXISTING render
-// path for the affected, currently-active tab — refreshAgents / refreshKanban /
-// refreshDispatcher refetch the full shape and redraw, and dropTerminalPane /
-// renderTerminals handle the wall reactively — so no new DOM path is added.
+// ONE EventSource opened on load — there is deliberately no second one. Each delta
+// event re-runs the EXISTING render path for the affected view: refreshAgents and
+// pollWork refetch the full shape and redraw, dropTerminalPane / renderTerminals
+// handle the wall reactively, and the `log` frame tells the Feed its cursor has
+// something behind it. Every frame is a NOTIFICATION — it carries no data the UI
+// renders directly, so a dropped frame is never a lost fact.
 //
-// This is strictly additive. The 30s global refresh, the 4s termTick, and the
-// dispatcher / kanban 30s timers all keep running. If the stream never connects
-// or drops, the browser auto-reconnects and the timers cover the gap, so the UI
-// behaves exactly as it did before SSE existed.
+// This is strictly additive. The 30s global refresh, the 4s termTick and work.js's
+// 30s /api/dispatcher poll all keep running. If the stream never connects or drops,
+// the browser auto-reconnects and the timers cover the gap, so the UI behaves
+// exactly as it did before SSE existed — the Feed included.
 // ---------------------------------------------------------------------------
 
 let _sse = null;
@@ -49,11 +51,20 @@ function _sseWindows(d) {
 
 function _sseRuns(d) {
     // A dispatcher run's status / PR state changed. First fire any run-state
-    // toasts (works regardless of the active tab), then redraw whichever board
-    // is showing it. Both refetch /api/dispatcher and fully re-render.
+    // toasts (works regardless of the active view), then redraw. One call now:
+    // pollWork() refetches /api/dispatcher ONCE and feeds the board, the runs
+    // tables and the sidebar badges from that one payload.
     _runStateToasts(d);
-    if (currentTab === 'dispatcher') refreshDispatcher();
-    else if (currentTab === 'kanban') refreshKanban();
+    pollWork();
+}
+
+function _sseLog(d) {
+    // The event log's seq moved. The frame is a NOTIFICATION — it carries the new
+    // seq, not the events — so the Feed fetches /api/log from its OWN cursor. Only
+    // while the Feed is on screen: off it, the view's entry does a fresh read, so a
+    // background fetch per appended event would buy nothing.
+    if (currentTab !== 'feed') return;
+    onLogDelta(d);
 }
 
 // Per-run last-seen status, so the toast is EDGE-TRIGGERED (fires only on the
@@ -153,6 +164,11 @@ function initSSE() {
         let d = null;
         try { d = JSON.parse(e.data); } catch (_) { /* trigger-only */ }
         _sseRuns(d);
+    });
+    _sse.addEventListener('log', e => {
+        let d = null;
+        try { d = JSON.parse(e.data); } catch (_) { /* trigger-only */ }
+        _sseLog(d);
     });
     _sse.addEventListener('term-ready', e => {
         let d = null;
