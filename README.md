@@ -637,6 +637,13 @@ literal Escape.
   VERIFY**, which blocks nothing and approves nothing. ⛔ **The judge never merges** — a clean
   PR stays exactly where it was, in your inbox. Off with `CHELA_JUDGE=0`, or for a workflow
   that sets no `judge.test_cmd` (no suite ⇒ no facts ⇒ nothing that may block).
+  ⛔ **`hooks.before_run` is the judge's environment, not just the agent's** — it runs on
+  every launch, and a judge worktree is a launch, so it has to build a worktree in which
+  `judge.test_cmd` can be **green**. Get that wrong and the judge is *inert*, not broken: it
+  is honest, correct, and it verifies nothing. Ours was, for its first PRs — the hook synced
+  the venv and never ran `npm ci`, so jsdom was missing, the DOM suites could not run, and
+  the baseline was red before a single mutation was applied. Every PR came back CANNOT
+  VERIFY. If your `test_cmd` needs it, your `before_run` installs it.
 - **The queue belongs to whoever holds it, not to whoever is faster.** The tracker
   has two writers — you reorder it, the dispatcher claims from it — and you lose
   that race every time: a merge frees the slot, and the next tick fires long before

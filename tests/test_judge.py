@@ -237,6 +237,24 @@ def test_a_baseline_that_is_not_green_verifies_NOTHING(tmp_path):
     assert report.outcomes == []                    # it never even started
 
 
+def test_a_red_baseline_says_WHY_it_was_red(tmp_path):
+    """⛔ CMX-80 — the unknown that hid the bug. The judge was inert for three weeks (jsdom
+    was never installed in its worktree, so the baseline was red on every PR), and the only
+    thing it ever said was "exited 1". An exit code names no cause and nobody can act on it.
+    The suite's own words go in the run's `judge_detail` AND in the PR comment."""
+    root = _project(tmp_path / "repo",
+                    guard_test="def test_the_env_is_missing():\n"
+                               "    raise AssertionError('jsdom is not installed')\n")
+
+    report = _run(root, _exp())
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert "1 failed" in report.cannot_verify          # the suite's summary line, not "exit 1"
+    body = judge.comment_body(report, None, TEST_CMD)
+    assert "jsdom is not installed" in body            # verbatim, from the suite's own output
+    assert "CANNOT VERIFY" in body and "NOT an approval" in body
+
+
 def test_a_dirty_worktree_verifies_NOTHING(tmp_path):
     root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
     (root / "guard.py").write_text(GUARD_PY + "\n# someone else was here\n")
