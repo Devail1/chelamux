@@ -55,6 +55,7 @@ import logging
 import os
 from typing import Callable
 
+from chela import epoch
 from chela.agent_manager import is_generic_name
 from chela.telegram.relay import Transport, _urllib_transport
 
@@ -194,6 +195,7 @@ def reconcile_bindings(
     dispatched: set[str] | frozenset[str] | None = None,
     gate_for: Callable[[str], object | None] | None = None,
     bind_dispatched: bool = False,
+    now_epoch: str | None = None,
 ) -> bool:
     """Diff the registry against the live fleet; provision + reap. Return changed.
 
@@ -217,6 +219,16 @@ def reconcile_bindings(
       the warning below.
     * ``bind_dispatched`` — ``True`` restores the old behaviour: a dispatched agent
       gets a topic like any other (``CHELA_TELEGRAM_BIND_DISPATCHED``).
+    * ``now_epoch``   — the tmux server issuing window ids right now
+      (:func:`chela.epoch.current`; injected, so this stays pure). A binding is STAMPED with
+      it, and one stamped with a **different** epoch is reaped like a dead window — because
+      that is what it is. tmux renumbers from ``@0`` when its server restarts (an OOM took
+      ours on 2026-07-14), so a binding that outlives its server does not merely go stale: it
+      keeps relaying, from whatever agent inherited that number, into a topic a human opened
+      for a different one — and routes their replies back into that stranger's prompt. A
+      binding with no stamp (a file written before CMX-77) is ADOPTED into the current epoch
+      once its window is seen live: chela cannot tell such a file from one written under this
+      server, and saying so is the honest limit — from the next restart on, it is verifiable.
 
     **Provision** every agent window with no binding: create a topic named after
     the agent's project (:func:`topic_name_for`, falling back to the window name)
@@ -274,6 +286,26 @@ def reconcile_bindings(
             log.debug("auto-topics: gate probe failed for %s", wid, exc_info=True)
             return False
 
+    # Reap FIRST: a bound window that is no longer live is dead — archive its topic and drop
+    # the binding. So is one bound in a PREVIOUS tmux epoch, even though something answers to
+    # its id today: the agent that owned that topic died with the server, and the window
+    # wearing its number now is a stranger (CMX-77). It runs before provisioning precisely so
+    # that stranger gets its OWN topic on this same tick, rather than inheriting a dead
+    # agent's conversation for a tick first. Snapshot the window list (we mutate it).
+    for wid in registry.windows():
+        dangling = epoch.is_dangling(registry.epoch_for(wid), now_epoch)
+        if wid in live_windows and not dangling:
+            if now_epoch and registry.stamp(wid, now_epoch):
+                changed = True             # adopt a pre-CMX-77 binding into this epoch
+            continue
+        thread = registry.thread_for_window(wid)
+        if thread is not None:
+            topic_api.close_topic(thread)
+        registry.unbind(wid)
+        why = "the tmux server restarted; its id was reissued" if dangling else "gone"
+        log.info("auto-topics: window %s %s — closed topic %s, unbound", wid, why, thread)
+        changed = True
+
     # Provision: an agent window with no binding gets a fresh topic. Idempotent —
     # a window that already has a binding (by id) is skipped, so no double-create.
     for wid in agent_ids:
@@ -287,7 +319,7 @@ def reconcile_bindings(
         thread = topic_api.create_topic(name)
         if thread is None:
             continue  # create failed (perms?); leave unbound and retry next tick
-        registry.bind(wid, thread)
+        registry.bind(wid, thread, now_epoch)
         registry.set_topic_name(wid, name)
         log.info("auto-topics: created topic %s for %s (%s)", thread, wid, name)
         changed = True
@@ -310,18 +342,6 @@ def reconcile_bindings(
             continue  # perms/deleted topic; leave it unsynced and retry next tick
         registry.set_topic_name(wid, desired)
         log.info("auto-topics: renamed topic %s for %s -> %s", thread, wid, desired)
-        changed = True
-
-    # Reap: a bound window that is no longer live is dead — archive its topic and
-    # drop the binding. Snapshot the window list first (we mutate it in the loop).
-    for wid in registry.windows():
-        if wid in live_windows:
-            continue
-        thread = registry.thread_for_window(wid)
-        if thread is not None:
-            topic_api.close_topic(thread)
-        registry.unbind(wid)
-        log.info("auto-topics: window %s gone — closed topic %s, unbound", wid, thread)
         changed = True
 
     return changed
@@ -385,7 +405,8 @@ def blocked_on_human(wid: str, *, gate=None, capture=None, detect=None):
 
 
 def dispatched_window_ids(runs: list[dict] | None = None,
-                          live_windows: dict[str, str] | None = None) -> set[str]:
+                          live_windows: dict[str, str] | None = None,
+                          now_epoch: str | None = None) -> set[str]:
     """The windows the DISPATCHER owns — read off the ``runs`` table.
 
     The run row **owns** the ``window_id`` of every window the dispatcher spawned
@@ -416,6 +437,15 @@ def dispatched_window_ids(runs: list[dict] | None = None,
     is exempt because a human is free to *rename* a live worker's window without
     disowning it.)
 
+    ⛔ **``now_epoch`` is what makes the FIRST case safe, and it was the hole** (CMX-77). An
+    in-flight row honoured its recorded id unconditionally — and a tmux restart leaves rows
+    reading ``running`` whose agents died with the server, so their ids were handed to
+    somebody else. That is a *human's* window being silently disowned by a corpse's row, and
+    the name check could never catch it because an in-flight row skips it by design. A row
+    whose ``window_epoch`` is not the epoch running now is dropped outright: whatever holds
+    that id today, it is not that run's agent. An unstamped row (written before CMX-77)
+    keeps the old behaviour — unverifiable is not the same as wrong.
+
     ``live_windows`` (``{window_id: name}``, the reconcile's own live fleet) is what that
     check reads; omit it and only the in-flight rows qualify. ``runs`` is injectable so
     this unit-tests with no sqlite; in production it is :func:`chela.dispatcher.list_runs`.
@@ -436,6 +466,8 @@ def dispatched_window_ids(runs: list[dict] | None = None,
         wid = str(row.get("window_id") or "").strip()
         if not wid:
             continue                                # a pre-CMX-69 row: no id was recorded
+        if epoch.is_dangling(row.get("window_epoch"), now_epoch):
+            continue                                # a DEAD server's id — it names a stranger
         if row.get("status") in dispatcher.ACTIVE_STATUSES:
             owned.add(wid)
             continue

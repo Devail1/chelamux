@@ -62,14 +62,27 @@ class BindingRegistry:
         # topic and rename it without hitting the Bot API for every window, every
         # tick, forever. An unknown/absent entry just means "resync once".
         self._topic_names: dict[str, str] = {}
+        # window_id -> the tmux epoch that ISSUED that id (chela.epoch). ``@3`` is an
+        # ADDRESS, not an identity: tmux numbers windows per SERVER, so after a restart
+        # the same ``@3`` is a different agent — and a binding that outlives its server
+        # would quietly relay THAT agent's pane into the topic a human opened for the one
+        # that died, and route their replies back into it. The stamp is what lets the
+        # reconcile tick tell "still bound" from "reissued to a stranger". Kept as data,
+        # never as a live tmux call: this class stays pure (the epoch is passed in).
+        self._epochs: dict[str, str] = {}
 
     @property
     def chat_id(self) -> str | None:
         """The bound supergroup chat id (the inbound security boundary)."""
         return self._chat_id
 
-    def bind(self, window_id: str, thread_id: str | int) -> None:
+    def bind(self, window_id: str, thread_id: str | int, epoch: str | None = None) -> None:
         """Bind ``window_id`` ↔ ``thread_id``, replacing any existing binding.
+
+        ``epoch`` is the tmux server that issued ``window_id`` (:func:`chela.epoch.current`,
+        passed in by the caller so this stays pure). Omitting it binds an UNSTAMPED window —
+        legal, and what a pre-CMX-77 file reads as, but such a binding cannot be told from a
+        stale one and is never reaped as dangling.
 
         Raises :class:`ValueError` if either id is empty/None (a General-topic
         thread, or a missing window, can never form a binding).
@@ -86,6 +99,7 @@ class BindingRegistry:
         if old_window is not None:
             self._window_to_thread.pop(old_window, None)
             self._topic_names.pop(old_window, None)
+            self._epochs.pop(old_window, None)
         # A fresh binding means a different topic, so whatever name we cached for
         # this window describes someone else's topic now. Drop it: unknown reads as
         # "resync once", which is always safe; a stale name reads as "in sync" and
@@ -93,6 +107,9 @@ class BindingRegistry:
         self._topic_names.pop(w, None)
         self._window_to_thread[w] = t
         self._thread_to_window[t] = w
+        self._epochs.pop(w, None)
+        if epoch:
+            self._epochs[w] = str(epoch)
 
     def unbind(self, window_id: str) -> bool:
         """Remove the binding for ``window_id``. Returns True if one was removed."""
@@ -104,7 +121,33 @@ class BindingRegistry:
             return False
         self._thread_to_window.pop(thread, None)
         self._topic_names.pop(w, None)
+        self._epochs.pop(w, None)
         return True
+
+    def stamp(self, window_id: str, epoch: str) -> bool:
+        """Record the tmux epoch of an ALREADY-bound window. True if that changed anything.
+
+        The upgrade path: a binding written before CMX-77 carries no epoch, so nothing can
+        say whether it still names the window it was made for. The reconcile tick stamps a
+        binding whose window is live in the CURRENT epoch — an adoption, and the honest limit
+        of what can be recovered: a file older than the running tmux server cannot be
+        distinguished from one written under it. From then on the binding is verifiable, and
+        the next server restart reaps it instead of silently relaying a stranger.
+        """
+        w = _norm(window_id)
+        if w is None or w not in self._window_to_thread or not epoch:
+            return False
+        if self._epochs.get(w) == str(epoch):
+            return False
+        self._epochs[w] = str(epoch)
+        return True
+
+    def epoch_for(self, window_id: str | int | None) -> str | None:
+        """The tmux epoch this window's binding was made in (None → unstamped)."""
+        w = _norm(window_id)
+        if w is None:
+            return None
+        return self._epochs.get(w)
 
     def set_topic_name(self, window_id: str, name: str) -> None:
         """Record the name ``window_id``'s topic now carries on Telegram."""
@@ -143,11 +186,12 @@ class BindingRegistry:
     # -- persistence -------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise to ``{chat_id, bindings: {window: thread}, topic_names: {...}}``."""
+        """Serialise to ``{chat_id, bindings, topic_names, epochs}``."""
         return {
             "chat_id": self._chat_id,
             "bindings": dict(self._window_to_thread),
             "topic_names": dict(self._topic_names),
+            "epochs": dict(self._epochs),
         }
 
     @classmethod
@@ -158,8 +202,12 @@ class BindingRegistry:
         the live ``TELEGRAM_CHAT_ID`` here so env stays the security boundary.
         """
         reg = cls(chat_id if chat_id is not None else data.get("chat_id"))
+        epochs = data.get("epochs") or {}
         for window, thread in (data.get("bindings") or {}).items():
-            reg.bind(window, thread)
+            # A file written before CMX-77 carries no epochs: those bindings read as
+            # UNSTAMPED, which is honest — chela cannot say which tmux server issued them.
+            # The next reconcile tick re-stamps a live one and reaps a dead one as usual.
+            reg.bind(window, thread, epochs.get(window))
         # Absent in files written before topic renaming existed: those windows just
         # look unsynced, so the next reconcile tick renames each topic once to the
         # live tmux name and records it. Bind first — bind() clears the cache entry.

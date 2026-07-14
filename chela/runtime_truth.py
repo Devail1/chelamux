@@ -65,7 +65,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chela import capabilities, config, discovery, hold, hooks, sessions
+from chela import capabilities, config, discovery, epoch, hold, hooks, sessions
 from chela.sources import get_source
 from chela.workflow import load_workflow
 
@@ -332,20 +332,21 @@ def _session_report(session: str, obs: Observation) -> list[Finding]:
     return out
 
 
-def _in_flight_runs() -> dict[str, str]:
-    """``{task_id: window_id}`` for every run that CLAIMS a live tmux window.
+def _in_flight_runs() -> dict[str, dict]:
+    """``{task_id: {wid, epoch}}`` for every run that CLAIMS a live tmux window.
 
     The id is recorded in the run row at spawn (CMX-62) — rule (a): the process that acts
-    writes down what it did. Rows that predate that carry no id and are skipped: an
-    unrecorded window is honestly unknown, and guessing one is worse than not knowing
-    (CMX-48).
+    writes down what it did — together with the tmux epoch that ISSUED it (CMX-77), because
+    an id without its epoch is a number, not a window. Rows that predate either carry no id
+    (or no stamp) and are honestly unknown: guessing one is worse than not knowing (CMX-48).
     """
     from chela import dispatcher                    # lazy: doctor must import cheaply
 
     if not Path(dispatcher.DB_PATH).exists():
         return {}
     return {
-        str(run["task_id"]): str(run["window_id"])
+        str(run["task_id"]): {"wid": str(run["window_id"]),
+                              "epoch": run.get("window_epoch")}
         for run in dispatcher.list_runs()
         if run.get("status") in ("claimed", "running") and run.get("window_id")
     }
@@ -355,18 +356,29 @@ def _windows_read() -> Observation:
     if _tmux_or_unverifiable() is None:
         return cannot_verify("tmux is not on PATH — chela cannot ask which windows are "
                              "alive, so it cannot tell a working agent from a corpse.")
-    return observed(discovery.get_windows_by_id())
+    return observed({"windows": discovery.get_windows_by_id(), "epoch": epoch.current()})
 
 
-def _windows_report(claimed: dict[str, str], obs: Observation) -> list[Finding]:
-    live: dict[str, str] = obs.value
-    dead = {task: wid for task, wid in claimed.items() if wid not in live}
+def _windows_report(claimed: dict[str, dict], obs: Observation) -> list[Finding]:
+    """A claimed window is alive only if tmux has that id AND the id is still THEIRS.
+
+    ⛔ "tmux has no such window" was never the whole check. After a server restart tmux has
+    ``@3`` again — issued afresh, to somebody else (CMX-77) — so a run row claiming ``@3``
+    reads as perfectly healthy while its agent is long dead and a stranger sits at that
+    address. Both halves are checked: the id, and the epoch that issued it.
+    """
+    live: dict[str, str] = obs.value["windows"]
+    now: str | None = obs.value["epoch"]
     if not claimed:
         return []                                  # nothing is in flight — nothing to check
-    if not dead:
-        return [Finding(OK, f"{len(claimed)} in-flight run(s): every claimed tmux window "
-                            "is alive")]
-    return [
+    dead, reissued = {}, {}
+    for task, claim in claimed.items():
+        wid = claim["wid"]
+        if epoch.is_dangling(claim.get("epoch"), now):
+            reissued[task] = wid
+        elif wid not in live:
+            dead[task] = wid
+    out = [
         Finding(
             WARN, f"run {task} claims window {wid}, but tmux has no such window",
             "The agent is gone and the run row still says it is working. Reconciliation "
@@ -376,6 +388,24 @@ def _windows_report(claimed: dict[str, str], obs: Observation) -> list[Finding]:
         )
         for task, wid in sorted(dead.items())
     ]
+    out += [
+        Finding(
+            ERROR,
+            f"run {task} claims window {wid} — but that id was issued by a tmux server that "
+            "is GONE, and tmux has since given it to somebody else",
+            f"The tmux server restarted ({epoch.describe(claimed[task].get('epoch'))} → "
+            f"{epoch.describe(now)}), which killed this run's agent and renumbered the fleet. "
+            f"The row still says it is working, and {wid} is now "
+            f"{live.get(wid, '(nothing)')!r} — so every id-keyed surface would file this "
+            "dead run's events under a LIVE agent. Reconciliation frees the slot on the next "
+            "dispatch tick; with the dispatcher OFF, nothing ever will.",
+        )
+        for task, wid in sorted(reissued.items())
+    ]
+    if not out:
+        out.append(Finding(OK, f"{len(claimed)} in-flight run(s): every claimed tmux window "
+                               "is alive, under the server that issued its id"))
+    return out
 
 
 # --- fact: the branch a parked run must return to, and whether git still has it -------
@@ -1099,6 +1129,109 @@ def _relay_report(bound: dict[str, str], obs: Observation) -> list[Finding]:
     return out
 
 
+# --- fact: the ADDRESS the decisions inbox pushes to ----------------------------------
+#
+# CMX-77, and the most expensive silence yet. An OOM killed the tmux server on 2026-07-14;
+# the fleet came back RENUMBERED (the orchestrator went @0 → @6) and `inbox.json` still read
+# {"orchestrator": "@0"}. Five `run_review` notifications queued behind an address that no
+# longer existed and NONE were delivered — no error, no warning, no log line, and this
+# doctor green 14/14, because nothing here had ever been asked to look at the one thing that
+# mattered: whether the window chela intends to push into is the window it thinks it is.
+# `@N` is an ADDRESS, not an identity (chela.epoch): tmux issues it per SERVER. So chela's
+# copy is the recorded address, tmux owns which server is issuing ids now — and the two
+# disagreeing is precisely the outage.
+
+
+def _inbox_address() -> dict:
+    """chela's copy: the address the inbox would push to, and what is waiting behind it."""
+    from chela import inbox                          # lazy: doctor must import cheaply
+
+    if not inbox.enabled():
+        return {}
+    store = inbox.load()
+    return {
+        "wid": inbox.orchestrator_wid(store),
+        "epoch": inbox.orchestrator_epoch(store),
+        "name": store.get("orchestrator_name"),
+        "queued": len(store.get("queue") or []),
+    }
+
+
+def _inbox_read() -> Observation:
+    """Ask tmux: which server is issuing window ids, and which windows exist under it?"""
+    if _tmux_or_unverifiable() is None:
+        return cannot_verify("tmux is not on PATH, so chela cannot ask which server issued "
+                             "the window id its decisions inbox is addressed to — and an "
+                             "inbox addressed to a dead id delivers NOTHING, in silence.")
+    now = epoch.current()
+    if now is None:
+        return cannot_verify("no tmux server is running, so there is no epoch to compare the "
+                             "inbox's recorded window id against. Every id in the store was "
+                             "issued by a server that is gone.")
+    return observed({"epoch": now, "windows": discovery.get_windows_by_id()})
+
+
+def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
+    if not declared:
+        return []                                    # the inbox is switched off
+    live: dict[str, str] = obs.value["windows"]
+    now: str = obs.value["epoch"]
+    wid, stamped, queued = declared["wid"], declared["epoch"], declared["queued"]
+
+    if not wid:
+        if queued:
+            return [Finding(
+                ERROR, f"the decisions inbox is holding {queued} event(s) and NOBODY is "
+                       "registered to receive them",
+                "Events are queued (a finished agent, a PR awaiting review) and no session "
+                "has registered as the orchestrator, so nothing is being delivered and "
+                "nothing ever will be. Run `chela watch` in the orchestrator's session — it "
+                "drains on the next idle tick.",
+            )]
+        return [Finding(OK, "decisions inbox: no orchestrator registered (inert by design)")]
+
+    if epoch.is_dangling(stamped, now):
+        return [Finding(
+            ERROR,
+            f"the decisions inbox is addressed to {wid} — an id issued by a tmux server that "
+            "is GONE",
+            f"Recorded under {epoch.describe(stamped)}; tmux is now running "
+            f"{epoch.describe(now)}. The server RESTARTED and renumbered every window, so "
+            f"{wid} does not name the orchestrator ({declared['name'] or '?'}) any more — it "
+            f"names another agent, or nothing. {queued} event(s) are queued behind it and "
+            "chela will not push them into a stranger's session (a wrong wid is worse than "
+            "no wid). This is the 2026-07-14 outage exactly: five finished PRs went "
+            "unreviewed because the queue was addressed to a window that no longer existed "
+            "and nothing said so. Fix: run `chela watch` in the orchestrator's session — the "
+            "queue is intact and goes out on its next idle tick.",
+        )]
+
+    if wid not in live:
+        return [Finding(
+            ERROR if queued else WARN,
+            f"the decisions inbox is addressed to {wid}, and tmux has no such window",
+            f"The session that registered as the orchestrator is gone. {queued} event(s) are "
+            "queued behind that address and nothing is delivering them. Register the session "
+            "that is doing the orchestrating: `chela watch`.",
+        )]
+
+    if not stamped:
+        return [Finding(
+            WARN,
+            f"the decisions inbox is addressed to {wid}, which carries NO tmux epoch",
+            "Recorded before CMX-77, or pinned with $CHELA_ORCHESTRATOR_WID. It is still "
+            "delivered to — but chela cannot tell whether it still names the session that "
+            "registered it, and after a tmux restart that id belongs to somebody else. Run "
+            "`chela watch` in the orchestrator's session to stamp it. (An env pin cannot be "
+            "stamped at all: baked into a service env, it outlives the tmux server it was "
+            "true for.)",
+        )]
+
+    return [Finding(
+        OK, f"decisions inbox → {wid} ({live[wid]}), issued by the tmux server now running"
+            + (f"; {queued} event(s) queued for its next idle tick" if queued else ""))]
+
+
 def _ago(seconds: float) -> str:
     if seconds < 90:
         return f"{int(seconds)}s ago"
@@ -1200,11 +1333,24 @@ def facts() -> list[Fact]:
         ),
         Fact(
             name="tmux.windows",
-            declared_by="the run row's window_id, recorded at spawn (CMX-62)",
-            owned_by="tmux — window liveness is its to answer, and nobody else's",
+            declared_by="the run row's window_id + window_epoch, recorded at spawn "
+                        "(CMX-62, CMX-77)",
+            owned_by="tmux — window liveness, and which server issued the id, are its to "
+                     "answer and nobody else's",
             declare=_in_flight_runs,
             read_back=_windows_read,
             report=_windows_report,
+            unverifiable_level=WARN,      # same reason as tmux.session
+        ),
+        Fact(
+            name="inbox.address",
+            declared_by="$CHELA_DIR/inbox.json — the window id the orchestrator registered "
+                        "(or $CHELA_ORCHESTRATOR_WID)",
+            owned_by="tmux — it issues `@N` PER SERVER, so it alone can say whether that id "
+                     "still names the window it was recorded for",
+            declare=_inbox_address,
+            read_back=_inbox_read,
+            report=_inbox_report,
             unverifiable_level=WARN,      # same reason as tmux.session
         ),
         Fact(

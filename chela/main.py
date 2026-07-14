@@ -29,10 +29,12 @@ from chela import (
     discovery,
     dispatcher,
     doctor,
+    epoch,
     event_log,
     hold,
     hooks,
     inbox,
+    judge,
     messenger,
     notify,
     okf,
@@ -206,8 +208,15 @@ def cmd_run(args) -> None:
                     # same line is how an operator learns to ignore the log.
                     if summary.get("blocked") and wf_path not in dispatch_blocked:
                         dispatch_blocked.add(wf_path)
-                        log.error("Dispatch BLOCKED for %s (reconciliation continues on the "
-                                  "last known-good config): %s", wf_path.name, summary.get("error"))
+                        if summary.get("refused"):
+                            # The workspace fence: NOTHING ran this tick — not the claim,
+                            # not the reconcile. Saying "reconciliation continues" here
+                            # would be a lie, and a log that lies is how this bug hid.
+                            log.error("Dispatch REFUSED for %s — this daemon does NOTHING "
+                                      "for it: %s", wf_path.name, summary.get("error"))
+                        else:
+                            log.error("Dispatch BLOCKED for %s (reconciliation continues on the "
+                                      "last known-good config): %s", wf_path.name, summary.get("error"))
                     elif not summary.get("blocked") and wf_path in dispatch_blocked:
                         dispatch_blocked.discard(wf_path)
                         log.info("Dispatch resumed for %s — workflow parses again", wf_path.name)
@@ -362,12 +371,30 @@ def cmd_watch(args) -> None:
     right after you dispatch: when that agent finishes, blocks, or dies, the event is
     pushed back into your session the moment you are idle, instead of the completion
     being invisible to you (and a human having to relay it).
+
+    With **no window**, it only (re-)registers you — stamped with the tmux epoch you are
+    really in (CMX-77). That is the recovery path after a tmux restart: the addresses in
+    ``inbox.json`` were issued by a server that no longer exists, so the inbox refuses to
+    push to them (they name other agents now) and holds the queue until a real session says
+    "I am here". This is that sentence.
     """
+    self_wid = orchestrator.self_wid()
+    if not args.wid:
+        if not self_wid:
+            print("no window id: run this from inside a tmux window (or pass @N to watch it)",
+                  file=sys.stderr)
+            sys.exit(1)
+        result = inbox.register(self_wid)
+        if not result["ok"]:
+            print(f"register failed: {result['error']}", file=sys.stderr)
+            sys.exit(1)
+        queued = result["queued"]
+        print(f"registered {self_wid} as the orchestrator (tmux epoch {result['epoch'] or '?'})"
+              + (f"; {queued} queued event(s) will be delivered when you are idle"
+                 if queued else "; nothing queued"))
+        return
     wid = _resolve_wid(args.wid)
-    if not wid:
-        print("no window id (pass @N)", file=sys.stderr)
-        sys.exit(1)
-    result = inbox.watch(wid, args.note or "", by=orchestrator.self_wid())
+    result = inbox.watch(wid, args.note or "", by=self_wid)
     if not result["ok"]:
         print(f"watch failed: {result['error']}", file=sys.stderr)
         sys.exit(1)
@@ -384,10 +411,24 @@ def cmd_unwatch(args) -> None:
 
 
 def cmd_watching(args) -> None:
-    """What the inbox is watching, and what is queued for delivery."""
+    """What the inbox is watching, and what is queued for delivery.
+
+    ⛔ And whether the address it would deliver TO is worth anything. A queue behind a dead
+    ``@N`` looks identical to a quiet day — that is exactly how five finished PRs went
+    unreviewed on 2026-07-14 — so the state of the address is the FIRST thing printed, and a
+    rotten one is not something you have to know to go looking for.
+    """
     store = inbox.load()
     orch = inbox.orchestrator_wid(store)
-    print(f"orchestrator: {orch or '(unregistered — the inbox is inert)'}")
+    now_epoch = epoch.current()
+    state, why = inbox.address_state(store, inbox.status_snapshot(), now_epoch)
+    stamp = inbox.orchestrator_epoch(store)
+    print(f"orchestrator: {orch or '(unregistered — the inbox is inert)'}"
+          + (f"  [{epoch.describe(stamp)}]" if orch else ""))
+    if state in inbox.UNDELIVERABLE:
+        print(f"\n⛔ THE INBOX CANNOT DELIVER — the address is {state.upper()}.\n   {why}")
+    elif state == inbox.ADDR_UNSTAMPED:
+        print(f"\n! {why}")
     if not inbox.enabled():
         print("inbox: DISABLED (CHELA_INBOX_ENABLED=false)")
     names = discovery.get_windows_by_id()
@@ -395,7 +436,9 @@ def cmd_watching(args) -> None:
     print(f"\nwatching ({len(watches)}):")
     for wid, meta in sorted(watches.items()):
         note = f' — "{meta.get("note")}"' if meta.get("note") else ""
-        print(f"  {wid:<6} {names.get(wid, '(gone)'):<24}{note}")
+        gone = epoch.is_dangling(meta.get("epoch"), now_epoch)
+        name = "(id reissued by a NEW tmux server)" if gone else names.get(wid, "(gone)")
+        print(f"  {wid:<6} {name:<24}{note}")
     queue = store["queue"]
     print(f"\nqueued, awaiting your next idle ({len(queue)}):")
     for event in queue:
@@ -1091,14 +1134,20 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
     while not stop.is_set():
         try:
             live, agents = tg.live_agent_windows()
+            # The tmux server issuing window ids right now (CMX-77). A binding — and a run
+            # row's window_id — only means anything inside the epoch that issued it; read it
+            # here and hand it to both, so a restart reaps the stale ones instead of relaying
+            # a stranger's pane into a dead agent's topic.
+            now_epoch = epoch.current()
             dispatched = set() if BIND_DISPATCHED else tg.dispatched_window_ids(
-                live_windows=live)
+                live_windows=live, now_epoch=now_epoch)
             if tg.reconcile_bindings(
                 registry, live, agents, topic_api,
                 cwd_for=get_window_cwd_by_id,
                 dispatched=dispatched,
                 gate_for=tg.blocked_on_human,
                 bind_dispatched=BIND_DISPATCHED,
+                now_epoch=now_epoch,
             ):
                 registry.save()
                 log.info("auto-topics: now bridging %s", ", ".join(registry.windows()) or "(none)")
@@ -1529,6 +1578,39 @@ def cmd_review(args) -> None:
               "the authority, so the loop still turns, but nothing landed on the PR.")
 
 
+def cmd_judge(args) -> None:
+    """⚖️ Execute the judge's experiments and publish the verdict — the judge agent's last step.
+
+    ⛔ It does NOT take the judge's word for anything. The agent proposes mutations; THIS
+    applies them (in the throwaway judge worktree), reads the files back to prove they
+    changed, parse-checks them, runs the repo's own ``judge.test_cmd``, restores them, and
+    adjudicates. A guard that survives a live, parsing, minimal corruption is a FACT, and it
+    is the only thing allowed to send a PR back — through ``request_changes``, the same
+    carrier a human reviewer and the CI gate use. Opinions go in ``notes`` and are posted as
+    a comment, where they cost nothing.
+
+    ⛔ It never merges and never approves: a clean PR stays ``awaiting_review``.
+    """
+    result = judge.judge_run(args.run, args.experiments, cleanup=not args.no_cleanup)
+    if not result.get("ok") and "task_id" not in result:
+        print(f"judge: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+
+    state = result.get("state")
+    for outcome in result.get("outcomes") or []:
+        print(f"  [{outcome['verdict']:8}] {outcome['file']}: {outcome['guard'][:70]}")
+        print(f"             {outcome['reason']}")
+    if state == judge.J_BLOCKED:
+        print(f"⚖️ {result['task_id']}: {result['blocking']} guard(s) SURVIVED corruption — "
+              f"the PR was SENT BACK (rework round {result.get('round')}).")
+    elif state == judge.J_CANNOT_VERIFY:
+        print(f"⚖️ {result['task_id']}: ⚠ CANNOT VERIFY — {result.get('cannot_verify') or result.get('error')}")
+        print("   Nothing was blocked and nothing was cleared. This PR is a human's.")
+    else:
+        print(f"⚖️ {result['task_id']}: every guard held. The run stays awaiting_review — "
+              "the judge never merges.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="chela",
@@ -1576,8 +1658,12 @@ def main() -> None:
     p_peek.add_argument("--json", action="store_true", help="Emit the raw peek dict as JSON")
 
     p_watch = sub.add_parser(
-        "watch", help="Report back when a window you delegated to finishes/blocks/dies")
-    p_watch.add_argument("wid", help="Window you dispatched work to (@N or N)")
+        "watch", help="Report back when a window you delegated to finishes/blocks/dies "
+                      "(no window: (re-)register THIS session as the orchestrator)")
+    p_watch.add_argument("wid", nargs="?",
+                         help="Window you dispatched work to (@N or N). Omit to register "
+                              "this session as the orchestrator and nothing else — the "
+                              "recovery path after tmux restarts and renumbers the fleet.")
     p_watch.add_argument("--note", help="What you asked it to do (echoed back to you)")
 
     p_unwatch = sub.add_parser("unwatch", help="Stop watching a window")
@@ -1757,6 +1843,28 @@ def main() -> None:
              "branch. Say why in the body",
     )
 
+    # judge — the adversarial pass whose BLOCKING verdicts are facts (chela/judge.py)
+    p_judge = sub.add_parser(
+        "judge",
+        help="⚖️ Run the judge's mutation experiments on a PR and publish the verdict",
+    )
+    judge_sub = p_judge.add_subparsers(dest="judge_cmd")
+    p_jrun = judge_sub.add_parser(
+        "run",
+        help="Apply the proposed mutations, re-run the suite, and publish the verdict. A "
+             "guard that survives corruption sends the PR back; everything else is a comment",
+    )
+    p_jrun.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-75)")
+    p_jrun.add_argument(
+        "--experiments", required=True, metavar="PATH",
+        help="The JSON the judge agent wrote: {\"experiments\": [{guard, file, before, "
+             "after, kind}], \"notes\": [...]}. chela runs them; it does not trust them",
+    )
+    p_jrun.add_argument(
+        "--no-cleanup", action="store_true",
+        help="Keep the judge worktree and the tmux window (debugging a judge run by hand)",
+    )
+
     # knowledge — export the fleet's knowledge as an OKF bundle (local data; see docs/OKF.md)
     p_know = sub.add_parser("knowledge", help="Export fleet knowledge as an OKF bundle")
     know_sub = p_know.add_subparsers(dest="know_cmd")
@@ -1893,6 +2001,11 @@ def main() -> None:
         cmd_task_finished(args)
     elif args.command == "review":
         cmd_review(args)
+    elif args.command == "judge":
+        if args.judge_cmd == "run":
+            cmd_judge(args)
+        else:
+            p_judge.print_help()
     else:
         parser.print_help()
 

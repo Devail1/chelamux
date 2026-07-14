@@ -15,6 +15,18 @@ goes out on the next idle tick. Two rules make that safe:
   session is sitting on a permission/question prompt, and pasting into it would
   ANSWER THE GATE with our notification. Only a session that is genuinely idle at
   its prompt is ever written to.
+* ⛔ **And ``idle`` is not "the prompt will treat this as prose".** The status
+  authority models whether a session is THINKING; it says nothing about the INPUT
+  MODE its prompt is in. On 2026-07-15 the orchestrator's idle pane was in ``!``
+  bash-input mode, this inbox typed a notification into it, and ``/bin/bash`` RAN
+  IT — surviving only because the summary contained ``(rework 1)`` and died on the
+  parens. The mode is now read off the TUI and an unsafe one is REFUSED
+  (:func:`chela.messenger.refuses_paste`, which holds the event in the queue), and —
+  because a refusal is a guess about somebody else's pane, while the text is the
+  thing we control — every summary is neutralised (:func:`_event`) so it cannot
+  execute in ANY mode. Two independent layers, because the chain is fully
+  agent-controlled: an agent writes a PR title, this builds a summary from it, this
+  types it at the prompt of the one session with merge authority and a real shell.
 * The orchestrator is identified EXPLICITLY (:func:`orchestrator_wid`) — registered
   by the orchestrator itself via ``chela watch``, or pinned with
   ``$CHELA_ORCHESTRATOR_WID``. It is never guessed, so a notification can never land
@@ -54,6 +66,21 @@ the notification was the *entire* TODO item pasted into the orchestrator's windo
 filter, re-check or re-render it — a string is not a fact. The summary is for the
 human/orchestrator; the payload is for the log and the UI that will consume it next.
 
+**`@0` IS AN ADDRESS, NOT AN IDENTITY — so every persisted one carries its tmux EPOCH.**
+On 2026-07-14 an OOM killed the tmux server. The fleet came back renumbered (the
+orchestrator went ``@0`` → ``@6``) and this file still read ``{"orchestrator": "@0"}``. The
+inbox queued five ``run_review`` notifications addressed to a window that no longer existed
+and delivered NONE of them — in complete silence, because the idle gate reads
+``statuses.get(orch) != IDLE`` and a dead address is simply *absent* from the status map, so
+it never opened. No error, no warning, no log line; ``chela doctor`` green 14/14. Five
+finished PRs sat unreviewed until a human noticed. Now the orchestrator's address, every
+watch and every queued event is stamped with :func:`chela.epoch.current`, an address that
+did not come from the running tmux server is **never acted on** (it names a stranger's
+window now — a wrong wid is worse than no wid, CMX-48), and being undeliverable is
+**LOUD**: an ``ERROR`` every tick, a durable ``inbox_undeliverable`` event, a phone
+notification, and a red ``chela doctor`` (``inbox.address``). The orchestrator re-registers
+with ``chela watch`` — which is what any dispatch already does.
+
 **A queued event is a claim about the PAST, so it is re-checked at DELIVERY time.**
 Delivery is deliberately deferred until the orchestrator is idle, and the world moves
 in the meantime: an ``awaiting_review`` event was delivered *after* its PR had already
@@ -78,9 +105,10 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from chela import agent_manager, discovery, event_log, messenger, transcripts
+from chela import agent_manager, discovery, epoch, event_log, messenger, notify, transcripts
 from chela import config
 from chela.config import INBOX_ENABLED
+from chela.tui_text import sanitize_prompt
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +162,15 @@ def store_path() -> Path:
 
 
 def _empty() -> dict:
-    return {"orchestrator": None, "watches": {}, "queue": [], "runs_seen": {}}
+    # `orchestrator_epoch` is the tmux server that ISSUED `orchestrator` — the half of the
+    # address that used to be missing, and without which `@0` is just a number that means
+    # something different after every tmux restart (chela.epoch). `orchestrator_name` is
+    # what that window was CALLED: an address that has gone stale cannot be re-resolved
+    # (never guess a wid), but the alarm can at least name what it was pointing at.
+    # `address_alarm` de-dups the undeliverable alarm — it must be loud, not a per-tick
+    # flood of identical rows in the event log.
+    return {"orchestrator": None, "orchestrator_epoch": None, "orchestrator_name": None,
+            "watches": {}, "queue": [], "runs_seen": {}, "address_alarm": None}
 
 
 def load() -> dict:
@@ -191,19 +227,106 @@ def locked_store():
 
 # --- who the orchestrator is (explicit, never guessed) -------------------------
 
+# What the recorded orchestrator address is WORTH, right now. The gate `deliver` opens on,
+# and the fact `chela doctor` audits (runtime_truth: inbox.address).
+ADDR_OK = "ok"                  # a live claude window, issued by the tmux server now running
+ADDR_NONE = "unregistered"      # nobody has called `chela watch` — the inbox is inert by design
+ADDR_DANGLING = "dangling"      # ⛔ issued by a DEAD tmux server: `@N` now names a stranger
+ADDR_GONE = "gone"              # this epoch's `@N`, but no claude is running in it any more
+ADDR_UNSTAMPED = "unstamped"    # recorded before CMX-77, or pinned by env — unverifiable
+
+# The states in which a push must NOT go out. `dangling` and `gone` are the loud ones: there
+# IS work to hand over and the address cannot take it. (`unregistered` is not an error — the
+# feature is simply not in use; `unstamped` is delivered, warily, see address_state.)
+UNDELIVERABLE = (ADDR_DANGLING, ADDR_GONE)
+
+
 def orchestrator_wid(store: dict | None = None) -> str | None:
-    """The window we may push into: ``$CHELA_ORCHESTRATOR_WID``, else the registered one.
+    """The ADDRESS we may push into: ``$CHELA_ORCHESTRATOR_WID``, else the registered one.
 
     An env pin always wins (an operator overriding the fleet's wiring). Otherwise it
     is whatever session registered itself by calling ``chela watch`` — i.e. the
     session that actually delegates work. None means "nobody is listening", and the
     inbox stays completely inert: we never fall back to a guess.
+
+    ⛔ This is the address AS RECORDED — it is not a promise that the window is there, or
+    that it is still the window that recorded it. ``@N`` is only meaningful inside the tmux
+    server that issued it (:mod:`chela.epoch`), and this one may have been issued by a
+    server that is now dead. :func:`address_state` is what says whether it is worth
+    anything, and :func:`deliver` refuses to write to one that is not.
     """
     env = (os.environ.get("CHELA_ORCHESTRATOR_WID") or "").strip()
     if env:
         return env
     store = load() if store is None else store
     return store.get("orchestrator")
+
+
+def orchestrator_epoch(store: dict | None = None) -> str | None:
+    """The tmux server that issued the registered address — None if it is unstamped.
+
+    An **env pin carries no epoch**, and cannot: it is a bare ``@N`` an operator exported.
+    That is honest rather than convenient — a pin baked into a long-lived service env
+    (a PM2 process that outlives the tmux server) is precisely an address that will one day
+    name a stranger, and it must not masquerade as verified. It reads as ``unstamped``.
+    """
+    if (os.environ.get("CHELA_ORCHESTRATOR_WID") or "").strip():
+        return None
+    store = load() if store is None else store
+    return store.get("orchestrator_epoch")
+
+
+def address_state(store: dict, statuses: dict[str, str],
+                  now_epoch: str | None = None) -> tuple[str, str]:
+    """Is the recorded orchestrator address worth writing to? — ``(state, why)``.
+
+    Three ways an address rots, and only one of them was ever visible:
+
+    * **dangling** — the tmux server that issued it is gone (an OOM, a reboot, a
+      ``kill-server``). The fleet came back renumbered, so ``@0`` either does not exist or,
+      worse, belongs to somebody else now. Never written to: a wrong wid is worse than no
+      wid (CMX-48) — a review notification pasted into an agent's prompt is an instruction
+      that agent will act on.
+    * **gone** — this epoch's ``@N``, but nothing is running claude in it any more (the
+      orchestrator exited). Nothing to deliver to.
+    * **unstamped** — recorded before CMX-77, or pinned via ``$CHELA_ORCHESTRATOR_WID``.
+      It cannot be verified either way, so it is still delivered (refusing would break every
+      store that predates this, and cry wolf on every operator pin) — but it is reported, and
+      one ``chela watch`` from the orchestrator replaces it with an address that CAN be
+      verified.
+
+    ``now_epoch`` unknown (no tmux, no server) means nothing can be compared: an unreadable
+    owner never accuses a stamp of being stale — it is what ``chela doctor`` reports as
+    CANNOT VERIFY, which is the one thing that must never read as green.
+
+    An EMPTY ``statuses`` map is not evidence that the orchestrator is gone: it is what a
+    hiccup in ``claude agents --json`` looks like, and alarming on it would cry wolf about
+    the whole fleet at once. Liveness is only asserted against a map that saw *something*.
+    """
+    wid = orchestrator_wid(store)
+    if not wid:
+        return ADDR_NONE, ("no session has registered as the orchestrator (`chela watch`), "
+                           "so the inbox has nobody to push to")
+    stamped = orchestrator_epoch(store)
+    if epoch.is_dangling(stamped, now_epoch):
+        name = store.get("orchestrator_name") or "?"
+        return ADDR_DANGLING, (
+            f"{wid} was issued by {epoch.describe(stamped)}, and tmux is now running "
+            f"{epoch.describe(now_epoch)} — the server RESTARTED and renumbered the fleet. "
+            f"That id does not name the orchestrator ({name!r}) any more, and may well name "
+            "another agent, so nothing will be written to it. Re-register from the "
+            "orchestrator's session: `chela watch` (any dispatch does it for you).")
+    if statuses and wid not in statuses:
+        return ADDR_GONE, (
+            f"tmux has no claude running in {wid} — the session that registered as the "
+            "orchestrator is gone. Its queue is intact and will go out to whichever session "
+            "registers next (`chela watch`).")
+    if not stamped and now_epoch:
+        return ADDR_UNSTAMPED, (
+            f"{wid} carries no tmux epoch (recorded before CMX-77, or pinned with "
+            "$CHELA_ORCHESTRATOR_WID), so chela cannot tell whether it still names the "
+            "session that registered it. Re-register with `chela watch` to stamp it.")
+    return ADDR_OK, ""
 
 
 # --- watches: the orchestrator registers interest when it delegates -------------
@@ -215,22 +338,55 @@ def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:
     :func:`chela.orchestrator.self_wid`) and registers it as THE orchestrator — the
     session that delegates is the session that gets told. Watching your own window is
     refused: that is the self-notify loop, and it is closed here at the source.
+
+    **Both ids are stamped with the tmux epoch they were issued in** (:mod:`chela.epoch`).
+    This is the one moment the stamp can be taken honestly — the windows are live and in
+    front of us — and it is what lets every later reader tell "the window I meant" from "the
+    number that window used to have". It also makes this the RECOVERY path: after a tmux
+    restart the orchestrator's next dispatch re-registers a valid address, and the queue that
+    piled up while the old one dangled goes out.
     """
     names = discovery.get_windows_by_id()          # slow-ish (tmux) — do it OUTSIDE the lock
     if wid not in names:
         return {"ok": False, "error": f"no such window: {wid}"}
+    now = epoch.current()
     with locked_store() as store:                  # ...so a concurrent daemon tick can't
         if by:                                     #    clobber the watch we are writing
             store["orchestrator"] = by
+            store["orchestrator_epoch"] = now
+            store["orchestrator_name"] = names.get(by)
+            store["address_alarm"] = None          # a fresh address: any old alarm is spent
         target = orchestrator_wid(store)
         if target and wid == target:
             return {"ok": False, "error": "refusing to watch the orchestrator's own window"}
         # `since` is the completion evidence line: work the transcript shows AFTER this
         # instant is work this dispatch caused (see agent_events). `name` outlives the
         # window itself and is what links it back to its run row (see run_for_window).
+        # `epoch` is what makes the id itself trustworthy a day later.
         store["watches"][wid] = {"note": note.strip(), "since": time.time(),
-                                 "name": names[wid]}
-    return {"ok": True, "wid": wid, "note": note.strip(), "orchestrator": target}
+                                 "name": names[wid], "epoch": now}
+    return {"ok": True, "wid": wid, "note": note.strip(), "orchestrator": target,
+            "epoch": now}
+
+
+def register(by: str) -> dict:
+    """Register ``by`` as THE orchestrator without watching anything.
+
+    The recovery command (``chela watch`` with no window): after tmux restarts, the stored
+    address is dangling and the inbox is holding a queue it refuses to misdeliver. This
+    re-stamps it — from the session that runs it, so it is still never a guess.
+    """
+    names = discovery.get_windows_by_id()
+    if by not in names:
+        return {"ok": False, "error": f"no such window: {by}"}
+    now = epoch.current()
+    with locked_store() as store:
+        store["orchestrator"] = by
+        store["orchestrator_epoch"] = now
+        store["orchestrator_name"] = names.get(by)
+        store["address_alarm"] = None
+        queued = len(store["queue"])
+    return {"ok": True, "orchestrator": by, "epoch": now, "queued": queued}
 
 
 def unwatch(wid: str) -> dict:
@@ -246,13 +402,21 @@ def watches() -> dict:
 # --- event generation (pure — no tmux, no send) ---------------------------------
 
 def _line(wid: str, name: str, body: str, note: str = "") -> str:
-    """One compact, actionable line. The orchestrator reads it as an instruction."""
-    tail = f' — note: "{note}"' if note else ""
-    return f"📥 {wid} ({name}) {body}{tail}"
+    """One compact, actionable line. The orchestrator reads it as an instruction.
+
+    The framing punctuation is ``·`` and curly quotes, NOT parentheses and ``"``. Those are
+    shell metacharacters, and every summary is neutralised before it is typed at a prompt
+    (:func:`_event`), so a frame built from them would just have its own punctuation stripped
+    back out — it was ``(name)``, and the live bash-mode execution died on exactly those
+    parens. Framing that is already inert renders identically before and after the sanitizer.
+    """
+    tail = f" — note: “{note}”" if note else ""
+    return f"📥 {wid} · {name} {body}{tail}"
 
 
 def _event(kind: str, summary: str, payload: dict, *, wid: str | None = None,
-           clear_watch: bool = False, silent: bool = False) -> dict:
+           clear_watch: bool = False, silent: bool = False,
+           watch_key: str | None = None) -> dict:
     """The queued event record: what happened, in one line, plus the facts behind it.
 
     ``summary`` is the ONLY thing ever pushed into a session — one line, no newlines.
@@ -260,11 +424,26 @@ def _event(kind: str, summary: str, payload: dict, *, wid: str | None = None,
     that a log, a filter, a de-dup or a UI can actually work with, and that
     :func:`stale_reason` re-checks at delivery. Keeping the two apart is what stops a
     notification from being an essay and stops a fact from being un-re-checkable.
+
+    ⛔ The summary is built from AGENT-AUTHORED text — a PR title, a tracker line, a CI
+    error — and it is TYPED AT A PROMPT. So it is neutralised HERE, at the source, before it
+    is ever durable: no shell metacharacters, no control bytes, no mode-switching first
+    character (:func:`chela.tui_text.sanitize_prompt`). CMX-79: an inbox summary was executed
+    as a shell command by an orchestrator pane sitting in ``!`` bash-input mode; it died on
+    the parens in "(rework 1)", and a PR title containing ``$(…)`` would not have. The
+    payload keeps the raw title — a record is read, not typed.
+
+    ``wid`` ATTRIBUTES the event (it is the Feed's lane), so it must only ever hold an id
+    that names the agent this event is about IN THE CURRENT EPOCH. ``watch_key`` is the
+    bookkeeping id instead — the key to retire in ``watches`` — for the one event whose
+    subject is precisely that its id no longer names anybody (``watch_epoch_lost``).
     """
-    event = {"kind": kind, "summary": " ".join(summary.split()), "payload": payload,
+    event = {"kind": kind, "summary": sanitize_prompt(summary), "payload": payload,
              "wid": wid, "clear_watch": clear_watch, "ts": time.time()}
     if silent:
         event["silent"] = True
+    if watch_key:
+        event["watch_key"] = watch_key
     return event
 
 
@@ -274,8 +453,15 @@ def render(event: dict) -> str:
     An event queued by an older daemon (before events were records) is still sitting in
     ``inbox.json`` across the upgrade, and must still be deliverable — hence the
     fallback. New events never set ``text``.
+
+    Neutralised AGAIN here, deliberately: ``inbox.json`` survives the upgrade, so the live
+    queue already holds summaries built before :func:`_event` sanitized anything — and those
+    are exactly the ones written while nothing was watching for ``$(…)``. Sanitizing only at
+    queue time would leave the one queue that holds the observed payload as the thing the fix
+    misses. :func:`chela.tui_text.sanitize_prompt` is idempotent, so a clean summary is
+    unchanged by the second pass.
     """
-    return event.get("summary") or event.get("text") or ""
+    return sanitize_prompt(event.get("summary") or event.get("text") or "")
 
 
 def _short_title(title: str, limit: int = SUMMARY_TITLE_CHARS) -> str:
@@ -402,7 +588,8 @@ def wid_for_window_name(name: str | None, windows: dict[str, str]) -> str | None
     return matches[0] if len(matches) == 1 else None
 
 
-def run_wid(run: dict, windows: dict[str, str] | None = None) -> str | None:
+def run_wid(run: dict, windows: dict[str, str] | None = None,
+            now_epoch: str | None = None) -> str | None:
     """The window a run was dispatched into — from the RUN ROW, not from live tmux.
 
     The row records ``window_id`` at spawn (``dispatcher._spawn``), which is the only
@@ -419,16 +606,55 @@ def run_wid(run: dict, windows: dict[str, str] | None = None) -> str | None:
     chela itself. ⛔ An id is never inferred from a branch, a worktree, or a reused
     window: tmux recycles ids, and filing a dead agent's work under a *live* agent is the
     worst version of this bug (CMX-48 — a wrong wid is worse than no wid).
+
+    ⛔ **And "tmux recycles ids" is not a figure of speech — it happens wholesale every time
+    the server restarts** (CMX-77). A row written before the 2026-07-14 OOM claims ``@3``;
+    ``@3`` today is a different agent entirely. So the recorded id is used only when the row
+    carries the epoch it was issued in and that epoch is still the one running
+    (``window_epoch``, stamped at spawn). Otherwise the id is DROPPED — back to the name
+    lookup, which reads live tmux and therefore cannot name a dead window at all — and an
+    event that cannot be attributed stays honestly ownerless.
     """
     recorded = (run.get("window_id") or "").strip()
-    if re.fullmatch(r"@\d+", recorded):
+    if re.fullmatch(r"@\d+", recorded) and not epoch.is_dangling(
+            run.get("window_epoch"), now_epoch):
         return recorded
     return wid_for_window_name(run.get("window_name"), windows or {})
 
 
+def _epoch_lost_event(wid: str, meta: dict, stamped: str | None,
+                      now_epoch: str | None) -> dict:
+    """A watched window whose id was issued by a tmux server that is now DEAD.
+
+    Every status this watch could be evaluated against is a lie: the agent it was registered
+    for died with the server, and the ``@N`` it was registered under has been handed out
+    again — so ``busy``, ``idle`` and "gone" all now describe a STRANGER. Reading any of them
+    would report someone else's work as this dispatch finishing (the false-DIED bug's evil
+    twin: a false FINISHED, which the orchestrator would act on).
+
+    So the watch is retired and the truth is reported: the outcome is unknown, and the run
+    row is where to look. ``wid=None`` deliberately — the event is not ABOUT the window that
+    holds that id today, and attributing it there is exactly the misattribution this whole
+    change exists to end. ``watch_key`` carries the stale id for the bookkeeping.
+    """
+    name = meta.get("name") or wid
+    note = meta.get("note", "")
+    tail = f' — note: "{note}"' if note else ""
+    return _event(
+        "watch_epoch_lost",
+        f"📥 the tmux SERVER restarted ({epoch.describe(stamped)} → "
+        f"{epoch.describe(now_epoch)}): the agent you were watching in {wid} ({name}) died "
+        f"with it, and {wid} now belongs to a different window. Outcome UNKNOWN — check its "
+        f"run/PR before assuming either way.{tail}",
+        {"wid": wid, "window_name": name, "note": note, "epoch": stamped,
+         "now_epoch": now_epoch},
+        wid=None, clear_watch=True, watch_key=wid)
+
+
 def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
                  runs: list[dict] | None = None,
-                 windows: dict[str, str] | None = None) -> list[dict]:
+                 windows: dict[str, str] | None = None,
+                 now_epoch: str | None = None) -> list[dict]:
     """Events from agent status transitions, scoped to WATCHED windows only.
 
     Edge-triggered (mirrors :func:`chela.notify.check_waiting`) so a window that sits
@@ -465,6 +691,14 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
         note = meta.get("note", "")
         since = meta.get("since") or 0.0
         was, now = prev.get(wid), cur.get(wid)
+
+        # ⛔ FIRST, before any status is believed: was this id issued by the tmux server
+        # that is running now? If not, it names somebody else and every branch below would
+        # be reasoning about the wrong window.
+        stamped = meta.get("epoch")
+        if epoch.is_dangling(stamped, now_epoch):
+            out.append(_epoch_lost_event(wid, meta, stamped, now_epoch))
+            continue
 
         if wid not in names:
             # Gone. Remember the name we last saw it under: it is the ONLY link back to
@@ -515,7 +749,8 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
 
 
 def run_events(runs: list[dict], seen: dict[str, str],
-               windows: dict[str, str] | None = None) -> tuple[list[dict], dict[str, str]]:
+               windows: dict[str, str] | None = None,
+               now_epoch: str | None = None) -> tuple[list[dict], dict[str, str]]:
     """Events from the dispatcher runs DB: → ``awaiting_review``, ``needs_human``, ``failed``.
 
     Edge-triggered on the run's status, against a DURABLE mark: a run parked in
@@ -544,7 +779,7 @@ def run_events(runs: list[dict], seen: dict[str, str],
         fresh[task_id] = status
         if seen.get(task_id) == status:
             continue                      # already announced at this status
-        wid = run_wid(run, windows)
+        wid = run_wid(run, windows, now_epoch)
         title = run.get("title") or ""
         # The branch is the handle a human recognises ("cmx-38"); the id is the handle
         # the dispatcher does. Prefer the branch, fall back to the id.
@@ -553,7 +788,9 @@ def run_events(runs: list[dict], seen: dict[str, str],
         payload = {"task_id": task_id, "run_status": status, "title": title,
                    "branch_name": run.get("branch_name"),
                    "window_name": run.get("window_name"),
-                   "window_id": run.get("window_id"), "pr_url": run.get("pr_url"),
+                   "window_id": run.get("window_id"),
+                   "window_epoch": run.get("window_epoch"),
+                   "pr_url": run.get("pr_url"),
                    "pr_state": run.get("pr_state"), "attempt": run.get("attempt"),
                    "started_at": run.get("started_at"), "ended_at": run.get("ended_at")}
         if status == "awaiting_review":
@@ -577,8 +814,10 @@ def run_events(runs: list[dict], seen: dict[str, str],
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
             out.append(_event(
                 "run_needs_human",
-                f"📥 {label} NEEDS A HUMAN — {payload['rework_count']} rework(s) and the PR "
-                f"still fails review ({len(reviews)} verdict(s) on the row) — {ref}"
+                # No parens, no `(s)`: the summary is sanitized before it is typed at a
+                # prompt (_event), and bracket punctuation comes back out mid-word.
+                f"📥 {label} NEEDS A HUMAN — reworks: {payload['rework_count']} · verdicts "
+                f"on the row: {len(reviews)} · the PR still fails review — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "changes_requested":
             # ⛔ NOT a silent state (CMX-68 review). A run sits here waiting for a dispatcher
@@ -598,7 +837,7 @@ def run_events(runs: list[dict], seen: dict[str, str],
                    else f"RETRY after: {str(run['last_error'])[:60]}")
             out.append(_event(
                 "run_changes_requested",
-                f"📥 {label} sent back for rework ({nxt}) — the next dispatcher tick "
+                f"📥 {label} sent back for rework — {nxt} — the next dispatcher tick "
                 f"re-spawns it in its own worktree — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "failed":
@@ -685,14 +924,87 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
     return None
 
 
+def _undeliverable(store: dict, state: str, wid: str, why: str,
+                   queued: int, alarms: list | None) -> None:
+    """An address that cannot take the work SHOUTS. This is CMX-77's whole point.
+
+    The 2026-07-14 outage was not that the address rotted — addresses rot; a tmux server can
+    be OOM-killed at any moment. It was that NOTHING SAID SO. Five ``run_review`` events
+    queued behind a dead ``@0``, the daemon logged nothing, doctor stayed green, and the
+    orchestrator sat waiting for an inbox that had quietly stopped existing. So this fires on
+    every surface a human or an agent actually watches:
+
+    * ``ERROR`` in the daemon log — every tick, for as long as it is true: this is not a
+      transient, it does not fix itself, and a once-only line scrolls away in a minute;
+    * a durable ``inbox_undeliverable`` event — the Feed and the audit trail;
+    * a phone push, if notifications are configured — the human who "had to notice" is told;
+    * a red ``chela doctor`` (``inbox.address``), which is what any of this is checked with.
+
+    The log line repeats; the event and the push do NOT — they are de-duped on the address
+    state, in the store, so an alarm that stays true for a day is one row in the Feed and one
+    buzz in a pocket, not 2,880 of each. Both are handed back to the caller (``alarms``)
+    rather than sent from here: this runs under the store lock, and a push is an HTTP POST
+    with a ten-second timeout — doing it here would hold the lock across the network and
+    block the very command that FIXES this (``chela watch``, which takes the same lock).
+    """
+    log.error("inbox: UNDELIVERABLE (%s) — %d event(s) queued for %s: %s",
+              state, queued, wid, why)
+    key = f"{state}:{wid}"
+    if store.get("address_alarm") == key:
+        return                             # same address, same failure: already announced
+    store["address_alarm"] = key
+    if alarms is None:
+        return
+    alarms.append({
+        "summary": f"📥 THE DECISIONS INBOX CANNOT DELIVER — {queued} event(s) are queued "
+                   f"for {wid} and that address is {state}. {why}",
+        "payload": {"orchestrator": wid, "state": state, "detail": why, "queued": queued,
+                    "epoch": store.get("orchestrator_epoch"),
+                    "orchestrator_name": store.get("orchestrator_name")},
+    })
+
+
+def raise_alarms(alarms: list[dict]) -> None:
+    """Publish the undeliverable alarms a tick raised — OUTSIDE the store lock.
+
+    The durable record first (it is the one that cannot be missed: it survives a restart and
+    lands in the Feed), then the phone. ``notify.send`` swallows its own failures, and
+    ``event_log.append`` never raises, so an alarm about a broken inbox cannot itself take the
+    daemon down.
+    """
+    for alarm in alarms:
+        event_log.append("inbox_undeliverable", alarm["summary"], alarm["payload"])
+        if notify.enabled():
+            notify.send(alarm["summary"],
+                        title="chela: the decisions inbox is not being delivered")
+
+
 def deliver(store: dict, statuses: dict[str, str],
-            runs: list[dict] | None = None) -> list[dict]:
+            runs: list[dict] | None = None,
+            now_epoch: str | None = None,
+            alarms: list[dict] | None = None) -> list[dict]:
     """Push queued events into the orchestrator — ONLY if its window is ``idle``.
 
     The gate is a strict equality against ``idle``. ``waiting`` must never be written
     to: that session is sitting on a permission/question prompt, and our paste would
     be consumed as the ANSWER to that prompt. ``busy`` we leave alone by design (never
     interrupt a session mid-thought) — the event just waits for the next idle tick.
+
+    **And the address itself is checked BEFORE the status is** (:func:`address_state`). That
+    order is the CMX-77 fix: ``statuses.get(orch) != IDLE`` is also what a DEAD address looks
+    like — a window that no longer exists is simply absent from the status map, which is
+    indistinguishable from a busy orchestrator, and reads as "wait for the next tick" forever.
+    That silence cost five unreviewed PRs. An address that cannot take the work is now refused
+    LOUDLY (:func:`_undeliverable`), and an address from a dead tmux epoch is refused even if
+    something IS running under that number now — especially then, because that something is
+    another agent, and a review instruction pasted into its prompt is one it will act on.
+
+    A live, idle pane in an unsafe INPUT MODE (``!`` bash, ``#`` memory) is the last unsafe
+    state, and it is refused by :func:`chela.messenger.send_tmux` itself — one authority,
+    every sender. The refusal reaches us as a failed send, which is exactly the behaviour we
+    want: the event stays at the head of the durable queue and goes out on a later tick. It
+    is HELD, never dropped — the notification still matters once the pane is prose again.
+    CMX-77 says WHICH window may be written to; this says WHAT may be typed into it.
 
     Every event is re-validated against the CURRENT runs (:func:`stale_reason`) on its
     way out; one that has rotted in the queue is dropped and LOGGED — never silently,
@@ -705,8 +1017,17 @@ def deliver(store: dict, statuses: dict[str, str],
     orch = orchestrator_wid(store)
     if not orch or not store["queue"]:
         return []
+    state, why = address_state(store, statuses, now_epoch)
+    if state in UNDELIVERABLE:
+        _undeliverable(store, state, orch, why, len(store["queue"]), alarms)
+        return []
+    if state == ADDR_UNSTAMPED:
+        log.warning("inbox: %s", why)
     if statuses.get(orch) != IDLE:
         return []
+    # A real, idle window at the address: whatever it was alarming about is over, and the
+    # next failure — even the same kind — is news again rather than a de-duped repeat.
+    store["address_alarm"] = None
     runs = runs or []
 
     sent: list[dict] = []
@@ -724,7 +1045,10 @@ def deliver(store: dict, statuses: dict[str, str],
             log.warning("inbox: dropping unrenderable %s event", event.get("kind"))
             continue
         if not messenger.send_tmux(orch, text):
-            log.warning("inbox: delivery to %s failed; leaving it queued", orch)
+            # Includes the unsafe-input-mode refusal: HOLD, never drop. The pane will be
+            # back at its prose prompt eventually, and the event is still true.
+            log.warning("inbox: delivery of %s to %s refused/failed; holding it queued",
+                        event.get("kind"), orch)
             break
         store["queue"].pop(0)
         sent.append(event)
@@ -752,11 +1076,17 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # what attributes an event to an agent — both the window events and, since the Feed's
     # lanes, the run events (see wid_for_window_name).
     windows = discovery.get_windows_by_id()
+    # The tmux server that is issuing window ids RIGHT NOW — read once, outside the lock,
+    # and handed to every reader of a persisted `@N`. It is what tells an id that still
+    # names its window from one that is a number tmux has since given to somebody else.
+    now_epoch = epoch.current()
+    alarms: list[dict] = []                # raised inside the lock, published outside it
 
     with locked_store() as store:
-        events = agent_events(prev, statuses, store, runs, windows=windows)
+        events = agent_events(prev, statuses, store, runs, windows=windows,
+                              now_epoch=now_epoch)
         r_events, store["runs_seen"] = run_events(runs, store.get("runs_seen", {}),
-                                                  windows=windows)
+                                                  windows=windows, now_epoch=now_epoch)
         events += r_events
 
         for event in events:
@@ -765,16 +1095,19 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
             # it would be the self-contradiction (run_events already announced the run).
             if not event.get("silent"):
                 store["queue"].append(event)
-            if event.get("clear_watch") and event.get("wid"):
+            watch_key = event.get("watch_key") or event.get("wid")
+            if event.get("clear_watch") and watch_key:
                 # Interest is satisfied — one dispatch, one completion. (A "blocked"
-                # event keeps the watch: the agent still owes you the finish.)
-                store["watches"].pop(event["wid"], None)
+                # event keeps the watch: the agent still owes you the finish.) `watch_key`
+                # rather than `wid` because a watch retired for having a DEAD id must not
+                # be attributed to whatever holds that id today (see _epoch_lost_event).
+                store["watches"].pop(watch_key, None)
             log.info("inbox: %s %s (%s)", "resolved" if event.get("silent") else "queued",
                      event["kind"], event.get("wid") or "run")
 
         # `runs` is the snapshot fetched above, outside the lock — re-validating against
         # it is a list scan, so the critical section stays as short as it was.
-        deliver(store, statuses, runs)
+        deliver(store, statuses, runs, now_epoch=now_epoch, alarms=alarms)
 
     # The durable record. Written OUTSIDE the store lock — an append is another file's
     # I/O, and locked_store()'s one rule is that nothing slow happens inside it. EVERY
@@ -785,4 +1118,9 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # the inbox down with it.
     for event in events:
         event_log.from_inbox(event)
+    # ...and the same rule for the alarm: an inbox that cannot deliver is the loudest thing
+    # this module has to say, and saying it costs a file append and (if configured) an HTTP
+    # POST with a ten-second timeout. Neither belongs inside the lock that `chela watch` —
+    # the command that FIXES a dangling address — has to take.
+    raise_alarms(alarms)
     return statuses

@@ -149,6 +149,18 @@ the ones it never delivers. The queue is what the orchestrator is *told*; the lo
 *happened*, and conflating the two is why a bug like the false `DIED` had no history to be
 reconciled against.
 
+That includes the inbox reporting **its own** failure to deliver (`inbox_undeliverable`,
+classed as a **gate** — it needs a human). A window id is an address, not an identity: tmux
+issues `@N` per *server*, so a restart renumbers the fleet and every id chela persisted now
+names somebody else. On 2026-07-14 an OOM did exactly that; the inbox queued five
+`run_review` events behind a `@0` that no longer existed and delivered none of them, with no
+error, no log line and `chela doctor` green — five finished PRs sat unreviewed until a human
+noticed. Every persisted id now carries the tmux epoch that issued it (`chela/epoch.py`), one
+from a dead epoch is never written to, and the queue being stuck behind it says so here, in
+the daemon log, on a phone, and in `chela doctor` (`inbox.address`). A watch whose agent died
+with the server is retired as `watch_epoch_lost` — outcome *unknown*, rather than a status
+read off the stranger who inherited its number.
+
 And **[Claude Code hooks](HOOKS.md)**, shipped as a plugin: typed events POSTed straight
 into the daemon by the agents themselves, namespaced `hook.*` (`hook.permission_request`,
 `hook.pre_tool_use`, …). They arrive *before* the fact — a gate lands in the log while the

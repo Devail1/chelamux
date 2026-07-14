@@ -36,12 +36,53 @@ agent:
   startup_delay_seconds: 4
   ready_timeout_seconds: 60
 
+# ⚖️ The judge — the adversarial pass CI cannot run (chela/judge.py).
+#
+# A PR reaching awaiting_review gets ONE judge per head commit. It works in a THROWAWAY
+# detached worktree, proposes mutations to the guards the PR claims to add, and chela — not
+# the agent — applies each one, proves the file changed, proves it still parses, re-runs
+# `test_cmd`, and restores it. A guard that survives a live, minimal, valid corruption is a
+# FACT: the PR goes back through the same carrier a human reviewer uses, and it spends a
+# rework round. Opinions can only ever become a PR comment.
+#
+# ⚠️ CHELA_REQUIRE_JS_TESTS=1 IS LOAD-BEARING, NOT DECORATION. Without it a missing `node`
+# or a missing `npm ci` makes the .mjs suites SKIP — silently, and green. The judge would
+# then mutate `terminals.js`, watch the suite pass, and send a GOOD PR back on the strength
+# of a suite that never ran. A judge is only ever as trustworthy as the suite it measures
+# against, so the suite must be the one that CANNOT quietly do nothing.
+#
+# `enabled: false` turns it off for this workflow; CHELA_JUDGE=0 turns it off fleet-wide.
+judge:
+  test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
+  suite_timeout_seconds: 900
+
 hooks:
-  # Sync the per-worktree venv with ALL extras before the agent starts, so
-  # dashboard/telegram tests don't false-fail on a default-only sync (a `uv run`
-  # in a fresh worktree auto-syncs without extras — the CMX-21 trap). `--extra X`
-  # DROPS other extras, so it must be `--all-extras`.
-  before_run: uv sync --all-extras --quiet
+  # ⛔ THIS HOOK IS THE JUDGE'S ENVIRONMENT TOO, not just the agent's — `_launch_agent` runs
+  # it on every launch, and a judge worktree is a launch. It therefore has to build an
+  # environment in which `judge.test_cmd` above can be GREEN. It did not, and the cost was
+  # total: from the day the judge shipped (2026-07-15) it returned CANNOT VERIFY on every
+  # single PR, because this line synced the venv and never installed jsdom, so the two
+  # real-DOM suites FAILED under CHELA_REQUIRE_JS_TESTS=1 and the baseline was red before a
+  # single mutation was applied. A judge whose baseline can never be green judges nothing.
+  # (`tests/test_judge_env.py` is the guard: it fails if either half of that contract —
+  # the env var above, the install below — goes away again.)
+  #
+  # ⛔ AND IT CANNOT BE THE JUDGE'S ONLY ENVIRONMENT — read this before "simplifying"
+  # `judge.provision_suite_env` away as a duplicate of the line below. The dispatcher runs
+  # hooks out of the WORKFLOW.md it LOADED (`runs.workflow_path`: the repo root, default
+  # branch), NEVER the copy on the PR branch it is judging. So this line only reaches a
+  # judge AFTER it is merged, and the first attempt at CMX-80 — which fixed only this line —
+  # was judged by the old hook and reported CANNOT VERIFY on itself. A config fix cannot fix
+  # what runs before it merges; `provision_suite_env` (in the judged tree, so it runs the
+  # moment it is pushed) is the half that can. Both halves stay: this one so AGENTS get a
+  # working worktree, that one so the JUDGE never depends on this one being right.
+  #
+  # `uv sync --all-extras`: dashboard/telegram tests false-fail on a default-only sync (a
+  # `uv run` in a fresh worktree auto-syncs WITHOUT extras — the CMX-21 trap), and
+  # `--extra X` DROPS the other extras, so it must be `--all-extras`.
+  # `npm ci`: jsdom, the repo's one npm dep (dev-only, nothing is bundled or shipped) —
+  # what CI installs, in the same breath, for the same reason.
+  before_run: uv sync --all-extras --quiet && npm ci --no-audit --no-fund --silent
 ---
 
 # Autonomous coding agent — chelamux

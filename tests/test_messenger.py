@@ -27,15 +27,22 @@ def _cmds(calls):
     return [c.args[0] for c in calls]
 
 
-def _run_send(text: str, pane_after_paste: str):
+def _run_send(text: str, pane_after_paste: str, pane_before: str | None = None):
     """Drive send_tmux with subprocess.run stubbed.
 
-    ``pane_after_paste`` is what capture-pane returns (the pane state after the
-    first Enter). Returns (result, list_of_argv).
+    ``pane_before`` is what the FIRST capture-pane returns — the input-mode guard's
+    read of the pane, before anything is sent (defaults to a safe prose prompt).
+    ``pane_after_paste`` is what every later capture-pane returns (the pane state
+    after the first Enter). Returns (result, list_of_argv).
     """
+    captures = []
+
     def fake_run(cmd, *a, **kw):
         if cmd[:2] == ["tmux", "capture-pane"]:
-            return _FakeResult(stdout=pane_after_paste)
+            captures.append(cmd)
+            first = len(captures) == 1
+            return _FakeResult(stdout=(pane_before if first and pane_before is not None
+                                       else pane_after_paste))
         return _FakeResult()
 
     with patch.object(messenger.subprocess, "run", side_effect=fake_run) as m, \
@@ -63,12 +70,14 @@ _PANE_SUBMITTED = (
 def test_paste_stranded_chip_gets_second_enter():
     ok, cmds = _run_send("line one\nline two", _PANE_STRANDED)
     assert ok is True
-    # Expected sequence: load-buffer, paste-buffer, Enter, capture-pane, Enter.
-    assert cmds[0][:2] == ["tmux", "load-buffer"]
-    assert cmds[1][:2] == ["tmux", "paste-buffer"]
-    assert cmds[2] == ["tmux", "send-keys", "-t", "chela:@1", "Enter"]
-    assert cmds[3][:2] == ["tmux", "capture-pane"]
-    assert cmds[4] == ["tmux", "send-keys", "-t", "chela:@1", "Enter"]
+    # Expected sequence: capture-pane (input-mode guard), load-buffer, paste-buffer,
+    # Enter, capture-pane (chip guard), Enter.
+    assert cmds[0][:2] == ["tmux", "capture-pane"]
+    assert cmds[1][:2] == ["tmux", "load-buffer"]
+    assert cmds[2][:2] == ["tmux", "paste-buffer"]
+    assert cmds[3] == ["tmux", "send-keys", "-t", "chela:@1", "Enter"]
+    assert cmds[4][:2] == ["tmux", "capture-pane"]
+    assert cmds[5] == ["tmux", "send-keys", "-t", "chela:@1", "Enter"]
     # Exactly two Enter presses — no more.
     enters = [c for c in cmds if c[:2] == ["tmux", "send-keys"] and c[-1] == "Enter"]
     assert len(enters) == 2
@@ -77,9 +86,9 @@ def test_paste_stranded_chip_gets_second_enter():
 def test_paste_submitted_no_second_enter():
     ok, cmds = _run_send("line one\nline two", _PANE_SUBMITTED)
     assert ok is True
-    # Chip already gone: capture-pane happens, but NO second Enter.
-    assert cmds[2] == ["tmux", "send-keys", "-t", "chela:@1", "Enter"]
-    assert cmds[3][:2] == ["tmux", "capture-pane"]
+    # Chip already gone: the chip-guard capture-pane happens, but NO second Enter.
+    assert cmds[3] == ["tmux", "send-keys", "-t", "chela:@1", "Enter"]
+    assert cmds[4][:2] == ["tmux", "capture-pane"]
     enters = [c for c in cmds if c[:2] == ["tmux", "send-keys"] and c[-1] == "Enter"]
     assert len(enters) == 1
 
@@ -91,13 +100,15 @@ def test_single_line_sends_literal_text_then_separate_enter():
     # the TUI settles the (possibly long) blob before the Enter lands — a
     # combined text+Enter strands long messages wrapped on the ❯ input line.
     assert cmds == [
+        ["tmux", "capture-pane", "-p", "-t", "chela:@1"],   # the input-mode guard
         ["tmux", "send-keys", "-t", "chela:@1", "-l", "just one line"],
         ["tmux", "send-keys", "-t", "chela:@1", "Enter"],
     ]
-    # Exactly one Enter — no capture/second-Enter chip guard (that's paste-only).
+    # Exactly one Enter — no second-Enter chip guard (that's paste-only), and exactly
+    # one capture-pane (the mode guard — the chip guard must not run on this branch).
     enters = [c for c in cmds if c[:2] == ["tmux", "send-keys"] and c[-1] == "Enter"]
     assert len(enters) == 1
-    assert not any(c[:2] == ["tmux", "capture-pane"] for c in cmds)
+    assert len([c for c in cmds if c[:2] == ["tmux", "capture-pane"]]) == 1
 
 
 def test_single_line_key_name_sent_literally():
@@ -105,8 +116,8 @@ def test_single_line_key_name_sent_literally():
     # interpreted as a keypress — that's what ``-l`` guarantees.
     ok, cmds = _run_send("Enter the code Up top", _PANE_STRANDED)
     assert ok is True
-    assert cmds[0] == ["tmux", "send-keys", "-t", "chela:@1", "-l", "Enter the code Up top"]
-    assert cmds[1] == ["tmux", "send-keys", "-t", "chela:@1", "Enter"]
+    assert cmds[1] == ["tmux", "send-keys", "-t", "chela:@1", "-l", "Enter the code Up top"]
+    assert cmds[2] == ["tmux", "send-keys", "-t", "chela:@1", "Enter"]
 
 
 def test_pane_has_unsubmitted_paste_guards_empty_prompt():

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from chela import hold
+from chela import epoch, hold, judge
 from chela.config import CHELA_DIR, DISPATCH_TICK_INTERVAL, TMUX_SESSION, max_reworks
 from chela.messenger import send_tmux
 from chela.sources import Task, get_source
@@ -23,8 +23,15 @@ from chela.workflow import (
     poll_interval_seconds,
     render_prompt,
     resolve_workspace_root,
+    workspace_escape,
 )
-from chela.worktree import BranchGone, attach_worktree, ensure_worktree
+from chela.worktree import (
+    BranchGone,
+    attach_worktree,
+    detached_worktree,
+    ensure_worktree,
+    remove_worktree,
+)
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +159,27 @@ CI_PENDING_STALE_SECONDS = 6 * 3600
 # A whole CI log does not fit in a prompt. The tail is where the failure is.
 CI_LOG_TAIL_CHARS = 4000
 _CI_RUN_ID_RE = re.compile(r"/actions/runs/(\d+)")
+
+# --- ⚖️ the judge: the checks CI cannot run ----------------------------------
+#
+# CI proves the suite passes. It cannot prove the suite CAN FAIL — it runs the tests, and
+# the tests are the thing that is broken (measured on 2026-07-14: four of five CI-green PRs
+# had a guard that survived deliberate corruption). The judge is the pass that closes that
+# hole, and everything about how a verdict of its becomes a FACT rather than an opinion
+# lives in `chela.judge`. Here there is only the trigger.
+#
+# ⛔ Only a GREEN or a CHECK-LESS PR is judged. A red one is already going back through the
+# CI gate (1c) — judging it would race a rework that is about to change the very sha we are
+# judging — and a `pending` one has not finished telling us what it is yet.
+JUDGE_TRIGGER_CHECKS = (CI_PASSING, CI_NONE)
+
+# One judge at a time, per workflow. Each experiment re-runs the whole suite in its own
+# worktree, so a fleet of judges is a fleet of test suites competing for the same box.
+JUDGE_MAX_CONCURRENT = 1
+
+# A judge that has not published a verdict in this long is not thinking, it is stuck. It is
+# killed and its run becomes CANNOT VERIFY — which blocks nothing and approves nothing.
+JUDGE_TIMEOUT_SECONDS = 60 * 60
 
 # --- agent launch command ---------------------------------------------------
 #
@@ -471,6 +499,15 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # landed ownerless. A pre-existing row simply has NULL here and falls back
         # to the by-name lookup (inbox.run_wid).
         ("window_id", "ALTER TABLE runs ADD COLUMN window_id TEXT"),
+        # ...and the tmux server that ISSUED that id (CMX-77). `@3` is an ADDRESS, not an
+        # identity: tmux numbers windows per server, so after a restart (an OOM took ours on
+        # 2026-07-14) the same `@3` names a different agent entirely. A recorded id with no
+        # epoch beside it cannot be told apart from one that is still good, and acting on it
+        # files a dead run's events under a LIVE agent's lane — a wrong wid is worse than no
+        # wid (CMX-48). Readers (inbox.run_wid, runtime_truth) drop the id when this stamp is
+        # not the epoch running now. A pre-existing row reads NULL and is treated as
+        # unverifiable, not as current.
+        ("window_epoch", "ALTER TABLE runs ADD COLUMN window_epoch TEXT"),
         # The rework loop (CMX-68). `rework_count` is the bounded-loop counter — it is
         # incremented when a rework is actually SPAWNED, not when the verdict is written,
         # so a verdict that never gets a slot cannot burn a round. `review_history` is
@@ -494,6 +531,17 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("pr_head_sha", "ALTER TABLE runs ADD COLUMN pr_head_sha TEXT"),
         ("ci_failed_sha", "ALTER TABLE runs ADD COLUMN ci_failed_sha TEXT"),
         ("ci_pending_since", "ALTER TABLE runs ADD COLUMN ci_pending_since TEXT"),
+        # ⚖️ The judge (CMX-75). `judge_sha` is the head commit a judge was LAUNCHED on —
+        # the same once-per-sha guard as `ci_failed_sha`, and for the same reason: without
+        # it every tick would spawn another judge agent onto the same unchanged PR. A rework
+        # pushes a NEW sha, which IS judged again — bounded by CHELA_MAX_REWORKS, because a
+        # judge block spends a rework round like any other verdict. `judge_state` is one of
+        # judge.J_* and `judge_detail` says why (it is the CANNOT VERIFY reason, and an
+        # unknown must never be silent).
+        ("judge_sha", "ALTER TABLE runs ADD COLUMN judge_sha TEXT"),
+        ("judge_state", "ALTER TABLE runs ADD COLUMN judge_state TEXT"),
+        ("judge_started_at", "ALTER TABLE runs ADD COLUMN judge_started_at TEXT"),
+        ("judge_detail", "ALTER TABLE runs ADD COLUMN judge_detail TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -1338,6 +1386,24 @@ def approve(ident: str, body: str = "", force: bool = False) -> dict:
     }
 
 
+def set_judge_state(task_id: str, state: str, detail: str = "") -> None:
+    """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE.
+
+    The judge's only way to change a run's STATUS is :func:`request_changes` — the one
+    carrier, shared with the CI gate and with a human reviewer. This column is a report, not
+    a lever: ``clean`` does not approve, does not merge, and does not move the row out of
+    ``awaiting_review``, where the orchestrator will find it. ``cannot_verify`` is the same
+    non-answer the CI gate's ``unknown`` is, and it is recorded rather than swallowed
+    precisely because an unknown that goes quiet is indistinguishable from a pass.
+    """
+    with _db() as conn:
+        conn.execute(
+            "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
+            (state, (detail or "")[:2000], task_id),
+        )
+        conn.commit()
+
+
 def _prune_done_rows(
     conn: sqlite3.Connection,
     workflow_path: str,
@@ -1385,6 +1451,29 @@ def poll_interval(workflow_path: str | Path, default: float | None = None) -> fl
     return poll_interval_seconds(load_workflow_cached(workflow_path).workflow, base)
 
 
+def _refused(error: str | None, refused: bool = False) -> dict:
+    """A tick that did NOTHING, and says why. Same shape every caller already reads:
+    `blocked` is what the daemon loop edge-triggers on and what the Settings drawer
+    renders, so a refusal surfaces through the plumbing a broken workflow already uses.
+
+    `refused` distinguishes the two. A BLOCKED workflow (unparseable) still reconciles on
+    its last known-good config; a REFUSED one does not reconcile either — it does nothing
+    at all — and the daemon must not tell the operator otherwise.
+    """
+    return {
+        "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
+        "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
+        "reworked": 0, "escalated": 0, "ci_failed": 0, "judged": 0, "judge_lost": 0,
+        "blocked": True, "error": error, "held": False, "hold_expired": False,
+        "refused": refused,
+    }
+
+
+# Workflows currently refused by the workspace fence — so the ERROR is logged on the
+# EDGE, not once per tick forever (a 60s drumbeat is how an operator learns to skip logs).
+_escaped: set[str] = set()
+
+
 def tick(workflow_path: str | Path) -> dict:
     """One dispatcher pass. Returns a dict summary for logging.
 
@@ -1417,12 +1506,19 @@ def tick(workflow_path: str | Path) -> dict:
     if wf is None:
         # Nothing has ever parsed — there is no last-good config to reconcile
         # against. Report, don't raise: a broken file must not kill the loop.
-        return {
-            "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
-            "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
-            "reworked": 0, "escalated": 0, "ci_failed": 0,
-            "blocked": True, "error": status.error, "held": False, "hold_expired": False,
-        }
+        return _refused(status.error)
+    # THE WORKSPACE FENCE, and it comes before EVERYTHING this tick would touch — the
+    # claim, the reconcile, the tracker strike, the spawn. `CHELA_DIR` isolates state,
+    # never the workspace (see workflow.workspace_escape), so a daemon on a scratch state
+    # dir would otherwise git-push, strike the tracker and launch agents in the REAL
+    # install's worktrees. There is nothing this tick can safely do; it does nothing.
+    escape = workspace_escape(wf)
+    if escape:
+        if str(workflow_path) not in _escaped:      # edge-triggered: LOUD once, not a drumbeat
+            _escaped.add(str(workflow_path))
+            log.error("Dispatch REFUSED — %s", escape)
+        return _refused(escape, refused=True)
+    _escaped.discard(str(workflow_path))
     blocked = status.error is not None
     source = get_source(wf)
     open_tasks = source.list_open_tasks()
@@ -1440,6 +1536,8 @@ def tick(workflow_path: str | Path) -> dict:
         "reworked": 0,
         "escalated": 0,
         "ci_failed": 0,
+        "judged": 0,
+        "judge_lost": 0,
         "blocked": blocked,
         "error": status.error,
         "held": False,
@@ -1827,6 +1925,15 @@ def tick(workflow_path: str | Path) -> dict:
                 )
                 summary["escalated"] += 1
 
+        # 1e. ⚖️ THE JUDGE'S SILENCE — a judge that stopped without publishing a verdict.
+        #
+        # With reconciliation, ABOVE the `blocked` and `hold` returns, for the same reason
+        # 1d is: it takes no slot, starts nothing, and it is the transition that stops a run
+        # from being stuck believing it is under review. ⛔ A judge that died is CANNOT
+        # VERIFY — it does NOT block and it does NOT approve; the run stays exactly where it
+        # was, and a human is told why.
+        summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
+
         # 2. Keep done rows for the "recent runs" view; just cap history per workflow.
         _prune_done_rows(conn, str(wf.path))
         conn.commit()
@@ -1890,6 +1997,37 @@ def tick(workflow_path: str | Path) -> dict:
             ),
             ACTIVE_STATUSES,
         ).fetchone()[0]
+
+        # 3a′. ⚖️ THE JUDGE — the adversarial pass CI cannot run.
+        #
+        # A PR reaches here GREEN and unreviewed. CI proved the suite passes; nothing has
+        # proved the suite CAN FAIL, and on 2026-07-14 four of five CI-green PRs shipped a
+        # guard that survived deliberate corruption. One judge is spawned per PR HEAD (the
+        # `judge_sha` guard, exactly the once-per-sha guard the CI gate uses), it works in a
+        # throwaway detached worktree, and its blocking verdicts go back through
+        # `request_changes` — the one carrier — so a judge round IS a rework round and the
+        # existing cap bounds the whole thing. See chela/judge.py.
+        #
+        # Below the hold/blocked gates, deliberately: a judge is an AGENT on this box, and an
+        # operator who paused the queue (or whose WORKFLOW.md does not parse) has not asked
+        # for new agents. It resumes when they do — nothing is lost, the PR simply waits.
+        if judge.judge_enabled(wf):
+            judging = conn.execute(
+                "SELECT COUNT(*) FROM runs WHERE workflow_path=? AND judge_state=?",
+                (str(wf.path), judge.J_RUNNING),
+            ).fetchone()[0]
+            for row in conn.execute(
+                "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
+                "AND pr_state='open' AND pr_head_sha IS NOT NULL "
+                "AND pr_checks IN ({}) AND (judge_sha IS NULL OR judge_sha != pr_head_sha)"
+                .format(",".join("?" * len(JUDGE_TRIGGER_CHECKS))),
+                (str(wf.path), *JUDGE_TRIGGER_CHECKS),
+            ).fetchall():
+                if judging >= JUDGE_MAX_CONCURRENT:
+                    break        # it waits a tick; each judge re-runs a whole test suite
+                if _spawn_judge(wf, row, row["pr_head_sha"], conn):
+                    judging += 1
+                    summary["judged"] += 1
 
         # 3b. REWORK — the runs the reviewer sent back (chela review --request-changes).
         #
@@ -2021,7 +2159,8 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
-             task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL""",
+             task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
+             window_epoch=NULL""",
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number),
     )
     conn.commit()
@@ -2050,6 +2189,7 @@ def _launch_agent(
     *,
     hook_vars: dict,
     fresh_worktree: bool,
+    record_window: bool = True,
 ) -> str:
     """PREPARE the worktree, then put an agent in it. THE spawn path — the only one.
 
@@ -2089,6 +2229,11 @@ def _launch_agent(
     ``hook_vars`` is the same ``{{...}}`` map the prompt is rendered from, so a hook can
     target the worktree it is preparing (``{{workspace_path}}``).
 
+    ``record_window=False`` for an agent that is working ON a run rather than AS it (the
+    judge): ``runs.window_id`` is the run's OWN window — the Feed keys its lane on it and the
+    inbox addresses ``run_review`` to it — so stamping a short-lived judge's id there would
+    misattribute both.
+
     Returns the window target (the ``@id``, or the bare name if the id was unreadable).
     """
     if fresh_worktree:
@@ -2109,9 +2254,12 @@ def _launch_agent(
     target_id = _new_window(window_name, str(worktree))
 
     # Only a real @id is stored — _new_window degrades to the bare name when the id can't
-    # be parsed, and a name in this column would be a lie the Feed keys a lane on.
-    if re.fullmatch(r"@\d+", target_id):
-        conn.execute("UPDATE runs SET window_id=? WHERE task_id=?", (target_id, task_id))
+    # be parsed, and a name in this column would be a lie the Feed keys a lane on. The id is
+    # stamped with the tmux epoch that ISSUED it (CMX-77): this is the same lossless moment,
+    # and the id is worthless to a later reader without it.
+    if record_window and re.fullmatch(r"@\d+", target_id):
+        conn.execute("UPDATE runs SET window_id=?, window_epoch=? WHERE task_id=?",
+                     (target_id, epoch.current(), task_id))
         conn.commit()
 
     # WORKFLOW.md's agent.cmd → the Settings permission mode → the built-in default (see
@@ -2302,7 +2450,7 @@ def _rework_failed(conn: sqlite3.Connection, row: sqlite3.Row, error: str) -> No
         spent += 1
     conn.execute(
         "UPDATE runs SET status='changes_requested', rework_count=?, last_error=?, "
-        "window_id=NULL WHERE task_id=?",
+        "window_id=NULL, window_epoch=NULL WHERE task_id=?",
         (spent, error, task_id),
     )
     conn.commit()
@@ -2368,7 +2516,8 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
     # forever. A launch that then fails reconciles like any other running run.
     conn.execute(
         "UPDATE runs SET status='running', rework_count=?, started_at=?, ended_at=NULL, "
-        "last_error=NULL, idle_nudged_at=NULL, window_id=NULL, worktree_path=? "
+        "last_error=NULL, idle_nudged_at=NULL, window_id=NULL, window_epoch=NULL, "
+        "worktree_path=? "
         "WHERE task_id=?",
         (rework_round, _now(), str(worktree), task_id),
     )
@@ -2386,6 +2535,209 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
         task_id, rework_round, max_reworks(), worktree, branch, row["pr_url"] or "?",
     )
     return True
+
+
+# --- ⚖️ the judge: spawn, and the watchdog that makes its silence mean something ---------
+
+# What the judge agent is told. ⛔ Read it as the CONTRACT it is: this agent DECIDES NOTHING.
+# It proposes experiments; `chela judge run` applies them, proves they applied, proves the
+# code still parses, runs the repo's OWN suite and adjudicates. That is the whole reason an
+# autonomous judge is safe to put in a blocking position — see chela/judge.py's module
+# docstring, which is the design and not a summary of it.
+#
+# Overridable per workflow with `agent.judge_prompt` in WORKFLOW.md (same {{...}} vars).
+JUDGE_PROMPT = """\
+⚖️ **You are the JUDGE for PR {{pr_url}}** (branch `{{branch_name}}`, run `{{task_id}}`).
+Its CI is green and it is waiting for review.
+
+⛔ **YOU DECIDE NOTHING, AND YOU REPORT NO RESULTS.** You propose EXPERIMENTS. `chela` runs
+them itself — it applies each mutation, reads the file back to prove it changed, checks it
+still parses, runs the suite, restores the file, and writes the verdict. Your opinion never
+reaches the blocking path; only a suite chela ran does. **Do not run the test suite yourself
+and do not report whether something passed** — your results are not evidence.
+
+⛔ **Do not commit, push, or edit the PR's branch.** `{{workspace_path}}` is a THROWAWAY
+detached checkout that is deleted when you finish.
+
+## What you are looking for — and it is NOT "is the code good?"
+
+Every feature in the last five PRs worked. Four were still sent back, because **the thing
+meant to PROVE the feature works could not fail**: a guard that stayed green with the
+guarded state folded back in, a colourblind cue whose glyph could be emptied with 0
+failures, a whole production wiring that could be REVERTED with 1112 passed.
+
+**A guard that survives deliberate corruption is not a guard.** That is what you hunt.
+
+## Do this, in order
+
+1. Read what this PR claims: `{{diff_cmd}}` and `{{pr_view_cmd}}`.
+2. For **each guard/invariant it adds** (each new or changed test, each "must never…"
+   comment, each accessibility cue), design ONE **minimal, live, syntactically valid**
+   mutation to the **production** code that a real guard MUST catch:
+   - ✅ `if (false && <cond>)`, invert a comparison, empty a returned value, blank a string.
+   - ⛔ **Never delete a line** that would unbalance braces or indentation. A mutation that
+     breaks the parse makes the suite red for the WRONG reason, proves nothing, and chela
+     will throw it out as INVALID.
+   - **WIRING** (`"kind": "wiring"`): the smallest edit that makes the feature NEVER RUN —
+     revert the production call-site. If the suite is still green, the tests never exercise
+     what actually runs.
+3. Write `{{experiments_path}}` — JSON, exactly this shape:
+
+```json
+{
+  "experiments": [
+    {"guard": "sidebar state must never reach _termSig",
+     "kind": "mutation",
+     "file": "chela/dashboard/static/terminals.js",
+     "before": "<the EXACT text to replace, copied verbatim, occurring EXACTLY ONCE>",
+     "after":  "<what to replace it with>"}
+  ],
+  "notes": [
+    {"title": "style/design opinion", "body": "posted as a comment; blocks nothing"}
+  ]
+}
+```
+
+   - `before` is matched **literally** and must occur **exactly once** in the file — chela
+     REFUSES an ambiguous anchor and refuses one it cannot find, because a mutation that
+     never applied leaves the suite green and would send a GOOD PR back.
+   - **`notes` are for everything that is a judgment** — style, taste, "I'd have done it
+     differently". They are posted as a comment and can never send a PR back. ⛔ Do not
+     smuggle an opinion into an experiment: **you are allowed to be useless. You are not
+     allowed to be wrong.**
+
+4. Run **`{{judge_cmd}}`** — your last step. It publishes the verdict, cleans up, and closes
+   this window.
+
+If you genuinely cannot find a guard to corrupt, say so in `notes` and still run the
+command with `"experiments": []` — that is recorded as **CANNOT VERIFY**, not as a pass.
+"""
+
+
+def _judge_vars(wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str) -> dict:
+    number = _pr_number(row["pr_url"])
+    base = wf.get("workspace", "base_branch", default="master")
+    exp_path = judge.experiments_path(worktree)
+    return {
+        "task_id": row["task_id"],
+        "task_title": row["title"] or "",
+        "branch_name": row["branch_name"] or "",
+        "base_branch": base,
+        "workspace_path": str(worktree),
+        "repo_path": str(wf.path.parent),
+        "project_key": wf.project_key,
+        "task_number": row["task_number"],
+        "pr_url": row["pr_url"] or "(no PR link on the run row)",
+        "head_sha": sha,
+        "experiments_path": str(exp_path),
+        "judge_cmd": f"chela judge run {row['task_id']} --experiments {exp_path}",
+        "test_cmd": judge.judge_test_cmd(wf) or "(none)",
+        "diff_cmd": f"git diff origin/{base}...HEAD",
+        "pr_view_cmd": (f"gh pr view {number} --comments" if number
+                        else "gh pr view --comments   # no PR url on the run row"),
+    }
+
+
+def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Connection) -> bool:
+    """Put a judge on this PR's head — in a throwaway worktree, on a detached HEAD.
+
+    ⛔ The sha is burned FIRST, before tmux is touched. A judge that fails to launch must not
+    be retried every 60s forever: the run is marked CANNOT VERIFY on this commit and left in
+    ``awaiting_review`` for a human, which is what an unknown is supposed to cost. (The
+    asymmetry is deliberate and it is the same one the CI gate makes: a missed judgement
+    costs a PR an adversarial pass; a re-fired one would spawn agents in a loop.)
+    """
+    task_id, branch = row["task_id"], row["branch_name"] or ""
+    worktree = judge.judge_worktree_path(wf, task_id)
+    conn.execute(
+        "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=? "
+        "WHERE task_id=?",
+        (sha, judge.J_RUNNING, _now(), "", task_id),
+    )
+    conn.commit()
+
+    try:
+        created = detached_worktree(wf.path.parent, sha, worktree)[1]
+    except (BranchGone, subprocess.CalledProcessError) as e:
+        detail = getattr(e, "stderr", None) or str(e)
+        if isinstance(detail, bytes):
+            detail = detail.decode(errors="replace")
+        set_judge_state(task_id, judge.J_CANNOT_VERIFY,
+                        f"the judge worktree could not be created: {str(detail).strip()[:300]}")
+        log.warning("judge: %s: could not check out %s: %s", task_id, sha[:12], detail)
+        return False
+
+    prompt = render_prompt(
+        wf.get("agent", "judge_prompt", default=None) or JUDGE_PROMPT,
+        _judge_vars(wf, row, worktree, sha),
+    )
+    try:
+        _launch_agent(
+            wf, task_id, judge.judge_window_name(branch), worktree, prompt, conn,
+            hook_vars=_judge_vars(wf, row, worktree, sha),
+            fresh_worktree=created,
+            # ⛔ The judge is NOT this run's agent. `window_id` is the run's own window (the
+            # Feed keys its lane on it, the inbox addresses run_review to it) and pointing it
+            # at a judge that will be gone in twenty minutes would misattribute both.
+            record_window=False,
+        )
+    except Exception as e:
+        log.exception("judge: %s: the judge agent failed to launch", task_id)
+        set_judge_state(task_id, judge.J_CANNOT_VERIFY, f"the judge agent failed to launch: {e}")
+        return False
+    log.info("judge: %s: judging %s on %s in %s", task_id, row["pr_url"] or "?", sha[:12], worktree)
+    return True
+
+
+def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set[str]) -> int:
+    """A judge that stopped without a verdict is CANNOT VERIFY — never a pass, never a fail.
+
+    Two silences mean the same thing, and neither may be mistaken for a clean bill of health:
+    the window is gone but no verdict was published (the agent died, or a human killed it),
+    or it has been running past :data:`JUDGE_TIMEOUT_SECONDS` (it is stuck, not thinking).
+    ⛔ `chela judge run` writes the state BEFORE it kills its own window, so "window gone,
+    state still running" is unambiguous — it did not finish.
+
+    Returns how many runs were handed back to a human this way.
+    """
+    now = _parse_ts(_now())
+    handed_over = 0
+    for row in conn.execute(
+        "SELECT * FROM runs WHERE workflow_path=? AND judge_state=?",
+        (str(wf.path), judge.J_RUNNING),
+    ).fetchall():
+        window = judge.judge_window_name(row["branch_name"] or "")
+        started = _parse_ts(row["judge_started_at"])
+        timed_out = (
+            started is not None and now is not None
+            and (now - started).total_seconds() >= JUDGE_TIMEOUT_SECONDS
+        )
+        alive = window in live_windows
+        if alive and not timed_out:
+            continue
+        reason = (
+            f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}min — it is stuck, "
+            "not thinking" if timed_out else
+            "the judge's window disappeared before it published a verdict"
+        )
+        conn.execute(
+            "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
+            (judge.J_CANNOT_VERIFY, reason, row["task_id"]),
+        )
+        conn.commit()
+        if alive:
+            _kill_windows_named(window)
+        remove_worktree(wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]))
+        handed_over += 1
+        # ⛔ Loud. The run stays exactly where it was (`awaiting_review`), which is the ONLY
+        # safe answer — but a judge that silently never ran is indistinguishable from a judge
+        # that found nothing, and that is precisely the confusion this whole feature exists
+        # to end.
+        log.warning(
+            "judge: %s → CANNOT VERIFY: %s. The PR was NOT reviewed adversarially and it was "
+            "NOT sent back; it is a human's now.", row["task_id"], reason,
+        )
+    return handed_over
 
 
 def list_runs() -> list[dict]:

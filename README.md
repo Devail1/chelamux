@@ -179,7 +179,10 @@ inbox closes that: completion is pushed back into the orchestrator's session.
 # in the orchestrator's session, after dispatching work to window @3:
 chela drive @3 "Fix the parser bug in src/lex.rs; commit when tests pass."
 chela watch @3 --note "parser bug"     # register interest — you'll be told
-chela watching                         # what's watched + what's queued
+chela watching                         # what's watched, what's queued, and whether
+                                       #   the address it delivers to is still real
+chela watch                            # no window: (re-)register THIS session as the
+                                       #   orchestrator — the fix after tmux restarts
 ```
 
 The daemon then reports, once, when `@3` **finishes**, **blocks** on a prompt, or
@@ -188,10 +191,10 @@ The daemon then reports, once, when `@3` **finishes**, **blocks** on a prompt, o
 as one line typed into the orchestrator's session:
 
 ```
-📥 @3 (chelamux) finished the task you dispatched — verify + commit. — note: "parser bug"
+📥 @3 · chelamux finished the task you dispatched — verify + commit. — note: “parser bug”
 ```
 
-Three rules make pushing into a live session safe:
+Four rules make pushing into a live session safe:
 
 - **Delivery is gated on `idle`, strictly.** A `busy` session is mid-thought and is
   never interrupted — the event queues durably and goes out on the next idle tick.
@@ -208,6 +211,25 @@ Three rules make pushing into a live session safe:
   `CHELA_ORCHESTRATOR_WID=@0`. Until something registers, the inbox is **inert** —
   it can't push into a random agent's session. It never reports on the
   orchestrator's own window either, so it can't notify itself in a loop.
+- **`@3` is an address, not an identity — so every stored one carries its tmux
+  epoch.** tmux issues window ids *per server*: restart it and the fleet comes back
+  renumbered from `@0`. On 2026-07-14 an OOM did exactly that, and the inbox spent the
+  day pushing at a `@0` that no longer existed — five finished PRs went unreviewed, in
+  total silence, with `chela doctor` green. Every persisted id (the orchestrator's
+  address, each watch, each run row, each Telegram binding) is now stamped with the
+  server that issued it; one from a dead server is **never acted on** — it names a
+  different agent now, and a wrong wid is worse than no wid — and being undeliverable
+  is **loud**: an ERROR every tick, an `inbox_undeliverable` event in the Feed, a phone
+  push, and a red `chela doctor` (`inbox.address`). Nothing is lost: the queue waits,
+  and `chela watch` (no arguments) re-registers the session that is really there.
+- **An idle prompt is not necessarily a *prose* prompt.** Claude Code's input line
+  has modes: `!` runs a shell command, `#` writes to memory. A session in `!` mode is
+  perfectly `idle` — and it will **execute** the next line it receives. (It did:
+  a notification built from an agent-authored PR title was run by `/bin/bash`.) So the
+  mode is read off the pane and an unsafe one is **refused** — the event is *held* in
+  the queue, never dropped — and, independently, every summary is **neutralised** of
+  shell metacharacters, control bytes and mode-switching prefixes before it is typed.
+  Agent-authored text must never be indistinguishable from something you typed.
 
 Kill it entirely with `CHELA_INBOX_ENABLED=false`.
 
@@ -379,6 +401,7 @@ the dashboard *publishes* the port it bound.
 | `CHELA_DISPATCH_WORKFLOWS` | — | Colon-separated WORKFLOW.md paths the daemon dispatches |
 | `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick interval in the daemon (s) |
 | `CHELA_MAX_REWORKS` | `2` | How many times a PR that fails review is sent back to its agent before the run stops at `needs_human`. `0` = no rework at all |
+| `CHELA_JUDGE` | `true` | The **judge** — the adversarial pass on a green PR (corrupt each guard, re-run the suite, block only on one that survives). One extra agent per PR head, so this is the fleet-wide off switch; a workflow turns it off for itself with `judge: {enabled: false}`, and it is off anyway without a `judge.test_cmd` |
 | `CHELA_AGENT_CMD` | `claude` | Launch command for the dashboard Start button |
 | `CHELA_PROJECTS_DIR` | `~/projects` | Folder scanned for git repos to suggest in the Launch sidebar (also settable in dashboard **Settings → Projects folder**, which wins) |
 | `CHELA_NOTIFY_URL` | — | Needs-input notification target (ntfy / Telegram / webhook) |
@@ -593,6 +616,35 @@ literal Escape.
   — telling an agent to branch and open a PR that is already open. Before downgrading, drain
   the loop: `chela dispatch-runs --awaiting` lists every parked run; merge, close or
   `chela runs delete` each one first.
+- **⚖️ The judge: every guard is corrupted, and one that survives sends the PR back.** CI
+  proves the suite passes. It cannot prove the suite *can fail* — it runs the tests, and the
+  tests are the thing that is broken. Measured here on 2026-07-14: of five CI-green PRs,
+  **four had a guard that survived deliberate corruption** — a "sidebar state must never
+  reach the render key" test that still passed with that state folded back in, a colourblind
+  cue whose glyph could be emptied with `0 failures`, a feature whose entire production
+  wiring could be **reverted** with `1112 passed`. Every feature worked; the proof that they
+  worked could not fail. So a PR reaching `awaiting_review` green gets one judge per head
+  commit. ⛔ **It is not "spawn a reviewer and trust it."** The agent proposes *experiments* —
+  `(file, before, after)` — and **chela** applies each one in a throwaway detached worktree,
+  reads the file back to prove it changed, parse-checks it, re-runs the repo's own
+  `judge.test_cmd`, restores it, and adjudicates. A guard that survives a **live, minimal,
+  syntactically valid** corruption is a **fact**, and it is the only thing allowed to block —
+  through the same carrier a human uses, spending a rework round like any other verdict.
+  Style, taste and "I'd have done it differently" go in `notes`: posted as a PR comment,
+  never blocking. **The judge is allowed to be useless; it is not allowed to be wrong.**
+  ⚠️ An unapplied mutation (the suite stays green — it would block a *good* PR) and one that
+  breaks the parse (red for the wrong reason — it would wave a *bad* PR through) are both
+  thrown out as `INVALID`; a red baseline, a dirty worktree or zero experiments is **CANNOT
+  VERIFY**, which blocks nothing and approves nothing. ⛔ **The judge never merges** — a clean
+  PR stays exactly where it was, in your inbox. Off with `CHELA_JUDGE=0`, or for a workflow
+  that sets no `judge.test_cmd` (no suite ⇒ no facts ⇒ nothing that may block).
+  ⛔ **`hooks.before_run` is the judge's environment, not just the agent's** — it runs on
+  every launch, and a judge worktree is a launch, so it has to build a worktree in which
+  `judge.test_cmd` can be **green**. Get that wrong and the judge is *inert*, not broken: it
+  is honest, correct, and it verifies nothing. Ours was, for its first PRs — the hook synced
+  the venv and never ran `npm ci`, so jsdom was missing, the DOM suites could not run, and
+  the baseline was red before a single mutation was applied. Every PR came back CANNOT
+  VERIFY. If your `test_cmd` needs it, your `before_run` installs it.
 - **The queue belongs to whoever holds it, not to whoever is faster.** The tracker
   has two writers — you reorder it, the dispatcher claims from it — and you lose
   that race every time: a merge frees the slot, and the next tick fires long before

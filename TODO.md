@@ -17,7 +17,7 @@
 
   ⚠️ **THE BUG CLASS, AGAIN (see the 07-14 handoff):** *the artifact you WROTE is not the artifact that RUNS.* A fixture that hands the resolver a tidy cwd reproduces the blind spot instead of the bug. **Drive it live: a real `--resume`, from a window whose cwd is NOT the session's origin dir, and watch the message actually arrive in Telegram.**
 
-- [ ] **⚖️ THE JUDGE — auto-adversarial review on `awaiting_review`. ⛔ ITS BLOCKING VERDICTS MUST BE FACTS, NOT OPINIONS.** The carrier is **proven** (CMX-68 rework loop + CMX-69 CI gate). This is the deferred half. 🔑 **THE DESIGN IS NOT "spawn a reviewer and trust it" — read the next paragraph before anything else.**
+- [x] **⚖️ THE JUDGE — auto-adversarial review on `awaiting_review`. ⛔ ITS BLOCKING VERDICTS MUST BE FACTS, NOT OPINIONS.** The carrier is **proven** (CMX-68 rework loop + CMX-69 CI gate). This is the deferred half. 🔑 **THE DESIGN IS NOT "spawn a reviewer and trust it" — read the next paragraph before anything else.**
 
   **THE EVIDENCE THAT MAKES THIS URGENT (2026-07-14, measured).** Five dispatched PRs reached `awaiting_review`, **all five CI-green**. I hand-spawned five adversarial reviewers. **FOUR were sent back — and NOT ONE for a broken feature.** Every feature worked. They were sent back because **the thing meant to PROVE the feature works could not fail**:
   | PR | the guard | the corruption that left the suite GREEN |
@@ -44,6 +44,55 @@
 
   ⚠️ **THE IRONY YOU MUST NOT COMMIT: the judge is itself a guard. CORRUPT IT AND WATCH IT GO RED, or you have built the very thing it exists to catch.** Feed it a PR whose guard you have *deliberately* broken and confirm it BLOCKS; feed it a genuinely good PR and confirm it does NOT.
 
+- [x] **🚨 THE TEST SUITE RUNS THE PRODUCTION DISPATCHER AGAINST THE PRODUCTION TRACKER — AND IT IS BLOCKING THE JUDGE.** ⛔ **HIGHEST PRIORITY: nothing can be adjudicated until this is fixed.**
+
+  **WHAT IT ACTUALLY DOES.** `tests/test_graceful_shutdown.py` spawns a **REAL daemon** (`python -m chela.main run`) with `CHELA_DIR` pointed at a `tmp_path`. But ⛔ **`CHELA_DIR` does NOT isolate worktrees** — the workspace root comes from **`WORKFLOW.md`'s `workspace.root`** (`workflow.py:235`), which the test daemon reads from the **REAL repo**. So it loads the **real `WORKFLOW.md`**, the **real `TODO.md`**, and **dispatches REAL OPEN TASKS into the REAL `~/.chela/worktrees/`.** Captured 2026-07-14:
+  ```
+  Work dispatcher: ON — 1 workflow: /home/liavedunix/projects/chelamux/WORKFLOW.md
+  WARNING chela.worktree: Worktree path ~/.chela/worktrees/chelamux/24d60c64fe21 exists but git has no record
+  ERROR   chela.dispatcher: Dispatch failed for task 24d60c64fe21     <-- THE LIVE WALL RUN'S WORKTREE
+  ```
+  🔴 **On this box it merely collided with a live run and threw. ON A CLEAN BOX IT WOULD HAVE SPAWNED REAL AGENTS.** ⛔ **`pytest` must never be able to do that.**
+
+  ⚠️ **AND IT WAS MISDIAGNOSED FOR HOURS — BY ME.** The assertion is `assert "Traceback" not in out`. I read the *line number*, called it *"a timing flake, env-only, CI is green — do not touch"*, and **told four agents exactly that.** It is not a flake and never was; **the traceback is not a shutdown bug at all.** 🔑 **READ THE ASSERTION, NOT THE LINE NUMBER.**
+
+  1. **STOP THE TEST DAEMON DISPATCHING.** Set `CHELA_DISPATCH_WORKFLOWS` to empty in the test env — the shutdown test only needs the daemon to **boot, nap, and take a signal**. ⛔ It has no business loading the real tracker.
+  2. 🔴 **THEN FIX THE FOOTGUN BEHIND IT — a test-only patch leaves the landmine armed.** `CHELA_DIR` isolates the DB but **NOT the workspace**: *any* daemon a human or a test starts with a custom `CHELA_DIR` still writes to the REAL worktrees and can spawn REAL agents. Either **confine the workspace root to `CHELA_DIR`**, or make a daemon with a non-default `CHELA_DIR` **REFUSE, LOUDLY, to dispatch into a workspace outside it.** **Pick one and justify it in the PR body.**
+  3. **THE SUITE MUST BE GREEN ON THIS MACHINE, not just in CI.** ⚖️ The judge's **first verdict was `cannot_verify`**: *"the suite is NOT GREEN before any mutation … a suite that is already red measures nothing."* It refused to block **and** refused to clear — correct — **but the judge is INERT until `uv run pytest -q` is green locally.** ⛔ **Do NOT "fix" this by skipping or xfailing the test.** That re-arms the landmine and lies to the judge.
+  4. **Guard it:** a test asserting a daemon under a non-default `CHELA_DIR` **cannot** touch the default workspace. ⚠️ **Corrupt it and watch it go RED — the judge will do exactly that to you.**
+
+- [x] **🚨🔓 THE DECISIONS INBOX CAN EXECUTE AGENT-AUTHORED TEXT AS A SHELL COMMAND IN THE ORCHESTRATOR'S SESSION.** ⛔ **A LIVE INJECTION PATH INTO THE ONE SESSION THAT HOLDS MERGE AUTHORITY AND AN UNSANDBOXED SHELL. Observed 2026-07-15, by accident.**
+
+  **WHAT HAPPENED.** The orchestrator's pane was in **`!` bash-input mode** (Claude Code's run-a-shell-command prompt). The inbox pasted a notification into it, and the pane **RAN IT AS A SHELL COMMAND**:
+  ```
+  <bash-input>📥 cmx-77 sent back for rework (rework 1) — … PR #91 — 🔑 @N IS AN ADDRESS…</bash-input>
+  /bin/bash: eval: line 1: syntax error near unexpected token `('
+  ```
+  It died on the parens in `(rework 1)`. **It did not have to.**
+
+  🔑 **THE CHAIN, AND IT IS FULLY AGENT-CONTROLLED:** an agent authors a **PR title** / a task title in `TODO.md` → the inbox builds its summary from that text → the inbox **pastes it into the orchestrator's prompt** → in `!` mode **the orchestrator's shell executes it**. ⛔ **A PR title containing `$(…)` or backticks runs arbitrary code in the session that merges to `dev`.** No sandbox, no permission prompt, no log.
+
+  ⚠️ **THE AUTHORS ALREADY REASONED ABOUT UNSAFE PANE STATES AND MISSED THIS ONE.** `inbox.py` is careful never to push into a `busy` pane or — in its own words — "critically, a `waiting` pane, which would answer its permission prompt". **The idle-gate models a pane that is BUSY. It does not model a pane that is in a DIFFERENT INPUT MODE.** ⛔ **`idle` is not the same as "the prompt will treat this as prose".**
+
+  1. **THE INBOX MUST REFUSE A PANE IN BASH-INPUT MODE.** Same shape as the existing `busy`/`waiting` refusal — a fourth unsafe state, not a new mechanism. The `!` prompt renders differently; detect it and **hold the item in the queue** (do NOT drop it — it is a durable queue and the notification still matters).
+  2. 🔴 **BELT AND BRACES — SANITIZE THE SUMMARY BEFORE IT IS PASTED ANYWHERE.** ⛔ **This repo ALREADY OWNS the sanitizer for exactly this reason** — `chela/tui_text.py`, used when pasting into an agent's TUI, because "a raw `\x1b`/`\x03` pasted into an agent's TUI is a KEYPRESS, not text". **The inbox path does not use it.** ONE implementation, both paths. Strip/neutralise shell metacharacters and control bytes in agent-authored text before it EVER reaches a prompt.
+  3. **⛔ AGENT-AUTHORED TEXT MUST NEVER BE INDISTINGUISHABLE FROM SOMETHING THE HUMAN TYPED.** That is the general defect, and this is its third instance: the Wall's `--writable` ttyd into `@0` (logged, unfixed) and the inbox paste (here). **Say so in the PR body** — the next one of these is coming.
+  4. **Guard it:** a test that an inbox item whose summary contains `$(…)`, a backtick, and a control byte is **either refused or neutralised**, and that a pane in bash-input mode is **NOT pushed into**. ⚠️ **Corrupt each guard and watch it go RED — the judge will.**
+
+- [x] **🚨⚖️ THE JUDGE IS INERT — it returns `cannot_verify` on EVERY PR because its worktree never installs jsdom.** ⛔ **The centerpiece we shipped 07-15 has NEVER verified a single PR.** Measured 07-15.
+
+  **ROOT CAUSE — two individually-correct decisions that deadlock:**
+  1. `judge.test_cmd = CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (WORKFLOW.md). The flag is **deliberate and correct** (WORKFLOW.md:48): without it, missing node/jsdom makes the `.mjs` DOM suites **SKIP silently and green**, and the judge would mutate `terminals.js`, watch a suite that never ran pass, and send a GOOD PR back / pass a BAD one. So it **fails LOUD** on missing JS deps.
+  2. `hooks.before_run = uv sync --all-extras` installs **only PYTHON deps.** It **never runs `npm ci`**, so **jsdom is always missing** in the judge's fresh worktree.
+  → Every judge baseline: `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` → the 2 jsdom suites (`sidebar.test.mjs`, `wall.test.mjs`) ERROR → exit 1 → **`cannot_verify`, always.** **PROVEN:** fresh worktree = `2 failed, 1223 passed`; `npm install jsdom` → **`1225 passed`**. jsdom is the SOLE cause.
+
+  ⛔ **IT FAILED SAFE, WHICH IS WHY IT WAS INVISIBLE.** `cannot_verify` quietly defers to a human. A judge that wrongly BLOCKED would have screamed; one that can't verify looks like it's just being cautious. **Every `cannot_verify` this session was mis-attributed** (first to the red shutdown-test baseline — but it persisted AFTER CMX-78 fixed that, for this different reason). The bug class of the night, on the thing built to catch it: **the judge's LOGIC was verified (guards mutate RED); the judge was never driven END-TO-END in its real environment.**
+
+  1. **`before_run` MUST install the JS deps the judge measures against.** Make it `uv sync --all-extras && npm ci` (CI uses `npm ci`, `.github/workflows/ci.yml:41`). ⛔ The judge is only as trustworthy as the suite it runs — and right now it runs no suite at all.
+  2. 🔴 **PROVE THE JUDGE ACTUALLY VERIFIES — drive it END TO END, not its logic.** A GOOD PR must reach `reviewed_clean` (or whatever the pass state is); a PR with a deliberately-broken guard must reach `changes_requested` via the judge. ⛔ **A green `test_judge.py` is NOT evidence the judge works in production — that is the exact hole this bug lived in.** Watch a real run's `judge_state` leave `cannot_verify`.
+  3. **Add a `chela doctor` fact: the judge's `test_cmd` passes in a freshly-set-up judge worktree.** ⛔ A judge that cannot verify anything must not read as healthy. Doctor was green through this entire outage.
+  4. ⚠️ **CHECK before_run renders/runs in BOTH the fresh-worktree and attached-worktree paths** (dispatcher.py:2347 notes this constraint). `npm ci` needs `package-lock.json` present in the worktree — confirm it is.
+
 - [ ] **🗜️ THE WALL: A DISPATCHED AGENT'S PANE OPENS MINIMIZED — and POPS OUT when it wants a human.** Same principle as the Telegram lazy-bind (`CHELA_TELEGRAM_BIND_DISPATCHED`), second surface: ⛔ **a dispatched worker should not occupy human attention surface — a topic OR a Wall tile — until it needs a human.** Liav, 07-14. **⚠️ DEPENDS ON the lazy-bind task's `dispatched_window_ids()` helper (run-row-derived) — reuse it, do not re-derive.**
 
   ✅ **The machinery EXISTS — do not build a new one.** `terminals.js` already has `_minimized` (a Set), `_minimizeItem`, and a **dock**, persisted to `localStorage` `pc_wall_minimized` (`terminals.js:801-817`).
@@ -53,7 +102,7 @@
   3. **IDENTIFY FROM THE RUN ROW, NOT THE NAME.** ⛔ **Do NOT regex `cmx-\d+`.** The `runs` table owns the wid. The browser needs it → **expose a `dispatched` flag on the agent record in `/api/agents`** (server-side, from the run row).
   4. 🔴 **THE `_termSig` TRAP — THIS IS THE HIGH-SEVERITY ONE.** `_termSig` (`terminals.js:1122`) is the Wall's **render-cache key**; if it changes, `buildWall` does `stage.innerHTML =` and **EVERY LIVE TERMINAL IN THE FLEET RELOADS**. ⛔ **Minimized/dispatched state must NEVER reach `_termSig`.** Patch the dock in place. **A reviewer corrupted exactly this on PR #85 and the suite stayed GREEN — so a grep-based test does NOT count.** Use the **jsdom** harness (`tests/wall.test.mjs`): real DOM, real `renderTerminals`, assert `frameFor(wid)` is the **SAME NODE** across a minimize/restore.
 
-- [ ] **🔑 `@N` IS AN ADDRESS, NOT AN IDENTITY — STAMP EVERY PERSISTED wid WITH A TMUX EPOCH, AND MAKE A DANGLING ONE LOUD.** ⛔ **This is a REAL, MEASURED outage, not a hypothetical.** On 2026-07-14 an OOM killed the tmux server. The fleet came back **renumbered** (the orchestrator went `@0` → `@6`). `~/.chela/inbox.json` still read `{"orchestrator": "@0"}` — so the decisions inbox **queued 5 `run_review` notifications addressed to a window that no longer existed** and delivered **none** of them. **No error. No warning. No log line. `chela doctor` stayed green (14/14).** The orchestrator sat there believing "the inbox will wake me" while five finished PRs went unreviewed. **A human had to notice.**
+- [x] **🔑 `@N` IS AN ADDRESS, NOT AN IDENTITY — STAMP EVERY PERSISTED wid WITH A TMUX EPOCH, AND MAKE A DANGLING ONE LOUD.** ⛔ **This is a REAL, MEASURED outage, not a hypothetical.** On 2026-07-14 an OOM killed the tmux server. The fleet came back **renumbered** (the orchestrator went `@0` → `@6`). `~/.chela/inbox.json` still read `{"orchestrator": "@0"}` — so the decisions inbox **queued 5 `run_review` notifications addressed to a window that no longer existed** and delivered **none** of them. **No error. No warning. No log line. `chela doctor` stayed green (14/14).** The orchestrator sat there believing "the inbox will wake me" while five finished PRs went unreviewed. **A human had to notice.**
 
   🔑 **THE PRINCIPLE, and it is the whole task:** *a tmux window id is an **ADDRESS**. Addresses change. **Never persist one as a KEY.*** Store the identity; **re-resolve the address every tick**. This is the SAME defect as the relay's `cwd` (CMX-70) and the event log's pre-#61 `cwd` correlation (CMX-48) — **third occurrence, third silent failure.** ⛔ **Do not fix this one consumer at a time; that is how it got to three.**
 

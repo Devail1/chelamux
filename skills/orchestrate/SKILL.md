@@ -89,6 +89,31 @@ Three things worth knowing:
 - The dispatcher claims from **`origin/<base_branch>`**, not from a working tree. An edit
   you have not pushed is an edit it cannot see — so **push before you resume**.
 
+## Gotcha: `@N` is an address, not an identity — it does not survive tmux
+
+tmux issues window ids **per server**. Restart it (an OOM, a reboot, a stray `kill-server`)
+and the whole fleet comes back **renumbered from `@0`** — the same `@3` is now a different
+agent. Every `@N` you wrote down (in a note, in a plan, in your own head) is an address to a
+window that no longer exists, and following one drives a stranger.
+
+This is not hypothetical: on 2026-07-14 an OOM killed the tmux server, the orchestrator went
+`@0` → `@6`, and the decisions inbox spent the rest of the day pushing at `@0`. Five finished
+PRs queued up and **none** were delivered — no error, no warning, `chela doctor` green. A
+human had to notice.
+
+chela now stamps every id it persists with the tmux server that issued it, refuses to act on
+one from a dead server, and shouts when it cannot deliver. Your part is small:
+
+```bash
+chela status         # ...says nothing you recognise? the server restarted. Re-derive EVERY wid.
+chela watching       # is the inbox's address still real? it says so, first line.
+chela watch          # no window: re-register THIS session as the orchestrator. The queue
+                     #   that piled up behind the dead address goes out on your next idle.
+```
+
+Re-derive window ids from `chela status` after any gap — never carry an `@N` across a
+restart, and never *assume* a quiet inbox means a quiet fleet.
+
 ## Gotcha: ghost text is not intent
 
 An idle Claude Code prompt shows a grey **ghost-text suggestion**. If you scrape the raw
