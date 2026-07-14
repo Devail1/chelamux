@@ -303,7 +303,8 @@ SHOW_TOOL_CALLS = os.environ.get("CHELA_SHOW_TOOL_CALLS", "false").strip().lower
 # churning a topic on spawn and archiving it on exit, turns a human's forum inbox
 # into a changelog. With it off, a dispatched agent is bound LAZILY — no topic while
 # it works, a topic the moment it BLOCKS on a permission gate / question (see
-# chela.telegram.reconcile.reconcile_bindings), so the forum shows only the agents
+# chela.telegram.reconcile.blocked_on_human — the hook log OR the pane, because a
+# PERMISSION gate is never in the log at all), so the forum shows only the agents
 # that want a human. Human-driven sessions (orchestrator, project sessions) are
 # unaffected either way. Set CHELA_TELEGRAM_BIND_DISPATCHED=true for the old
 # bind-everything behaviour.
