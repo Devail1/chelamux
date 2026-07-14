@@ -91,6 +91,34 @@ def test_cmd_dispatch_runs_awaiting_filters_and_shows_pr(capsys):
     assert "running" not in out
 
 
+def test_cmd_dispatch_runs_awaiting_shows_the_WHOLE_review_loop(capsys):
+    """--awaiting is "what is parked in review?", and since the rework loop that is three
+    states, not one: a run the reviewer sent back (changes_requested) and a run the loop
+    gave up on (needs_human) are exactly what a "what still needs me?" question is after.
+    Showing only awaiting_review would hide the loop this filter now feeds."""
+    runs = [
+        _run("a", "running", started_at=_NOW.isoformat()),
+        _run("b", "awaiting_review", pr_url="https://x/pull/1", started_at=_NOW.isoformat()),
+        _run("c", "changes_requested", pr_url="https://x/pull/2", started_at=_NOW.isoformat()),
+        _run("d", "needs_human", pr_url="https://x/pull/3", started_at=_NOW.isoformat()),
+        _run("e", "done", started_at=_NOW.isoformat()),
+    ]
+    with patch.object(main.dispatcher, "list_runs", return_value=runs):
+        main.cmd_dispatch_runs(SimpleNamespace(awaiting=True, status=None))
+    out = capsys.readouterr().out
+    assert "changes_requested" in out and "https://x/pull/2" in out
+    assert "needs_human" in out and "https://x/pull/3" in out
+    assert "awaiting_review" in out
+    # Neither in-flight nor shipped work belongs in the review view.
+    assert "running" not in out and "done" not in out
+
+
+def test_filter_runs_takes_several_statuses():
+    runs = [_run("a", "running"), _run("b", "changes_requested"), _run("c", "done")]
+    got = main._filter_runs(runs, ["changes_requested", "needs_human"])
+    assert [r["task_id"] for r in got] == ["b"]
+
+
 def test_cmd_dispatch_runs_status_no_match_prints_message(capsys):
     runs = [_run("a", "running", started_at=_NOW.isoformat())]
     with patch.object(main.dispatcher, "list_runs", return_value=runs):

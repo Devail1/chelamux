@@ -2117,19 +2117,26 @@ def api_cron():
 def _runs_for_workflow(
     all_runs: list[dict], wf_path: str
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    """Split runs into (active, awaiting_review, recent_completed) for a workflow.
+    """Split runs into (active, in-review, recent_completed) for a workflow.
 
     Match is by resolved-path equality so different env spellings still align
     with the path stored by dispatcher.tick() (which writes str(wf.path) where
     wf.path is already resolved). Returns at most 10 awaiting / completed.
+
+    The middle bucket is every run parked in the review loop — ``awaiting_review``,
+    ``changes_requested`` and ``needs_human`` (``dispatcher.REVIEW_STATUSES``). A run the
+    reviewer sent back is not done, not active, and not failed: with the old
+    ``== 'awaiting_review'`` test it appeared in NO column of the Kanban at all — it simply
+    vanished from the board while its agent was being re-spawned. Each card keeps its OWN
+    status (see kanban.js), so the column never claims a rejected PR is awaiting review.
     """
     try:
         target = str(Path(wf_path).expanduser().resolve())
     except OSError:
         target = wf_path
     matching = [r for r in all_runs if r.get("workflow_path") == target]
-    active = [r for r in matching if r.get("status") in ("claimed", "running")]
-    awaiting = [r for r in matching if r.get("status") == "awaiting_review"][:10]
+    active = [r for r in matching if r.get("status") in dispatcher.ACTIVE_STATUSES]
+    awaiting = [r for r in matching if r.get("status") in dispatcher.REVIEW_STATUSES][:10]
     recent = [r for r in matching if r.get("status") in ("done", "failed")][:10]
     return active, awaiting, recent
 

@@ -1328,6 +1328,13 @@ tr:hover td { background: rgba(88, 166, 255, 0.04); }
 .badge-on { background: #0d4429; color: var(--green); }
 .badge-off { background: #3d1c1c; color: var(--red); }
 .badge-awaiting { background: #2d2b1c; color: var(--yellow); }
+/* The rework loop (CMX-68). `changes_requested` is live work — an agent is going back in.
+   `needs_human` is the loop STOPPING: the loudest badge on the board, because it is the one
+   run state that is waiting on a person. */
+.badge-rework { background: #1c2d3d; color: var(--accent); }
+.badge-needs-human { background: #6e1b1b; color: #ff7b72; }
+/* Grey by choice, not by fallthrough — see runstate.js. */
+.badge-done { background: #21262d; color: var(--text-dim); }
 
 .badge-priority-critical { background: #6e1b1b; color: #ff7b72; }
 .badge-priority-high { background: #3d1c1c; color: var(--red); }
@@ -1624,6 +1631,21 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-card-awaiting_review { border-left-color: var(--yellow); background: rgba(210, 153, 34, 0.04); }
 .kanban-card-failed          { border-left-color: var(--red); background: rgba(248, 81, 73, 0.04); }
 .kanban-card-done            { border-left-color: var(--text-dim); opacity: 0.75; }
+
+/* The rework loop's two other states share the Awaiting Review column. The border is a
+   secondary cue only — the card also carries a WORD (.kanban-state-chip), because a
+   colour on its own is not a signal anyone can be assumed to read. */
+.kanban-card-changes_requested { border-left-color: var(--orange, #d18616); background: rgba(209, 134, 22, 0.06); }
+.kanban-card-needs_human       { border-left-color: var(--red); background: rgba(248, 81, 73, 0.07); }
+
+.kanban-state-chip {
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid rgba(248, 81, 73, 0.45);
+    border-radius: 10px;
+    padding: 0 8px;
+    font-size: 10px;
+    white-space: nowrap;
+}
 
 .kanban-card-error {
     color: var(--red);

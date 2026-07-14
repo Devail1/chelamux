@@ -18,6 +18,7 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from chela import (
     orchestrator,
     rooms,
     scheduler,
+    workflow,
 )
 from chela.config import (
     SCHEDULER_POLL_INTERVAL,
@@ -864,14 +866,15 @@ def cmd_dispatch(args) -> None:
     stop.log_exit()
 
 
-def _filter_runs(runs: list[dict], status: str | None) -> list[dict]:
-    """Runs in ``status`` (exact match), or all runs when ``status`` is None.
+def _filter_runs(runs: list[dict], status: str | Sequence[str] | None) -> list[dict]:
+    """Runs in ``status`` — one status, or any of several — or all runs when it is None.
 
     Reuses the single ``dispatcher.list_runs()`` source of truth — the filter is
     a pure view over it, never a second query."""
     if not status:
         return runs
-    return [r for r in runs if r.get("status") == status]
+    wanted = {status} if isinstance(status, str) else set(status)
+    return [r for r in runs if r.get("status") in wanted]
 
 
 def _run_age_str(started_at: str | None, *, now: datetime | None = None) -> str:
@@ -908,11 +911,16 @@ def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:
 def cmd_dispatch_runs(args) -> None:
     """Show dispatcher runs, optionally filtered by status.
 
-    ``--awaiting`` is shorthand for ``--status awaiting_review`` — the "what's up
-    for review?" view: only runs blocked on a human, each with its PR URL + age,
-    so the orchestrator can answer on demand without polling the dashboard.
+    ``--awaiting`` is the "what is parked in review?" view — every run in
+    ``dispatcher.REVIEW_STATUSES``, each with its PR URL + age, so the orchestrator can
+    answer on demand without polling the dashboard. It is deliberately all THREE review
+    states, not just ``awaiting_review``: a run the reviewer sent back
+    (``changes_requested``) and a run the rework loop gave up on (``needs_human``) are
+    exactly the ones a "what still needs me?" question is asking about, and a filter that
+    showed only the first state would hide the loop it now feeds.
     """
-    status = "awaiting_review" if getattr(args, "awaiting", False) else getattr(args, "status", None)
+    status = (list(dispatcher.REVIEW_STATUSES) if getattr(args, "awaiting", False)
+              else getattr(args, "status", None))
     runs = _filter_runs(dispatcher.list_runs(), status)
     if not runs:
         print(f"No runs in status {status!r}" if status else "No runs")
@@ -1340,6 +1348,98 @@ def cmd_task_finished(args) -> None:
     print(f"Task {result['task_id']} awaiting review (pr_url={result.get('pr_url') or 'unknown'})")
 
 
+def _rework_prospects(workflow_path: str | None) -> list[str]:
+    """Will anything ACTUALLY re-spawn this run? Say what is true, not what is intended.
+
+    The first cut of this command printed "The dispatcher re-spawns it in its own worktree
+    on the next tick." unconditionally — a promise it never checked. Three ordinary
+    conditions make it a lie, and in all three the run parks in ``changes_requested``
+    indefinitely: the workflow is not one the daemon ticks, its WORKFLOW.md does not parse,
+    or the queue is on hold. The reviewer is the person who can fix all three, and this is
+    the moment they are looking.
+    """
+    lines: list[str] = []
+    wf_path = Path(workflow_path).resolve() if workflow_path else None
+
+    if wf_path is None or wf_path not in DISPATCH_WORKFLOWS:
+        shown = str(wf_path or "?")
+        lines.append(
+            f"⚠ {shown} is NOT in CHELA_DISPATCH_WORKFLOWS — the daemon ticks nothing for "
+            "it, so NOTHING will re-spawn this run. Add it (and restart the daemon), or "
+            f"turn the loop by hand: chela dispatch {shown}"
+        )
+    else:
+        status = workflow.load_workflow_cached(wf_path)
+        if status.error:
+            lines.append(
+                f"⚠ {wf_path} does not parse ({status.error}) — dispatch is BLOCKED for it "
+                "and the re-spawn waits until the file is valid again."
+            )
+
+    held = hold.active()
+    if held:
+        lines.append(
+            f"⚠ the queue is HELD ({hold.human_duration(held.age())} ago"
+            f"{', ' + held.by if held.by else ''}"
+            f"{': ' + held.reason if held.reason else ''}) — a hold pauses CLAIMS, and a "
+            "rework re-spawn is a claim. It waits until the hold is released "
+            "(chela hold --release)."
+        )
+
+    if not lines:
+        lines.append("The dispatcher re-spawns it in its own worktree on the next tick.")
+    return lines
+
+
+def cmd_review(args) -> None:
+    """Record the verdict on a PR under review — the carrier of the rework loop.
+
+    ``--request-changes`` sends the run BACK: the row goes to ``changes_requested`` and the
+    next dispatcher tick re-spawns the agent in its ORIGINAL worktree, on its ORIGINAL
+    branch, with this verdict in its prompt. ``--approve`` records a pass and changes
+    nothing — the run stays ``awaiting_review`` and merging remains a human's call.
+
+    The body is read from a file or from stdin (``--body-file -``) and never from an
+    argument: a verdict is long-form markdown — backticks, quotes, newlines, a table of
+    defects — and shell-quoting one is how it arrives mangled or truncated.
+
+    ⛔ The run row is the authority, NOT GitHub. ``gh pr review --request-changes`` refuses
+    a PR authored by the calling account, and the whole fleet is one account, so GitHub's
+    ``reviewDecision`` can never carry this. The PR comment this posts is the projection.
+    """
+    if args.approve == args.request_changes:      # neither, or both
+        print("review: pass exactly one of --approve / --request-changes")
+        sys.exit(2)
+
+    body = ""
+    if args.body_file:
+        body = sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text()
+    if args.request_changes and not body.strip():
+        print("review: --request-changes needs a verdict body (--body-file <path>|-)")
+        sys.exit(2)
+
+    result = (dispatcher.request_changes(args.run, body) if args.request_changes
+              else dispatcher.approve(args.run, body))
+    if not result.get("ok"):
+        print(f"review: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+
+    task_id, status = result["task_id"], result["status"]
+    if args.request_changes:
+        print(f"Run {task_id} ({result.get('branch_name') or '?'}) → changes_requested "
+              f"(verdict {result['round']}, rework {result['rework_count']}/{result['max_reworks']})")
+        for line in _rework_prospects(result.get("workflow_path")):
+            print(f"  {line}")
+    else:
+        print(f"Run {task_id} ({result.get('branch_name') or '?'}) approved — still "
+              f"{status}; merge is yours to make.")
+    if result.get("comment_posted"):
+        print(f"  PR comment posted: {result.get('pr_url') or ''}")
+    elif args.request_changes or body.strip():
+        print(f"  ⚠ PR comment NOT posted ({result.get('comment_detail')}) — the run row is "
+              "the authority, so the loop still turns, but nothing landed on the PR.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="chela",
@@ -1531,11 +1631,35 @@ def main() -> None:
     p_runs = sub.add_parser("dispatch-runs", help="List dispatcher runs")
     p_runs.add_argument(
         "--status", default=None,
-        help="Only show runs in this status (e.g. awaiting_review, running, failed, done)",
+        help="Only show runs in this status (e.g. awaiting_review, changes_requested, "
+             "needs_human, running, failed, done)",
     )
     p_runs.add_argument(
         "--awaiting", action="store_true",
-        help="Shorthand for --status awaiting_review — runs waiting on human review, with PR URL + age",
+        help="Every run parked in the review loop — awaiting_review, changes_requested "
+             "(sent back) and needs_human (the loop gave up) — with PR URL + age",
+    )
+
+    # review — the verdict on a PR under review (the rework loop's carrier)
+    p_review = sub.add_parser(
+        "review",
+        help="Record a verdict on a run's PR: --request-changes sends it back to its agent",
+    )
+    p_review.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-68)")
+    p_review.add_argument(
+        "--request-changes", action="store_true",
+        help="FAIL the PR: the run goes to changes_requested and the dispatcher re-spawns "
+             "its agent in the ORIGINAL worktree/branch with this verdict",
+    )
+    p_review.add_argument(
+        "--approve", action="store_true",
+        help="PASS the PR: records the verdict, leaves the run awaiting_review. Merging "
+             "stays a human's call — this never merges anything",
+    )
+    p_review.add_argument(
+        "--body-file", default=None, metavar="PATH",
+        help="Read the verdict from PATH, or from stdin with '-'. A verdict is long-form "
+             "markdown and must never be shell-quoted",
     )
 
     # knowledge — export the fleet's knowledge as an OKF bundle (local data; see docs/OKF.md)
@@ -1672,6 +1796,8 @@ def main() -> None:
         cmd_dashboard(args)
     elif args.command == "task-finished":
         cmd_task_finished(args)
+    elif args.command == "review":
+        cmd_review(args)
     else:
         parser.print_help()
 

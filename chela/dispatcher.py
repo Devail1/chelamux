@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from chela import hold
-from chela.config import CHELA_DIR, DISPATCH_TICK_INTERVAL, TMUX_SESSION
+from chela.config import CHELA_DIR, DISPATCH_TICK_INTERVAL, TMUX_SESSION, max_reworks
 from chela.messenger import send_tmux
 from chela.sources import Task, get_source
 from chela.transcripts import agent_transcript_summary
@@ -22,13 +22,43 @@ from chela.workflow import (
     render_prompt,
     resolve_workspace_root,
 )
-from chela.worktree import ensure_worktree
+from chela.worktree import BranchGone, attach_worktree, ensure_worktree
 
 log = logging.getLogger(__name__)
 
 DB_PATH = CHELA_DIR / "scheduler.db"
 MAX_ATTEMPTS = 3
 DONE_HISTORY_PER_WORKFLOW = 50
+
+# --- the run states, and which of them mean what -----------------------------
+#
+# THE RUN ROW IS THE AUTHORITY ON WHETHER A PR PASSED REVIEW — not GitHub. This is
+# measured, not a preference: `gh pr review --request-changes` HARD-ERRORS on a PR the
+# calling account authored ("Can not request changes on your own pull request"), and the
+# whole fleet is one account, so `reviewDecision` is null FOREVER and is useless as a
+# trigger. The verdict is therefore written HERE, and the PR comment
+# (`gh pr comment` — never `gh pr review`) is a human-readable PROJECTION of it. That is
+# rule (a) of the runtime-truth registry: the process that ACTS publishes what it
+# actually DID, and readers read that.
+#
+# ⛔ Every hard-coded status list is a hole waiting to happen — the new states must be
+# added to each list they belong in (reconcile, the claim filter, the inbox's
+# SETTLED_RUN_STATES). These constants exist so those lists are named, not spelled.
+
+# Slot-holding states. `awaiting_review` is deliberately NOT one: a PR waiting on a human
+# must not pin the fleet, which is why a new task is claimed the moment a PR opens. The
+# consequence for the rework loop is the load-bearing one — a run re-entering `running`
+# RE-CONSUMES a slot and must respect concurrency.max like any other work.
+ACTIVE_STATUSES = ("claimed", "running")
+
+# A PR is open and the verdict is out of the agent's hands. `changes_requested` is a
+# rework the dispatcher will pick up; `needs_human` is a rework that hit the cap and
+# stopped. Neither holds a concurrency slot, and neither may be re-claimed as a fresh
+# task (they already own their branch, worktree and PR).
+REVIEW_STATUSES = ("awaiting_review", "changes_requested", "needs_human")
+
+# States a fresh claim must skip: already in flight, parked in review, or shipped.
+NOT_CLAIMABLE = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "done")
 
 # Readiness poll (see _wait_for_ready) — how long to wait for the agent TUI to
 # accept input before sending the prompt, and how often to re-check.
@@ -384,6 +414,14 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # landed ownerless. A pre-existing row simply has NULL here and falls back
         # to the by-name lookup (inbox.run_wid).
         ("window_id", "ALTER TABLE runs ADD COLUMN window_id TEXT"),
+        # The rework loop (CMX-68). `rework_count` is the bounded-loop counter — it is
+        # incremented when a rework is actually SPAWNED, not when the verdict is written,
+        # so a verdict that never gets a slot cannot burn a round. `review_history` is
+        # every verdict this run has ever received, as a JSON list (see reviews_of): the
+        # escalation to needs_human carries the history of what was tried, not just the
+        # last thing anyone said.
+        ("rework_count", "ALTER TABLE runs ADD COLUMN rework_count INTEGER DEFAULT 0"),
+        ("review_history", "ALTER TABLE runs ADD COLUMN review_history TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -787,6 +825,198 @@ def mark_awaiting_review(task_id: str) -> dict:
         }
 
 
+# --- the review verdict: the carrier of the rework loop ----------------------
+#
+# A PR that FAILED review used to have nowhere to go. The dispatcher could claim a task
+# and reconcile a merged PR, but `awaiting_review` was terminal unless a human climbed
+# into the worktree and hand-spawned a fix agent (which is literally what happened on
+# 2026-07-14, reviewing PR #80). These two functions are the carrier — NOT the judge:
+# the reviewer is still whoever calls them.
+
+
+def reviews_of(run: dict) -> list[dict]:
+    """Every verdict this run has received, oldest first. Never raises.
+
+    The column is JSON written by :func:`request_changes`; a legacy row (or a hand-edited
+    one) reads as an empty list rather than taking down the daemon that reads it.
+    """
+    raw = run.get("review_history")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    return [r for r in parsed if isinstance(r, dict)] if isinstance(parsed, list) else []
+
+
+def latest_verdict(run: dict) -> str:
+    reviews = reviews_of(run)
+    return str(reviews[-1].get("body") or "") if reviews else ""
+
+
+def _pr_number(pr_url: str | None) -> str | None:
+    m = _PR_NUMBER_RE.search(str(pr_url or ""))
+    return m.group(1) if m else None
+
+
+def _post_pr_comment(pr_url: str | None, repo_dir: str | None, body: str) -> tuple[bool, str]:
+    """Post the verdict on the PR — with ``gh pr comment``, NEVER ``gh pr review``.
+
+    Measured on 2026-07-14: ``gh pr review --request-changes`` REFUSES a PR authored by
+    the calling account ("Can not request changes on your own pull request"), and every
+    agent in the fleet pushes as the same account. So a review is impossible to record on
+    GitHub, ``reviewDecision`` stays null forever, and anything built on it is built on
+    sand. A comment always works — and it is the durable record the reworking agent reads
+    back with ``gh pr view <n> --comments``.
+
+    The comment is a PROJECTION. The run row is the authority, and it is written first,
+    so a `gh` that is missing, unauthenticated or offline degrades to "the loop still
+    runs, the human-readable copy is missing" — reported, never fatal.
+    """
+    number = _pr_number(pr_url)
+    if not number or not repo_dir:
+        return False, "no PR number on the run row"
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "comment", number, "--body-file", "-"],
+            cwd=repo_dir, input=body, capture_output=True, text=True, timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return False, f"gh pr comment failed: {e}"
+    if out.returncode != 0:
+        return False, (out.stderr or out.stdout or "gh pr comment failed").strip()
+    return True, (out.stdout or "").strip()
+
+
+def resolve_run(ident: str) -> dict | None:
+    """Find a run by task id, branch name, or window name. Never guesses.
+
+    The orchestrator reviews a PR titled ``CMX-68`` on branch ``cmx-68`` — it does not
+    have the task id in hand, and making it look one up is how a verdict ends up on the
+    wrong run. An ambiguous identifier resolves to None (CMX-48: a wrong id is worse than
+    no id); the caller says so.
+    """
+    ident = (ident or "").strip()
+    if not ident:
+        return None
+    runs = list_runs()
+    exact = [r for r in runs if r.get("task_id") == ident]
+    if exact:
+        return exact[0]
+    low = ident.lower()
+    named = [
+        r for r in runs
+        if (r.get("branch_name") or "").lower() == low
+        or (r.get("window_name") or "").lower() == low
+    ]
+    return named[0] if len(named) == 1 else None
+
+
+def request_changes(ident: str, body: str) -> dict:
+    """FAIL a PR under review: the run goes to ``changes_requested`` and the loop turns.
+
+    (a) writes the verdict + the status on the run row — THE authority — and (b) posts the
+    body as a PR comment, which is the human-readable projection and the record the
+    reworking agent reads back. In that order: if the comment fails, the loop still runs.
+
+    It increments nothing. ``rework_count`` is spent when the dispatcher actually spawns
+    the rework (:func:`_respawn_rework`) — a verdict that never gets a concurrency slot
+    must not burn a round of the cap.
+    """
+    body = (body or "").strip()
+    if not body:
+        return {"ok": False, "error": "a verdict with no body is not a verdict"}
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    task_id = run["task_id"]
+    if run["status"] != "awaiting_review":
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"run is in status {run['status']!r}, not 'awaiting_review' — "
+                     "only a run that is actually under review can fail review",
+        }
+
+    reviews = reviews_of(run)
+    reviews.append({"round": len(reviews) + 1, "at": _now(), "body": body,
+                    "verdict": "changes_requested"})
+    with _db() as conn:
+        # COMPARE-AND-SWAP on the status we READ. ⛔ Not a formality: `resolve_run` above is
+        # a separate connection and a separate moment, and a dispatcher tick runs every 60s
+        # in another process. If it reconciles this row to `done` (the human merged the PR
+        # while the reviewer was typing) in between, an unconditional UPDATE would RESURRECT
+        # a merged run — and the next tick would dutifully re-spawn an agent onto a branch
+        # whose PR is closed. The row moves only if it is still the row we judged.
+        cur = conn.execute(
+            "UPDATE runs SET status='changes_requested', review_history=? "
+            "WHERE task_id=? AND status='awaiting_review'",
+            (json.dumps(reviews), task_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            now = conn.execute(
+                "SELECT status FROM runs WHERE task_id=?", (task_id,)
+            ).fetchone()
+            current = now["status"] if now else "gone"
+            log.warning("review: %s moved to %r under the verdict — nothing written",
+                        task_id, current)
+            return {
+                "ok": False, "task_id": task_id,
+                "error": f"run moved to {current!r} while the verdict was being written "
+                         "(a tick reconciled it, or another reviewer got there first) — "
+                         "nothing was changed. Re-read it and decide again.",
+            }
+
+    wf_path = run.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    posted, detail = _post_pr_comment(run.get("pr_url"), repo_dir, body)
+    if not posted:
+        log.warning(
+            "review: %s is changes_requested, but the PR comment did not post (%s). The "
+            "run row is the authority, so the rework still spawns — with the verdict in "
+            "its prompt but nothing on the PR to read back.", task_id, detail,
+        )
+    log.info("review: %s → changes_requested (round %d)", task_id, len(reviews))
+    return {
+        "ok": True, "task_id": task_id, "status": "changes_requested",
+        "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
+        "round": len(reviews), "rework_count": run.get("rework_count") or 0,
+        "max_reworks": max_reworks(), "comment_posted": posted, "comment_detail": detail,
+        # The CLI checks that SOMETHING will actually come and pick this run up before it
+        # tells the reviewer so (main._rework_prospects). It needs the workflow to check.
+        "workflow_path": wf_path,
+    }
+
+
+def approve(ident: str, body: str = "") -> dict:
+    """PASS a PR under review — and change nothing about the run.
+
+    The run STAYS in ``awaiting_review`` and the merge stays a human's call: this is the
+    carrier, not the judge, and nothing here merges anything. An approval with a body
+    posts it as a PR comment; without one it is a no-op that just confirms the state.
+    """
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    if run["status"] != "awaiting_review":
+        return {
+            "ok": False, "task_id": run["task_id"],
+            "error": f"run is in status {run['status']!r}, not 'awaiting_review'",
+        }
+    posted, detail = (False, "no body given")
+    if (body or "").strip():
+        wf_path = run.get("workflow_path")
+        repo_dir = str(Path(wf_path).parent) if wf_path else None
+        posted, detail = _post_pr_comment(run.get("pr_url"), repo_dir, body.strip())
+    return {
+        "ok": True, "task_id": run["task_id"], "status": "awaiting_review",
+        "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
+        "comment_posted": posted, "comment_detail": detail,
+        "note": "approved — the run stays awaiting_review; merging is still a human's call",
+    }
+
+
 def _prune_done_rows(
     conn: sqlite3.Connection,
     workflow_path: str,
@@ -855,6 +1085,11 @@ def tick(workflow_path: str | Path) -> dict:
     * **fetch-then-claim** (:func:`_claim_order`) — the queue is re-read from
       ``origin/<base_branch>`` at the instant of claiming, not from the parse at
       the top of this tick.
+
+    Dispatch itself has TWO sources of work, in this order: the runs a reviewer sent back
+    (``changes_requested`` → :func:`_respawn_rework`, capped by ``CHELA_MAX_REWORKS`` and
+    then escalated to ``needs_human``), and only then the fresh queue. Both draw from the
+    SAME ``concurrency.max`` slots — a rework is finishing work, not free work.
     """
     status = load_workflow_cached(workflow_path)
     wf = status.workflow
@@ -864,6 +1099,7 @@ def tick(workflow_path: str | Path) -> dict:
         return {
             "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
             "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
+            "reworked": 0, "escalated": 0,
             "blocked": True, "error": status.error, "held": False, "hold_expired": False,
         }
     blocked = status.error is not None
@@ -880,6 +1116,8 @@ def tick(workflow_path: str | Path) -> dict:
         "pr_state_refreshed": 0,
         "watchdog_renudged": 0,
         "tracker_struck": 0,
+        "reworked": 0,
+        "escalated": 0,
         "blocked": blocked,
         "error": status.error,
         "held": False,
@@ -926,11 +1164,21 @@ def tick(workflow_path: str | Path) -> dict:
         # is no longer the signal we rely on: agents don't touch the tracker any
         # more, so an awaiting_review row would otherwise sit there forever
         # waiting for a line that only we will ever strike (_strike_merged_tasks).
+        #
+        # The review states are ALL reconcilable, not just awaiting_review: a human can
+        # merge a PR that is sitting in `changes_requested` (they decided the verdict was
+        # wrong) or in `needs_human` (they fixed it themselves), and a merged PR is done no
+        # matter which state the loop left the row in. A status list that only knew
+        # awaiting_review would strand those rows forever — and the run would keep its
+        # branch, its worktree and its tracker line, unstruck.
         rows = conn.execute(
-            "SELECT * FROM runs WHERE status IN ('claimed', 'running', 'awaiting_review')"
+            "SELECT * FROM runs WHERE status IN ({})".format(
+                ",".join("?" * len(ACTIVE_STATUSES + REVIEW_STATUSES))
+            ),
+            ACTIVE_STATUSES + REVIEW_STATUSES,
         ).fetchall()
         for row in rows:
-            if row["status"] == "awaiting_review" and row["pr_state"] == "merged":
+            if row["status"] in REVIEW_STATUSES and row["pr_state"] == "merged":
                 # pr_state was refreshed in phase 0 above, so we see the merge on
                 # the very tick it lands. The tracker strike happens in 1b, after
                 # this transition is durable — if it fails, this row stays `done`
@@ -954,11 +1202,11 @@ def tick(workflow_path: str | Path) -> dict:
                 pr_url = _read_pr_url(row["window_name"])
                 if row["window_name"]:
                     _kill_window(row["window_name"])
-                # Preserve the original ended_at on awaiting_review → done so
+                # Preserve the original ended_at on a review-state → done so
                 # the timestamp reflects when the agent finished, not when the
                 # human merged the PR. claimed/running rows have no ended_at
                 # yet, so stamp it now.
-                if row["status"] == "awaiting_review":
+                if row["status"] in REVIEW_STATUSES:
                     conn.execute(
                         "UPDATE runs SET status='done', pr_url=COALESCE(?, pr_url) WHERE task_id=?",
                         (pr_url, row["task_id"]),
@@ -973,6 +1221,11 @@ def tick(workflow_path: str | Path) -> dict:
                 log.info("Task %s done (removed from source, window killed)", row["task_id"])
                 continue
             if row["status"] == "running" and row["window_name"] and row["window_name"] not in live_windows:
+                # A dead REWORK re-enters the rework loop; only a dead first dispatch is a
+                # `failed` the claim loop may retry from scratch (_rework_failed).
+                if _is_rework(row):
+                    _rework_failed(conn, row, "rework agent's tmux window disappeared")
+                    continue
                 attempt = row["attempt"]
                 conn.execute(
                     "UPDATE runs SET status='failed', ended_at=?, last_error=? WHERE task_id=?",
@@ -1015,21 +1268,27 @@ def tick(workflow_path: str | Path) -> dict:
                         # effect before declaring it dead, to avoid failing an
                         # agent that's merely between steps.
                         if (datetime.now(timezone.utc) - nudged).total_seconds() >= WATCHDOG_IDLE_MINUTES * 60:
+                            if _is_rework(row):
+                                _rework_failed(
+                                    conn, row,
+                                    "rework agent idle at empty prompt after re-nudge",
+                                )
+                                continue
                             conn.execute(
                                 "UPDATE runs SET status='failed', ended_at=?, last_error=? WHERE task_id=?",
                                 (_now(), "agent idle at empty prompt after re-nudge", row["task_id"]),
                             )
                             summary["reconciled_failed"] += 1
                             log.warning("Task %s failed (idle at empty prompt after re-nudge)", row["task_id"])
-                    elif task is not None:
-                        base_branch = wf.get("workspace", "base_branch", default="master")
-                        prompt = render_prompt(
-                            wf.prompt_template,
-                            _prompt_vars(
-                                wf, task, row["worktree_path"], row["branch_name"],
-                                base_branch, row["task_number"],
-                            ),
-                        )
+                    else:
+                        # ⛔ A stuck REWORK is re-nudged with its REWORK prompt, not the
+                        # first-dispatch one: the two say opposite things ("branch and open a
+                        # PR" vs "you are already on your branch, your PR is open, here is
+                        # the verdict"). Re-seeding the wrong one is the same lost verdict as
+                        # a `failed` rework, just delivered by hand.
+                        prompt = _renudge_prompt(wf, row, task)
+                        if prompt is None:
+                            continue          # task gone from the tracker; nothing to re-send
                         _send_seed(row["window_name"], prompt, row["task_id"])
                         conn.execute(
                             "UPDATE runs SET idle_nudged_at=? WHERE task_id=?",
@@ -1060,6 +1319,29 @@ def tick(workflow_path: str | Path) -> dict:
         ]
         if pending_strikes:
             summary["tracker_struck"] = _strike_merged_tasks(wf, source, pending_strikes)
+
+        # 1c. ESCALATE the runs that have spent their rework budget.
+        #
+        # ⛔ Deliberately HERE — with reconciliation, ABOVE the `blocked` and `hold` returns
+        # — and not with the re-spawn in 3b. Escalation is not a claim: it takes no slot, it
+        # starts no agent, and it is the only thing that makes `changes_requested` a state a
+        # run can LEAVE without a human. Gating it behind the hold (as the first cut did)
+        # meant a paused queue also paused the ONE transition that says "the loop gave up,
+        # come look" — and a hold that is forgotten is exactly when you need that said. A
+        # broken WORKFLOW.md must not silence it either: `needs_human` is how it gets fixed.
+        cap = max_reworks()
+        for row in conn.execute(
+            "SELECT * FROM runs WHERE workflow_path=? AND status='changes_requested'",
+            (str(wf.path),),
+        ).fetchall():
+            if (row["rework_count"] or 0) >= cap:
+                _escalate(
+                    conn, row,
+                    f"rework cap reached ({row['rework_count'] or 0}/{cap}) — the PR still "
+                    "fails review. Branch, worktree and PR are preserved; every verdict is "
+                    "on the run row (review_history).",
+                )
+                summary["escalated"] += 1
 
         # 2. Keep done rows for the "recent runs" view; just cap history per workflow.
         _prune_done_rows(conn, str(wf.path))
@@ -1113,11 +1395,52 @@ def tick(workflow_path: str | Path) -> dict:
             return summary
 
         max_concurrent = wf.get("concurrency", "max", default=1) or 1
+        # ⛔ ONLY claimed/running. `awaiting_review` does NOT hold a slot — that is why a
+        # new task is claimed the moment a PR opens — and neither do `changes_requested`
+        # (waiting for a slot) or `needs_human` (stopped, and it must never pin the queue
+        # behind it). The consequence for the rework loop is the load-bearing one: a run
+        # re-entering `running` RE-CONSUMES a slot, so it is capped like any other work.
         active = conn.execute(
-            "SELECT COUNT(*) FROM runs WHERE status IN ('claimed', 'running')"
+            "SELECT COUNT(*) FROM runs WHERE status IN ({})".format(
+                ",".join("?" * len(ACTIVE_STATUSES))
+            ),
+            ACTIVE_STATUSES,
         ).fetchone()[0]
 
-        # 3b. FETCH-THEN-CLAIM: re-read the queue from origin/<base_branch> right now,
+        # 3b. REWORK — the runs the reviewer sent back (chela review --request-changes).
+        #
+        # Before the fresh claims, deliberately: a run that already has a branch, a
+        # worktree, an open PR and a verdict against it is further along than anything in
+        # the queue, and finishing work beats starting more of it. It is not a privilege,
+        # though — a rework takes a slot on exactly the same terms as a fresh dispatch:
+        #
+        #   ⛔ it NEVER exceeds concurrency.max, and it NEVER preempts a claimed/running
+        #      run (chela.hold: preemption is deliberately NO, and that stands). With every
+        #      slot busy the rework simply waits its turn, like everything else.
+        #
+        # The over-cap runs are already gone by now — step 1c escalated them with the rest of
+        # reconciliation, because escalation is not a claim and must not wait on a hold, on a
+        # free slot, or on a WORKFLOW.md that parses. Everything still here has budget left.
+        for row in conn.execute(
+            "SELECT * FROM runs WHERE workflow_path=? AND status='changes_requested' "
+            "ORDER BY COALESCE(started_at, '')",
+            (str(wf.path),),
+        ).fetchall():
+            if active >= max_concurrent:
+                continue                     # waits its turn — it does not jump the queue
+            try:
+                if _respawn_rework(wf, row, conn):
+                    active += 1
+                    summary["reworked"] += 1
+            except Exception as e:
+                # ⛔ NOT `failed`. See _rework_failed: `failed` is the FRESH-dispatch retry
+                # state, and a rework that fell into it would be re-claimed as a new task,
+                # losing the verdict and bypassing the cap. It goes back where it came from,
+                # one round poorer.
+                log.exception("Rework re-spawn failed for task %s", row["task_id"])
+                _rework_failed(conn, row, f"rework re-spawn failed: {e}")
+
+        # 3c. FETCH-THEN-CLAIM: re-read the queue from origin/<base_branch> right now,
         # rather than trusting the parse made at the top of this tick (before the PR
         # polling and the tracker strike, both of which touch the network). Necessary,
         # NOT sufficient — see _claim_order. Skipped entirely when every slot is busy:
@@ -1131,11 +1454,13 @@ def tick(workflow_path: str | Path) -> dict:
                 "SELECT status, attempt FROM runs WHERE task_id=?", (task.id,)
             ).fetchone()
             if existing:
-                # Fresh tasks only: anything already in flight (claimed/running),
-                # waiting on a human (awaiting_review), or already shipped (done)
-                # is excluded. Only `failed` rows are eligible for a retry, and
-                # only until MAX_ATTEMPTS.
-                if existing["status"] in ("claimed", "running", "awaiting_review", "done"):
+                # Fresh tasks only: anything already in flight (claimed/running), parked in
+                # review (awaiting_review / changes_requested / needs_human — each of which
+                # already owns a branch, a worktree and a PR), or already shipped (done) is
+                # excluded. ⛔ A `changes_requested` row claimed here as a fresh task would
+                # fork a NEW worktree off the base branch and abandon the PR under review.
+                # Only `failed` rows are eligible for a retry, and only until MAX_ATTEMPTS.
+                if existing["status"] in NOT_CLAIMABLE:
                     continue
                 if existing["status"] == "failed" and existing["attempt"] >= MAX_ATTEMPTS:
                     continue
@@ -1199,31 +1524,7 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     worktree, created = ensure_worktree(repo_path, task.id, base_branch, project_key, task_number, root)
     branch = f"{project_key.lower()}-{task_number}"
     window_name = branch
-
-    # after_create hook — fires once, only when ensure_worktree freshly created
-    # the worktree (skipped on idempotent re-dispatch into a reused worktree),
-    # and BEFORE before_run. This is the seam for seeding a per-worktree
-    # `.claude/settings.local.json` so an agent can launch *without*
-    # --dangerously-skip-permissions. Unlike after_done (best-effort, detached),
-    # a failure here is a hard dispatch abort: a missing settings file would
-    # leave the agent hanging on its first permission prompt, so we'd rather
-    # fail loudly. The command sees the same {{...}} template vars as the prompt
-    # (e.g. {{workspace_path}}) so it can target the worktree.
-    if created:
-        after_create = wf.get("hooks", "after_create")
-        if after_create:
-            rendered = render_prompt(
-                after_create,
-                _prompt_vars(wf, task, str(worktree), branch, base_branch, task_number),
-            )
-            log.info("Running after_create hook for %s", task.id)
-            subprocess.run(rendered, shell=True, cwd=worktree, check=True)
-
-    # before_run hook
-    before = wf.get("hooks", "before_run")
-    if before:
-        log.info("Running before_run hook for %s", task.id)
-        subprocess.run(before, shell=True, cwd=worktree, check=True)
+    hook_vars = _prompt_vars(wf, task, str(worktree), branch, base_branch, task_number)
 
     # Claim the row before touching tmux so failure leaves a trace. A retry re-enters
     # here with the same task_id and gets a NEW window, so window_id is cleared on
@@ -1241,37 +1542,101 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     )
     conn.commit()
 
-    # Spawn tmux window. Kill any pre-existing window(s) of this name first so a
-    # retry starts clean — tmux allows duplicate names, and a stacked second
-    # window makes the by-name target ambiguous (the orphan-window bug).
-    _kill_windows_named(window_name)
+    prompt = render_prompt(wf.prompt_template, hook_vars)
+    _launch_agent(
+        wf, task.id, window_name, worktree, prompt, conn,
+        hook_vars=hook_vars, fresh_worktree=created,
+    )
 
-    # Create the window and capture its @id; target THIS spawn by id (not name)
-    # for the agent-cmd, readiness poll, and prompt send so no residual same-name
-    # window can make send-keys ambiguous and exit non-zero.
+    conn.execute(
+        "UPDATE runs SET status='running' WHERE task_id=?", (task.id,)
+    )
+    conn.commit()
+    log.info("Dispatched task %s → %s (attempt %d)", task.id, window_name, attempt)
+    return True
+
+
+def _launch_agent(
+    wf: WorkflowDef,
+    task_id: str,
+    window_name: str,
+    worktree: Path | str,
+    prompt: str,
+    conn: sqlite3.Connection,
+    *,
+    hook_vars: dict,
+    fresh_worktree: bool,
+) -> str:
+    """PREPARE the worktree, then put an agent in it. THE spawn path — the only one.
+
+    Shared by the first dispatch (:func:`_spawn`) and the rework re-spawn
+    (:func:`_respawn_rework`) precisely so there is no second one. It has TWO halves and
+    the environment half is the one a refactor forgets — CMX-68's first cut extracted the
+    tmux half alone and shipped a rework path that ran NO hooks:
+
+    ENVIRONMENT (this must never move back out — a worktree an agent cannot work in is
+    worse than no agent, because the agent will believe what it sees there):
+
+    * ``after_create`` — fires only when the worktree is FRESH (``fresh_worktree``), which
+      on the rework path means ``attach_worktree`` had to RE-CREATE a directory that was
+      cleaned up. That directory is as bare as a first-dispatch one: no
+      ``.claude/settings.local.json``, so the agent hangs on its first permission prompt.
+      A non-zero exit is a HARD ABORT for exactly that reason.
+    * ``before_run`` — fires on EVERY launch, fresh worktree or not, because it is the hook
+      that makes the venv real (``uv sync --all-extras``, the CMX-21 trap). ⛔ Skipping it
+      on a rework hands the agent phantom test failures — and the rework prompt orders it
+      to re-run the CI gates and believe them.
+
+    TMUX (every rule below was paid for once already; a hand-rolled copy relearns them):
+
+    * the TWO-STEP window pattern — ``new-window`` and THEN ``send-keys 'claude …'``.
+      ⛔ Never ``tmux new-window '<cmd>'``: claude then *is* the pane process,
+      ``agent_manager.claude_pid()`` (``pgrep -P``) never correlates it, and the agent
+      never gets a Telegram topic.
+    * kill any pre-existing same-name window first (tmux allows duplicates, and a stacked
+      second window makes the by-name target ambiguous — the orphan-window bug), then
+      target THIS window by the captured ``@id`` for everything that follows.
+    * record the ``@id`` on the run row NOW, the one lossless moment (CMX-62): the agent
+      kills its own window on ``chela task-finished``, so a later live-tmux lookup always
+      misses and the run's events land ownerless.
+    * confirm the paste actually landed (:func:`_send_seed`) rather than trusting the
+      readiness glyph — a late splash redraw still swallows prompts.
+
+    ``hook_vars`` is the same ``{{...}}`` map the prompt is rendered from, so a hook can
+    target the worktree it is preparing (``{{workspace_path}}``).
+
+    Returns the window target (the ``@id``, or the bare name if the id was unreadable).
+    """
+    if fresh_worktree:
+        after_create = wf.get("hooks", "after_create")
+        if after_create:
+            log.info("Running after_create hook for %s", task_id)
+            subprocess.run(
+                render_prompt(after_create, hook_vars),
+                shell=True, cwd=worktree, check=True,
+            )
+
+    before = wf.get("hooks", "before_run")
+    if before:
+        log.info("Running before_run hook for %s", task_id)
+        subprocess.run(before, shell=True, cwd=worktree, check=True)
+
+    _kill_windows_named(window_name)
     target_id = _new_window(window_name, str(worktree))
 
-    # Record the @id on the run row NOW — the window is alive and its id is free and
-    # unambiguous exactly here, and nowhere later. The agent kills its own window on
-    # `chela task-finished`, and only then does the run reconcile to awaiting_review,
-    # so inbox.run_events resolving the id against the live tmux table always missed
-    # (every run_review event landed in the `chela itself` lane instead of its
-    # agent's). Only a real @id is stored — _new_window degrades to the bare name when
-    # the id can't be parsed, and a name in this column would be a lie.
+    # Only a real @id is stored — _new_window degrades to the bare name when the id can't
+    # be parsed, and a name in this column would be a lie the Feed keys a lane on.
     if re.fullmatch(r"@\d+", target_id):
-        conn.execute(
-            "UPDATE runs SET window_id=? WHERE task_id=?", (target_id, task.id)
-        )
+        conn.execute("UPDATE runs SET window_id=? WHERE task_id=?", (target_id, task_id))
         conn.commit()
 
-    # WORKFLOW.md's agent.cmd → the Settings permission mode → the built-in
-    # default (see resolve_agent_cmd). The mode is fixed at spawn: changing it in
-    # Settings affects the NEXT dispatch, never an agent already running.
+    # WORKFLOW.md's agent.cmd → the Settings permission mode → the built-in default (see
+    # resolve_agent_cmd). The mode is fixed at spawn: changing it in Settings affects the
+    # NEXT dispatch, never an agent already running.
     agent_cmd, cmd_source = resolve_agent_cmd(wf)
-    log.info("Launching %s with %r (source: %s)", task.id, agent_cmd, cmd_source)
-    # Export CHELA_WID first so the worktree agent knows its own window id
-    # (self-identity for peek/read/drive), then launch. Only when we captured a
-    # real @id — _new_window falls back to the bare name under a mock.
+    log.info("Launching %s with %r (source: %s)", task_id, agent_cmd, cmd_source)
+    # Export CHELA_WID first so the worktree agent knows its own window id (self-identity
+    # for peek/read/drive), then launch.
     if re.fullmatch(r"@\d+", target_id):
         subprocess.run(
             ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}",
@@ -1283,11 +1648,6 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
         check=True, capture_output=True,
     )
 
-    # Wait for the Claude Code TUI to be ready before sending the prompt. A
-    # fixed sleep loses the prompt to the startup splash under load (the
-    # send-keys lands mid-splash and is silently dropped), so poll the pane for
-    # the ready indicator instead — honoring startup_delay_seconds only as a
-    # minimum initial wait.
     min_wait = int(wf.get("agent", "startup_delay_seconds", default=4) or 4)
     ready_timeout = int(
         wf.get("agent", "ready_timeout_seconds", default=READY_TIMEOUT_SECONDS)
@@ -1296,26 +1656,251 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     if not _wait_for_ready(target_id, min_wait, ready_timeout):
         log.warning(
             "Task %s: window %s (%s) not ready after %ds; sending prompt anyway",
-            task.id, window_name, target_id, ready_timeout,
+            task_id, window_name, target_id, ready_timeout,
         )
 
-    prompt = render_prompt(
-        wf.prompt_template,
-        _prompt_vars(wf, task, str(worktree), branch, base_branch, task_number),
-    )
-
-    # Target by the captured @id (not the bare name) so a duplicate-named
-    # window can't make the prompt send-keys ambiguous. Confirm the paste
-    # actually landed (the agent goes busy) instead of trusting the readiness
-    # glyph: a late boot-splash redraw can still swallow it.
-    if not _send_seed(target_id, prompt, task.id):
+    if not _send_seed(target_id, prompt, task_id):
         raise RuntimeError(f"failed to send prompt to {window_name} ({target_id})")
+    return target_id
 
+
+# --- the rework re-spawn -----------------------------------------------------
+
+# The prompt a reworking agent wakes up to. Generic on purpose — it says nothing about
+# any one project's test commands — and overridable per workflow with `agent.rework_prompt`
+# in WORKFLOW.md, which sees the same {{...}} vars.
+#
+# It does two things the first-dispatch prompt cannot: it tells the agent it is BACK in
+# its own worktree on its own branch with its PR already open (so it pushes instead of
+# forking anything), and it hands it the verdict — while pointing it at the PR comments as
+# the durable record, because the comment thread is what a human will have added to.
+REWORK_PROMPT = """\
+🔁 **REWORK — your PR failed review.** This is round {{rework_round}} of {{max_reworks}}.
+
+You are back in your ORIGINAL worktree (`{{workspace_path}}`) on your ORIGINAL branch
+(`{{branch_name}}`), and your PR is ALREADY OPEN: {{pr_url}}
+
+⛔ Do NOT open a second PR and do NOT branch again — push to `{{branch_name}}` and the
+existing PR updates itself.
+
+## The verdict
+
+{{verdict}}
+
+## Do this, in order
+
+1. **Read the PR thread yourself** — `{{pr_comments_cmd}}`. The comment is the durable
+   record, and a human may have added to it since the verdict above was written.
+2. Fix every defect it names, in this worktree.
+3. Re-run the SAME validation your original task told you to run (this repo's CI gates are
+   not optional).
+4. Stage only what you changed (`git add <paths>` — never `git add -A`), commit, and
+   `git push`.
+5. Run `chela task-finished {{task_id}}` as your last step — it puts the run back in
+   `awaiting_review` and wakes the reviewer.
+
+**Do NOT touch the tracker file.** If the verdict is wrong, or you cannot fix it, say so
+plainly in your final message and stop — do not push a half-fix. There are only
+{{max_reworks}} rounds; after that the run escalates to a human.
+"""
+
+
+def _rework_vars(
+    wf: WorkflowDef, row: sqlite3.Row, worktree: Path | str, verdict: str, rework_round: int
+) -> dict:
+    """The ``{{...}}`` map a rework renders from — the prompt AND the worktree hooks.
+
+    Deliberately a superset of :func:`_prompt_vars`' keys where they overlap
+    (``workspace_path``, ``branch_name``, ``repo_path``, …): the same ``after_create`` /
+    ``before_run`` command has to render in BOTH paths, and it can only do that if it sees
+    the same names. ``base_branch`` is here for the same reason and nothing else — a rework
+    never forks from it.
+    """
+    number = _pr_number(row["pr_url"])
+    return {
+        "task_id": row["task_id"],
+        "task_title": row["title"] or "",
+        "branch_name": row["branch_name"] or "",
+        "workspace_path": str(worktree),
+        "base_branch": wf.get("workspace", "base_branch", default="master"),
+        "repo_path": str(wf.path.parent),
+        "project_key": wf.project_key,
+        "task_number": row["task_number"],
+        "pr_url": row["pr_url"] or "(no PR link on the run row)",
+        "pr_comments_cmd": (
+            f"gh pr view {number} --comments" if number
+            else "gh pr view --comments   # this run has no PR url recorded"
+        ),
+        "verdict": verdict,
+        "rework_round": rework_round,
+        "max_reworks": max_reworks(),
+    }
+
+
+def _escalate(conn: sqlite3.Connection, row: sqlite3.Row, reason: str) -> None:
+    """Stop the loop and hand the run to a human — keeping EVERYTHING.
+
+    The branch, the worktree and the PR all stay exactly where they are: a run that
+    defeated the loop is the one case where throwing work away is least forgivable. The
+    concurrency slot is freed simply by not being in :data:`ACTIVE_STATUSES` — a stuck run
+    must never pin the queue behind it.
+
+    The orchestrator finds out through the decisions inbox, which is edge-triggered on the
+    runs DB (``inbox.run_events``) and carries the whole review history in the payload —
+    every verdict, not just the last. That is also why nothing is pushed from here: the
+    row IS the notification, and a second publisher would be a second source of truth.
+    """
     conn.execute(
-        "UPDATE runs SET status='running' WHERE task_id=?", (task.id,)
+        "UPDATE runs SET status='needs_human', ended_at=?, last_error=? WHERE task_id=?",
+        (_now(), reason, row["task_id"]),
     )
     conn.commit()
-    log.info("Dispatched task %s → %s (attempt %d)", task.id, window_name, attempt)
+    log.warning(
+        "Task %s → needs_human: %s (branch %s and worktree %s preserved; slot freed)",
+        row["task_id"], reason, row["branch_name"], row["worktree_path"],
+    )
+
+
+def _renudge_prompt(wf: WorkflowDef, row: sqlite3.Row, task: Task | None) -> str | None:
+    """The prompt the watchdog re-sends to a run stuck at an empty prompt — ITS OWN.
+
+    A rework gets the rework prompt (rebuilt from the row: the same verdict, the same round
+    it is already spending), never the first-dispatch one. None when there is nothing to
+    re-send: a first dispatch whose task has left the tracker.
+    """
+    if _is_rework(row):
+        return render_prompt(
+            wf.get("agent", "rework_prompt", default=None) or REWORK_PROMPT,
+            _rework_vars(
+                wf, row, row["worktree_path"] or "",
+                latest_verdict(dict(row)), row["rework_count"] or 0,
+            ),
+        )
+    if task is None:
+        return None
+    return render_prompt(
+        wf.prompt_template,
+        _prompt_vars(
+            wf, task, row["worktree_path"], row["branch_name"],
+            wf.get("workspace", "base_branch", default="master"), row["task_number"],
+        ),
+    )
+
+
+def _rework_failed(conn: sqlite3.Connection, row: sqlite3.Row, error: str) -> None:
+    """A rework that DIED goes back to ``changes_requested`` — never to ``failed``.
+
+    ⛔ ``failed`` is not in :data:`NOT_CLAIMABLE`, deliberately: it is the retry state for a
+    FRESH dispatch. Dropping a rework into it hands the run to the claim loop, which knows
+    nothing about reworks — it would call :func:`_spawn` with the ORIGINAL first-dispatch
+    prompt (telling an agent to branch and open a PR that is already open), bump ``attempt``,
+    and never look at ``rework_count``. The verdict would be silently lost and the cap
+    silently bypassed. So a dead rework re-enters the loop it was already in.
+
+    The round is SPENT even though the agent never worked, which is what bounds this: a
+    rework that cannot be launched at all (no tmux, a hook that always fails) retries once
+    per tick, burns its rounds, and escalates to ``needs_human`` — where a human sees it.
+    Refunding the round would spin forever instead.
+    """
+    task_id = row["task_id"]
+    # What round did we just lose? The snapshot's OWN status answers it, and the two answers
+    # differ by one:
+    #   `running`           — _respawn_rework already wrote rework_count = the round in
+    #                         flight. It is spent. Charging another would let a single dead
+    #                         tmux window burn the entire budget.
+    #   `changes_requested` — it never got out of the gate, and the attempt STILL costs a
+    #                         round: a launch that always fails (no tmux, a hook that always
+    #                         exits non-zero) would otherwise retry every tick forever. This
+    #                         is what makes the failure path terminate — in `needs_human`,
+    #                         where a person sees it.
+    spent = (row["rework_count"] or 0)
+    if row["status"] != "running":
+        spent += 1
+    conn.execute(
+        "UPDATE runs SET status='changes_requested', rework_count=?, last_error=?, "
+        "window_id=NULL WHERE task_id=?",
+        (spent, error, task_id),
+    )
+    conn.commit()
+    log.warning(
+        "Task %s: rework round %d FAILED (%s) — back to changes_requested, verdict intact "
+        "(cap %d)", task_id, spent, error, max_reworks(),
+    )
+
+
+def _is_rework(row: sqlite3.Row) -> bool:
+    """Is this ``running`` row a rework in flight (rather than a first dispatch)?
+
+    ``rework_count`` is only ever spent by :func:`_respawn_rework`, so a running row that
+    has one is an agent working on a verdict. It is the flag that keeps a dead rework out
+    of the fresh-dispatch retry path (:func:`_rework_failed`).
+    """
+    return (row["rework_count"] or 0) > 0
+
+
+def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection) -> bool:
+    """Re-spawn a ``changes_requested`` run IN ITS OWN WORKTREE, ON ITS OWN BRANCH.
+
+    The branch history, the open PR and the agent's own work are all preserved — which is
+    exactly what the human did by hand on 2026-07-14, and it worked. ⛔ It must never fork
+    a fresh worktree from the base branch: that would abandon the commits the PR points at.
+
+    Worktree gone (cleaned up) → re-attached from the branch. BRANCH gone → there is
+    nothing to rework and :func:`_escalate` hands it to a human. The caller has already
+    checked the concurrency slot and the rework cap.
+    """
+    task_id = row["task_id"]
+    repo_path = wf.path.parent
+    branch = row["branch_name"]
+    if not branch:
+        _escalate(conn, row, "rework: the run row has no branch — nothing to re-enter")
+        return False
+
+    root = resolve_workspace_root(wf)
+    want = Path(row["worktree_path"]) if row["worktree_path"] else (root / task_id)
+    try:
+        worktree, attached = attach_worktree(repo_path, branch, want)
+    except BranchGone as e:
+        _escalate(conn, row, f"rework: {e} — the work it points at is unreachable")
+        return False
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+        _escalate(conn, row, f"rework: could not attach a worktree for {branch}: {stderr.strip()}")
+        return False
+    if attached:
+        log.info("Task %s: worktree was gone; re-attached %s from branch %s",
+                 task_id, worktree, branch)
+
+    rework_round = (row["rework_count"] or 0) + 1
+    verdict = latest_verdict(dict(row))
+    hook_vars = _rework_vars(wf, row, worktree, verdict, rework_round)
+    prompt = render_prompt(
+        wf.get("agent", "rework_prompt", default=None) or REWORK_PROMPT, hook_vars
+    )
+    window_name = branch
+
+    # Spend the round and take the slot BEFORE touching tmux, exactly as _spawn claims its
+    # row first: a crash mid-launch must leave a trace, and must not be free to retry
+    # forever. A launch that then fails reconciles like any other running run.
+    conn.execute(
+        "UPDATE runs SET status='running', rework_count=?, started_at=?, ended_at=NULL, "
+        "last_error=NULL, idle_nudged_at=NULL, window_id=NULL, worktree_path=? "
+        "WHERE task_id=?",
+        (rework_round, _now(), str(worktree), task_id),
+    )
+    conn.commit()
+
+    # ⛔ fresh_worktree=attached: a RE-CREATED worktree is a fresh one. It has the branch's
+    # tracked files and nothing else — no .claude/settings.local.json, no venv — so it needs
+    # after_create exactly like a first dispatch. (before_run fires either way.)
+    _launch_agent(
+        wf, task_id, window_name, worktree, prompt, conn,
+        hook_vars=hook_vars, fresh_worktree=attached,
+    )
+    log.info(
+        "Task %s: rework round %d/%d spawned in %s on %s (PR %s)",
+        task_id, rework_round, max_reworks(), worktree, branch, row["pr_url"] or "?",
+    )
     return True
 
 

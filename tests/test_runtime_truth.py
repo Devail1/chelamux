@@ -75,6 +75,17 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "cmx-66"})
     monkeypatch.setattr(runtime_truth, "_in_flight_runs", lambda: {"CMX-66": "@1"})
 
+    # the rework loop: a run is parked in changes_requested, and git still has the branch
+    # it must be re-spawned into. git is the OWNER here, for the same reason tmux is above.
+    # (`needs_human`: parked and waiting on a PERSON, so no tick is owed it — a
+    # `changes_requested` run IS owed one, and _stalled_report checks that separately.)
+    monkeypatch.setattr(runtime_truth, "_parked_runs", lambda: {
+        "CMX-68": {"branch": "cmx-68", "worktree": str(tmp_path / "wt"), "repo": str(repo),
+                   "workflow": str(repo / "WORKFLOW.md"), "status": "needs_human",
+                   "waiting": 30.0},
+    })
+    monkeypatch.setattr(runtime_truth, "_git_branches", lambda repo: {"dev", "cmx-68"})
+
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
         runtime_truth, "collected_js_suites",
@@ -189,6 +200,17 @@ def _break_tests_js_suites(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_runs_parked_branch(tmp_path, monkeypatch):
+    """The branch a sent-back run has to be re-spawned INTO is gone (CMX-68).
+
+    The run row still says `changes_requested`, the PR is still open, and the work the PR
+    points at is now unreachable — the rework loop can never turn again for this run, and
+    without this check nothing would say so until the dispatcher tried and failed.
+    """
+    monkeypatch.setattr(runtime_truth, "_git_branches", lambda repo: {"dev"})
+    return doctor.ERROR
+
+
 CORRUPTIONS = {
     "env.file": _break_env_file,
     "env.running": _break_env_running,
@@ -200,6 +222,7 @@ CORRUPTIONS = {
     "dispatch.workflows": _break_dispatch_workflows,
     "dispatch.hold": _break_dispatch_hold,
     "tmux.windows": _break_tmux_windows,
+    "runs.parked_branch": _break_runs_parked_branch,
     "tests.js_suites": _break_tests_js_suites,
 }
 
@@ -371,3 +394,58 @@ def test_an_expired_hold_still_says_so(fleet):
     }))
     findings = [f for f in doctor.check() if f.fact == "dispatch.hold"]
     assert findings and "EXPIRED" in findings[0].title
+
+
+# --- the OTHER half of "parked": is anything ever going to come for it? -----------------
+#
+# `runs.parked_branch` asked git one question — does the branch still exist? — and stopped
+# there. But a run sent back for rework is a PROMISE ("the dispatcher re-spawns it on the
+# next tick"), and three ordinary conditions break that promise in total silence: the
+# workflow is not in CHELA_DISPATCH_WORKFLOWS, its WORKFLOW.md does not parse, or a hold was
+# taken and forgotten. The run then sits in `changes_requested` FOREVER — branch intact, PR
+# open, verdict written, and nobody coming. `changes_requested` only emits an event on the
+# EDGE, so once it is parked, this is the only thing that speaks.
+
+def _claim(**over) -> dict:
+    claim = {"branch": "cmx-68", "worktree": "/wt", "repo": "/repo",
+             "workflow": "/repo/WORKFLOW.md", "status": "changes_requested", "waiting": 60.0}
+    claim.update(over)
+    return {"CMX-68": claim}
+
+
+def test_a_sent_back_run_whose_workflow_NOTHING_dispatches_is_an_ERROR(monkeypatch):
+    """The daemon ticks the workflows in CHELA_DISPATCH_WORKFLOWS and no others. A run sent
+    back for rework under a workflow that is not in that list will never be re-spawned by
+    anything, ever."""
+    monkeypatch.setattr(runtime_truth.config, "DISPATCH_WORKFLOWS", [Path("/other/WORKFLOW.md")])
+
+    findings = runtime_truth._stalled_report(_claim())
+
+    assert [f.level for f in findings] == [doctor.ERROR]
+    assert "NOTHING dispatches" in findings[0].title
+    assert "chela dispatch /repo/WORKFLOW.md" in findings[0].detail
+
+
+def test_a_sent_back_run_that_has_waited_for_HOURS_is_a_WARN(monkeypatch):
+    """Legitimate only while every slot is busy — a rework normally restarts on the next
+    tick. Past an hour it is far likelier that a hold was forgotten or the daemon is down."""
+    monkeypatch.setattr(runtime_truth.config, "DISPATCH_WORKFLOWS",
+                        [Path("/repo/WORKFLOW.md")])
+
+    fresh = runtime_truth._stalled_report(_claim(waiting=30.0))
+    stale = runtime_truth._stalled_report(
+        _claim(waiting=runtime_truth.PARKED_STALL_SECONDS + 1))
+
+    assert fresh == []                                     # one tick old — that is the loop
+    assert [f.level for f in stale] == [doctor.WARN]
+    assert "has not been re-spawned" in stale[0].title
+    assert "hold" in stale[0].detail                       # names all three causes
+
+
+def test_a_run_parked_on_a_HUMAN_is_never_reported_as_stalled(monkeypatch):
+    """`needs_human` is parked ON PURPOSE: the loop gave up and is waiting for a person. No
+    tick is owed it, so no amount of waiting makes it a finding."""
+    monkeypatch.setattr(runtime_truth.config, "DISPATCH_WORKFLOWS", [])
+
+    assert runtime_truth._stalled_report(
+        _claim(status="needs_human", waiting=99999.0)) == []

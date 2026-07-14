@@ -254,6 +254,23 @@ SCHEDULER_POLL_INTERVAL = int(os.environ.get("CHELA_SCHEDULER_POLL_INTERVAL", "3
 # paths (~ and $VAR are expanded). Empty = dispatcher off in the daemon; the
 # `chela dispatch <workflow>` CLI still works regardless.
 DISPATCH_TICK_INTERVAL = int(os.environ.get("CHELA_DISPATCH_TICK_INTERVAL", "60"))
+
+
+def max_reworks() -> int:
+    """How many times a PR that FAILED REVIEW may be sent back to its agent.
+
+    Past the cap the run escalates to ``needs_human`` instead of going round again —
+    a bounded loop that surfaces rather than spins (``rooms.MAX_HOPS`` is the same
+    idea). ``0`` disables rework entirely: the first ``changes_requested`` escalates.
+
+    Read per call, never latched at import: it is a policy knob an operator turns on a
+    daemon that is already running, and a garbage value must degrade to the default
+    rather than crash the tick.
+    """
+    try:
+        return max(0, int(os.environ.get("CHELA_MAX_REWORKS", "2")))
+    except ValueError:
+        return 2
 _dispatch_raw = os.environ.get("CHELA_DISPATCH_WORKFLOWS", "")
 DISPATCH_WORKFLOWS = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()

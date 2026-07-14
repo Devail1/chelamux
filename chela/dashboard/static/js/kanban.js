@@ -31,6 +31,14 @@ const KANBAN_COL_LABELS = {
     failed: 'Failed',
     done: 'Done',
 };
+// The rework loop's states (CMX-68). They ride in the Awaiting Review column — a run the
+// reviewer sent back has an open PR and is nowhere near done — but they are NOT awaiting
+// review, and the card must not pretend otherwise. Text, deliberately: a border colour is
+// a secondary cue, never the whole message.
+const REVIEW_STATE_CHIPS = {
+    changes_requested: '🔁 changes requested',
+    needs_human: '🛑 needs a human',
+};
 // Columns that start collapsed in the mobile "Rows" accordion — low-traffic
 // buckets the user rarely needs open at a glance. Overridden + persisted per
 // user once they tap a caret.
@@ -137,6 +145,12 @@ function _kCard(card) {
         branchOrLine = `<span class="ts">${escHtml(card.file.split('/').pop())}:${card.line_number}</span>`;
     }
     const pr = _runPrCell(card.pr_url);
+    // The Awaiting Review column also holds the rework loop's other two states, so a card
+    // that is NOT awaiting review says which one it is — in words. (Liav is red-weak: hue
+    // is never the only signal, here or anywhere.)
+    const stateChip = REVIEW_STATE_CHIPS[card.status]
+        ? `<span class="kanban-state-chip">${escHtml(REVIEW_STATE_CHIPS[card.status])}</span>`
+        : '';
     // Merge button rides next to the PR badge on Awaiting Review cards —
     // that's where cards with open, unmerged PRs live. dispatcher.tick()
     // refreshes pr_state via `gh pr view` for any row carrying a pr_url, so the
@@ -164,6 +178,7 @@ function _kCard(card) {
             <span class="kanban-wf-chip">${wf}</span>
             <span class="kanban-card-id" title="${tid}">${displayId}</span>
             ${branchOrLine}
+            ${stateChip}
             ${pr}
             ${merge}
         </div>
@@ -433,7 +448,12 @@ function _kanbanFlatten(data) {
             buckets[status].push({ ...r, status });
         }
         for (const r of (wf.awaiting_review_runs || [])) {
-            buckets.awaiting_review.push({ ...r, status: 'awaiting_review' });
+            // The column holds the whole review loop — awaiting_review, changes_requested
+            // (sent back by the reviewer) and needs_human (the loop hit its cap). Each card
+            // KEEPS ITS OWN STATUS: overwriting it with 'awaiting_review' would put a
+            // Merge button on a PR that just failed review and tell the reader a run that
+            // stopped is still waiting on them.
+            buckets.awaiting_review.push({ ...r, status: r.status || 'awaiting_review' });
         }
         for (const r of (wf.recent_runs || [])) {
             const status = (r.status === 'done' || r.status === 'failed') ? r.status : 'done';
@@ -586,9 +606,12 @@ function renderKanban(data) {
     const apply = arr => _kanbanFilter === 'all' ? arr : arr.filter(c => c.workflow_path === _kanbanFilter);
 
     // Merge-all count = awaiting_review cards that GitHub reports MERGEABLE in
-    // the active filter. Drives the toolbar button's label + visibility.
+    // the active filter. Drives the toolbar button's label + visibility. The status test
+    // is load-bearing since the rework loop shares this column: a `changes_requested` PR
+    // is perfectly MERGEABLE and must never be counted into a Merge-all — it is the PR a
+    // reviewer just REJECTED. (The server refuses it too; this keeps the count honest.)
     const mergeableCount = apply(buckets.awaiting_review)
-        .filter(c => c.pr_mergeable === 'MERGEABLE').length;
+        .filter(c => c.status === 'awaiting_review' && c.pr_mergeable === 'MERGEABLE').length;
     _renderKanbanFilters(workflows, mergeableCount);
     _renderKanbanNav(buckets);
     _applyKanbanLayout();
