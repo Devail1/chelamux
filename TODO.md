@@ -61,6 +61,24 @@
   3. **THE SUITE MUST BE GREEN ON THIS MACHINE, not just in CI.** ⚖️ The judge's **first verdict was `cannot_verify`**: *"the suite is NOT GREEN before any mutation … a suite that is already red measures nothing."* It refused to block **and** refused to clear — correct — **but the judge is INERT until `uv run pytest -q` is green locally.** ⛔ **Do NOT "fix" this by skipping or xfailing the test.** That re-arms the landmine and lies to the judge.
   4. **Guard it:** a test asserting a daemon under a non-default `CHELA_DIR` **cannot** touch the default workspace. ⚠️ **Corrupt it and watch it go RED — the judge will do exactly that to you.**
 
+- [ ] **🚨🔓 THE DECISIONS INBOX CAN EXECUTE AGENT-AUTHORED TEXT AS A SHELL COMMAND IN THE ORCHESTRATOR'S SESSION.** ⛔ **A LIVE INJECTION PATH INTO THE ONE SESSION THAT HOLDS MERGE AUTHORITY AND AN UNSANDBOXED SHELL. Observed 2026-07-15, by accident.**
+
+  **WHAT HAPPENED.** The orchestrator's pane was in **`!` bash-input mode** (Claude Code's run-a-shell-command prompt). The inbox pasted a notification into it, and the pane **RAN IT AS A SHELL COMMAND**:
+  ```
+  <bash-input>📥 cmx-77 sent back for rework (rework 1) — … PR #91 — 🔑 @N IS AN ADDRESS…</bash-input>
+  /bin/bash: eval: line 1: syntax error near unexpected token `('
+  ```
+  It died on the parens in `(rework 1)`. **It did not have to.**
+
+  🔑 **THE CHAIN, AND IT IS FULLY AGENT-CONTROLLED:** an agent authors a **PR title** / a task title in `TODO.md` → the inbox builds its summary from that text → the inbox **pastes it into the orchestrator's prompt** → in `!` mode **the orchestrator's shell executes it**. ⛔ **A PR title containing `$(…)` or backticks runs arbitrary code in the session that merges to `dev`.** No sandbox, no permission prompt, no log.
+
+  ⚠️ **THE AUTHORS ALREADY REASONED ABOUT UNSAFE PANE STATES AND MISSED THIS ONE.** `inbox.py` is careful never to push into a `busy` pane or — in its own words — "critically, a `waiting` pane, which would answer its permission prompt". **The idle-gate models a pane that is BUSY. It does not model a pane that is in a DIFFERENT INPUT MODE.** ⛔ **`idle` is not the same as "the prompt will treat this as prose".**
+
+  1. **THE INBOX MUST REFUSE A PANE IN BASH-INPUT MODE.** Same shape as the existing `busy`/`waiting` refusal — a fourth unsafe state, not a new mechanism. The `!` prompt renders differently; detect it and **hold the item in the queue** (do NOT drop it — it is a durable queue and the notification still matters).
+  2. 🔴 **BELT AND BRACES — SANITIZE THE SUMMARY BEFORE IT IS PASTED ANYWHERE.** ⛔ **This repo ALREADY OWNS the sanitizer for exactly this reason** — `chela/tui_text.py`, used when pasting into an agent's TUI, because "a raw `\x1b`/`\x03` pasted into an agent's TUI is a KEYPRESS, not text". **The inbox path does not use it.** ONE implementation, both paths. Strip/neutralise shell metacharacters and control bytes in agent-authored text before it EVER reaches a prompt.
+  3. **⛔ AGENT-AUTHORED TEXT MUST NEVER BE INDISTINGUISHABLE FROM SOMETHING THE HUMAN TYPED.** That is the general defect, and this is its third instance: the Wall's `--writable` ttyd into `@0` (logged, unfixed) and the inbox paste (here). **Say so in the PR body** — the next one of these is coming.
+  4. **Guard it:** a test that an inbox item whose summary contains `$(…)`, a backtick, and a control byte is **either refused or neutralised**, and that a pane in bash-input mode is **NOT pushed into**. ⚠️ **Corrupt each guard and watch it go RED — the judge will.**
+
 - [ ] **🗜️ THE WALL: A DISPATCHED AGENT'S PANE OPENS MINIMIZED — and POPS OUT when it wants a human.** Same principle as the Telegram lazy-bind (`CHELA_TELEGRAM_BIND_DISPATCHED`), second surface: ⛔ **a dispatched worker should not occupy human attention surface — a topic OR a Wall tile — until it needs a human.** Liav, 07-14. **⚠️ DEPENDS ON the lazy-bind task's `dispatched_window_ids()` helper (run-row-derived) — reuse it, do not re-derive.**
 
   ✅ **The machinery EXISTS — do not build a new one.** `terminals.js` already has `_minimized` (a Set), `_minimizeItem`, and a **dock**, persisted to `localStorage` `pc_wall_minimized` (`terminals.js:801-817`).
