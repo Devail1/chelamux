@@ -2,6 +2,25 @@
 
 ## Open — CI drives the loop
 
+- [ ] **⚙️🧠 SELECTABLE AGENT MODEL — default the dispatched coding agents to Sonnet, keep the JUDGE capable.** Today every dispatched agent (and the judge) inherits whatever `claude` defaults to. Make the **coding-agent model a Settings choice, default `sonnet`** (cost/speed — cmx tasks rarely need Opus), while the **judge stays on a capable model regardless** (it's the adversarial safety net — it caught the cmx-89/90 wiring gaps + the proof-that-cannot-fail class this session; do NOT let a Sonnet default downgrade it). Note: "Sonnet 200k" is just plain `--model sonnet` (the 1M window is a separate variant — not needed here). The critic makes no LLM call in v1, so it's out of scope.
+
+  🔑 **REUSE the permission-mode rails exactly** — the model rides the same path the mode already does: `dispatcher.resolve_agent_cmd` (`:233`, precedence `agent.cmd` → Settings → built-in), `dispatcher.settings_permission_mode`/`PERMISSION_MODES`/`DEFAULT_PERMISSION_MODE`/`PERMISSION_MODE_KEY` (`:204`–`218`), `userconfig` (the store), and `/api/settings` in `chela/dashboard/app.py` (`:1438`, the GET/set + `_effective`/`_default`/list fields) + the Settings-drawer JS control. Mirror all of it for the model.
+
+  **OBJECTIVE:**
+  1. **Coding-agent model, Settings-driven, default Sonnet.** Add `AGENT_MODELS` (the aliases `claude --model` accepts — verify: `sonnet`/`opus`/`haiku`), `DEFAULT_AGENT_MODEL = "sonnet"`, an `AGENT_MODEL_KEY` userconfig key + `settings_agent_model()` (validated; invalid/unset → default). Extend `resolve_agent_cmd` to append `--model <model>` for the coding-agent command, precedence unchanged: a workflow's `agent.cmd` still shadows Settings (it may carry its own `--model`); else Settings model; else `--model sonnet`.
+  2. **Judge stays capable, decoupled.** `_spawn_judge` → `_launch_agent`: the judge's command must NOT pick up the coding-agent Settings model. Give it `DEFAULT_JUDGE_MODEL` (a capable default, e.g. `opus`) — fixed, NOT the user-facing dropdown (v1). Ensure setting the coding-agent model to `sonnet`/`haiku` leaves the judge's model capable.
+  3. **Settings surface.** `/api/settings` GET/sets `agent_model` (validated against `AGENT_MODELS`) with `agent_model_effective`/`_default`/`agent_models` list, mirroring the mode fields; add a model dropdown to the Settings drawer next to the permission-mode control.
+
+  ⛔ **BOUNDARIES:** don't change the permission-mode behaviour or `agent.cmd` precedence; don't make the judge model user-selectable in v1 (fixed capable default); don't go near `_termSig`. Public-repo boundaries (no secrets/abs paths). Don't touch the tracker.
+
+  ⛔ **GUARDS (WORKFLOW step 3 — corrupt each → RED):**
+  - **Default is Sonnet:** with nothing set, `resolve_agent_cmd` yields a coding-agent command containing `--model sonnet`. Drop the `--model` append → RED.
+  - **Settings override works:** userconfig `agent_model=opus` → the command contains `--model opus`. Corrupt (ignore the setting) → RED.
+  - **🔴 The judge is NOT downgraded (load-bearing):** with the Settings model set to `sonnet`/`haiku`, the JUDGE's spawn command still uses the capable judge model, NOT the coding-agent model. Corrupt (let the judge inherit the coding-agent model) → RED.
+  - **Invalid model rejected:** a value not in `AGENT_MODELS` falls back to the default, never reaches the command. Corrupt → RED.
+
+  **Files:** `chela/dispatcher.py` (models allowlist/default/key, `settings_agent_model`, `resolve_agent_cmd` + judge cmd) or `chela/config.py` for the constants · `chela/dashboard/app.py` (`/api/settings` `agent_model`) · the Settings-drawer JS (+ a `.mjs` test if the drawer has one) · `tests/` (a `test_agent_model`/extend `test_dispatcher`). **Verify:** `uv run ruff check chela tests` (MUST pass) + `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green · the four guard mutations each RED · **eyeball: the Settings drawer shows a model dropdown defaulting to Sonnet.**
+
 - [x] **🎭🤖 AUTO-LAUNCH THE ORCHESTRATOR PERSONA (attended-autonomous, inbox-woken) — the persona layer's last piece.** chela auto-launches the embedded orchestrator (`chela/personas/orchestrator.md`, registry key `orchestrator`) to run the loop the human runs today: review a run at `awaiting_review`, do the corrupt-each-guard verification, and **act within the standing-auth envelope (`chela merge`) OR escalate** — WITHOUT regressing to confirm-each. v1 = **inbox-woken (NOT boot-persistent)** + an **attended-lease** that keeps its autonomous actions supervised (the buildable-now form of "attended-autonomous", honouring `docs/ESCALATION_CONTRACT.md`'s "no unattended action until isolation/srt lands").
 
   ⛔ **SHIPS BEHIND AN OFF-BY-DEFAULT FLAG** `CHELA_ORCHESTRATOR` (default off, like `CHELA_JUDGE` but inverted). Merging this **embeds the capability but does NOT activate an auto-actor** — the human flips it on deliberately after review. Non-negotiable: this PR must not, on merge, start something that merges PRs on its own.
