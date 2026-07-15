@@ -2,6 +2,18 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🪟➋ SIDEBAR POLISH #2 (Liav, after CMX-85 shipped): enlarge the EXPANDED-sidebar icons to match the collapsed ones · swap the Feed glyph for lucide `rss`.** Two small frontend changes.
+
+  1. **Expanded icons match collapsed.** CMX-85 enlarged the *collapsed*-rail icons; the *expanded* sidebar nav icons are now smaller than the collapsed ones. Bump the expanded nav-icon size (CSS, `style.css`) so they match. ⛔ Don't break alignment of the labels next to them, and don't touch the collapsed sizing CMX-85 just set.
+  2. **Feed icon → lucide `rss`.** The Feed view's icon is `views.js:~28 icon: '≡'` — a unicode glyph that reads **exactly like the sidebar-toggle hamburger**, which is confusing. Change it to lucide's **`rss`** icon. ⛔ **Lucide is already used in this codebase** (the command palette + topbar overflow — `style.css:~2552`, "Lucide icon rows"): **reuse that exact mechanism** for rendering the glyph, don't hand-roll a new SVG pipeline. If the nav renderer only takes a unicode `icon:` today, extend it *minimally* to render a lucide `rss` for this one view (and note whether the other four should follow in a later pass — do NOT convert them now).
+
+  ⛔ **GUARDRAILS:**
+  - 🔴 **THE CMX-67/71 FLEET-RELOAD TRAP still applies to anything in the sidebar/terminals area.** These are icon/CSS changes and should not go near `_termSig`/`_displayLabel` — but if you touch any shared render path, **confirm a live fleet does not reload** (the `wall.test.mjs` relabel/room guards must stay green, and don't regress them).
+  - Don't change the nav ORDER (CMX-85 set `Feed·Wall·Work·Knowledge·Agents`) or any label logic — icons + sizing only.
+  - The Feed-icon change must be **visible in BOTH the expanded sidebar and the collapsed rail** (same registry `icon:` feeds both) — check both.
+
+  **Files:** `chela/dashboard/static/js/views.js` (the Feed `icon:`) · `chela/dashboard/static/style.css` (expanded icon size + any lucide-glyph styling) · possibly the nav-glyph renderer (`nav.js`) if it must learn to render a lucide icon. **Verify:** `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` + the `.mjs` suites + `ruff` green · **eyeball: the Feed icon is a clear RSS mark (not the hamburger) in both sidebar states, and the expanded icons match the collapsed size.**
+
 - [x] **⚙️⚖️ CONTRACT-AS-CODE CORE — `chela merge` + `chela escalate`: turn the escalation contract from a doc the LLM is *asked* to follow into code it *cannot violate*.** 🔑 **This is the judge's proven trick generalized (see `docs/PERSONA_PATTERN.md`): the LLM proposes an action, CODE adjudicates whether it is allowed.** It is the load-bearing foundation the critic and the orchestrator-harness both build against, and — unlike process-isolation — it is **buildable now**: it bounds the *decision* blast-radius (`docs/ESCALATION_CONTRACT.md`).
 
   🔑 **REUSE THE SEED, don't reinvent:** `chela/dispatcher.py::approve` (`~:1345`) is already a gate that **refuses on unreadable checks (unknown ≠ pass)** and reads CI/judge state. Extend *that* pattern; `chela review` (`main.py:~1827`) is the CLI shape to mirror.
