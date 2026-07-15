@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 from chela import epoch, hold, judge
-from chela.config import CHELA_DIR, DISPATCH_TICK_INTERVAL, TMUX_SESSION, max_reworks
+from chela.config import (
+    CHELA_DIR,
+    DISPATCH_TICK_INTERVAL,
+    TMUX_SESSION,
+    judge_max_unknown_retries,
+    max_reworks,
+)
 from chela.messenger import send_tmux
 from chela.sources import Task, get_source
 from chela.transcripts import agent_transcript_summary
@@ -537,11 +543,23 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # pushes a NEW sha, which IS judged again — bounded by CHELA_MAX_REWORKS, because a
         # judge block spends a rework round like any other verdict. `judge_state` is one of
         # judge.J_* and `judge_detail` says why (it is the CANNOT VERIFY reason, and an
-        # unknown must never be silent).
+        # unknown must never be silent). ⚖️ CMX-81 loosened "once per sha" for exactly one
+        # state: a `cannot_verify` on an unchanged sha is RE-tried (bounded — see
+        # `judge_cannot_verify_tries` below), because an unknown is not a judgement.
         ("judge_sha", "ALTER TABLE runs ADD COLUMN judge_sha TEXT"),
         ("judge_state", "ALTER TABLE runs ADD COLUMN judge_state TEXT"),
         ("judge_started_at", "ALTER TABLE runs ADD COLUMN judge_started_at TEXT"),
         ("judge_detail", "ALTER TABLE runs ADD COLUMN judge_detail TEXT"),
+        # ⚖️ CMX-81. How many times the judge has been RE-RUN on the CURRENT `judge_sha` after
+        # coming back CANNOT VERIFY. `cannot_verify` is an UNKNOWN (a flake, a gh timeout, a
+        # worktree that would not check out, a dead window), not a verdict — so it must cost a
+        # BOUNDED retry, never permanently retire the commit from judgment the way a bare
+        # `judge_sha == pr_head_sha` guard did (it let a green PR merge UNJUDGED on any flake).
+        # `_spawn_judge` owns this count: it zeroes on a new head sha (a fresh judgement) and
+        # bumps it each time it re-launches on the same unknown one, up to
+        # `judge_max_unknown_retries`.
+        ("judge_cannot_verify_tries",
+         "ALTER TABLE runs ADD COLUMN judge_cannot_verify_tries INTEGER"),
     ):
         try:
             conn.execute(ddl)
@@ -2008,6 +2026,14 @@ def tick(workflow_path: str | Path) -> dict:
         # `request_changes` — the one carrier — so a judge round IS a rework round and the
         # existing cap bounds the whole thing. See chela/judge.py.
         #
+        # ⚖️ CMX-81: the ONE exception to once-per-sha. A `cannot_verify` is an UNKNOWN, not a
+        # judgement — a flake, a gh timeout, a worktree that would not check out, a judge that
+        # died. So the SAME head is re-judged while it last came back `cannot_verify` and under
+        # `judge_max_unknown_retries` (`_spawn_judge` counts the retries in
+        # `judge_cannot_verify_tries`). Without this a single transient failure retired the
+        # commit from judgment for good and it merged UNJUDGED. `clean`/`blocked` are real
+        # verdicts and never re-fire; a new sha resets the count and is judged afresh.
+        #
         # Below the hold/blocked gates, deliberately: a judge is an AGENT on this box, and an
         # operator who paused the queue (or whose WORKFLOW.md does not parse) has not asked
         # for new agents. It resumes when they do — nothing is lost, the PR simply waits.
@@ -2019,9 +2045,13 @@ def tick(workflow_path: str | Path) -> dict:
             for row in conn.execute(
                 "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
                 "AND pr_state='open' AND pr_head_sha IS NOT NULL "
-                "AND pr_checks IN ({}) AND (judge_sha IS NULL OR judge_sha != pr_head_sha)"
+                "AND pr_checks IN ({}) AND ("
+                "  judge_sha IS NULL OR judge_sha != pr_head_sha"
+                "  OR (judge_state=? AND COALESCE(judge_cannot_verify_tries, 0) < ?)"
+                ")"
                 .format(",".join("?" * len(JUDGE_TRIGGER_CHECKS))),
-                (str(wf.path), *JUDGE_TRIGGER_CHECKS),
+                (str(wf.path), *JUDGE_TRIGGER_CHECKS,
+                 judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
             ).fetchall():
                 if judging >= JUDGE_MAX_CONCURRENT:
                     break        # it waits a tick; each judge re-runs a whole test suite
@@ -2643,16 +2673,27 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
 
     ⛔ The sha is burned FIRST, before tmux is touched. A judge that fails to launch must not
     be retried every 60s forever: the run is marked CANNOT VERIFY on this commit and left in
-    ``awaiting_review`` for a human, which is what an unknown is supposed to cost. (The
-    asymmetry is deliberate and it is the same one the CI gate makes: a missed judgement
-    costs a PR an adversarial pass; a re-fired one would spawn agents in a loop.)
+    ``awaiting_review``. ⚖️ CMX-81: that CANNOT VERIFY is not the end of the road, though — it
+    is an UNKNOWN, and the trigger gate re-fires this same commit a BOUNDED number of times
+    (``judge_max_unknown_retries``), so a one-off launch failure or flake costs a retry, not
+    the whole adversarial pass. Only once the budget is spent does the unknown settle to a
+    human — a loop that surfaces rather than spins.
     """
     task_id, branch = row["task_id"], row["branch_name"] or ""
     worktree = judge.judge_worktree_path(wf, task_id)
+    # ⚖️ CMX-81: the CANNOT VERIFY retry budget belongs to a COMMIT, and this is its ONLY
+    # writer. A new head is a fresh judgement → the count starts at 0. Re-launching on the
+    # SAME head that last came back `cannot_verify` IS a retry → bump it (the trigger gate
+    # already proved the bump stays under `judge_max_unknown_retries`). Any other same-head
+    # re-launch keeps the running total. Counting retries HERE, not on the verdict, keeps one
+    # writer whatever ended the judge — the watchdog, a launch failure, or `chela judge run`.
+    same_sha = row["judge_sha"] == sha
+    prior = (row["judge_cannot_verify_tries"] or 0) if same_sha else 0
+    tries = prior + 1 if (same_sha and row["judge_state"] == judge.J_CANNOT_VERIFY) else prior
     conn.execute(
-        "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=? "
-        "WHERE task_id=?",
-        (sha, judge.J_RUNNING, _now(), "", task_id),
+        "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=?, "
+        "judge_cannot_verify_tries=? WHERE task_id=?",
+        (sha, judge.J_RUNNING, _now(), "", tries, task_id),
     )
     conn.commit()
 

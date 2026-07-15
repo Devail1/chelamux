@@ -580,8 +580,12 @@ def test_the_judge_fires_ONCE_per_head_sha(tmp_path):
         conn.commit()
         return True
 
-    assert _tick(wf, spawn)["judged"] == 1          # the sha was read from GitHub this tick
-    assert _tick(wf, spawn)["judged"] == 0          # ⛔ and never judged twice
+    # The judge's window stays alive across the ticks (a real running judge has one) so the
+    # watchdog does not reap it to cannot_verify — this test is about NOT re-spawning onto a
+    # judge that is still working, not about the CMX-81 retry.
+    win = (judge.judge_window_name("test-1"),)
+    assert _tick(wf, spawn, windows=win)["judged"] == 1   # the sha was read from GitHub this tick
+    assert _tick(wf, spawn, windows=win)["judged"] == 0   # ⛔ and never judged twice
     assert spawns == ["cafe1234"]
 
     # A rework pushes a NEW commit: that IS a new judgement — and it spends a rework round,
@@ -589,8 +593,112 @@ def test_the_judge_fires_ONCE_per_head_sha(tmp_path):
     with dispatcher._db() as conn:
         conn.execute("UPDATE runs SET judge_state=NULL WHERE task_id='abc123'")
         conn.commit()
-    assert _tick(wf, spawn, sha="f00dbabe")["judged"] == 1
+    assert _tick(wf, spawn, sha="f00dbabe", windows=win)["judged"] == 1
     assert spawns == ["cafe1234", "f00dbabe"]
+
+
+def test_a_cannot_verify_is_a_bounded_RETRY_not_a_permanent_retirement(tmp_path, monkeypatch):
+    """⚖️ CMX-81. An unknown (a flake, a gh timeout, a worktree that would not check out) must
+    cost a RETRY, never retire the commit from judgment for good.
+
+    The old `judge_sha == pr_head_sha` guard let a SINGLE transient cannot_verify keep the
+    judge from ever re-running on that commit — it then merged UNJUDGED, silently defeating
+    the judge on any flake. Now the SAME head is re-judged up to `judge_max_unknown_retries`
+    while it keeps coming back cannot_verify, and only then settles for a human.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None)
+
+    spawns: list[str] = []
+
+    def spawn(w, row, sha, conn):
+        # Mirror _spawn_judge's per-commit counter, then simulate the judge finishing with a
+        # flake — the exact row state the real cycle leaves behind (verified independently in
+        # test_spawn_judge_resets_the_unknown_count_on_a_new_sha_and_bumps_it_on_a_retry).
+        spawns.append(sha)
+        same = row["judge_sha"] == sha
+        prior = (row["judge_cannot_verify_tries"] or 0) if same else 0
+        tries = prior + 1 if (same and row["judge_state"] == judge.J_CANNOT_VERIFY) else prior
+        conn.execute("UPDATE runs SET judge_sha=?, judge_cannot_verify_tries=? WHERE task_id=?",
+                     (sha, tries, row["task_id"]))
+        conn.commit()
+        dispatcher.set_judge_state(row["task_id"], judge.J_CANNOT_VERIFY, "a flake")
+        return True
+
+    # initial + exactly 2 retries = 3 judgements on the same sha; the extra ticks do nothing.
+    for _ in range(5):
+        _tick(wf, spawn)
+    assert spawns == ["cafe1234"] * 3
+    run = dispatcher.resolve_run("abc123")
+    assert run["judge_state"] == judge.J_CANNOT_VERIFY
+    assert run["status"] == "awaiting_review"       # ⛔ never merged, never blocked
+
+
+def test_only_cannot_verify_re_fires_a_real_verdict_and_a_spent_budget_do_not(tmp_path, monkeypatch):
+    """The retry is for UNKNOWNS only. `clean`/`blocked` are verdicts and are terminal; a
+    cannot_verify past `judge_max_unknown_retries` settles for a human rather than spinning."""
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    fired: list[str] = []
+
+    def spawn(w, row, sha, conn):
+        fired.append(row["task_id"])
+        return True
+
+    for state, tries, expect_fire in [
+        (judge.J_CLEAN, 0, False),          # a real verdict — the judge is done here
+        (judge.J_BLOCKED, 0, False),        # a real verdict — it went back through rework
+        (judge.J_CANNOT_VERIFY, 0, True),   # unknown, budget untouched → retry
+        (judge.J_CANNOT_VERIFY, 1, True),   # unknown, one retry left → retry
+        (judge.J_CANNOT_VERIFY, 2, False),  # budget spent → a human's now
+    ]:
+        fired.clear()
+        with dispatcher._db() as conn:
+            conn.execute("DELETE FROM runs")
+            conn.commit()
+            _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None,
+                     judge_sha="cafe1234", judge_state=state, judge_cannot_verify_tries=tries)
+        _tick(wf, spawn)
+        assert bool(fired) is expect_fire, (state, tries)
+
+
+def test_spawn_judge_resets_the_unknown_count_on_a_new_sha_and_bumps_it_on_a_retry(tmp_path):
+    """The counter is per-COMMIT and `_spawn_judge` is its only writer: 0 on a fresh head,
+    +1 each time it re-launches on the same head that last came back cannot_verify."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    def _spawn(sha):
+        with dispatcher._db() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+            with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+                 patch.object(dispatcher, "render_prompt", return_value="x"), \
+                 patch.object(dispatcher, "_judge_vars", return_value={}), \
+                 patch.object(dispatcher, "_launch_agent", return_value=None):
+                assert dispatcher._spawn_judge(wf, row, sha, conn) is True
+
+    def _state():
+        r = dispatcher.resolve_run("abc123")
+        return r["judge_sha"], r["judge_state"], r["judge_cannot_verify_tries"]
+
+    _spawn("cafe1234")
+    assert _state() == ("cafe1234", judge.J_RUNNING, 0)    # first judgement on this commit
+
+    # a flake: the judge came back cannot_verify. Re-launching the SAME sha is retry #1.
+    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "flake")
+    _spawn("cafe1234")
+    assert _state() == ("cafe1234", judge.J_RUNNING, 1)
+
+    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "flake")
+    _spawn("cafe1234")
+    assert _state() == ("cafe1234", judge.J_RUNNING, 2)
+
+    # a rework pushes a NEW commit → a fresh judgement, and the count resets to 0.
+    _spawn("f00dbabe")
+    assert _state() == ("f00dbabe", judge.J_RUNNING, 0)
 
 
 def test_a_red_pr_is_not_judged_it_is_already_going_back(tmp_path):

@@ -271,6 +271,28 @@ def max_reworks() -> int:
         return max(0, int(os.environ.get("CHELA_MAX_REWORKS", "2")))
     except ValueError:
         return 2
+
+
+def judge_max_unknown_retries() -> int:
+    """How many times a judge that came back CANNOT VERIFY may be RE-RUN on the SAME commit.
+
+    ⚖️ CMX-81. ``cannot_verify`` is an UNKNOWN — a flake, a ``gh`` timeout, a worktree that
+    would not check out, a judge window that died — NOT a verdict. An unknown must cost a
+    BOUNDED retry, never permanently retire the commit from judgment: without this a single
+    transient failure lets a green PR merge UNJUDGED, silently defeating the judge on any
+    flake. This bounds the retries beyond the first attempt; a new head sha is a fresh
+    judgement and resets the count. Past the cap the run is left in ``awaiting_review`` for a
+    human, exactly where a settled cannot-verify leaves it — the loop surfaces rather than
+    spins (``max_reworks`` / ``rooms.MAX_HOPS`` are the same idea). ``0`` disables the retry:
+    the first cannot-verify is final.
+
+    Read per call, never latched at import: a policy knob an operator turns on a running
+    daemon, and a garbage value degrades to the default rather than crashing the tick.
+    """
+    try:
+        return max(0, int(os.environ.get("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")))
+    except ValueError:
+        return 2
 # ⚖️ The judge (see chela.judge) — the adversarial pass on a PR that reached
 # awaiting_review. The fleet-wide kill switch; a workflow turns it off for itself with
 # `judge: {enabled: false}`, and it is off anyway for any workflow with no `judge.test_cmd`

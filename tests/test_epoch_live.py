@@ -124,7 +124,12 @@ class Scratch:
         return next(w for w, n in discovery.get_windows_by_id().items() if n == name)
 
     def pane(self, wid: str) -> str:
-        return self._tmux("capture-pane", "-p", "-J", "-t", f"{self.session}:{wid}",
+        # -J joins soft-wrapped lines. Without it, a word that straddles the pane's
+        # width boundary is split by a newline ("Outcome UN\nKNOWN"), so a substring
+        # check like `"UNKNOWN" in pane` fails. Where that boundary lands depends on
+        # the message length — and the message embeds a tmux epoch (a timestamp), so
+        # it drifts run to run: the assertion passes locally and fails in CI at random.
+        return self._tmux("capture-pane", "-pJ", "-t", f"{self.session}:{wid}",
                           check=False).stdout
 
 
