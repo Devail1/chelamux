@@ -320,6 +320,15 @@ test('relabelling a session updates the pane title in place — it does NOT rebu
             'the pane title did not pick up the new session name');
         assert.equal(titleFor('@2').textContent, 'shell', 'the other pane is untouched');
 
+        // termTick's relabel path is surgical (_refreshPaneLabels) and never touches
+        // `_termSig`, so the assertions above prove the title updated in place but say
+        // NOTHING about the signature. The invariant the PR actually claims — the label
+        // must never leak into `_termSig` — only bites on the NEXT full render pass, when
+        // renderTerminals recomputes the sig and early-returns iff it is unchanged. So
+        // drive the REAL render: with the label in the sig this recomputes a fresh key,
+        // buildWall re-innerHTMLs the stage, and every iframe below becomes a new NODE.
+        await terminals.renderTerminals();
+
         // …and it reloaded nothing: same NODES, same src, no src ASSIGNMENT, same grid.
         assert.equal(grid(), gridEl, 'the stage was re-innerHTML-ed — the wall was rebuilt on a relabel');
         for (const wid of ['@1', '@2']) {
