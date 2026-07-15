@@ -811,14 +811,29 @@
   4. **Scope guard:** this is the **pull/awareness** feature ONLY — do NOT auto-`send_keys` the event into any agent session (autonomous push into the orchestrator is a separate, deliberate decision — the future "decisions inbox"). Toasts are for the dashboard viewer; the CLI is on-demand.
   **Landmines:** toast MUST be edge-triggered (transition only) or it spams every poll; don't regress the existing Kanban toasts (promote/merge) or the SSE stream; keep the Notifications mute working; `--awaiting` reuses the existing runs query. Keep `uv run ruff check chela tests` green + `uv run pytest -q`. **Reference:** `chela/dashboard/app.py` (`/api/events` SSE ~2573, `/api/dispatcher`), `chela/dashboard/static/style.css:1506` (`.kanban-toast`), the dashboard frontend JS that renders the Kanban + consumes `/api/events`, `chela/dispatcher.py` (run statuses: claimed/running/awaiting_review/done/failed), `chela/main.py` (`cmd_dispatch_runs`). **Verify:** (a) a run entering `awaiting_review` pops exactly ONE toast (not one per poll) with the PR link; (b) muting via Notifications suppresses it; (c) `chela dispatch-runs --awaiting` lists only awaiting-review runs with PR URLs. Unit-test the CLI filter + the edge-trigger (prev vs new status) logic; the toast DOM may need a light JS test or manual check.
 
-## Backlog (not yet dispatchable)
+## Backlog (not yet dispatchable — groomed 2026-07-15)
 
-- **Settings view — editable toggles (follow-up)**: in-UI write-back + daemon restart.
-- **Retire ccbot** ~07-19 after warm standby: `pm2 delete ccbot` + `pm2 save` + archive repo (ops).
-- `/kill` (explicit agent-kill + close topic) — optional, higher-stakes; `/unbind` `/history` `/usage` skipped (don't fit auto-topics).
-- Privacy scrub (forum IDs, `CCBOT_PANE_FALLBACK`, abs paths → env) before public `main`.
-- **Cost view** (cockpit): transcript tokens × price → $ per agent / run / fleet.
-- **Unified graph viewer** (cockpit): memory `[[wikilinks]]` + fleet; renderer = **Sigma.js + Graphology (MIT, WebGL)**, clean-room (not a GitNexus fork — PolyForm-NC). Colorblind-safe.
+_Each becomes a proper four-field brief (objective/boundaries/guardrails/verify) when picked for dispatch — the critic reviews it. Rough priority top-to-bottom within groups._
+
+**⏰ Time-boxed / ops**
+- **Retire ccbot** (~07-19, after warm standby) — `pm2 delete ccbot` + `pm2 save` + archive repo. Imminent; ops, not a code change.
+
+**🎭 Persona-layer follow-ups (from the cmx-90 review, 07-15)**
+- **Teardown the auto-orchestrator on lease expiry** — unregister/kill its window when the attended-lease lapses, so the action-gate on `contract.merge` isn't the *sole* post-expiry stop (the defense-in-depth #2 the judge called "defensible v1 to defer"). Small; safety polish.
+- **Fully-unattended orchestrator operation** — ⛔ GATED on process isolation (srt hook-transport BLOCKED — `reference_srt_sandbox_spike_2026-07-15`). The attended-lease keeps v1 supervised; unattended is the next tier and cannot ship until srt lands. Not buildable now — kept here as the known gate.
+
+**🔌 Fleet loose ends (handoff 07-15)**
+- **gate-unify** — the review-gate path and the merge-path are separate authorities; reconcile to one.
+- **Wall ttyd → `@0`** — terminal addressing on the Wall.
+- **`/kill`** — explicit agent-kill + close topic (higher-stakes; `/unbind` `/history` `/usage` skipped — don't fit auto-topics).
+
+**🚪 Path toward (a possible) public `main`** — ⛔ repo stays PRIVATE by decision (`project_chelamux_privacy_scrub_closed_2026-07-13`); this is prep only, not a decision to publish
+- **Privacy scrub** — forum IDs, `CCBOT_PANE_FALLBACK`, abs paths → env. (History also carries a forum id in 2 commits — LOW severity; a chat id is not a credential.)
+
+**📊 Cockpit / UX features**
+- **Settings view — editable toggles** — in-UI write-back + daemon restart.
+- **Cost view** — transcript tokens × price → $ per agent / run / fleet.
+- **Unified graph viewer** — memory `[[wikilinks]]` + fleet; renderer = **Sigma.js + Graphology** (MIT, WebGL), clean-room (not a GitNexus fork — PolyForm-NC). Colorblind-safe.
 
 ## Done
 
