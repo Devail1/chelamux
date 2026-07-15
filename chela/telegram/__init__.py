@@ -42,6 +42,12 @@ from chela.telegram.inbound import (
 )
 from chela.telegram.gatewatch import PermissionGateWatcher, StatusRelay
 from chela.telegram.monitor import TranscriptMonitor
+from chela.telegram.newsession import (
+    build_browser,
+    decode_new_callback,
+    launch_claude_window,
+    list_subdirs,
+)
 from chela.telegram.panescan import (
     AskUQ,
     Dialog,
@@ -101,4 +107,8 @@ __all__ = [
     "dispatched_window_ids",
     "live_agent_windows",
     "topic_name_for",
+    "build_browser",
+    "decode_new_callback",
+    "launch_claude_window",
+    "list_subdirs",
 ]

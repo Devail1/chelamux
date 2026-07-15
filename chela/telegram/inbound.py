@@ -35,7 +35,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import re
+from pathlib import Path
 from typing import Callable
 
 from chela import config, messenger
@@ -51,6 +53,13 @@ from chela.telegram.interactive import (
     select_keystrokes,
     select_keystrokes_relative,
     split_select_keys,
+)
+from chela.telegram.newsession import (
+    NEW_CB_PREFIX,
+    build_browser,
+    decode_new_callback,
+    launch_claude_window,
+    start_dir,
 )
 from chela.telegram.panescan import detect_askuserquestion
 
@@ -85,6 +94,7 @@ Sender = Callable[[str, str], bool]
 # ``/command`` falls through to the window's Claude Code prompt via send_tmux.
 # ``(name, description)`` pairs — descriptions are what Telegram shows in the menu.
 BRIDGE_COMMANDS: list[tuple[str, str]] = [
+    ("new", "Start a Claude session (browse to a folder)"),
     ("screenshot", "Snapshot the terminal (with control keys)"),
     ("esc", "Send Escape to interrupt the agent"),
 ]
@@ -229,6 +239,11 @@ class TopicRouter:
         self._topic_id = str(topic_id) if topic_id not in (None, "") else None
         self._sender = sender or messenger.send_tmux
 
+    @property
+    def chat_id(self) -> str | None:
+        """The bound supergroup chat id — the chat-only gate ``/new`` honours."""
+        return self._chat_id
+
     def resolve(
         self, chat_id: str | int | None, topic_id: str | int | None
     ) -> str | None:
@@ -281,6 +296,16 @@ class RegistryRouter:
         self._chat_id = str(registry.chat_id) if registry.chat_id is not None else None
         self._sender = sender or messenger.send_tmux
 
+    @property
+    def chat_id(self) -> str | None:
+        """The bound supergroup chat id — the chat-only gate ``/new`` honours.
+
+        The same CMX-8 security boundary :meth:`resolve` enforces, exposed one
+        step earlier so ``/new`` can be allowed from the *unbound* General topic
+        (which has no window binding) while still refusing a wrong chat.
+        """
+        return self._chat_id
+
     def resolve(
         self, chat_id: str | int | None, topic_id: str | int | None
     ) -> str | None:
@@ -325,6 +350,7 @@ def build_application(
     drafts=None,
     refresh_mirror=None,
     toggle_mirror=None,
+    launch_session=None,
 ):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
@@ -388,6 +414,19 @@ def build_application(
     key at all: it swaps the message's body between the live pane and the gate's full option
     list and re-draws it in place.
 
+    ``launch_session`` backs the ``/new`` command (:data:`BRIDGE_COMMANDS`): a
+    ``launch_session(cwd) -> (window_id, error)`` that opens a tmux window and
+    starts ``claude`` in it (default :func:`chela.telegram.newsession.
+    launch_claude_window`; injected for tests). Unlike every other handler, ``/new``
+    gates on the bound ``chat_id`` ALONE — never on a topic binding — so it works
+    from the forum's General topic, whose whole purpose here is "start a session
+    from anywhere". It opens a folder browser (:func:`chela.telegram.newsession.
+    build_browser`); ``/new <path>`` skips the browser and launches directly. It
+    binds NOTHING: a ``/new`` window is an ordinary agent window, so the auto-topics
+    reconcile provisions and binds its topic on the next tick, exactly like any other
+    agent. Browser navigation state (current path + subdir list) lives in PTB's
+    per-user ``context.user_data`` so callback payloads stay tiny.
+
     ``on_topic_closed`` (optional) is a callable ``(thread_id) -> None`` invoked on
     a ``StatusUpdate.FORUM_TOPIC_CLOSED`` service message — Slice B's auto-topics
     wires :meth:`chela.telegram.reconcile.TopicClosedHandler.handle` here to
@@ -419,6 +458,7 @@ def build_application(
     capture = capture or messenger.capture_pane
     send_escape = send_escape or messenger.send_escape
     send_key = send_key or messenger.send_key
+    launch_session = launch_session or launch_claude_window
     # The zero-keypress answer book (CMX-50) — the taps for the gates whose hooks the
     # daemon is holding open. This process is the only one that sees a tap, so this is the
     # only place the half-answered map for a multi-question gate can live.
@@ -603,6 +643,148 @@ def build_application(
             return
         ok = send_escape(window_id)
         await msg.reply_text("⎋ Sent Escape" if ok else "❌ Couldn't send Escape.")
+
+    # -- /new: launch a Claude session from anywhere -----------------------------
+    # State keys in PTB's per-user context.user_data: the folder currently being
+    # browsed and its subdir list (so a n:cd:<idx> tap resolves the folder by index
+    # without packing its name into the 64-byte callback). Per-user, so two
+    # operators browsing at once never cross wires.
+    _NEW_PATH, _NEW_DIRS = "new_path", "new_dirs"
+
+    def _new_markup(rows) -> "InlineKeyboardMarkup":
+        """A pure ``[[(label, cb), …]]`` from :func:`build_browser` → PTB markup."""
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(label, callback_data=cb) for (label, cb) in row]
+             for row in rows]
+        )
+
+    def _new_chat_ok(update) -> bool:
+        """``/new``'s gate: the bound CHAT only — never a topic binding (CMX-8).
+
+        Deliberately one step short of ``router.resolve``: ``/new`` must work from
+        the forum's General topic, which has no window binding, so it checks the
+        chat boundary and stops — the whole point is to start a session from a
+        topic that isn't bound to anything yet.
+        """
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        bound = router.chat_id
+        return bound is not None and chat_id is not None and str(chat_id) == bound
+
+    def _tilde(path) -> str:
+        """``path`` with the home prefix collapsed to ``~`` for a tidy reply."""
+        text = str(path)
+        home = str(Path.home())
+        if text == home:
+            return "~"
+        if text.startswith(home + os.sep):
+            return "~" + text[len(home):]
+        return text
+
+    async def _launch_and_reply(reply_to, cwd) -> None:
+        """Launch a Claude session in ``cwd`` and tell the operator what happened.
+
+        The bind is NOT done here: a ``/new`` window is an ordinary agent window,
+        so the auto-topics reconcile provisions and binds its topic on the next
+        tick — hence "its topic will appear shortly". Runs the launcher off the
+        event loop (it shells out to tmux).
+        """
+        try:
+            wid, err = await asyncio.to_thread(launch_session, str(cwd))
+        except Exception:  # a launch hiccup must not wedge the update queue
+            log.exception("/new launch failed for %s", cwd)
+            wid, err = None, "launch failed (see the daemon log)"
+        if wid is None:
+            await reply_to.reply_text(f"❌ {err}")
+            return
+        await reply_to.reply_text(
+            f"🚀 Started a Claude session in {_tilde(cwd)}.\n"
+            "Its topic will appear here shortly."
+        )
+
+    async def _on_new(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Open the folder browser, or launch directly when ``/new <path>`` is given."""
+        msg = update.message
+        if msg is None or not _new_chat_ok(update):
+            return  # wrong chat — stay silent, exactly like the other commands
+        arg = ""
+        if msg.text:
+            parts = msg.text.split(maxsplit=1)  # drop the "/new" (or "/new@bot") token
+            if len(parts) > 1:
+                arg = parts[1].strip()
+        if arg:  # explicit path — skip the browser, launch there
+            await _launch_and_reply(msg, arg)
+            return
+        base = start_dir()
+        text, rows, subdirs = build_browser(base)
+        if context.user_data is not None:
+            context.user_data[_NEW_PATH] = str(base)
+            context.user_data[_NEW_DIRS] = subdirs
+        await msg.reply_text(text, reply_markup=_new_markup(rows))
+
+    async def _on_new_cb(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Drive the ``/new`` folder browser: navigate, cancel, or launch here.
+
+        Every tap is answered so Telegram stops the button spinner — including one
+        gated out (wrong chat), the page-indicator ``noop``, and one landing on a
+        browser whose per-user state has expired. Navigation edits the SAME message
+        in place; ``✅ Start here`` launches and strips the keyboard so it can't be
+        double-tapped into two sessions.
+        """
+        query = update.callback_query
+        if query is None:
+            return
+        action = decode_new_callback(query.data or "")
+        if action is None:
+            return  # not ours — some other inline keyboard
+        if not _new_chat_ok(update):  # wrong chat — answer to stop the spinner, do nothing
+            await query.answer()
+            return
+        kind, value = action
+        data = context.user_data if context.user_data is not None else {}
+        current = Path(data.get(_NEW_PATH) or str(start_dir()))
+
+        if kind == "noop":
+            await query.answer()
+            return
+        if kind == "cancel":
+            await query.answer("Cancelled")
+            try:
+                await query.edit_message_text("✖ Cancelled.")
+            except Exception:  # message gone / unchanged — the cancel still stands
+                log.debug("could not edit the cancelled /new browser", exc_info=True)
+            return
+        if kind == "go":
+            await query.answer("🚀")
+            try:  # strip the keyboard first so it can't be tapped into a second session
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                log.debug("could not clear the /new browser keyboard", exc_info=True)
+            if query.message is not None:
+                await _launch_and_reply(query.message, current)
+            return
+
+        # Navigation: recompute the target folder + page and redraw in place.
+        page = 0
+        if kind == "up":
+            target = current.parent
+        elif kind == "cd":
+            dirs = data.get(_NEW_DIRS) or []
+            if value is None or value >= len(dirs):  # stale browser — nothing to enter
+                await query.answer()
+                return
+            target = current / dirs[value]
+        else:  # "pg"
+            target, page = current, (value or 0)
+        await query.answer()
+        text, rows, subdirs = build_browser(target, page)
+        if context.user_data is not None:
+            context.user_data[_NEW_PATH] = str(target)
+            context.user_data[_NEW_DIRS] = subdirs
+        try:
+            await query.edit_message_text(text, reply_markup=_new_markup(rows))
+        except Exception:  # unchanged text / deleted message — the state still advanced
+            log.debug("could not redraw the /new browser", exc_info=True)
 
     async def _on_key(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
         """Deliver a tapped control key to the window bound to the keyboard's topic.
@@ -883,6 +1065,7 @@ def build_application(
     application = Application.builder().token(token).post_init(_post_init).build()
     # Command handlers FIRST so /screenshot and /esc are intercepted here; the
     # catch-all text handler forwards every other message (and /command) onward.
+    application.add_handler(CommandHandler("new", _on_new))
     application.add_handler(CommandHandler("screenshot", _on_screenshot))
     application.add_handler(CommandHandler("esc", _on_esc))
     # AskUserQuestion taps (``qa:``) and mirror D-pad taps (``m:``) are matched FIRST
@@ -892,6 +1075,11 @@ def build_application(
     application.add_handler(CallbackQueryHandler(_on_qa, pattern=r"^qa:"))
     application.add_handler(
         CallbackQueryHandler(_on_mirror, pattern="^" + re.escape(MIRROR_CB_PREFIX))
+    )
+    # ``/new`` folder-browser taps (``n:``), matched by pattern so they route here
+    # and not to the pattern-less _on_key catch-all below.
+    application.add_handler(
+        CallbackQueryHandler(_on_new_cb, pattern="^" + re.escape(NEW_CB_PREFIX))
     )
     application.add_handler(CallbackQueryHandler(_on_key))
     # Media handlers BEFORE the text catch-all (PTB runs one handler per group):

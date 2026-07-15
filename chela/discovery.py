@@ -96,7 +96,7 @@ def ensure_session(session: str | None = None) -> bool:
     failed") even on success, so the exit code is ignored — ``has-session`` alone decides.
 
     A session must own at least one window, so the anchor window is named to match the
-    wall's own scheme (``shell-1``, cf. dashboard ``_next_shell_name``); passing ``-n``
+    wall's own scheme (``shell-1``, cf. :func:`chela.spawn.next_shell_name`); passing ``-n``
     is itself what pins automatic-rename off, so no follow-up option write is needed.
     """
     session = session or config.current_session()
