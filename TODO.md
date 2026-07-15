@@ -838,6 +838,7 @@ _Each becomes a proper four-field brief (objective/boundaries/guardrails/verify)
 - **Retire ccbot** (~07-19, after warm standby) — `pm2 delete ccbot` + `pm2 save` + archive repo. Imminent; ops, not a code change.
 
 **🎭 Persona-layer follow-ups (from the cmx-90 review, 07-15)**
+- **Critic must review the FULL task body, not just the checkbox line** — `_run_critic` feeds `task.title + task.raw`, but `task.raw` is only the `- [ ]` line, so the four-field check never sees the indented `OBJECTIVE:`/`Guardrails:`/`Verify:` sections and **false-flags them missing on every well-formed brief** (observed live on cmx-91's own advisory). Fix: capture the item's full indented body into the Task (tracker parser) and review that. Small, high-value — the field-check is near-useless until then.
 - **Teardown the auto-orchestrator on lease expiry** — unregister/kill its window when the attended-lease lapses, so the action-gate on `contract.merge` isn't the *sole* post-expiry stop (the defense-in-depth #2 the judge called "defensible v1 to defer"). Small; safety polish.
 - **Fully-unattended orchestrator operation** — ⛔ GATED on process isolation (srt hook-transport BLOCKED — `reference_srt_sandbox_spike_2026-07-15`). The attended-lease keeps v1 supervised; unattended is the next tier and cannot ship until srt lands. Not buildable now — kept here as the known gate.
 
