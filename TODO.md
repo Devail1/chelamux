@@ -2,6 +2,27 @@
 
 ## Open — CI drives the loop
 
+- [ ] **⚙️⚖️ CONTRACT-AS-CODE CORE — `chela merge` + `chela escalate`: turn the escalation contract from a doc the LLM is *asked* to follow into code it *cannot violate*.** 🔑 **This is the judge's proven trick generalized (see `docs/PERSONA_PATTERN.md`): the LLM proposes an action, CODE adjudicates whether it is allowed.** It is the load-bearing foundation the critic and the orchestrator-harness both build against, and — unlike process-isolation — it is **buildable now**: it bounds the *decision* blast-radius (`docs/ESCALATION_CONTRACT.md`).
+
+  🔑 **REUSE THE SEED, don't reinvent:** `chela/dispatcher.py::approve` (`~:1345`) is already a gate that **refuses on unreadable checks (unknown ≠ pass)** and reads CI/judge state. Extend *that* pattern; `chela review` (`main.py:~1827`) is the CLI shape to mirror.
+
+  **BUILD TWO GATED COMMANDS** (new subparsers in `chela/main.py`, logic in `chela/dispatcher.py`):
+
+  1. **`chela merge <run> --verified "<what you checked>"`** — the AUTONOMOUS gate, in code. It performs the squash-merge to `dev` **only if ALL hold**, else it REFUSES and points at `chela escalate`:
+     - CI **green** · judge **`clean`** · PR **open + mergeable** · base branch **== `dev`**.
+     - ⛔ **base `main` (or any non-`dev`) is a HARD REFUSE** — a NEVER-boundary rule, in code, not a warning. The orchestrator physically cannot merge to `main` through this command.
+     - ⛔ **FAIL CLOSED:** an unreadable CI state or an unknown/`cannot_verify`/`running` judge state is **not** green/clean → refuse (extend `approve`'s existing unknown≠pass behaviour).
+     - **`--verified` is REQUIRED and LOGGED** (provenance): code cannot check that the orchestrator ran its corrupt-each-guard pass, so it **records the asserted justification** to the event log — a merge with no logged justification is a bug. Be honest in the help text that this is an *audited assertion*, not a verified fact.
+     - On success: merge + the existing reconcile (close the run, strike the tracker). (Leave `pm2 restart` to the caller — out of scope.)
+  2. **`chela escalate <run> --reason "<text>"`** — the ONE structured path to the human. It emits a **structured `needs_decision` event into the decisions inbox** (`chela/inbox.py`) that surfaces to the orchestrator's human via the existing Telegram/dashboard path. ⛔ **NEVER inject text into a pane** (the CMX-79 injection class) — it is a structured event, not a keystroke.
+
+  ⛔ **GUARDRAILS:**
+  - ⛔ **Every gate is a guard — prove each one with corrupt-each-guard.** Corrupt the `base == dev` check (allow `main`) → a test MUST go RED. Corrupt the judge-`clean` requirement → RED. Corrupt the fail-closed-on-unknown → RED. A gate that survives corruption is decoration ([[feedback_proof_that_cannot_fail_bug_class]]). ⛔ Validate each mutation applied + parses.
+  - **This task BUILDS the gated commands; it does NOT yet restrict the orchestrator's tool surface** (removing raw `gh pr merge` from its reach is the harness's job, later). ⛔ Do not touch the dispatcher's own agent-merge/reconcile paths beyond reusing them.
+  - Do **not** re-implement CI/judge state reads — call the existing readers `approve` uses.
+
+  **Files:** `chela/main.py` (two subparsers) · `chela/dispatcher.py` (the merge gate, extending `approve`; the reconcile reuse) · `chela/inbox.py` (the structured `needs_decision` escalate event) · tests. **Verify:** `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` + `ruff check chela tests` green · **corrupt-each-guard on all three merge gates** · a live drive: `chela merge` merges a clean `dev`-targeted run, and REFUSES (pointing to `chela escalate`) a run that is judge-unclean OR `main`-targeted; `chela escalate` lands a decision event the human sees.
+
 - [x] **⚖️ THE JUDGE'S `cannot_verify` MUST MEAN *RETRY* (BOUNDED), NOT *DONE*. Today a transient/environmental unknown PERMANENTLY retires a commit from judgment — it then merges UNJUDGED, silently.** 🔑 **The judge is now load-bearing (CMX-75/80). This bug silently defeats it on any flake** — I had to hand-clear a `judge_sha` in the DB to re-judge cmx-76 after a one-off. **Unknown must cost a RETRY, not the whole adversarial pass.**
 
   **THE MECHANICAL BUG (all in `chela/dispatcher.py`).** `_spawn_judge` (`:2642`) writes `judge_sha = pr_head_sha` **FIRST, at launch** (`:2653`), *before* the judge can succeed or fail. The re-trigger query (`:2022`) is `... AND (judge_sha IS NULL OR judge_sha != pr_head_sha)`. So the instant `judge_sha == pr_head_sha`, **that commit is never judged again** — regardless of outcome. A `cannot_verify` leaves the run in `awaiting_review` with the sha burned, so the PR can be merged with **no adversarial pass ever completed, and nothing says so.** ⛔ **IT FAILS SILENT — a wrongly-BLOCKED PR screams; a never-judged one looks exactly like a cautious deferral.** (This is the same invisible-failure class as CMX-70/77 — read [[feedback_proof_that_cannot_fail_bug_class]].)
