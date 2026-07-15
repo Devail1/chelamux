@@ -125,6 +125,91 @@ def test_maybe_wake_launches_only_when_evaluate_says_go(monkeypatch):
     assert len(calls) == 1, "wake MUST be called exactly once when the gate says go"
 
 
+# --- the PRODUCTION call-site: the daemon loop actually calls maybe_wake each tick ------------
+
+def test_the_daemon_loop_calls_maybe_wake_on_the_inbox_tick(monkeypatch):
+    """🔴 WIRING (production call-site) — every test above exercises ``autolaunch`` in isolation,
+    so they ALL stay green even if ``cmd_run`` never calls it: the whole feature can be reverted
+    (``autolaunch.maybe_wake(...)`` → ``pass`` in ``chela/main.py``) with the suite green. This
+    drives ONE real tick of the daemon loop and proves the wire is connected — replace that call
+    with ``pass`` and this goes red, which is the only thing that keeps the feature wired in.
+    """
+    from chela import main
+
+    # install() no-op so pytest's own signal handlers survive; the end-of-tick wait() sets the
+    # stop flag so EXACTLY ONE iteration of the `while not stop.stopping` loop runs.
+    monkeypatch.setattr(main.GracefulShutdown, "install", lambda self: self)
+
+    def stop_after_one(self, _seconds):
+        self._event.set()
+        return True
+
+    monkeypatch.setattr(main.GracefulShutdown, "wait", stop_after_one)
+
+    # Keep the tick inert: no scheduler work, no window renames, no dispatch, no notify, no rooms.
+    monkeypatch.setattr(main.scheduler, "init", lambda: None)
+    monkeypatch.setattr(main.scheduler, "tick", lambda: 0)
+    monkeypatch.setattr(main.agent_manager, "reconcile_window_names", lambda: [])
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: False)
+    monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+
+    # The inbox branch must run (that is where the auto-launch call lives), and it must be armed.
+    monkeypatch.setattr(main.inbox, "enabled", lambda: True)
+    monkeypatch.setattr(main.inbox, "orchestrator_wid", lambda: None)
+    monkeypatch.setattr(main.inbox, "tick", lambda statuses: statuses)
+    monkeypatch.setattr(main.inbox, "load", lambda: {"queue": [{"kind": "run_review"}]})
+    monkeypatch.setattr(main.epoch, "current", lambda: "e1")
+    monkeypatch.setattr(main.autolaunch, "enabled", lambda: True)
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(main.autolaunch, "maybe_wake",
+                        lambda *a, **k: calls.append(a) or None)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert len(calls) == 1, (
+        "cmd_run did NOT call autolaunch.maybe_wake on the inbox tick — the feature is unwired "
+        "and can be reverted with the suite green"
+    )
+    # ...and it must feed the wire the LIVE inbox + statuses + epoch, not empty placeholders.
+    args = calls[0]
+    assert args[0] == {"queue": [{"kind": "run_review"}]}   # inbox.load()
+    assert args[1] == {}                                    # inbox.tick()'s status snapshot
+    assert args[2] == "e1"                                  # epoch.current()
+
+
+def test_the_daemon_loop_skips_maybe_wake_when_autolaunch_is_disabled(monkeypatch):
+    """The flip side of the wire: with the flag off (the default), the loop must NOT reach
+    maybe_wake — the same one-tick harness, autolaunch.enabled() False, so the guarded call is
+    skipped. Corrupt the `if autolaunch.enabled():` guard in cmd_run and this goes red.
+    """
+    from chela import main
+
+    monkeypatch.setattr(main.GracefulShutdown, "install", lambda self: self)
+    monkeypatch.setattr(main.GracefulShutdown, "wait",
+                        lambda self, _s: (self._event.set(), True)[1])
+    monkeypatch.setattr(main.scheduler, "init", lambda: None)
+    monkeypatch.setattr(main.scheduler, "tick", lambda: 0)
+    monkeypatch.setattr(main.agent_manager, "reconcile_window_names", lambda: [])
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: False)
+    monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+    monkeypatch.setattr(main.inbox, "enabled", lambda: True)
+    monkeypatch.setattr(main.inbox, "orchestrator_wid", lambda: None)
+    monkeypatch.setattr(main.inbox, "tick", lambda statuses: statuses)
+    monkeypatch.setattr(main.inbox, "load", lambda: {"queue": [{"kind": "run_review"}]})
+    monkeypatch.setattr(main.epoch, "current", lambda: "e1")
+    monkeypatch.setattr(main.autolaunch, "enabled", lambda: False)
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(main.autolaunch, "maybe_wake", lambda *a, **k: calls.append(a))
+
+    main.cmd_run(SimpleNamespace())
+
+    assert calls == [], "maybe_wake must not be reached when auto-launch is disabled"
+
+
 # --- the relaunch cooldown --------------------------------------------------------------------
 
 def test_recently_launched_reflects_the_stamp():
