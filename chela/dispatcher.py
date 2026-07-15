@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from chela import epoch, hold, judge
+from chela import critic, epoch, hold, judge
 from chela.config import (
     CHELA_DIR,
     DISPATCH_TICK_INTERVAL,
@@ -560,6 +560,15 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `judge_max_unknown_retries`.
         ("judge_cannot_verify_tries",
          "ALTER TABLE runs ADD COLUMN judge_cannot_verify_tries INTEGER"),
+        # 🧑‍⚖️ The critic (CMX-88) — the persona pattern's ADVISORY brief-review, run once at
+        # dispatch. `critic_notes` is the advisory it produced ("" ⇒ it ran and had nothing to
+        # add; NULL ⇒ it never ran — a different fact, and not to be shown as either an
+        # approval or a complaint); `critic_reviewed_at` is when. ⛔ Advisory-only by design:
+        # nothing in the dispatch path ever READS these back, so a wrong note — or a crashed
+        # critic — can never block, delay, or change a dispatch. A pre-migration row reads NULL
+        # in both, which is exactly "the critic never ran".
+        ("critic_notes", "ALTER TABLE runs ADD COLUMN critic_notes TEXT"),
+        ("critic_reviewed_at", "ALTER TABLE runs ADD COLUMN critic_reviewed_at TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -2206,7 +2215,86 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     )
     conn.commit()
     log.info("Dispatched task %s → %s (attempt %d)", task.id, window_name, attempt)
+
+    # 🧑‍⚖️ THE CRITIC (CMX-88) — advisory brief-review, AFTER the dispatch is already done.
+    # ⛔ Deliberately the last thing _spawn touches and swallowing every failure: the agent is
+    # launched, the row is 'running', the dispatch has HAPPENED — so nothing this call does or
+    # fails to do can block, delay, or change it. See _run_critic.
+    _run_critic(wf, task, conn)
     return True
+
+
+# The run statuses that mean "still in flight" for the critic's coupling check — a run that
+# owns a worktree and may be editing its target files right now. ``claimed``/``running`` are
+# the brief's "dispatched"/"running"; ``awaiting_review``/``changes_requested`` still hold the
+# worktree (the PR is open, a rework may re-spawn). ``done``/``failed``/``needs_human`` are
+# terminal — their files are no longer contested — so they are excluded.
+_CRITIC_INFLIGHT_STATUSES = ("claimed", "running", "awaiting_review", "changes_requested")
+
+
+def _run_critic(wf: WorkflowDef, task: Task, conn: sqlite3.Connection) -> None:
+    """🧑‍⚖️ Advisory brief-review at dispatch (persona-pattern step 3, ``chela.critic``).
+
+    ⛔ ADVISORY-ONLY, and it is ENFORCED here, not promised. This runs *after* the agent is
+    launched and the run row is already ``running``; every failure is SWALLOWED; and nothing
+    in the dispatch path ever reads ``critic_notes`` back. So a wrong opinion — or an outright
+    crash — costs at most a missing note, never a dispatch. This is the critic's version of the
+    judge's founding property ("the reviewing agent decides NOTHING"): a wrong critic cannot do
+    the one thing v1 forbids, because the code never gives its output a way to.
+
+    It reviews the **task-specific brief** — the TODO item the human actually wrote
+    (``task.title`` / ``task.raw``), NOT the rendered WORKFLOW.md prompt. The template is
+    boilerplate identical on every dispatch and already carries every field-signal, so
+    reviewing it would report "complete" for every task and the critic would never say
+    anything. The text that varies per task is the only text worth reviewing.
+
+    Writes ``critic_notes`` ("" ⇒ ran, nothing to add) and ``critic_reviewed_at`` when the
+    critic is on; a disabled critic writes NOTHING, leaving both NULL — "the critic never ran",
+    which is a different fact from "ran and clean".
+    """
+    try:
+        if not critic.critic_enabled(wf):
+            return
+        brief_text = f"{task.title}\n{task.raw}"
+        review = critic.review_brief(brief_text)
+        files = critic.target_files(brief_text)
+        inflight = _inflight_target_files(conn, task.id)
+        note = critic.compose_advisory(review, files, inflight)
+        conn.execute(
+            "UPDATE runs SET critic_notes=?, critic_reviewed_at=? WHERE task_id=?",
+            (note, _now(), task.id),
+        )
+        conn.commit()
+        if review.missing:
+            log.info("critic: %s brief names no explicit %s (advisory only — dispatch "
+                     "unaffected)", task.id, ", ".join(review.missing))
+    except Exception:
+        # ⛔ The whole point. A broken critic must never surface as a broken dispatch.
+        log.warning("critic: advisory brief-review failed for %s — dispatch is unaffected",
+                    task.id, exc_info=True)
+
+
+def _inflight_target_files(
+    conn: sqlite3.Connection, exclude_task_id: str
+) -> list[tuple[str, frozenset[str]]]:
+    """The target files of every run still in flight, keyed by short run id.
+
+    Excludes ``exclude_task_id`` — the run being dispatched right now, whose own row is already
+    ``running`` and must not be reported as colliding with itself. Each run's target files come
+    from its stored ``title`` (the TODO line), the same task-specific text the current brief is
+    parsed from, so the two sides couple on the same basis.
+    """
+    placeholders = ",".join("?" for _ in _CRITIC_INFLIGHT_STATUSES)
+    rows = conn.execute(
+        f"SELECT task_id, title FROM runs WHERE status IN ({placeholders}) AND task_id != ?",
+        (*_CRITIC_INFLIGHT_STATUSES, exclude_task_id),
+    ).fetchall()
+    out: list[tuple[str, frozenset[str]]] = []
+    for row in rows:
+        files = critic.target_files(row["title"] or "")
+        if files:
+            out.append((str(row["task_id"]), files))
+    return out
 
 
 def _launch_agent(

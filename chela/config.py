@@ -302,6 +302,15 @@ JUDGE_ENABLED = os.environ.get("CHELA_JUDGE", "true").strip().lower() not in (
     "false", "0", "no", "off",
 )
 
+# 🧑‍⚖️ The critic (see chela.critic) — the persona pattern's third instance: an ADVISORY
+# brief-review at the moment a task is picked for dispatch ("plan review is the new linter").
+# The fleet-wide kill switch; a workflow turns it off for itself with `critic: {enabled:
+# false}`. Unlike the judge it is advisory-only (it never blocks/delays/changes a dispatch)
+# and needs no `test_cmd`, so it defaults ON — "on" costs nothing it can get wrong.
+CRITIC_ENABLED = os.environ.get("CHELA_CRITIC", "true").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+
 _dispatch_raw = os.environ.get("CHELA_DISPATCH_WORKFLOWS", "")
 DISPATCH_WORKFLOWS = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()
