@@ -23,7 +23,7 @@
 
   **Files:** `chela/main.py` (two subparsers) · `chela/dispatcher.py` (the merge gate, extending `approve`; the reconcile reuse) · `chela/inbox.py` (the structured `needs_decision` escalate event) · tests. **Verify:** `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` + `ruff check chela tests` green · **corrupt-each-guard on all three merge gates** · a live drive: `chela merge` merges a clean `dev`-targeted run, and REFUSES (pointing to `chela escalate`) a run that is judge-unclean OR `main`-targeted; `chela escalate` lands a decision event the human sees.
 
-- [ ] **🪟 SIDEBAR POLISH (3 small changes, Liav after living in the CMX-71 sidebar): bigger collapsed icons · real session names · reorder nav.** All frontend; ⛔ two real traps below.
+- [x] **🪟 SIDEBAR POLISH (3 small changes, Liav after living in the CMX-71 sidebar): bigger collapsed icons · real session names · reorder nav.** All frontend; ⛔ two real traps below.
 
   1. **Bigger collapsed-rail icons.** In the *collapsed* sidebar (the icon rail), the nav + session icons are a touch too small — bump them modestly (CSS). ⛔ Don't overflow the rail width or misalign the session dots; don't touch the *expanded* layout.
   2. **Sessions show a REAL name, not the generic "claude window".** `_agentLabel` (`nav.js:~221` → `terminals.js::_displayLabel`) falls back to a generic label. Prefer a MEANINGFUL name, in order: the Claude **`a.session_name`** (already on the agent object — `agents.js:~292` uses it in a tooltip today), else the **project** (`_agentProject`, `nav.js:~211`, the same source topic-naming uses — CMX-12), else the window name; generic "claude window" only as the last resort. `escHtml`/`attrEsc` it (tmux/user-derived).
