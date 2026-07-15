@@ -2,6 +2,23 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🪟➌ NAV ICONS — convert the other four to lucide so they match the Feed icon's box (uniform width/height).** CMX-86 made Feed a lucide `rss` SVG (clean fixed box); Wall/Work/Knowledge/Agents are still **unicode glyphs** (`views.js`: Wall `▦`, Work `▤`, Knowledge `◆`, Agents `▢`) whose metrics differ, so they don't line up with Feed or each other. Liav wants all five uniform.
+
+  🔑 **REUSE the CMX-86 mechanism — do NOT rebuild it:** the `lucide:` field on a view (`views.js`), the `lucideIcon()`/nav renderer (`nav.js`), and the `_LUCIDE` inline-SVG set (`util.js`). Add a `lucide:` to each of the four views + its SVG path to `_LUCIDE`, exactly as Feed does. Keep the unicode `icon:` as the fallback.
+
+  **Suggested mappings** (pick recognizable lucide icons matching each view; refine if a better fit exists):
+  - **Wall** (terminal grid) → `layout-grid` (or `grid-2x2`)
+  - **Work** (dispatch/runs board, carries the PR badge) → `square-kanban` (or `list-todo`)
+  - **Knowledge** (memory/docs) → `book-open` (or `library`)
+  - **Agents** (agent windows) → `bot`
+
+  ⛔ **GUARDRAILS:**
+  - **Uniform box is the POINT** — all five nav icons must render at the same width/height (the lucide SVGs share a `viewBox`/stroke; ensure the CSS sizes them identically in BOTH expanded and collapsed states).
+  - Don't change the nav ORDER, labels, or the Feed icon. Don't go near `_termSig`/`_displayLabel` (the CMX-67/71 fleet-reload trap) — this is icons only.
+  - **Self-verify (now required by WORKFLOW step 3):** add a test that each of the four views emits its lucide `<svg>`, and corrupt it — drop one icon from `_LUCIDE` (or its `lucide:` field) and confirm the test goes **RED**. A guard that survives is decoration.
+
+  **Files:** `chela/dashboard/static/js/views.js` (four `lucide:` fields) · `chela/dashboard/static/js/util.js` (four SVG paths in `_LUCIDE`) · `chela/dashboard/static/style.css` only if the box needs equalizing · `tests/sidebar.test.mjs`. **Verify:** `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` + the `.mjs` suites + ruff green · **eyeball: all five NAVIGATE icons the same size and aligned, expanded and collapsed.**
+
 - [x] **🪟➋ SIDEBAR POLISH #2 (Liav, after CMX-85 shipped): enlarge the EXPANDED-sidebar icons to match the collapsed ones · swap the Feed glyph for lucide `rss`.** Two small frontend changes.
 
   1. **Expanded icons match collapsed.** CMX-85 enlarged the *collapsed*-rail icons; the *expanded* sidebar nav icons are now smaller than the collapsed ones. Bump the expanded nav-icon size (CSS, `style.css`) so they match. ⛔ Don't break alignment of the labels next to them, and don't touch the collapsed sizing CMX-85 just set.
