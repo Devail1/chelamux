@@ -191,6 +191,66 @@ test('colour is the SECOND channel, and it is colourblind-safe (Okabe-Ito)', () 
         assert.ok(CSS.includes(c), `the type cue dropped the Okabe-Ito colour ${c}`));
 });
 
+// --- 1c. 🔴 the Feed nav icon is the lucide `rss` mark, not the ≡ glyph ----------
+//
+// The old ≡ read exactly like the sidebar toggle. views.js now carries `lucide: 'rss'`
+// and _navItemHtml renders it through util.js's vendored SVG set. Driven through the
+// REAL renderNav() into the REAL #side-nav: revert the view to a glyph and no <svg>
+// is emitted; drop 'rss' from util.js's _LUCIDE and the <svg> comes out empty. Either
+// reddens this — it asserts the mark that RENDERS, not the string in the source.
+test('the Feed nav item renders the lucide rss SVG — not a glyph that apes the toggle', () => {
+    nav.renderNav();
+    const icon = document.querySelector('#side-nav .side-item[data-view="feed"] .side-item-icon');
+    assert.ok(icon, 'the Feed nav item is missing');
+    const svg = icon.querySelector('svg');
+    assert.ok(svg, 'the Feed icon is not an SVG — it fell back to a text glyph');
+    // The distinctive rss arc — present iff util.js still carries the `rss` paths.
+    assert.ok(/M4 11a9 9 0 0 1 9 9/.test(svg.innerHTML),
+        'the Feed icon SVG is empty — `rss` is not in util.js _LUCIDE');
+    assert.ok(!icon.textContent.includes('≡'), 'the old ≡ glyph is still rendered');
+});
+
+// --- 1d. 🔴 the EXPANDED sidebar icons are sized to MATCH the collapsed rail ------
+//
+// CMX-85 enlarged the collapsed-rail glyphs; CMX-86 brings the expanded ones up to
+// the same size so folding the sidebar never resizes an icon. jsdom does no layout,
+// so this reads the two rules off the CSS source and asserts they AGREE — which is
+// the actual requirement ("match the collapsed ones"), not a magic number. Change
+// one side and not the other and the equality breaks. (A bare `.side-item-icon`
+// declaration also feeds `.side-item.active .side-item-icon`, so anchor to the rule
+// that opens the property block.)
+function _ruleBody(selectorSource) {
+    const m = CSS.match(new RegExp(selectorSource + '\\s*\\{([^}]*)\\}'));
+    assert.ok(m, `CSS rule not found: ${selectorSource}`);
+    return m[1];
+}
+const _prop = (body, prop) => {
+    const m = body.match(new RegExp('(?:^|[;{\\s])' + prop + '\\s*:[^;]*?(\\d+)px'));
+    return m ? Number(m[1]) : null;
+};
+
+test('the expanded nav glyph is the SAME font-size as the collapsed rail', () => {
+    const expanded = _prop(_ruleBody('\\n\\.side-item-icon'), 'font-size');
+    const collapsed = _prop(_ruleBody('body\\.sidebar-collapsed \\.side-item-icon'), 'font-size');
+    assert.ok(expanded && collapsed, 'a nav-icon font-size is missing');
+    assert.equal(expanded, collapsed,
+        `expanded nav glyph (${expanded}px) does not match the collapsed rail (${collapsed}px)`);
+});
+
+test('the expanded type badge (.ar-type) is the SAME size as the collapsed rail', () => {
+    const exp = _ruleBody('\\n\\.ar-type');
+    const col = _ruleBody('body\\.sidebar-collapsed \\.ar-type');
+    assert.equal(_prop(exp, 'height'), _prop(col, 'height'), '.ar-type height differs from the collapsed rail');
+    assert.equal(_prop(exp, 'font-size'), _prop(col, 'font-size'), '.ar-type font-size differs from the collapsed rail');
+});
+
+test('the expanded status dot is the SAME size as the collapsed rail', () => {
+    const exp = _ruleBody('\\.agent-row\\.rich \\.term-status-dot');
+    const col = _ruleBody('body\\.sidebar-collapsed \\.agent-row\\.rich \\.term-status-dot');
+    assert.equal(_prop(exp, 'width'), _prop(col, 'width'), 'the status-dot width differs from the collapsed rail');
+    assert.equal(_prop(exp, 'height'), _prop(col, 'height'), 'the status-dot height differs from the collapsed rail');
+});
+
 // --- 2. 🔴 one control, two behaviours — and the desktop state survives a reload --
 
 test('the desktop rail RESTORES itself from the last session', () => {

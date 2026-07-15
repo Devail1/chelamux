@@ -100,7 +100,7 @@ function _navItemHtml(v) {
     // is collapsed to its icon rail.
     return `<div class="side-item" data-view="${attrEsc(v.id)}" title="${attrEsc(v.label || v.id)}"
         onclick="chela.selectView(this.dataset.view)">
-        <span class="side-item-icon">${escHtml(v.icon || '')}</span>
+        <span class="side-item-icon">${v.lucide ? lucideIcon(v.lucide) : escHtml(v.icon || '')}</span>
         <span class="side-item-label">${escHtml(v.label || v.id)}</span>
         ${badges ? `<span class="side-badges">${badges}</span>` : ''}
     </div>`;
