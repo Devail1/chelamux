@@ -320,6 +320,15 @@ ORCHESTRATOR_ENABLED = os.environ.get("CHELA_ORCHESTRATOR", "false").strip().low
     "true", "1", "yes", "on",
 )
 
+# 🎭🔑 The ACTOR stamp — how a chela session names itself to the contract gate (chela.contract).
+# The auto-launched orchestrator exports CHELA_ACTOR=auto-orchestrator into its window (alongside
+# CHELA_WID) so that `chela merge`, run from THAT session, requires a live attended-lease of it:
+# it is auto-*launched*, and the lease keeps its autonomous ACTIONS attended too, not just its
+# start. A human's own `chela merge` carries no such stamp, so the lease gate never applies to a
+# human — the human's presence IS the attendance. Read live at merge-time, never latched here.
+ACTOR_ENV = "CHELA_ACTOR"
+AUTO_ORCHESTRATOR_ACTOR = "auto-orchestrator"
+
 _dispatch_raw = os.environ.get("CHELA_DISPATCH_WORKFLOWS", "")
 DISPATCH_WORKFLOWS = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()

@@ -220,11 +220,19 @@ act; judgment or security or irreversible → ask.** That is the whole contract.
   *cannot* violate through this surface.
 - **v0.3 (CMX-90)** — the orchestrator is **auto-launched**, inbox-woken and gated by a human's
   **attended-lease** (`chela/personas/autolaunch.py` + `lease.py`). This is the buildable-now form
-  of "attended-autonomous": auto-launch fires only while a human's bounded, self-expiring lease is
-  active (`chela orchestrator attend`), so the orchestrator is never *unattended* even though it is
-  auto-*launched*. It honours the line above — the lease is a **judgment/supervision** guardrail,
-  NOT the blast-radius one. **Isolation stays the hard gate** on ever dropping the lease and running
-  truly unattended; auto-launch under a lease does not cross it. OFF by default (`CHELA_ORCHESTRATOR`).
+  of "attended-autonomous", and the lease gates the orchestrator at **two** points, not one:
+  - **launch** — auto-launch fires only while the lease is active (`autolaunch.should_launch`); and
+  - **action** — the auto-launched orchestrator's `chela merge` is **itself** lease-gated. It stamps
+    `CHELA_ACTOR=auto-orchestrator` into its window, and `contract.merge` refuses that actor's merge
+    on a stale/absent lease (→ it must `chela escalate` instead). So even if the lease lapses *after*
+    launch, the orchestrator cannot *act* unattended — the merge is refused, not performed. A human's
+    own `chela merge` carries no such stamp and is never gated: the human IS the attendance.
+
+  That is what makes "never *unattended*" true and not merely asserted — the launch gate stops it
+  *starting* unattended; the action gate stops it *acting* unattended. It honours the line above —
+  the lease is a **judgment/supervision** guardrail, NOT the blast-radius one. **Isolation stays the
+  hard gate** on ever dropping the lease and running truly unattended; auto-launch under a lease does
+  not cross it. OFF by default (`CHELA_ORCHESTRATOR`).
 - **Next**: encode nothing new into the taxonomy (CMX-90 changed *when* a supervised orchestrator
   is woken, not *what* it may decide); treat **isolation** as the explicit blocker on ever flipping
   the orchestrator from lease-attended to fully unattended.

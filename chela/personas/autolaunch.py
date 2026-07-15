@@ -19,6 +19,13 @@ Two design choices bound this v1, both straight from ``docs/ESCALATION_CONTRACT.
   let it lapse, and the gate closes. The orchestrator is thus *attended-autonomous* — it acts
   autonomously within the lease, but never *unattended*.
 
+  ⛔ This module gates only the **launch** (don't *start* unattended). The matching **action**
+  gate — the load-bearing half — lives in :func:`chela.contract.merge`: the window this module
+  spawns exports ``CHELA_ACTOR=auto-orchestrator``, and ``contract.merge`` refuses that actor's
+  merge whenever the lease is stale/absent, forcing a ``chela escalate`` instead. So a lease that
+  lapses *after* launch still stops the orchestrator from *acting* — the merge is refused, not
+  performed. Two gates, one lease: launch here, action there.
+
 ⛔ **The decision is a pure, fail-closed function** (:func:`should_launch`) — the same discipline
 as the merge gate. Every one of its inputs must hold or the launch does not fire, and *any*
 unknown resolves to "do not launch". A wrong reading never spawns an orchestrator it should not;
@@ -202,9 +209,14 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
     wid = out.stdout.strip() if isinstance(out.stdout, str) else ""
     target = wid if re.fullmatch(r"@\d+", wid) else WINDOW_NAME
     if re.fullmatch(r"@\d+", target):
+        # Export CHELA_WID (self-identity) AND CHELA_ACTOR (the actor stamp) into the pane shell
+        # BEFORE claude starts, so both propagate to every `chela …` the orchestrator runs. The
+        # actor stamp is load-bearing: it is how contract.merge knows THIS merge came from the
+        # auto-launched orchestrator and must therefore hold a live attended-lease to proceed.
         subprocess.run(
             ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target}",
-             f"export CHELA_WID={target}", "Enter"],
+             f"export CHELA_WID={target} {config.ACTOR_ENV}={config.AUTO_ORCHESTRATOR_ACTOR}",
+             "Enter"],
             check=True, capture_output=True,
         )
     # The persona is its runnable system prompt. ``--append-system-prompt`` loads it as the

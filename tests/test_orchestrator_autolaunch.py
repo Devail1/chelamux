@@ -6,6 +6,9 @@ should have been withheld fire — and prove ``maybe_wake`` only spawns when the
 """
 from __future__ import annotations
 
+import subprocess
+from types import SimpleNamespace
+
 import pytest
 
 from chela import config, inbox
@@ -137,6 +140,30 @@ def test_recently_launched_is_false_on_a_corrupt_stamp():
     autolaunch._state_path().write_text("nonsense", encoding="utf-8")
     # fail-OPEN here by design (a corrupt stamp must not WITHHOLD an otherwise-armed launch)
     assert autolaunch.recently_launched(now=1000.0 + 10) is False
+
+
+# --- the spawn stamps the ACTOR: the wiring the action-gate depends on ------------------------
+
+def test_the_spawned_window_exports_the_auto_orchestrator_actor_stamp(monkeypatch):
+    """🔴 ACTION-GATE WIRING — the launched window MUST export CHELA_ACTOR=auto-orchestrator, or
+    ``contract.merge`` can never tell an auto-orchestrator merge apart from a human's and the
+    attended-lease action-gate silently never fires in production. Drop the actor from the export
+    in ``_spawn_orchestrator_window`` and this goes red."""
+    sent: list[str] = []
+
+    def fake_run(argv, *a, **k):
+        if argv[:2] == ["tmux", "new-window"]:
+            return SimpleNamespace(stdout="@42\n", returncode=0)
+        if argv[:2] == ["tmux", "send-keys"]:
+            sent.append(argv[4])          # the keystrokes being sent to the pane
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    target = autolaunch._spawn_orchestrator_window("/tmp/repo")
+    assert target == "@42"
+    export = next((s for s in sent if "export CHELA_WID" in s), "")
+    assert f"{config.ACTOR_ENV}={config.AUTO_ORCHESTRATOR_ACTOR}" in export, sent
+    assert "CHELA_WID=@42" in export      # self-identity still exported alongside
 
 
 # --- orchestrator_live(): maps the inbox address state ----------------------------------------
