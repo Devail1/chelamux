@@ -26,10 +26,10 @@ const src = f => readFileSync(join(JS_DIR, f), 'utf8');
 function fakeRegistry() {
     return [
         { id: 'feed', label: 'Feed', icon: '≡' },
-        { id: 'agents', label: 'Agents', icon: '▢' },
         { id: 'terminals', label: 'Wall', icon: '▦', enabled: ctx => !!ctx.terminalsOn },
         { id: 'work', label: 'Work', icon: '▤', badges: [{ id: 'side-runs-count' }] },
         { id: 'knowledge', label: 'Knowledge', icon: '◆' },
+        { id: 'agents', label: 'Agents', icon: '▢' },
         { id: 'agent-detail', label: 'Agent', virtual: true },
     ];
 }
@@ -42,7 +42,7 @@ test('the sidebar and the palette both derive from the registry — same views, 
     const views = fakeRegistry();
     const nav = navViews(views, CTX).map(v => v.id);
     const palette = paletteViews(views, CTX).map(v => v.id);
-    assert.deepEqual(nav, ['feed', 'agents', 'terminals', 'work', 'knowledge']);
+    assert.deepEqual(nav, ['feed', 'terminals', 'work', 'knowledge', 'agents']);
     assert.deepEqual(palette, nav);
 });
 
@@ -63,7 +63,7 @@ test('REMOVING a view is one registry deletion — it leaves the nav, the palett
     assert.ok(!navViews(views, CTX).some(v => v.id === 'knowledge'));
     assert.ok(!paletteViews(views, CTX).some(v => v.id === 'knowledge'));
     // …and nothing else is disturbed: the other four still stand.
-    assert.deepEqual(navViews(views, CTX).map(v => v.id), ['feed', 'agents', 'terminals', 'work']);
+    assert.deepEqual(navViews(views, CTX).map(v => v.id), ['feed', 'terminals', 'work', 'agents']);
 });
 
 test('a virtual view (agent-detail) is reachable but is NOT a nav item or a palette entry', () => {
@@ -77,7 +77,7 @@ test('a disabled view vanishes from the chrome (the Wall, when terminals are off
     const views = fakeRegistry();
     const ids = navViews(views, { terminalsOn: false }).map(v => v.id);
     assert.ok(!ids.includes('terminals'));
-    assert.deepEqual(ids, ['feed', 'agents', 'work', 'knowledge']);
+    assert.deepEqual(ids, ['feed', 'work', 'knowledge', 'agents']);
 });
 
 test('entering a view tells every OTHER view to let go — no if/else chain to extend', () => {
