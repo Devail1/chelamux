@@ -77,9 +77,11 @@ acts through gated `chela` commands, not raw `gh`/shell.** Its tool surface is r
   slice of the contract, and read-only investigation.
 - ⛔ **Not** reachable: raw `gh pr merge`, `pkill`, `git push origin main`, an unrestricted shell.
 
-The seed already exists: **`chela review --approve` refuses on unreadable checks** (unknown ≠ pass).
-The work is to extend that one pattern across the surface — a `chela merge` that enforces the full
-autonomous gate, and a `chela escalate` that is the *one* structured way to reach the human.
+The seed already existed — **`chela review --approve` refuses on unreadable checks** (unknown ≠
+pass) — and that one pattern is now extended across the surface (`chela/contract.py`, CMX-84):
+**`chela merge`** enforces the full autonomous gate (base = `dev`, judge `clean`, CI green,
+MERGEABLE — all read live, no `--force`), and **`chela escalate`** is the *one* structured way to
+reach the human. A wrong LLM opinion cannot reach `gh pr merge` raw, so it cannot merge to `main`.
 
 > A wrong LLM opinion can't wrongly-block (judge); can't wrongly-gate a brief (critic — only facts
 > gate); can't take an unsafe action (orchestrator — only the safe envelope is reachable). One
@@ -126,8 +128,11 @@ available now, and it is the larger share of the risk.
 ## Build order (implied)
 
 1. **Judge** — done. The reference.
-2. **The contract-as-code core** — extract the mechanical gates into `chela merge` / `chela escalate`,
-   extending `chela review --approve`. This is the load-bearing new work.
+2. **The contract-as-code core** — **built** (`chela/contract.py`, CMX-84): the mechanical gates
+   are extracted into `chela merge` / `chela escalate`, extending the `chela review --approve`
+   pattern. `chela merge` refuses unless *base = `dev` (NEVER main/master) AND judge = `clean`
+   AND CI green AND MERGEABLE*, reads every GitHub fact live, has **no `--force`**, and logs each
+   merge with its justification; `chela escalate` records the decision and pushes it to the human.
 3. **Critic** — structural checks (code, can gate) + advisory (LLM); reuses the judge's
    propose-then-adjudicate shape.
 4. **Orchestrator harness** — the persona-loaded session whose action surface *is* the gated

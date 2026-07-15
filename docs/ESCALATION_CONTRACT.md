@@ -140,6 +140,13 @@ The plumbing already exists — this contract just decides *when* to use it:
 The auto-orchestrator's **system prompt encodes this contract**; the inbox + phone-gates enforce
 that its escalations actually reach a human.
 
+As of CMX-84 the two load-bearing decisions are **enforced in code**, not just prompted
+(`chela/contract.py`, see `PERSONA_PATTERN.md`): **`chela merge`** is the Autonomous merge tier
+made mechanical — it refuses unless *base = `dev` (NEVER `main`/`master`) AND judge `clean` AND CI
+green AND MERGEABLE*, reads every GitHub fact live, has **no `--force`** (overriding a gate is an
+escalation, not an autonomous act), and logs each merge with its justification; **`chela escalate`**
+is the *one* structured way to reach the human, recording the decision and pushing it to the phone.
+
 ---
 
 ## Shared-pane isolation — the blast-radius prerequisite (the other half)
@@ -206,7 +213,11 @@ act; judgment or security or irreversible → ask.** That is the whole contract.
 
 ## Status / next
 
-- **v0.1** — captures observed practice. Not yet enforced in code.
+- **v0.1** — captures observed practice.
+- **v0.2 (CMX-84)** — the merge gate and the escalation path are enforced in code
+  (`chela merge` / `chela escalate`, `chela/contract.py`). The NEVER line (no merge to `main`) and
+  the Autonomous merge gate are no longer things the LLM is *asked* to honour — they are things it
+  *cannot* violate through this surface.
 - **Next**: encode the Autonomous/Escalate/Never taxonomy into the orchestrator persona prompt;
   build the **critic** first (advisory, low-risk); treat **isolation** as the explicit blocker on
   ever flipping the orchestrator from human-attended to auto-launched.
