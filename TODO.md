@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **🪟➌ NAV ICONS — convert the other four to lucide so they match the Feed icon's box (uniform width/height).** CMX-86 made Feed a lucide `rss` SVG (clean fixed box); Wall/Work/Knowledge/Agents are still **unicode glyphs** (`views.js`: Wall `▦`, Work `▤`, Knowledge `◆`, Agents `▢`) whose metrics differ, so they don't line up with Feed or each other. Liav wants all five uniform.
+- [x] **🪟➌ NAV ICONS — convert the other four to lucide so they match the Feed icon's box (uniform width/height).** CMX-86 made Feed a lucide `rss` SVG (clean fixed box); Wall/Work/Knowledge/Agents are still **unicode glyphs** (`views.js`: Wall `▦`, Work `▤`, Knowledge `◆`, Agents `▢`) whose metrics differ, so they don't line up with Feed or each other. Liav wants all five uniform.
 
   🔑 **REUSE the CMX-86 mechanism — do NOT rebuild it:** the `lucide:` field on a view (`views.js`), the `lucideIcon()`/nav renderer (`nav.js`), and the `_LUCIDE` inline-SVG set (`util.js`). Add a `lucide:` to each of the four views + its SVG path to `_LUCIDE`, exactly as Feed does. Keep the unicode `icon:` as the fallback.
 
