@@ -26,23 +26,45 @@ const src = f => readFileSync(join(JS_DIR, f), 'utf8');
 function fakeRegistry() {
     return [
         { id: 'feed', label: 'Feed', icon: '≡' },
-        { id: 'agents', label: 'Agents', icon: '▢' },
         { id: 'terminals', label: 'Wall', icon: '▦', enabled: ctx => !!ctx.terminalsOn },
         { id: 'work', label: 'Work', icon: '▤', badges: [{ id: 'side-runs-count' }] },
         { id: 'knowledge', label: 'Knowledge', icon: '◆' },
+        { id: 'agents', label: 'Agents', icon: '▢' },
         { id: 'agent-detail', label: 'Agent', virtual: true },
     ];
 }
 
 const CTX = { terminalsOn: true };
 
+// The declaration order of the REAL views.js — pulled from source because the
+// module can't be imported here (its hooks reach for `window`). This is the one
+// property fakeRegistry() cannot vouch for: reorder two entries in views.js and
+// every fake-based test below stays green. So we read the real order from disk
+// and every order assertion checks against IT, not a hand-copy.
+function shippedOrder() {
+    const body = src('views.js').split('export const VIEWS')[1];
+    return [...body.matchAll(/^\s+id:\s*'([^']+)'/gm)].map(m => m[1]);
+}
+
 // --- the registry is the ONE declaration ------------------------------------
+
+// GUARD: the shipped nav order is Feed · Wall · Work · Knowledge · Agents, with
+// agent-detail as the trailing virtual drill-in. fakeRegistry() copies views.js
+// by hand, so on its own it proves nothing about what actually ships — swap two
+// entries in views.js and the fake stays put. This ties the fake to the real
+// file: if they diverge (a reorder, an add, a delete in views.js), it goes red.
+test('the REAL views.js declares the shipped order — Feed·Wall·Work·Knowledge·Agents', () => {
+    assert.deepEqual(shippedOrder(), ['feed', 'terminals', 'work', 'knowledge', 'agents', 'agent-detail']);
+    // …and fakeRegistry() is an HONEST copy of it — same ids, same order — so the
+    // derivation tests below are exercising the order that actually ships.
+    assert.deepEqual(fakeRegistry().map(v => v.id), shippedOrder());
+});
 
 test('the sidebar and the palette both derive from the registry — same views, same order', () => {
     const views = fakeRegistry();
     const nav = navViews(views, CTX).map(v => v.id);
     const palette = paletteViews(views, CTX).map(v => v.id);
-    assert.deepEqual(nav, ['feed', 'agents', 'terminals', 'work', 'knowledge']);
+    assert.deepEqual(nav, ['feed', 'terminals', 'work', 'knowledge', 'agents']);
     assert.deepEqual(palette, nav);
 });
 
@@ -63,7 +85,7 @@ test('REMOVING a view is one registry deletion — it leaves the nav, the palett
     assert.ok(!navViews(views, CTX).some(v => v.id === 'knowledge'));
     assert.ok(!paletteViews(views, CTX).some(v => v.id === 'knowledge'));
     // …and nothing else is disturbed: the other four still stand.
-    assert.deepEqual(navViews(views, CTX).map(v => v.id), ['feed', 'agents', 'terminals', 'work']);
+    assert.deepEqual(navViews(views, CTX).map(v => v.id), ['feed', 'terminals', 'work', 'agents']);
 });
 
 test('a virtual view (agent-detail) is reachable but is NOT a nav item or a palette entry', () => {
@@ -77,7 +99,7 @@ test('a disabled view vanishes from the chrome (the Wall, when terminals are off
     const views = fakeRegistry();
     const ids = navViews(views, { terminalsOn: false }).map(v => v.id);
     assert.ok(!ids.includes('terminals'));
-    assert.deepEqual(ids, ['feed', 'agents', 'work', 'knowledge']);
+    assert.deepEqual(ids, ['feed', 'work', 'knowledge', 'agents']);
 });
 
 test('entering a view tells every OTHER view to let go — no if/else chain to extend', () => {

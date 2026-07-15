@@ -2349,10 +2349,15 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
     body.sidebar-collapsed .side-item,
     body.sidebar-collapsed .agent-row { justify-content: center; gap: 5px; padding: 8px 4px; }
-    body.sidebar-collapsed .side-item-icon { flex: 0 0 auto; font-size: 14px; }
+    /* With only glyphs left, the rail has room to breathe — bump the nav icon,
+       the session type letter and its status dot a notch so they read at a
+       glance. Stays well inside the 60px column (dot 10 + gap 5 + type 18). */
+    body.sidebar-collapsed .side-item-icon { flex: 0 0 auto; font-size: 18px; }
     body.sidebar-collapsed .agent-row.rich { align-items: center; }
-    body.sidebar-collapsed .agent-row.rich .term-status-dot { margin-top: 0; }
-    body.sidebar-collapsed .ar-type { margin-top: 0; }
+    body.sidebar-collapsed .agent-row.rich .term-status-dot { margin-top: 0; width: 10px; height: 10px; }
+    body.sidebar-collapsed .ar-type {
+        margin-top: 0; flex-basis: 18px; height: 18px; font-size: 11px;
+    }
 
     /* Grouped sessions flatten: no header to hang the nesting guide off. */
     body.sidebar-collapsed .group-rows { margin-left: 0; padding-left: 0; border-left: 0; }

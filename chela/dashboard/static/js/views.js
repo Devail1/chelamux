@@ -11,7 +11,7 @@
 // hooks come from this array, the global refresh calls this array's `tick`, and
 // the palette lists this array. Deleting a view is deleting its entry below.
 //
-// The five views are Feed · Agents · Wall · Work · Knowledge. `agent-detail` is
+// The five views are Feed · Wall · Work · Knowledge · Agents. `agent-detail` is
 // a virtual drill-in — reachable, no nav item. See viewreg.js for the entry shape.
 // ---------------------------------------------------------------------------
 import { refreshAgents } from './agents.js';
@@ -32,12 +32,6 @@ export const VIEWS = [
         // the fallback that keeps it correct if the stream never connects.
         enter: () => enterFeed(),
         tick: () => tickFeed(),
-    },
-    {
-        id: 'agents',
-        label: 'Agents',
-        icon: '▢',
-        tick: () => refreshAgents(),
     },
     {
         id: 'terminals',
@@ -71,6 +65,12 @@ export const VIEWS = [
         // was last open.
         enter: () => { if (typeof knBackToGlance === 'function' && _kn.tree) knBackToGlance(); },
         tick: () => refreshKnowledge(),
+    },
+    {
+        id: 'agents',
+        label: 'Agents',
+        icon: '▢',
+        tick: () => refreshAgents(),
     },
     {
         id: 'agent-detail',

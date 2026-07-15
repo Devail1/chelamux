@@ -287,6 +287,64 @@ test('collapsing the sidebar re-fits the wall — it does NOT rebuild it', async
     assert.equal(document.body.classList.contains('sidebar-collapsed'), false, 'left clean');
 });
 
+// --- 1d. 🔴 RELABELLING A SESSION RELOADS NO TERMINAL ----------------------------
+//
+// CMX-85 gave a session a REAL name (its Claude session_name / repo) instead of a
+// generic "claude"/"shell". `_displayLabel` is the shared formatter for both the
+// sidebar row AND the wall pane title, and what it resolves to now depends on the
+// agent's session_name/cwd — not just its window id. THE TRAP: if that new input
+// leaks into `_termSig` (mode | selected | sorted wids), buildWall re-innerHTMLs the
+// stage and every live terminal in the fleet reloads on a mere relabel. `_termSig`
+// is keyed on window ids alone by design; this proves the CMX-85 change kept it so —
+// the title updates in place, the iframes are the same NODES, and nobody wrote .src.
+
+test('relabelling a session updates the pane title in place — it does NOT rebuild the wall', async () => {
+    const before = { '@1': frameFor('@1'), '@2': frameFor('@2') };
+    assert.equal(iframes().length, 2, 'no iframes on the wall would make this test vacuous');
+    const srcs = { '@1': before['@1'].src, '@2': before['@2'].src };
+    const gridEl = grid();
+    const titleFor = wid => document.querySelector(`.grid-stack-item[gs-id="${wid}"] .pane-title`);
+    assert.equal(titleFor('@1').textContent, 'shell', 'the fixture starts on the generic label');
+    const srcWrites = [];
+    Object.values(before).forEach(f => watchSrcWrites(f, srcWrites));
+
+    // The relabel: @1's Claude session gets a real name. Mutate the /api/agents
+    // fixture and run the REAL poll (termTick → setAgentsCache → _refreshPaneLabels).
+    const saved = AGENTS[0].session_name;
+    AGENTS[0].session_name = 'porting the wall';
+    try {
+        await terminals.termTick();
+
+        // The relabel REALLY landed — otherwise "nothing rebuilt" is a tautology.
+        assert.equal(titleFor('@1').textContent, 'porting the wall',
+            'the pane title did not pick up the new session name');
+        assert.equal(titleFor('@2').textContent, 'shell', 'the other pane is untouched');
+
+        // termTick's relabel path is surgical (_refreshPaneLabels) and never touches
+        // `_termSig`, so the assertions above prove the title updated in place but say
+        // NOTHING about the signature. The invariant the PR actually claims — the label
+        // must never leak into `_termSig` — only bites on the NEXT full render pass, when
+        // renderTerminals recomputes the sig and early-returns iff it is unchanged. So
+        // drive the REAL render: with the label in the sig this recomputes a fresh key,
+        // buildWall re-innerHTMLs the stage, and every iframe below becomes a new NODE.
+        await terminals.renderTerminals();
+
+        // …and it reloaded nothing: same NODES, same src, no src ASSIGNMENT, same grid.
+        assert.equal(grid(), gridEl, 'the stage was re-innerHTML-ed — the wall was rebuilt on a relabel');
+        for (const wid of ['@1', '@2']) {
+            assert.equal(frameFor(wid), before[wid],
+                `${wid}'s iframe is a NEW NODE — relabelling reloaded the fleet (label leaked into _termSig)`);
+            assert.equal(frameFor(wid).src, srcs[wid], `${wid}'s src was rewritten`);
+            assert.ok(frameFor(wid).isConnected, 'and it never left the document');
+        }
+        assert.deepEqual(srcWrites, [],
+            'nobody so much as ASSIGNED .src — an assignment reloads the terminal even if the URL is identical');
+    } finally {
+        AGENTS[0].session_name = saved;
+        await terminals.termTick();     // leave the fixture as the next test expects it
+    }
+});
+
 // --- 2. 🔴 the wire drag must never leave the wall dead --------------------------
 //
 // `.gs-dragging` on the grid = `pointer-events: none` on every `.term-frame`

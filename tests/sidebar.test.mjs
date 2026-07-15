@@ -140,6 +140,50 @@ test('a window with no declared type still gets a glyph — never a blank cue', 
     assert.equal(rowFor('bare').querySelector('.ar-type').textContent, '$');
 });
 
+// --- 1b. a session reads as a REAL name, not the generic "claude window" ---------
+//
+// _agentLabel (nav.js) → _displayLabel (terminals.js) is the shared formatter for
+// both the sidebar row and the wall pane title. A name a human chose is shown
+// verbatim; a generic one (`shell-2`, or the bare `claude` tmux follows) is a blank
+// filled with the most meaningful thing known: the Claude session name, then the
+// repo, then the raw name. Driven through the REAL render into the REAL node.
+const nameFor = name => rowFor(name).querySelector('.agent-row-name').textContent;
+
+test('a generic "claude" window shows its Claude session name, not "claude"', () => {
+    const rows = [
+        // human-chosen name — intent, shown verbatim even though a session name exists
+        { name: 'reviewer', window_id: '@1', session_name: 'ignore me', online: true },
+        // generic tmux-followed `claude` — the session name fills the blank
+        { name: 'claude', window_id: '@2', session_name: 'porting the wall', cwd: '/x/chelamux', online: true },
+        // generic, no session name — falls through to the repo (cwd basename)
+        { name: 'claude', window_id: '@3', cwd: '/home/u/projects/ccbot', online: true },
+        // generic shell in a repo — the pre-existing repo-basename behaviour holds
+        { name: 'shell-1', window_id: '@4', cwd: '/home/u/projects/nautilus', online: true },
+        // generic, nothing to fill it with — the raw name, never a blank
+        { name: 'claude', window_id: '@5', online: true },
+    ];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+
+    assert.equal(nameFor('reviewer'), 'reviewer');       // chosen name wins over session_name
+    // The three 'claude' windows share a data-agent, so assert their resolved labels
+    // over the rendered nodes — each fell back a different rung of the same ladder.
+    const labels = [...document.querySelectorAll('#sidebar-agents .agent-row-name')].map(n => n.textContent);
+    assert.ok(labels.includes('porting the wall'), 'a generic claude window did not use its session name');
+    assert.ok(labels.includes('ccbot'), 'a generic claude window did not fall back to its repo');
+    assert.ok(labels.includes('nautilus'), 'a generic shell did not fall back to its repo');
+    assert.ok(labels.includes('claude'), 'a generic window with nothing to resolve lost its raw name');
+});
+
+test('a session name is ESCAPED — it is tmux/user-derived, never trusted into the DOM', () => {
+    const rows = [{ name: 'claude', window_id: '@9', session_name: '<img src=x>', online: true }];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+    const span = document.querySelector('#sidebar-agents .agent-row-name');
+    assert.equal(span.textContent, '<img src=x>');           // shown as text…
+    assert.equal(span.querySelector('img'), null);           // …never parsed as markup
+});
+
 test('colour is the SECOND channel, and it is colourblind-safe (Okabe-Ito)', () => {
     // The palette itself is a CSS fact — there is no computed style in jsdom to read
     // it back from, so this one is honestly a source assertion, and says so.
