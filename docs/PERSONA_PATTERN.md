@@ -37,13 +37,21 @@ judge demonstrated, and it is the whole architecture.
 - **The rule:** block on mechanical facts only; `cannot_verify` → a human; opinions → an advisory PR
   comment, never a block.
 
-### Critic — to build, modeled on the judge
+### Critic — v1 built (`chela/critic.py`, CMX-88): the code half, advisory-only
 - **LLM proposes:** design / necessity / scope opinions ("is this the right work," "this reads
-  awkward") — **advisory**.
+  awkward") — **advisory**. *(The judgment half — the next slice; not wired in v1, which keeps
+  the lowest-risk slice free of new agent-spawn surface.)*
 - **Code decides / gates (facts):** does the brief carry the four mandatory fields
   (objective / boundaries / guardrails / verify)? does a queued task collide with an in-flight task's
   files (the coupling check)? does a PR touch files *outside* its stated scope? These are facts, so
   they can **gate** — reject a malformed brief *before* an agent is spent, flag scope-drift on a PR.
+- **v1 (`critic.py`) is the lowest-risk slice: ADVISORY-ONLY and BRIEFS-ONLY.** The four-field
+  check is computed in code the moment a task is picked for dispatch and surfaced as a *note* on
+  the run row (`critic_notes`) — it gates NOTHING yet. It is enforced advisory: it runs *after*
+  the agent is launched and every failure is swallowed, so a wrong critic — or a crashed one —
+  cannot block, delay, or change a dispatch (the analog of the judge's "decides nothing"). The PR
+  trigger (scope-drift) is the judge's slot and is out of v1 scope; gating on the facts is a later
+  slice, once the advisory has earned trust.
 - **Same rule as the judge:** block on facts, opine on the rest. A wrong *advisory* opinion costs a
   glance, not a rework round — which is exactly why the judgment half is allowed to be fallible.
 - **Triggers:** a newly-*queued task* (critique the brief before spending an agent — "plan review is
@@ -134,7 +142,9 @@ available now, and it is the larger share of the risk.
    AND CI green AND MERGEABLE*, reads every GitHub fact live, has **no `--force`**, and logs each
    merge with its justification; `chela escalate` records the decision and pushes it to the human.
 3. **Critic** — structural checks (code, can gate) + advisory (LLM); reuses the judge's
-   propose-then-adjudicate shape.
+   propose-then-adjudicate shape. **v1 built** (`chela/critic.py`, CMX-88): the code half
+   (the four-field brief check) wired ADVISORY-ONLY and BRIEFS-ONLY at dispatch — it surfaces
+   a note, gates nothing. The LLM judgment half and the gate-on-facts are later slices.
 4. **Orchestrator harness** — the persona-loaded session whose action surface *is* the gated
    commands, run **supervised**.
 5. *(Gated)* **Less-supervised operation** — once (2)+(4) are solid *and* process isolation covers the

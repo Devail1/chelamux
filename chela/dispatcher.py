@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from chela import epoch, hold, judge
+from chela import critic, epoch, hold, judge
 from chela.config import (
     CHELA_DIR,
     DISPATCH_TICK_INTERVAL,
@@ -560,6 +560,15 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `judge_max_unknown_retries`.
         ("judge_cannot_verify_tries",
          "ALTER TABLE runs ADD COLUMN judge_cannot_verify_tries INTEGER"),
+        # 🧑‍⚖️ The critic (CMX-88) — the persona pattern's ADVISORY brief-review, run once at
+        # dispatch. `critic_notes` is the advisory it produced ("" ⇒ it ran and had nothing to
+        # add; NULL ⇒ it never ran — a different fact, and not to be shown as either an
+        # approval or a complaint); `critic_reviewed_at` is when. ⛔ Advisory-only by design:
+        # nothing in the dispatch path ever READS these back, so a wrong note — or a crashed
+        # critic — can never block, delay, or change a dispatch. A pre-migration row reads NULL
+        # in both, which is exactly "the critic never ran".
+        ("critic_notes", "ALTER TABLE runs ADD COLUMN critic_notes TEXT"),
+        ("critic_reviewed_at", "ALTER TABLE runs ADD COLUMN critic_reviewed_at TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -2206,7 +2215,45 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     )
     conn.commit()
     log.info("Dispatched task %s → %s (attempt %d)", task.id, window_name, attempt)
+
+    # 🧑‍⚖️ THE CRITIC (CMX-88) — advisory brief-review, AFTER the dispatch is already done.
+    # ⛔ Deliberately the last thing _spawn touches and swallowing every failure: the agent is
+    # launched, the row is 'running', the dispatch has HAPPENED — so nothing this call does or
+    # fails to do can block, delay, or change it. See _run_critic.
+    _run_critic(wf, task, prompt, conn)
     return True
+
+
+def _run_critic(wf: WorkflowDef, task: Task, prompt: str, conn: sqlite3.Connection) -> None:
+    """🧑‍⚖️ Advisory brief-review at dispatch (persona-pattern step 3, ``chela.critic``).
+
+    ⛔ ADVISORY-ONLY, and it is ENFORCED here, not promised. This runs *after* the agent is
+    launched and the run row is already ``running``; every failure is SWALLOWED; and nothing
+    in the dispatch path ever reads ``critic_notes`` back. So a wrong opinion — or an outright
+    crash — costs at most a missing note, never a dispatch. This is the critic's version of the
+    judge's founding property ("the reviewing agent decides NOTHING"): a wrong critic cannot do
+    the one thing v1 forbids, because the code never gives its output a way to.
+
+    Writes ``critic_notes`` ("" ⇒ ran, nothing to add) and ``critic_reviewed_at`` when the
+    critic is on; a disabled critic writes NOTHING, leaving both NULL — "the critic never ran",
+    which is a different fact from "ran and clean".
+    """
+    try:
+        if not critic.critic_enabled(wf):
+            return
+        review = critic.review_brief(prompt)
+        conn.execute(
+            "UPDATE runs SET critic_notes=?, critic_reviewed_at=? WHERE task_id=?",
+            (critic.advisory_body(review), _now(), task.id),
+        )
+        conn.commit()
+        if review.missing:
+            log.info("critic: %s brief names no explicit %s (advisory only — dispatch "
+                     "unaffected)", task.id, ", ".join(review.missing))
+    except Exception:
+        # ⛔ The whole point. A broken critic must never surface as a broken dispatch.
+        log.warning("critic: advisory brief-review failed for %s — dispatch is unaffected",
+                    task.id, exc_info=True)
 
 
 def _launch_agent(
