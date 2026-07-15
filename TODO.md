@@ -2,6 +2,30 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🧑‍⚖️ THE CRITIC v1 — advisory brief-review upstream of the dispatcher (persona-pattern step 3).** The judge reviews *code* on `awaiting_review`; the **critic reviews the *brief*** the moment a task is picked for dispatch — "plan review is the new linter." It is the persona pattern (`docs/PERSONA_PATTERN.md`) applied a third time: **mechanical facts computed in code, judgment proposed by the LLM.** v1 is deliberately the lowest-risk slice: **ADVISORY-ONLY (never blocks/delays/changes a dispatch) and BRIEFS-ONLY (no PR trigger — that's the judge's slot).**
+
+  🔑 **REUSE `chela/judge.py`'s shape, do NOT reinvent a framework.** The judge is the proven reference (propose-then-adjudicate; `_spawn_judge` `dispatcher.py:~2671`, `_judge_vars` `~2647`, `set_judge_state` `~1407`, config `JUDGE_ENABLED` `config.py:~301`). Mirror that spawn/vars/state/config pattern for a new `chela/critic.py` + a `CHELA_CRITIC` env flag (default on) in `config.py`.
+
+  **OBJECTIVE** — on task dispatch, compute mechanical facts about the brief in code, get one LLM advisory opinion, and post a **non-blocking** advisory note to the run's event history (the channel the decisions inbox is edge-triggered on — `inbox.run_events`, so the orchestrator sees it with no polling). Two mechanical facts (deterministic, unit-tested pure functions in `critic.py`):
+  1. **Field presence** — does the brief carry the four mandatory fields (**objective / boundaries / guardrails / verify**)? Report which are missing. Heuristic detection is fine but must be deterministic.
+  2. **File coupling** — parse the brief's target files (e.g. its `Files:` line / path-looking tokens) and compare to the target files of **in-flight** runs (status `dispatched`/`running`/`awaiting_review`); report any overlap as a coupling warning.
+  The LLM half proposes a **scope / necessity / design** opinion (well-scoped? too big? reads coupled?) — a comment, never a gate.
+
+  **TRIGGER** — fire at the dispatch seam (`_launch_agent`, `dispatcher.py:~2212`) when a task is picked. Recommended: run the two mechanical checks synchronously (instant) and the LLM advisory async, so dispatch is never delayed. A manual `chela critic <run>` CLI (mirror `chela judge run`) is a nice-to-have, not required.
+
+  ⛔ **BOUNDARIES:**
+  - **Advisory-only, absolute:** the critic MUST NOT block, delay, fail, or alter a dispatch — a malformed brief (even an empty one) still dispatches. A critic exception must be swallowed (logged), never propagated into the dispatch path.
+  - **Briefs-only:** no PR/`awaiting_review` trigger in v1 — do not touch the judge's logic or its trigger.
+  - Public-repo boundaries (no secrets, chat ids, or absolute `/home/<user>` paths in committed code). Don't touch the tracker file.
+
+  ⛔ **GUARDRAILS (prove each, per WORKFLOW step 3 — corrupt it and watch it go RED):**
+  - **The non-block guarantee is a test:** dispatch proceeds even when the critic raises / returns "brief missing all four fields." Corrupt it (make the critic raise, or make a missing field block) → the dispatch-still-happens test must go RED.
+  - **The field check is real:** a fixture brief missing `verify` → the check reports `verify` missing. Drop the detector (or the field from the fixture) → RED.
+  - **The coupling check is real:** two fixture briefs sharing a file → flagged; break the overlap detector → RED.
+  - Don't go near `_termSig`/`_displayLabel` (the CMX-67/71 fleet-reload trap) — unrelated here, but the rule stands.
+
+  **Files:** new `chela/critic.py` · `chela/dispatcher.py` (the dispatch-seam trigger, non-blocking) · `chela/config.py` (`CHELA_CRITIC`/`CRITIC_ENABLED`, mirror `JUDGE_ENABLED`) · new `tests/test_critic.py` · optionally `chela/main.py` (a `chela critic <run>` subcommand). **Verify:** `uv run ruff check chela tests` (MUST pass) + `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green · and the three guardrail mutations above each go RED under corruption.
+
 - [x] **🪟➌ NAV ICONS — convert the other four to lucide so they match the Feed icon's box (uniform width/height).** CMX-86 made Feed a lucide `rss` SVG (clean fixed box); Wall/Work/Knowledge/Agents are still **unicode glyphs** (`views.js`: Wall `▦`, Work `▤`, Knowledge `◆`, Agents `▢`) whose metrics differ, so they don't line up with Feed or each other. Liav wants all five uniform.
 
   🔑 **REUSE the CMX-86 mechanism — do NOT rebuild it:** the `lucide:` field on a view (`views.js`), the `lucideIcon()`/nav renderer (`nav.js`), and the `_LUCIDE` inline-SVG set (`util.js`). Add a `lucide:` to each of the four views + its SVG path to `_LUCIDE`, exactly as Feed does. Keep the unicode `icon:` as the fallback.
