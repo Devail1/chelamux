@@ -1152,6 +1152,7 @@ def _inbox_address() -> dict:
     return {
         "wid": inbox.orchestrator_wid(store),
         "epoch": inbox.orchestrator_epoch(store),
+        "session": inbox.orchestrator_session(store),
         "name": store.get("orchestrator_name"),
         "queued": len(store.get("queue") or []),
     }
@@ -1177,6 +1178,17 @@ def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
     live: dict[str, str] = obs.value["windows"]
     now: str = obs.value["epoch"]
     wid, stamped, queued = declared["wid"], declared["epoch"], declared["queued"]
+    # CMX-82: the inbox re-resolves a rotted address from the orchestrator's recorded session
+    # identity every tick. If doctor still sees it rotted, that self-heal has NOT succeeded —
+    # either no identity was recorded (pre-CMX-82 / an env pin), or the session is not running
+    # under any live window. Say which, so the reader knows whether `chela watch` is even needed.
+    if declared.get("session"):
+        heal = (f" chela is trying to self-heal this from the orchestrator's recorded session "
+                f"({declared['session']}); still rotted means that session is not live under any "
+                "window right now.")
+    else:
+        heal = (" No session identity is recorded (registered before CMX-82, or an env pin), so "
+                "there is nothing to self-heal from.")
 
     if not wid:
         if queued:
@@ -1202,8 +1214,8 @@ def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
             "chela will not push them into a stranger's session (a wrong wid is worse than "
             "no wid). This is the 2026-07-14 outage exactly: five finished PRs went "
             "unreviewed because the queue was addressed to a window that no longer existed "
-            "and nothing said so. Fix: run `chela watch` in the orchestrator's session — the "
-            "queue is intact and goes out on its next idle tick.",
+            "and nothing said so." + heal + " Fix: run `chela watch` in the orchestrator's "
+            "session — the queue is intact and goes out on its next idle tick.",
         )]
 
     if wid not in live:
@@ -1211,8 +1223,8 @@ def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
             ERROR if queued else WARN,
             f"the decisions inbox is addressed to {wid}, and tmux has no such window",
             f"The session that registered as the orchestrator is gone. {queued} event(s) are "
-            "queued behind that address and nothing is delivering them. Register the session "
-            "that is doing the orchestrating: `chela watch`.",
+            "queued behind that address and nothing is delivering them." + heal + " Register "
+            "the session that is doing the orchestrating: `chela watch`.",
         )]
 
     if not stamped:

@@ -67,6 +67,10 @@ const TYPE_CLASS = {
     // `chela watch`) acts, and the whole cost of the 2026-07-14 outage was that this state
     // had no surface at all. It must not fall through to an anonymous `·`.
     inbox_undeliverable: 'gate',
+    // The recovery (CMX-82): the inbox re-resolved its rotted address from the orchestrator's
+    // session identity and the held queue is flowing again — a lifecycle event, the good-news
+    // counterpart to inbox_undeliverable, done with no human in the loop.
+    inbox_self_healed: 'lifecycle',
     watch_epoch_lost: 'lifecycle',          // the watched agent died with the tmux server
     'hook.user_prompt_submit': 'prompt',
     'hook.pre_tool_use': 'tool',

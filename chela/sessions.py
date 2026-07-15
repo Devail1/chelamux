@@ -286,6 +286,65 @@ def wid_claiming_session(session_id: str | None,
     return claims[0] if len(claims) == 1 else None
 
 
+def session_of_window(wid: str | None,
+                      pane_map: dict[str, Pane] | None = None) -> str | None:
+    """The claude SESSION a live window is running — its stable identity, not its address.
+
+    Same evidence order as :func:`resolve_window`, minus the transcript hop: the event log
+    first (hook-borne, so it comes from inside the agent's own process, and it follows a
+    ``/clear`` to a fresh session id), then the pane's own ``claude --resume <sid>`` command
+    line. Bounded by the claude process's start time, so a recycled window id cannot inherit a
+    dead agent's session (:func:`_session_from_log`). ``None`` when nothing can say — never a
+    guess. This is the ``@N`` → identity half; :func:`wid_for_session` is the inverse.
+    """
+    if not wid:
+        return None
+    pane_map = panes() if pane_map is None else pane_map
+    pane = pane_map.get(wid)
+    if pane and pane.started is not None:
+        sid = _session_from_log(wid, since=pane.started)
+        if sid:
+            return sid
+    if pane and pane.resumed:
+        return pane.resumed
+    return None
+
+
+def wid_for_session(session_id: str | None,
+                    pane_map: dict[str, Pane] | None = None) -> str | None:
+    """The LIVE window currently running ``session_id`` — the inverse of :func:`session_of_window`.
+
+    This is what lets a PERSISTED address self-heal after tmux renumbers the fleet: the window
+    id changed, but the session resumed into the new window is the same identity. Two
+    self-verifying signals, strongest first:
+
+    * the pane's own command line — ``claude --resume <sid>`` (:func:`wid_claiming_session`),
+      which belongs to that pane by construction and refuses an ambiguous claim;
+    * the event log — the newest window a hook filed this session under, accepted ONLY if that
+      window is live now AND its own process still resolves to this session
+      (:func:`session_of_window`, bounded by the pane's start time) — so a recycled ``@N`` that
+      a stale record still names cannot be inherited.
+
+    ``None`` when nothing live is running the session (it really is gone) — never a guess: a
+    wrong window is worse than none (CMX-48).
+    """
+    if not session_id or not SESSION_RE.match(session_id):
+        return None
+    pane_map = panes() if pane_map is None else pane_map
+    claimed = wid_claiming_session(session_id, pane_map)
+    if claimed:
+        return claimed
+    for rec in reversed(event_log.ring()):
+        if rec.get("session_id") != session_id:
+            continue
+        wid = rec.get("wid")
+        if not wid or wid not in pane_map:
+            continue
+        if session_of_window(wid, pane_map) == session_id:
+            return wid
+    return None
+
+
 # --- session → transcript -----------------------------------------------------------
 
 def transcript_for_session(session_id: str | None, base: Path | None = None) -> Path | None:

@@ -78,10 +78,19 @@ def _runs(n=1):
              "pr_url": f"https://github.com/x/y/pull/{i}"} for i in range(n)]
 
 
-def _registered_under_the_old_server(queued=1):
-    """The store as the OOM left it: an address from a server that is now dead, and a queue."""
+SESSION = "0a1b2c3d-4e5f-6789-abcd-ef0123456789"   # the orchestrator's stable claude identity
+
+
+def _registered_under_the_old_server(queued=1, *, session=None):
+    """The store as the OOM left it: an address from a server that is now dead, and a queue.
+
+    ``session`` is the orchestrator's recorded identity (CMX-82). None reproduces a store
+    written before CMX-82 — nothing to self-heal from; a value lets the renumbered address
+    re-resolve itself.
+    """
     inbox.save({
         "orchestrator": ORCH, "orchestrator_epoch": OLD, "orchestrator_name": "orchestrator",
+        "orchestrator_session": session,
         "watches": {}, "queue": [
             inbox._event("run_review", f"📥 cmx-7{i} awaiting review — PR #{i}",
                          {"task_id": f"T{i}"})
@@ -168,6 +177,154 @@ def test_re_registering_after_the_restart_drains_the_queue_that_piled_up(
     inbox.tick({}, runs=_runs(2))
     assert [wid for wid, _ in sends] == ["@6", "@6"]
     assert inbox.load()["queue"] == []
+
+
+# --- CMX-82: the recovery no longer waits on a human ------------------------------------
+
+def _heals_to(monkeypatch, wid, session=SESSION):
+    """The sessions layer says: `session` is running under `wid` right now."""
+    monkeypatch.setattr(inbox.sessions, "wid_for_session",
+                        lambda sid, pane_map=None: wid if sid == session else None)
+
+
+def test_a_renumbered_address_SELF_HEALS_from_the_session_identity(store, sends, monkeypatch):
+    """The 4th face of the address-as-a-key bug, fixed like the other three.
+
+    CMX-77 made the renumbered address LOUD but the recovery still waited on a human to re-run
+    `chela watch`. Now the inbox re-resolves its OWN address from the orchestrator's session
+    identity — the same wid↔session evidence CMX-48/70/77 trust — to the window running it
+    today (`@6`), re-points itself, and the held queue goes out. No human, nothing lost, and
+    NOT one byte into `@1`, the stranger that inherited the dead number.
+    """
+    _registered_under_the_old_server(queued=2, session=SESSION)
+    _tmux(monkeypatch, now=NEW, windows={ORCH: "cmx-88-worker", "@6": "orchestrator"})
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, "@6": inbox.IDLE})   # @1 is a live STRANGER
+    _heals_to(monkeypatch, "@6")
+
+    inbox.tick({}, runs=_runs(2))
+
+    healed = inbox.load()
+    assert healed["orchestrator"] == "@6", "the address must re-point at the window running the session"
+    assert healed["orchestrator_epoch"] == NEW, "re-stamped in the epoch that resolved it"
+    assert [wid for wid, _ in sends] == ["@6"], "the held queue delivers — to the right window"
+    assert all(wid == "@6" for wid, _ in sends), "nothing pasted into the id's new owner"
+    assert "inbox_self_healed" in _kinds(), "the recovery is a durable record"
+    assert "inbox_undeliverable" not in _kinds(), "a healed address never alarms"
+
+
+def test_self_heal_delivers_the_whole_backlog_across_ticks(store, sends, monkeypatch):
+    """Once healed the address is stamped in the current epoch, so it stays OK: the rest of the
+    queue drains one-per-idle-tick, exactly as it would for an address that never rotted."""
+    _registered_under_the_old_server(queued=2, session=SESSION)
+    _tmux(monkeypatch, now=NEW, windows={"@6": "orchestrator"})
+    _statuses(monkeypatch, {"@6": inbox.IDLE})
+    _heals_to(monkeypatch, "@6")
+
+    inbox.tick({}, runs=_runs(2))
+    inbox.tick({}, runs=_runs(2))
+
+    assert [wid for wid, _ in sends] == ["@6", "@6"]
+    assert inbox.load()["queue"] == []
+    assert _kinds().count("inbox_self_healed") == 1, "recovery announced once, not per tick"
+
+
+def test_no_identity_recorded_stays_loud_and_never_guesses(store, sends, monkeypatch, caplog):
+    """A store written before CMX-82 (or an env pin) has no identity to re-resolve from. The
+    CMX-77 behaviour is preserved EXACTLY — loud, held, waiting for `chela watch` — and the
+    resolver is never even consulted, so a live window is never guessed into the address."""
+    _registered_under_the_old_server(queued=1, session=None)
+    _tmux(monkeypatch, now=NEW, windows={"@6": "orchestrator"})
+    _statuses(monkeypatch, {"@6": inbox.IDLE})
+    monkeypatch.setattr(inbox.sessions, "wid_for_session",
+                        lambda sid, pane_map=None: pytest.fail("resolved without a recorded identity"))
+
+    with caplog.at_level(logging.ERROR, logger="chela.inbox"):
+        inbox.tick({}, runs=_runs())
+
+    assert sends == []
+    assert inbox.load()["orchestrator"] == ORCH, "the address is left dangling, not guessed"
+    assert "inbox_undeliverable" in _kinds() and "inbox_self_healed" not in _kinds()
+
+
+def test_self_heal_refuses_when_the_session_is_not_live_anywhere(store, sends, monkeypatch, caplog):
+    """The identity is recorded but the session is not running under any window (it truly
+    exited). No guess: the address stays dangling-and-loud, precisely as CMX-77 left it."""
+    _registered_under_the_old_server(queued=1, session=SESSION)
+    _tmux(monkeypatch, now=NEW, windows={"@6": "some-agent"})
+    _statuses(monkeypatch, {"@6": inbox.IDLE})
+    _heals_to(monkeypatch, None)                     # the resolver finds nothing live
+
+    with caplog.at_level(logging.ERROR, logger="chela.inbox"):
+        inbox.tick({}, runs=_runs())
+
+    assert sends == []
+    assert inbox.load()["orchestrator"] == ORCH
+    assert "inbox_self_healed" not in _kinds()
+    assert "inbox_undeliverable" in _kinds()
+
+
+def test_self_heal_also_recovers_a_GONE_address_under_the_same_server(store, sends, monkeypatch):
+    """No renumbering needed: the orchestrator's session exited `@1` and was resumed into `@6`
+    on the SAME tmux server. `@1` is simply gone; the identity still resolves, so the inbox
+    re-points and delivers instead of holding the queue for a human."""
+    _registered_under_the_old_server(queued=1, session=SESSION)
+    _tmux(monkeypatch, now=OLD, windows={"@6": "orchestrator", AGENT: "cmx-9"})  # same epoch
+    _statuses(monkeypatch, {"@6": inbox.IDLE})
+    _heals_to(monkeypatch, "@6")
+
+    inbox.tick({}, runs=_runs())
+
+    assert inbox.load()["orchestrator"] == "@6"
+    assert [wid for wid, _ in sends] == ["@6"]
+    assert "inbox_self_healed" in _kinds()
+
+
+def test_registering_records_the_session_identity(store, monkeypatch):
+    """The identity self-heal needs is captured at registration — read off the window's own
+    session (chela.sessions), never guessed. No session resolvable → recorded as None, and
+    self-heal is simply unavailable, never wrong."""
+    monkeypatch.setattr(epoch, "current", lambda: NEW)
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id", lambda: {ORCH: "orchestrator"})
+    monkeypatch.setattr(inbox.sessions, "session_of_window",
+                        lambda wid, pane_map=None: SESSION if wid == ORCH else None)
+
+    result = inbox.register(ORCH)
+
+    assert result["session"] == SESSION
+    assert inbox.orchestrator_session(inbox.load()) == SESSION
+
+
+def test_apply_heal_re_checks_under_the_lock_before_it_trusts_the_resolution(store, monkeypatch):
+    """The heal is resolved OUTSIDE the store lock (it reads tmux + /proc), so the world can move
+    before `_apply_heal` runs. It re-checks three things under the lock: the recorded identity is
+    still the one resolved, the address is still undeliverable, and the resolved window is a live
+    claude — any of them failing (a concurrent `chela watch`, a dead pane) means the heal is stale
+    and is refused, never a guess."""
+    monkeypatch.setattr(epoch, "current", lambda: NEW)
+    windows, statuses = {"@6": "orchestrator"}, {"@6": inbox.IDLE}
+
+    # identity changed under us (a `chela watch` re-registered a different session) → refuse
+    changed = {**inbox._empty(), "orchestrator": ORCH, "orchestrator_epoch": OLD,
+               "orchestrator_session": "other-sid"}
+    assert inbox._apply_heal(changed, (SESSION, "@6"), statuses, NEW, windows) is None
+    assert changed["orchestrator"] == ORCH
+
+    # the address is already healthy again → nothing to heal → refuse
+    ok = {**inbox._empty(), "orchestrator": "@6", "orchestrator_epoch": NEW,
+          "orchestrator_session": SESSION}
+    assert inbox._apply_heal(ok, (SESSION, "@6"), statuses, NEW, windows) is None
+
+    # the resolved window has no claude running in it → refuse (don't guess into a dead pane)
+    nolive = {**inbox._empty(), "orchestrator": ORCH, "orchestrator_epoch": OLD,
+              "orchestrator_session": SESSION}
+    assert inbox._apply_heal(nolive, (SESSION, "@9"), statuses, NEW, windows) is None
+    assert nolive["orchestrator"] == ORCH
+
+    # dangling + identity matches + window live → heal, and re-stamp in the current epoch
+    good = {**inbox._empty(), "orchestrator": ORCH, "orchestrator_epoch": OLD,
+            "orchestrator_session": SESSION, "orchestrator_name": "orchestrator"}
+    assert inbox._apply_heal(good, (SESSION, "@6"), statuses, NEW, windows) == ORCH
+    assert good["orchestrator"] == "@6" and good["orchestrator_epoch"] == NEW
 
 
 def test_an_address_whose_window_is_simply_GONE_is_loud_too(store, sends, monkeypatch, caplog):
