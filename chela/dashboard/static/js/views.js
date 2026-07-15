@@ -39,7 +39,9 @@ export const VIEWS = [
     {
         id: 'terminals',
         label: 'Wall',
-        icon: '▦',
+        // lucide (not a glyph) so the nav rail's five icons share one box — see the
+        // Feed note above. `layout-grid` reads as the wall's grid of live tiles.
+        lucide: 'layout-grid',
         enabled: ctx => !!ctx.terminalsOn,
         // The wall holds LIVE iframes: entering reconciles by stable window id and
         // never reloads a pane (terminals.js), so this hook only owns the timer.
@@ -50,7 +52,8 @@ export const VIEWS = [
     {
         id: 'work',
         label: 'Work',
-        icon: '▤',
+        // lucide `columns-3` — the Dispatch/Kanban/Schedules board, as a fixed box.
+        lucide: 'columns-3',
         badges: [
             { id: 'side-runs-count', title: 'Active runs', text: '0' },
             { id: 'side-pr-count', cls: 'badge-pr', title: 'Open PRs', text: '0 PR' },
@@ -63,7 +66,8 @@ export const VIEWS = [
     {
         id: 'knowledge',
         label: 'Knowledge',
-        icon: '◆',
+        // lucide `book-open` — the knowledge base, as a fixed box.
+        lucide: 'book-open',
         // Entering from the nav lands on the glance overview, not whatever concept
         // was last open.
         enter: () => { if (typeof knBackToGlance === 'function' && _kn.tree) knBackToGlance(); },
@@ -72,7 +76,8 @@ export const VIEWS = [
     {
         id: 'agents',
         label: 'Agents',
-        icon: '▢',
+        // lucide `bot` — the agent fleet, as a fixed box.
+        lucide: 'bot',
         tick: () => refreshAgents(),
     },
     {
