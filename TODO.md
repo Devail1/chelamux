@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **🧑‍⚖️ THE CRITIC v1 — advisory brief-review upstream of the dispatcher (persona-pattern step 3).** The judge reviews *code* on `awaiting_review`; the **critic reviews the *brief*** the moment a task is picked for dispatch — "plan review is the new linter." It is the persona pattern (`docs/PERSONA_PATTERN.md`) applied a third time: **mechanical facts computed in code, judgment proposed by the LLM.** v1 is deliberately the lowest-risk slice: **ADVISORY-ONLY (never blocks/delays/changes a dispatch) and BRIEFS-ONLY (no PR trigger — that's the judge's slot).**
+- [x] **🧑‍⚖️ THE CRITIC v1 — advisory brief-review upstream of the dispatcher (persona-pattern step 3).** The judge reviews *code* on `awaiting_review`; the **critic reviews the *brief*** the moment a task is picked for dispatch — "plan review is the new linter." It is the persona pattern (`docs/PERSONA_PATTERN.md`) applied a third time: **mechanical facts computed in code, judgment proposed by the LLM.** v1 is deliberately the lowest-risk slice: **ADVISORY-ONLY (never blocks/delays/changes a dispatch) and BRIEFS-ONLY (no PR trigger — that's the judge's slot).**
 
   🔑 **REUSE `chela/judge.py`'s shape, do NOT reinvent a framework.** The judge is the proven reference (propose-then-adjudicate; `_spawn_judge` `dispatcher.py:~2671`, `_judge_vars` `~2647`, `set_judge_state` `~1407`, config `JUDGE_ENABLED` `config.py:~301`). Mirror that spawn/vars/state/config pattern for a new `chela/critic.py` + a `CHELA_CRITIC` env flag (default on) in `config.py`.
 
