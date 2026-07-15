@@ -124,7 +124,7 @@ class Scratch:
         return next(w for w, n in discovery.get_windows_by_id().items() if n == name)
 
     def pane(self, wid: str) -> str:
-        return self._tmux("capture-pane", "-p", "-t", f"{self.session}:{wid}",
+        return self._tmux("capture-pane", "-p", "-J", "-t", f"{self.session}:{wid}",
                           check=False).stdout
 
 
