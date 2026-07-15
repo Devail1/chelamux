@@ -6,9 +6,18 @@ corrupts the critic into raising and proves the dispatch still completes. If tha
 stays green with the swallow removed, the advisory-only property is decoration; corrupt it
 (drop the ``try/except`` in ``dispatcher._run_critic``) and it must go red.
 
-The rest pin the mechanical facts (the four-field detector) and the advisory rendering, each
-written so a broken detector or a lying advisory turns it red — not so it passes whatever the
-code does.
+The rest pin the mechanical facts and the advisory rendering, each written so a broken
+detector or a lying advisory turns it red — not so it passes whatever the code does. Two of
+them are load-bearing in their own right:
+
+* The critic reviews the TASK-SPECIFIC brief, not the rendered WORKFLOW.md template — the
+  template is field-complete boilerplate on every dispatch, so reviewing it makes the critic
+  inert. :func:`test_critic_reviews_the_task_not_the_rendered_template` feeds the realistic
+  boilerplate template and proves a thin task is flagged anyway; regress the input back to the
+  template and it goes red.
+* The file-coupling detector is real — :func:`test_coupling_note_flags_a_shared_file` (pure)
+  and :func:`test_dispatch_flags_file_coupling_with_an_inflight_run` (wired). Break the
+  overlap intersection and both go red.
 """
 from __future__ import annotations
 
@@ -43,6 +52,29 @@ Run ruff and pytest; self-verify each guard before you hand off.
 # nothing.
 THIN_BRIEF = "wt=/tmp/x"
 
+# The production-shaped prompt template: the standing WORKFLOW.md boilerplate every dispatch is
+# wrapped in. ⚠️ It already carries EVERY field-signal as boilerplate — "## Your task",
+# "boundaries", "Do NOT"/"⛔", "ruff"/"pytest"/"Done criteria" — so a critic that reviewed the
+# *rendered prompt* would report "complete" for every real dispatch and never say anything.
+# The wiring tests feed this deliberately, so a critic that flags a thin task ANYWAY is proven
+# to review the task-specific brief, not this identical-every-time wrapper.
+WORKFLOW_TEMPLATE = """\
+# Autonomous coding agent
+
+## Your task
+> {{task_title}}
+
+## Your workspace
+A fresh git worktree at {{workspace_path}}.
+
+## Done criteria — follow in order
+1. Implement the task.
+2. Run `uv run ruff check` and `uv run pytest`; fix what you broke.
+
+## Public-repo boundaries
+Stay in scope. ⛔ Do NOT touch the tracker file or push the base branch.
+"""
+
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
@@ -50,19 +82,23 @@ def _conn() -> sqlite3.Connection:
     return dispatcher.ensure_schema(conn)
 
 
-def _wf(tmp_path: Path, critic_cfg: object | None = None) -> WorkflowDef:
+def _wf(tmp_path: Path, critic_cfg: object | None = None,
+        prompt_template: str = WORKFLOW_TEMPLATE) -> WorkflowDef:
+    # Defaults to the REALISTIC WORKFLOW.md boilerplate on purpose: the wiring tests must prove
+    # the critic reviews the task, not this template, so the template they run against has to be
+    # the field-complete one production actually renders.
     cfg: dict = {"project_key": "TEST"}
     if critic_cfg is not None:
         cfg["critic"] = critic_cfg
     return WorkflowDef(
-        path=tmp_path / "WORKFLOW.md", config=cfg, prompt_template="wt={{workspace_path}}"
+        path=tmp_path / "WORKFLOW.md", config=cfg, prompt_template=prompt_template
     )
 
 
-def _task(tmp_path: Path) -> Task:
+def _task(tmp_path: Path, title: str = "do a thing") -> Task:
     return Task(
-        id="abc123", title="do a thing", file=str(tmp_path / "TODO.md"),
-        line_number=7, raw="- [ ] do a thing",
+        id="abc123", title=title, file=str(tmp_path / "TODO.md"),
+        line_number=7, raw=f"- [ ] {title}",
     )
 
 
@@ -133,6 +169,51 @@ def test_an_incomplete_brief_names_its_missing_fields_in_the_advisory():
     assert "boundaries" in body  # a named missing field, not just boilerplate
 
 
+# --- the mechanical facts: the file-coupling detector ------------------------
+
+
+def test_target_files_parses_paths_and_bare_filenames():
+    files = critic.target_files(
+        "touch chela/critic.py and tests/test_critic.py, plus views.js and WORKFLOW.md"
+    )
+    assert files == frozenset(
+        {"chela/critic.py", "tests/test_critic.py", "views.js", "workflow.md"}
+    )
+
+
+def test_target_files_ignores_prose_abbreviations():
+    # "e.g." has a one-letter "extension" and is NOT a file — the two-letter floor keeps prose
+    # out. Version numbers ("4.8") have a digit "extension" and are excluded too. A detector
+    # that swept these up would raise false couplings on every brief.
+    assert critic.target_files("e.g. version 4.8, i.e. nothing here") == frozenset()
+
+
+def test_target_files_on_a_non_string_is_empty_not_a_crash():
+    assert critic.target_files(None) == frozenset()  # type: ignore[arg-type]
+
+
+def test_coupling_note_flags_a_shared_file():
+    # Two briefs naming the same file → flagged, and the shared path is named. This is the
+    # coupling guard: break the intersection in coupling_note (drop the `&`) and it goes red.
+    files = critic.target_files("edit chela/critic.py and chela/config.py")
+    inflight = [("run9", critic.target_files("also edit chela/critic.py"))]
+    note = critic.coupling_note(files, inflight)
+    assert note != ""
+    assert "chela/critic.py" in note
+    assert "run9" in note
+    assert "not a gate" in note.lower()  # it must SAY it changed nothing
+
+
+def test_coupling_note_is_silent_when_files_are_disjoint():
+    files = critic.target_files("edit chela/critic.py")
+    inflight = [("run9", critic.target_files("edit chela/dashboard/app.py"))]
+    assert critic.coupling_note(files, inflight) == ""
+
+
+def test_coupling_note_is_silent_with_no_inflight_runs():
+    assert critic.coupling_note(critic.target_files("edit chela/critic.py"), []) == ""
+
+
 # --- the kill switches -------------------------------------------------------
 
 
@@ -152,23 +233,24 @@ def test_fleet_kill_switch_turns_it_off(tmp_path):
 # --- the wiring: advisory-only, at dispatch ----------------------------------
 
 
-def _spawn(wf: WorkflowDef, tmp_path: Path, conn: sqlite3.Connection):
+def _spawn(wf: WorkflowDef, tmp_path: Path, conn: sqlite3.Connection,
+           task: Task | None = None):
     worktree = tmp_path / "wt"
     with patch.object(dispatcher, "ensure_worktree", return_value=(worktree, True)), \
          patch.object(dispatcher.subprocess, "run"), \
          patch.object(dispatcher, "send_tmux", return_value=True), \
          patch.object(dispatcher, "_wait_for_ready", return_value=True):
-        return dispatcher._spawn(wf, _task(tmp_path), attempt=1, conn=conn)
+        return dispatcher._spawn(wf, task or _task(tmp_path), attempt=1, conn=conn)
 
 
-def _row(conn: sqlite3.Connection) -> sqlite3.Row:
-    return conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+def _row(conn: sqlite3.Connection, task_id: str = "abc123") -> sqlite3.Row:
+    return conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
 
 
 def test_dispatch_records_the_critic_advisory(tmp_path):
-    # The thin prompt_template renders to a brief missing fields, so the critic writes a
-    # non-empty note and stamps when it ran. Remove the _run_critic call from _spawn and both
-    # go NULL → this fails.
+    # The thin TASK ("do a thing") is missing fields, so the critic writes a non-empty note and
+    # stamps when it ran — EVEN THOUGH the wf's prompt_template is the field-complete WORKFLOW.md
+    # boilerplate. Remove the _run_critic call from _spawn and both go NULL → this fails.
     conn = _conn()
     assert _spawn(_wf(tmp_path), tmp_path, conn) is True
     row = _row(conn)
@@ -176,6 +258,26 @@ def test_dispatch_records_the_critic_advisory(tmp_path):
     assert row["critic_reviewed_at"], "the critic should stamp when it ran"
     assert row["critic_notes"], "a thin brief should get a non-empty advisory"
     assert "boundaries" in row["critic_notes"]
+
+
+def test_critic_reviews_the_task_not_the_rendered_template(tmp_path):
+    # 🔴 The regression this PR's rework fixes: the critic must review the TASK-SPECIFIC brief,
+    # not the rendered WORKFLOW.md template. The template already carries every field-signal as
+    # boilerplate, so reviewing it reports "complete" for every dispatch and the critic never
+    # fires. Proof in two halves:
+    #   (a) the rendered template really IS field-complete (else this test proves nothing)…
+    rendered = dispatcher.render_prompt(WORKFLOW_TEMPLATE, {"task_title": "do a thing"})
+    assert critic.review_brief(rendered).complete is True, (
+        "the WORKFLOW.md boilerplate must look complete — that is exactly what would mask a "
+        "thin task if the critic reviewed the rendered prompt"
+    )
+    #   …(b) yet a thin task, dispatched THROUGH that very template, is still flagged — which is
+    #   only possible if the critic reviewed the task, not the template.
+    conn = _conn()
+    assert _spawn(_wf(tmp_path), tmp_path, conn, task=_task(tmp_path, "do a thing")) is True
+    note = _row(conn)["critic_notes"]
+    assert note, "a thin task must be flagged despite the field-complete template around it"
+    assert "boundaries" in note
 
 
 def test_a_disabled_critic_leaves_no_note(tmp_path):
@@ -218,3 +320,33 @@ def test_the_critic_runs_after_the_agent_is_launched(tmp_path):
     with patch.object(critic, "review_brief", side_effect=_spy):
         _spawn(_wf(tmp_path), tmp_path, conn)
     assert seen["status"] == "running"
+
+
+def test_dispatch_flags_file_coupling_with_an_inflight_run(tmp_path):
+    # An in-flight run already owns chela/critic.py; a NEW task naming the same file is
+    # dispatched. The critic's note must call out the overlap. This exercises the wiring end to
+    # end: _run_critic queries in-flight runs and composes the coupling advisory.
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status, started_at) "
+        "VALUES (?, ?, ?, 'running', ?)",
+        ("other1", "wf", "rework chela/critic.py detector", "t0"),
+    )
+    conn.commit()
+    task = _task(tmp_path, "also refactor chela/critic.py")
+    assert _spawn(_wf(tmp_path), tmp_path, conn, task=task) is True
+    note = _row(conn, "abc123")["critic_notes"]
+    assert "chela/critic.py" in note
+    assert "other1" in note
+    assert "overlap" in note.lower()
+
+
+def test_a_dispatch_alone_gets_no_coupling_note(tmp_path):
+    # The current run's own row is 'running' by the time the critic runs; it must NOT be read
+    # back as colliding with itself. With no OTHER in-flight run, a file-naming task gets a
+    # field note but no coupling line.
+    conn = _conn()
+    task = _task(tmp_path, "refactor chela/critic.py")
+    assert _spawn(_wf(tmp_path), tmp_path, conn, task=task) is True
+    note = _row(conn, "abc123")["critic_notes"]
+    assert "overlap" not in note.lower()

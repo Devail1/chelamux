@@ -21,12 +21,23 @@ promised:
 
 THE SPLIT, exactly as the persona doc frames it:
 
-* **Code computes the FACTS.** Does the brief carry the four mandatory fields an agent needs
-  to work without guessing — an *objective*, its *boundaries*, its *guardrails*, and how to
-  *verify* it? Each is detected mechanically (a signal matches the text or it does not — a
-  fact, in the same sense a failing check is a fact), and per the persona doc these facts
-  *could* gate. ⛔ In v1 they do NOT: the presence-of-a-field is surfaced as an advisory note
-  only. The gate is a later slice, once the advisory has earned trust.
+* **Code computes the FACTS.** Two of them, both mechanical:
+  1. *Field presence* — does the brief carry the four mandatory fields an agent needs to work
+     without guessing — an *objective*, its *boundaries*, its *guardrails*, and how to
+     *verify* it? Each is detected by a signal match.
+  2. *File coupling* — do the target files this brief names (:func:`target_files`) overlap the
+     target files of a run that is still in flight? Two agents editing the same file tend to
+     collide at merge, so a queued brief that touches a file another run already owns is worth
+     a heads-up.
+  Each is a fact in the same sense a failing check is a fact — a signal matches the text or it
+  does not; two file sets intersect or they do not — and per the persona doc these facts
+  *could* gate. ⛔ In v1 they do NOT: both are surfaced as an advisory note only. The gate is a
+  later slice, once the advisory has earned trust.
+
+  ⚠️ Both detectors are deliberately coarse (keyword/heading match; a regex for path-looking
+  tokens). A false positive or negative costs at most a wrong glance while advisory-only —
+  exactly the cost this design is built to absorb. The moment either is allowed to GATE, that
+  slack stops being free and the detectors must tighten first.
 * **The LLM proposes the JUDGMENT.** "Is this the right work? Is it scoped well? Does it read
   awkwardly?" — design / necessity / scope opinions. That half is advisory by nature (a wrong
   opinion costs a glance, not a rework round) and plugs into this same non-gating surface; it
@@ -131,6 +142,71 @@ def advisory_body(review: BriefReview) -> str:
         "boundaries, its guardrails, and how to verify the result is one an agent can satisfy "
         "without guessing. This is a note, not a gate — the dispatch already happened."
     )
+
+
+# A path-looking token: a relative path with a directory segment and an extension
+# (``chela/critic.py``, ``tests/test_critic.py``, ``docs/PERSONA_PATTERN.md``), OR a bare
+# filename whose extension is at least two letters (``views.js``, ``WORKFLOW.md``). The
+# two-letter floor keeps prose abbreviations out — ``e.g.`` has a one-letter "extension" and
+# is not a file. This is the same class of coarse-but-deterministic detector as the field
+# signals: it can over- or under-match, and while advisory-only that only ever costs a glance.
+_PATH_RE = re.compile(r"\b(?:[\w-]+/)+[\w-]+\.[A-Za-z][\w]*\b|\b[\w-]+\.[A-Za-z]{2,8}\b")
+
+
+def target_files(brief_text: str) -> frozenset[str]:
+    """The target files a brief names — every path-looking token in it, case-folded.
+
+    Pure — no I/O. Case-folded so ``Chela/Critic.py`` and ``chela/critic.py`` couple; the
+    fold cannot introduce a false overlap between genuinely different files on Linux (that
+    would need two files differing only in case, which the repo does not have). A non-string
+    brief yields the empty set rather than raising — the critic must never turn a dispatch
+    into an error.
+    """
+    text = brief_text if isinstance(brief_text, str) else ""
+    return frozenset(m.group(0).casefold() for m in _PATH_RE.finditer(text))
+
+
+def coupling_note(files: frozenset[str] | set[str],
+                  inflight: list[tuple[str, frozenset[str]]]) -> str:
+    """Advisory note when ``files`` overlap the target files of an in-flight run — else "".
+
+    ``inflight`` is ``[(label, files), ...]`` for the runs still in flight (each ``label`` a
+    short run id). A file present in both this brief and an in-flight run's brief is the
+    mechanical fact "two agents may edit the same file"; that is what this surfaces. The
+    intersection is the whole check — corrupt it (drop the ``&``) and every coupling test goes
+    red.
+
+    ⛔ Like every critic output this is a NOTE: it says, in its own words, that it changed
+    nothing. Coupling is a heads-up, never a gate — the dispatch has already happened.
+    """
+    shared: dict[str, list[str]] = {}
+    for label, other in inflight:
+        common = set(files) & set(other)
+        if common:
+            shared[label] = sorted(common)
+    if not shared:
+        return ""
+    bits = "; ".join(f"{', '.join(paths)} (run {label})"
+                     for label, paths in sorted(shared.items()))
+    return (
+        "🧑‍⚖️ THE CRITIC (advisory — this did NOT block, delay, or change the dispatch): "
+        f"this brief's target files overlap work already in flight — {bits}. Two agents "
+        "editing the same file tend to collide at merge. This is a note, not a gate — the "
+        "dispatch already happened."
+    )
+
+
+def compose_advisory(review: BriefReview,
+                     files: frozenset[str] | set[str],
+                     inflight: list[tuple[str, frozenset[str]]]) -> str:
+    """The full advisory for one dispatch: the field note and the coupling note, joined.
+
+    Both halves are independently empty when there is nothing to say, so a complete brief with
+    no coupling composes to "" — "the critic ran and had nothing to add", distinct from the
+    NULL that means it never ran.
+    """
+    parts = [p for p in (advisory_body(review), coupling_note(files, inflight)) if p]
+    return "\n\n".join(parts)
 
 
 def critic_enabled(wf) -> bool:

@@ -2220,11 +2220,19 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # ⛔ Deliberately the last thing _spawn touches and swallowing every failure: the agent is
     # launched, the row is 'running', the dispatch has HAPPENED — so nothing this call does or
     # fails to do can block, delay, or change it. See _run_critic.
-    _run_critic(wf, task, prompt, conn)
+    _run_critic(wf, task, conn)
     return True
 
 
-def _run_critic(wf: WorkflowDef, task: Task, prompt: str, conn: sqlite3.Connection) -> None:
+# The run statuses that mean "still in flight" for the critic's coupling check — a run that
+# owns a worktree and may be editing its target files right now. ``claimed``/``running`` are
+# the brief's "dispatched"/"running"; ``awaiting_review``/``changes_requested`` still hold the
+# worktree (the PR is open, a rework may re-spawn). ``done``/``failed``/``needs_human`` are
+# terminal — their files are no longer contested — so they are excluded.
+_CRITIC_INFLIGHT_STATUSES = ("claimed", "running", "awaiting_review", "changes_requested")
+
+
+def _run_critic(wf: WorkflowDef, task: Task, conn: sqlite3.Connection) -> None:
     """🧑‍⚖️ Advisory brief-review at dispatch (persona-pattern step 3, ``chela.critic``).
 
     ⛔ ADVISORY-ONLY, and it is ENFORCED here, not promised. This runs *after* the agent is
@@ -2234,6 +2242,12 @@ def _run_critic(wf: WorkflowDef, task: Task, prompt: str, conn: sqlite3.Connecti
     judge's founding property ("the reviewing agent decides NOTHING"): a wrong critic cannot do
     the one thing v1 forbids, because the code never gives its output a way to.
 
+    It reviews the **task-specific brief** — the TODO item the human actually wrote
+    (``task.title`` / ``task.raw``), NOT the rendered WORKFLOW.md prompt. The template is
+    boilerplate identical on every dispatch and already carries every field-signal, so
+    reviewing it would report "complete" for every task and the critic would never say
+    anything. The text that varies per task is the only text worth reviewing.
+
     Writes ``critic_notes`` ("" ⇒ ran, nothing to add) and ``critic_reviewed_at`` when the
     critic is on; a disabled critic writes NOTHING, leaving both NULL — "the critic never ran",
     which is a different fact from "ran and clean".
@@ -2241,10 +2255,14 @@ def _run_critic(wf: WorkflowDef, task: Task, prompt: str, conn: sqlite3.Connecti
     try:
         if not critic.critic_enabled(wf):
             return
-        review = critic.review_brief(prompt)
+        brief_text = f"{task.title}\n{task.raw}"
+        review = critic.review_brief(brief_text)
+        files = critic.target_files(brief_text)
+        inflight = _inflight_target_files(conn, task.id)
+        note = critic.compose_advisory(review, files, inflight)
         conn.execute(
             "UPDATE runs SET critic_notes=?, critic_reviewed_at=? WHERE task_id=?",
-            (critic.advisory_body(review), _now(), task.id),
+            (note, _now(), task.id),
         )
         conn.commit()
         if review.missing:
@@ -2254,6 +2272,29 @@ def _run_critic(wf: WorkflowDef, task: Task, prompt: str, conn: sqlite3.Connecti
         # ⛔ The whole point. A broken critic must never surface as a broken dispatch.
         log.warning("critic: advisory brief-review failed for %s — dispatch is unaffected",
                     task.id, exc_info=True)
+
+
+def _inflight_target_files(
+    conn: sqlite3.Connection, exclude_task_id: str
+) -> list[tuple[str, frozenset[str]]]:
+    """The target files of every run still in flight, keyed by short run id.
+
+    Excludes ``exclude_task_id`` — the run being dispatched right now, whose own row is already
+    ``running`` and must not be reported as colliding with itself. Each run's target files come
+    from its stored ``title`` (the TODO line), the same task-specific text the current brief is
+    parsed from, so the two sides couple on the same basis.
+    """
+    placeholders = ",".join("?" for _ in _CRITIC_INFLIGHT_STATUSES)
+    rows = conn.execute(
+        f"SELECT task_id, title FROM runs WHERE status IN ({placeholders}) AND task_id != ?",
+        (*_CRITIC_INFLIGHT_STATUSES, exclude_task_id),
+    ).fetchall()
+    out: list[tuple[str, frozenset[str]]] = []
+    for row in rows:
+        files = critic.target_files(row["title"] or "")
+        if files:
+            out.append((str(row["task_id"]), files))
+    return out
 
 
 def _launch_agent(

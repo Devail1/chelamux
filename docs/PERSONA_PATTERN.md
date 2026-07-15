@@ -45,13 +45,17 @@ judge demonstrated, and it is the whole architecture.
   (objective / boundaries / guardrails / verify)? does a queued task collide with an in-flight task's
   files (the coupling check)? does a PR touch files *outside* its stated scope? These are facts, so
   they can **gate** — reject a malformed brief *before* an agent is spent, flag scope-drift on a PR.
-- **v1 (`critic.py`) is the lowest-risk slice: ADVISORY-ONLY and BRIEFS-ONLY.** The four-field
-  check is computed in code the moment a task is picked for dispatch and surfaced as a *note* on
-  the run row (`critic_notes`) — it gates NOTHING yet. It is enforced advisory: it runs *after*
-  the agent is launched and every failure is swallowed, so a wrong critic — or a crashed one —
-  cannot block, delay, or change a dispatch (the analog of the judge's "decides nothing"). The PR
-  trigger (scope-drift) is the judge's slot and is out of v1 scope; gating on the facts is a later
-  slice, once the advisory has earned trust.
+- **v1 (`critic.py`) is the lowest-risk slice: ADVISORY-ONLY and BRIEFS-ONLY.** Both mechanical
+  facts ship — the **four-field check** and the **file-coupling check** (the queued brief's target
+  files vs. those of in-flight runs) — computed in code the moment a task is picked for dispatch
+  and surfaced as a *note* on the run row (`critic_notes`); they gate NOTHING yet. ⚠️ Both review
+  the **task-specific brief** (the TODO item the human wrote), NOT the rendered WORKFLOW.md
+  template — the template is field-complete boilerplate identical on every dispatch, so reviewing
+  it would report "complete" every time and the critic would never fire. It is enforced advisory:
+  it runs *after* the agent is launched and every failure is swallowed, so a wrong critic — or a
+  crashed one — cannot block, delay, or change a dispatch (the analog of the judge's "decides
+  nothing"). The PR trigger (scope-drift) is the judge's slot and is out of v1 scope; gating on the
+  facts is a later slice, once the advisory has earned trust.
 - **Same rule as the judge:** block on facts, opine on the rest. A wrong *advisory* opinion costs a
   glance, not a rework round — which is exactly why the judgment half is allowed to be fallible.
 - **Triggers:** a newly-*queued task* (critique the brief before spending an agent — "plan review is
@@ -143,8 +147,9 @@ available now, and it is the larger share of the risk.
    merge with its justification; `chela escalate` records the decision and pushes it to the human.
 3. **Critic** — structural checks (code, can gate) + advisory (LLM); reuses the judge's
    propose-then-adjudicate shape. **v1 built** (`chela/critic.py`, CMX-88): the code half
-   (the four-field brief check) wired ADVISORY-ONLY and BRIEFS-ONLY at dispatch — it surfaces
-   a note, gates nothing. The LLM judgment half and the gate-on-facts are later slices.
+   (the four-field brief check AND the file-coupling check, both over the task-specific brief)
+   wired ADVISORY-ONLY and BRIEFS-ONLY at dispatch — it surfaces a note, gates nothing. The LLM
+   judgment half and the gate-on-facts are later slices.
 4. **Orchestrator harness** — the persona-loaded session whose action surface *is* the gated
    commands, run **supervised**.
 5. *(Gated)* **Less-supervised operation** — once (2)+(4) are solid *and* process isolation covers the
