@@ -210,6 +210,29 @@ test('the Feed nav item renders the lucide rss SVG — not a glyph that apes the
     assert.ok(!icon.textContent.includes('≡'), 'the old ≡ glyph is still rendered');
 });
 
+// --- 1c². 🔴 ALL FIVE nav icons are lucide SVGs — one uniform box, no stray glyph --
+//
+// CMX-86 made Feed a lucide mark; CMX-87 converts the other four (Wall/Work/Knowledge/
+// Agents) so every nav icon shares the same fixed 24×24 box instead of unicode glyphs
+// whose metrics differ. This drives the REAL renderNav() into the REAL #side-nav and
+// asserts what RENDERS: each of the five nav items carries a non-empty <svg> and none
+// leaks an old glyph. Revert any one view to `icon: '…'` and that item's <svg> vanishes
+// (red); drop its name from util.js _LUCIDE and its <svg> comes out empty (red).
+test('every nav item renders a non-empty lucide SVG — no unicode glyph survives', () => {
+    nav.renderNav();
+    const OLD_GLYPHS = ['▦', '▤', '◆', '▢', '≡'];
+    for (const id of ['feed', 'terminals', 'work', 'knowledge', 'agents']) {
+        const icon = document.querySelector(`#side-nav .side-item[data-view="${id}"] .side-item-icon`);
+        assert.ok(icon, `the ${id} nav item is missing`);
+        const svg = icon.querySelector('svg');
+        assert.ok(svg, `the ${id} nav icon is not an SVG — it fell back to a text glyph`);
+        assert.ok(svg.children.length > 0,
+            `the ${id} nav icon SVG is empty — its lucide name is not in util.js _LUCIDE`);
+        for (const g of OLD_GLYPHS)
+            assert.ok(!icon.textContent.includes(g), `the old ${g} glyph is still rendered on ${id}`);
+    }
+});
+
 // --- 1d. 🔴 the EXPANDED sidebar icons are sized to MATCH the collapsed rail ------
 //
 // CMX-85 enlarged the collapsed-rail glyphs; CMX-86 brings the expanded ones up to

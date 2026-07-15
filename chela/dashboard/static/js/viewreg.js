@@ -15,7 +15,8 @@
 //   id       'work'                 — the canvas panel is `panel-<id>`, the only
 //                                     real DOM contract, and it is kept.
 //   label    'Work'                 — sidebar + palette text
-//   icon     '▤'                    — sidebar glyph
+//   lucide   'columns-3'            — sidebar icon, an inline lucide SVG (fixed box)
+//   icon     '▤'                    — sidebar glyph (fallback when no `lucide`)
 //   badges   [{id, cls, title}]     — sidebar badge slots (a renderer fills them)
 //   enabled  ctx => bool            — e.g. the wall only exists when terminals are on
 //   virtual  true                   — reachable, but NOT a nav item (agent-detail)
