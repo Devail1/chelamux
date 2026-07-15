@@ -192,12 +192,27 @@ def test_merge_requires_MERGEABLE(repo, mergeable):
     squash.assert_not_called()
 
 
-def test_merge_refuses_a_run_not_awaiting_review(repo):
-    _seed_run(repo, status="running")
-    with patch.object(contract, "_squash_merge") as squash:
+@pytest.mark.parametrize("status", ["running", "changes_requested", "escalated", "done"])
+def test_merge_refuses_a_run_not_awaiting_review_even_when_all_else_passes(repo, status):
+    """The ``status != 'awaiting_review'`` gate IN ISOLATION — base ``dev``, judge clean, CI
+    green, MERGEABLE, so the ONLY thing wrong is the run is not under review. It must refuse.
+
+    Every downstream gate is mocked to pass, so this gate is the sole possible refusal: corrupt
+    ``if run["status"] != "awaiting_review"`` to ``if False and …`` and the merge goes through,
+    turning this red. Without the downstream mocks the flow would still hit the real
+    ``_read_pr_base`` (None with no gh) and refuse on the base gate — staying green under the
+    mutation and guarding nothing."""
+    _seed_run(repo, status=status)
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
         result = contract.merge("t1")
     assert result["ok"] is False
-    squash.assert_not_called()
+    assert result["tier"] == "escalate"
+    assert status in result["error"]      # the refusal names the offending status
+    squash.assert_not_called()      # ⛔ nothing merged — the status gate held
 
 
 def test_merge_refuses_an_unknown_run(repo):
