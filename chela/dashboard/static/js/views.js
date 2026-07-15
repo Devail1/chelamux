@@ -25,7 +25,10 @@ export const VIEWS = [
     {
         id: 'feed',
         label: 'Feed',
-        icon: '≡',
+        // A lucide `rss` mark, not a glyph: the old ≡ read exactly like the sidebar
+        // toggle. `lucide` names an inline SVG from util.js's vendored set (see
+        // _navItemHtml); a plain `icon` string is still a unicode glyph.
+        lucide: 'rss',
         // AGENT LANES: the log, grouped under the agent that produced each row, with
         // the agents that need you sorted to the top. Entering re-reads the fleet AND
         // the log from scratch; the SSE `log` delta accelerates it, and this tick is

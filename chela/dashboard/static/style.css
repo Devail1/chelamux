@@ -2221,9 +2221,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .agent-row.active .agent-row-name { color: var(--accent); font-weight: 600; }
 .side-item-label { flex: 1; }
 /* Fixed-width nav glyph so every label starts on the same x — the block reads as
-   one aligned menu. Dim by default, accent when the row is active. */
+   one aligned menu. Dim by default, accent when the row is active. Sized to MATCH
+   the collapsed rail (body.sidebar-collapsed .side-item-icon, 18px) so folding the
+   sidebar doesn't resize the icons. */
 .side-item-icon {
-    flex: 0 0 16px; text-align: center; font-size: 12px;
+    flex: 0 0 18px; text-align: center; font-size: 18px;
     color: var(--text-dim); line-height: 1;
 }
 .side-item.active .side-item-icon { color: var(--accent); }
@@ -2279,17 +2281,22 @@ input[type="text"]:focus, textarea:focus, select:focus {
 /* ---- Richer agent rows: name + ctx% on the top line, live state · age · recap
    beneath, so you read what a session is doing without opening it. */
 .agent-row.rich { align-items: flex-start; gap: 8px; }
-.agent-row.rich .term-status-dot { margin-top: 4px; flex: 0 0 auto; }
+/* 10px status dot — matches the collapsed rail (body.sidebar-collapsed .agent-row.rich
+   .term-status-dot) so folding doesn't resize it. Scoped to the rich row, so the 8px
+   base still holds for the wall pane dots and term pills. */
+.agent-row.rich .term-status-dot { margin-top: 4px; flex: 0 0 auto; width: 10px; height: 10px; }
 .agent-row.rich.active::before { height: 22px; }
 /* Window-type cue: a GLYPH (C / $ / ⚙), never colour alone. The letter carries the
    type; the tint only reinforces it, and it comes from the Okabe-Ito colourblind-
    safe palette (sky blue / bluish green / orange) rather than a red-green pairing.
    Desaturate the whole row and it still reads. */
+/* 18px box / 11px letter — matches the collapsed rail (body.sidebar-collapsed
+   .ar-type) so folding the sidebar doesn't resize the type cue. */
 .ar-type {
-    flex: 0 0 15px; height: 15px; margin-top: 3px;
+    flex: 0 0 18px; height: 18px; margin-top: 2px;
     display: inline-flex; align-items: center; justify-content: center;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 9px; font-weight: 700; line-height: 1; border-radius: 4px;
+    font-size: 11px; font-weight: 700; line-height: 1; border-radius: 4px;
     color: var(--text-dim); background: var(--surface);
 }
 .ar-type.claude { color: #56B4E9; background: color-mix(in srgb, #56B4E9 16%, transparent); }
