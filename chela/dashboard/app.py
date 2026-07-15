@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, event_log, gateanswer, hold, hooks, launcher, messenger, notify, okf, rooms, scheduler, spawn, starter, transcripts, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, event_log, gateanswer, hold, hooks, judge, launcher, messenger, notify, okf, personas, rooms, scheduler, spawn, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -2236,6 +2236,55 @@ def api_dispatcher_init():
     except OSError as e:
         return jsonify({"ok": False, "error": f"write failed: {e}"}), 400
     return jsonify(result)
+
+
+def _judge_live_status() -> str | None:
+    """A cheap "reviewing cmx-N" note when the judge is mid-review, or None.
+
+    The judge writes ``judge_state='running'`` on the run it is adjudicating
+    (``dispatcher.set_judge_state``); we read it back so the panel can show the
+    persona as live. Best-effort and non-fatal — a DB hiccup just means no note.
+    """
+    try:
+        running = [
+            r for r in dispatcher.list_runs()
+            if r.get("judge_state") == judge.J_RUNNING
+        ]
+    except Exception:
+        return None
+    if not running:
+        return None
+    labels = []
+    for r in running:
+        label = r.get("branch_name")
+        if not label and r.get("task_number") is not None:
+            label = f"cmx-{r['task_number']}"
+        if not label and r.get("task_id"):
+            label = str(r["task_id"])[:8]
+        if label:
+            labels.append(label)
+    if not labels:
+        return "reviewing a run"
+    return "reviewing " + ", ".join(labels)
+
+
+@app.route("/api/personas")
+@require_auth
+def api_personas():
+    """The declared persona layer (judge · critic · orchestrator), read-only.
+
+    Single source of truth is ``chela/personas`` — this route serializes the
+    registry and stamps a cheap live status where one is available (the judge,
+    while it is mid-review). It DECLARES the personas; it never launches one.
+    """
+    judge_status = _judge_live_status()
+    out = []
+    for p in personas.registry():
+        entry = p.as_dict()
+        if p.key == "judge" and judge_status:
+            entry["status"] = judge_status
+        out.append(entry)
+    return jsonify({"personas": out})
 
 
 @app.route("/api/dispatcher")

@@ -11,13 +11,14 @@
 // hooks come from this array, the global refresh calls this array's `tick`, and
 // the palette lists this array. Deleting a view is deleting its entry below.
 //
-// The five views are Feed · Wall · Work · Knowledge · Agents. `agent-detail` is
-// a virtual drill-in — reachable, no nav item. See viewreg.js for the entry shape.
+// The views are Feed · Wall · Work · Knowledge · Agents · Personas. `agent-detail`
+// is a virtual drill-in — reachable, no nav item. See viewreg.js for the entry shape.
 // ---------------------------------------------------------------------------
 import { refreshAgents } from './agents.js';
 import { enterFeed, tickFeed } from './feed.js';
 import { _kn, knBackToGlance, refreshKnowledge } from './knowledge.js';
 import { renderAgentDetail } from './nav.js';
+import { refreshPersonas } from './personas.js';
 import { renderTerminals, startTermTimer, stopTermTimer } from './terminals.js';
 import { pollWork } from './work.js';
 
@@ -79,6 +80,15 @@ export const VIEWS = [
         // lucide `bot` — the agent fleet, as a fixed box.
         lucide: 'bot',
         tick: () => refreshAgents(),
+    },
+    {
+        id: 'personas',
+        label: 'Personas',
+        // lucide `drama` — the theatre masks: the declared persona layer (judge · critic ·
+        // orchestrator). Read-only: it renders the registry, it never launches a persona.
+        lucide: 'drama',
+        enter: () => refreshPersonas(),
+        tick: () => refreshPersonas(),
     },
     {
         id: 'agent-detail',

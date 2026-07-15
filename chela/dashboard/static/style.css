@@ -2962,3 +2962,31 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kn-browse > summary { cursor: pointer; color: var(--text-dim); font-size: 12px;
     font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
 .kn-browse[open] > summary { margin-bottom: 10px; }
+
+/* Personas — the declared persona layer (judge · critic · orchestrator), read-only. */
+.personas-intro { color: var(--text-dim); font-size: 13px; line-height: 1.5;
+    margin: 4px 0 16px; max-width: 720px; }
+.personas-intro strong { color: var(--text); }
+.personas-list { display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.persona-card { background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px; }
+.persona-head { display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 8px; }
+.persona-title { font-weight: 600; font-size: 14px; }
+.persona-state { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: .03em; border: 1px solid var(--border);
+    color: var(--text-dim); }
+.persona-state.on { color: var(--accent); border-color: var(--accent); }
+.persona-state.dormant { color: var(--text-dim); }
+.persona-summary { color: var(--text-dim); font-size: 12.5px; line-height: 1.5;
+    margin-bottom: 12px; }
+.persona-rows { display: grid; gap: 6px; }
+.persona-row { display: grid; grid-template-columns: 108px 1fr; gap: 10px;
+    font-size: 12px; align-items: baseline; }
+.persona-row-key { color: var(--text-dim); text-transform: uppercase; font-size: 10.5px;
+    letter-spacing: .04em; font-weight: 600; }
+.persona-row-val { color: var(--text); line-height: 1.45; }
+.persona-docs { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+.persona-doc { font-size: 10.5px; color: var(--text-dim); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }

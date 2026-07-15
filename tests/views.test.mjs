@@ -30,6 +30,7 @@ function fakeRegistry() {
         { id: 'work', label: 'Work', icon: '▤', badges: [{ id: 'side-runs-count' }] },
         { id: 'knowledge', label: 'Knowledge', icon: '◆' },
         { id: 'agents', label: 'Agents', icon: '▢' },
+        { id: 'personas', label: 'Personas', icon: '🎭' },
         { id: 'agent-detail', label: 'Agent', virtual: true },
     ];
 }
@@ -53,8 +54,8 @@ function shippedOrder() {
 // by hand, so on its own it proves nothing about what actually ships — swap two
 // entries in views.js and the fake stays put. This ties the fake to the real
 // file: if they diverge (a reorder, an add, a delete in views.js), it goes red.
-test('the REAL views.js declares the shipped order — Feed·Wall·Work·Knowledge·Agents', () => {
-    assert.deepEqual(shippedOrder(), ['feed', 'terminals', 'work', 'knowledge', 'agents', 'agent-detail']);
+test('the REAL views.js declares the shipped order — Feed·Wall·Work·Knowledge·Agents·Personas', () => {
+    assert.deepEqual(shippedOrder(), ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas', 'agent-detail']);
     // …and fakeRegistry() is an HONEST copy of it — same ids, same order — so the
     // derivation tests below are exercising the order that actually ships.
     assert.deepEqual(fakeRegistry().map(v => v.id), shippedOrder());
@@ -64,7 +65,7 @@ test('the sidebar and the palette both derive from the registry — same views, 
     const views = fakeRegistry();
     const nav = navViews(views, CTX).map(v => v.id);
     const palette = paletteViews(views, CTX).map(v => v.id);
-    assert.deepEqual(nav, ['feed', 'terminals', 'work', 'knowledge', 'agents']);
+    assert.deepEqual(nav, ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas']);
     assert.deepEqual(palette, nav);
 });
 
@@ -84,8 +85,8 @@ test('REMOVING a view is one registry deletion — it leaves the nav, the palett
     assert.equal(findView(views, 'knowledge'), null);
     assert.ok(!navViews(views, CTX).some(v => v.id === 'knowledge'));
     assert.ok(!paletteViews(views, CTX).some(v => v.id === 'knowledge'));
-    // …and nothing else is disturbed: the other four still stand.
-    assert.deepEqual(navViews(views, CTX).map(v => v.id), ['feed', 'terminals', 'work', 'agents']);
+    // …and nothing else is disturbed: the others still stand.
+    assert.deepEqual(navViews(views, CTX).map(v => v.id), ['feed', 'terminals', 'work', 'agents', 'personas']);
 });
 
 test('a virtual view (agent-detail) is reachable but is NOT a nav item or a palette entry', () => {
@@ -99,7 +100,7 @@ test('a disabled view vanishes from the chrome (the Wall, when terminals are off
     const views = fakeRegistry();
     const ids = navViews(views, { terminalsOn: false }).map(v => v.id);
     assert.ok(!ids.includes('terminals'));
-    assert.deepEqual(ids, ['feed', 'work', 'knowledge', 'agents']);
+    assert.deepEqual(ids, ['feed', 'work', 'knowledge', 'agents', 'personas']);
 });
 
 test('entering a view tells every OTHER view to let go — no if/else chain to extend', () => {
@@ -107,6 +108,34 @@ test('entering a view tells every OTHER view to let go — no if/else chain to e
     const left = otherViews(views, 'work').map(v => v.id);
     assert.ok(!left.includes('work'));
     assert.equal(left.length, views.length - 1);
+});
+
+// --- the Personas view is WIRED to refreshPersonas ---------------------------
+//
+// views.js can't be imported here (its `agents.js → main.js` import runs selectView at load,
+// before VIEWS initialises — a circular-init that only bites in isolation). So, like
+// shippedOrder() above, we read the source — but a bare grep for the string 'refreshPersonas'
+// would pass a hook that merely mentions it in a comment. Instead we EXTRACT the personas
+// view's enter/tick arrow SOURCE and EXECUTE it with a refreshPersonas spy in scope: the hook
+// really runs, and the spy really has to fire. Replace the body with `() => {}` (the WIRING
+// corruption) and the arrow no longer calls the spy → red.
+function personasHook(name) {
+    const body = src('views.js');
+    const block = body.slice(body.indexOf("id: 'personas'"));
+    const m = block.match(new RegExp(`${name}:\\s*(\\([^)]*\\)\\s*=>\\s*[^\\n,]+)`));
+    assert.ok(m, `the personas view has no ${name} hook (extraction failed — did its shape change?)`);
+    let calls = 0;
+    // eslint-disable-next-line no-new-func — we execute the REAL hook source, not a copy of it
+    new Function('refreshPersonas', `return ${m[1]}`)(() => { calls++; })();
+    return calls;
+}
+
+test('the Personas view enter hook calls refreshPersonas — nav switch populates the panel', () => {
+    assert.equal(personasHook('enter'), 1, 'entering the Personas view did not call refreshPersonas');
+});
+
+test('the Personas view tick hook calls refreshPersonas — it keeps the live status fresh', () => {
+    assert.equal(personasHook('tick'), 1, 'the Personas view tick did not call refreshPersonas');
 });
 
 // --- one dataset, one poller -------------------------------------------------
