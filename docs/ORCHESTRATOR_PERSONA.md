@@ -166,6 +166,12 @@ never a green light.**
 
 - **v0.1**, run **supervised**. The next work is to *dogfood this attended* and watch where the
   orchestrator's judgment diverges from the human's — every divergence tightens this prompt.
+- **CMX-90 — auto-launch shipped, inbox-woken + attended-lease-gated** (`chela/personas/autolaunch.py`,
+  `chela/personas/lease.py`). chela now launches this persona itself when the decisions inbox has
+  work and a human's **attended-lease** is active, then registers it so the queued review lands in
+  it. OFF by default (`CHELA_ORCHESTRATOR`); the lease (`chela orchestrator attend`) is the
+  supervision that keeps it human-attended until isolation lands. It does not widen the taxonomy —
+  it only decides *when a supervised orchestrator is woken*.
 - **Do not flip to unattended** until the isolation gate in `ESCALATION_CONTRACT.md` is closed. This
   prompt bounds what the orchestrator *decides*; isolation bounds what a wrong decision can *break*.
 - An **independent critic** persona (advisory, catches "is this work needed / correctly scoped"

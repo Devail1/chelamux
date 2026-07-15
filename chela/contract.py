@@ -16,7 +16,12 @@ Two actions live here, each enforcing its slice of the contract:
        production-facing branch (``main``/``master``/…) — the contract's NEVER line;
     2. the judge said ``clean`` on this run;
     3. CI is green;
-    4. GitHub reports the PR open and ``MERGEABLE``.
+    4. GitHub reports the PR open and ``MERGEABLE``;
+    5. **and — for the auto-launched orchestrator only — a human's attended-lease is live.**
+       An action initiated by the auto-orchestrator (``$CHELA_ACTOR == auto-orchestrator``)
+       is refused when the lease is stale/absent: it is auto-*launched*, but it may only
+       *act* while a human is attending (``chela.personas.lease``). A human's own merge
+       carries no actor stamp and is never gated this way — the human IS the attendance.
 
   Any miss **refuses** — there is no ``--force`` here, so the command literally cannot
   merge to ``main`` or merge a red PR regardless of what the LLM decided. Every merge is
@@ -40,9 +45,10 @@ import os
 import subprocess
 from pathlib import Path
 
-from chela import dispatcher, event_log, notify
+from chela import config, dispatcher, event_log, notify
 from chela.dispatcher import CI_PASSING
 from chela.judge import J_CLEAN
+from chela.personas import lease
 
 log = logging.getLogger("chela.contract")
 
@@ -59,6 +65,18 @@ AUTONOMOUS_BASE = os.environ.get("CHELA_MERGE_BASE", "dev").strip() or "dev"
 FORBIDDEN_BASES = frozenset({"main", "master", "production", "prod", "release", "stable"})
 
 GIT_TIMEOUT = 60
+
+
+def _actor(explicit: str | None = None) -> str:
+    """Who is initiating this action — the auto-launched orchestrator names itself here.
+
+    An explicit arg (tests, an in-process caller) wins; otherwise the actor is read LIVE from
+    ``$CHELA_ACTOR`` in the calling session's environment. Only the auto-launched orchestrator
+    stamps this (``config.AUTO_ORCHESTRATOR_ACTOR``); a human's shell has no stamp, which is
+    exactly what keeps a human's own ``chela merge`` off the attended-lease path.
+    """
+    return (explicit if explicit is not None
+            else os.environ.get(config.ACTOR_ENV, "")).strip()
 
 
 def _refuse(task_id: str | None, tier: str, error: str, **extra) -> dict:
@@ -159,7 +177,7 @@ def _squash_merge(run: dict, repo_dir: str, pr_url: str) -> dict:
     return {"ok": True, "merge_commit_sha": merge_sha}
 
 
-def merge(ident: str, *, reason: str = "") -> dict:
+def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
     """AUTONOMOUSLY merge a dispatched PR — but only if the contract's whole gate holds.
 
     Every clause is checked here and the GitHub-derived ones are read LIVE at the moment of
@@ -167,12 +185,19 @@ def merge(ident: str, *, reason: str = "") -> dict:
     clause and the contract tier it belongs to):
 
     1. the run exists and is ``awaiting_review``;
-    2. the PR's base branch is not a production-facing branch (**NEVER**), and is the one
+    2. **the ATTENDED-LEASE — for the auto-launched orchestrator only.** When the caller is the
+       auto-launched orchestrator (``$CHELA_ACTOR == auto-orchestrator``), a human's attended-lease
+       must be *active* right now, or the merge is refused as an escalation. This is the ACTION-time
+       half of "attended-autonomous": the orchestrator is auto-*launched*, but it may only *act*
+       (merge) while a human is still attending — the moment the lease lapses it must ``chela
+       escalate`` instead. A **human's** own ``chela merge`` carries no actor stamp, so this gate
+       never applies to a human — the human's presence IS the attendance;
+    3. the PR's base branch is not a production-facing branch (**NEVER**), and is the one
        autonomous target ``dev`` — an unreadable base is refused too (unknown ≠ safe);
-    3. the judge said ``clean`` on this run (anything else — ``blocked`` /
+    4. the judge said ``clean`` on this run (anything else — ``blocked`` /
        ``cannot_verify`` / never-ran — is a human's call);
-    4. CI is green per GitHub;
-    5. GitHub reports the PR open and ``MERGEABLE``.
+    5. CI is green per GitHub;
+    6. GitHub reports the PR open and ``MERGEABLE``.
 
     There is deliberately **no ``--force``**: overriding a gate is an escalation, not an
     autonomous act, so this command cannot do it. A human who knows a failure is unrelated
@@ -202,7 +227,17 @@ def merge(ident: str, *, reason: str = "") -> dict:
     if not repo_dir or not Path(repo_dir).is_dir():
         return _refuse(task_id, "escalate", f"the workflow repo dir is missing ({wf_path})")
 
-    # 2. THE NEVER LINE — the base branch, read live and checked first & hardest.
+    # 2. THE ATTENDED-LEASE — the ACTION-time supervision gate, for the auto-orchestrator only.
+    #    The auto-launched orchestrator may merge ONLY while a human's lease is live; stale or
+    #    absent ⇒ it must escalate, not act. A human merge (no actor stamp) is never gated here.
+    if _actor(actor) == config.AUTO_ORCHESTRATOR_ACTOR and lease.active() is None:
+        return _refuse(task_id, "escalate", actor=config.AUTO_ORCHESTRATOR_ACTOR,
+                       error="the auto-launched orchestrator has NO active attended-lease — its "
+                             "autonomous actions require a human to be attending (`chela "
+                             "orchestrator attend`). The lease has lapsed or was never granted, so "
+                             "this merge is unattended and is REFUSED. Escalate to a human instead.")
+
+    # 3. THE NEVER LINE — the base branch, read live and checked first & hardest.
     base = _read_pr_base(pr_url, repo_dir)
     if base is None:
         return _refuse(task_id, "escalate",
@@ -219,7 +254,7 @@ def merge(ident: str, *, reason: str = "") -> dict:
                              f"{AUTONOMOUS_BASE!r}. Merging outside the standing dev/dogfood "
                              "grant is an escalation. Refusing.")
 
-    # 3. The judge's verdict — clean, or it is not the orchestrator's to merge.
+    # 4. The judge's verdict — clean, or it is not the orchestrator's to merge.
     judge_state = run.get("judge_state")
     if judge_state != J_CLEAN:
         shown = judge_state or "never ran"
@@ -228,7 +263,7 @@ def merge(ident: str, *, reason: str = "") -> dict:
                              "is not judge-clean is a human's call (blocked → rework, "
                              "cannot_verify / no-judge → escalate). Refusing to merge.")
 
-    # 4. CI — green per GitHub, read live. Anything else (pending / red / none / unreadable)
+    # 5. CI — green per GitHub, read live. Anything else (pending / red / none / unreadable)
     #    is refused: for an AUTONOMOUS merge, only a check that was SEEN to pass is a pass.
     ci = dispatcher._read_pr_checks(pr_url, repo_dir)
     if ci.state != CI_PASSING:
@@ -241,7 +276,7 @@ def merge(ident: str, *, reason: str = "") -> dict:
         return _refuse(task_id, "escalate", ci_state=ci.state,
                        error=f"{detail}. An autonomous merge requires green CI. Refusing.")
 
-    # 5. Mergeable — GitHub's own verdict on whether the merge is clean, read live.
+    # 6. Mergeable — GitHub's own verdict on whether the merge is clean, read live.
     pr_state, mergeable = dispatcher._read_pr_status(pr_url, repo_dir)
     if pr_state and pr_state != "open":
         return _refuse(task_id, "escalate", pr_state=pr_state,
@@ -257,6 +292,7 @@ def merge(ident: str, *, reason: str = "") -> dict:
     justification = {
         "task_id": task_id, "pr_url": pr_url, "base": base, "judge_state": judge_state,
         "ci_state": ci.state, "pr_mergeable": mergeable, "reason": reason.strip(),
+        "actor": _actor(actor) or "human",
     }
     if not result.get("ok"):
         event_log.append(

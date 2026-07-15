@@ -57,14 +57,18 @@ def test_registry_is_rebuilt_fresh_so_enabled_tracks_the_env(monkeypatch):
     assert personas.find("judge").enabled is True
 
 
-def test_orchestrator_is_declared_but_dormant():
-    # The whole point of this task's boundary: the orchestrator is EMBEDDED (declared) but NOT
-    # launched. It must read as dormant, and its prompt source is the in-repo prompt file.
+def test_orchestrator_is_dormant_by_default_and_flag_arms_it(monkeypatch):
+    # CMX-90: the orchestrator's auto-launch is now flag-driven like the judge/critic, but OFF by
+    # default (auto-launching a merge-authority agent is opt-in). Unset ⇒ dormant; flip
+    # CHELA_ORCHESTRATOR on ⇒ armed. Corrupt registry() to hardcode `enabled` and this goes red.
+    monkeypatch.delenv("CHELA_ORCHESTRATOR", raising=False)
     orch = personas.find("orchestrator")
     assert orch is not None
     assert orch.mode == "attended-autonomous"
-    assert orch.enabled is False
     assert orch.prompt_source == "chela/personas/orchestrator.md"
+    assert orch.enabled is False, "default must be OFF (dormant) with the flag unset"
+    monkeypatch.setenv("CHELA_ORCHESTRATOR", "true")
+    assert personas.find("orchestrator").enabled is True, "the flag must arm it"
 
 
 def test_as_dict_is_json_shaped():
@@ -158,3 +162,23 @@ def test_api_personas_stamps_the_judge_live_status(client, monkeypatch):
     # …and only the judge is stamped — the note is judge-specific, not sprayed across the layer.
     others = [p for p in payload["personas"] if p["key"] != "judge"]
     assert all("status" not in p or not p["status"] for p in others)
+
+
+def test_api_personas_stamps_the_orchestrator_attended_status(client, monkeypatch):
+    """🔴 WIRING — the route stamps the orchestrator's attended-lease state (CMX-90).
+
+    ``_orchestrator_live_status`` reads the flag + ``lease.active()``; the route grafts it onto
+    the orchestrator entry. Sever either half (return None, or stop stamping) and the note
+    vanishes — this drives the route to prove both are wired.
+    """
+    from chela.dashboard.app import autolaunch, lease
+    monkeypatch.setattr(autolaunch, "enabled", lambda: True)
+    lease.grant(ttl_seconds=600)
+    payload = client.get("/api/personas").get_json()
+    orch_entry = next(p for p in payload["personas"] if p["key"] == "orchestrator")
+    assert orch_entry.get("status") and "attended" in orch_entry["status"]
+    # off ⇒ no note (the stamp reflects the live flag, it is not hardcoded)
+    monkeypatch.setattr(autolaunch, "enabled", lambda: False)
+    payload = client.get("/api/personas").get_json()
+    orch_entry = next(p for p in payload["personas"] if p["key"] == "orchestrator")
+    assert not orch_entry.get("status")

@@ -311,6 +311,24 @@ CRITIC_ENABLED = os.environ.get("CHELA_CRITIC", "true").strip().lower() not in (
     "false", "0", "no", "off",
 )
 
+# 🎭🤖 The orchestrator auto-launch (see chela.personas.autolaunch) — the persona pattern's
+# harness instance: chela launches the embedded orchestrator persona itself, inbox-woken and
+# gated by a human's attended-lease (CMX-90). ⛔ Defaults OFF, unlike the judge/critic: this one
+# spawns an agent that holds `chela merge` authority, so it fires only when an operator has
+# explicitly armed it AND is actively attending (`chela orchestrator attend`).
+ORCHESTRATOR_ENABLED = os.environ.get("CHELA_ORCHESTRATOR", "false").strip().lower() in (
+    "true", "1", "yes", "on",
+)
+
+# 🎭🔑 The ACTOR stamp — how a chela session names itself to the contract gate (chela.contract).
+# The auto-launched orchestrator exports CHELA_ACTOR=auto-orchestrator into its window (alongside
+# CHELA_WID) so that `chela merge`, run from THAT session, requires a live attended-lease of it:
+# it is auto-*launched*, and the lease keeps its autonomous ACTIONS attended too, not just its
+# start. A human's own `chela merge` carries no such stamp, so the lease gate never applies to a
+# human — the human's presence IS the attendance. Read live at merge-time, never latched here.
+ACTOR_ENV = "CHELA_ACTOR"
+AUTO_ORCHESTRATOR_ACTOR = "auto-orchestrator"
+
 _dispatch_raw = os.environ.get("CHELA_DISPATCH_WORKFLOWS", "")
 DISPATCH_WORKFLOWS = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()

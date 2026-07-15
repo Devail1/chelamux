@@ -12,14 +12,17 @@ Each refusal below is one clause of ``docs/ESCALATION_CONTRACT.md`` made mechani
 """
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from chela import contract, dispatcher, event_log
+from chela import config, contract, dispatcher, event_log
 from chela.dispatcher import CI_FAILING, CI_NONE, CI_PASSING, CI_PENDING, CI_UNKNOWN, CIStatus
 from chela.judge import J_BLOCKED, J_CANNOT_VERIFY, J_RUNNING
+from chela.personas import lease
 
 
 @pytest.fixture(autouse=True)
@@ -258,6 +261,102 @@ def test_a_gate_that_holds_but_a_merge_that_fails_is_reported(repo):
     assert "gh pr merge timed out" in result["error"]
     # A gate-passed-but-merge-failed is auditable too.
     assert event_log.read(types=["orchestrator.merge_failed"])["events"]
+
+
+# --- the ATTENDED-LEASE: the auto-orchestrator may ACT only while a human is attending ---
+#
+# The launch gate (autolaunch.should_launch) only decides whether the orchestrator STARTS. The
+# safety property the contract requires is that its autonomous ACTIONS stay attended: an
+# auto-launched orchestrator may `chela merge` ONLY while a human's attended-lease is live, and
+# when the lease is stale/absent it must escalate instead. These prove the ACTION-time gate — and,
+# crucially, that a HUMAN's own merge is never touched by it (the human IS the attendance).
+
+
+def _write_expired_lease() -> None:
+    """A lease file whose window has already closed — present on disk, but NOT active."""
+    lease.path().parent.mkdir(parents=True, exist_ok=True)
+    past = time.time() - 100
+    lease.path().write_text(
+        json.dumps({"by": "h", "created_at": past - 600, "expires_at": past}), encoding="utf-8")
+    assert lease.active() is None      # sanity: this fixture really is a stale lease
+
+
+@pytest.mark.parametrize("make_stale", [
+    lambda: None,                      # absent — no lease file at all
+    _write_expired_lease,              # present but expired
+])
+def test_auto_orchestrator_merge_is_REFUSED_without_a_live_lease(repo, make_stale):
+    """🔴 THE ACTION-GATE — the load-bearing guard the brief named. The auto-launched
+    orchestrator (actor=auto-orchestrator) with a stale/absent lease, and an otherwise fully
+    MERGEABLE run (base dev, judge clean, CI green, MERGEABLE), must be REFUSED — it has to
+    escalate, not act, because no human is attending. Every downstream gate is mocked to pass,
+    so the lease gate is the SOLE possible refusal: delete it (ignore the actor's stale lease on
+    the merge path) and the merge goes through — turning this red."""
+    _seed_run(repo)
+    make_stale()
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1", actor=config.AUTO_ORCHESTRATOR_ACTOR)
+    assert result["ok"] is False
+    assert result["tier"] == "escalate"
+    assert result.get("actor") == config.AUTO_ORCHESTRATOR_ACTOR
+    squash.assert_not_called()         # ⛔ nothing merged — the unattended orchestrator was stopped
+
+
+def test_auto_orchestrator_actor_is_read_from_the_environment(repo, monkeypatch):
+    """The actor stamp is not just a param: the launched window exports CHELA_ACTOR, and the gate
+    reads it live. Stamp it in the env (no explicit arg), no lease → the same refusal. Corrupt
+    ``_actor`` to ignore the env and this goes red."""
+    _seed_run(repo)
+    monkeypatch.setenv(config.ACTOR_ENV, config.AUTO_ORCHESTRATOR_ACTOR)
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")      # no actor= arg — it must come from the env
+    assert result["ok"] is False
+    assert result["tier"] == "escalate"
+    squash.assert_not_called()
+
+
+def test_auto_orchestrator_MAY_merge_while_the_lease_is_live(repo):
+    """The other side of the gate: when a human IS attending (lease active), the auto-orchestrator
+    merges normally — and the provenance log records that the auto-orchestrator was the actor."""
+    _seed_run(repo)
+    lease.grant(ttl_seconds=600)           # a human is attending right now
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "beef"}) as squash:
+        result = contract.merge("t1", actor=config.AUTO_ORCHESTRATOR_ACTOR)
+    assert result["ok"] is True
+    squash.assert_called_once()
+    payload = event_log.read(types=["orchestrator.merge"])["events"][0]["payload"]
+    assert payload["actor"] == config.AUTO_ORCHESTRATOR_ACTOR
+
+
+def test_a_HUMAN_merge_is_NOT_gated_by_the_lease(repo):
+    """🔴 THE REVERSE GUARD — the human's own `chela merge` must be UNAFFECTED by the lease. A
+    human carries no actor stamp, so with no lease at all the merge still proceeds (the human's
+    presence IS the attendance). Corrupt the gate to apply to human merges too (drop the actor
+    check) and this goes red — the lease would then block the very person who is attending."""
+    _seed_run(repo)
+    assert lease.active() is None          # no lease — a human never needs one
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "cafe"}) as squash:
+        result = contract.merge("t1")      # actor defaults to "" (a human) — no stamp
+    assert result["ok"] is True
+    squash.assert_called_once()
+    payload = event_log.read(types=["orchestrator.merge"])["events"][0]["payload"]
+    assert payload["actor"] == "human"
 
 
 # --- escalate: the one structured way to reach the human -------------------------------

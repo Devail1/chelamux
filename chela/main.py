@@ -44,6 +44,7 @@ from chela import (
     scheduler,
     workflow,
 )
+from chela.personas import autolaunch, lease
 from chela.config import (
     BIND_DISPATCHED,
     SCHEDULER_POLL_INTERVAL,
@@ -256,6 +257,17 @@ def cmd_run(args) -> None:
                 except Exception:
                     log.exception("Decisions-inbox tick failed")
 
+                # 🎭🤖 Auto-launch the orchestrator (CMX-90): inbox-woken — if the inbox has
+                # queued work but no live orchestrator to take it, and a human's attended-lease
+                # is active, launch the persona itself. Gated hard (flag OFF by default + lease +
+                # not-already-live + cooldown, all in autolaunch.evaluate) and wrapped so a
+                # launch failure can never take the daemon loop down.
+                if autolaunch.enabled():
+                    try:
+                        autolaunch.maybe_wake(inbox.load(), inbox_statuses, epoch.current())
+                    except Exception:
+                        log.exception("Orchestrator auto-launch check failed")
+
             # Agent rooms: a targeted handoff/question/blocker whose recipient was sitting
             # at a gate is PARKED, never pasted (that paste would answer the gate). This is
             # what finally sends it — the moment that window is at its prompt again. Gated
@@ -452,6 +464,44 @@ def cmd_watching(args) -> None:
     print(f"\nqueued, awaiting your next idle ({len(queue)}):")
     for event in queue:
         print(f"  {inbox.render(event)}")
+
+
+# --- the orchestrator persona: the attended-lease (auto-launch supervision) -----
+
+def cmd_orchestrator(args) -> None:
+    """Manage the auto-launched orchestrator persona's attended-lease (CMX-90).
+
+    The lease is how the auto-launch stays *supervised* without process isolation: chela
+    inbox-wakes the orchestrator only while a human's lease is active. ``attend`` opens/refreshes
+    it, ``release`` closes it, ``status`` shows the lease + whether an auto-launch would fire.
+    """
+    sub = getattr(args, "orch_cmd", None)
+    if sub == "attend":
+        try:
+            ttl = hold.parse_ttl(args.ttl)
+        except ValueError as e:
+            print(f"orchestrator attend: {e}", file=sys.stderr)
+            sys.exit(1)
+        granted = lease.grant(ttl_seconds=ttl)
+        print(f"attending the orchestrator — {granted.summary()}")
+        print(f"  auto-launch armed: {'yes' if autolaunch.enabled() else 'NO — set CHELA_ORCHESTRATOR=true'}")
+        return
+    if sub == "release":
+        released = lease.release()
+        print("released the orchestrator lease — auto-launch is now closed"
+              if released is not None else "no orchestrator lease was in force")
+        return
+    # status (the default)
+    active = lease.active()
+    print(f"orchestrator persona: {'ARMED' if autolaunch.enabled() else 'off'} "
+          f"(CHELA_ORCHESTRATOR={'true' if autolaunch.enabled() else 'unset/false'})")
+    print(f"attended-lease: {active.summary() if active is not None else '(none — auto-launch closed)'}")
+    store = inbox.load()
+    statuses = inbox.status_snapshot()
+    now_epoch = epoch.current()
+    go, reason = autolaunch.evaluate(store, statuses, now_epoch)
+    print(f"would auto-launch now: {'YES' if go else 'no'}"
+          + (f" — {reason}" if not go else ""))
 
 
 # --- agent rooms: the relationship a message finally has ------------------------
@@ -1721,6 +1771,27 @@ def main() -> None:
 
     sub.add_parser("watching", help="Show inbox watches + the queued events")
 
+    # orchestrator — the auto-launched persona's attended-lease (the supervision gate, CMX-90)
+    p_orch = sub.add_parser(
+        "orchestrator",
+        help="🎭 Manage the auto-launched orchestrator persona's attended-lease "
+             "(attend/release/status)",
+    )
+    orch_sub = p_orch.add_subparsers(dest="orch_cmd")
+    p_attend = orch_sub.add_parser(
+        "attend",
+        help="Open (or refresh) the attended-lease: arm inbox-woken auto-launch for a bounded "
+             "window. This is the human 'I am here' that keeps the orchestrator supervised",
+    )
+    p_attend.add_argument(
+        "--ttl", default=str(lease.DEFAULT_TTL_SECONDS),
+        help=f"How long the lease lasts — 900, 30m, 2h (default "
+             f"{lease.human_duration(lease.DEFAULT_TTL_SECONDS)}, max "
+             f"{lease.human_duration(lease.MAX_TTL_SECONDS)}). It self-expires; re-run to extend",
+    )
+    orch_sub.add_parser("release", help="Close the attended-lease now (stop attending)")
+    orch_sub.add_parser("status", help="Show the lease + whether an auto-launch would fire now")
+
     # rooms — a typed, durable ledger two windows are members of, plus ACTIVE DISPATCH:
     # a targeted handoff/question/blocker is injected into the peer's terminal, and the
     # answer routes back to the asker with no human in the middle.
@@ -2045,6 +2116,8 @@ def main() -> None:
         cmd_unwatch(args)
     elif args.command == "watching":
         cmd_watching(args)
+    elif args.command == "orchestrator":
+        cmd_orchestrator(args)
     elif args.command == "room":
         room_cmds = {"create": cmd_room_create, "join": cmd_room_join,
                      "leave": cmd_room_leave, "status": cmd_room_status,
