@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, event_log, gateanswer, hold, hooks, launcher, messenger, notify, okf, rooms, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, event_log, gateanswer, hold, hooks, launcher, messenger, notify, okf, rooms, scheduler, spawn, starter, transcripts, userconfig
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -1345,14 +1345,6 @@ def api_agents_rename(wid):
     return jsonify({"ok": True, "wid": wid, "name": name})
 
 
-def _next_shell_name(existing: set[str]) -> str:
-    """Smallest ``shell-N`` (N >= 1) not already a live window name."""
-    n = 1
-    while f"shell-{n}" in existing:
-        n += 1
-    return f"shell-{n}"
-
-
 @app.route("/api/agents/spawn", methods=["POST"])
 @require_auth
 def api_agents_spawn():
@@ -1363,6 +1355,12 @@ def api_agents_spawn():
       command — a command to run once the shell is up. Only `claude` (with
                 optional args) is accepted; omit it for a bare interactive shell.
 
+    The window-open itself is the shared :func:`chela.spawn.spawn_window` (the ONE
+    path the Telegram `/new` bridge uses too, so the two can't drift — see that
+    module). This endpoint owns only what is dashboard-specific: validating the
+    user-supplied `command` against the `claude`-only allowlist BEFORE spawning, and
+    recording an explicit cwd in the launcher's Recent list after.
+
     The ttyd supervisor (scripts/agent-terminals.sh) discovers the new window on
     its own poll and assigns a port within ~12s; until then the pane's iframe
     404s (known latency). When an explicit cwd is given, it's recorded in the
@@ -1372,88 +1370,26 @@ def api_agents_spawn():
     body = request.get_json(silent=True) or {}
 
     cwd_arg = (body.get("cwd") or "").strip()
-    launched_dir = None
-    if cwd_arg:
-        cwd = os.path.realpath(os.path.expanduser(cwd_arg))
-        if not os.path.isdir(cwd):
-            return jsonify({"ok": False, "error": f"no such directory: {cwd_arg}"}), 400
-        launched_dir = cwd
-    else:
-        cwd = str(Path.home())
-
     command = (body.get("command") or "").strip()
+    # Validate the untrusted command at the door, before spawning anything: only
+    # `claude` (with optional args) may be auto-launched into a fresh window.
     if command and not _LAUNCH_CMD_RE.match(command):
         return jsonify({"ok": False, "error": "only `claude` may be auto-launched"}), 400
 
-    # The session may not exist yet (fresh boot, or a `wsl --shutdown` that took the
-    # tmux server with it). It's chela's own session, so create it rather than fail
-    # the spawn with a raw "error connecting to /tmp/tmux-1000/default" the user can
-    # do nothing about. Idempotent + race-safe; only tmux being unreachable fails.
-    if not discovery.ensure_session():
-        return jsonify({"ok": False,
-                        "error": "tmux is unreachable — cannot create the chela session"}), 500
+    result = spawn.spawn_window(cwd_arg or str(Path.home()), command=command or None)
+    if not result.ok:
+        # A missing directory is the caller's fault (400); anything else — tmux
+        # unreachable, a rejected name, a failed new-window — is ours (500).
+        status = 400 if (result.error or "").startswith("no such directory") else 500
+        return jsonify({"ok": False, "error": result.error}), status
 
-    existing = set(discovery.get_all_windows())
-    name = _next_shell_name(existing)
-    if not _WINDOW_NAME_RE.match(name):
-        return jsonify({"ok": False, "error": f"invalid window name: {name}"}), 500
-    try:
-        # Trailing ':' forces session resolution. A bare session name is
-        # ambiguous to tmux when a *window* shares that name (e.g. a Claude
-        # window opened in a dir whose basename == the session name); tmux then
-        # targets that window's index and fails with "index N in use".
-        proc = subprocess.run(
-            ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd,
-             "-P", "-F", "#{window_id}"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "tmux new-window failed").strip()
-        return jsonify({"ok": False, "error": err}), 500
-
-    # Export CHELA_WID into the fresh shell so the agent knows its own window id
-    # (self-identity for peek/read/drive), whether or not a command follows.
-    new_wid = (proc.stdout or "").strip()
-    target = f"{TMUX_SESSION}:{name}"
-    # Pin the name against tmux's automatic-rename (command-follow) and
-    # allow-rename (OSC) so a claude spawned here never flickers to the
-    # subcommand name mid-shell-out. `new-window -n` already disables
-    # automatic-rename; assert both explicitly so the invariant can't drift.
-    agent_manager.lock_window_name(new_wid if re.fullmatch(r"@\d+", new_wid) else target)
-    if re.fullmatch(r"@\d+", new_wid):
+    if cwd_arg:  # record only an explicitly-chosen target in the Recent list
         try:
-            subprocess.run(["tmux", "send-keys", "-t", target, "-l",
-                            f"export CHELA_WID={new_wid}"],
-                           capture_output=True, text=True, timeout=10)
-            subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
-                           capture_output=True, text=True, timeout=10)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            log.warning("spawned %s but could not export CHELA_WID: %s", name, e)
-
-    if command:
-        # Send the command literally (-l, no key-name lookup) then Enter. tmux
-        # buffers send-keys into the pty, so this lands even before the shell has
-        # finished drawing its prompt. We start a shell and *send* `claude` rather
-        # than running it as the window command so the pane survives claude exiting.
-        try:
-            subprocess.run(["tmux", "send-keys", "-t", target, "-l", command],
-                           capture_output=True, text=True, timeout=10)
-            subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
-                           capture_output=True, text=True, timeout=10)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            log.warning("spawned %s but could not send %r: %s", name, command, e)
-
-    if launched_dir:
-        try:
-            launcher.record_recent(launched_dir)
+            launcher.record_recent(result.cwd)
         except Exception:  # noqa: BLE001 — a store hiccup must never fail the spawn
-            log.warning("launcher.record_recent failed for %s", launched_dir, exc_info=True)
+            log.warning("launcher.record_recent failed for %s", result.cwd, exc_info=True)
 
-    log.info("spawned window %s in %s%s", name, cwd,
-             f" running {command!r}" if command else "")
-    return jsonify({"ok": True, "name": name, "cwd": cwd})
+    return jsonify({"ok": True, "name": result.name, "cwd": result.cwd})
 
 
 # ---------------------------------------------------------------------------

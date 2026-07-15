@@ -16,9 +16,10 @@ Two halves, split so the UI unit-tests with no tmux and no ``python-telegram-bot
   ``n:x``) so they never approach Telegram's 64-byte limit; the current path and
   its subdir list live in the caller's per-user state instead (ccbot's approach).
 * the **launcher** — :func:`launch_claude_window` opens a tmux window in the chosen
-  directory and starts ``claude`` in it, exactly as the dashboard's spawn endpoint
-  does. It is the one tmux-touching piece and is injected into
-  :func:`chela.telegram.inbound.build_application` so tests drive a stub.
+  directory and starts ``claude`` in it. It does NOT re-implement the window spawn:
+  it delegates to :func:`chela.spawn.spawn_window`, the ONE window-creation path the
+  dashboard launcher uses too, so the two can never drift (see that module). It is
+  injected into :func:`chela.telegram.inbound.build_application` so tests drive a stub.
 
 **Launch-and-BIND, without this module binding anything.** ``/new`` only *launches*
 the window; the bind is emergent. A ``/new`` window is an ordinary agent window (not
@@ -43,7 +44,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import subprocess
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -196,88 +196,25 @@ def decode_new_callback(data: str) -> tuple[str, int | None] | None:
     return None
 
 
-# A launched window's id looks like ``@7``; used to tell tmux's ``-P -F`` id echo
-# from a fallback so THIS spawn stays addressable by id.
-_WID_RE = re.compile(r"@\d+")
-
-
-def _next_name(existing: set[str]) -> str:
-    """Smallest ``shell-N`` (N ≥ 1) not already a live window name.
-
-    A generic ``shell-N`` on purpose (cf. the dashboard's ``_next_shell_name``): the
-    auto-topics reconcile then names the resulting topic after the PROJECT — the cwd
-    basename — rather than after ``shell-3`` (:func:`chela.telegram.reconcile.
-    topic_name_for` keys off :func:`chela.agent_manager.is_generic_name`).
-    """
-    n = 1
-    while f"shell-{n}" in existing:
-        n += 1
-    return f"shell-{n}"
-
-
 def launch_claude_window(cwd: str | Path) -> tuple[str | None, str | None]:
     """Open a tmux window in ``cwd`` and start ``claude`` in it: ``(window_id, error)``.
 
     The production launcher injected into
     :func:`chela.telegram.inbound.build_application`. Returns the new window's
-    ``@id`` and ``None`` on success, or ``(None, message)`` on failure — the
-    caller relays the message to the operator rather than raising into the update
-    queue.
+    ``@id`` (or its name, if this tmux build echoed no id) and ``None`` on success,
+    or ``(None, message)`` on failure — the caller relays the message to the
+    operator rather than raising into the update queue.
 
-    Mirrors the dashboard's spawn endpoint (``/api/agents/spawn``): create the
-    session if it is missing (a boot-ordering condition, not an error), open the
-    window with ``-P -F '#{window_id}'`` so THIS spawn is addressable by id, pin
-    its name against tmux's automatic-rename, export ``CHELA_WID`` so the agent
-    knows its own window, then ``send-keys`` the literal ``claude`` + Enter — we
-    start a shell and *send* the command (rather than running it as the window
-    command) so the pane survives ``claude`` exiting.
+    Just an adapter: the actual window-open is :func:`chela.spawn.spawn_window`, the
+    SAME path the dashboard launcher takes, so ``/new`` and the dashboard can never
+    diverge in how they set a window up. ``/new`` always launches the configured
+    :data:`chela.agent_manager.DEFAULT_LAUNCH_CMD` (trusted, not user input — so no
+    per-caller command validation is needed here).
     """
-    from chela import agent_manager, config, discovery
+    from chela import agent_manager, spawn
 
-    real = os.path.realpath(os.path.expanduser(str(cwd)))
-    if not os.path.isdir(real):
-        return None, f"no such directory: {cwd}"
-
-    if not discovery.ensure_session():
-        return None, "tmux is unreachable — cannot create the chela session"
-
-    session = config.current_session()
-    name = _next_name(set(discovery.get_all_windows()))
-    target = f"{session}:{name}"
-    try:
-        # Trailing ':' forces session resolution; a bare session name is ambiguous
-        # to tmux when a window shares that name (see the dashboard spawn note).
-        proc = subprocess.run(
-            ["tmux", "new-window", "-t", f"{session}:", "-n", name, "-c", real,
-             "-P", "-F", "#{window_id}"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        return None, str(e)
-    if proc.returncode != 0:
-        return None, (proc.stderr or proc.stdout or "tmux new-window failed").strip()
-
-    wid = (proc.stdout or "").strip()
-    have_wid = bool(_WID_RE.fullmatch(wid))
-    # Pin the name against automatic-rename/allow-rename so the claude spawn never
-    # flickers the window to "claude" (which would drift the topic's name).
-    agent_manager.lock_window_name(wid if have_wid else target)
-    try:
-        if have_wid:
-            subprocess.run(["tmux", "send-keys", "-t", target, "-l",
-                            f"export CHELA_WID={wid}"],
-                           capture_output=True, text=True, timeout=10)
-            subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
-                           capture_output=True, text=True, timeout=10)
-        subprocess.run(["tmux", "send-keys", "-t", target, "-l",
-                        agent_manager.DEFAULT_LAUNCH_CMD],
-                       capture_output=True, text=True, timeout=10)
-        subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
-                       capture_output=True, text=True, timeout=10)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        # The window exists; only the command send failed. Report it — a silent
-        # half-launch (empty shell, no agent) is worse than a named failure.
-        return None, f"opened the window but couldn't start claude: {e}"
-
-    log.info("telegram /new: launched %s in %s", name, real)
-    return (wid if have_wid else name), None
+    result = spawn.spawn_window(cwd, command=agent_manager.DEFAULT_LAUNCH_CMD)
+    if not result.ok:
+        return None, result.error
+    log.info("telegram /new: launched %s in %s", result.name, result.cwd)
+    return (result.wid or result.name), None
