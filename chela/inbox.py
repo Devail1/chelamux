@@ -81,6 +81,19 @@ window now — a wrong wid is worse than no wid, CMX-48), and being undeliverabl
 notification, and a red ``chela doctor`` (``inbox.address``). The orchestrator re-registers
 with ``chela watch`` — which is what any dispatch already does.
 
+**AND IT NOW SELF-HEALS — an address is not an identity, so it re-resolves from one.** CMX-77
+made a renumbered address LOUD, but the recovery still waited on a human (or the orchestrator's
+next dispatch) to re-run ``chela watch``: the inbox was keyed on a bare ``@N`` with nothing to
+re-resolve it from. That is the 4th face of one bug — an address used as a key — that CMX-48
+(the event log), CMX-70 (the relay) and CMX-77 (the epoch) each fixed in one other consumer.
+The last one is fixed the same way: the orchestrator's stable claude SESSION id is recorded at
+registration (:func:`_identity_of`), and when the address rots the tick re-resolves it to the
+window running that session TODAY (:func:`resolve_heal` → :func:`chela.sessions.wid_for_session`,
+the same wid↔session evidence CMX-48/70/77 trust) and re-points itself — no human, no lost
+queue. It is still never a guess: an identity that cannot be re-resolved to a live window leaves
+the address exactly as dangling-and-loud as CMX-77 left it. Recovery is announced once
+(:func:`_announce_heal`); the held queue then flows on the next idle tick.
+
 **A queued event is a claim about the PAST, so it is re-checked at DELIVERY time.**
 Delivery is deliberately deferred until the orchestrator is idle, and the world moves
 in the meantime: an ``awaiting_review`` event was delivered *after* its PR had already
@@ -105,7 +118,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from chela import agent_manager, discovery, epoch, event_log, messenger, notify, transcripts
+from chela import agent_manager, discovery, epoch, event_log, messenger, notify, sessions, transcripts
 from chela import config
 from chela.config import INBOX_ENABLED
 from chela.tui_text import sanitize_prompt
@@ -164,13 +177,16 @@ def store_path() -> Path:
 def _empty() -> dict:
     # `orchestrator_epoch` is the tmux server that ISSUED `orchestrator` — the half of the
     # address that used to be missing, and without which `@0` is just a number that means
-    # something different after every tmux restart (chela.epoch). `orchestrator_name` is
-    # what that window was CALLED: an address that has gone stale cannot be re-resolved
-    # (never guess a wid), but the alarm can at least name what it was pointing at.
-    # `address_alarm` de-dups the undeliverable alarm — it must be loud, not a per-tick
-    # flood of identical rows in the event log.
-    return {"orchestrator": None, "orchestrator_epoch": None, "orchestrator_name": None,
-            "watches": {}, "queue": [], "runs_seen": {}, "address_alarm": None}
+    # something different after every tmux restart (chela.epoch). `orchestrator_session` is
+    # the orchestrator's stable IDENTITY: the claude session id an ``@N`` re-resolves TO after
+    # a restart renumbers the fleet (CMX-82 self-heal) — the thing this address used to be
+    # keyed on with no way back. `orchestrator_name` is what that window was CALLED, a human
+    # label for the alarm when even the identity cannot be re-resolved. `address_alarm`
+    # de-dups the undeliverable alarm — it must be loud, not a per-tick flood of identical
+    # rows in the event log.
+    return {"orchestrator": None, "orchestrator_epoch": None, "orchestrator_session": None,
+            "orchestrator_name": None, "watches": {}, "queue": [], "runs_seen": {},
+            "address_alarm": None}
 
 
 def load() -> dict:
@@ -276,6 +292,40 @@ def orchestrator_epoch(store: dict | None = None) -> str | None:
     return store.get("orchestrator_epoch")
 
 
+def orchestrator_session(store: dict | None = None) -> str | None:
+    """The recorded session IDENTITY of the orchestrator — what a renumbered ``@N`` re-resolves to.
+
+    An **env pin carries no identity**, exactly as it carries no epoch (:func:`orchestrator_epoch`):
+    a bare ``@N`` an operator exported has no session behind it that chela recorded, so there is
+    nothing to re-resolve and self-heal simply does not apply to a pin. None here means the
+    address cannot self-heal — it was registered before CMX-82, or the orchestrator's session
+    could not be established at registration; either way the CMX-77 loud-and-wait path still holds.
+    """
+    if (os.environ.get("CHELA_ORCHESTRATOR_WID") or "").strip():
+        return None
+    store = load() if store is None else store
+    return store.get("orchestrator_session")
+
+
+def _identity_of(wid: str | None) -> str | None:
+    """The orchestrator's stable claude session id — the identity a renumbered address heals to.
+
+    Best-effort and never fatal: if the session cannot be established (a brand-new orchestrator
+    that has fired no hook and was not resumed), the address is recorded WITHOUT an identity and
+    self-heal is unavailable until the next ``chela watch`` — exactly the pre-CMX-82 behaviour,
+    never worse. Reads tmux + /proc via :mod:`chela.sessions`, so callers run it outside the
+    store lock.
+    """
+    if not wid:
+        return None
+    try:
+        return sessions.session_of_window(wid)
+    except Exception:
+        log.debug("inbox: could not resolve the orchestrator's session for %s", wid,
+                  exc_info=True)
+        return None
+
+
 def address_state(store: dict, statuses: dict[str, str],
                   now_epoch: str | None = None) -> tuple[str, str]:
     """Is the recorded orchestrator address worth writing to? — ``(state, why)``.
@@ -350,10 +400,14 @@ def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:
     if wid not in names:
         return {"ok": False, "error": f"no such window: {wid}"}
     now = epoch.current()
+    # The orchestrator's stable identity, resolved OUTSIDE the lock (tmux + /proc): this is what
+    # a renumbered address re-resolves to (CMX-82). Only meaningful when we are (re)registering.
+    session = _identity_of(by) if by else None
     with locked_store() as store:                  # ...so a concurrent daemon tick can't
         if by:                                     #    clobber the watch we are writing
             store["orchestrator"] = by
             store["orchestrator_epoch"] = now
+            store["orchestrator_session"] = session
             store["orchestrator_name"] = names.get(by)
             store["address_alarm"] = None          # a fresh address: any old alarm is spent
         target = orchestrator_wid(store)
@@ -380,13 +434,15 @@ def register(by: str) -> dict:
     if by not in names:
         return {"ok": False, "error": f"no such window: {by}"}
     now = epoch.current()
+    session = _identity_of(by)                      # the identity self-heal re-resolves to (CMX-82)
     with locked_store() as store:
         store["orchestrator"] = by
         store["orchestrator_epoch"] = now
+        store["orchestrator_session"] = session
         store["orchestrator_name"] = names.get(by)
         store["address_alarm"] = None
         queued = len(store["queue"])
-    return {"ok": True, "orchestrator": by, "epoch": now, "queued": queued}
+    return {"ok": True, "orchestrator": by, "epoch": now, "session": session, "queued": queued}
 
 
 def unwatch(wid: str) -> dict:
@@ -1056,6 +1112,86 @@ def deliver(store: dict, statuses: dict[str, str],
     return sent
 
 
+# --- self-heal: re-resolve a renumbered address from the session's identity (CMX-82) ---
+
+def resolve_heal(store: dict, statuses: dict[str, str],
+                 now_epoch: str | None = None) -> tuple[str, str] | None:
+    """A live window running the orchestrator's session, when its address has ROTTED — or None.
+
+    The CMX-82 fix. The inbox target was the last consumer keyed on a bare ``@N`` with nothing to
+    re-resolve it from, so a tmux restart left it dangling until a HUMAN re-ran ``chela watch``.
+    Now the orchestrator's recorded session identity (:func:`orchestrator_session`) is re-resolved
+    to the window running it TODAY (:func:`chela.sessions.wid_for_session`) — the same wid↔session
+    evidence CMX-48/70/77 already trust.
+
+    Attempted ONLY when the address is actually UNDELIVERABLE (dangling / gone): a healthy or
+    merely unstamped address is left exactly as registered, and an unregistered/pinned one has no
+    identity to heal from. Reads tmux + /proc, so the caller runs this OUTSIDE the store lock;
+    :func:`_apply_heal` re-checks under the lock before it trusts the result. ``None`` when there
+    is no identity, the address is fine, or the session cannot be found live — never a guess.
+    """
+    session = orchestrator_session(store)
+    if not session:
+        return None
+    state, _ = address_state(store, statuses, now_epoch)
+    if state not in UNDELIVERABLE:
+        return None
+    try:
+        wid = sessions.wid_for_session(session)
+    except Exception:
+        log.debug("inbox: self-heal resolution failed", exc_info=True)
+        return None
+    if not wid or wid == orchestrator_wid(store):
+        return None
+    return session, wid
+
+
+def _apply_heal(store: dict, heal: tuple[str, str], statuses: dict[str, str],
+                now_epoch: str | None, windows: dict[str, str]) -> str | None:
+    """Re-point the orchestrator address at the re-resolved window, UNDER the store lock.
+
+    Guarded three ways, because the resolution ran outside the lock and the world moves: the
+    recorded identity must still be the one we resolved (a concurrent ``chela watch`` may have
+    re-registered a DIFFERENT session), the address must still be undeliverable (that same watch
+    may already have fixed it), and the resolved window must be a live claude session right now.
+    The healed address is stamped with the CURRENT epoch — it was resolved against the running
+    tmux server, so that stamp is honest. Returns the old address on success (the caller
+    announces the recovery), else None.
+    """
+    session, wid = heal
+    if orchestrator_session(store) != session:
+        return None
+    state, _ = address_state(store, statuses, now_epoch)
+    if state not in UNDELIVERABLE:
+        return None
+    if wid not in statuses:
+        return None                        # resolved to a window with no claude running: not it
+    old = store.get("orchestrator")
+    store["orchestrator"] = wid
+    store["orchestrator_epoch"] = now_epoch
+    store["orchestrator_name"] = windows.get(wid) or store.get("orchestrator_name")
+    store["address_alarm"] = None          # the failure is over — the next one is news again
+    return old
+
+
+def _announce_heal(old: str | None, wid: str, session: str) -> None:
+    """A recovered address is LOUD, but as good news and exactly ONCE.
+
+    CMX-77 made the FAILURE shout on every surface, every tick; the recovery is a single durable
+    record and a log line — the real signal is that the held queue now flows to ``wid`` on the
+    next idle tick. Written outside the store lock (an ``event_log`` append is another file's
+    I/O), and ``event_log.append`` never raises, so announcing a recovery can never take the
+    inbox down.
+    """
+    log.warning("inbox: self-healed orchestrator address %s -> %s (session %s)",
+                old or "?", wid, session)
+    event_log.append(
+        "inbox_self_healed",
+        f"📥 the decisions inbox re-resolved its orchestrator address: {old or '?'} → {wid} — "
+        "same session, renumbered by a tmux restart. The held queue now delivers.",
+        {"old": old, "wid": wid, "session": session}, wid=wid, session_id=session)
+
+
 def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]:
     """One daemon pass: scan for events, queue them, deliver what the gate allows.
 
@@ -1080,9 +1216,15 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # and handed to every reader of a persisted `@N`. It is what tells an id that still
     # names its window from one that is a number tmux has since given to somebody else.
     now_epoch = epoch.current()
+    # If the recorded orchestrator address has ROTTED (a tmux restart renumbered it, or the
+    # session exited and came back under a new `@N`), re-resolve it from the session's identity
+    # instead of holding the queue until a human re-runs `chela watch` (CMX-82). Resolved OUTSIDE
+    # the lock — it reads tmux + /proc — and applied under it, where the address is re-checked.
+    heal = resolve_heal(load(), statuses, now_epoch)
     alarms: list[dict] = []                # raised inside the lock, published outside it
 
     with locked_store() as store:
+        healed_from = _apply_heal(store, heal, statuses, now_epoch, windows) if heal else None
         events = agent_events(prev, statuses, store, runs, windows=windows,
                               now_epoch=now_epoch)
         r_events, store["runs_seen"] = run_events(runs, store.get("runs_seen", {}),
@@ -1109,6 +1251,11 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         # it is a list scan, so the critical section stays as short as it was.
         deliver(store, statuses, runs, now_epoch=now_epoch, alarms=alarms)
 
+    # A self-heal is announced once, OUTSIDE the lock (an event_log append is another file's
+    # I/O): the address just recovered from a renumbering, and the held queue — delivered above
+    # in the same tick, now that `deliver` sees the healed address — is already on its way.
+    if healed_from is not None:
+        _announce_heal(healed_from, heal[1], heal[0])
     # The durable record. Written OUTSIDE the store lock — an append is another file's
     # I/O, and locked_store()'s one rule is that nothing slow happens inside it. EVERY
     # event is logged, including the `silent` ones (a watch retired because the work

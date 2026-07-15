@@ -42,6 +42,9 @@ test('a gate is a gate, a tool call is the firehose, an unknown type is shown', 
     // An inbox that cannot deliver is a GATE: work is stuck until a human acts, and it
     // stayed invisible for a whole outage (CMX-77). `other` would render it as a `·`.
     assert.equal(classOf('inbox_undeliverable'), 'gate');
+    // ...and its recovery (CMX-82) is a lifecycle event: the address self-healed from the
+    // orchestrator's session identity, no human in the loop.
+    assert.equal(classOf('inbox_self_healed'), 'lifecycle');
     assert.ok(DEFAULT_CLASSES.includes('gate'));
     // An unknown type is `other` — and `other` is ON by default. The safe default for
     // "I have never heard of this" is to show it, not to swallow it.

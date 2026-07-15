@@ -389,7 +389,10 @@ def cmd_watch(args) -> None:
             print(f"register failed: {result['error']}", file=sys.stderr)
             sys.exit(1)
         queued = result["queued"]
-        print(f"registered {self_wid} as the orchestrator (tmux epoch {result['epoch'] or '?'})"
+        ident = (f", identity {result['session']}" if result.get("session")
+                 else ", no session identity (self-heal unavailable — fire a hook first)")
+        print(f"registered {self_wid} as the orchestrator (tmux epoch {result['epoch'] or '?'}"
+              + ident + ")"
               + (f"; {queued} queued event(s) will be delivered when you are idle"
                  if queued else "; nothing queued"))
         return
@@ -423,10 +426,15 @@ def cmd_watching(args) -> None:
     now_epoch = epoch.current()
     state, why = inbox.address_state(store, inbox.status_snapshot(), now_epoch)
     stamp = inbox.orchestrator_epoch(store)
+    session = inbox.orchestrator_session(store)
     print(f"orchestrator: {orch or '(unregistered — the inbox is inert)'}"
-          + (f"  [{epoch.describe(stamp)}]" if orch else ""))
+          + (f"  [{epoch.describe(stamp)}]" if orch else "")
+          + (f"  identity: {session}" if session else ""))
     if state in inbox.UNDELIVERABLE:
         print(f"\n⛔ THE INBOX CANNOT DELIVER — the address is {state.upper()}.\n   {why}")
+        if session:
+            print(f"   ↻ self-heal will re-resolve this from session {session} once it is live "
+                  "under a window (CMX-82).")
     elif state == inbox.ADDR_UNSTAMPED:
         print(f"\n! {why}")
     if not inbox.enabled():

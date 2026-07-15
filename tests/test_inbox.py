@@ -80,6 +80,19 @@ def no_transcript_evidence(monkeypatch):
     monkeypatch.setattr(inbox.transcripts, "last_assistant_activity", lambda cwd: None)
 
 
+@pytest.fixture(autouse=True)
+def no_session_identity(monkeypatch):
+    """Purity: the sessions layer (tmux + /proc) is inert here.
+
+    ``watch``/``register`` resolve the orchestrator's session identity (CMX-82 self-heal), and
+    ``tick`` re-resolves a rotted address from it — both would reach the LIVE fleet's tmux and
+    ``/proc``. Stubbed to None so these tests stay pure and record no identity; the CMX-82
+    behaviour itself is covered in ``test_epoch.py``, which stubs these explicitly.
+    """
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: None)
+    monkeypatch.setattr(inbox.sessions, "wid_for_session", lambda sid, pane_map=None: None)
+
+
 @pytest.fixture
 def windows(monkeypatch):
     live = {ORCH: "orchestrator", AGENT: "chelamux"}

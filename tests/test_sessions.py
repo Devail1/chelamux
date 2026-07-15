@@ -327,6 +327,60 @@ def test_two_panes_claiming_ONE_session_claim_it_for_NEITHER(monkeypatch):
     assert sessions.wid_claiming_session(SID) is None
 
 
+# --- session → wid, the inverse (self-heal a renumbered @N) --------------------------
+
+def test_wid_for_session_refuses_a_recycled_window_a_stale_event_record_still_names():
+    """CMX-48, the INVERSE. :func:`wid_for_session` self-heals a persisted ``@N`` after tmux
+    renumbers the fleet — but the interactive orchestrator that most needs it is usually started
+    as plain ``claude``, NOT ``claude --resume``, so signal (1) (``wid_claiming_session``) finds
+    nothing and resolution falls through to the EVENT-LOG fallback. There the danger is a stale
+    record: session ``SID`` fired a hook under ``@6``, tmux restarted, and ``@6`` was recycled to
+    a DIFFERENT session (its live process now resumes ``OTHER``). Returning ``@6`` would deliver
+    the orchestrator's whole held queue into a STRANGER's window. The logged wid is accepted only
+    if ``@6``'s own live process still resolves back to ``SID`` (:func:`session_of_window`) — and
+    here it does not, so it is refused."""
+    now = time.time()
+    event_log.append("hook.pre_tool_use", "SID's hook, before the restart",
+                     wid="@6", session_id=SID)
+    pane_map = {"@6": sessions.Pane(
+        wid="@6", command="claude", resumed=OTHER,     # recycled: --resume of a DIFFERENT session
+        started=now + 10)}                             # started AFTER the stale SID record
+
+    # the event-log fallback is FORCED: no pane was launched with `--resume SID`, so signal (1)
+    # is empty — this is the plain-`claude` orchestrator, the LIKELY production path…
+    assert sessions.wid_claiming_session(SID, pane_map) is None
+    # …and @6's own process now resolves to the STRANGER, not SID (the recycle is real):
+    assert sessions.session_of_window("@6", pane_map) == OTHER
+
+    # so the recycled @6 the stale record still names is REFUSED — never a stranger's window.
+    # (Corrupt the `== session_id` bidirectional check to always-true and this returns "@6".)
+    assert sessions.wid_for_session(SID, pane_map) is None
+
+
+def test_wid_for_session_returns_the_LIVE_window_not_the_recycled_stranger():
+    """The 'or the correct live window' half of the same guard: ``SID`` is genuinely alive in
+    ``@9`` (resolved via the event log — plain ``claude``, no ``--resume``), while a stale record
+    still names the recycled ``@6``. The stale record is the NEWER one, so the reversed scan meets
+    it FIRST — and the guard must step over it to reach the real window, not return it."""
+    now = time.time()
+    # @9 — where SID really lives now (a hook filed it; the process predates the record):
+    event_log.append("hook.pre_tool_use", "SID, alive", wid="@9", session_id=SID)
+    # @6 — the recycled stranger, filed LATER so it is hit first on the reversed scan:
+    event_log.append("hook.pre_tool_use", "SID, stale", wid="@6", session_id=SID)
+    pane_map = {
+        "@9": sessions.Pane(wid="@9", command="claude", started=now - 60),   # before its record
+        "@6": sessions.Pane(wid="@6", command="claude", resumed=OTHER,
+                            started=now + 10),                               # after the stale one
+    }
+
+    assert sessions.wid_claiming_session(SID, pane_map) is None   # plain `claude`: fallback forced
+    assert sessions.session_of_window("@6", pane_map) == OTHER    # @6 is a stranger now
+    assert sessions.session_of_window("@9", pane_map) == SID      # @9 is really SID
+
+    # the live window is returned; the newer-but-recycled @6 is stepped over, never returned:
+    assert sessions.wid_for_session(SID, pane_map) == "@9"
+
+
 # --- the process facts, off a fixture /proc ------------------------------------------
 
 def _fake_proc(tmp_path, monkeypatch, pid: int, *, comm: str, cmdline: list[str],
