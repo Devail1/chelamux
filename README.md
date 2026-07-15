@@ -481,8 +481,10 @@ panes. A QR of the connect string makes this one tap.
 both ways: the agent's output streams into its topic, and anything you type there
 lands in its pane. Topics are created, named after the agent's project, and closed
 as windows come and go; a rename of the window renames the topic. So you can drive
-or supervise any agent from your phone, not just get pinged by it. Setup (bot
-token, forum group, PM2): [`skills/telegram-setup`](skills/telegram-setup/SKILL.md).
+or supervise any agent from your phone, not just get pinged by it. `/new` (from the
+General topic, or anywhere) browses to a folder and **starts a fresh Claude session
+there** — its topic appears a moment later, already bound. Setup (bot token, forum
+group, PM2): [`skills/telegram-setup`](skills/telegram-setup/SKILL.md).
 
 > The bridge is text/media over the Bot API — it needs no inbound port and doesn't
 > expose the wall. It's a supervision channel, not a substitute for the tailnet
