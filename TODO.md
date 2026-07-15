@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **⚖️ THE JUDGE'S `cannot_verify` MUST MEAN *RETRY* (BOUNDED), NOT *DONE*. Today a transient/environmental unknown PERMANENTLY retires a commit from judgment — it then merges UNJUDGED, silently.** 🔑 **The judge is now load-bearing (CMX-75/80). This bug silently defeats it on any flake** — I had to hand-clear a `judge_sha` in the DB to re-judge cmx-76 after a one-off. **Unknown must cost a RETRY, not the whole adversarial pass.**
+- [x] **⚖️ THE JUDGE'S `cannot_verify` MUST MEAN *RETRY* (BOUNDED), NOT *DONE*. Today a transient/environmental unknown PERMANENTLY retires a commit from judgment — it then merges UNJUDGED, silently.** 🔑 **The judge is now load-bearing (CMX-75/80). This bug silently defeats it on any flake** — I had to hand-clear a `judge_sha` in the DB to re-judge cmx-76 after a one-off. **Unknown must cost a RETRY, not the whole adversarial pass.**
 
   **THE MECHANICAL BUG (all in `chela/dispatcher.py`).** `_spawn_judge` (`:2642`) writes `judge_sha = pr_head_sha` **FIRST, at launch** (`:2653`), *before* the judge can succeed or fail. The re-trigger query (`:2022`) is `... AND (judge_sha IS NULL OR judge_sha != pr_head_sha)`. So the instant `judge_sha == pr_head_sha`, **that commit is never judged again** — regardless of outcome. A `cannot_verify` leaves the run in `awaiting_review` with the sha burned, so the PR can be merged with **no adversarial pass ever completed, and nothing says so.** ⛔ **IT FAILS SILENT — a wrongly-BLOCKED PR screams; a never-judged one looks exactly like a cautious deferral.** (This is the same invisible-failure class as CMX-70/77 — read [[feedback_proof_that_cannot_fail_bug_class]].)
 
