@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **⚙️⚖️ CONTRACT-AS-CODE CORE — `chela merge` + `chela escalate`: turn the escalation contract from a doc the LLM is *asked* to follow into code it *cannot violate*.** 🔑 **This is the judge's proven trick generalized (see `docs/PERSONA_PATTERN.md`): the LLM proposes an action, CODE adjudicates whether it is allowed.** It is the load-bearing foundation the critic and the orchestrator-harness both build against, and — unlike process-isolation — it is **buildable now**: it bounds the *decision* blast-radius (`docs/ESCALATION_CONTRACT.md`).
+- [x] **⚙️⚖️ CONTRACT-AS-CODE CORE — `chela merge` + `chela escalate`: turn the escalation contract from a doc the LLM is *asked* to follow into code it *cannot violate*.** 🔑 **This is the judge's proven trick generalized (see `docs/PERSONA_PATTERN.md`): the LLM proposes an action, CODE adjudicates whether it is allowed.** It is the load-bearing foundation the critic and the orchestrator-harness both build against, and — unlike process-isolation — it is **buildable now**: it bounds the *decision* blast-radius (`docs/ESCALATION_CONTRACT.md`).
 
   🔑 **REUSE THE SEED, don't reinvent:** `chela/dispatcher.py::approve` (`~:1345`) is already a gate that **refuses on unreadable checks (unknown ≠ pass)** and reads CI/judge state. Extend *that* pattern; `chela review` (`main.py:~1827`) is the CLI shape to mirror.
 
