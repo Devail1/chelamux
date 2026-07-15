@@ -2,6 +2,31 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🎭🤖 AUTO-LAUNCH THE ORCHESTRATOR PERSONA (attended-autonomous, inbox-woken) — the persona layer's last piece.** chela auto-launches the embedded orchestrator (`chela/personas/orchestrator.md`, registry key `orchestrator`) to run the loop the human runs today: review a run at `awaiting_review`, do the corrupt-each-guard verification, and **act within the standing-auth envelope (`chela merge`) OR escalate** — WITHOUT regressing to confirm-each. v1 = **inbox-woken (NOT boot-persistent)** + an **attended-lease** that keeps its autonomous actions supervised (the buildable-now form of "attended-autonomous", honouring `docs/ESCALATION_CONTRACT.md`'s "no unattended action until isolation/srt lands").
+
+  ⛔ **SHIPS BEHIND AN OFF-BY-DEFAULT FLAG** `CHELA_ORCHESTRATOR` (default off, like `CHELA_JUDGE` but inverted). Merging this **embeds the capability but does NOT activate an auto-actor** — the human flips it on deliberately after review. Non-negotiable: this PR must not, on merge, start something that merges PRs on its own.
+
+  🔑 **REUSE, don't reinvent:** `_spawn_judge` (`dispatcher.py:~2759`) = the pattern for spawning a headless persona session; `inbox.run_events` (`inbox.py:~807`) = the wake channel (edge-triggered on the runs DB, carries review history); `contract.merge`/`contract.escalate` (`contract.py:162`/`286`) = the ONLY action surface; `personas.registry()` (flip `orchestrator.enabled` live while running); `event_log.append` (`event_log.py:248`) = act-then-log.
+
+  **OBJECTIVE — three parts:**
+  1. **Inbox-wake launch.** When `CHELA_ORCHESTRATOR` is on AND the decisions inbox has a pending decision (a run `awaiting_review` with no orchestrator verdict), spawn a headless orchestrator session (mirror `_spawn_judge`) whose system prompt is `orchestrator.md`, handed the pending run + its review history. It does the one decision and exits — NOT a persistent boot session; it appears only when there's work.
+  2. **The attended-lease — ENFORCED IN CODE, not the prompt.** A lease with a TTL (`chela orchestrator arm --for <ttl>`, e.g. default 2h; a small store like `~/.chela/orchestrator_lease`). The auto-orchestrator's autonomous ACTIONS require a fresh lease: it may `chela merge` ONLY when the lease is fresh; when stale/absent it MUST `chela escalate` instead. ⛔ **The gate is CODE** — the auto-orchestrator's merge path (or `contract.merge` keyed on `actor=auto-orchestrator`) REFUSES on a stale/absent lease — so a wrong LLM opinion or an injected instruction CANNOT merge unattended. A **human's own `chela merge` is unaffected** (the human IS the attendance). **Fail-closed: no lease → escalate, never act.**
+  3. **Act-then-log.** Every autonomous decision (merge / escalate) → `event_log.append` with the CI/judge state it relied on + its justification. An autonomous action with no logged justification is a bug.
+
+  ⛔ **BOUNDARIES:**
+  - **Gated surface ONLY** — acts through `chela merge` / `chela escalate` / read-only investigation. ⛔ NO raw `gh pr merge`, `pkill`, `git push origin main`, or an unrestricted shell reachable from its action path. (Keep `contract.merge`'s existing refusals: non-`dev`/red-CI/non-clean-judge/non-mergeable.)
+  - **Fully-unattended acting is OUT of scope** (isolation-gated on srt). The lease makes v1 act only when supervised; it does NOT run acting-unattended.
+  - Don't alter the judge/critic/dispatcher behaviour; don't go near `_termSig`. Public-repo boundaries (no secrets/chat-ids/abs `/home/<user>` paths).
+
+  ⛔ **GUARDS (WORKFLOW step 3 — corrupt each, watch it go RED):**
+  - **Lease gate is real:** stale/absent lease + an otherwise-mergeable run → the auto-orchestrator ESCALATES, does NOT merge. Corrupt (ignore the lease / let it merge stale) → RED.
+  - **Fail-closed:** no lease at all → escalate taken, merge refused. Corrupt → RED.
+  - **Human merge unaffected:** a human `chela merge` still works with no lease. Corrupt (apply the lease gate to humans too) → RED.
+  - **Act-then-log:** an autonomous merge/escalate writes an event-log entry with its justification. Corrupt (skip the log) → RED.
+  - **Gated-surface only + flag-gated:** the action path has no raw-`gh`/shell merge route, and with `CHELA_ORCHESTRATOR` off nothing auto-launches. Corrupt either → RED.
+
+  **Files:** new `chela/orchestrator.py` (launch + lease + action path) · `chela/contract.py` (lease-aware, actor-keyed merge) · `chela/main.py` (`chela orchestrator arm/status`) · `chela/config.py` (`CHELA_ORCHESTRATOR`, default off) · `chela/personas/__init__.py` (enabled toggle) · `tests/test_orchestrator.py`. **Verify:** `uv run ruff check chela tests` (MUST pass) + `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green · the five guard mutations each RED.
+
 - [x] **🧑‍⚖️ THE CRITIC v1 — advisory brief-review upstream of the dispatcher (persona-pattern step 3).** The judge reviews *code* on `awaiting_review`; the **critic reviews the *brief*** the moment a task is picked for dispatch — "plan review is the new linter." It is the persona pattern (`docs/PERSONA_PATTERN.md`) applied a third time: **mechanical facts computed in code, judgment proposed by the LLM.** v1 is deliberately the lowest-risk slice: **ADVISORY-ONLY (never blocks/delays/changes a dispatch) and BRIEFS-ONLY (no PR trigger — that's the judge's slot).**
 
   🔑 **REUSE `chela/judge.py`'s shape, do NOT reinvent a framework.** The judge is the proven reference (propose-then-adjudicate; `_spawn_judge` `dispatcher.py:~2671`, `_judge_vars` `~2647`, `set_judge_state` `~1407`, config `JUDGE_ENABLED` `config.py:~301`). Mirror that spawn/vars/state/config pattern for a new `chela/critic.py` + a `CHELA_CRITIC` env flag (default on) in `config.py`.
