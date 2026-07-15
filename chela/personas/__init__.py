@@ -10,9 +10,10 @@ human running the loop by hand.
 This module is the **declaration** of that layer — one :class:`Persona` per persona, naming
 its trigger, mode, action surface and prompt source. It is *non-invasive*: it DESCRIBES the
 judge and critic, referencing their existing implementations; it does **not** re-plumb their
-working launch paths. It also does **not** launch, wake, or run the orchestrator — auto-launch
-is a later, isolation-gated step (CMX-90). What this gives the rest of chela is a single place
-to ask "what personas exist, and what is each allowed to do", consumed read-only by the
+working launch paths. The orchestrator's *auto-launch* — inbox-woken and attended-lease-gated —
+lives in :mod:`chela.personas.autolaunch` (CMX-90); this module only declares the persona and,
+via ``enabled``, whether that auto-launch is armed. What this gives the rest of chela is a single
+place to ask "what personas exist, and what is each allowed to do", consumed read-only by the
 dashboard "Personas" panel (``/api/personas``) and locked down by ``tests/test_personas.py``.
 
 The orchestrator's *runnable* system prompt lives next to this file as ``orchestrator.md`` —
@@ -115,7 +116,7 @@ def registry() -> list[Persona]:
         Persona(
             key="orchestrator",
             title="The Orchestrator",
-            trigger="boot + inbox event",
+            trigger="inbox event (attended-lease)",
             mode="attended-autonomous",
             action_surface=(
                 "gated chela commands — dispatch / review / merge / escalate "
@@ -125,12 +126,13 @@ def registry() -> list[Persona]:
             summary=(
                 "Runs the fleet: discover → scope → dispatch → review → decide → relay. Acts "
                 "within the standing-auth merge envelope (CI-green + judge-clean + its own "
-                "verification), escalates judgment / security / irreversible calls. Human-attended "
-                "until isolation lands; this layer declares it but does NOT auto-launch it (CMX-90)."
+                "verification), escalates judgment / security / irreversible calls. Auto-launched "
+                "inbox-woken under a human's attended-lease (CMX-90) — the supervision that keeps "
+                "it human-attended until isolation lands; OFF by default (CHELA_ORCHESTRATOR)."
             ),
-            # DECLARED, not launched: the orchestrator does not run yet, so the layer shows it
-            # as an embedded-but-dormant persona rather than an active one.
-            enabled=False,
+            # Flag-driven like the judge/critic, but default OFF: auto-launch is armed only when an
+            # operator sets CHELA_ORCHESTRATOR *and* an attended-lease is active. Unset ⇒ dormant.
+            enabled=_env_on("CHELA_ORCHESTRATOR", False),
             docs=(
                 "docs/ORCHESTRATOR_PERSONA.md",
                 "docs/ESCALATION_CONTRACT.md",

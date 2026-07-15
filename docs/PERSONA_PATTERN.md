@@ -151,9 +151,14 @@ available now, and it is the larger share of the risk.
    wired ADVISORY-ONLY and BRIEFS-ONLY at dispatch — it surfaces a note, gates nothing. The LLM
    judgment half and the gate-on-facts are later slices.
 4. **Orchestrator harness** — the persona-loaded session whose action surface *is* the gated
-   commands, run **supervised**.
-5. *(Gated)* **Less-supervised operation** — once (2)+(4) are solid *and* process isolation covers the
-   execution surface.
+   commands, run **supervised**. **Auto-launch built (CMX-90)** — `chela/personas/autolaunch.py`
+   launches it **inbox-woken** (when the decisions inbox has work with nobody live to take it) and
+   **attended-lease-gated** (`lease.py`: only while a human's bounded, self-expiring lease is
+   active). OFF by default (`CHELA_ORCHESTRATOR`); the lease is the supervision that keeps it
+   human-attended without isolation — it decides *when* a supervised orchestrator is woken, never
+   *what* it may decide.
+5. *(Gated)* **Less-supervised operation** — dropping the attended-lease to run truly unattended,
+   once (2)+(4) are solid *and* process isolation covers the execution surface.
 
 ---
 

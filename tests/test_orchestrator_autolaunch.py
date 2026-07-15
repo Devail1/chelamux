@@ -1,0 +1,153 @@
+"""🎭🤖 The orchestrator auto-launch — inbox-woken, attended-lease-gated (CMX-90).
+
+The launch ACTION is a tmux spawn (untestable here); the launch DECISION is a pure, fail-closed
+function, and that is where the guard lives. These corrupt each gate and watch a launch that
+should have been withheld fire — and prove ``maybe_wake`` only spawns when the gate says go.
+"""
+from __future__ import annotations
+
+import pytest
+
+from chela import config, inbox
+from chela.personas import autolaunch, lease
+
+
+# The all-conditions-hold kwargs for should_launch: a launch SHOULD fire. Each test flips exactly
+# one to False and asserts the launch is withheld — i.e. every gate is load-bearing.
+def _all_go() -> dict:
+    return dict(flag_on=True, lease_active=True, has_pending_work=True,
+                orchestrator_live=False, recently_launched=False)
+
+
+def test_should_launch_fires_only_when_every_condition_holds():
+    go, reason = autolaunch.should_launch(**_all_go())
+    assert go is True
+    assert reason == ""
+
+
+@pytest.mark.parametrize("flip", [
+    {"flag_on": False},
+    {"lease_active": False},
+    {"has_pending_work": False},
+    {"orchestrator_live": True},
+    {"recently_launched": True},
+])
+def test_should_launch_is_fail_closed_on_any_single_gate(flip):
+    """🔴 FAIL-CLOSED — flip ANY one input off (or a 'no need' input on) and the launch is
+    withheld with a non-empty reason. Corrupt should_launch to drop a gate (e.g. stop checking
+    ``lease_active``) and the matching row here goes red — a launch fires that should not."""
+    kwargs = {**_all_go(), **flip}
+    go, reason = autolaunch.should_launch(**kwargs)
+    assert go is False
+    assert reason.strip(), "a withheld launch must say why"
+
+
+def test_the_flag_is_off_by_default():
+    # 🔴 DEFAULT-OFF — auto-launching a merge-authority agent must be opt-in. The test env does
+    # not set CHELA_ORCHESTRATOR, so the latched config value must read False. Corrupt the config
+    # expression to default-on (flip `in` → `not in`) and this goes red.
+    assert config.ORCHESTRATOR_ENABLED is False
+    assert autolaunch.enabled() is False
+
+
+def test_the_lease_gate_specifically_blocks_without_a_lease():
+    # The supervision gate, called out on its own: everything else armed, but no attended-lease.
+    go, reason = autolaunch.should_launch(**{**_all_go(), "lease_active": False})
+    assert go is False
+    assert "attended" in reason.lower() or "attend" in reason.lower()
+
+
+# --- evaluate(): the impure read wired to the pure decision -----------------------------------
+
+@pytest.fixture
+def armed(monkeypatch):
+    """Flag on + attended-lease active + no live orchestrator + not recently launched."""
+    monkeypatch.setattr(config, "ORCHESTRATOR_ENABLED", True)
+    lease.grant(ttl_seconds=600)
+    monkeypatch.setattr(autolaunch.inbox, "address_state",
+                        lambda *a, **k: (inbox.ADDR_NONE, "nobody registered"))
+    # ensure no stale launch stamp
+    monkeypatch.setattr(autolaunch, "recently_launched", lambda *a, **k: False)
+
+
+def test_evaluate_says_go_when_armed_and_work_is_queued(armed):
+    go, reason = autolaunch.evaluate({"queue": [{"kind": "run_review"}]}, {}, None)
+    assert go is True, reason
+
+
+def test_evaluate_withholds_when_no_work_is_queued(armed):
+    # inbox-woken: an empty queue is nothing to wake for, even fully armed.
+    go, reason = autolaunch.evaluate({"queue": []}, {}, None)
+    assert go is False
+    assert "pending" in reason or "work" in reason
+
+
+def test_evaluate_withholds_when_an_orchestrator_is_already_live(armed, monkeypatch):
+    monkeypatch.setattr(autolaunch.inbox, "address_state",
+                        lambda *a, **k: (inbox.ADDR_OK, ""))
+    go, reason = autolaunch.evaluate({"queue": [{"kind": "run_review"}]}, {}, None)
+    assert go is False
+    assert "already" in reason
+
+
+def test_evaluate_withholds_when_the_flag_is_off(armed, monkeypatch):
+    monkeypatch.setattr(config, "ORCHESTRATOR_ENABLED", False)
+    go, reason = autolaunch.evaluate({"queue": [{"kind": "run_review"}]}, {}, None)
+    assert go is False
+    assert "off" in reason or "CHELA_ORCHESTRATOR" in reason
+
+
+def test_evaluate_withholds_when_the_lease_lapsed(armed):
+    lease.release()  # the human stopped attending
+    go, reason = autolaunch.evaluate({"queue": [{"kind": "run_review"}]}, {}, None)
+    assert go is False
+    assert "lease" in reason or "attend" in reason
+
+
+# --- maybe_wake(): only spawns when the gate says go ------------------------------------------
+
+def test_maybe_wake_launches_only_when_evaluate_says_go(monkeypatch):
+    """🔴 WIRING — maybe_wake must call wake() iff evaluate() says go. Corrupt maybe_wake to
+    always call wake (drop the ``if not go`` guard) and the withheld case goes red."""
+    calls = []
+    monkeypatch.setattr(autolaunch, "wake", lambda *a, **k: calls.append(k or a) or {"ok": True})
+
+    monkeypatch.setattr(autolaunch, "evaluate", lambda *a, **k: (False, "withheld"))
+    assert autolaunch.maybe_wake({"queue": []}, {}, None) is None
+    assert calls == [], "wake must NOT be called when the gate withholds"
+
+    monkeypatch.setattr(autolaunch, "evaluate", lambda *a, **k: (True, ""))
+    result = autolaunch.maybe_wake({"queue": [{"kind": "x"}]}, {}, None)
+    assert result == {"ok": True}
+    assert len(calls) == 1, "wake MUST be called exactly once when the gate says go"
+
+
+# --- the relaunch cooldown --------------------------------------------------------------------
+
+def test_recently_launched_reflects_the_stamp():
+    assert autolaunch.recently_launched() is False       # no stamp yet
+    autolaunch.record_launch("@9", now=1000.0)
+    assert autolaunch.recently_launched(now=1000.0 + 10) is True
+    # past the cooldown → not recent any more
+    assert autolaunch.recently_launched(now=1000.0 + autolaunch.RELAUNCH_COOLDOWN_SECONDS + 1) is False
+
+
+def test_recently_launched_is_false_on_a_corrupt_stamp():
+    autolaunch.record_launch("@9", now=1000.0)
+    autolaunch._state_path().write_text("nonsense", encoding="utf-8")
+    # fail-OPEN here by design (a corrupt stamp must not WITHHOLD an otherwise-armed launch)
+    assert autolaunch.recently_launched(now=1000.0 + 10) is False
+
+
+# --- orchestrator_live(): maps the inbox address state ----------------------------------------
+
+@pytest.mark.parametrize("state,expected", [
+    (inbox.ADDR_OK, True),
+    (inbox.ADDR_UNSTAMPED, True),
+    (inbox.ADDR_NONE, False),
+    (inbox.ADDR_GONE, False),
+    (inbox.ADDR_DANGLING, False),
+])
+def test_orchestrator_live_maps_address_state(monkeypatch, state, expected):
+    monkeypatch.setattr(autolaunch.inbox, "address_state", lambda *a, **k: (state, ""))
+    assert autolaunch.orchestrator_live({}, {}, None) is expected

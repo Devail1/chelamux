@@ -27,6 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
 from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, event_log, gateanswer, hold, hooks, judge, launcher, messenger, notify, okf, personas, rooms, scheduler, spawn, starter, transcripts, userconfig
+from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
@@ -2268,21 +2269,43 @@ def _judge_live_status() -> str | None:
     return "reviewing " + ", ".join(labels)
 
 
+def _orchestrator_live_status() -> str | None:
+    """A cheap live note for the orchestrator persona, or None when it is off.
+
+    Reflects the CMX-90 auto-launch state: whether an attended-lease is open (the supervision
+    gate). ``armed`` = flag on but nobody attending; ``attended`` = a human's lease is active, so
+    an inbox-woken auto-launch would fire. Best-effort — a read failure just means no note.
+    """
+    try:
+        if not autolaunch.enabled():
+            return None
+        active = lease.active()
+    except Exception:
+        return None
+    if active is None:
+        return "armed — needs `chela orchestrator attend`"
+    return f"attended · {active.summary()}"
+
+
 @app.route("/api/personas")
 @require_auth
 def api_personas():
     """The declared persona layer (judge · critic · orchestrator), read-only.
 
     Single source of truth is ``chela/personas`` — this route serializes the
-    registry and stamps a cheap live status where one is available (the judge,
-    while it is mid-review). It DECLARES the personas; it never launches one.
+    registry and stamps a cheap live status where one is available (the judge
+    while mid-review; the orchestrator's attended-lease state). It DECLARES the
+    personas and reports their live state; the auto-launch itself runs in the daemon.
     """
     judge_status = _judge_live_status()
+    orch_status = _orchestrator_live_status()
     out = []
     for p in personas.registry():
         entry = p.as_dict()
         if p.key == "judge" and judge_status:
             entry["status"] = judge_status
+        if p.key == "orchestrator" and orch_status:
+            entry["status"] = orch_status
         out.append(entry)
     return jsonify({"personas": out})
 

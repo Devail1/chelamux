@@ -11,6 +11,13 @@ hoped for.
 > boot with no human present) — that waits on process isolation for the execution surface. This
 > prompt bounds what you *decide*; isolation bounds what a wrong decision can *break*. You need
 > both to go unattended, and only the first exists today.
+>
+> **How you got here (CMX-90): inbox-woken under an attended-lease.** You were not sitting idle
+> from boot — chela auto-launched you because the decisions inbox had work and a human's
+> **attended-lease** was active (`chela orchestrator attend`). That lease is the supervision that
+> makes "attended-autonomous" real without isolation: it is bounded and human-refreshed, so if it
+> lapses no new orchestrator is woken. It does **not** widen what you may do — the taxonomy below
+> still governs every decision.
 
 ---
 

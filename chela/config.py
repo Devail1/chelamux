@@ -311,6 +311,15 @@ CRITIC_ENABLED = os.environ.get("CHELA_CRITIC", "true").strip().lower() not in (
     "false", "0", "no", "off",
 )
 
+# 🎭🤖 The orchestrator auto-launch (see chela.personas.autolaunch) — the persona pattern's
+# harness instance: chela launches the embedded orchestrator persona itself, inbox-woken and
+# gated by a human's attended-lease (CMX-90). ⛔ Defaults OFF, unlike the judge/critic: this one
+# spawns an agent that holds `chela merge` authority, so it fires only when an operator has
+# explicitly armed it AND is actively attending (`chela orchestrator attend`).
+ORCHESTRATOR_ENABLED = os.environ.get("CHELA_ORCHESTRATOR", "false").strip().lower() in (
+    "true", "1", "yes", "on",
+)
+
 _dispatch_raw = os.environ.get("CHELA_DISPATCH_WORKFLOWS", "")
 DISPATCH_WORKFLOWS = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()
