@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **🪟➋ SIDEBAR POLISH #2 (Liav, after CMX-85 shipped): enlarge the EXPANDED-sidebar icons to match the collapsed ones · swap the Feed glyph for lucide `rss`.** Two small frontend changes.
+- [x] **🪟➋ SIDEBAR POLISH #2 (Liav, after CMX-85 shipped): enlarge the EXPANDED-sidebar icons to match the collapsed ones · swap the Feed glyph for lucide `rss`.** Two small frontend changes.
 
   1. **Expanded icons match collapsed.** CMX-85 enlarged the *collapsed*-rail icons; the *expanded* sidebar nav icons are now smaller than the collapsed ones. Bump the expanded nav-icon size (CSS, `style.css`) so they match. ⛔ Don't break alignment of the labels next to them, and don't touch the collapsed sizing CMX-85 just set.
   2. **Feed icon → lucide `rss`.** The Feed view's icon is `views.js:~28 icon: '≡'` — a unicode glyph that reads **exactly like the sidebar-toggle hamburger**, which is confusing. Change it to lucide's **`rss`** icon. ⛔ **Lucide is already used in this codebase** (the command palette + topbar overflow — `style.css:~2552`, "Lucide icon rows"): **reuse that exact mechanism** for rendering the glyph, don't hand-roll a new SVG pipeline. If the nav renderer only takes a unicode `icon:` today, extend it *minimally* to render a lucide `rss` for this one view (and note whether the other four should follow in a later pass — do NOT convert them now).
