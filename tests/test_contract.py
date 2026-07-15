@@ -19,6 +19,7 @@ import pytest
 
 from chela import contract, dispatcher, event_log
 from chela.dispatcher import CI_FAILING, CI_NONE, CI_PASSING, CI_PENDING, CI_UNKNOWN, CIStatus
+from chela.judge import J_BLOCKED, J_CANNOT_VERIFY, J_RUNNING
 
 
 @pytest.fixture(autouse=True)
@@ -92,6 +93,29 @@ def test_an_unreadable_base_is_refused(repo):
     squash.assert_not_called()
 
 
+@pytest.mark.parametrize("base", ["staging", "develop", "feature-x"])
+def test_merge_refuses_a_non_dev_base_even_when_all_else_passes(repo, base):
+    """The ``base != AUTONOMOUS_BASE`` gate IN ISOLATION — judge clean, CI green, MERGEABLE,
+    so the ONLY thing wrong is the base is not ``dev`` (and not forbidden). It must refuse,
+    tier ``escalate`` (not ``never`` — ``never`` is the forbidden set alone).
+
+    Every downstream gate is mocked to pass, so this gate is the sole possible refusal: corrupt
+    ``if base != AUTONOMOUS_BASE`` to ``if False and …`` and the merge goes through, turning
+    this red. (The sibling ``test_merge_to_an_unlisted_base_is_an_escalation`` does NOT mock the
+    downstream gates, so it stays green under that mutation — it is not the guard.)"""
+    _seed_run(repo)
+    with patch.object(contract, "_read_pr_base", return_value=base), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "escalate"
+    assert result.get("pr_base") == base
+    squash.assert_not_called()      # ⛔ nothing merged — the base gate held
+
+
 @pytest.mark.parametrize("judge_state", [None, "blocked", "cannot_verify"])
 def test_merge_refuses_unless_the_judge_is_clean(repo, judge_state):
     _seed_run(repo, judge_state=judge_state)
@@ -100,6 +124,29 @@ def test_merge_refuses_unless_the_judge_is_clean(repo, judge_state):
         result = contract.merge("t1")
     assert result["ok"] is False
     squash.assert_not_called()
+
+
+@pytest.mark.parametrize("judge_state", [J_BLOCKED, J_CANNOT_VERIFY, J_RUNNING, None])
+def test_merge_refuses_a_run_not_judge_clean_even_when_all_else_passes(repo, judge_state):
+    """The ``judge_state != J_CLEAN`` gate IN ISOLATION — base ``dev``, CI green, MERGEABLE, so
+    the ONLY thing wrong is the judge is not ``clean`` (blocked / cannot_verify / still running /
+    never ran). Each must refuse, tier ``escalate``.
+
+    Every other gate is mocked to pass, so this gate is the sole possible refusal: corrupt
+    ``if judge_state != J_CLEAN`` to ``if False and …`` and an un-vetted run merges, turning
+    this red. (The sibling ``test_merge_refuses_unless_the_judge_is_clean`` does NOT mock the
+    downstream CI/mergeable gates, so it stays green under that mutation — it is not the guard.)"""
+    _seed_run(repo, judge_state=judge_state)
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "escalate"
+    assert result.get("judge_state") == judge_state
+    squash.assert_not_called()      # ⛔ nothing merged — the judge gate held
 
 
 @pytest.mark.parametrize("ci", [CI_FAILING, CI_PENDING, CI_NONE, CI_UNKNOWN])
@@ -111,6 +158,26 @@ def test_merge_requires_green_CI(repo, ci):
         result = contract.merge("t1")
     assert result["ok"] is False and result["ci_state"] == ci
     squash.assert_not_called()
+
+
+@pytest.mark.parametrize("pr_state", ["closed", "merged", "MERGED"])
+def test_merge_refuses_a_pr_that_is_not_open(repo, pr_state):
+    """The ``pr_state != 'open'`` refusal IN ISOLATION — base dev, judge clean, CI green,
+    MERGEABLE, and the ONLY thing wrong is GitHub reports the PR already closed/merged. This
+    is the ``not-open`` half of the mergeability gate: the existing ``test_merge_requires_MERGEABLE``
+    always feeds ``("open", …)``, so it never exercises (nor guards) this branch. Corrupt
+    ``if pr_state and pr_state != "open"`` and an already-closed PR "merges" — turning this red."""
+    _seed_run(repo)
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=(pr_state, "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "escalate"
+    assert result.get("pr_state") == pr_state
+    squash.assert_not_called()      # ⛔ nothing merged — the open-PR gate held
 
 
 @pytest.mark.parametrize("mergeable", ["CONFLICTING", "UNKNOWN", None])
