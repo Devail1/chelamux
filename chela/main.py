@@ -26,6 +26,7 @@ from chela import (
     agent_manager,
     capabilities,
     config,
+    contract,
     discovery,
     dispatcher,
     doctor,
@@ -1619,6 +1620,47 @@ def cmd_judge(args) -> None:
               "the judge never merges.")
 
 
+def cmd_merge(args) -> None:
+    """⚙️⚖️ AUTONOMOUSLY merge a dispatched PR — the escalation contract, enforced in code.
+
+    The gate (``chela.contract.merge``) refuses unless ALL hold, read LIVE from GitHub:
+    base is the autonomous target ``dev`` (NEVER main/master), the judge said ``clean``, CI
+    is green, and the PR is open + MERGEABLE. There is no ``--force``: overriding a gate is
+    an escalation, not an autonomous act, so this command cannot do it — merge past a gate
+    by hand, or ``chela escalate`` to ask. Every merge is logged with its justification.
+    """
+    result = contract.merge(args.run, reason=getattr(args, "reason", "") or "")
+    if not result.get("ok"):
+        tier = result.get("tier")
+        prefix = "⛔ NEVER" if tier == "never" else "merge REFUSED"
+        print(f"{prefix}: {result.get('error', 'unknown error')}")
+        if tier == "escalate":
+            print("  This is a decision for a human — run `chela escalate` with a recommendation.")
+        sys.exit(1)
+    print(f"✅ Merged {result['task_id']} → {result['base']} "
+          f"(sha {(result.get('merge_commit_sha') or '?')[:12]})")
+    print(f"  logged: event #{result.get('event_seq')} — CI green, judge clean, MERGEABLE")
+
+
+def cmd_escalate(args) -> None:
+    """Hand a decision to the human — the ONE structured escalation path (``chela.contract``).
+
+    Records the escalation to the event log (durable provenance) and pushes it to the human
+    over the notification channel. A missed escalation costs a question; a wrong autonomous
+    action costs trust — so when a decision is not unambiguously autonomous, it comes here.
+    """
+    result = contract.escalate(
+        args.summary, kind=args.kind, recommendation=args.recommendation,
+        run=args.run, options=args.options,
+    )
+    if not result.get("ok"):
+        print(f"escalate: {result.get('error', 'unknown error')}")
+        sys.exit(2)
+    where = "pushed to the human" if result.get("notified") else \
+        "recorded (no notifier configured — set CHELA_NOTIFY_URL to push it)"
+    print(f"↑ Escalated ({result['kind']}) — event #{result.get('event_seq')}, {where}.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="chela",
@@ -1873,6 +1915,39 @@ def main() -> None:
         help="Keep the judge worktree and the tmux window (debugging a judge run by hand)",
     )
 
+    # merge — the AUTONOMOUS merge gate: the escalation contract enforced in code
+    p_merge = sub.add_parser(
+        "merge",
+        help="Autonomously merge a dispatched PR to dev — ONLY if the contract's gate holds "
+             "(base=dev, judge clean, CI green, mergeable). No --force: it cannot merge to main",
+    )
+    p_merge.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
+    p_merge.add_argument(
+        "--reason", default="",
+        help="Optional free-text justification recorded alongside the mechanical gate facts",
+    )
+
+    # escalate — the ONE structured way to hand a decision to the human
+    p_esc = sub.add_parser(
+        "escalate",
+        help="Hand a decision to the human: record it (provenance) and push it over the "
+             "notifier. The fail-closed default when a call is not unambiguously autonomous",
+    )
+    p_esc.add_argument("summary", help="One-line statement of the decision to escalate")
+    p_esc.add_argument(
+        "--kind", default="decision",
+        help="What kind of call it is, e.g. priority / merge / security / scope (default: decision)",
+    )
+    p_esc.add_argument(
+        "--recommend", dest="recommendation", default="",
+        help="Your recommendation — the orchestrator forms one, it does not sit idle",
+    )
+    p_esc.add_argument("--run", default=None, help="The run this decision concerns, if any")
+    p_esc.add_argument(
+        "--option", action="append", dest="options", metavar="TEXT",
+        help="An option the human could pick (repeatable)",
+    )
+
     # knowledge — export the fleet's knowledge as an OKF bundle (local data; see docs/OKF.md)
     p_know = sub.add_parser("knowledge", help="Export fleet knowledge as an OKF bundle")
     know_sub = p_know.add_subparsers(dest="know_cmd")
@@ -2014,6 +2089,10 @@ def main() -> None:
             cmd_judge(args)
         else:
             p_judge.print_help()
+    elif args.command == "merge":
+        cmd_merge(args)
+    elif args.command == "escalate":
+        cmd_escalate(args)
     else:
         parser.print_help()
 
