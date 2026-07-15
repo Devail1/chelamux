@@ -1437,16 +1437,19 @@ def _agent_cmd_overrides() -> list[dict]:
 def api_config():
     """Dashboard-editable user prefs (userconfig.json). GET reports the stored
     projects_dir plus the effective dir the launcher will scan (after env/default
-    fallback), and the dispatcher's agent permission mode (stored + effective +
-    the closed enum of valid modes + any WORKFLOW.md that overrides it). POST
-    {projects_dir} and/or {agent_permission_mode} sets or (empty) clears them.
+    fallback), the dispatcher's agent permission mode, and the coding-agent model
+    (each stored + effective + the closed enum of valid values + any WORKFLOW.md
+    that overrides them). POST {projects_dir}, {agent_permission_mode}, and/or
+    {agent_model} sets or (empty) clears them.
 
-    ``agent_permission_mode`` is validated against dispatcher.PERMISSION_MODES
-    HERE, server-side — the UI's <select> is a convenience, not the gate. An
-    unknown value is rejected 400 and the stored mode is left untouched (fail
-    closed): the mode is interpolated into the shell command that spawns an
-    agent, so only the enum may ever reach it. There is deliberately no endpoint
-    to set the command itself."""
+    ``agent_permission_mode`` and ``agent_model`` are validated against
+    dispatcher.PERMISSION_MODES / dispatcher.AGENT_MODELS HERE, server-side — the
+    UI's <select> is a convenience, not the gate. An unknown value is rejected
+    400 and the stored value is left untouched (fail closed): both are
+    interpolated into the shell command that spawns an agent, so only the enum
+    may ever reach it. There is deliberately no endpoint to set the command
+    itself. The JUDGE's model is fixed (dispatcher.DEFAULT_JUDGE_MODEL) and not
+    settable here — a fleet-wide coding-model choice must not downgrade it."""
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
         if "agent_permission_mode" in data:
@@ -1457,9 +1460,18 @@ def api_config():
                     "valid": list(dispatcher.PERMISSION_MODES),
                 }), 400
             userconfig.set_(dispatcher.PERMISSION_MODE_KEY, mode)
+        if "agent_model" in data:
+            model = (data.get("agent_model") or "").strip()
+            if model and model not in dispatcher.AGENT_MODELS:
+                return jsonify({
+                    "error": "invalid agent model",
+                    "valid": list(dispatcher.AGENT_MODELS),
+                }), 400
+            userconfig.set_(dispatcher.AGENT_MODEL_KEY, model)
         if "projects_dir" in data:
             userconfig.set_("projects_dir", (data.get("projects_dir") or "").strip())
     stored_mode = dispatcher.settings_permission_mode()
+    stored_model = dispatcher.settings_agent_model()
     return jsonify({
         "projects_dir": userconfig.get("projects_dir", ""),
         "projects_dir_effective": str(launcher._projects_dir()),
@@ -1468,6 +1480,13 @@ def api_config():
         "agent_permission_mode_effective": stored_mode or dispatcher.DEFAULT_PERMISSION_MODE,
         "agent_permission_mode_default": dispatcher.DEFAULT_PERMISSION_MODE,
         "agent_permission_modes": list(dispatcher.PERMISSION_MODES),
+        # The coding-agent model — same shape as the mode fields. The judge's
+        # model is a fixed capable default and deliberately NOT surfaced here:
+        # it is not user-selectable in v1 (see dispatcher.DEFAULT_JUDGE_MODEL).
+        "agent_model": stored_model or "",
+        "agent_model_effective": stored_model or dispatcher.DEFAULT_AGENT_MODEL,
+        "agent_model_default": dispatcher.DEFAULT_AGENT_MODEL,
+        "agent_models": list(dispatcher.AGENT_MODELS),
         "agent_cmd_overrides": _agent_cmd_overrides(),
     })
 

@@ -74,12 +74,14 @@ def test_workflow_cmd_wins(mods):
 def test_settings_mode_used_when_workflow_has_no_cmd(mods):
     _, userconfig, dispatcher = mods
     userconfig.set_(dispatcher.PERMISSION_MODE_KEY, "plan")
-    assert dispatcher.resolve_agent_cmd(_wf()) == ("claude --permission-mode plan", "settings")
+    assert dispatcher.resolve_agent_cmd(_wf()) == (
+        "claude --permission-mode plan --model sonnet", "settings")
 
 
 def test_built_in_default_when_nothing_set(mods):
     _, _, dispatcher = mods
-    assert dispatcher.resolve_agent_cmd(_wf()) == ("claude --permission-mode auto", "default")
+    assert dispatcher.resolve_agent_cmd(_wf()) == (
+        "claude --permission-mode auto --model sonnet", "default")
 
 
 def test_blank_workflow_cmd_falls_through_to_settings(mods):
@@ -107,7 +109,8 @@ def test_bad_stored_mode_fails_closed_to_default(mods, bad):
     _, userconfig, dispatcher = mods
     userconfig._save({dispatcher.PERMISSION_MODE_KEY: bad})
     assert dispatcher.settings_permission_mode() is None
-    assert dispatcher.resolve_agent_cmd(_wf()) == ("claude --permission-mode auto", "default")
+    assert dispatcher.resolve_agent_cmd(_wf()) == (
+        "claude --permission-mode auto --model sonnet", "default")
 
 
 def test_corrupt_config_file_does_not_crash_the_daemon(mods):
@@ -129,7 +132,8 @@ def test_mode_persists_across_a_daemon_restart(mods):
     importlib.reload(userconfig)                      # simulate a restart
     importlib.reload(dispatcher)
     assert dispatcher.settings_permission_mode() == "acceptEdits"
-    assert dispatcher.resolve_agent_cmd(_wf())[0] == "claude --permission-mode acceptEdits"
+    assert dispatcher.resolve_agent_cmd(_wf())[0] == \
+        "claude --permission-mode acceptEdits --model sonnet"
 
 
 # --- the write path (POST /api/config) --------------------------------------

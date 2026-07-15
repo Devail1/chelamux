@@ -512,6 +512,19 @@ function renderSettings(focus) {
             </div>
             <div id="agent-mode-msg" class="s-savemsg"></div>
             <p class="s-desc" id="agent-mode-source"></p>
+            <div class="s-row">
+                <span class="s-rowlabel">Model</span>
+                <select id="agent-model-select" class="s-select"
+                        onchange="chela.setAgentModel(this.value)">
+                    <option value="">Loading…</option>
+                </select>
+            </div>
+            <div id="agent-model-msg" class="s-savemsg"></div>
+            <p class="s-desc" id="agent-model-source"></p>
+            <p class="s-desc">The <strong>coding</strong> model — cmx tasks rarely need Opus,
+            so Sonnet is the default (cheaper/faster). The <strong>judge</strong> (the
+            adversarial reviewer) always runs on a capable model and is not affected by this
+            setting.</p>
         </section>
 
         <section class="settings-section">
@@ -617,6 +630,7 @@ function renderSettings(focus) {
     _loadProjectsSetting();
     _loadCollabSetting();
     _loadAgentModeSetting();
+    _loadAgentModelSetting();
     _loadSettingsStatus();
 }
 
@@ -693,6 +707,67 @@ async function setAgentPermissionMode(v) {
     }
     setMsg('ok', 'Saved · next dispatch launches in ' + (cfg.agent_permission_mode_effective || v));
     _renderAgentModeSource(cfg);
+}
+
+// Coding-agent model. Same rails as the permission mode: the <select> is
+// populated from the server's enum (/api/config → agent_models) so it can never
+// offer a value the server would reject, and the server re-validates anyway. The
+// JUDGE's model is a fixed capable default, decoupled from this — not surfaced.
+function _agentModelLabel(m, dflt) {
+    return m + (m === dflt ? ' · default' : '');
+}
+
+// The model rides on the permission-mode command, so a WORKFLOW.md that pins
+// agent.cmd shadows it too — the mode-source line already says which workflows
+// override, so here we only state the effective coding model.
+function _renderAgentModelSource(cfg) {
+    const el = document.getElementById('agent-model-source');
+    if (!el) return;
+    const eff = (cfg && cfg.agent_model_effective) || '';
+    const stored = (cfg && cfg.agent_model) || '';
+    const src = stored ? 'this setting' : 'the built-in default';
+    el.innerHTML = `Coding agents launch with <code>--model ${escHtml(eff)}</code> — from ${src}.`;
+}
+
+async function _loadAgentModelSetting() {
+    const sel = document.getElementById('agent-model-select');
+    if (!sel) return;
+    let cfg;
+    try {
+        cfg = await api('/api/config');
+    } catch (e) { sel.innerHTML = '<option value="">(unavailable)</option>'; return; }
+    const models = (cfg && cfg.agent_models) || [];
+    const dflt = (cfg && cfg.agent_model_default) || '';
+    const stored = (cfg && cfg.agent_model) || '';
+    sel.innerHTML = models.map(m =>
+        `<option value="${attrEsc(m)}"${stored === m ? ' selected' : ''}>${escHtml(_agentModelLabel(m, dflt))}</option>`
+    ).join('');
+    // Unset reads as the built-in default — select it without storing anything.
+    if (!stored && dflt) sel.value = dflt;
+    _renderAgentModelSource(cfg);
+}
+
+async function setAgentModel(v) {
+    const msg = document.getElementById('agent-model-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    setMsg('', 'Saving…');
+    let cfg;
+    try {
+        cfg = await api('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_model: v }),
+        });
+    } catch (e) { setMsg('err', 'Save failed — model unchanged.'); return; }
+    // api() resolves on a 4xx too, so a server rejection arrives as a body, not
+    // a throw. Fail closed: report it and re-read the model that IS stored.
+    if (!cfg || cfg.error) {
+        setMsg('err', 'Rejected — model unchanged.');
+        _loadAgentModelSetting();
+        return;
+    }
+    setMsg('ok', 'Saved · next dispatch launches with --model ' + (cfg.agent_model_effective || v));
+    _renderAgentModelSource(cfg);
 }
 
 // Live "Connections & Status" surface (READ-ONLY). Fetches /api/settings and
@@ -1108,4 +1183,4 @@ export { openPalette, refreshSidebar, renderAgentDetail, renderNav, renderSideba
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
