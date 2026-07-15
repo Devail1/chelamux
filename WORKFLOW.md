@@ -109,13 +109,21 @@ A fresh git worktree at `{{workspace_path}}` on branch `{{branch_name}}` (forked
    `skills/telegram-send` skills.
 2. **Validate — this repo's CI gates on ruff.** Run `uv run ruff check chela tests`
    (MUST pass — pytest-green is NOT sufficient) and `uv run pytest -q`; fix what you broke.
-3. **Commit in the worktree.** Stage only files you intentionally changed
+3. **⚖️ SELF-VERIFY YOUR GUARDS — corrupt each one and watch it go RED.** For every test or
+   guard you added or changed, deliberately break the invariant it *claims* to protect (flip its
+   condition, empty its returned value, delete the production call-site it wires) and re-run the
+   suite. ⛔ **A guard that stays GREEN under its own corruption is DECORATION — it asserts
+   something other than what it claims; fix it before you hand off.** Confirm each mutation
+   actually applied (the file changed) *and still parses* (`node --check` / `py_compile`), then
+   revert it. **This is the exact check the judge will run — catch your own decoration first, or
+   the PR comes straight back.**
+4. **Commit in the worktree.** Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`). Verify with `git status` +
    `git diff --cached --stat` before committing.
-4. **Push and open a PR.** `git push -u origin {{branch_name}}` then
+5. **Push and open a PR.** `git push -u origin {{branch_name}}` then
    `gh pr create --base {{base_branch}} --title "{{project_key}}-{{task_number}}: <summary>" --body ...`
    (put `{{task_id}}` in the body).
-5. **Run `chela task-finished {{task_id}}` as your last step** — marks the run
+6. **Run `chela task-finished {{task_id}}` as your last step** — marks the run
    `awaiting_review`, records the PR URL, and kills your tmux window.
 
 **Do NOT touch the tracker file.** You do not tick your own checkbox — the dispatcher
