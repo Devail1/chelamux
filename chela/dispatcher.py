@@ -214,6 +214,30 @@ PERMISSION_MODE_KEY = "agent_permission_mode"
 
 AGENT_BASE_CMD = "claude"
 
+# --- coding-agent model (CMX-91) --------------------------------------------
+#
+# The MODEL the dispatched CODING agents run on — a Settings choice like the
+# permission mode, and it rides the exact same rails (validated closed enum,
+# fail-closed to the default, interpolated into a shell string). Default `sonnet`:
+# cmx tasks rarely need Opus, and Sonnet is cheaper/faster. ("Sonnet 200k" is
+# plain `--model sonnet`; the 1M-window variant is separate and not used here.)
+#
+# The enum is the alias set `claude --model` accepts. Members must be shell-inert
+# for the same reason the permission modes are — they reach a shell verbatim.
+AGENT_MODELS = ("sonnet", "opus", "haiku")
+DEFAULT_AGENT_MODEL = "sonnet"
+
+# The dashboard-writable key in ~/.chela/config.json (see chela.userconfig).
+AGENT_MODEL_KEY = "agent_model"
+
+# ⛔ THE JUDGE IS NOT DOWNGRADED. It is the adversarial safety net — the pass that
+# caught the wiring gaps and the "proof that cannot fail" class CI cannot — so it
+# runs on a fixed CAPABLE model, decoupled from the coding-agent Settings choice:
+# a `sonnet`/`haiku` default set for the fleet must never reach it. This is a v1
+# constant, deliberately NOT a user-facing dropdown (see resolve_agent_cmd's
+# ``role``). It is not read from userconfig, so no Settings write can touch it.
+DEFAULT_JUDGE_MODEL = "opus"
+
 
 def settings_permission_mode() -> str | None:
     """The permission mode set from Settings, or None if unset/invalid.
@@ -230,7 +254,40 @@ def settings_permission_mode() -> str | None:
     return val if val in PERMISSION_MODES else None
 
 
-def resolve_agent_cmd(wf: WorkflowDef) -> tuple[str, str]:
+def settings_agent_model() -> str | None:
+    """The coding-agent model set from Settings, or None if unset/invalid.
+
+    Read defensively, exactly like :func:`settings_permission_mode`: a missing,
+    corrupt, or hand-edited config.json degrades to "unset" (→ built-in default),
+    and a value outside :data:`AGENT_MODELS` is treated as unset rather than
+    interpolated into the shell command — the model reaches a shell verbatim, so
+    only the enum may.
+    """
+    try:
+        from chela import userconfig
+        val = userconfig.get(AGENT_MODEL_KEY)
+    except Exception:  # unreadable config, import failure — fail closed
+        return None
+    return val if val in AGENT_MODELS else None
+
+
+def agent_model_for(role: str = "coding") -> str:
+    """The model an agent of this ``role`` launches on.
+
+    ⛔ The one place the coding/judge split lives. The JUDGE gets the fixed
+    :data:`DEFAULT_JUDGE_MODEL` and NEVER the coding-agent Settings model, so a
+    `sonnet`/`haiku` default set for the fleet cannot downgrade the adversarial
+    pass. Everything else is a coding agent → the Settings model, or the
+    :data:`DEFAULT_AGENT_MODEL` default. Anything that is not the judge falls to
+    the coding model on purpose: a mistaken role gives the human-owned coding
+    default, never a silent judge downgrade.
+    """
+    if role == "judge":
+        return DEFAULT_JUDGE_MODEL
+    return settings_agent_model() or DEFAULT_AGENT_MODEL
+
+
+def resolve_agent_cmd(wf: WorkflowDef, role: str = "coding") -> tuple[str, str]:
     """The command that launches an agent, and where it came from.
 
     PRECEDENCE (highest first) — the one place this is decided:
@@ -238,7 +295,8 @@ def resolve_agent_cmd(wf: WorkflowDef) -> tuple[str, str]:
       1. ``agent.cmd`` in WORKFLOW.md  → source ``"workflow"``.
          An explicit per-workflow override stays authoritative: it is set by
          someone who can already write files in the repo, so it may be any
-         command, and it deliberately shadows Settings.
+         command (including its own ``--model``), and it deliberately shadows
+         Settings.
       2. the Settings permission mode → source ``"settings"``.
          ``agent_permission_mode`` in ~/.chela/config.json, written by the
          dashboard. Only ever one of :data:`PERMISSION_MODES`; anything else is
@@ -251,15 +309,23 @@ def resolve_agent_cmd(wf: WorkflowDef) -> tuple[str, str]:
     WORKFLOW.md no longer sets it, and why the dashboard surfaces the winning
     source instead of implying the setting always applies.
 
+    THE MODEL rides on top of (2)/(3) via ``--model`` (never (1) — a pinned
+    ``agent.cmd`` already carries its own). ``role`` decides which model:
+    ``"coding"`` → the Settings coding model (default `sonnet`); ``"judge"`` →
+    the fixed capable :data:`DEFAULT_JUDGE_MODEL`, so the judge is decoupled from
+    the fleet's coding-model choice. The ``source`` reported is the permission
+    mode's origin, unchanged — the model does not have its own precedence chain.
+
     Returns ``(cmd, source)``.
     """
     cmd = wf.get("agent", "cmd", default=None)
     if isinstance(cmd, str) and cmd.strip():
         return cmd.strip(), "workflow"
     mode = settings_permission_mode()
-    if mode:
-        return f"{AGENT_BASE_CMD} --permission-mode {mode}", "settings"
-    return f"{AGENT_BASE_CMD} --permission-mode {DEFAULT_PERMISSION_MODE}", "default"
+    permission_mode = mode or DEFAULT_PERMISSION_MODE
+    source = "settings" if mode else "default"
+    model = agent_model_for(role)
+    return f"{AGENT_BASE_CMD} --permission-mode {permission_mode} --model {model}", source
 
 
 def _git(repo: Path, *args: str, timeout: float = GIT_TIMEOUT_SECONDS):
@@ -2308,6 +2374,7 @@ def _launch_agent(
     hook_vars: dict,
     fresh_worktree: bool,
     record_window: bool = True,
+    role: str = "coding",
 ) -> str:
     """PREPARE the worktree, then put an agent in it. THE spawn path — the only one.
 
@@ -2352,6 +2419,11 @@ def _launch_agent(
     inbox addresses ``run_review`` to it — so stamping a short-lived judge's id there would
     misattribute both.
 
+    ``role`` (``"coding"`` | ``"judge"``) picks the MODEL the launch command runs on (see
+    :func:`resolve_agent_cmd`). ⛔ The judge passes ``role="judge"`` so its command stays on
+    the capable :data:`DEFAULT_JUDGE_MODEL` and never inherits the fleet's coding-model
+    Settings choice — a `sonnet` default must not downgrade the adversarial pass.
+
     Returns the window target (the ``@id``, or the bare name if the id was unreadable).
     """
     if fresh_worktree:
@@ -2381,9 +2453,10 @@ def _launch_agent(
         conn.commit()
 
     # WORKFLOW.md's agent.cmd → the Settings permission mode → the built-in default (see
-    # resolve_agent_cmd). The mode is fixed at spawn: changing it in Settings affects the
-    # NEXT dispatch, never an agent already running.
-    agent_cmd, cmd_source = resolve_agent_cmd(wf)
+    # resolve_agent_cmd). The mode AND model are fixed at spawn: changing either in Settings
+    # affects the NEXT dispatch, never an agent already running. ``role`` keeps the judge on
+    # its capable model regardless of the coding-agent Settings choice.
+    agent_cmd, cmd_source = resolve_agent_cmd(wf, role)
     log.info("Launching %s with %r (source: %s)", task_id, agent_cmd, cmd_source)
     # Export CHELA_WID first so the worktree agent knows its own window id (self-identity
     # for peek/read/drive), then launch.
@@ -2809,6 +2882,9 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
             # Feed keys its lane on it, the inbox addresses run_review to it) and pointing it
             # at a judge that will be gone in twenty minutes would misattribute both.
             record_window=False,
+            # ⛔ The judge runs on the fixed capable model, NEVER the coding-agent Settings
+            # model — a `sonnet` default set for the fleet must not downgrade the safety net.
+            role="judge",
         )
     except Exception as e:
         log.exception("judge: %s: the judge agent failed to launch", task_id)
