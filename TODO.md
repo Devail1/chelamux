@@ -40,6 +40,29 @@
 
   **Files:** `chela/inbox.py` (`_empty`/store schema — add `orchestrator_session`; the `watch()` registration; the delivery idle-gate + `address_alarm` path) · `chela/event_log.py` (the `session_id ↔ wid` lookup — reuse CMX-70's resolver, do NOT add a second registry) · `chela/epoch.py` (current-epoch check) · a `chela doctor` fact for inbox-address liveness · a REAL test under `tests/`. **Verify:** `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green · `ruff check chela tests` clean · the end-to-end renumber observation above · doctor green.
 
+- [ ] **📱 RESTORE LAUNCH-AND-BIND FROM TELEGRAM via a `/new` bridge command — a ccbot capability LOST in the fold, never tracked.** Today `RegistryRouter` **DROPS** any message from an unbound topic (incl. the forum's General), so the phone-first "start a session from anywhere" workflow is gone. ccbot had it in `~/projects/ccbot/src/ccbot/handlers/directory_browser.py` (window picker + folder browser). The fold ported the *binding* machinery but not the *launcher UI*.
+
+  🔑 **REUSE, DON'T REBUILD — every backend already exists; this is a Telegram FRONT-END over them:**
+  - `chela/launcher.py` — the folder-picker DATA: `suggest()` (scans git repos under the projects root), `view()` (favorites + recent), `pin`/`unpin`/`record_recent`. ⛔ Prefer these over raw filesystem walking (they're already scoped to a safe root).
+  - `chela/dashboard/app.py:~1359` — the SPAWN (`tmux new-window -c <cwd> … claude`). ⛔ **Factor it into ONE shared helper and reuse it — do NOT fork a second spawn path** (a spawn that skips the naming/epoch conventions desyncs the bridge and the Wall, CMX-77).
+  - `chela/telegram/bindings.py::BindingRegistry.bind(wid, thread_id, epoch=…)` — the topic binding, epoch-stamped.
+  - the window list / `discovery` — for the UNBOUND-windows picker · `chela/telegram/interactive.py` — the existing inline-keyboard callback scheme (`qa:*`) to model new callbacks on.
+
+  **THE FLOW** (`/new`, a new `BRIDGE_COMMANDS` entry in `chela/telegram/inbound.py`):
+  1. `/new` → the launcher: a **window picker** of UNBOUND tmux windows (tap → bind that window to a fresh topic) + a **➕ New Session** button.
+  2. **New Session** → a **directory browser** off `launcher.suggest()`/`view()` (favorites · recent · git-repos), paginated.
+  3. Pick a folder → **spawn** `claude` in a new `chela`-session window at that cwd (the shared helper) → **bind** it to a new topic (`BindingRegistry`, epoch-stamped) → `record_recent(cwd)`.
+  - **DEFER to v2:** ccbot's third UI (resume an EXISTING session in the folder). MVP = window-picker + new-in-folder only.
+
+  ⛔ **GUARDRAILS:**
+  - 🔒 **THE CHAT GATE IS LOAD-BEARING (CMX-8).** `/new` MUST honor the same `chat_id` boundary as `RegistryRouter` — **only the bound control chat may launch a process on the box.** ⛔ A `/new` any chat can fire is a remote shell. Fail closed.
+  - **Window picker lists UNBOUND windows ONLY** — never offer to re-bind an already-bound agent window (that steals its topic).
+  - **`callback_data` ≤ 64 bytes** — cache the candidate list per-user and index into it; ⛔ do NOT pack paths into callback data (ccbot truncated to `[:64]` and it bit them).
+  - **Bind WITH the epoch** (`epoch.current()`) — an unstamped binding can't survive a tmux restart (CMX-77).
+  - ⛔ **TEST IT END-TO-END, not a mocked picker.** Drive `/new` → assert the picker lists REAL unbound windows; drive New Session → pick a folder → assert a REAL `claude` window is created at that cwd in the `chela` session AND an epoch-stamped `BindingRegistry` binding now maps it to the new topic. **A test that stubs the spawn and asserts the keyboard shape reproduces the fixture, not the feature** ([[feedback_proof_that_cannot_fail_bug_class]]) — the live window + the binding ARE the feature.
+
+  **Files:** `chela/telegram/inbound.py` (the `/new` command + chat gate) · a new `chela/telegram/launcher_ui.py` (keyboards + per-user callback state) · `chela/telegram/interactive.py` (callback routing) · reuse `chela/launcher.py` + the factored spawn helper + `bindings.py`. **Verify:** `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` + `ruff check chela tests` green · the end-to-end drive above · **LIVE on @chelamuxbot / the test forum: `/new` from your phone → bind an unbound window AND launch a new session in a folder; screenshot both.**
+
 - [x] **🧭 THE OUTBOUND RELAY MUST RESOLVE `wid → transcript` BY `session_id`, NOT BY `cwd`.** ⛔ **The transcript monitor is the LAST consumer still correlating on `cwd` — the exact key PR #61 already ripped out of the event log (CMX-48: events "filed against the **wrong window**").** `monitor._default_resolver` does `discovery.get_window_cwd_by_id(wid)` → `transcripts.transcript_for_cwd(cwd)` → *newest `*.jsonl` in `~/.claude/projects/<encoded-cwd>/`*. Its docstring asserts *"tmux is the source of truth"* for this mapping. **That assertion is FALSE, and it failed live on 2026-07-14.**
 
   🔑 **THE FAILURE IS SILENT — that is what makes it worth fixing over merely surviving.** No transcript resolved → resolver returns `None` → **nothing to relay, no error, no warning, no log line.** The bridge looks perfectly healthy: bindings reconcile, topics get created, **inbound works** (it only needs the `wid`). The human just… never hears back. Liav sat in front of a live nautilus topic sending messages that landed, receiving nothing, with every health surface green. ⛔ **Whatever you build, a resolver that finds no transcript must be LOUD.**
