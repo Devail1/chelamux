@@ -78,3 +78,24 @@ test('each card renders the declared trigger and mode — the panel SHOWS the la
     const judge = document.querySelector('#personas-list .persona-card[data-persona="judge"]');
     assert.ok(judge.textContent.includes('reviewing cmx-3'), 'the judge live status is not rendered');
 });
+
+// WIRING — the tests above call renderPersonas() with a fixture, which proves the RENDER but
+// not the FETCH. The view's enter/tick hooks call refreshPersonas(), which fetches /api/personas
+// and renders `data.personas`. If refreshPersonas stops threading the payload through (renders
+// []/undefined, reads the wrong key), the panel goes blank against a healthy API and every
+// render test above still passes. So this drives the REAL refreshPersonas() against a stubbed
+// /api/personas and counts the cards it puts on screen.
+test('refreshPersonas fetches /api/personas and renders ITS payload — the fetch→render wire', async () => {
+    let requested = null;
+    // api() (util.js) does `fetch(BASE_PATH + path).json()`; stub fetch to serve the three.
+    globalThis.fetch = (url) => {
+        requested = String(url);
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ personas: THREE }) });
+    };
+    await personas.refreshPersonas();
+    assert.ok(requested && requested.includes('/api/personas'), 'refreshPersonas did not fetch /api/personas');
+    // the payload's three personas reached the DOM — a refresh that dropped the payload
+    // (renderPersonas([])) would render the "No personas declared" empty state, zero cards.
+    assert.equal(cards().length, 3, 'refreshPersonas did not render the fetched personas');
+    assert.deepEqual([...cards()].map(c => c.dataset.persona), ['judge', 'critic', 'orchestrator']);
+});

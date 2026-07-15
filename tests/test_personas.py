@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from chela import personas
+from chela import dispatcher, judge, personas
+from chela.dashboard import app as dash
 
 REQUIRED_KEYS = ("judge", "critic", "orchestrator")
 
@@ -107,3 +108,53 @@ def test_orchestrator_prompt_encodes_the_gated_action_surface():
     assert "chela merge" in text
     assert "gh pr merge" in text          # named as the thing it must NEVER reach
     assert "chela escalate" in text
+
+
+# --- the WIRING: /api/personas is the production surface that feeds the panel -------------
+#
+# The tests above prove the registry is a complete, correct DECLARATION — pure data. But the
+# dashboard panel never touches the registry directly; it fetches /api/personas. If that route
+# stops serializing the registry (an empty loop, a wrong source), the panel goes blank and
+# every test above still passes — the exact gap a corruption of ``api_personas`` opens. These
+# import the real Flask app and drive the route, so the serialization loop is under test.
+
+@pytest.fixture
+def client():
+    return dash.app.test_client()
+
+
+def test_api_personas_route_serializes_the_registry(client):
+    """🔴 WIRING — the route's payload IS the registry, in order, one entry per persona.
+
+    Corrupt ``api_personas`` to iterate ``[]`` (or any source that is not the registry) and
+    this goes red: the served keys no longer equal the declared keys.
+    """
+    res = client.get("/api/personas")
+    assert res.status_code == 200
+    served = [p["key"] for p in res.get_json()["personas"]]
+    # the SAME three the registry declares, in registry order — not empty, not a subset
+    assert served == list(personas.PERSONA_KEYS)
+    assert served == [p.key for p in personas.registry()]
+    # …and each served entry carries the declared fields the panel renders — a route that
+    # emitted three empty dicts would pass a bare count but fail this.
+    for entry in res.get_json()["personas"]:
+        for field in ("title", "trigger", "mode", "action_surface", "prompt_source"):
+            assert entry.get(field), f"{entry.get('key')}.{field} missing from /api/personas"
+
+
+def test_api_personas_stamps_the_judge_live_status(client, monkeypatch):
+    """🔴 WIRING — the route stamps the judge's live 'reviewing cmx-N' from a running run.
+
+    ``_judge_live_status`` reads ``judge_state='running'`` off ``dispatcher.list_runs`` and the
+    route grafts it onto the judge entry. Sever either half and the note vanishes.
+    """
+    monkeypatch.setattr(
+        dispatcher, "list_runs",
+        lambda *a, **k: [{"judge_state": judge.J_RUNNING, "task_number": 3}],
+    )
+    payload = client.get("/api/personas").get_json()
+    judge_entry = next(p for p in payload["personas"] if p["key"] == "judge")
+    assert judge_entry.get("status") == "reviewing cmx-3"
+    # …and only the judge is stamped — the note is judge-specific, not sprayed across the layer.
+    others = [p for p in payload["personas"] if p["key"] != "judge"]
+    assert all("status" not in p or not p["status"] for p in others)

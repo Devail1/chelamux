@@ -110,6 +110,34 @@ test('entering a view tells every OTHER view to let go — no if/else chain to e
     assert.equal(left.length, views.length - 1);
 });
 
+// --- the Personas view is WIRED to refreshPersonas ---------------------------
+//
+// views.js can't be imported here (its `agents.js → main.js` import runs selectView at load,
+// before VIEWS initialises — a circular-init that only bites in isolation). So, like
+// shippedOrder() above, we read the source — but a bare grep for the string 'refreshPersonas'
+// would pass a hook that merely mentions it in a comment. Instead we EXTRACT the personas
+// view's enter/tick arrow SOURCE and EXECUTE it with a refreshPersonas spy in scope: the hook
+// really runs, and the spy really has to fire. Replace the body with `() => {}` (the WIRING
+// corruption) and the arrow no longer calls the spy → red.
+function personasHook(name) {
+    const body = src('views.js');
+    const block = body.slice(body.indexOf("id: 'personas'"));
+    const m = block.match(new RegExp(`${name}:\\s*(\\([^)]*\\)\\s*=>\\s*[^\\n,]+)`));
+    assert.ok(m, `the personas view has no ${name} hook (extraction failed — did its shape change?)`);
+    let calls = 0;
+    // eslint-disable-next-line no-new-func — we execute the REAL hook source, not a copy of it
+    new Function('refreshPersonas', `return ${m[1]}`)(() => { calls++; })();
+    return calls;
+}
+
+test('the Personas view enter hook calls refreshPersonas — nav switch populates the panel', () => {
+    assert.equal(personasHook('enter'), 1, 'entering the Personas view did not call refreshPersonas');
+});
+
+test('the Personas view tick hook calls refreshPersonas — it keeps the live status fresh', () => {
+    assert.equal(personasHook('tick'), 1, 'the Personas view tick did not call refreshPersonas');
+});
+
 // --- one dataset, one poller -------------------------------------------------
 
 test('exactly ONE module fetches /api/dispatcher — work.js', () => {
