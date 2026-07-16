@@ -464,19 +464,37 @@ def test_a_capture_that_blows_up_never_reaches_the_tap_handler():
 # ── The composition rule (the mirror vs the semantic cards) ─────────────────
 
 
-def test_a_permission_gate_keeps_its_one_tap_card_AND_gains_a_mirror():
-    # Coexistence, not competition. The card's ✅ Allow once stays one tap; the mirror is
-    # what lets you reach option 2 ("don't ask again"), which the card deliberately refuses
-    # to bind — today that option is reachable from a phone only by guessing at a selector
-    # you cannot see.
+def test_a_permission_gate_is_BUTTONS_ONLY_no_redundant_numbered_mirror():
+    # CMX-92 (reverses the CMX-54 coexistence rule for the permission shape ONLY). A binary
+    # permission gate is self-describing: the ❓ card NAMES the command (legible on a lock
+    # screen) and the ✅ Allow once / ❌ Deny buttons NAME what they do. A <pre> mirror of
+    # "1. Yes / 2. don't ask / 3. No" under them repeats two self-describing buttons and
+    # nothing more, so the permission gate no longer posts one.
     bot = _Bot()
     w = _watcher(bot, {"@1": BASH_PANE})
     w.poll(["@1"])
 
     bodies = [s[1] for s in bot.sent]
+    # The card — the context line + the Allow/Deny keyboard — is still posted, in full.
     assert any(b.startswith("❓ Permission — Bash: rm -rf build/") for b in bodies)
-    assert len(_mirror_sends(bot)) == 1
-    assert "2. Yes, and don't ask again" in _mirror_sends(bot)[0][1]
+    # …and it is the ONLY message: no mirror, so no numbered "1. Yes / 2. … / 3. No" body.
+    assert _mirror_sends(bot) == [], "a permission gate must not post a redundant mirror"
+    assert not any("don't ask again" in b for b in bodies), "the numbered menu is gone"
+
+
+def test_an_ASKUSERQUESTION_still_mirrors_with_its_numbered_options_UNCHANGED():
+    # The other side of CMX-92: the suppression is scoped to the permission shape alone. An
+    # AskUserQuestion's mirror is its ONLY message and the only carrier of its option text,
+    # so it must be byte-for-byte what it was — numbered options, on the mirror, drivable.
+    bot = _Bot()
+    w = _watcher(bot, {"@1": SINGLE_PANE})
+    w.poll(["@1"])
+
+    assert len(_mirror_sends(bot)) == 1, "the AskUserQuestion mirror is untouched"
+    mirror = _mirror_sends(bot)[0]
+    assert "❯ 1. Apple" in mirror[1] and "2. Banana" in mirror[1], "its numbered options stay"
+    data = [b["callback_data"] for row in mirror[4]["inline_keyboard"] for b in row]
+    assert data[:2] == ["qa:0", "qa:1"] and "m:ent" in data, "the selector + D-pad stay"
 
 
 def test_a_single_select_selector_is_mirrored_TOO():

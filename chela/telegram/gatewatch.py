@@ -1623,7 +1623,21 @@ class PermissionGateWatcher:
         # draw (:func:`mirror_suppressed` — the whole composition rule is written out above
         # ``format_mirror_card``). The hook lookups this tick already did are reused rather
         # than repeated.
-        self._sync_mirror(window_id, dialog, hook=hook, held=held, uq=uq)
+        #
+        # …with ONE exception (CMX-92): a **permission** gate is buttons-only. Its ❓ card
+        # already NAMES what is being permitted (``❓ Permission — Bash: rm -rf …`` — legible on
+        # a lock screen) and its ✅ Allow once / ❌ Deny buttons name what they DO, so a
+        # ``<pre>`` mirror of "1. Yes / 2. … / 3. No" beneath them only repeats two
+        # self-describing buttons. ``gate is not None`` is exactly "a permission gate is up and
+        # it is NOT an AskUserQuestion or a plan" (``gate`` above is forced to ``None`` whenever
+        # ``uq`` or ``plan`` is present), so passing ``dialog=None`` here suppresses ONLY the
+        # permission mirror and leaves every OTHER shape mirrored exactly as before — the
+        # AskUserQuestion mirror (which is a gate's ONLY message and carries its option
+        # descriptions), a plan review, a checkpoint restore, an unrecognised dialog.
+        self._sync_mirror(
+            window_id, None if gate is not None else dialog,
+            hook=hook, held=held, uq=uq,
+        )
         # The fourth read of the same captured text (no extra tmux call). Last, and
         # in its own try: a decoration must never cost us a gate relay.
         if self._status is not None:
