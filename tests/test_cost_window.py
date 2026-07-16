@@ -140,10 +140,22 @@ def test_api_cost_window_live_reads_the_current_snapshot_not_the_db(chela_db, cl
 
 
 def test_api_cost_window_today_reads_windowed_history(chela_db, client):
-    # No datetime mocking needed: insert relative to the REAL now, well inside
-    # today's UTC boundary, and let the endpoint compute its own "today" window.
+    # No datetime mocking needed: insert relative to the REAL now and let the
+    # endpoint compute its own "today" window. A single reading placed
+    # "well inside today" (the previous version of this test) cannot tell
+    # apart a correct since-UTC-midnight window from a 7d/30d-style lookback -
+    # every one of those windows contains it too. Pin the actual boundary
+    # instead: one reading from BEFORE today's UTC midnight (25h back always
+    # crosses one, DST-free since this is UTC) that a since-midnight window
+    # must exclude from the baseline, and one reading from today. If "today"
+    # were corrupted into a longer lookback, the yesterday reading would fall
+    # inside the window too, the baseline would be read as 0 instead of
+    # yesterday's cumulative total, and the result would inflate to 10.5
+    # instead of the correct delta of 1.5.
     real_now = datetime.now(timezone.utc)
-    _insert("cmx-1", "sess-a", real_now - timedelta(minutes=1), 1.5)
+    yesterday = real_now - timedelta(hours=25)
+    _insert("cmx-1", "sess-a", yesterday, 9.00)
+    _insert("cmx-1", "sess-a", real_now, 10.50)
     resp = client.get("/api/cost?window=today")
     assert resp.status_code == 200
     assert resp.get_json() == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 1.5}]

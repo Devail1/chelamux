@@ -203,3 +203,26 @@ test('setCostWindow falls back to live for an unrecognized window key', async ()
     await cost.setCostWindow('nonsense');
     assert.ok(lastCostUrl && lastCostUrl.includes('window=live'), 'an unrecognized window key should fall back to live, not be sent verbatim');
 });
+
+// WIRING — every test above calls cost.setCostWindow() via the MODULE EXPORT.
+// index.html's selector buttons don't import the module; they call
+// onclick="chela.setCostWindow(...)" against the window.chela namespace. If cost.js
+// stopped registering setCostWindow onto window.chela, every test above would still
+// pass (they never touch window.chela) while every real click in the shipped
+// dashboard would throw "chela.setCostWindow is not a function". This test drives
+// the actual production entry point instead of the module export.
+test('setCostWindow is reachable via window.chela — the entry point index.html\'s onclick actually calls', async () => {
+    assert.equal(typeof window.chela.setCostWindow, 'function',
+        'window.chela.setCostWindow must be registered; index.html\'s onclick="chela.setCostWindow(...)" is the only production entry point for the selector');
+    let lastCostUrl = null;
+    globalThis.fetch = (url) => {
+        if (String(url).includes('/api/cost')) lastCostUrl = String(url);
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    };
+    await window.chela.setCostWindow('30d');
+    assert.ok(lastCostUrl && lastCostUrl.includes('window=30d'),
+        'calling setCostWindow through window.chela did not drive the real fetch path');
+    const thirtyDBtn = document.querySelector('.cost-window-btn[data-win="30d"]');
+    assert.equal(thirtyDBtn.getAttribute('aria-pressed'), 'true',
+        '30d should read pressed after being selected through the window.chela entry point');
+});
