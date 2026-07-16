@@ -97,8 +97,8 @@ export const VIEWS = [
         label: 'Cost',
         // lucide `dollar-sign` — fleet spend, as a fixed box.
         lucide: 'dollar-sign',
-        // A current-snapshot table (v1, deliberately no time-series): entering and
-        // ticking both just re-pull /api/agents + /api/agents/context and re-render.
+        // Entering and ticking both just re-pull /api/cost (scoped by the tab's own
+        // Live/Today/7d/30d selector state) + /api/agents (for project) and re-render.
         enter: () => refreshCost(),
         tick: () => refreshCost(),
     },

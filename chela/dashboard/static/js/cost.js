@@ -3,17 +3,46 @@
 //
 // The statusLine payload carries Claude Code's own cumulative session cost
 // (cost.total_cost_usd); context.py._parse_cache_file extracts it and it lands
-// in context_snapshots.cost_usd, already surfaced per-agent at
-// /api/agents/context (app.py). This view is a plain read over that same
-// endpoint — no new backend, no history: a CURRENT-SNAPSHOT table, not a
-// time-series (context_snapshots' history is there for a later pass).
+// in context_snapshots.cost_usd. /api/cost?window=... (app.py) serves it two
+// ways: `live` is a current-snapshot read (context.live_snapshot, no DB
+// dependency); `today`/`7d`/`30d` are period rollups over context_snapshots
+// history via context.windowed_cost.
 //
 // "Project" is the same grouping the sidebar already uses (_agentProject, from
 // the session's cwd basename) — joined in here via a parallel /api/agents
 // fetch, exactly like refreshSidebar() already joins agents + context to paint
 // the ctx% chip. One convention for "what project is this agent", not two.
 // ---------------------------------------------------------------------------
-import { $, _agentProject, api, escHtml } from './util.js';
+import { $, $$, _agentProject, api, escHtml } from './util.js';
+
+// The selected window is UI state, not fetch state — persisted per browser
+// like work.js's segment, so a reload lands you back on the period you had
+// open instead of resetting to Live.
+const WINDOWS = ['live', 'today', '7d', '30d'];
+const WINDOW_KEY = 'chela_cost_window';
+
+function _loadWindow() {
+    try {
+        const v = localStorage.getItem(WINDOW_KEY);
+        return WINDOWS.includes(v) ? v : 'live';
+    } catch (e) { return 'live'; }
+}
+let _window = _loadWindow();
+
+function _applyWindowButtons() {
+    $$('#cost-window .cost-window-btn').forEach(b => {
+        const on = b.dataset.win === _window;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+}
+
+function setCostWindow(win) {
+    _window = WINDOWS.includes(win) ? win : 'live';
+    try { localStorage.setItem(WINDOW_KEY, _window); } catch (e) { /* ignore */ }
+    _applyWindowButtons();
+    return refreshCost();
+}
 
 function _fmtCost(v) {
     return v == null ? null : '$' + v.toFixed(2);
@@ -74,13 +103,15 @@ function renderCostTable(rows) {
     </table>`;
 }
 
-// Fetch + join: /api/agents/context has the cost, /api/agents has the cwd
-// _agentProject groups by. Same two-fetch shape as refreshSidebar().
+// Fetch + join: /api/cost (scoped to the selected window) has the cost,
+// /api/agents has the cwd _agentProject groups by. Same two-fetch shape as
+// refreshSidebar().
 async function refreshCost() {
+    _applyWindowButtons();
     const host = $('#cost-table');
     let agents, ctx;
     try {
-        [agents, ctx] = await Promise.all([api('/api/agents'), api('/api/agents/context')]);
+        [agents, ctx] = await Promise.all([api('/api/agents'), api(`/api/cost?window=${_window}`)]);
     } catch (e) {
         if (host) host.innerHTML = '<div class="side-empty">Cost data unavailable.</div>';
         return;
@@ -96,5 +127,8 @@ async function refreshCost() {
     renderCostTable(rows);
 }
 
+window.chela = window.chela || {};
+Object.assign(window.chela, { setCostWindow });
+
 // --- Stage 0: ES-module exports ---
-export { refreshCost, renderCostTable };
+export { refreshCost, renderCostTable, setCostWindow };
