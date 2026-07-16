@@ -177,6 +177,102 @@ def test_the_daemon_loop_calls_prune_snapshots_when_due(monkeypatch):
     assert calls[0] == main.CONTEXT_SNAPSHOT_RETENTION_DAYS
 
 
+# --- cadence PERSISTENCE across ticks: the single-tick tests above prove the loop calls -----
+# --- the seam, but not that the cadence STATE survives to the next pass --------------------
+
+def _run_daemon_ticks(monkeypatch, n: int) -> None:
+    """Like ``_run_one_daemon_tick``, but drives exactly ``n`` iterations of the daemon loop.
+
+    Round-1's single-tick tests can't see a cadence variable failing to persist between
+    passes (``last_capture = maintenance_tick(...)`` discarding its return, or
+    ``last_prune = now`` reverted to ``last_prune = last_prune``) — both leave the *first*
+    tick looking identical to correct code. Only a second pass exposes it: a
+    discarded/frozen cadence variable re-triggers the same call on tick 2 that should only
+    have fired once.
+
+    Deliberately does NOT mock ``time.time`` — ``main.time`` is the real stdlib module, shared
+    process-wide, and Python's own logging calls ``time.time()`` once per LogRecord, so a
+    scripted return-value sequence gets consumed (and exhausted) by log lines this test never
+    intended to drive. Real wall-clock time works fine here on its own: two ticks execute
+    microseconds apart, far below either cadence interval, while the real epoch (it's 2026) is
+    already far *past* both — so "is this due" comes out correct in both directions without
+    needing to fake it.
+    """
+    monkeypatch.setattr(main.GracefulShutdown, "install", lambda self: self)
+
+    remaining = n
+
+    def stop_after_n(self, _seconds):
+        nonlocal remaining
+        remaining -= 1
+        if remaining <= 0:
+            self._event.set()
+            return True
+        return False
+
+    monkeypatch.setattr(main.GracefulShutdown, "wait", stop_after_n)
+
+    monkeypatch.setattr(main.scheduler, "init", lambda: None)
+    monkeypatch.setattr(main.scheduler, "tick", lambda: 0)
+    monkeypatch.setattr(main.agent_manager, "reconcile_window_names", lambda: [])
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: False)
+    monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+    monkeypatch.setattr(main.inbox, "enabled", lambda: False)
+
+
+def test_the_daemon_loop_persists_last_capture_across_ticks(monkeypatch):
+    """🔴 WIRING (cadence persistence) — ``maintenance_tick(last_capture, now)`` called but its
+    return DISCARDED (``last_capture`` never reassigned) still calls it once per tick, so the
+    round-1 single-tick test above stays green. Drive two ticks and prove tick 2 is called with
+    tick 1's returned timestamp, not the original ``0.0`` — otherwise capture keys off a frozen
+    ``last_capture`` and runs on every 30s pass instead of on the interval config.py promises."""
+    _run_daemon_ticks(monkeypatch, n=2)
+
+    seen = []
+
+    def fake_maintenance_tick(last_capture, now):
+        seen.append((last_capture, now))
+        return now   # simulate: capture ran and the cadence should advance to `now`
+
+    monkeypatch.setattr(main, "maintenance_tick", fake_maintenance_tick)
+    monkeypatch.setattr(main.context, "prune_snapshots", lambda days: 0)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert len(seen) == 2
+    assert seen[0][0] == 0.0             # tick 1: the loop's initial last_capture, unmodified
+    assert seen[1][0] == seen[0][1], (   # tick 2's last_capture must be tick 1's returned `now`
+        "cmd_run did not feed maintenance_tick's returned timestamp back in as the next "
+        "tick's last_capture — the return is being discarded, so capture would re-run on "
+        f"every daemon pass instead of on CAPTURE_INTERVAL_SECONDS (got {seen})"
+    )
+
+
+def test_the_daemon_loop_advances_last_prune_after_pruning(monkeypatch):
+    """🔴 WIRING (cadence persistence) — the prune guard is inline (``last_prune = now``
+    right before calling ``prune_snapshots``), so reverting it to ``last_prune = last_prune``
+    still lets the round-1 single-tick test above pass (that test only drives ONE tick, and
+    ``last_prune`` starts at ``0.0`` so the first pass is due either way). Drive two REAL
+    ticks, microseconds apart — real code prunes once (tick 1 advances ``last_prune`` to ~now,
+    so tick 2's microsecond gap isn't due); a frozen ``last_prune`` prunes on BOTH ticks (it
+    never advances off ``0.0``, and the real epoch is always >> PRUNE_INTERVAL_SECONDS), which
+    is a DELETE+commit against scheduler.db every 30s pass instead of once a day."""
+    _run_daemon_ticks(monkeypatch, n=2)
+
+    monkeypatch.setattr(main, "maintenance_tick", lambda last_capture, now: last_capture)
+    calls = []
+    monkeypatch.setattr(main.context, "prune_snapshots", lambda days: calls.append(days) or 0)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert len(calls) == 1, (
+        "context.prune_snapshots was called on both ticks — last_prune is not advancing "
+        "after a prune, so retention runs on EVERY daemon pass instead of "
+        f"PRUNE_INTERVAL_SECONDS (called {len(calls)} times)"
+    )
+
+
 # --- prune_snapshots (retention) --------------------------------------------------
 
 def _insert_snapshot(db_path, agent: str, age_days: float) -> None:
