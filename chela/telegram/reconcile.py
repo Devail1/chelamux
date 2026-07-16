@@ -451,8 +451,22 @@ def dispatched_window_ids(runs: list[dict] | None = None,
     this unit-tests with no sqlite; in production it is :func:`chela.dispatcher.list_runs`.
     A failure to read the DB returns an empty set — i.e. "nothing is dispatched", the
     pre-CMX-73 behaviour — rather than wedging the reconcile loop over a locked database.
+
+    🤫 **A THIRD kind of row-owned window: the judge** (CMX-97). ``_spawn_judge`` launches
+    it with ``record_window=False`` — deliberately, because ``window_id`` above is the
+    RUN's own window, and a short-lived judge must never be stamped over it — so the judge
+    would otherwise be invisible here and read as a *human's* window: a Telegram topic
+    nobody should message, and a full-size pop on the Wall instead of docking minimized
+    like every other dispatcher-owned worker. It gets its own ``judge_window_id`` /
+    ``judge_window_epoch`` pair (stamped by ``_spawn_judge``, same epoch-safety shape as
+    the row's own) and is honoured by the same two rules: in flight
+    (``judge_state == judge.J_RUNNING``) unconditionally, or settled-but-not-yet-reaped —
+    ``judge._cleanup`` kills the window LAST, after the verdict is already written — proven
+    by the deterministic ``judge.judge_window_name(branch)`` the same way the row's own
+    ``window_name`` proves it above.
     """
     from chela import dispatcher
+    from chela import judge as judge_mod
 
     try:
         rows = dispatcher.list_runs() if runs is None else runs
@@ -464,18 +478,26 @@ def dispatched_window_ids(runs: list[dict] | None = None,
     owned: set[str] = set()
     for row in rows:
         wid = str(row.get("window_id") or "").strip()
-        if not wid:
-            continue                                # a pre-CMX-69 row: no id was recorded
-        if epoch.is_dangling(row.get("window_epoch"), now_epoch):
-            continue                                # a DEAD server's id — it names a stranger
-        if row.get("status") in dispatcher.ACTIVE_STATUSES:
-            owned.add(wid)
+        if wid and not epoch.is_dangling(row.get("window_epoch"), now_epoch):
+            if row.get("status") in dispatcher.ACTIVE_STATUSES:
+                owned.add(wid)
+            else:
+                # Settled/parked, but its window may not be reaped yet. Only the row's
+                # OWN recorded name can prove the live @N is still that window and not a
+                # recycled id.
+                name = str(row.get("window_name") or "").strip()
+                if name and live.get(wid) == name:
+                    owned.add(wid)
+
+        jwid = str(row.get("judge_window_id") or "").strip()
+        if not jwid or epoch.is_dangling(row.get("judge_window_epoch"), now_epoch):
             continue
-        # Settled/parked, but its window may not be reaped yet. Only the row's OWN
-        # recorded name can prove the live @N is still that window and not a recycled id.
-        name = str(row.get("window_name") or "").strip()
-        if name and live.get(wid) == name:
-            owned.add(wid)
+        if row.get("judge_state") == judge_mod.J_RUNNING:
+            owned.add(jwid)
+            continue
+        expected = judge_mod.judge_window_name(str(row.get("branch_name") or ""))
+        if expected and live.get(jwid) == expected:
+            owned.add(jwid)
     return owned
 
 
