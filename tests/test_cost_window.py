@@ -153,8 +153,13 @@ def test_api_cost_window_today_reads_windowed_history(chela_db, client):
     # yesterday's cumulative total, and the result would inflate to 10.5
     # instead of the correct delta of 1.5.
     real_now = datetime.now(timezone.utc)
-    yesterday = real_now - timedelta(hours=25)
-    _insert("cmx-1", "sess-a", yesterday, 9.00)
+    # Baseline sits ONE MINUTE before today's UTC midnight — the boundary that
+    # tells a since-midnight window apart from a rolling last-24h lookback. (25h
+    # back, the previous version, is outside BOTH, so it could not.) since-midnight
+    # EXCLUDES this row from the window (baseline=9.00 -> delta 1.5); a `now - 24h`
+    # corruption INCLUDES it (baseline read as 0 -> inflates to 10.5).
+    before_midnight = real_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(minutes=1)
+    _insert("cmx-1", "sess-a", before_midnight, 9.00)
     _insert("cmx-1", "sess-a", real_now, 10.50)
     resp = client.get("/api/cost?window=today")
     assert resp.status_code == 200
