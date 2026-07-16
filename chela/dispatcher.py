@@ -1479,6 +1479,120 @@ def approve(ident: str, body: str = "", force: bool = False) -> dict:
     }
 
 
+def reopen(ident: str, reason: str = "") -> dict:
+    """Put a ``needs_human`` run BACK under review — the human-takeover re-entry.
+
+    ``needs_human`` is terminal everywhere else in this file: the rework loop gave up on
+    it (CMX-68), and ``request_changes``/``approve`` both refuse anything that is not
+    ``awaiting_review``. That left a human who fixes the branch themselves and pushes a
+    new commit with no in-contract way back — the only escape was a raw ``gh pr merge``,
+    which never re-verifies the fixed head and skips the judge entirely (a self-review
+    hole). This is the missing edge: flip the row back to ``awaiting_review`` so the
+    EXISTING ``judge run`` / ``review`` / ``merge`` path picks the fixed head up exactly
+    as it would a fresh PR. It does not touch the branch, the worktree, or the PR — those
+    were already preserved by the escalation this reverses.
+
+    ``rework_count`` is left exactly as it was. That is deliberate, not an oversight: if
+    the judge blocks the "fixed" head again, ``request_changes`` sends it to
+    ``changes_requested`` and the very next tick's cap check (the row's ``rework_count``
+    is still at the cap) escalates it straight back to ``needs_human`` — no wasted
+    automatic rework attempt, just the loop correctly refusing to spend a budget it has
+    already spent. A human fix that actually passes the judge never spends the budget at
+    all: it rides ``awaiting_review`` → ``merge`` like any other clean run.
+
+    ⛔ THE NEW-COMMIT GATE. Refuses to reopen unless the branch's CURRENT head (re-read
+    from ``gh``, right here — never trusted stale off the row) differs from ``judge_sha``,
+    the commit the judge last ruled on. Without this, reopening an unchanged head (no fix
+    pushed, wrong branch, fat-fingered) would flip the row to ``awaiting_review`` carrying
+    its OLD failing verdict — and the dispatcher judges once per head commit, so the judge
+    would never re-run to catch it. That stale, already-rejected head would then be
+    reachable by ``review --approve`` → ``merge``: the "reopen the same failing code" hole.
+    """
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    task_id = run["task_id"]
+    if run["status"] != "needs_human":
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"run is in status {run['status']!r}, not 'needs_human' — only a run "
+                     "the rework loop actually gave up on can be reopened",
+        }
+
+    # ⛔ GUARD: the new-commit gate. The dispatcher judges ONE PASS PER HEAD COMMIT
+    # (`pr_head_sha` vs `judge_sha` — see the cap check around line 2200). Reopening an
+    # UNCHANGED head would flip the row to `awaiting_review` carrying its old failing
+    # verdict, reachable by `review --approve` → `merge`, with the judge never re-running
+    # to catch it — the exact "reopen the same failing code" loop/merge hole this call
+    # exists to close. So: refresh the head sha from `gh` (the same read the poller does)
+    # and refuse unless it has actually moved past the last-judged commit.
+    wf_path = run.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    ci = _read_pr_checks(run.get("pr_url"), repo_dir)
+    if ci.head_sha is None:
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"could not read the PR's current head commit from GitHub ({ci.detail or 'no detail'}) "
+                     "— refusing to reopen without knowing whether the head actually changed. Push a fix, "
+                     "make sure `gh` can reach this PR, and try again.",
+        }
+    judge_sha = run.get("judge_sha")
+    if judge_sha and ci.head_sha == judge_sha:
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"the PR's head ({ci.head_sha[:12]}) is the SAME commit the judge already reviewed "
+                     "and rejected — reopening it would send an unchanged head back into `awaiting_review`, "
+                     "where the judge does not re-run (one pass per head commit) and the old failing "
+                     "verdict would still be reachable by review → merge. Push a fix to the branch first, "
+                     "then reopen.",
+        }
+
+    reviews = reviews_of(run)
+    note = (reason or "").strip() or "reopened for review — a human fixed the branch"
+    reviews.append({"round": len(reviews) + 1, "at": _now(), "body": note, "verdict": "reopened"})
+    with _db() as conn:
+        # Same COMPARE-AND-SWAP discipline as request_changes: the row must still be the
+        # needs_human row this call read, or a concurrent reconcile (a human merged the
+        # stale PR directly, in the gap between the read above and this write) would be
+        # resurrected out of `done`.
+        cur = conn.execute(
+            "UPDATE runs SET status='awaiting_review', review_history=?, last_error=NULL, "
+            "pr_head_sha=? WHERE task_id=? AND status='needs_human'",
+            (json.dumps(reviews), ci.head_sha, task_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            now = conn.execute(
+                "SELECT status FROM runs WHERE task_id=?", (task_id,)
+            ).fetchone()
+            current = now["status"] if now else "gone"
+            log.warning("reopen: %s moved to %r before it could be reopened", task_id, current)
+            return {
+                "ok": False, "task_id": task_id,
+                "error": f"run moved to {current!r} while this was being written (a tick "
+                         "reconciled it, or someone else reopened it first) — nothing was "
+                         "changed. Re-read it and decide again.",
+            }
+
+    wf_path = run.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    posted, detail = _post_pr_comment(
+        run.get("pr_url"), repo_dir,
+        f"🔓 Reopened for review by a human: {note}\n\nBack in `awaiting_review` — the "
+        "judge and the merge gate will re-verify the fixed head before anything ships.",
+    )
+    if not posted:
+        log.warning("reopen: %s is awaiting_review again, but the PR comment did not post "
+                    "(%s)", task_id, detail)
+    log.info("reopen: %s (needs_human) → awaiting_review", task_id)
+    return {
+        "ok": True, "task_id": task_id, "status": "awaiting_review",
+        "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
+        "rework_count": run.get("rework_count") or 0, "max_reworks": max_reworks(),
+        "comment_posted": posted, "comment_detail": detail,
+    }
+
+
 def set_judge_state(task_id: str, state: str, detail: str = "") -> None:
     """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE.
 
