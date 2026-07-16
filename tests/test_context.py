@@ -273,6 +273,33 @@ def test_the_daemon_loop_advances_last_prune_after_pruning(monkeypatch):
     )
 
 
+def test_the_default_capture_interval_binds_the_real_gate(monkeypatch):
+    """🔴 WIRING (default-interval binding) — the loop calls ``maintenance_tick(last_capture, now)``
+    with NO explicit interval, so the cadence rides entirely on the
+    ``interval=CAPTURE_INTERVAL_SECONDS`` default. Every test above either mocks
+    ``maintenance_tick`` wholesale or passes ``interval=300`` by hand, so severing that default to
+    ``0.0`` (capture fires on every 30s pass; the config knob is dead) stays green. Drive two REAL
+    ticks microseconds apart through the real ``maintenance_tick``/``_due`` and prove ``capture_all``
+    fires exactly ONCE: tick 1 is due (the 2026 epoch is far past the default interval vs
+    ``last_capture=0.0``), tick 2's microsecond gap is not — unless the default is 0.0, which makes
+    tick 2 due too. Mocks only ``capture_all`` (not the seam), so it also re-covers the
+    discard-return mutation with less mocking."""
+    _run_daemon_ticks(monkeypatch, n=2)
+
+    captured = Mock()
+    monkeypatch.setattr(context, "capture_all", captured)
+    monkeypatch.setattr(main.context, "prune_snapshots", lambda days: 0)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert captured.call_count == 1, (
+        "capture_all fired more than once across two microsecond-apart ticks — the real "
+        "CAPTURE_INTERVAL_SECONDS default is not binding the cadence gate (severing it to 0.0 "
+        f"makes capture run on every daemon pass instead of on the interval); got "
+        f"{captured.call_count} calls"
+    )
+
+
 # --- prune_snapshots (retention) --------------------------------------------------
 
 def _insert_snapshot(db_path, agent: str, age_days: float) -> None:
