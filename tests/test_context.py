@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -100,6 +101,80 @@ def test_maintenance_tick_skips_capture_when_not_due(monkeypatch):
 
     captured.assert_not_called()
     assert new_last == 100.0        # unchanged — the next call still measures from it
+
+
+# --- the PRODUCTION call-sites: the daemon loop actually calls maintenance_tick and the ------
+# --- prune branch, not just the extracted seams -----------------------------------------------
+
+def _run_one_daemon_tick(monkeypatch) -> None:
+    """Drive exactly ONE iteration of ``cmd_run``'s ``while not stop.stopping`` loop with
+    every other subsystem kept inert (no scheduler work, no window renames, no dispatch,
+    no notify, no inbox, no rooms) so the tick reaches the capture/prune call-sites and stops.
+
+    Mirrors ``tests/test_orchestrator_autolaunch.py::test_the_daemon_loop_calls_maybe_wake_
+    on_the_inbox_tick`` — the same shape of test that catches a call-site being unwired
+    (e.g. ``last_capture = maintenance_tick(...)`` reverted to ``last_capture = last_capture``,
+    or the prune ``if _due(...)`` reverted to ``if False and _due(...)``) even though every
+    unit test of the extracted seam (``maintenance_tick``, ``_due``, ``prune_snapshots``)
+    stays green, because none of them exercise ``cmd_run`` itself.
+    """
+    monkeypatch.setattr(main.GracefulShutdown, "install", lambda self: self)
+
+    def stop_after_one(self, _seconds):
+        self._event.set()
+        return True
+
+    monkeypatch.setattr(main.GracefulShutdown, "wait", stop_after_one)
+
+    monkeypatch.setattr(main.scheduler, "init", lambda: None)
+    monkeypatch.setattr(main.scheduler, "tick", lambda: 0)
+    monkeypatch.setattr(main.agent_manager, "reconcile_window_names", lambda: [])
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: False)
+    monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+    monkeypatch.setattr(main.inbox, "enabled", lambda: False)
+
+
+def test_the_daemon_loop_calls_maintenance_tick_every_pass(monkeypatch):
+    """🔴 WIRING (production call-site) — every test above exercises ``maintenance_tick`` in
+    isolation, so they ALL stay green even if ``cmd_run`` never calls it (e.g. reverted to
+    ``last_capture = last_capture``). This drives one real tick of the daemon loop and proves
+    the wire is connected."""
+    _run_one_daemon_tick(monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(main, "maintenance_tick",
+                        lambda last_capture, now: calls.append((last_capture, now)) or now)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert len(calls) == 1, (
+        "cmd_run did NOT call maintenance_tick on the loop pass — capture accrual is unwired "
+        "and can be reverted with the suite green"
+    )
+    assert calls[0][0] == 0.0   # the loop's initial last_capture, fed through unmodified
+
+
+def test_the_daemon_loop_calls_prune_snapshots_when_due(monkeypatch):
+    """🔴 WIRING (production call-site) — ``test_prune_snapshots_deletes_old_keeps_recent``
+    exercises ``context.prune_snapshots`` in isolation, so it stays green even if ``cmd_run``
+    never reaches it (e.g. the prune guard reverted to ``if False and _due(...)``). This drives
+    one real tick — ``last_prune`` starts at 0.0, so the real (unmocked) ``_due`` gate is due on
+    the very first pass — and proves prune is actually invoked from the loop."""
+    _run_one_daemon_tick(monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(main.context, "prune_snapshots", lambda days: calls.append(days) or 0)
+    # Keep maintenance_tick a no-op so this test isolates the prune call-site only.
+    monkeypatch.setattr(main, "maintenance_tick", lambda last_capture, now: last_capture)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert len(calls) == 1, (
+        "cmd_run did NOT call context.prune_snapshots when the prune interval was due — "
+        "retention is unwired and can be reverted with the suite green"
+    )
+    assert calls[0] == main.CONTEXT_SNAPSHOT_RETENTION_DAYS
 
 
 # --- prune_snapshots (retention) --------------------------------------------------
