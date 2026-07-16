@@ -11,10 +11,12 @@
 // hooks come from this array, the global refresh calls this array's `tick`, and
 // the palette lists this array. Deleting a view is deleting its entry below.
 //
-// The views are Feed · Wall · Work · Knowledge · Agents · Personas. `agent-detail`
-// is a virtual drill-in — reachable, no nav item. See viewreg.js for the entry shape.
+// The views are Feed · Wall · Work · Knowledge · Agents · Personas · Cost.
+// `agent-detail` is a virtual drill-in — reachable, no nav item. See viewreg.js
+// for the entry shape.
 // ---------------------------------------------------------------------------
 import { refreshAgents } from './agents.js';
+import { refreshCost } from './cost.js';
 import { enterFeed, tickFeed } from './feed.js';
 import { _kn, knBackToGlance, refreshKnowledge } from './knowledge.js';
 import { renderAgentDetail } from './nav.js';
@@ -89,6 +91,16 @@ export const VIEWS = [
         lucide: 'drama',
         enter: () => refreshPersonas(),
         tick: () => refreshPersonas(),
+    },
+    {
+        id: 'cost',
+        label: 'Cost',
+        // lucide `dollar-sign` — fleet spend, as a fixed box.
+        lucide: 'dollar-sign',
+        // A current-snapshot table (v1, deliberately no time-series): entering and
+        // ticking both just re-pull /api/agents + /api/agents/context and re-render.
+        enter: () => refreshCost(),
+        tick: () => refreshCost(),
     },
     {
         id: 'agent-detail',

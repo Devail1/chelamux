@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { $, $$, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util.js';
+import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util.js';
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
@@ -204,14 +204,6 @@ function updateCtxCache(ctx) {
     const m = {};
     ctx.forEach(c => { if (c && c.window_id) m[c.window_id] = c; });
     _ctxByWid = m;
-}
-
-// Project key for grouping = basename of the session's cwd. Shells / sessions
-// with no resolved cwd collect under one "other" group.
-function _agentProject(a) {
-    if (!a || !a.cwd) return null;
-    const parts = String(a.cwd).replace(/\/+$/, '').split('/');
-    return parts[parts.length - 1] || null;
 }
 
 // Friendly label, shared with the wall panes (_displayLabel): a custom rename

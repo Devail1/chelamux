@@ -2990,3 +2990,15 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .persona-docs { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
 .persona-doc { font-size: 10.5px; color: var(--text-dim); background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
+
+/* Cost — fleet spend table (current-snapshot, v1; see cost.js). */
+.cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cost-table th { text-align: left; color: var(--text-dim); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: .04em; font-weight: 600;
+    padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.cost-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.cost-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.cost-project-row { background: var(--surface); font-weight: 600; }
+.cost-agent-row td:nth-child(2) { color: var(--text-dim); }
+.cost-total-row { font-weight: 700; }
+.cost-total-row td { border-bottom: none; border-top: 2px solid var(--border); }
