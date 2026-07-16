@@ -1743,6 +1743,30 @@ def cmd_merge(args) -> None:
     print(f"  logged: event #{result.get('event_seq')} — CI green, judge clean, MERGEABLE")
 
 
+def cmd_reopen(args) -> None:
+    """🔓 Put a ``needs_human`` run back under review — the human-takeover re-entry.
+
+    ``needs_human`` is terminal in the CLI everywhere else: the rework loop gave up on it,
+    and ``task-finished``/``review``/``merge`` all refuse anything that is not
+    ``awaiting_review``. Use this AFTER you have fixed the branch yourself and pushed a new
+    commit to it — it flips the row back to ``awaiting_review`` so ``chela judge run`` and
+    ``chela merge`` can pick up the fixed head exactly like a fresh PR. It does not touch
+    the branch, the worktree, or the PR; those were already preserved when the run escalated.
+    """
+    result = dispatcher.reopen(args.run, reason=getattr(args, "reason", "") or "")
+    if not result.get("ok"):
+        print(f"reopen: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"🔓 Run {result['task_id']} ({result.get('branch_name') or '?'}) → awaiting_review "
+          f"(rework {result.get('rework_count')}/{result.get('max_reworks')}) — "
+          "back under judge/review/merge.")
+    if result.get("comment_posted"):
+        print(f"  PR comment posted: {result.get('pr_url') or ''}")
+    else:
+        print(f"  ⚠ PR comment NOT posted ({result.get('comment_detail')}) — the run row is "
+              "the authority, so the run is reopened regardless, but nothing landed on the PR.")
+
+
 def cmd_escalate(args) -> None:
     """Hand a decision to the human — the ONE structured escalation path (``chela.contract``).
 
@@ -2049,6 +2073,19 @@ def main() -> None:
         help="Optional free-text justification recorded alongside the mechanical gate facts",
     )
 
+    # reopen — the human-takeover re-entry: needs_human back into review
+    p_reopen = sub.add_parser(
+        "reopen",
+        help="🔓 Put a needs_human run back into awaiting_review — after YOU fixed the "
+             "branch and pushed a new commit — so judge/review/merge can re-verify it",
+    )
+    p_reopen.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
+    p_reopen.add_argument(
+        "--reason", default="",
+        help="Optional free-text note (e.g. what you fixed), posted on the PR and recorded "
+             "in the run's review history",
+    )
+
     # escalate — the ONE structured way to hand a decision to the human
     p_esc = sub.add_parser(
         "escalate",
@@ -2215,6 +2252,8 @@ def main() -> None:
             p_judge.print_help()
     elif args.command == "merge":
         cmd_merge(args)
+    elif args.command == "reopen":
+        cmd_reopen(args)
     elif args.command == "escalate":
         cmd_escalate(args)
     else:
