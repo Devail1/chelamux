@@ -161,6 +161,43 @@ def test_api_cost_window_today_reads_windowed_history(chela_db, client):
     assert resp.get_json() == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 1.5}]
 
 
+def test_api_cost_window_7d_reads_windowed_history(chela_db, client):
+    # Same boundary-pinning approach as the "today" test above: a single
+    # in-window reading can't tell a correct 7-day lookback apart from a
+    # longer one (30d, or anything else) since every longer window contains
+    # it too. Pin the actual boundary - one reading from just OUTSIDE a 7-day
+    # lookback (8 days back) that a correct window must exclude from the
+    # baseline, and one reading from INSIDE it (3 days back). If "7d" were
+    # corrupted into a longer lookback (e.g. 700 days), the 8-day-old reading
+    # would fall inside the window too, the baseline would be read as 0
+    # instead of that reading's cumulative total, and the result would
+    # inflate to 10.5 instead of the correct delta of 1.5.
+    real_now = datetime.now(timezone.utc)
+    outside_7d = real_now - timedelta(days=8)
+    inside_7d = real_now - timedelta(days=3)
+    _insert("cmx-1", "sess-a", outside_7d, 9.00)
+    _insert("cmx-1", "sess-a", inside_7d, 10.50)
+    resp = client.get("/api/cost?window=7d")
+    assert resp.status_code == 200
+    assert resp.get_json() == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 1.5}]
+
+
+def test_api_cost_window_30d_reads_windowed_history(chela_db, client):
+    # Same boundary-pinning approach, for the 30d lookback: one reading from
+    # just OUTSIDE a 30-day lookback (31 days back) and one from INSIDE it
+    # (10 days back). A corrupted (longer) lookback would read the 31-day-old
+    # reading as the baseline instead of excluding it, inflating the result
+    # from the correct delta of 1.5 to 10.5.
+    real_now = datetime.now(timezone.utc)
+    outside_30d = real_now - timedelta(days=31)
+    inside_30d = real_now - timedelta(days=10)
+    _insert("cmx-1", "sess-a", outside_30d, 9.00)
+    _insert("cmx-1", "sess-a", inside_30d, 10.50)
+    resp = client.get("/api/cost?window=30d")
+    assert resp.status_code == 200
+    assert resp.get_json() == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 1.5}]
+
+
 def test_api_cost_rejects_an_unknown_window_by_falling_back_to_live(chela_db, client):
     with patch.object(discovery, "get_all_windows", return_value={}):
         resp = client.get("/api/cost?window=nonsense")
