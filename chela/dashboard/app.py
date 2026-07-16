@@ -19,7 +19,7 @@ import os
 import re
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import abort, Flask, jsonify, render_template, request, Response
@@ -1920,6 +1920,54 @@ def api_agents_context():
             "ts": s.get("ts"),
         })
     return jsonify(results)
+
+
+# Window keys the Cost tab's selector offers, and the lookback each implies.
+# "live" isn't a lookback at all — it's the current-snapshot read the Cost tab
+# always did, kept as the default so a DB with no history yet (capture_all not
+# wired in, or freshly deployed) still shows today's running totals instead of
+# a blank table.
+_COST_WINDOWS = ("live", "today", "7d", "30d")
+
+
+@app.route("/api/cost")
+@require_auth
+def api_cost():
+    """Per-agent spend for the Cost tab: a live snapshot, or a period rollup.
+
+    ``window=live`` (default) is the same current-snapshot read the tab always
+    did — no dependency on context_snapshots history. ``today``/``7d``/``30d``
+    sum each agent's spend over that lookback via context.windowed_cost, which
+    handles multiple Claude Code sessions per agent and cumulative-per-session
+    cost_usd correctly (see context.py's windowed_cost docstring).
+    """
+    window = request.args.get("window", "live")
+    if window not in _COST_WINDOWS:
+        window = "live"
+
+    if window == "live":
+        windows = discovery.get_all_windows()
+        rows = []
+        for name in windows:
+            s = context.live_snapshot(name)
+            if not s:
+                continue
+            rows.append({
+                "name": s["name"],
+                "model": s.get("model"),
+                "cost_usd": round(s["cost_usd"], 2) if s.get("cost_usd") else None,
+            })
+        return jsonify(rows)
+
+    now = datetime.now(timezone.utc)
+    if window == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif window == "7d":
+        start = now - timedelta(days=7)
+    else:  # 30d
+        start = now - timedelta(days=30)
+
+    return jsonify(context.windowed_cost(start, now))
 
 
 # ---------------------------------------------------------------------------

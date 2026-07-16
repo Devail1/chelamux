@@ -1,23 +1,34 @@
-// THE COST TAB, IN A REAL DOM — a current-snapshot table over data chela already
+// THE COST TAB, IN A REAL DOM — a fleet spend view over data chela already
 // ingests (statusLine cost.total_cost_usd -> context_snapshots.cost_usd ->
-// /api/agents/context). v1 is deliberately NOT a time-series: these tests drive
-// the real renderCostTable()/refreshCost() into a real #cost-table (jsdom) and
-// assert what RENDERS — project subtotals, agent rows, and the fleet-total
-// footer — not what the source merely mentions.
+// /api/cost?window=...). A Live/Today/7d/30d selector scopes which window the
+// tab fetches; these tests drive the real renderCostTable()/refreshCost()/
+// setCostWindow() into a real #cost-table (jsdom) and assert what RENDERS —
+// project subtotals, agent rows, the fleet-total footer, and which window
+// param actually gets fetched — not what the source merely mentions.
 //
 // Run: node --test tests/cost.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
-const BODY = '<div class="panel" id="panel-cost"><div id="cost-table"></div></div>';
+const BODY = `<div class="panel" id="panel-cost">
+    <div class="work-toolbar">
+        <div class="work-seg" id="cost-window" role="group" aria-label="Cost window">
+            <button type="button" class="work-seg-btn cost-window-btn" data-win="live" aria-pressed="true">Live</button>
+            <button type="button" class="work-seg-btn cost-window-btn" data-win="today" aria-pressed="false">Today</button>
+            <button type="button" class="work-seg-btn cost-window-btn" data-win="7d" aria-pressed="false">7d</button>
+            <button type="button" class="work-seg-btn cost-window-btn" data-win="30d" aria-pressed="false">30d</button>
+        </div>
+    </div>
+    <div id="cost-table"></div>
+</div>`;
 
 let cost;
 
 before(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node']) {
+    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement', 'Element', 'Node']) {
         Object.defineProperty(globalThis, k, {
             value: dom.window[k], writable: true, configurable: true,
         });
@@ -29,6 +40,13 @@ before(async () => {
 
 beforeEach(() => {
     document.getElementById('cost-table').innerHTML = '';
+    localStorage.clear();
+    // setCostWindow('live') both resets the module's selected-window state and
+    // refetches — safe here since the default fetch (see `before`) resolves an
+    // empty object for any url, and refreshCost's own try/catch swallows a
+    // non-array payload into the "unavailable" empty state rather than throwing.
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    return cost.setCostWindow('live');
 });
 
 const projectRows = () => [...document.querySelectorAll('.cost-project-row')];
@@ -93,15 +111,15 @@ test('an empty payload renders the empty-state message, not a blank table', () =
 
 // WIRING — the render tests above call renderCostTable() with a hand-built fixture,
 // which proves the RENDER but not the FETCH+JOIN. refreshCost() fetches /api/agents
-// (for cwd) and /api/agents/context (for cost) in parallel and joins them by agent
-// name via the SAME project rule the sidebar uses (_agentProject). If it stopped
-// threading either payload through, the table would render wrong or empty against
-// healthy APIs and every test above would still pass.
-test('refreshCost fetches agents+context, joins by name, and groups by project like the sidebar', async () => {
+// (for cwd) and /api/cost (for cost, scoped by the selected window) in parallel and
+// joins them by agent name via the SAME project rule the sidebar uses
+// (_agentProject). If it stopped threading either payload through, the table would
+// render wrong or empty against healthy APIs and every test above would still pass.
+test('refreshCost fetches agents+cost, joins by name, and groups by project like the sidebar', async () => {
     const requested = [];
     globalThis.fetch = (url) => {
         requested.push(String(url));
-        if (String(url).includes('/api/agents/context')) {
+        if (String(url).includes('/api/cost')) {
             return Promise.resolve({
                 ok: true, status: 200,
                 json: () => Promise.resolve([
@@ -124,8 +142,9 @@ test('refreshCost fetches agents+context, joins by name, and groups by project l
         });
     };
     await cost.refreshCost();
-    assert.ok(requested.some(u => u.includes('/api/agents/context')), 'refreshCost did not fetch /api/agents/context');
-    assert.ok(requested.some(u => u.includes('/api/agents') && !u.includes('/context')), 'refreshCost did not fetch /api/agents for cwd');
+    assert.ok(requested.some(u => u.includes('/api/cost') && u.includes('window=live')),
+        'refreshCost did not fetch /api/cost with the default (live) window');
+    assert.ok(requested.some(u => u.includes('/api/agents') && !u.includes('/cost')), 'refreshCost did not fetch /api/agents for cwd');
     // Both agents' cwd basename is the SAME dir -> grouped as one project subtotal.
     assert.equal(projectRows().length, 1, 'both agents share a cwd basename and should collapse into one project');
     // The project row must be named after the cwd basename ('chelamux'), NOT the
@@ -142,7 +161,7 @@ test('refreshCost fetches agents+context, joins by name, and groups by project l
 
 test('refreshCost falls back to a grouping bucket when an agent has no resolvable cwd', async () => {
     globalThis.fetch = (url) => {
-        if (String(url).includes('/api/agents/context')) {
+        if (String(url).includes('/api/cost')) {
             return Promise.resolve({
                 ok: true, status: 200,
                 json: () => Promise.resolve([{ name: 'lone-shell', model: null, cost_usd: 0.42 }]),
@@ -153,4 +172,34 @@ test('refreshCost falls back to a grouping bucket when an agent has no resolvabl
     await cost.refreshCost();
     assert.equal(projectRows().length, 1);
     assert.ok(projectRows()[0].textContent.includes('(unknown)'), 'a cwd-less agent should land in the (unknown) bucket, not crash the render');
+});
+
+// WINDOW SELECTOR — setCostWindow() must (a) persist the pick so a reload doesn't
+// silently reset to Live, (b) flip which button reads pressed, and (c) actually
+// change the `window=` param on the next fetch — a selector that updates the UI
+// but not the fetch would look right while showing stale (Live) data forever.
+test('setCostWindow persists the pick, updates aria-pressed, and re-fetches with the new window', async () => {
+    let lastCostUrl = null;
+    globalThis.fetch = (url) => {
+        if (String(url).includes('/api/cost')) lastCostUrl = String(url);
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    };
+    await cost.setCostWindow('7d');
+    assert.equal(localStorage.getItem('chela_cost_window'), '7d', 'the picked window should persist to localStorage');
+    assert.ok(lastCostUrl && lastCostUrl.includes('window=7d'), 'setCostWindow(\'7d\') did not re-fetch /api/cost?window=7d');
+    const liveBtn = document.querySelector('.cost-window-btn[data-win="live"]');
+    const sevenDBtn = document.querySelector('.cost-window-btn[data-win="7d"]');
+    assert.equal(liveBtn.getAttribute('aria-pressed'), 'false', 'Live should no longer read pressed after switching to 7d');
+    assert.equal(sevenDBtn.getAttribute('aria-pressed'), 'true', '7d should read pressed after being selected');
+    assert.ok(sevenDBtn.classList.contains('active'));
+});
+
+test('setCostWindow falls back to live for an unrecognized window key', async () => {
+    let lastCostUrl = null;
+    globalThis.fetch = (url) => {
+        if (String(url).includes('/api/cost')) lastCostUrl = String(url);
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    };
+    await cost.setCostWindow('nonsense');
+    assert.ok(lastCostUrl && lastCostUrl.includes('window=live'), 'an unrecognized window key should fall back to live, not be sent verbatim');
 });

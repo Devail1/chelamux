@@ -249,10 +249,22 @@
     </div>
 
     <!-- Cost — fleet spend, from the cost chela already ingests (the statusLine
-         payload's cost.total_cost_usd, surfaced per-agent at /api/agents/context).
-         v1 is a CURRENT-SNAPSHOT table, not a time-series: cost.js joins that
-         endpoint with /api/agents (for cwd → project) and groups by project. -->
+         payload's cost.total_cost_usd, surfaced per-agent at /api/cost). The
+         Live/Today/7d/30d selector scopes that endpoint's `window` param; cost.js
+         joins it with /api/agents (for cwd → project) and groups by project. -->
     <div class="panel" id="panel-cost">
+      <div class="work-toolbar">
+        <div class="work-seg" id="cost-window" role="group" aria-label="Cost window">
+          <button type="button" class="work-seg-btn cost-window-btn" data-win="live" aria-pressed="true"
+                  onclick="chela.setCostWindow('live')">Live</button>
+          <button type="button" class="work-seg-btn cost-window-btn" data-win="today" aria-pressed="false"
+                  onclick="chela.setCostWindow('today')">Today</button>
+          <button type="button" class="work-seg-btn cost-window-btn" data-win="7d" aria-pressed="false"
+                  onclick="chela.setCostWindow('7d')">7d</button>
+          <button type="button" class="work-seg-btn cost-window-btn" data-win="30d" aria-pressed="false"
+                  onclick="chela.setCostWindow('30d')">30d</button>
+        </div>
+      </div>
       <div id="cost-table"></div>
     </div>
 
