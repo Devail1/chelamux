@@ -247,6 +247,15 @@ def live_dashboard_port() -> int:
 CONTEXT_CACHE_DIR = CHELA_DIR / "context"
 CACHE_STALE_SECONDS = int(os.environ.get("CHELA_CACHE_STALE_SECONDS", "7200"))  # skip files older than 2h
 
+# Cost history: how often the daemon calls `context.capture_all()` to accrue
+# `context_snapshots` rows — the foundation the Cost tab's Today/7d/30d windows sum
+# over. Cheap (one row per live statusLine cache file), so a 5-minute default is
+# plenty of resolution without writing on every daemon tick.
+CAPTURE_INTERVAL_SECONDS = int(os.environ.get("CHELA_CAPTURE_INTERVAL_SECONDS", "300"))
+# How long accrued snapshots are kept before `context.prune_snapshots` deletes them —
+# an always-on daemon would otherwise grow scheduler.db without bound.
+CONTEXT_SNAPSHOT_RETENTION_DAYS = int(os.environ.get("CHELA_CONTEXT_RETENTION_DAYS", "30"))
+
 # Daemon loop intervals (seconds).
 SCHEDULER_POLL_INTERVAL = int(os.environ.get("CHELA_SCHEDULER_POLL_INTERVAL", "30"))
 

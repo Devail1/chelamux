@@ -14,7 +14,7 @@ import os
 import sqlite3
 import time
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from chela import transcripts
@@ -206,6 +206,20 @@ def capture_all() -> list[dict]:
         log.info("Context snapshots captured for %d agents", len(results))
 
     return results
+
+
+def prune_snapshots(older_than_days: int = 30) -> int:
+    """Delete context_snapshots rows older than `older_than_days`. Returns rows deleted.
+
+    `capture_all` accrues history on a daemon cadence with no natural cap, so this
+    keeps scheduler.db bounded — called on its own coarser cadence from the daemon
+    loop, independent of how often capture runs.
+    """
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    with closing(_get_db()) as conn:
+        cur = conn.execute("DELETE FROM context_snapshots WHERE ts < ?", (cutoff_iso,))
+        conn.commit()
+        return cur.rowcount
 
 
 def get_latest() -> list[dict]:
