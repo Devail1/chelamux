@@ -139,6 +139,32 @@ test('the Personas view tick hook calls refreshPersonas — it keeps the live st
     assert.equal(personasHook('tick'), 1, 'the Personas view tick did not call refreshPersonas');
 });
 
+// --- the Cost view is WIRED to refreshCost -----------------------------------
+//
+// Same extraction-and-execute approach as personasHook above: read the Cost view's
+// enter/tick arrow SOURCE out of views.js and EXECUTE it with a refreshCost spy in
+// scope. A bare grep for 'refreshCost' would pass a hook reverted to `() => {}` (the
+// production-breaking corruption that leaves the tab blank) since the string still
+// appears in the surrounding comment.
+function costHook(name) {
+    const body = src('views.js');
+    const block = body.slice(body.indexOf("id: 'cost'"));
+    const m = block.match(new RegExp(`${name}:\\s*(\\([^)]*\\)\\s*=>\\s*[^\\n,]+)`));
+    assert.ok(m, `the cost view has no ${name} hook (extraction failed — did its shape change?)`);
+    let calls = 0;
+    // eslint-disable-next-line no-new-func — we execute the REAL hook source, not a copy of it
+    new Function('refreshCost', `return ${m[1]}`)(() => { calls++; })();
+    return calls;
+}
+
+test('the Cost view enter hook calls refreshCost — nav switch populates the panel', () => {
+    assert.equal(costHook('enter'), 1, 'entering the Cost view did not call refreshCost');
+});
+
+test('the Cost view tick hook calls refreshCost — it keeps the fleet spend snapshot fresh', () => {
+    assert.equal(costHook('tick'), 1, 'the Cost view tick did not call refreshCost');
+});
+
 // --- one dataset, one poller -------------------------------------------------
 
 test('exactly ONE module fetches /api/dispatcher — work.js', () => {

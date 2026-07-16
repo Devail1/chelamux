@@ -128,6 +128,15 @@ test('refreshCost fetches agents+context, joins by name, and groups by project l
     assert.ok(requested.some(u => u.includes('/api/agents') && !u.includes('/context')), 'refreshCost did not fetch /api/agents for cwd');
     // Both agents' cwd basename is the SAME dir -> grouped as one project subtotal.
     assert.equal(projectRows().length, 1, 'both agents share a cwd basename and should collapse into one project');
+    // The project row must be named after the cwd basename ('chelamux'), NOT the
+    // '(unknown)' fallback bucket — if the /api/agents cwd payload stopped being
+    // threaded through the name-join, every agent would fall back to '(unknown)'
+    // and this count-only assertion above would still pass against a bucket that
+    // is real but wrongly labelled.
+    assert.ok(projectRows()[0].textContent.includes('chelamux'),
+        'the project row should be named after the cwd basename (chelamux), not the (unknown) fallback');
+    assert.ok(!projectRows()[0].textContent.includes('(unknown)'),
+        'the cwd payload was not threaded through — agents fell back to the (unknown) bucket');
     assert.ok(totalRow().textContent.includes('$2.25'), 'fleet total should be 1.5 + 0.75 = 2.25');
 });
 

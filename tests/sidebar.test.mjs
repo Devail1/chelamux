@@ -221,7 +221,7 @@ test('the Feed nav item renders the lucide rss SVG — not a glyph that apes the
 test('every nav item renders a non-empty lucide SVG — no unicode glyph survives', () => {
     nav.renderNav();
     const OLD_GLYPHS = ['▦', '▤', '◆', '▢', '≡'];
-    for (const id of ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas']) {
+    for (const id of ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas', 'cost']) {
         const icon = document.querySelector(`#side-nav .side-item[data-view="${id}"] .side-item-icon`);
         assert.ok(icon, `the ${id} nav item is missing`);
         const svg = icon.querySelector('svg');
