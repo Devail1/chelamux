@@ -26,6 +26,7 @@ from chela import (
     agent_manager,
     capabilities,
     config,
+    context,
     contract,
     discovery,
     dispatcher,
@@ -47,12 +48,18 @@ from chela import (
 from chela.personas import autolaunch, lease
 from chela.config import (
     BIND_DISPATCHED,
+    CAPTURE_INTERVAL_SECONDS,
+    CONTEXT_SNAPSHOT_RETENTION_DAYS,
     SCHEDULER_POLL_INTERVAL,
     DISPATCH_WORKFLOWS,
     NOTIFY_INTERVAL,
     SHOW_TOOL_CALLS,
     STATUS_LINE,
 )
+
+# Cost history (CMX-94): how often the daemon prunes context_snapshots — coarser
+# than CAPTURE_INTERVAL_SECONDS on purpose, since retention is measured in days.
+PRUNE_INTERVAL_SECONDS = 86400
 
 logging.basicConfig(
     level=logging.INFO,
@@ -125,6 +132,34 @@ def cmd_status(args) -> None:
         print(f"  {name:<24} {wid:<6} {cwd}")
 
 
+def _due(last: float, now: float, interval: float) -> bool:
+    """True once `interval` seconds have elapsed since `last` (0 is always due)."""
+    return now - last >= interval
+
+
+def maintenance_tick(last_capture: float, now: float,
+                      interval: float = CAPTURE_INTERVAL_SECONDS) -> float:
+    """Capture context snapshots when due; a no-op otherwise.
+
+    Cost-history accrual (CMX-94): `context.capture_all()` writes one
+    `context_snapshots` row per live statusLine cache file — currently the ONLY
+    thing missing to make the Cost tab's Today/7d/30d windows possible. Same
+    cadence shape as the dispatch tick below (a per-call interval, re-checked
+    every daemon pass) rather than a `chela/scheduler.py` task — that scheduler
+    sends prompts to tmux windows; capture is an internal Python call.
+
+    Returns the timestamp to remember as `last_capture` for the next call: `now`
+    if capture ran this call, otherwise `last_capture` unchanged.
+    """
+    if not _due(last_capture, now, interval):
+        return last_capture
+    try:
+        context.capture_all()
+    except Exception:
+        log.exception("Context capture failed")
+    return now
+
+
 def cmd_run(args) -> None:
     """Run the daemon loop: scheduler tick every pass, dispatcher on its own cadence."""
     log.info("chela daemon starting (session=%s, poll=%ds)",
@@ -171,6 +206,10 @@ def cmd_run(args) -> None:
     # requiring a daemon restart before the feature ever works is dead on arrival. We
     # only log the TRANSITION (unregistered -> @0), so a 30s loop stays quiet.
     inbox_orch = object()   # sentinel: distinct from every real value, incl. None
+    # Cost history (CMX-94): 0.0 makes the first tick immediately due, same as every
+    # other "last_*" cadence var here — no reason to wait a full interval after boot.
+    last_capture = 0.0
+    last_prune = 0.0
     stop = GracefulShutdown("chela daemon").install()
 
     while not stop.stopping:
@@ -192,6 +231,18 @@ def cmd_run(args) -> None:
             now = time.time()
             if stop.stopping:
                 break          # a signal landed mid-tick: don't start new work
+
+            last_capture = maintenance_tick(last_capture, now)
+            if _due(last_prune, now, PRUNE_INTERVAL_SECONDS):
+                last_prune = now
+                try:
+                    deleted = context.prune_snapshots(CONTEXT_SNAPSHOT_RETENTION_DAYS)
+                    if deleted:
+                        log.info("Pruned %d stale context snapshot(s) (older than %dd)",
+                                  deleted, CONTEXT_SNAPSHOT_RETENTION_DAYS)
+                except Exception:
+                    log.exception("Context snapshot prune failed")
+
             for wf_path in DISPATCH_WORKFLOWS:
                 # The workflow is HOT-RELOADED: `poll_interval` re-reads the file
                 # only when it changed on disk (a stat, otherwise), so an edited

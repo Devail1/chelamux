@@ -111,6 +111,11 @@ def effective() -> list[Capability]:
             key="scheduler", label="Scheduler", on=True,
             detail=f"polling every {config.SCHEDULER_POLL_INTERVAL}s",
         ),
+        Capability(
+            key="capture", label="Cost history capture", on=True,
+            detail=(f"context_snapshots every {config.CAPTURE_INTERVAL_SECONDS}s, "
+                    f"{config.CONTEXT_SNAPSHOT_RETENTION_DAYS}d retention"),
+        ),
         dispatch,
         reconcile,
         Capability(
