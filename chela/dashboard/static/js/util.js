@@ -20,6 +20,8 @@ const _LUCIDE = {
     'settings': '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
     // `drama` — the comedy/tragedy theatre masks: the Personas view (the persona layer).
     'drama': '<path d="M10 11h.01"/><path d="M14 6h.01"/><path d="M18 6h.01"/><path d="M6.5 13.1h.01"/><path d="M22 5c0 9-4 12-6 12s-6-3-6-12c0-2 2-3 6-3s6 1 6 3"/><path d="M17.4 9.9c-.8.8-2 .8-2.8 0"/><path d="M10.1 7.1C9 7.2 7.7 7.7 6 8.6c-3.5 2-4.7 3.9-3.7 5.6 4.5 7.8 9.5 8.4 11.2 7.4.9-.5 1.9-2.1 1.9-4.7"/><path d="M9.1 16.5c.3-1.1 1.4-1.7 2.4-1.4"/>',
+    // `dollar-sign` — the Cost view (fleet spend, from the cost chela already ingests).
+    'dollar-sign': '<line x1="12" x2="12" y1="1" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
 };
 function lucideIcon(name, size = 16) {
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" `
@@ -117,6 +119,16 @@ function agentDotColor(a) {
     if (wantsHuman(a)) return 'yellow';   // blocked on you — incl. a pane-only permission gate
     if (a && a.session_status === 'busy') return 'green';
     return 'grey';   // idle, or no Claude in the window — matches the wall
+}
+
+// Project key for grouping = basename of the session's cwd. Shells / sessions
+// with no resolved cwd have no project (callers pick their own "unknown" bucket
+// label). Shared by the sidebar's project groups (nav.js) and the Cost view
+// (cost.js) — one rule for "what project is this agent", not two.
+function _agentProject(a) {
+    if (!a || !a.cwd) return null;
+    const parts = String(a.cwd).replace(/\/+$/, '').split('/');
+    return parts[parts.length - 1] || null;
 }
 
 // --- Tab signal: surface "agents waiting on input" in the title + favicon ----
@@ -241,7 +253,7 @@ function setMsgTarget(v) { msgTargetAgent = v; }
 function setAgentsCache(v) { _agentsCache = v; }
 
 // --- Stage 0: ES-module exports ---
-export { $, $$, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, lucideIcon, msgTargetAgent, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, updateTabSignal, wantsHuman };
+export { $, $$, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, lucideIcon, msgTargetAgent, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, updateTabSignal, wantsHuman };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

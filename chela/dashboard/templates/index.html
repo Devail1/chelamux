@@ -248,6 +248,14 @@
       <div class="personas-list" id="personas-list"></div>
     </div>
 
+    <!-- Cost — fleet spend, from the cost chela already ingests (the statusLine
+         payload's cost.total_cost_usd, surfaced per-agent at /api/agents/context).
+         v1 is a CURRENT-SNAPSHOT table, not a time-series: cost.js joins that
+         endpoint with /api/agents (for cwd → project) and groups by project. -->
+    <div class="panel" id="panel-cost">
+      <div id="cost-table"></div>
+    </div>
+
     <!-- Knowledge (OKF viewer) -->
     <div class="panel" id="panel-knowledge">
       <div class="canvas-toolbar">

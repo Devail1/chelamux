@@ -31,6 +31,7 @@ function fakeRegistry() {
         { id: 'knowledge', label: 'Knowledge', icon: '◆' },
         { id: 'agents', label: 'Agents', icon: '▢' },
         { id: 'personas', label: 'Personas', icon: '🎭' },
+        { id: 'cost', label: 'Cost', icon: '$' },
         { id: 'agent-detail', label: 'Agent', virtual: true },
     ];
 }
@@ -54,8 +55,8 @@ function shippedOrder() {
 // by hand, so on its own it proves nothing about what actually ships — swap two
 // entries in views.js and the fake stays put. This ties the fake to the real
 // file: if they diverge (a reorder, an add, a delete in views.js), it goes red.
-test('the REAL views.js declares the shipped order — Feed·Wall·Work·Knowledge·Agents·Personas', () => {
-    assert.deepEqual(shippedOrder(), ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas', 'agent-detail']);
+test('the REAL views.js declares the shipped order — Feed·Wall·Work·Knowledge·Agents·Personas·Cost', () => {
+    assert.deepEqual(shippedOrder(), ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas', 'cost', 'agent-detail']);
     // …and fakeRegistry() is an HONEST copy of it — same ids, same order — so the
     // derivation tests below are exercising the order that actually ships.
     assert.deepEqual(fakeRegistry().map(v => v.id), shippedOrder());
@@ -65,18 +66,18 @@ test('the sidebar and the palette both derive from the registry — same views, 
     const views = fakeRegistry();
     const nav = navViews(views, CTX).map(v => v.id);
     const palette = paletteViews(views, CTX).map(v => v.id);
-    assert.deepEqual(nav, ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas']);
+    assert.deepEqual(nav, ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas', 'cost']);
     assert.deepEqual(palette, nav);
 });
 
 test('ADDING a view is one registry entry — nav, palette and lookup all pick it up', () => {
     const views = fakeRegistry();
-    views.push({ id: 'costs', label: 'Costs', icon: '$' });
+    views.push({ id: 'metrics', label: 'Metrics', icon: '#' });
 
-    assert.ok(navViews(views, CTX).some(v => v.id === 'costs'));
-    assert.ok(paletteViews(views, CTX).some(v => v.id === 'costs'));
-    assert.equal(findView(views, 'costs').label, 'Costs');
-    assert.equal(panelId('costs'), 'panel-costs');   // the one DOM contract, kept
+    assert.ok(navViews(views, CTX).some(v => v.id === 'metrics'));
+    assert.ok(paletteViews(views, CTX).some(v => v.id === 'metrics'));
+    assert.equal(findView(views, 'metrics').label, 'Metrics');
+    assert.equal(panelId('metrics'), 'panel-metrics');   // the one DOM contract, kept
 });
 
 test('REMOVING a view is one registry deletion — it leaves the nav, the palette AND the lifecycle', () => {
@@ -86,7 +87,7 @@ test('REMOVING a view is one registry deletion — it leaves the nav, the palett
     assert.ok(!navViews(views, CTX).some(v => v.id === 'knowledge'));
     assert.ok(!paletteViews(views, CTX).some(v => v.id === 'knowledge'));
     // …and nothing else is disturbed: the others still stand.
-    assert.deepEqual(navViews(views, CTX).map(v => v.id), ['feed', 'terminals', 'work', 'agents', 'personas']);
+    assert.deepEqual(navViews(views, CTX).map(v => v.id), ['feed', 'terminals', 'work', 'agents', 'personas', 'cost']);
 });
 
 test('a virtual view (agent-detail) is reachable but is NOT a nav item or a palette entry', () => {
@@ -100,7 +101,7 @@ test('a disabled view vanishes from the chrome (the Wall, when terminals are off
     const views = fakeRegistry();
     const ids = navViews(views, { terminalsOn: false }).map(v => v.id);
     assert.ok(!ids.includes('terminals'));
-    assert.deepEqual(ids, ['feed', 'work', 'knowledge', 'agents', 'personas']);
+    assert.deepEqual(ids, ['feed', 'work', 'knowledge', 'agents', 'personas', 'cost']);
 });
 
 test('entering a view tells every OTHER view to let go — no if/else chain to extend', () => {
@@ -136,6 +137,32 @@ test('the Personas view enter hook calls refreshPersonas — nav switch populate
 
 test('the Personas view tick hook calls refreshPersonas — it keeps the live status fresh', () => {
     assert.equal(personasHook('tick'), 1, 'the Personas view tick did not call refreshPersonas');
+});
+
+// --- the Cost view is WIRED to refreshCost -----------------------------------
+//
+// Same extraction-and-execute approach as personasHook above: read the Cost view's
+// enter/tick arrow SOURCE out of views.js and EXECUTE it with a refreshCost spy in
+// scope. A bare grep for 'refreshCost' would pass a hook reverted to `() => {}` (the
+// production-breaking corruption that leaves the tab blank) since the string still
+// appears in the surrounding comment.
+function costHook(name) {
+    const body = src('views.js');
+    const block = body.slice(body.indexOf("id: 'cost'"));
+    const m = block.match(new RegExp(`${name}:\\s*(\\([^)]*\\)\\s*=>\\s*[^\\n,]+)`));
+    assert.ok(m, `the cost view has no ${name} hook (extraction failed — did its shape change?)`);
+    let calls = 0;
+    // eslint-disable-next-line no-new-func — we execute the REAL hook source, not a copy of it
+    new Function('refreshCost', `return ${m[1]}`)(() => { calls++; })();
+    return calls;
+}
+
+test('the Cost view enter hook calls refreshCost — nav switch populates the panel', () => {
+    assert.equal(costHook('enter'), 1, 'entering the Cost view did not call refreshCost');
+});
+
+test('the Cost view tick hook calls refreshCost — it keeps the fleet spend snapshot fresh', () => {
+    assert.equal(costHook('tick'), 1, 'the Cost view tick did not call refreshCost');
 });
 
 // --- one dataset, one poller -------------------------------------------------
