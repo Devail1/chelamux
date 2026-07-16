@@ -57,16 +57,45 @@ def _no_gh(cmd, *a, **k):
     return R()
 
 
+def _gh_view(sha="deadbeef0000"):
+    """A successful `gh pr view --json statusCheckRollup,headRefOid` — reports `sha` as
+    the PR's current head commit (the guard's new-commit read)."""
+    class R:
+        returncode = 0
+        stdout = json.dumps({"headRefOid": sha, "statusCheckRollup": []})
+        stderr = ""
+    return R()
+
+
+def _gh_router(sha="deadbeef0000", comment_ok=True):
+    """Route `gh` subprocess calls by shape: the checks read (`--json ...`, used by the
+    new-commit guard) always answers with `sha`; the PR comment succeeds unless
+    `comment_ok=False` (in which case it fails the way a real `gh pr comment` would,
+    without raising — matching the two "comment didn't post" tests below)."""
+    def _run(cmd, *a, **k):
+        if "--json" in cmd:
+            return _gh_view(sha)
+        if comment_ok:
+            return _no_gh(cmd, *a, **k)
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "gh pr comment failed"
+        return R()
+    return _run
+
+
 # --- (a) the happy path: needs_human -> awaiting_review, everything else untouched -----
 
 def test_reopen_flips_needs_human_to_awaiting_review_and_posts_a_comment(tmp_path):
     with dispatcher._db() as conn:
         _row(conn)
     gh: list[list[str]] = []
+    router = _gh_router(sha="freshfix00")
 
     def _run(cmd, *a, **k):
         gh.append(cmd)
-        return _no_gh(cmd, *a, **k)
+        return router(cmd, *a, **k)
 
     with patch.object(dispatcher.subprocess, "run", side_effect=_run):
         result = dispatcher.reopen("abc123", "pushed a fix for the loose wire")
@@ -85,21 +114,22 @@ def test_reopen_flips_needs_human_to_awaiting_review_and_posts_a_comment(tmp_pat
     assert run["branch_name"] == "test-1"
     assert run["worktree_path"] == "/wt/abc123"
     assert run["pr_url"] == "https://github.com/o/r/pull/80"
+    # the head sha read for the guard is persisted — the poller's own refresh.
+    assert run["pr_head_sha"] == "freshfix00"
 
     reviews = dispatcher.reviews_of(dict(run))
     assert len(reviews) == 3
     assert reviews[-1]["verdict"] == "reopened"
     assert "loose wire" in reviews[-1]["body"]
 
-    posted = [c for c in gh if c[:2] == ["gh", "pr"]]
-    assert posted and posted[0][:3] == ["gh", "pr", "comment"]
-    assert posted[0][3] == "80"
+    posted = [c for c in gh if c[:3] == ["gh", "pr", "comment"]]
+    assert posted and posted[0][3] == "80"
 
 
 def test_reopen_with_no_reason_still_writes_a_default_note(tmp_path):
     with dispatcher._db() as conn:
         _row(conn)
-    with patch.object(dispatcher.subprocess, "run", side_effect=_no_gh):
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router()):
         result = dispatcher.reopen("abc123")
     assert result["ok"] is True
     reviews = dispatcher.reviews_of(dict(dispatcher.resolve_run("abc123")))
@@ -110,10 +140,65 @@ def test_reopen_with_no_reason_still_writes_a_default_note(tmp_path):
 def test_a_failed_pr_comment_does_not_block_the_reopen(tmp_path):
     with dispatcher._db() as conn:
         _row(conn)
-    with patch.object(dispatcher.subprocess, "run", side_effect=FileNotFoundError("no gh")):
+
+    def _run(cmd, *a, **k):
+        if "--json" in cmd:
+            return _gh_view()
+        raise FileNotFoundError("no gh")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_run):
         result = dispatcher.reopen("abc123", "fixed it")
     assert result["ok"] is True and result["comment_posted"] is False
     assert dispatcher.resolve_run("abc123")["status"] == "awaiting_review"
+
+
+# --- (b') 🔴 the new-commit gate: reopen must not resurrect an UNCHANGED head -----------
+#
+# The dispatcher judges ONE PASS PER HEAD COMMIT (`judge_sha` vs `pr_head_sha`). If a human
+# reopens a `needs_human` run whose branch head never moved, the row flips to
+# `awaiting_review` carrying its old failing verdict — and the judge will never re-run to
+# catch it, since its own guard sees `judge_sha == pr_head_sha` and does nothing. That
+# stale, already-rejected head becomes reachable by `review --approve` -> `merge`. This is
+# the loop/merge hole the gate below closes.
+
+def test_reopen_refuses_when_the_head_is_unchanged_since_the_judge(tmp_path):
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="deadbeef0000", pr_head_sha="deadbeef0000")
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router(sha="deadbeef0000")):
+        result = dispatcher.reopen("abc123", "fixed it")
+
+    assert result["ok"] is False
+    assert "same" in result["error"].lower()
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"          # NOT reopened
+    assert len(dispatcher.reviews_of(dict(run))) == 2   # nothing appended
+
+
+def test_reopen_succeeds_once_the_head_has_moved_past_the_judged_commit(tmp_path):
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="oldsha000001", pr_head_sha="oldsha000001")
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router(sha="freshfix0002")):
+        result = dispatcher.reopen("abc123", "pushed the fix")
+
+    assert result["ok"] is True
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"
+    # the refreshed head is persisted — the same read the poller would have done next tick.
+    assert run["pr_head_sha"] == "freshfix0002"
+
+
+def test_reopen_refuses_when_the_current_head_cannot_be_read_from_github(tmp_path):
+    """A `gh` that cannot answer is CANNOT VERIFY, never a pass — same doctrine as the CI
+    gate elsewhere in this file. Reopening blind would let an unchanged (or worse, reverted)
+    head slip past the guard just because GitHub was unreachable."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="deadbeef0000", pr_head_sha="deadbeef0000")
+    with patch.object(dispatcher.subprocess, "run", side_effect=FileNotFoundError("no gh")):
+        result = dispatcher.reopen("abc123", "fixed it")
+
+    assert result["ok"] is False
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
 
 
 # --- (b) ONLY needs_human can be reopened -----------------------------------------------
@@ -152,7 +237,7 @@ def test_reopen_will_not_resurrect_a_run_that_moved_under_it(tmp_path):
         conn.commit()
 
     with patch.object(dispatcher, "resolve_run", return_value=stale), \
-         patch.object(dispatcher.subprocess, "run", side_effect=FileNotFoundError()):
+         patch.object(dispatcher.subprocess, "run", side_effect=_gh_router()):
         result = dispatcher.reopen("abc123", "fixed it")
 
     assert result["ok"] is False
@@ -171,7 +256,7 @@ def test_a_reopened_run_that_fails_review_again_re_escalates_without_burning_a_s
     sends it straight back to `needs_human`, with no wasted automatic rework attempt."""
     with dispatcher._db() as conn:
         _row(conn)
-    with patch.object(dispatcher.subprocess, "run", side_effect=_no_gh):
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router()):
         reopened = dispatcher.reopen("abc123", "fixed it")
     assert reopened["ok"] is True
 
@@ -194,7 +279,7 @@ def test_cmd_reopen_success(tmp_path, capsys):
 
     with dispatcher._db() as conn:
         _row(conn)
-    with patch.object(dispatcher.subprocess, "run", side_effect=_no_gh):
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router()):
         main.cmd_reopen(_ReopenArgs())
     out = capsys.readouterr().out
     assert "awaiting_review" in out
@@ -223,7 +308,7 @@ def test_chela_reopen_reaches_the_dispatcher_end_to_end(tmp_path):
 
     with dispatcher._db() as conn:
         _row(conn)
-    with patch.object(dispatcher.subprocess, "run", side_effect=_no_gh), \
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router()), \
          patch.object(sys, "argv", ["chela", "reopen", "abc123", "--reason", "fixed it"]):
         main.main()
     run = dispatcher.resolve_run("abc123")
