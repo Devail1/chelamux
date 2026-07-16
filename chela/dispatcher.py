@@ -626,6 +626,18 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `judge_max_unknown_retries`.
         ("judge_cannot_verify_tries",
          "ALTER TABLE runs ADD COLUMN judge_cannot_verify_tries INTEGER"),
+        # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
+        # `record_window=False` (the run's `window_id` must stay the RUN's window, not a
+        # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
+        # means it is otherwise invisible to `dispatched_window_ids` — the SAME "is this a
+        # dispatched worker?" read the forum-topic bridge (CMX-73) and the Wall tile (CMX-76)
+        # both use. Invisible there, the judge looked like a HUMAN window: a Telegram topic
+        # for a headless agent nobody is meant to talk to, and a full-size pop on the Wall
+        # instead of docking minimized like every other worker. These two columns are the
+        # judge's OWN `window_id`/`window_epoch` pair — same epoch-safety shape as the run's,
+        # recorded separately so the two identities can never collide.
+        ("judge_window_id", "ALTER TABLE runs ADD COLUMN judge_window_id TEXT"),
+        ("judge_window_epoch", "ALTER TABLE runs ADD COLUMN judge_window_epoch TEXT"),
         # 🧑‍⚖️ The critic (CMX-88) — the persona pattern's ADVISORY brief-review, run once at
         # dispatch. `critic_notes` is the advisory it produced ("" ⇒ it ran and had nothing to
         # add; NULL ⇒ it never ran — a different fact, and not to be shown as either an
@@ -2988,7 +3000,7 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
         _judge_vars(wf, row, worktree, sha),
     )
     try:
-        _launch_agent(
+        judge_target_id = _launch_agent(
             wf, task_id, judge.judge_window_name(branch), worktree, prompt, conn,
             hook_vars=_judge_vars(wf, row, worktree, sha),
             fresh_worktree=created,
@@ -3004,6 +3016,18 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
         log.exception("judge: %s: the judge agent failed to launch", task_id)
         set_judge_state(task_id, judge.J_CANNOT_VERIFY, f"the judge agent failed to launch: {e}")
         return False
+    # 🤫 CMX-97. `record_window=False` (above) keeps the RUN's `window_id` untouched on
+    # purpose — but that also left the judge invisible to `dispatched_window_ids`, so it
+    # looked like a human window: a Telegram topic nobody should message, popped full-size
+    # on the Wall instead of docking minimized. Stamp the judge's OWN id/epoch pair here so
+    # that same classifier can tell "the dispatcher owns this too" without touching the
+    # run's window_id.
+    if judge_target_id and re.fullmatch(r"@\d+", judge_target_id):
+        conn.execute(
+            "UPDATE runs SET judge_window_id=?, judge_window_epoch=? WHERE task_id=?",
+            (judge_target_id, epoch.current(), task_id),
+        )
+        conn.commit()
     log.info("judge: %s: judging %s on %s in %s", task_id, row["pr_url"] or "?", sha[:12], worktree)
     return True
 

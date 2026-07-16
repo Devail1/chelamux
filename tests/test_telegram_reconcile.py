@@ -665,6 +665,58 @@ def test_a_settled_run_whose_id_tmux_recycled_is_NOT_dispatched():
     assert dispatched_window_ids(runs, live_windows=live) == set()
 
 
+# --------------------------------------------------------------------------
+# The judge's OWN window (CMX-97) — `_spawn_judge` launches with `record_window=False`,
+# so it must be found through `judge_window_id`, never `window_id`.
+# --------------------------------------------------------------------------
+
+def test_a_running_judge_window_is_dispatched_even_though_window_id_is_someone_elses():
+    from chela import judge as judge_mod
+
+    runs = [{
+        "task_id": "abc123", "status": "awaiting_review", "branch_name": "cmx-9",
+        "window_id": "@1", "window_name": "cmx-9",             # the RUN's own window
+        "judge_window_id": "@42", "judge_state": judge_mod.J_RUNNING,
+    }]
+    # @1 (the run's own window) is not "in flight" (status is awaiting_review) and is not
+    # live at all here — only the judge's @42 should come back dispatched.
+    assert dispatched_window_ids(runs) == {"@42"}
+
+
+def test_a_just_finished_judge_whose_window_is_not_reaped_yet_is_still_dispatched():
+    from chela import judge as judge_mod
+
+    # judge.judge_run writes the verdict, THEN judge._cleanup kills the window last —
+    # so a tick landing in that gap must still see the judge as dispatcher-owned.
+    runs = [{"task_id": "abc123", "status": "awaiting_review", "branch_name": "cmx-9",
+             "judge_window_id": "@42", "judge_state": judge_mod.J_CLEAN}]
+    live = {"@42": judge_mod.judge_window_name("cmx-9")}
+    assert dispatched_window_ids(runs, live_windows=live) == {"@42"}
+
+
+def test_a_judge_id_tmux_recycled_to_a_human_is_NOT_dispatched():
+    from chela import judge as judge_mod
+
+    runs = [{"task_id": "abc123", "status": "awaiting_review", "branch_name": "cmx-9",
+             "judge_window_id": "@42", "judge_state": judge_mod.J_CLEAN}]
+    live = {"@42": "orchestrator"}                  # @42 is Liav's window now
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
+def test_a_dead_servers_judge_window_cannot_disown_a_humans_window():
+    from chela import epoch, judge as judge_mod
+
+    OLD, NEW = "old-epoch", "new-epoch"
+    runs = [{"task_id": "abc123", "status": "awaiting_review", "branch_name": "cmx-9",
+             "judge_window_id": "@42", "judge_window_epoch": OLD,
+             "judge_state": judge_mod.J_RUNNING}]
+    live = {"@42": "orchestrator"}
+
+    assert dispatched_window_ids(runs, live_windows=live, now_epoch=NEW) == set()
+    assert dispatched_window_ids(runs, live_windows=live, now_epoch=OLD) == {"@42"}
+    assert epoch.is_dangling(OLD, NEW)               # sanity: the fixture actually differs
+
+
 def test_a_lingering_failed_run_does_not_churn_a_topic():
     # End to end through the reconcile: the window of a failed run is still alive and
     # quiet, so it gets NO topic — where before it would have been created and archived.
