@@ -35,6 +35,22 @@ because the launch *action* (a tmux spawn) is the untestable half.
 Off by default: ``CHELA_ORCHESTRATOR`` (``config.ORCHESTRATOR_ENABLED``) must be explicitly set —
 auto-launching an agent that holds ``chela merge`` authority is not something a fresh install does
 without being asked.
+
+**The other half: teardown (CMX-100).** Everything above spawns the orchestrator; nothing used
+to stop it. Once launched it persisted idle — "sleeping on the inbox" — for as long as tmux kept
+the window alive, so its context accumulated across every wake with no owner ever compacting it,
+and the *only* post-launch stop was the ``contract.merge`` action-gate refusing to let a
+stale-lease actor merge. The window itself lived on unattended. :func:`should_teardown` /
+:func:`maybe_teardown` are the symmetric close: the judge and critic are already ephemeral
+(spawn on work, die when done, see ``judge._cleanup``); this makes the orchestrator ephemeral too.
+Fail-closed the OTHER direction from launch — teardown is destructive (a window a human is
+reading disappears), so *any* unknown here means "leave it running", never "kill it". Two gates
+guard that: **ownership** (:func:`we_launched` — the recorded launch stamp must name THIS window;
+a hand-run ``chela watch`` session is never touched) and **idle** (never kill a window mid-turn).
+Given those hold, teardown fires on either of the two "done" conditions: the inbox queue is
+drained (nothing left to hand it), or the attended-lease has lapsed (the supervision window
+closed) — either alone means the window is pure cost with no further benefit, because durable
+state (the inbox queue / run rows / event log) is the memory, not the chat window.
 """
 from __future__ import annotations
 
@@ -127,6 +143,18 @@ def record_launch(wid: str, now: float | None = None) -> None:
         log.warning("could not record orchestrator auto-launch stamp: %s", e)
 
 
+def _read_launch_stamp() -> dict | None:
+    """The raw launch-stamp record, or None if it is absent/unreadable. Shared by the cooldown
+    (:func:`recently_launched`) and the teardown ownership check (:func:`we_launched`) — one
+    file, one reader, so the two never disagree on what it says."""
+    try:
+        return json.loads(_state_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def recently_launched(now: float | None = None,
                       cooldown: float = RELAUNCH_COOLDOWN_SECONDS) -> bool:
     """Did we auto-launch within the cooldown? An unreadable/absent stamp reads as 'no'.
@@ -138,14 +166,28 @@ def recently_launched(now: float | None = None,
     prevents from recurring; a corrupt stamp must never be able to *withhold* supervision.
     """
     now = time.time() if now is None else now
-    try:
-        data = json.loads(_state_path().read_text(encoding="utf-8"))
-        launched_at = float(data["launched_at"])
-    except FileNotFoundError:
+    data = _read_launch_stamp()
+    if data is None:
         return False
-    except (OSError, ValueError, TypeError, KeyError):
+    try:
+        launched_at = float(data["launched_at"])
+    except (ValueError, TypeError, KeyError):
         return False
     return (now - launched_at) < cooldown
+
+
+def we_launched(wid: str) -> bool:
+    """Does the recorded auto-launch stamp name THIS window? Fail-*closed*, unlike
+    :func:`recently_launched` — this is the ownership gate teardown depends on, so an absent,
+    unreadable, or mismatched stamp all read as False. A hand-run ``chela watch`` session never
+    wrote this file, and must never be torn down because of it.
+    """
+    if not wid:
+        return False
+    data = _read_launch_stamp()
+    if not data:
+        return False
+    return data.get("wid") == wid
 
 
 # --- deriving the live inputs -----------------------------------------------------------------
@@ -270,3 +312,100 @@ def maybe_wake(store: dict, statuses: dict[str, str], now_epoch: str | None = No
         return None
     log.info("orchestrator auto-launch firing: inbox has work, lease active, none live")
     return wake(repo_dir)
+
+
+# --- teardown: the symmetric close (CMX-100) ---------------------------------------------------
+
+def should_teardown(*, we_launched_it: bool, orchestrator_idle: bool,
+                    has_pending_work: bool, lease_active: bool) -> tuple[bool, str]:
+    """Should the currently-registered orchestrator window be torn down right now? — ``(go, reason)``.
+
+    Fail-closed on the two SAFETY gates, exactly like :func:`should_launch` is fail-closed on
+    every gate: ``we_launched_it`` and ``orchestrator_idle`` must BOTH hold, or teardown is
+    withheld — corrupt either check to a constant and a hand-run session or a mid-turn window
+    gets killed, which the guard tests assert against. Past those two, the WHY-fire condition is
+    an OR, not an AND: either the queue is drained (nothing left to hand it) or the attended-lease
+    has lapsed (the supervision window closed) is enough on its own — an idle, owned window that
+    is neither doing anything nor able to act is pure cost, so either reason alone fires it.
+    """
+    if not we_launched_it:
+        return False, ("this window was not confirmed as chela's own auto-launch — never tear "
+                       "down a hand-run orchestrator session")
+    if not orchestrator_idle:
+        return False, "the orchestrator is mid-turn — never kill a window while it is working"
+    if has_pending_work and lease_active:
+        return False, ("pending inbox work and the attended-lease is still active — nothing to "
+                       "tear down yet")
+    if not has_pending_work:
+        return True, ("the inbox queue is drained and the orchestrator is idle — ephemeral "
+                      "teardown, fresh context on the next wake")
+    return True, "the attended-lease has lapsed — tearing down until a human re-attends"
+
+
+def evaluate_teardown(store: dict, statuses: dict[str, str],
+                      now: float | None = None) -> tuple[bool, str]:
+    """Read the live world and return the teardown decision — ``(go, reason)``.
+
+    The thin impure shell around :func:`should_teardown`, mirroring :func:`evaluate`: gathers the
+    registered orchestrator's wid and the four booleans, then defers the verdict to the pure
+    function. No registered orchestrator at all is an immediate "nothing to tear down" — there is
+    no window to check ownership or idleness against.
+    """
+    wid = inbox.orchestrator_wid(store)
+    if not wid:
+        return False, "no orchestrator is registered — nothing to tear down"
+    return should_teardown(
+        we_launched_it=we_launched(wid),
+        orchestrator_idle=statuses.get(wid) == inbox.IDLE,
+        has_pending_work=bool(store.get("queue")),
+        lease_active=lease.active(now) is not None,
+    )
+
+
+def _kill_orchestrator_window(wid: str) -> None:
+    subprocess.run(["tmux", "kill-window", "-t", f"{TMUX_SESSION}:{wid}"], capture_output=True)
+
+
+def teardown(wid: str, reason: str) -> dict:
+    """Tear down the auto-launched orchestrator window. The ACTION half of :func:`evaluate_teardown`.
+
+    Atomic in three parts: unregister the inbox address (so no event is ever delivered to a
+    window about to die, and no dead address is left for :func:`deliver` to refuse against),
+    kill the window, then clear the launch stamp so a stale cooldown can never hold the launch
+    gate shut for a window that no longer exists. Best-effort and logged with provenance, mirroring
+    :func:`wake`'s own act-then-log shape. ⛔ The caller is responsible for the gate
+    (:func:`evaluate_teardown`); this assumes the decision already said go.
+    """
+    inbox.unregister(wid)
+    _kill_orchestrator_window(wid)
+    try:
+        _state_path().unlink()
+    except OSError:
+        pass
+    event_log.append(
+        "orchestrator.teardown",
+        f"tore down the auto-launched orchestrator in {wid} — {reason}",
+        payload={"wid": wid, "reason": reason},
+        wid=wid if re.fullmatch(r"@\d+", wid) else None,
+    )
+    log.info("orchestrator: torn down %s (%s)", wid, reason)
+    return {"ok": True, "wid": wid, "reason": reason}
+
+
+def maybe_teardown(store: dict, statuses: dict[str, str],
+                   now: float | None = None) -> dict | None:
+    """One inbox-woken pass: evaluate the teardown gate and, only if it says go, tear down.
+
+    Returns the teardown result on a teardown, or ``None`` when the gate withheld one (the common
+    case: a window still has work, is mid-turn, or is a human's own). A withheld teardown is
+    logged at debug — a teardown is logged loudly by :func:`teardown`. The daemon calls this each
+    tick, wrapped so a failure can never take the loop down — see :func:`maybe_wake`, its
+    symmetric twin.
+    """
+    go, reason = evaluate_teardown(store, statuses, now)
+    if not go:
+        log.debug("orchestrator teardown withheld: %s", reason)
+        return None
+    wid = inbox.orchestrator_wid(store)
+    log.info("orchestrator teardown firing: %s", reason)
+    return teardown(wid, reason)

@@ -319,6 +319,16 @@ def cmd_run(args) -> None:
                     except Exception:
                         log.exception("Orchestrator auto-launch check failed")
 
+                # 🎭🧹 Tear it down when its work is done (CMX-100): the symmetric close. Checked
+                # regardless of `autolaunch.enabled()` — ownership is proven by the launch stamp
+                # (`autolaunch.we_launched`), never by the flag, so an orchestrator this daemon
+                # spawned earlier still gets torn down cleanly even if the flag was since flipped
+                # off. A hand-run `chela watch` session wrote no stamp and is never touched.
+                try:
+                    autolaunch.maybe_teardown(inbox.load(), inbox_statuses)
+                except Exception:
+                    log.exception("Orchestrator teardown check failed")
+
             # Agent rooms: a targeted handoff/question/blocker whose recipient was sitting
             # at a gate is PARKED, never pasted (that paste would answer the gate). This is
             # what finally sends it — the moment that window is at its prompt again. Gated
@@ -553,6 +563,9 @@ def cmd_orchestrator(args) -> None:
     go, reason = autolaunch.evaluate(store, statuses, now_epoch)
     print(f"would auto-launch now: {'YES' if go else 'no'}"
           + (f" — {reason}" if not go else ""))
+    td_go, td_reason = autolaunch.evaluate_teardown(store, statuses)
+    print(f"would tear down now: {'YES' if td_go else 'no'}"
+          + (f" — {td_reason}" if not td_go else ""))
 
 
 # --- agent rooms: the relationship a message finally has ------------------------
