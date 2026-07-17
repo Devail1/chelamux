@@ -317,21 +317,46 @@ function knGraphSeed(i) {
     return { x: r * Math.cos(a), y: r * Math.sin(a) };
 }
 
-// type -> {theme CSS var, static fallback}. `project` has no CSS var: it was a
-// fixed hex in every theme even under the old SVG renderer, so it stays fixed.
+// type -> fixed Okabe-Ito colorblind-safe hex (https://jfly.uni-koeln.de/color/,
+// verified distinguishable under deuteranopia/protanopia). NOT theme CSS vars —
+// a theme's --green/--accent/--yellow are picked for contrast, not colorblind
+// separability, so resolving through them risked two node types landing on
+// hues a red-weak viewer can't tell apart. `other` stays the theme-dim grey:
+// achromatic, so it's colorblind-safe by construction and still reads as "no
+// strong category" across every theme.
 const _KN_TYPE_COLOR = {
-    agent: { varName: '--green', fallback: '#3fb950' },
-    run: { varName: '--accent', fallback: '#58a6ff' },
-    sched: { varName: '--yellow', fallback: '#d29922' },
-    project: { varName: null, fallback: '#a371f7' },
+    agent: '#009E73',   // bluish green
+    run: '#0072B2',     // blue
+    sched: '#E69F00',   // orange
+    project: '#CC79A7', // reddish purple
     other: { varName: '--text-dim', fallback: '#8b949e' },
 };
 
+// type -> a short glyph rendered as a label prefix. Colour is reinforcement
+// only — Liav is red-weak (deuteranomaly), so the type must also be legible
+// from a non-hue cue, and the row must stay identifiable in greyscale.
+const _KN_TYPE_GLYPH = {
+    agent: 'A', run: 'R', sched: 'S', project: 'P', other: '•',
+};
+
+function knNodeGlyph(type) {
+    return _KN_TYPE_GLYPH[knTypeClass(type)] || _KN_TYPE_GLYPH.other;
+}
+
+// Rendered node label: glyph prefix + title, so the type is legible even with
+// colour stripped out (greyscale, colorblind, or a monochrome print of a demo).
+function knNodeLabel(type, title) {
+    return `[${knNodeGlyph(type)}] ${title}`;
+}
+
 // Resolve a concept type to a render color. `cssVar(name, fallback)` is injected
 // so this stays pure/testable (production passes knCssVar, which reads the DOM).
+// Only `other` still resolves through a theme var; every named type is a fixed
+// Okabe-Ito hex, deliberately not theme-dependent (see _KN_TYPE_COLOR above).
 function knNodeColor(type, cssVar) {
     const c = _KN_TYPE_COLOR[knTypeClass(type)] || _KN_TYPE_COLOR.other;
-    return c.varName ? cssVar(c.varName, c.fallback) : c.fallback;
+    if (typeof c === 'string') return c;
+    return cssVar(c.varName, c.fallback);
 }
 
 // Build a plain-data graph model from the /api/knowledge/graph response: seeded
@@ -347,6 +372,7 @@ function knGraphModel(g, cssVar) {
             id: n.id, title: n.title, type: n.type,
             x: seed.x, y: seed.y,
             color: knNodeColor(n.type, cssVar),
+            label: knNodeLabel(n.type, n.title),
         };
     });
     const seen = new Set();
@@ -375,7 +401,7 @@ function knRenderSigma(container, model) {
     const { Graph, Sigma, forceAtlas2 } = libs;
     const graph = new Graph();
     model.nodes.forEach(n => {
-        graph.addNode(n.id, { x: n.x, y: n.y, size: 5, label: n.title, color: n.color });
+        graph.addNode(n.id, { x: n.x, y: n.y, size: 5, label: n.label, color: n.color });
     });
     model.edges.forEach(e => {
         graph.addEdge(e.source, e.target, { size: 1, color: knCssVar('--border', '#21262d') });
@@ -405,12 +431,27 @@ function knKillGraph() {
     }
 }
 
+// A visible failure state (back link + message) for knShowGraph. Never leave
+// the "Building graph…" spinner frozen or an empty <div id="kn-graph-canvas">
+// on screen with nothing explaining why — both read as "still working" or
+// "no data" when the real story is "this broke".
+function knGraphError(msg) {
+    return `<div class="kn-glance"><a class="kn-back" onclick="chela.knBackToGlance()">← Knowledge</a>
+        <div class="kn-dim kn-graph-error">⚠ ${escHtml(msg)}</div></div>`;
+}
+
 async function knShowGraph() {
     knKillGraph();
     _kn.view = 'graph';
     const el = $('#kn-content');
     if (el) el.innerHTML = '<div class="kn-loading">Building graph…</div>';
-    const g = await api('/api/knowledge/graph');
+    let g;
+    try {
+        g = await api('/api/knowledge/graph');
+    } catch (e) {
+        if (el) el.innerHTML = knGraphError('Could not load the graph data.');
+        return;
+    }
     if (!el) return;
     const nodes = g.nodes || [], edges = g.edges || [];
     if (!nodes.length) {
@@ -426,7 +467,12 @@ async function knShowGraph() {
         <div class="kn-graph-wrap"><div id="kn-graph-canvas" class="kn-graph-canvas"></div></div>
       </div>`;
     const model = knGraphModel(g, knCssVar);
-    _kn.sigma = knRenderSigma($('#kn-graph-canvas'), model);
+    const renderer = knRenderSigma($('#kn-graph-canvas'), model);
+    if (!renderer) {
+        el.innerHTML = knGraphError('Graph renderer failed to load.');
+        return;
+    }
+    _kn.sigma = renderer;
 }
 
 // --- Shared helpers (also reused by the portable viewer, Phase 4) ----------
@@ -513,7 +559,7 @@ function knMd(src, base) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { _kn, knBackToGlance, refreshKnowledge, knGraphModel, knNodeColor };
+export { _kn, knBackToGlance, refreshKnowledge, knGraphModel, knNodeColor, knNodeGlyph, knNodeLabel, knGraphError };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
