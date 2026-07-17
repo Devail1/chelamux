@@ -233,6 +233,14 @@ act; judgment or security or irreversible → ask.** That is the whole contract.
   the lease is a **judgment/supervision** guardrail, NOT the blast-radius one. **Isolation stays the
   hard gate** on ever dropping the lease and running truly unattended; auto-launch under a lease does
   not cross it. OFF by default (`CHELA_ORCHESTRATOR`).
+- **v0.4 (CMX-100)** — the auto-launched orchestrator is **torn down**, not left running idle.
+  `autolaunch.should_teardown` / `maybe_teardown` fire whenever the window is confirmed
+  auto-launched (`autolaunch.we_launched`, never a hand-run `chela watch` session) and idle, and
+  either the inbox queue is drained or the attended-lease has lapsed. This is defense-in-depth #2
+  for the lease-expiry case (the action-gate on `contract.merge` was previously the *only* stop),
+  and it also makes the orchestrator **ephemeral** like the judge and critic: spawn on work, die
+  when done, fresh context on the next wake — durable state (the inbox queue / run rows / event
+  log) is the memory, not a long-lived chat window.
 - **Next**: encode nothing new into the taxonomy (CMX-90 changed *when* a supervised orchestrator
   is woken, not *what* it may decide); treat **isolation** as the explicit blocker on ever flipping
   the orchestrator from lease-attended to fully unattended.

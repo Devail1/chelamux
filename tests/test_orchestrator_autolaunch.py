@@ -263,3 +263,256 @@ def test_the_spawned_window_exports_the_auto_orchestrator_actor_stamp(monkeypatc
 def test_orchestrator_live_maps_address_state(monkeypatch, state, expected):
     monkeypatch.setattr(autolaunch.inbox, "address_state", lambda *a, **k: (state, ""))
     assert autolaunch.orchestrator_live({}, {}, None) is expected
+
+
+# ================================================================================================
+# --- teardown (CMX-100): the symmetric close ----------------------------------------------------
+# ================================================================================================
+
+# The all-conditions-hold kwargs for should_teardown: a teardown SHOULD fire (queue drained).
+def _all_teardown_go() -> dict:
+    return dict(we_launched_it=True, orchestrator_idle=True, has_pending_work=False,
+                lease_active=True)
+
+
+def test_should_teardown_fires_when_drained_idle_and_owned():
+    go, reason = autolaunch.should_teardown(**_all_teardown_go())
+    assert go is True
+    assert reason.strip()
+
+
+def test_should_teardown_fires_when_lease_lapsed_even_with_pending_work():
+    # 🔴 THE LEASE-EXPIRY CASE — the original backlog ask: pending work but no active lease means
+    # nothing can act on it anyway (should_launch itself requires lease_active), so the window is
+    # torn down rather than left running unattended. Corrupt this branch away and the lease-expiry
+    # teardown never fires.
+    go, reason = autolaunch.should_teardown(
+        we_launched_it=True, orchestrator_idle=True, has_pending_work=True, lease_active=False,
+    )
+    assert go is True
+    assert "lease" in reason.lower()
+
+
+@pytest.mark.parametrize("flip", [
+    {"we_launched_it": False},
+    {"orchestrator_idle": False},
+])
+def test_should_teardown_is_fail_closed_on_the_safety_gates(flip):
+    """🔴 FAIL-CLOSED (the destructive direction) — flip ownership or idleness off and teardown
+    must be withheld, no matter how "done" the queue/lease look. Corrupt should_teardown to drop
+    either check and this goes red: a hand-run session or a mid-turn window gets killed."""
+    kwargs = {**_all_teardown_go(), **flip}
+    go, reason = autolaunch.should_teardown(**kwargs)
+    assert go is False
+    assert reason.strip(), "a withheld teardown must say why"
+
+
+def test_should_teardown_withholds_when_there_is_still_work_and_an_active_lease():
+    go, reason = autolaunch.should_teardown(
+        we_launched_it=True, orchestrator_idle=True, has_pending_work=True, lease_active=True,
+    )
+    assert go is False
+    assert reason.strip()
+
+
+def test_the_ownership_gate_specifically_blocks_a_hand_run_session():
+    # Called out on its own, mirroring test_the_lease_gate_specifically_blocks_without_a_lease:
+    # everything else says "done", but this window was never confirmed as chela's own launch.
+    go, reason = autolaunch.should_teardown(**{**_all_teardown_go(), "we_launched_it": False})
+    assert go is False
+    assert "hand-run" in reason.lower() or "confirmed" in reason.lower()
+
+
+# --- we_launched(): the ownership stamp, read fail-closed ---------------------------------------
+
+def test_we_launched_is_false_with_no_stamp():
+    assert autolaunch.we_launched("@7") is False
+
+
+def test_we_launched_is_true_only_for_the_recorded_wid():
+    autolaunch.record_launch("@7")
+    assert autolaunch.we_launched("@7") is True
+    assert autolaunch.we_launched("@8") is False
+
+
+def test_we_launched_is_false_on_a_corrupt_stamp():
+    autolaunch.record_launch("@7")
+    autolaunch._state_path().write_text("not json", encoding="utf-8")
+    # 🔴 FAIL-CLOSED — a corrupt stamp must never be read as "yes, we own this window".
+    assert autolaunch.we_launched("@7") is False
+
+
+def test_we_launched_is_false_for_an_empty_wid():
+    autolaunch.record_launch("")
+    assert autolaunch.we_launched("") is False
+
+
+# --- evaluate_teardown(): the impure read wired to the pure decision -----------------------------
+
+@pytest.fixture
+def owned_and_idle(monkeypatch):
+    """The orchestrator wid is registered, we launched it, and it is idle."""
+    monkeypatch.setattr(autolaunch.inbox, "orchestrator_wid", lambda store=None: "@7")
+    autolaunch.record_launch("@7")
+
+
+def test_evaluate_teardown_says_go_when_queue_is_drained(owned_and_idle):
+    lease.grant(ttl_seconds=600)
+    go, reason = autolaunch.evaluate_teardown({"queue": []}, {"@7": inbox.IDLE})
+    assert go is True, reason
+
+
+def test_evaluate_teardown_withholds_with_pending_work_and_active_lease(owned_and_idle):
+    lease.grant(ttl_seconds=600)
+    go, reason = autolaunch.evaluate_teardown(
+        {"queue": [{"kind": "run_review"}]}, {"@7": inbox.IDLE},
+    )
+    assert go is False
+
+
+def test_evaluate_teardown_withholds_when_busy(owned_and_idle):
+    lease.grant(ttl_seconds=600)
+    go, reason = autolaunch.evaluate_teardown({"queue": []}, {"@7": inbox.BUSY})
+    assert go is False
+    assert "mid-turn" in reason or "working" in reason
+
+
+def test_evaluate_teardown_withholds_when_the_idle_state_is_unknown(owned_and_idle):
+    """🔴 FAIL-SAFE ON UNKNOWN (load-bearing) — an unknown/unreadable window status is NOT idle.
+    With the queue drained AND the lease active, the only thing between @7 and a graceful teardown
+    is its idle state; when that state cannot be read (the wid is absent from the status map),
+    teardown must be WITHHELD, never fired on the ambiguity — the same fail-closed discipline the
+    launch gate uses. Corrupt (default unknown→idle, e.g. ``!= BUSY`` instead of ``== IDLE``) →
+    this goes red because the graceful teardown then fires on an unreadable window."""
+    lease.grant(ttl_seconds=600)
+    go, reason = autolaunch.evaluate_teardown({"queue": []}, {})   # @7 absent ⇒ status unknown
+    assert go is False, reason
+
+
+def test_evaluate_teardown_withholds_when_nobody_is_registered():
+    go, reason = autolaunch.evaluate_teardown({"queue": []}, {})
+    assert go is False
+    assert "nothing to tear down" in reason
+
+
+def test_evaluate_teardown_withholds_when_the_window_was_not_our_launch(monkeypatch):
+    monkeypatch.setattr(autolaunch.inbox, "orchestrator_wid", lambda store=None: "@9")
+    # no record_launch call — nobody stamped @9 as an auto-launch
+    go, reason = autolaunch.evaluate_teardown({"queue": []}, {"@9": inbox.IDLE})
+    assert go is False
+    assert "hand-run" in reason.lower() or "confirmed" in reason.lower()
+
+
+# --- maybe_teardown(): only tears down when evaluate_teardown says go ----------------------------
+
+def test_maybe_teardown_tears_down_only_when_evaluate_teardown_says_go(monkeypatch):
+    """🔴 WIRING — maybe_teardown must call teardown() iff evaluate_teardown() says go. Corrupt
+    maybe_teardown to always tear down (drop the ``if not go`` guard) and the withheld case goes
+    red."""
+    calls = []
+    monkeypatch.setattr(autolaunch, "teardown",
+                        lambda wid, reason: calls.append((wid, reason)) or {"ok": True})
+
+    monkeypatch.setattr(autolaunch, "evaluate_teardown", lambda *a, **k: (False, "withheld"))
+    assert autolaunch.maybe_teardown({"queue": []}, {}) is None
+    assert calls == [], "teardown must NOT be called when the gate withholds"
+
+    monkeypatch.setattr(autolaunch, "evaluate_teardown", lambda *a, **k: (True, "drained"))
+    monkeypatch.setattr(autolaunch.inbox, "orchestrator_wid", lambda store=None: "@7")
+    result = autolaunch.maybe_teardown({"queue": []}, {})
+    assert result == {"ok": True}
+    assert calls == [("@7", "drained")]
+
+
+# --- teardown(): the action — kills the window, clears the stamp, logs --------------------------
+
+def test_teardown_kills_the_recorded_window_and_clears_the_stamp(monkeypatch):
+    autolaunch.record_launch("@7")
+    killed = []
+
+    def fake_run(argv, *a, **k):
+        if argv[:2] == ["tmux", "kill-window"]:
+            killed.append(argv)
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = autolaunch.teardown("@7", "the inbox queue is drained")
+    assert result == {"ok": True, "wid": "@7", "reason": "the inbox queue is drained"}
+    assert killed and killed[0][-1] == f"{config.TMUX_SESSION}:@7"
+    # the launch stamp is gone — a stale cooldown must not survive the window it described
+    assert autolaunch._read_launch_stamp() is None
+
+
+def test_teardown_unregisters_the_inbox_address(monkeypatch):
+    """🔴 ATOMICITY (load-bearing) — teardown must UNREGISTER the inbox address, not only kill the
+    window and clear the stamp. Killing the window while leaving its wid registered leaves a DEAD
+    ADDRESS: :func:`inbox.orchestrator_wid` keeps returning it and :func:`inbox.deliver` refuses
+    to write to it (ADDR_GONE) while the queue silently backs up. Corrupt (drop the
+    ``inbox.unregister(wid)`` call from :func:`teardown`) → this goes red."""
+    autolaunch.record_launch("@7")
+    unregistered = []
+    monkeypatch.setattr(autolaunch.inbox, "unregister",
+                        lambda wid: unregistered.append(wid) or {"ok": True, "wid": wid})
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="", returncode=0))
+
+    autolaunch.teardown("@7", "the inbox queue is drained")
+
+    assert unregistered == ["@7"], "teardown must clear the registered address for the killed window"
+
+
+def test_teardown_survives_a_missing_stamp_file(monkeypatch):
+    # No record_launch call — the stamp file never existed. teardown() must not raise trying to
+    # unlink it (best-effort, exactly like judge._cleanup's ordering).
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="", returncode=0))
+    result = autolaunch.teardown("@7", "the attended-lease has lapsed")
+    assert result["ok"] is True
+
+
+# --- the PRODUCTION call-site: the daemon loop actually calls maybe_teardown each tick -----------
+
+def test_the_daemon_loop_calls_maybe_teardown_on_the_inbox_tick(monkeypatch):
+    """🔴 WIRING (production call-site) — mirrors the launch wiring test: drives ONE real tick of
+    the daemon loop and proves maybe_teardown is reached. Replace the call in `chela/main.py`
+    with `pass` and this goes red, which is the only thing that keeps the teardown wired in.
+    """
+    from chela import main
+
+    monkeypatch.setattr(main.GracefulShutdown, "install", lambda self: self)
+
+    def stop_after_one(self, _seconds):
+        self._event.set()
+        return True
+
+    monkeypatch.setattr(main.GracefulShutdown, "wait", stop_after_one)
+    monkeypatch.setattr(main.scheduler, "init", lambda: None)
+    monkeypatch.setattr(main.scheduler, "tick", lambda: 0)
+    monkeypatch.setattr(main.agent_manager, "reconcile_window_names", lambda: [])
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: False)
+    monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+
+    monkeypatch.setattr(main.inbox, "enabled", lambda: True)
+    monkeypatch.setattr(main.inbox, "orchestrator_wid", lambda: None)
+    monkeypatch.setattr(main.inbox, "tick", lambda statuses: statuses)
+    monkeypatch.setattr(main.inbox, "load", lambda: {"queue": []})
+    monkeypatch.setattr(main.epoch, "current", lambda: "e1")
+    # Auto-launch itself OFF for this test — teardown must still be reached (it is checked
+    # regardless of the launch flag; ownership is proven by the stamp, not by the flag).
+    monkeypatch.setattr(main.autolaunch, "enabled", lambda: False)
+
+    launch_calls: list[tuple] = []
+    monkeypatch.setattr(main.autolaunch, "maybe_wake", lambda *a, **k: launch_calls.append(a))
+    teardown_calls: list[tuple] = []
+    monkeypatch.setattr(main.autolaunch, "maybe_teardown",
+                        lambda *a, **k: teardown_calls.append(a) or None)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert launch_calls == [], "maybe_wake must not run when the launch flag is off"
+    assert len(teardown_calls) == 1, (
+        "cmd_run did NOT call autolaunch.maybe_teardown on the inbox tick — teardown is unwired "
+        "and can be reverted with the suite green"
+    )
+    args = teardown_calls[0]
+    assert args[0] == {"queue": []}   # inbox.load()
+    assert args[1] == {}              # inbox.tick()'s status snapshot

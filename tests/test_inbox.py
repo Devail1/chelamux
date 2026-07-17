@@ -256,6 +256,27 @@ def test_queue_drains_one_event_per_idle_tick(store_file, windows, sends, monkey
     assert [t for _, t in sends] == ["📥 one", "📥 two"]
 
 
+def test_unregister_clears_the_address_only_when_it_names_that_wid(store_file):
+    # unregister is the inverse of register (orchestrator teardown uses it). It clears the
+    # recorded address so a killed window leaves no dead address behind — but ONLY if the
+    # address still names the wid being torn down; a human who re-registered in the meantime
+    # must never be cleared out from under.
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    store["orchestrator_epoch"] = "e1"
+    inbox.save(store)
+
+    # a mismatching wid is a no-op — someone else is registered now
+    res = inbox.unregister("@999")
+    assert res["ok"] is False
+    assert inbox.orchestrator_wid(inbox.load()) == ORCH
+
+    # the matching wid clears the address back to inert (ADDR_NONE)
+    res = inbox.unregister(ORCH)
+    assert res["ok"] is True
+    assert inbox.orchestrator_wid(inbox.load()) is None
+
+
 # --- anti-self-notify: the loop must not be able to run away -------------------
 
 def test_the_orchestrator_is_never_an_event_source(store_file, windows, sends, monkeypatch):

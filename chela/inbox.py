@@ -445,6 +445,29 @@ def register(by: str) -> dict:
     return {"ok": True, "orchestrator": by, "epoch": now, "session": session, "queued": queued}
 
 
+def unregister(wid: str) -> dict:
+    """Clear the recorded orchestrator address — the inverse of :func:`register`.
+
+    Used by orchestrator teardown so a killed window never leaves a *dead address* registered:
+    :func:`orchestrator_wid` would keep returning it, and :func:`deliver` would refuse to write
+    to it (ADDR_GONE) while the queue silently backed up. Clearing it to ``None`` returns the
+    inbox to the inert ADDR_NONE state — the queue is durable and waits for the next registrant.
+
+    ⛔ Guarded: a no-op unless the address CURRENTLY names ``wid``. A human may have re-registered
+    their own session in the meantime (or the epoch renumbered); we never clear someone else's
+    registration out from under them.
+    """
+    with locked_store() as store:
+        if store.get("orchestrator") != wid:
+            return {"ok": False, "wid": wid, "orchestrator": store.get("orchestrator")}
+        store["orchestrator"] = None
+        store["orchestrator_epoch"] = None
+        store["orchestrator_session"] = None
+        store["orchestrator_name"] = None
+        store["address_alarm"] = None
+    return {"ok": True, "wid": wid}
+
+
 def unwatch(wid: str) -> dict:
     with locked_store() as store:
         existed = store["watches"].pop(wid, None) is not None
