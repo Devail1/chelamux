@@ -2,6 +2,30 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🧹🔁 DISPATCH MUST BE COLLISION-PROOF ON SLOT REUSE — a reused task-number / stale branch / orphaned worktree must never fail a fresh dispatch. THE second-repo seamless blocker (make chela free to build other projects with).**
+
+  **PROBLEM (surfaced live 2026-07-17 running lean-alpha as a 2nd repo — two coupled leaks):**
+  1. **Number reuse (`dispatcher.py:~2407`):** next `task_number = MAX(task_number)+1 FROM runs WHERE workflow_path=?`. A task built OUT OF BAND (no `runs` row — e.g. the cmx-103 teardown the orchestrator hand-built) leaves a GAP, so the next dispatched task got **`103` again** — a duplicate of a merged task's branch/PR number.
+  2. **`ensure_worktree` (`worktree.py:9-48`) isn't collision-proof:** it reuses a worktree only when `_find_existing_worktree(branch)` hits; otherwise it runs `git worktree add -b {branch} … {base}` with `check=True`, which dies **exit 128** when the branch already exists (the reused number) or `wt_path` is a stale dir. A stale REMOTE branch of that name (PR merged by hand via `gh`, bypassing `contract._squash_merge`'s `push origin --delete` cleanup at `:226`) then ALSO rejects the worker's push non-fast-forward. This session both had to be fixed BY HAND (deleted the stale `cmx-103` remote branch; the exit-128 was the earlier orphaned-worktree symptom).
+
+  **OBJECTIVE:** a fresh dispatch must succeed regardless of leftover slot state — WITHOUT ever clobbering an in-flight run.
+  1. **Unique numbers (root):** derive the next `task_number` so it never collides with an already-used slot — MAX over BOTH `runs.task_number` (this workflow) AND the existing `{project_key.lower()}-<n>` git branches in the repo (an out-of-band task's branch must bump the counter). A retry of the SAME task still reuses its own number (keep the `:~2401-2404` reuse-on-retry path).
+  2. **Idempotent add (defense-in-depth):** in `ensure_worktree`, before `worktree add -b`, clear GENUINELY-STALE state for the target `{branch}`/`wt_path`: `git worktree prune`; if a local branch `{branch}` exists with no live worktree, delete it so `-b` recreates it from `base_branch`; if `wt_path` is a stale dir with no git record, remove it.
+
+  ⛔ **SAFETY BOUNDARIES (load-bearing):**
+  - **NEVER touch an in-flight run's branch/worktree.** Only clear state whose task is NOT an active run (no open PR, not a REVIEW status, not `running`/`claimed`). The rework path (`attach_worktree`, which REUSES the branch + its pushed history) must be UNAFFECTED — this change is only the fresh `-b` fork path. Deleting a live branch throws away pushed commits + an open PR (the exact disaster `attach_worktree`'s `BranchGone` guards against).
+  - Don't delete REMOTE branches from `ensure_worktree` (a remote branch may belong to an open PR); remote-branch cleanup stays `contract._squash_merge`'s job. This task makes dispatch SURVIVE a stale remote branch by using a fresh unique local branch — the worker's `push -u` to an orphaned remote is out of scope here (note it if you must, force only with `--force-with-lease` and only when the run has NO open PR).
+  - Public-repo boundaries. ⛔ Don't touch the tracker.
+
+  ⛔ **GUARDS (corrupt-each → RED):**
+  - **🔴 Reused number gets a fresh unique slot:** a `{key}-5` branch exists with NO runs row at 5; dispatch a new task → it gets number **6**, not 5, and `worktree add` succeeds. Corrupt (derive from runs-only MAX) → RED.
+  - **🔴 Stale local branch (no worktree, no active run) → fresh dispatch still succeeds:** a leftover local `{key}-7` present; `ensure_worktree` for that name creates the worktree (pruning/deleting the stale branch first) and returns `created=True`. Corrupt (skip the prune/delete) → `worktree add -b` raises → RED.
+  - **🔴 An IN-FLIGHT run's branch is NEVER cleared (load-bearing):** a `{key}-8` branch with an active run (`running`/`awaiting_review`) → numbering + `ensure_worktree` refuse to delete it; the attach/rework path reuses it intact. Corrupt (clear it anyway) → RED (assert the branch + its commits survive).
+  - **Retry reuses its own number:** re-dispatch of the SAME `task_id` keeps its existing `task_number`. Corrupt → RED.
+  - **Stale `wt_path` dir with no git record → reused/cleared, dispatch succeeds.** Corrupt → RED.
+
+  **FILES:** `chela/dispatcher.py` (number derivation `~:2401-2410`) · `chela/worktree.py` (`ensure_worktree` `:9-48` — guarded stale-state clearing before `worktree add -b`) · `tests/`. **VERIFY:** `uv run ruff check chela tests` + `CHELA_REQUIRE_JS_TESTS=1 uv run --all-extras pytest -q` green · each guard mutation RED · cite the lean-alpha cmx-103 reuse repro in the PR body.
+
 - [x] **🔀🔓 PER-WORKFLOW AUTONOMOUS MERGE BASE — resolve the allowed merge target from the dispatching workflow's declared `base_branch`, so a repo whose trunk is `main` (lean-alpha) can auto-merge WITHOUT weakening chelamux's own `main` protection.**
 
   **PROBLEM:** `chela/contract.py` gates autonomous merges against a SINGLE global base — `AUTONOMOUS_BASE` (`CHELA_MERGE_BASE`, default `dev`, `:59`) — plus an absolute `FORBIDDEN_BASES` (`:65`, {main,master,production,prod,release,stable}) checked BEFORE the base test. lean-alpha's trunk IS `main` (its `WORKFLOW.md` declares `workspace.base_branch: main` — "worktrees fork from main; PRs target main"), so **`chela merge` refuses EVERY lean-alpha PR** as a NEVER-tier forbidden-base violation. **Surfaced live 2026-07-17:** LAP-4 (PR #1, `a61976…`, base=`main`) was fully reviewed + judge-clean, yet the gate refused it — a human had to merge by hand via `gh pr merge`. With ≥2 registered workflows of differing trunk conventions, one global base cannot serve both.
