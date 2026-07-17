@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **🔀🔓 PER-WORKFLOW AUTONOMOUS MERGE BASE — resolve the allowed merge target from the dispatching workflow's declared `base_branch`, so a repo whose trunk is `main` (lean-alpha) can auto-merge WITHOUT weakening chelamux's own `main` protection.**
+- [x] **🔀🔓 PER-WORKFLOW AUTONOMOUS MERGE BASE — resolve the allowed merge target from the dispatching workflow's declared `base_branch`, so a repo whose trunk is `main` (lean-alpha) can auto-merge WITHOUT weakening chelamux's own `main` protection.**
 
   **PROBLEM:** `chela/contract.py` gates autonomous merges against a SINGLE global base — `AUTONOMOUS_BASE` (`CHELA_MERGE_BASE`, default `dev`, `:59`) — plus an absolute `FORBIDDEN_BASES` (`:65`, {main,master,production,prod,release,stable}) checked BEFORE the base test. lean-alpha's trunk IS `main` (its `WORKFLOW.md` declares `workspace.base_branch: main` — "worktrees fork from main; PRs target main"), so **`chela merge` refuses EVERY lean-alpha PR** as a NEVER-tier forbidden-base violation. **Surfaced live 2026-07-17:** LAP-4 (PR #1, `a61976…`, base=`main`) was fully reviewed + judge-clean, yet the gate refused it — a human had to merge by hand via `gh pr merge`. With ≥2 registered workflows of differing trunk conventions, one global base cannot serve both.
 
