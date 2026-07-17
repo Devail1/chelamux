@@ -2376,6 +2376,42 @@ def tick(workflow_path: str | Path) -> dict:
     return summary
 
 
+def _max_existing_task_number(repo_path: Path, project_key: str) -> int:
+    """Highest N already spoken for by a `{project_key.lower()}-<n>` branch — local
+    or on `origin` — regardless of what the `runs` table remembers.
+
+    `runs.task_number` alone is not the whole story: `_prune_done_rows` and
+    `delete_run` drop rows while leaving the branch (local and/or remote) behind, and a
+    dispatch that only looked at `MAX(task_number) FROM runs` would happily hand a fresh
+    task_id that same, still-occupied number. Two real incidents from reusing it: two
+    open PRs both titled the same `CMX-<n>` (the row for the first was gone by the time
+    the second was minted), and a `git push -u origin {branch}` rejected non-fast-forward
+    because a same-named remote branch from an out-of-band-merged PR was still there
+    (`contract._squash_merge` deletes the remote branch on ITS merges, but a PR merged by
+    hand via `gh` bypasses that). Scanning branches closes both: a slot with no live
+    `runs` row but a surviving branch is never handed out again.
+    """
+    prefix = f"{project_key.lower()}-"
+    out = subprocess.run(
+        ["git", "-C", str(repo_path), "for-each-ref",
+         "--format=%(refname:short)", "refs/heads/", "refs/remotes/origin/"],
+        capture_output=True, text=True, check=False,
+    )
+    if out.returncode != 0:
+        return 0
+    best = 0
+    for line in out.stdout.splitlines():
+        name = line.strip()
+        if name.startswith("origin/"):
+            name = name[len("origin/"):]
+        if not name.startswith(prefix):
+            continue
+        suffix = name[len(prefix):]
+        if suffix.isdigit():
+            best = max(best, int(suffix))
+    return best
+
+
 def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) -> bool:
     repo_path = wf.path.parent
     base_branch = wf.get("workspace", "base_branch", default="master")
@@ -2407,7 +2443,7 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
             "SELECT COALESCE(MAX(task_number), 0) + 1 AS n FROM runs WHERE workflow_path=?",
             (str(wf.path),),
         ).fetchone()
-        task_number = int(row["n"])
+        task_number = max(int(row["n"]), _max_existing_task_number(repo_path, project_key) + 1)
 
     worktree, created = ensure_worktree(repo_path, task.id, base_branch, project_key, task_number, root)
     branch = f"{project_key.lower()}-{task_number}"

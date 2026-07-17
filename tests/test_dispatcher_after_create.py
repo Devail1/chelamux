@@ -101,7 +101,11 @@ def test_after_create_nonzero_exit_aborts_dispatch(tmp_path):
     def _run(cmd, *a, **kw):
         if kw.get("shell"):
             raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
-        return None
+
+        class R:
+            returncode = 0
+            stdout = ""
+        return R()
 
     with patch.object(dispatcher, "ensure_worktree", return_value=(worktree, True)), \
          patch.object(dispatcher.subprocess, "run", side_effect=_run) as run, \
