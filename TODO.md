@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **🧹🔁 DISPATCH MUST BE COLLISION-PROOF ON SLOT REUSE — a reused task-number / stale branch / orphaned worktree must never fail a fresh dispatch. THE second-repo seamless blocker (make chela free to build other projects with).**
+- [x] **🧹🔁 DISPATCH MUST BE COLLISION-PROOF ON SLOT REUSE — a reused task-number / stale branch / orphaned worktree must never fail a fresh dispatch. THE second-repo seamless blocker (make chela free to build other projects with).**
 
   **PROBLEM (surfaced live 2026-07-17 running lean-alpha as a 2nd repo — two coupled leaks):**
   1. **Number reuse (`dispatcher.py:~2407`):** next `task_number = MAX(task_number)+1 FROM runs WHERE workflow_path=?`. A task built OUT OF BAND (no `runs` row — e.g. the cmx-103 teardown the orchestrator hand-built) leaves a GAP, so the next dispatched task got **`103` again** — a duplicate of a merged task's branch/PR number.
