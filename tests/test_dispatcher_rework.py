@@ -560,6 +560,128 @@ def test_reconcile_never_false_dones_a_SIBLING_WORKFLOWS_live_run(tmp_path):
     assert dispatcher.resolve_run("foo")["status"] == "awaiting_review"
 
 
+def test_reconcile_never_false_dones_a_PR_LESS_orphaned_run_CMX_100(tmp_path):
+    """CMX-100 repro (`bcdcf0738775`): a `running` row whose worker window died before it
+    ever opened a PR, whose task_id then leaves `open_ids` for ANY non-merge reason (tracker
+    edited, task re-hashed, uncommitted-tracker churn), must NOT be marked `done` — "the task
+    left the tracker" is not proof of a merge. It reconciles to `failed` instead, via the
+    SAME window-gone→failed path a dead running window already takes, so it can re-dispatch
+    (`failed` is not in `NOT_CLAIMABLE`; `done` is).
+
+    Seen to go red: marking the `else` branch `done` unconditionally (the pre-fix behavior)
+    fails this test — the row ends up `done` with no PR and no merge evidence.
+    """
+    wf = _wf(tmp_path)
+    source = _Source()      # "abc123" has left the tracker entirely
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="running",
+             window_name="test-1", pr_url=None, pr_state=None)
+
+    fake = _FakeTmux()      # "test-1" is NOT in fake.windows — the window is dead
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_read_pr_url", return_value=None), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["reconciled_done"] == 0
+    assert summary["reconciled_failed"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "failed"
+    assert run["last_error"] == "tmux window disappeared"
+
+
+def test_reconcile_done_ordering_never_preempts_the_failed_path(tmp_path):
+    """Guard 5 — ordering. The `not in open_ids` check runs BEFORE the window-gone→failed
+    check, so a PR-less dead-window row must not win a race into `done` by virtue of being
+    checked first: the evidence gate has to reject it there and let the failed check (below)
+    actually make the call. This is the same scenario as the cmx-100 repro, asserted from the
+    ordering angle: if the done-branch were ever restored to fire unconditionally, this row
+    would be marked `done` on the SAME tick the failed-path should have claimed it.
+    """
+    wf = _wf(tmp_path)
+    source = _Source()
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="running",
+             window_name="test-1", pr_url=None, pr_state=None)
+
+    fake = _FakeTmux()       # dead window AND not in open_ids, at the same time
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_read_pr_url", return_value=None), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        summary = dispatcher.tick(wf.path)
+
+    # The done-branch never fires for this row — the failed-path (reused, not duplicated)
+    # is what actually decides it.
+    assert summary["reconciled_done"] == 0
+    assert summary["reconciled_failed"] == 1
+    assert dispatcher.resolve_run("abc123")["status"] == "failed"
+
+
+def test_reconcile_done_from_a_MERGED_PR_even_with_no_review_state(tmp_path):
+    """Guard 4 — merged-PR evidence counts even without a review state. A `running` row
+    that left `open_ids` but whose `_read_pr_status` finds a MERGED PR is legitimate
+    completion evidence (the agent pushed a PR directly and it merged before the loop ever
+    saw an awaiting_review row) — it reconciles to `done`, same as the REVIEW-status path.
+
+    Seen to go red: gating `done` on review-status alone (ignoring a merged PR when the row
+    never reached a review state) fails this test — the row is left `running`/`failed`
+    instead of `done` despite a real, verifiable merge.
+    """
+    wf = _wf(tmp_path)
+    source = _Source()
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="running", window_name="test-1",
+             pr_url="https://github.com/o/r/pull/80", pr_state="open")
+
+    fake = _FakeTmux()
+    fake.windows = [("@1", "test-1")]     # window still alive — irrelevant once merged
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_read_pr_url", return_value=None), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("merged", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["reconciled_done"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "done"
+    assert run["pr_url"] == "https://github.com/o/r/pull/80"
+
+
+def test_reconcile_done_from_a_review_state_row_that_left_the_tracker(tmp_path):
+    """Guard 3 (confirm) — the genuine happy path stays intact. A REVIEW-status row (the
+    agent opened a PR; a human struck the tracker line by hand, or the legacy self-strike
+    flow removed it) whose task left `open_ids` still reconciles to `done` — the completion-
+    evidence gate added for claimed/running rows must not touch this path.
+    """
+    wf = _wf(tmp_path)
+    source = _Source()      # "abc123" has left the tracker
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="awaiting_review",
+             window_name="test-1", pr_url="https://github.com/o/r/pull/80", pr_state="open")
+
+    fake = _FakeTmux()
+    fake.windows = [("@1", "test-1")]
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_read_pr_url", return_value=None), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["reconciled_done"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "done"
+    kill_calls = [c for c in fake.calls if isinstance(c, list) and c[:2] == ["tmux", "kill-window"]]
+    assert any("test-1" in c[-1] for c in kill_calls)   # window killed
+
+
 def test_a_vanished_window_in_a_review_state_is_completion_not_death(tmp_path):
     """The agent killed its own window on task-finished; the PR then failed review. That
     window is not a corpse — reporting it as one is the false-DIED bug in a new hat."""
