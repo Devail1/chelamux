@@ -496,6 +496,28 @@ def test_env_override_cannot_widen_the_forbidden_base(tmp_path):
     squash.assert_not_called()
 
 
+def test_env_main_cannot_widen_when_the_workflow_declares_nothing(tmp_path):
+    """🔴 ENV CANNOT WIDEN AN UNSET DECLARATION — the most dangerous env case: a workflow
+    that declares NO base_branch (declared_base None) must fall back to AUTONOMOUS_BASE for
+    the *allowed* base, but a FORBIDDEN base is reachable ONLY via a COMMITTED declaration —
+    never via the env fallback. So even with CHELA_MERGE_BASE=main (patched here) and a
+    declaration-less workflow, a PR based on ``main`` is refused. Corrupt (key the forbidden
+    bypass on ``allowed_base`` instead of ``declared_base``) and this goes red."""
+    wf_dir = tmp_path
+    (wf_dir / "WORKFLOW.md").write_text("---\nproject_key: CMX\n---\nbody\n")  # declares nothing
+    _seed_run(wf_dir)
+    with patch.object(contract, "AUTONOMOUS_BASE", "main"), \
+         patch.object(contract, "_read_pr_base", return_value="main"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "never"
+    squash.assert_not_called()
+
+
 def test_a_declaration_does_not_widen_a_different_workflows_runs(tmp_path):
     """🔴 SCOPED TO ITS OWN RUNS — workflow A declares ``main``; the run under test is
     dispatched by workflow B (declares ``dev``). A's declaration must never apply to B's
