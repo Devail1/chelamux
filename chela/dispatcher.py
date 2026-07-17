@@ -1864,11 +1864,18 @@ def tick(workflow_path: str | Path) -> dict:
         # matter which state the loop left the row in. A status list that only knew
         # awaiting_review would strand those rows forever — and the run would keep its
         # branch, its worktree and its tracker line, unstruck.
+        #
+        # ⛔ SCOPED TO THIS WORKFLOW, same reason as the PR-refresh query above.
+        # `open_ids` is only THIS workflow's open tasks, so an unscoped query here
+        # would pull every OTHER workflow's active/review runs too, find their
+        # task_id missing from open_ids, and mark them `done` ("removed from
+        # source, window killed") — killing a live sibling workflow's run within
+        # one tick of dispatch.
         rows = conn.execute(
-            "SELECT * FROM runs WHERE status IN ({})".format(
+            "SELECT * FROM runs WHERE workflow_path=? AND status IN ({})".format(
                 ",".join("?" * len(ACTIVE_STATUSES + REVIEW_STATUSES))
             ),
-            ACTIVE_STATUSES + REVIEW_STATUSES,
+            (str(wf.path), *ACTIVE_STATUSES, *REVIEW_STATUSES),
         ).fetchall()
         for row in rows:
             if row["status"] in REVIEW_STATUSES and row["pr_state"] == "merged":
@@ -1885,34 +1892,62 @@ def tick(workflow_path: str | Path) -> dict:
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (PR merged)", row["task_id"])
                 continue
-            if row["task_id"] not in open_ids:
+            if row["task_id"] not in open_ids and row["status"] in REVIEW_STATUSES:
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
                 # the live tmux pane, and that mapping disappears once tmux drops
                 # the window. For awaiting_review rows the window is already dead
                 # (the task-finished CLI kills it), so the transcript read is a
                 # no-op fallback for the rare case where it wasn't killed.
+                #
+                # A REVIEW-status row already carries its own completion evidence
+                # (the agent opened a PR and reached a review state) — the task
+                # leaving the tracker (a human striking the line on merge, or the
+                # legacy self-strike) is legitimate done-evidence here. Preserve
+                # the original ended_at so the timestamp reflects when the agent
+                # finished, not when the human merged the PR.
                 pr_url = _read_pr_url(row["window_name"])
                 if row["window_name"]:
                     _kill_window(row["window_name"])
-                # Preserve the original ended_at on a review-state → done so
-                # the timestamp reflects when the agent finished, not when the
-                # human merged the PR. claimed/running rows have no ended_at
-                # yet, so stamp it now.
-                if row["status"] in REVIEW_STATUSES:
-                    conn.execute(
-                        "UPDATE runs SET status='done', pr_url=COALESCE(?, pr_url) WHERE task_id=?",
-                        (pr_url, row["task_id"]),
-                    )
-                    merged_in_tick += 1
-                else:
-                    conn.execute(
-                        "UPDATE runs SET status='done', ended_at=?, pr_url=COALESCE(?, pr_url) WHERE task_id=?",
-                        (_now(), pr_url, row["task_id"]),
-                    )
+                conn.execute(
+                    "UPDATE runs SET status='done', pr_url=COALESCE(?, pr_url) WHERE task_id=?",
+                    (pr_url, row["task_id"]),
+                )
+                merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (removed from source, window killed)", row["task_id"])
                 continue
+            if row["task_id"] not in open_ids:
+                # claimed/running, no review state: "left the tracker" is NOT proof of a
+                # merge (cmx-100 — an orphaned agent whose window died before ever opening a
+                # PR still leaves the tracker for unrelated reasons: a human edit, a re-hash,
+                # uncommitted-tracker churn). Gate `done` on completion evidence — a merged
+                # PR — same as _read_pr_url already fetches for the review-status branch
+                # above. No evidence means this row is NOT done here: it falls through to
+                # the window-gone→failed check below (reused, not duplicated) if its window
+                # is dead, or is left alone — still running/claimed — for the watchdog if
+                # its window is still alive. Don't kill a window we haven't proven finished.
+                pr_url = _read_pr_url(row["window_name"])
+                effective_pr_url = pr_url or row["pr_url"]
+                wf_path = row["workflow_path"]
+                repo_dir = str(Path(wf_path).parent) if wf_path else None
+                pr_state = row["pr_state"]
+                if pr_state != "merged" and effective_pr_url:
+                    pr_state, _mergeable = _read_pr_status(effective_pr_url, repo_dir)
+                if pr_state == "merged":
+                    if row["window_name"]:
+                        _kill_window(row["window_name"])
+                    conn.execute(
+                        "UPDATE runs SET status='done', ended_at=?, pr_url=COALESCE(?, pr_url), "
+                        "pr_state=COALESCE(?, pr_state) WHERE task_id=?",
+                        (_now(), pr_url, pr_state, row["task_id"]),
+                    )
+                    summary["reconciled_done"] += 1
+                    log.info("Task %s done (removed from source, merged PR found)", row["task_id"])
+                    continue
+                # No completion evidence — fall through (no `continue`): the window-gone→
+                # failed check right below catches a dead window; a live window (or a
+                # claimed row with none yet) is left untouched for the watchdog.
             if row["status"] == "running" and row["window_name"] and row["window_name"] not in live_windows:
                 # A dead REWORK re-enters the rework loop; only a dead first dispatch is a
                 # `failed` the claim loop may retry from scratch (_rework_failed).
