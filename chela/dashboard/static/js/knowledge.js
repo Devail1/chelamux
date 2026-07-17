@@ -15,7 +15,7 @@ import { $, api, attrEsc, escHtml, relativeTime } from './util.js';
 // self-contained so the portable viewer.html (Phase 4) can reuse them verbatim.
 // ---------------------------------------------------------------------------
 
-const _kn = { tree: null, view: 'glance', path: null, q: '' };
+const _kn = { tree: null, view: 'glance', path: null, q: '', sigma: null };
 
 // Entry point — called by the global refresh loop while the Knowledge tab is
 // active. Loads the tree once; never clobbers a concept the user is reading.
@@ -42,6 +42,7 @@ async function knRefresh(btn) {
 }
 
 function knBackToGlance() {
+    knKillGraph();
     _kn.view = 'glance';
     _kn.path = null;
     const s = $('#kn-search'); if (s) s.value = '';
@@ -189,6 +190,7 @@ function knProjectChip(p) {
 // --- Concept detail (frontmatter card + body + backlinks) ------------------
 
 async function knOpen(path) {
+    knKillGraph();
     _kn.view = 'concept';
     _kn.path = path;
     const el = $('#kn-content');
@@ -271,6 +273,7 @@ function knFilterType(type) {
 
 async function knRunSearch(q, type) {
     if (!q && !type) { knBackToGlance(); return; }
+    knKillGraph();
     _kn.view = 'search';
     const el = $('#kn-content');
     let params = '/api/knowledge/search?q=' + encodeURIComponent(q || '');
@@ -290,9 +293,120 @@ async function knRunSearch(q, type) {
     el.innerHTML = `<div class="kn-glance">${head}${body}</div>`;
 }
 
-// --- Graph -----------------------------------------------------------------
+// --- Graph -------------------------------------------------------------
+//
+// Renderer = sigma.js + graphology (WebGL), vendored+minified at
+// static/vendor/sigma-graph.min.js and loaded as a global (window.chelaGraphLibs)
+// — the same pattern as gridstack. graphology-layout-forceatlas2 gives an actual
+// force-directed layout instead of the old hand-rolled circular SVG.
+//
+// The DOM/WebGL glue (knRenderSigma) is not unit-tested — sigma needs a real
+// WebGL context, which jsdom doesn't provide. What IS tested is the pure data
+// step (knGraphModel/knNodeColor below): seeding node positions, resolving
+// per-type colors, and filtering edges — no graphology/Sigma/DOM involved.
+
+const _KN_GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+// Deterministic, non-overlapping seed layout (golden-angle spiral). forceAtlas2
+// needs a starting position per node before it can spread them; a symmetric seed
+// (e.g. a plain circle) leaves force-directed layout stuck at a degenerate fixed
+// point, so this is a correctness requirement, not cosmetic.
+function knGraphSeed(i) {
+    const r = Math.sqrt(i + 1);
+    const a = i * _KN_GOLDEN_ANGLE;
+    return { x: r * Math.cos(a), y: r * Math.sin(a) };
+}
+
+// type -> {theme CSS var, static fallback}. `project` has no CSS var: it was a
+// fixed hex in every theme even under the old SVG renderer, so it stays fixed.
+const _KN_TYPE_COLOR = {
+    agent: { varName: '--green', fallback: '#3fb950' },
+    run: { varName: '--accent', fallback: '#58a6ff' },
+    sched: { varName: '--yellow', fallback: '#d29922' },
+    project: { varName: null, fallback: '#a371f7' },
+    other: { varName: '--text-dim', fallback: '#8b949e' },
+};
+
+// Resolve a concept type to a render color. `cssVar(name, fallback)` is injected
+// so this stays pure/testable (production passes knCssVar, which reads the DOM).
+function knNodeColor(type, cssVar) {
+    const c = _KN_TYPE_COLOR[knTypeClass(type)] || _KN_TYPE_COLOR.other;
+    return c.varName ? cssVar(c.varName, c.fallback) : c.fallback;
+}
+
+// Build a plain-data graph model from the /api/knowledge/graph response: seeded
+// node positions + resolved colors, edges filtered to known node pairs (mirrors
+// the old SVG renderer's dangling-edge guard), self-loops dropped, deduped. Pure
+// — no graphology/Sigma/DOM — so it's unit-testable without a WebGL context.
+function knGraphModel(g, cssVar) {
+    const nodes = g.nodes || [];
+    const known = new Set(nodes.map(n => n.id));
+    const outNodes = nodes.map((n, i) => {
+        const seed = knGraphSeed(i);
+        return {
+            id: n.id, title: n.title, type: n.type,
+            x: seed.x, y: seed.y,
+            color: knNodeColor(n.type, cssVar),
+        };
+    });
+    const seen = new Set();
+    const outEdges = [];
+    for (const e of (g.edges || [])) {
+        if (!known.has(e.source) || !known.has(e.target) || e.source === e.target) continue;
+        const key = e.source + ' ' + e.target;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        outEdges.push({ source: e.source, target: e.target });
+    }
+    return { nodes: outNodes, edges: outEdges };
+}
+
+// Read a theme CSS var with a fallback (same pattern as util.js's amber lookup).
+function knCssVar(name, fallback) {
+    const v = (getComputedStyle(document.body).getPropertyValue(name) || '').trim();
+    return v || fallback;
+}
+
+// The WebGL glue: graphology Graph -> forceAtlas2 layout -> Sigma renderer.
+// Click a node to open its concept; hover swaps the cursor.
+function knRenderSigma(container, model) {
+    const libs = window.chelaGraphLibs;
+    if (!libs || !container) return null;
+    const { Graph, Sigma, forceAtlas2 } = libs;
+    const graph = new Graph();
+    model.nodes.forEach(n => {
+        graph.addNode(n.id, { x: n.x, y: n.y, size: 5, label: n.title, color: n.color });
+    });
+    model.edges.forEach(e => {
+        graph.addEdge(e.source, e.target, { size: 1, color: knCssVar('--border', '#21262d') });
+    });
+    forceAtlas2.assign(graph, {
+        iterations: 120,
+        settings: { gravity: 1, scalingRatio: 8, barnesHutOptimize: model.nodes.length > 200 },
+    });
+    const renderer = new Sigma(graph, container, {
+        renderLabels: true,
+        labelRenderedSizeThreshold: 0,
+        labelColor: { color: knCssVar('--text-dim', '#8b949e') },
+        defaultEdgeColor: knCssVar('--border', '#21262d'),
+    });
+    renderer.on('clickNode', ({ node }) => knOpen(node));
+    renderer.on('enterNode', () => { container.style.cursor = 'pointer'; });
+    renderer.on('leaveNode', () => { container.style.cursor = 'default'; });
+    return renderer;
+}
+
+// Tear down the live Sigma instance — must run before every view change away
+// from 'graph' (knBackToGlance/knOpen/knRunSearch) or its WebGL context leaks.
+function knKillGraph() {
+    if (_kn.sigma) {
+        _kn.sigma.kill();
+        _kn.sigma = null;
+    }
+}
 
 async function knShowGraph() {
+    knKillGraph();
     _kn.view = 'graph';
     const el = $('#kn-content');
     if (el) el.innerHTML = '<div class="kn-loading">Building graph…</div>';
@@ -304,39 +418,15 @@ async function knShowGraph() {
             + '<div class="kn-dim">No concepts to graph.</div></div>';
         return;
     }
-    // Circular layout: cheap, deterministic, dependency-free. Position nodes on a
-    // ring, draw edges as lines, label each node; click to open the concept.
-    const W = 760, H = 520, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 70;
-    const pos = {};
-    nodes.forEach((n, i) => {
-        const a = (i / nodes.length) * 2 * Math.PI - Math.PI / 2;
-        pos[n.id] = { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) };
-    });
-    const lines = edges.map(e => {
-        const a = pos[e.source], b = pos[e.target];
-        if (!a || !b) return '';
-        return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" class="kn-edge"/>`;
-    }).join('');
-    const dots = nodes.map(n => {
-        const p = pos[n.id];
-        const anchor = p.x < cx - 20 ? 'end' : (p.x > cx + 20 ? 'start' : 'middle');
-        const dx = p.x < cx - 20 ? -8 : (p.x > cx + 20 ? 8 : 0);
-        return `<g class="kn-node kn-node-${knTypeClass(n.type)}" onclick="chela.knOpen('${attrEsc(n.id)}')">
-            <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="6"/>
-            <text x="${(p.x + dx).toFixed(1)}" y="${(p.y + 4).toFixed(1)}" text-anchor="${anchor}">${escHtml(n.title)}</text>
-          </g>`;
-    }).join('');
     el.innerHTML = `
       <div class="kn-glance">
         <div class="kn-section-title">Graph
           <span class="kn-dim">· ${nodes.length} concepts · ${edges.length} links</span>
           <a class="kn-back" style="float:right" onclick="chela.knBackToGlance()">← Knowledge</a></div>
-        <div class="kn-graph-wrap">
-          <svg viewBox="0 0 ${W} ${H}" class="kn-graph" preserveAspectRatio="xMidYMid meet">
-            <g class="kn-edges">${lines}</g>${dots}
-          </svg>
-        </div>
+        <div class="kn-graph-wrap"><div id="kn-graph-canvas" class="kn-graph-canvas"></div></div>
       </div>`;
+    const model = knGraphModel(g, knCssVar);
+    _kn.sigma = knRenderSigma($('#kn-graph-canvas'), model);
 }
 
 // --- Shared helpers (also reused by the portable viewer, Phase 4) ----------
@@ -423,7 +513,7 @@ function knMd(src, base) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { _kn, knBackToGlance, refreshKnowledge };
+export { _kn, knBackToGlance, refreshKnowledge, knGraphModel, knNodeColor };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

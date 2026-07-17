@@ -528,6 +528,8 @@
 {% if terminals_enabled %}<script>window.TERMINALS_ENABLED = true;</script>{% endif %}
 {% if wall_tile_dispatched %}<script>window.WALL_TILE_DISPATCHED = true;</script>{% endif %}
 <script src="static/vendor/gridstack-all.js"></script>
+<!-- Knowledge tab graph view: sigma.js + graphology (WebGL), vendored+minified. -->
+<script src="static/vendor/sigma-graph.min.js"></script>
 <!-- Stage 0: one ES-module entry. main.js imports the rest through the module
      graph (util → feature renderers → nav → sse → main bootstrap). No build step.
      terminals.js/launcher.js load via the graph and stay inert when terminals
