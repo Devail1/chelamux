@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -14,12 +15,12 @@ def ensure_worktree(
     task_number: int,
     root: Path,
 ) -> tuple[Path, bool]:
-    """Idempotent. Returns (worktree_path, created) for task_id.
+    """Idempotent AND collision-proof. Returns (worktree_path, created) for task_id.
 
-    `created` is True only when this call freshly created the worktree, and
-    False when an existing worktree for the derived branch was reused (an
-    idempotent re-dispatch). Callers use this to fire one-shot, per-worktree
-    setup (e.g. `hooks.after_create`) exactly once on creation.
+    `created` is True when this call freshly created the worktree — including when it
+    had to clear a collision to do so — and False only when a LIVE worktree for the
+    derived branch was reused (an idempotent re-dispatch). Callers use this to fire
+    one-shot, per-worktree setup (e.g. `hooks.after_create`) exactly once on creation.
 
     Branch name follows the Jira-style scheme `{project_key.lower()}-{task_number}`
     (e.g. `proj-7`). The worktree directory is still keyed by `task_id` so the
@@ -28,17 +29,56 @@ def ensure_worktree(
 
     If a worktree already exists for the derived branch, return its path with
     created=False. Otherwise create one branched from base_branch (created=True).
+
+    ⛔ `task_number` is minted per-workflow as `MAX(task_number)+1` over the runs the
+    DB currently remembers (see `dispatcher._spawn`) — and the DB does not remember
+    forever: `_prune_done_rows` drops old `done` rows past the retention window, and
+    `delete_run` drops a `claimed`/`running` row outright. Both leave the branch name
+    (and sometimes the worktree directory) behind on disk with nothing in the DB
+    pointing at it any more. The NEXT task to land on that same number — a fresh
+    task_id, unrelated to whatever used the slot before — must not have its dispatch
+    fail just because `-b branch` refuses a branch that already exists, or `worktree
+    add` refuses a directory that's still sitting there. Three collisions, handled in
+    order, all resolved by clearing the leftover and creating fresh (never by reusing
+    stale history — a reused slot is a NEW task, not a continuation of the old one):
+      1. a dead worktree *administrative record* (directory gone, git doesn't know) —
+         `worktree prune` drops it so it doesn't shadow the live check below;
+      2. a *stale branch* with no worktree attached to it — force-deleted before `-b`;
+      3. an *orphaned directory* at the target path that git has no record of at all —
+         cleared before `worktree add`.
+    A branch or directory that a LIVE worktree still owns is never touched here; that
+    case returns via the reuse path above, before any of this runs.
     """
     branch = f"{project_key.lower()}-{task_number}"
     wt_path = (root / task_id).resolve()
 
+    # (1) Drop administrative records for worktrees whose directory is already gone —
+    # otherwise `git worktree list` still reports one as live and it would wrongly
+    # shadow the reuse check below, or block `worktree add` on the path/branch later.
+    subprocess.run(
+        ["git", "-C", str(repo_path), "worktree", "prune"], check=False, capture_output=True,
+    )
+
     existing = _find_existing_worktree(repo_path, branch)
-    if existing is not None:
+    if existing is not None and existing.is_dir():
         return existing, False
 
+    # (2) A branch with this name exists but nothing above claimed a live worktree for
+    # it — a stale leftover from a pruned/deleted run that reused this task_number.
+    # Nothing owns it, so it's safe to drop and let `-b` recreate it fresh.
+    if _branch_exists(repo_path, branch):
+        log.warning("Branch %s exists with no live worktree; deleting stale branch", branch)
+        subprocess.run(
+            ["git", "-C", str(repo_path), "branch", "-D", branch],
+            check=True, capture_output=True,
+        )
+
+    # (3) Something occupies wt_path that git has no record of (a crash mid-create, a
+    # hand-deleted worktree that left files behind). `worktree add` refuses a
+    # pre-existing target, so clear it rather than fail the dispatch on it.
     if wt_path.exists():
-        # Stale directory; let git reuse it if it can, else bail.
-        log.warning("Worktree path %s exists but git has no record; attempting reuse", wt_path)
+        log.warning("Worktree path %s exists but git has no record of it; clearing it", wt_path)
+        shutil.rmtree(wt_path, ignore_errors=True)
 
     root.mkdir(parents=True, exist_ok=True)
     subprocess.run(
