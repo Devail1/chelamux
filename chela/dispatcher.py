@@ -1864,11 +1864,18 @@ def tick(workflow_path: str | Path) -> dict:
         # matter which state the loop left the row in. A status list that only knew
         # awaiting_review would strand those rows forever — and the run would keep its
         # branch, its worktree and its tracker line, unstruck.
+        #
+        # ⛔ SCOPED TO THIS WORKFLOW, same reason as the PR-refresh query above.
+        # `open_ids` is only THIS workflow's open tasks, so an unscoped query here
+        # would pull every OTHER workflow's active/review runs too, find their
+        # task_id missing from open_ids, and mark them `done` ("removed from
+        # source, window killed") — killing a live sibling workflow's run within
+        # one tick of dispatch.
         rows = conn.execute(
-            "SELECT * FROM runs WHERE status IN ({})".format(
+            "SELECT * FROM runs WHERE workflow_path=? AND status IN ({})".format(
                 ",".join("?" * len(ACTIVE_STATUSES + REVIEW_STATUSES))
             ),
-            ACTIVE_STATUSES + REVIEW_STATUSES,
+            (str(wf.path), *ACTIVE_STATUSES, *REVIEW_STATUSES),
         ).fetchall()
         for row in rows:
             if row["status"] in REVIEW_STATUSES and row["pr_state"] == "merged":

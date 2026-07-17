@@ -524,6 +524,42 @@ def test_a_merged_pr_still_reconciles_to_done_from_any_review_state(tmp_path, st
     assert dispatcher.resolve_run("abc123")["status"] == "done"
 
 
+def test_reconcile_never_false_dones_a_SIBLING_WORKFLOWS_live_run(tmp_path):
+    """CMX-102. `open_ids` is only THIS workflow's open tasks — a run belonging to a
+    DIFFERENT registered workflow was never going to be in it. Before the fix, the
+    reconcile query pulled active/review rows from every workflow, so a tick of workflow
+    A saw workflow B's live run, found its task_id missing from A's open_ids, and killed
+    it as "removed from source, window killed" — seconds after B dispatched it.
+
+    Seen to go red: reverting the `WHERE workflow_path=?` scope on the reconcile query
+    (chela/dispatcher.py) fails this test — the sibling row gets marked `done` and its
+    window killed even though it belongs to a workflow this tick never touched.
+    """
+    wf = _wf(tmp_path)
+    sibling_wf_path = str(tmp_path / "sibling" / "WORKFLOW.md")
+    source = _Source("foo")     # workflow A's ONLY open task — "sibling-task" is not in it
+    with dispatcher._db() as conn:
+        _row(conn, task_id="foo", workflow_path=str(wf.path),
+             status="awaiting_review", pr_state="open", window_name="test-1")
+        _row(conn, task_id="sibling-task", workflow_path=sibling_wf_path,
+             status="running", pr_state=None, pr_url=None, window_name="sib-1")
+
+    fake = _FakeTmux()
+    fake.windows = [("@1", "test-1"), ("@2", "sib-1")]
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["reconciled_done"] == 0
+    sibling = dispatcher.resolve_run("sibling-task")
+    assert sibling["status"] == "running"          # NOT false-doned
+    assert sibling["window_name"] == "sib-1"        # NOT killed
+    assert dispatcher.resolve_run("foo")["status"] == "awaiting_review"
+
+
 def test_a_vanished_window_in_a_review_state_is_completion_not_death(tmp_path):
     """The agent killed its own window on task-finished; the PR then failed review. That
     window is not a corpse — reporting it as one is the false-DIED bug in a new hat."""
