@@ -395,3 +395,176 @@ def test_escalate_pushes_to_the_human_when_a_notifier_is_configured():
 def test_escalate_refuses_an_empty_summary():
     result = contract.escalate("   ")
     assert result["ok"] is False
+
+
+# --- PER-WORKFLOW AUTONOMOUS MERGE BASE (CMX-103) --------------------------------------
+#
+# One repo's trunk convention must never leak into another's: the allowed autonomous base
+# is resolved PER RUN from its OWN dispatching workflow's committed `workspace.base_branch`
+# (lean-alpha declares `main`; chelamux declares `dev`), and a FORBIDDEN base is reachable
+# ONLY as that workflow's own explicit, committed declaration — never via the env fallback,
+# never on another workflow's behalf, and never for chela's own control repo.
+
+
+def _repo_declaring(tmp_path: Path, base_branch: str, *, project_key: str = "CMX") -> Path:
+    """A workflow dir whose WORKFLOW.md COMMITS to ``workspace.base_branch`` — the per-repo
+    declaration ``contract._declared_base_branch`` resolves the allowed autonomous base from."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(
+        f"---\nproject_key: {project_key}\nworkspace:\n  base_branch: {base_branch}\n---\nbody\n"
+    )
+    return tmp_path
+
+
+def test_declared_base_branch_is_none_when_workflow_path_is_falsy():
+    assert contract._declared_base_branch(None) is None
+    assert contract._declared_base_branch("") is None
+
+
+def test_declared_base_branch_reads_the_committed_declaration(tmp_path):
+    repo = _repo_declaring(tmp_path, "main")
+    assert contract._declared_base_branch(str(repo / "WORKFLOW.md")) == "main"
+
+
+def test_declared_base_branch_is_none_when_the_workflow_declares_nothing(tmp_path):
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text("---\nproject_key: CMX\n---\nbody\n")
+    assert contract._declared_base_branch(str(wf)) is None
+
+
+def test_is_control_repo_detects_chelas_own_source_dir():
+    control = Path(contract.__file__).resolve().parent.parent
+    assert contract._is_control_repo(str(control)) is True
+
+
+def test_is_control_repo_is_false_for_an_unrelated_dir(tmp_path):
+    assert contract._is_control_repo(str(tmp_path)) is False
+
+
+def test_a_workflow_declaring_main_may_merge_to_its_own_declared_main(tmp_path):
+    """🔴 THE LEAN-ALPHA REPRO — a run whose OWN dispatching workflow commits to
+    ``base_branch: main`` merges to that ``main``. Corrupt the resolver to ignore the
+    declaration (always fall back to the global ``dev`` base) and this goes red."""
+    repo = _repo_declaring(tmp_path, "main")
+    _seed_run(repo)
+    with patch.object(contract, "_read_pr_base", return_value="main"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "lap4"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is True
+    assert result["base"] == "main"
+    squash.assert_called_once()
+
+
+def test_a_workflow_declaring_dev_is_still_forbidden_from_main(tmp_path):
+    """🔴 THE SACROSANCT INVARIANT — a run whose own workflow declares ``dev`` may NEVER
+    reach a PR based on ``main``, even with everything else green. Corrupt (let a
+    non-matching declared base widen the forbidden check anyway) and this goes red."""
+    repo = _repo_declaring(tmp_path, "dev")
+    _seed_run(repo)
+    with patch.object(contract, "_read_pr_base", return_value="main"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "never"
+    squash.assert_not_called()
+
+
+def test_env_override_cannot_widen_the_forbidden_base(tmp_path):
+    """🔴 ENV CANNOT WIDEN — even with ``CHELA_MERGE_BASE=main`` (simulated here by patching
+    the module constant it seeds), a run whose own workflow declares ``dev`` is still
+    refused from ``main``. Only a COMMITTED per-workflow declaration may reach a forbidden
+    base — never the env fallback. Corrupt (let ``AUTONOMOUS_BASE`` win over the declared
+    base check) and this goes red."""
+    repo = _repo_declaring(tmp_path, "dev")
+    _seed_run(repo)
+    with patch.object(contract, "AUTONOMOUS_BASE", "main"), \
+         patch.object(contract, "_read_pr_base", return_value="main"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "never"
+    squash.assert_not_called()
+
+
+def test_a_declaration_does_not_widen_a_different_workflows_runs(tmp_path):
+    """🔴 SCOPED TO ITS OWN RUNS — workflow A declares ``main``; the run under test is
+    dispatched by workflow B (declares ``dev``). A's declaration must never apply to B's
+    run. Corrupt (resolve the declared base from some other/cached workflow instead of THIS
+    run's own ``workflow_path``) and this goes red."""
+    _repo_declaring(tmp_path / "a", "main")               # a sibling workflow — unused here
+    workflow_b = _repo_declaring(tmp_path / "b", "dev")
+    _seed_run(workflow_b)
+    with patch.object(contract, "_read_pr_base", return_value="main"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "never"
+    squash.assert_not_called()
+
+
+def test_unreadable_workflow_fails_closed_to_the_fallback_base(repo):
+    """🔴 UNREADABLE FAILS CLOSED — an unparseable ``WORKFLOW.md`` (the ``repo`` fixture's
+    front-matter-less stub) declares nothing, so the allowed base falls back to
+    ``AUTONOMOUS_BASE`` (``dev``) — never to whatever the live PR base happens to be. A PR
+    based on ``main`` is still refused. Corrupt (fail OPEN — treat an unreadable workflow as
+    licensing whatever base the PR already has) and this goes red."""
+    _seed_run(repo)
+    with patch.object(contract, "_read_pr_base", return_value="main"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "never"
+    squash.assert_not_called()
+
+
+def test_a_workflow_declaring_dev_merges_normally_to_dev(tmp_path):
+    """The happy path stays intact: a workflow that commits to ``dev`` and a PR based on
+    ``dev`` merges exactly as before. Corrupt the resolver (e.g. always refuse) and this
+    goes red."""
+    repo = _repo_declaring(tmp_path, "dev")
+    _seed_run(repo)
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is True
+    assert result["base"] == "dev"
+    squash.assert_called_once()
+
+
+def test_control_repo_self_protection_still_forbids_its_own_declared_main(tmp_path):
+    """Defense in depth (not today's live gap — chelamux's own WORKFLOW.md declares
+    ``dev``): even if chela's OWN control repo declared ``base_branch: main``, that
+    declaration must never be honored to widen ITS OWN autonomous merge into a forbidden
+    base. Corrupt (drop the control-repo check from the widen condition) and this goes
+    red."""
+    repo = _repo_declaring(tmp_path, "main")
+    _seed_run(repo)
+    with patch.object(contract, "_is_control_repo", return_value=True), \
+         patch.object(contract, "_read_pr_base", return_value="main"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "never"
+    squash.assert_not_called()

@@ -12,8 +12,12 @@ Two actions live here, each enforcing its slice of the contract:
 - :func:`merge` — the **AUTONOMOUS merge gate**. A dispatched ``cmx-N`` PR merges only when
   *all* hold, checked HERE and read LIVE from GitHub at the moment of merging:
 
-    1. the PR's base branch is the one autonomous target (``dev``) and is **never** a
-       production-facing branch (``main``/``master``/…) — the contract's NEVER line;
+    1. the PR's base branch is the one autonomous target **declared by this run's own
+       dispatching workflow** (``workspace.base_branch`` — ``dev`` for chelamux itself,
+       falling back to ``dev``/``CHELA_MERGE_BASE`` when a workflow declares nothing) and is
+       **never** a production-facing branch (``main``/``master``/…) UNLESS that same
+       workflow explicitly committed to exactly that branch — the contract's NEVER line,
+       scoped per workflow so one repo's trunk convention can never widen another's;
     2. the judge said ``clean`` on this run;
     3. CI is green;
     4. GitHub reports the PR open and ``MERGEABLE``;
@@ -49,13 +53,16 @@ from chela import config, dispatcher, event_log, notify
 from chela.dispatcher import CI_PASSING
 from chela.judge import J_CLEAN
 from chela.personas import lease
+from chela.workflow import load_workflow_cached
 
 log = logging.getLogger("chela.contract")
 
-# The one branch an autonomous merge may target. dev/dogfood is the ceiling
-# (ESCALATION_CONTRACT.md §AUTONOMOUS). Env-overridable for a fleet whose integration
-# branch is named differently — but the FORBIDDEN set below is absolute and no override
-# can widen it.
+# The FALLBACK autonomous base — used only when a run's own dispatching workflow declares
+# no `workspace.base_branch` (or its WORKFLOW.md can't be read/parsed). dev/dogfood is the
+# ceiling (ESCALATION_CONTRACT.md §AUTONOMOUS). Env-overridable for a fleet whose integration
+# branch is named differently — but the FORBIDDEN set below is absolute and the env alone can
+# never widen it: only a per-workflow COMMITTED ``base_branch`` can (see ``_declared_base_branch``
+# and the NEVER-line handling in :func:`merge`), and only for that workflow's own runs.
 AUTONOMOUS_BASE = os.environ.get("CHELA_MERGE_BASE", "dev").strip() or "dev"
 
 # NEVER — production-facing branches. No env, no --force, no chain of small autonomous
@@ -113,6 +120,49 @@ def _read_pr_base(pr_url: str | None, repo_dir: str | None) -> str | None:
     if not isinstance(data, dict):
         return None
     return (data.get("baseRefName") or "").strip() or None
+
+
+def _declared_base_branch(workflow_path: str | None) -> str | None:
+    """This run's OWN dispatching workflow's committed ``workspace.base_branch`` — the
+    per-repo declaration :func:`merge` resolves the allowed autonomous base from (PER-WORKFLOW
+    AUTONOMOUS MERGE BASE). Reads the same hot-reloaded, stat-gated cache the daemon's poll loop
+    already uses (:func:`chela.workflow.load_workflow_cached`), so a workflow's declared base is
+    always the one currently committed to disk.
+
+    None — never a default — when ``workflow_path`` is falsy, the file is missing/unparseable
+    (``WorkflowStatus.ok`` is False), or the front matter simply omits ``workspace.base_branch``.
+    Fail-closed: callers must treat None as "fall back to :data:`AUTONOMOUS_BASE`", not as any
+    particular branch name — an unreadable declaration is never silently assumed to be ``dev``
+    (or anything else).
+    """
+    if not workflow_path:
+        return None
+    status = load_workflow_cached(workflow_path)
+    if not status.ok or status.workflow is None:
+        return None
+    declared = status.workflow.get("workspace", "base_branch", default=None)
+    if not isinstance(declared, str):
+        return None
+    return declared.strip() or None
+
+
+def _is_control_repo(repo_dir: str) -> bool:
+    """Is ``repo_dir`` the repo chela's OWN source is running from — the control plane?
+
+    Self-protection (ESCALATION_CONTRACT.md's per-workflow base declaration must never
+    reach back and loosen chela's own gate): even if THIS repo's own ``WORKFLOW.md`` ever
+    declared a forbidden ``workspace.base_branch``, that declaration must not be honored here
+    — the daemon must never be talked into autonomously merging to its own production
+    ``main``. Detected by comparing ``repo_dir`` against the directory this very module's
+    package lives in (``chela/contract.py`` → its repo root), which is where the CURRENTLY
+    RUNNING chela's source sits, regardless of which repo it happens to be dispatching.
+    """
+    try:
+        here = Path(repo_dir).expanduser().resolve()
+        control = Path(__file__).resolve().parent.parent
+    except OSError:
+        return False
+    return here == control
 
 
 def _best_effort(task_id: str | None, label: str, argv: list[str], cwd: str, timeout: int) -> None:
@@ -192,8 +242,12 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
        (merge) while a human is still attending — the moment the lease lapses it must ``chela
        escalate`` instead. A **human's** own ``chela merge`` carries no actor stamp, so this gate
        never applies to a human — the human's presence IS the attendance;
-    3. the PR's base branch is not a production-facing branch (**NEVER**), and is the one
-       autonomous target ``dev`` — an unreadable base is refused too (unknown ≠ safe);
+    3. the PR's base branch equals the AUTONOMOUS TARGET this run's own dispatching
+       workflow declared (its committed ``workspace.base_branch`` — falling back to ``dev``
+       when it declares nothing or can't be read), and is not a production-facing branch
+       (**NEVER**) UNLESS that same workflow explicitly declared exactly that branch (never
+       via the env fallback, never on another workflow's behalf, never for chela's own
+       control repo) — an unreadable base is refused too (unknown ≠ safe);
     4. the judge said ``clean`` on this run (anything else — ``blocked`` /
        ``cannot_verify`` / never-ran — is a human's call);
     5. CI is green per GitHub;
@@ -238,21 +292,46 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
                              "this merge is unattended and is REFUSED. Escalate to a human instead.")
 
     # 3. THE NEVER LINE — the base branch, read live and checked first & hardest.
+    #
+    #    The allowed base is resolved PER RUN from its OWN dispatching workflow's committed
+    #    `workspace.base_branch` (a repo whose trunk IS `main` — e.g. lean-alpha — declares
+    #    that in its WORKFLOW.md). A workflow that declares nothing, or whose file can't be
+    #    read, falls back to the global AUTONOMOUS_BASE (`dev`) — fail-closed, never a guess.
     base = _read_pr_base(pr_url, repo_dir)
     if base is None:
         return _refuse(task_id, "escalate",
                        "could not read this PR's base branch — and a target nobody could "
                        "read is never assumed safe. Refusing to merge.")
+
+    declared_base = _declared_base_branch(wf_path)
+    allowed_base = declared_base or AUTONOMOUS_BASE
+
     if base.casefold() in FORBIDDEN_BASES:
-        return _refuse(task_id, "never", pr_base=base,
-                       error=f"this PR targets {base!r} — a production-facing branch. Merging "
-                             "to it is NEVER autonomous under any circumstance; it is a human's "
-                             "explicit, per-instance act. Refusing.")
-    if base != AUTONOMOUS_BASE:
+        # A forbidden base is reachable ONLY as an explicit, COMMITTED per-workflow
+        # declaration of exactly that branch — never via the AUTONOMOUS_BASE fallback (so
+        # the env alone, e.g. a misconfigured CHELA_MERGE_BASE=main, can never widen it),
+        # never for a workflow OTHER than the one that declared it, and never for chela's
+        # own control repo (self-protection — see `_is_control_repo`).
+        widened_by_own_declaration = (
+            declared_base is not None
+            and base.casefold() == declared_base.casefold()
+            and not _is_control_repo(repo_dir)
+        )
+        if not widened_by_own_declaration:
+            return _refuse(
+                task_id, "never", pr_base=base,
+                error=f"this PR targets {base!r} — a production-facing branch. Merging to it "
+                      "is NEVER autonomous unless THIS run's own dispatching workflow "
+                      f"explicitly declares {base!r} as its workspace.base_branch (it does "
+                      f"not: declared={declared_base!r}), and it is never honored for chela's "
+                      "own control repo. Otherwise this is a human's explicit, per-instance "
+                      "act. Refusing.")
+
+    if base != allowed_base:
         return _refuse(task_id, "escalate", pr_base=base,
                        error=f"this PR targets {base!r}, not the autonomous base "
-                             f"{AUTONOMOUS_BASE!r}. Merging outside the standing dev/dogfood "
-                             "grant is an escalation. Refusing.")
+                             f"{allowed_base!r} declared for its dispatching workflow. Merging "
+                             "outside that grant is an escalation. Refusing.")
 
     # 4. The judge's verdict — clean, or it is not the orchestrator's to merge.
     judge_state = run.get("judge_state")
@@ -290,9 +369,9 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
     # THE GATE HELD. Merge, then record the decision with its justification.
     result = _squash_merge(run, repo_dir, pr_url)
     justification = {
-        "task_id": task_id, "pr_url": pr_url, "base": base, "judge_state": judge_state,
-        "ci_state": ci.state, "pr_mergeable": mergeable, "reason": reason.strip(),
-        "actor": _actor(actor) or "human",
+        "task_id": task_id, "pr_url": pr_url, "base": base, "allowed_base": allowed_base,
+        "judge_state": judge_state, "ci_state": ci.state, "pr_mergeable": mergeable,
+        "reason": reason.strip(), "actor": _actor(actor) or "human",
     }
     if not result.get("ok"):
         event_log.append(
