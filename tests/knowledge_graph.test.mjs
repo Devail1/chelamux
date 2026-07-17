@@ -95,3 +95,65 @@ test('knNodeColor: matches knGraphModel\'s per-node resolution for the same type
     assert.equal(kn.knNodeColor('Agent', cssVar), '#3fb950');
     assert.equal(kn.knNodeColor('Project', cssVar), '#a371f7');
 });
+
+// --- Wiring: knShowGraph must actually feed knRenderSigma the knGraphModel ---
+// output, not the raw /api/knowledge/graph payload. The tests above only prove
+// knGraphModel itself is correct in isolation; they say nothing about whether
+// the live call site (knShowGraph) runs it before handing nodes to Sigma. A
+// regression there (e.g. `const model = { nodes, edges }` instead of
+// `knGraphModel(g, knCssVar)`) would still leave every test above green, so
+// this test drives knShowGraph end-to-end through a fake window.chelaGraphLibs
+// (no real WebGL needed — graphology/Sigma are just constructors we replace)
+// and asserts the nodes handed to graph.addNode carry knGraphModel's output:
+// seeded x/y and a resolved color. Raw API nodes have neither.
+class _FakeGraph {
+    constructor() { this.nodes = []; this.edges = []; }
+    addNode(id, attrs) { this.nodes.push({ id, ...attrs }); }
+    addEdge(source, target, attrs) { this.edges.push({ source, target, ...attrs }); }
+}
+class _FakeSigma {
+    on() {}
+    kill() {}
+}
+
+test('knShowGraph wiring: Sigma receives knGraphModel\'s seeded/colored nodes, not raw API nodes', async () => {
+    let builtGraph = null;
+    const origLibs = globalThis.window.chelaGraphLibs;
+    const origFetch = globalThis.fetch;
+    globalThis.window.chelaGraphLibs = {
+        Graph: class extends _FakeGraph { constructor() { super(); builtGraph = this; } },
+        Sigma: _FakeSigma,
+        forceAtlas2: { assign: () => {} },
+    };
+    const apiGraph = {
+        nodes: [
+            { id: 'a', title: 'A', type: 'Agent' },
+            { id: 'b', title: 'B', type: 'Project' },
+        ],
+        edges: [{ source: 'a', target: 'b' }],
+    };
+    globalThis.fetch = async () => ({ json: async () => apiGraph });
+    const container = globalThis.document.createElement('div');
+    container.id = 'kn-content';
+    globalThis.document.body.appendChild(container);
+
+    try {
+        await globalThis.window.chela.knShowGraph();
+    } finally {
+        globalThis.window.chelaGraphLibs = origLibs;
+        globalThis.fetch = origFetch;
+        container.remove();
+    }
+
+    assert.ok(builtGraph, 'knRenderSigma must construct a graph via window.chelaGraphLibs.Graph');
+    assert.equal(builtGraph.nodes.length, 2);
+    for (const n of builtGraph.nodes) {
+        assert.equal(typeof n.x, 'number', `node ${n.id} must carry knGraphModel's seeded x, not raw API data`);
+        assert.equal(typeof n.y, 'number', `node ${n.id} must carry knGraphModel's seeded y, not raw API data`);
+        assert.equal(typeof n.color, 'string', `node ${n.id} must carry knGraphModel's resolved color, not raw API data`);
+    }
+    const a = builtGraph.nodes.find(n => n.id === 'a');
+    const b = builtGraph.nodes.find(n => n.id === 'b');
+    assert.equal(a.color, '#3fb950', 'agent -> green, per knGraphModel type resolution');
+    assert.equal(b.color, '#a371f7', 'project -> fixed purple, per knGraphModel type resolution');
+});
