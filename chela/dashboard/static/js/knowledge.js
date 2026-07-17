@@ -379,7 +379,7 @@ function knGraphModel(g, cssVar) {
     const outEdges = [];
     for (const e of (g.edges || [])) {
         if (!known.has(e.source) || !known.has(e.target) || e.source === e.target) continue;
-        const key = e.source + ' ' + e.target;
+        const key = e.source + '\0' + e.target;
         if (seen.has(key)) continue;
         seen.add(key);
         outEdges.push({ source: e.source, target: e.target });
