@@ -178,6 +178,11 @@ test('knShowGraph wiring: Sigma receives knGraphModel\'s seeded/colored nodes, n
     const b = builtGraph.nodes.find(n => n.id === 'b');
     assert.equal(a.color, '#009E73', 'agent -> Okabe-Ito bluish green, per knGraphModel type resolution');
     assert.equal(b.color, '#CC79A7', 'project -> Okabe-Ito reddish purple, per knGraphModel type resolution');
+    assert.equal(a.label, kn.knNodeLabel('Agent', 'A'),
+        'node handed to graph.addNode must carry knGraphModel\'s glyph-prefixed label, not the raw title — '
+        + 'a render call-site reverted to n.title would still pass every other assertion here');
+    assert.equal(b.label, kn.knNodeLabel('Project', 'B'),
+        'node handed to graph.addNode must carry knGraphModel\'s glyph-prefixed label, not the raw title');
 });
 
 // --- FAIL-LOUD: knShowGraph must never leave a frozen spinner or a blank ---
