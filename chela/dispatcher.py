@@ -415,6 +415,89 @@ def _claim_order(wf: WorkflowDef, source, on_disk: list[Task]) -> list[Task]:
     return remote_tasks + unpushed
 
 
+def _base_write_precheck(repo: Path, base: str, rel: str, what: str) -> bool:
+    """Preconditions shared by every unattended writer to ``base_branch`` — the
+    tracker strike and the trial ledger (see :func:`_strike_merged_tasks` and
+    :func:`_write_trial_ledger`): only the branch we were told to write, never a
+    human's in-progress edit swept into our commit, and fast-forwarded to the
+    remote before we touch anything. FAILS CLOSED — a False here means the
+    caller writes nothing this tick and simply retries the next one.
+    """
+    head = _git_out(_git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
+    if head != base:
+        log.warning("%s skipped: %s is on %r, not %r", what, repo, head or "?", base)
+        return False
+
+    status = _git(repo, "status", "--porcelain", "--", rel)
+    if not _git_ok(status):
+        return False
+    if status.stdout.strip():
+        log.warning("%s skipped: %s has uncommitted changes", what, rel)
+        return False
+
+    # Get level with the remote first, fast-forward only: a diverged base branch
+    # is a skip-and-retry, never a rebase we weren't asked for and never a force.
+    remote = _git_out(_git(repo, "remote"))
+    if remote:
+        if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
+            log.warning("%s skipped: could not fetch origin/%s", what, base)
+            return False
+        if not _git_ok(_git(repo, "merge", "--ff-only", "FETCH_HEAD")):
+            log.warning(
+                "%s skipped: %s has diverged from origin/%s — leaving it for a human",
+                what, base, base,
+            )
+            return False
+    return True
+
+
+def _base_write_commit_push(repo: Path, base: str, rel: str, subject: str, body: str, what: str) -> bool:
+    """Commit ``rel`` (already rewritten on disk by the caller — possibly a BRAND
+    NEW path, e.g. the trial ledger's first-ever write) and push to
+    ``base_branch``, rolling the local commit back if the push is rejected —
+    someone else pushed between our fetch and our push, so this retries next
+    tick rather than force-pushing. Never commits a path other than ``rel``,
+    whatever else a human may have staged in this checkout.
+
+    ``git commit -- rel`` alone (no prior ``git add``) only picks up changes to
+    a path git already tracks; a never-before-committed ``rel`` is silently
+    left out — so this always stages it first, and its rollback path has to
+    know the difference: a path that existed at ``HEAD`` is restored FROM
+    ``HEAD`` (``checkout HEAD -- rel``), one that did not is unstaged and
+    deleted — ``checkout HEAD -- rel`` on a path HEAD has never heard of
+    errors out and would leave it staged-but-uncommitted forever, failing
+    every future tick's "clean tree" precheck.
+    """
+    parent = _git_out(_git(repo, "rev-parse", "HEAD"))
+    existed_before = bool(parent) and _git_ok(_git(repo, "cat-file", "-e", f"{parent}:{rel}"))
+
+    def _restore() -> None:
+        if existed_before:
+            _git(repo, "checkout", "HEAD", "--", rel)
+        else:
+            _git(repo, "reset", "--", rel)
+            (repo / rel).unlink(missing_ok=True)
+
+    if not _git_ok(_git(repo, "add", "--", rel)):
+        log.warning("%s: git add failed for %s", what, rel)
+        return False
+    if not _git_ok(_git(repo, "commit", "-m", subject, "-m", body, "--", rel)):
+        log.warning("%s: commit failed; restoring %s", what, rel)
+        _restore()
+        return False
+
+    remote = _git_out(_git(repo, "remote"))
+    if remote:
+        mine = _git_out(_git(repo, "rev-parse", "HEAD"))
+        if not _git_ok(_git(repo, "push", "origin", f"HEAD:{base}", timeout=GIT_NET_TIMEOUT_SECONDS)):
+            if parent and mine and _git_out(_git(repo, "rev-parse", "HEAD")) == mine:
+                _git(repo, "reset", "--soft", parent)
+                _restore()
+            log.warning("%s: push to %s rejected — rolled back, retrying next tick", what, base)
+            return False
+    return True
+
+
 def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
     """Mark merged tasks `- [x]` in the tracker, on base_branch, in ONE commit.
 
@@ -429,13 +512,11 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
     Tasks are matched by their stable task id (the hash of the line's title), not
     by fuzzy text, and the strike is idempotent — see markdown.strike_lines.
 
-    This runs unattended under PM2, so every step FAILS CLOSED: it writes only
-    when it is on base_branch, only when the tracker file is clean, and only
-    after a fast-forward to the remote. It never force-pushes, never commits a
-    path other than the tracker, and rolls its own commit back if the push is
-    rejected. A missed checkbox is cosmetic and self-heals — the pending set is
-    recomputed from the runs table on every tick, not remembered — whereas a
-    mangled base branch is not.
+    This runs unattended under PM2, so every step FAILS CLOSED — see
+    :func:`_base_write_precheck` / :func:`_base_write_commit_push`, which this
+    shares with :func:`_write_trial_ledger`. A missed checkbox is cosmetic and
+    self-heals — the pending set is recomputed from the runs table on every
+    tick, not remembered — whereas a mangled base branch is not.
 
     Returns the number of lines actually struck.
     """
@@ -454,35 +535,8 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
         log.warning("tracker strike skipped: %s is outside the repo %s", tracker, repo)
         return 0
 
-    # Only ever write the branch we were told to write.
-    head = _git_out(_git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
-    if head != base:
-        log.warning(
-            "tracker strike skipped: %s is on %r, not %r", repo, head or "?", base
-        )
+    if not _base_write_precheck(repo, base, rel, "tracker strike"):
         return 0
-
-    # Never sweep a human's in-progress edit of the tracker into our commit.
-    status = _git(repo, "status", "--porcelain", "--", rel)
-    if not _git_ok(status):
-        return 0
-    if status.stdout.strip():
-        log.warning("tracker strike skipped: %s has uncommitted changes", rel)
-        return 0
-
-    # Get level with the remote first, fast-forward only: a diverged base branch
-    # is a skip-and-retry, never a rebase we weren't asked for and never a force.
-    remote = _git_out(_git(repo, "remote"))
-    if remote:
-        if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
-            log.warning("tracker strike skipped: could not fetch origin/%s", base)
-            return 0
-        if not _git_ok(_git(repo, "merge", "--ff-only", "FETCH_HEAD")):
-            log.warning(
-                "tracker strike skipped: %s has diverged from origin/%s — "
-                "leaving it for a human", base, base,
-            )
-            return 0
 
     try:
         results = close_tasks(task_ids)
@@ -503,31 +557,197 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
     if not struck:
         return 0
 
-    parent = _git_out(_git(repo, "rev-parse", "HEAD"))
     subject = f"chore({rel}): strike {len(struck)} merged task" + ("s" if len(struck) > 1 else "")
     body = "\n".join(f"- {tid}" for tid in struck)
-    # Pathspec form: commits ONLY the tracker, ignoring whatever else a human
-    # may have staged in this checkout.
-    if not _git_ok(_git(repo, "commit", "-m", subject, "-m", body, "--", rel)):
-        log.warning("tracker strike: commit failed; restoring %s", rel)
-        _git(repo, "checkout", "--", rel)
+    if not _base_write_commit_push(repo, base, rel, subject, body, "tracker strike"):
         return 0
-
-    if remote:
-        mine = _git_out(_git(repo, "rev-parse", "HEAD"))
-        if not _git_ok(_git(repo, "push", "origin", f"HEAD:{base}", timeout=GIT_NET_TIMEOUT_SECONDS)):
-            # Someone pushed between our fetch and our push. Roll our own commit
-            # back — but only if HEAD is still exactly it — and retry next tick.
-            if parent and mine and _git_out(_git(repo, "rev-parse", "HEAD")) == mine:
-                _git(repo, "reset", "--soft", parent)
-                _git(repo, "checkout", "HEAD", "--", rel)
-            log.warning(
-                "tracker strike: push to %s rejected — rolled back, retrying next tick", base
-            )
-            return 0
 
     log.info("tracker strike: marked %d task(s) done on %s: %s", len(struck), base, ", ".join(struck))
     return len(struck)
+
+
+# --- the trial ledger (CMX-105) ---------------------------------------------
+#
+# lean-alpha's honesty harness deflates a probe's Sharpe by N = number of trials run
+# ("run 100, keep the best" is the classic false-positive machine — the bar must rise
+# with N). A hand-maintained N, written by the probe agent into its own repo, is exactly
+# what a fan-out would game: dispatch 20 probes, register only the 1 winner, N stays low,
+# every OTHER probe's bar stays low too. To be honest under fan-out, N must be owned by
+# something the agent cannot undercount, and it must count trials that never merged — a
+# died/abandoned probe leaves no PR and no row in the repo's own tracker, but it WAS a
+# trial. chela already has the ground truth (the `runs` table records every dispatched
+# run); this projects it into a committed, git-visible artifact a repo's own guards can
+# read — including in a throwaway judge worktree and in GitHub CI, neither of which has
+# `~/.chela/scheduler.db`.
+#
+# GENERIC and opt-in on purpose: chela does not know what PROBES.md or a DSR guard is,
+# and must not — the layering is "chela counts dispatched trials, the repo decides the
+# statistical use". A workflow that never sets `trial_ledger:` gets no ledger, no extra
+# git writes, byte-unchanged behavior.
+
+def _trial_ledger_rel(wf: WorkflowDef) -> str | None:
+    """This workflow's trial-ledger path, relative to its repo — or None when it has
+    not opted in (no `trial_ledger:` key in the WORKFLOW.md front matter)."""
+    raw = wf.get("trial_ledger")
+    if not raw:
+        return None
+    repo = wf.path.parent
+    p = (repo / raw).resolve()
+    try:
+        return str(p.relative_to(repo))
+    except ValueError:
+        log.warning("trial ledger skipped: %s is outside the repo %s", raw, repo)
+        return None
+
+
+def _parse_trial_ledger(text: str) -> list[dict]:
+    """One JSON object per non-blank line — the file's on-disk form."""
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def _format_trial_ledger(entries: list[dict]) -> str:
+    return "".join(json.dumps(e, sort_keys=True) + "\n" for e in entries)
+
+
+def _run_trial_outcome(row: sqlite3.Row) -> str | None:
+    """The terminal outcome for a `runs` row, or None while it is still pending — in
+    flight, or a `failed` row with retries left (the claim loop may still re-dispatch
+    the SAME task_id, and that is the same trial, not a new one — see
+    :func:`reconcile_trial_ledger`).
+
+    `died`: a `failed` row at MAX_ATTEMPTS — the exact same "no more retries" test the
+    claim loop itself uses to refuse a re-claim, so a row this function calls terminal is
+    a row that will never move again.
+    `abandoned`: `done` without a merged PR — the task left the tracker (a human edit, a
+    re-hash, a manually-closed PR) with no completion evidence. The trial ran and was
+    walked away from, not shipped.
+    `merged`: the PR landed. Checked first — `pr_state` can be `merged` on a row whose
+    `status` is not yet `done` for one tick (phase-0 PR-state refresh runs before the
+    reconcile step that flips `status`), and a trial that merged is never "abandoned".
+    """
+    if row["pr_state"] == "merged":
+        return "merged"
+    if row["status"] == "failed" and (row["attempt"] or 1) >= MAX_ATTEMPTS:
+        return "died"
+    if row["status"] == "done":
+        return "abandoned"
+    return None
+
+
+def reconcile_trial_ledger(existing_text: str, rows: list[sqlite3.Row]) -> tuple[str, list[str], list[str]]:
+    """Pure merge of the ledger's current text with `rows` (this workflow's `runs`
+    table). Returns ``(new_text, appended_ids, resolved_ids)``.
+
+    * A `task_id` with no line yet gets exactly ONE appended, at the end — its outcome
+      is the row's current terminal outcome, or `"pending"` while still in flight. The
+      line exists the moment a `runs` row exists, before any PR and before any merge:
+      THAT is the dispatcher-owned trial count.
+    * A `"pending"` line whose row has since resolved gets its `outcome` field updated
+      IN PLACE — same position, same `task_id` — never a second line. Re-dispatch and
+      rework of the same `task_id` is the same trial, so this is the only way an
+      existing line ever changes.
+    * Every OTHER existing line survives untouched — including one whose `task_id` no
+      longer appears in `rows` (pruned by `_prune_done_rows`, or simply not the current
+      workflow_path). The ledger only ever grows or resolves, never shrinks: a
+      died/abandoned trial keeps its line forever, so a fan-out cannot game N by letting
+      its losers age out of the `runs` table.
+    """
+    entries = _parse_trial_ledger(existing_text)
+    by_id = {e["task_id"]: e for e in entries}
+    appended: list[str] = []
+    resolved: list[str] = []
+    for row in rows:
+        tid = row["task_id"]
+        outcome = _run_trial_outcome(row)
+        entry = by_id.get(tid)
+        if entry is None:
+            entry = {
+                "task_id": tid,
+                "dispatched_at": row["started_at"] or "",
+                "outcome": outcome or "pending",
+            }
+            entries.append(entry)
+            by_id[tid] = entry
+            appended.append(tid)
+        elif entry.get("outcome") == "pending" and outcome:
+            entry["outcome"] = outcome
+            resolved.append(tid)
+    if not appended and not resolved:
+        return existing_text, [], []
+    return _format_trial_ledger(entries), appended, resolved
+
+
+def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
+    """Project this workflow's `runs` table onto its trial ledger, on base_branch, in
+    ONE commit — see :func:`reconcile_trial_ledger` for the merge and
+    :func:`_base_write_precheck` / :func:`_base_write_commit_push` for the unattended-
+    write discipline this shares with :func:`_strike_merged_tasks`.
+
+    Opt-in via `trial_ledger: <path>` (CMX-105) — a workflow without the key returns 0
+    immediately, no git touched, no behavior change. Scoped to `workflow_path`, same as
+    every other per-workflow query here: a shared repo with two workflows must not have
+    one's trials counted on the other's ledger.
+
+    Returns the number of NEW trial lines appended this call.
+    """
+    rel = _trial_ledger_rel(wf)
+    if rel is None:
+        return 0
+
+    repo = wf.path.parent
+    path = repo / rel
+    rows = conn.execute(
+        "SELECT task_id, started_at, status, attempt, pr_state FROM runs WHERE workflow_path=?",
+        (str(wf.path),),
+    ).fetchall()
+
+    def _reconcile(text: str):
+        # A ledger this process never wrote invalid JSON into can only be
+        # invalid because a human hand-edited it mid-save — degrade, don't die
+        # (workflow.py's rule for a bad WORKFLOW.md applies here too): skip
+        # this tick rather than crash the whole reconcile loop over one file.
+        try:
+            return reconcile_trial_ledger(text, rows)
+        except (ValueError, KeyError) as e:
+            log.warning("trial ledger: %s is not valid — skipping this tick: %s", rel, e)
+            return None
+
+    # Cheap check first — no git touched when nothing would change, same as the
+    # tracker strike's caller only invoking it `if pending_strikes:`.
+    merged = _reconcile(path.read_text() if path.exists() else "")
+    if merged is None:
+        return 0
+    _, appended, resolved = merged
+    if not appended and not resolved:
+        return 0
+
+    base = wf.get("workspace", "base_branch", default="master")
+    if not _base_write_precheck(repo, base, rel, "trial ledger"):
+        return 0
+
+    # Re-read AFTER the precheck's fetch/ff-merge and re-reconcile against
+    # whatever is on base_branch NOW, in case it moved since the read above —
+    # the same "recompute, don't trust the pre-network read" discipline
+    # `_strike_merged_tasks` gets from `close_tasks` reading the tracker itself.
+    merged = _reconcile(path.read_text() if path.exists() else "")
+    if merged is None:
+        return 0
+    new_text, appended, resolved = merged
+    if not appended and not resolved:
+        return 0
+    path.write_text(new_text)
+
+    subject = f"chore({rel}): trial ledger — {len(appended)} new, {len(resolved)} resolved"
+    body = "\n".join(f"+ {tid}" for tid in appended) + ("\n" if appended and resolved else "") + \
+        "\n".join(f"~ {tid}" for tid in resolved)
+    if not _base_write_commit_push(repo, base, rel, subject, body, "trial ledger"):
+        return 0
+
+    log.info(
+        "trial ledger: %d new trial(s), %d resolved on %s (%s)",
+        len(appended), len(resolved), base, rel,
+    )
+    return len(appended)
 
 
 def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
@@ -1683,6 +1903,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "judged": 0, "judge_lost": 0,
+        "trial_ledger": 0,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
     }
@@ -1757,6 +1978,7 @@ def tick(workflow_path: str | Path) -> dict:
         "ci_failed": 0,
         "judged": 0,
         "judge_lost": 0,
+        "trial_ledger": 0,
         "blocked": blocked,
         "error": status.error,
         "held": False,
@@ -2187,6 +2409,11 @@ def tick(workflow_path: str | Path) -> dict:
         # VERIFY — it does NOT block and it does NOT approve; the run stays exactly where it
         # was, and a human is told why.
         summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
+
+        # 1f. 📊 THE TRIAL LEDGER (CMX-105) — opt-in, and BEFORE the prune below: a died
+        # or abandoned row must get its ledger line while it still exists in `runs`, or
+        # a row pruned this very tick would never resolve. See `_write_trial_ledger`.
+        summary["trial_ledger"] = _write_trial_ledger(wf, conn)
 
         # 2. Keep done rows for the "recent runs" view; just cap history per workflow.
         _prune_done_rows(conn, str(wf.path))
