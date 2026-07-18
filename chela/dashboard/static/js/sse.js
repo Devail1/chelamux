@@ -3,6 +3,8 @@ import { $, BASE_PATH, TERMINALS_ON, _agentsCache, api, attrEsc, currentTab, esc
 import { refreshAgents } from './agents.js';
 import { pollWork } from './work.js';
 import { onLogDelta } from './feed.js';
+import { onDecisionsLogDelta } from './decisions.js';
+import { refreshOrchestratorStatus } from './orchestrator.js';
 import { RUN_TOAST_KINDS, runToastKind } from './runtoast.js';
 import { _absorbFreshTerminals, _cssEsc, _refreshPaneLabels, _renderedWids, _stopReadyPoll, _swapToFrame, _termReady, dropTerminalPane } from './terminals.js';
 
@@ -60,11 +62,21 @@ function _sseRuns(d) {
 
 function _sseLog(d) {
     // The event log's seq moved. The frame is a NOTIFICATION — it carries the new
-    // seq, not the events — so the Feed fetches /api/log from its OWN cursor. Only
-    // while the Feed is on screen: off it, the view's entry does a fresh read, so a
-    // background fetch per appended event would buy nothing.
-    if (currentTab !== 'feed') return;
-    onLogDelta(d);
+    // seq, not the events — so the reader fetches /api/log from its OWN cursor. Only
+    // while its view is on screen: off it, the view's entry does a fresh read, so a
+    // background fetch per appended event would buy nothing. Two readers share this
+    // one delta — the Feed (everything) and the decisions panel (a filtered tail).
+    if (currentTab === 'feed') onLogDelta(d);
+    if (currentTab === 'personas') onDecisionsLogDelta(d);
+}
+
+function _sseOrchestrator() {
+    // Who owns the pane-title toggle changed (a subscribe/release/self-heal took the
+    // slot, or it went to nobody). A NOTIFICATION like every other frame here — it
+    // carries only the new wid — so refetch /api/orchestrator/status for the full
+    // state (state/why/queued). Refreshed regardless of tab: a takeover on Personas
+    // must repaint the Wall's pane buttons too, and vice versa.
+    refreshOrchestratorStatus();
 }
 
 // Per-run last-seen status, so the toast is EDGE-TRIGGERED (fires only on the
@@ -175,6 +187,7 @@ function initSSE() {
         try { d = JSON.parse(e.data); } catch (_) { /* trigger-only */ }
         _sseTermReady(d);
     });
+    _sse.addEventListener('orchestrator', () => _sseOrchestrator());
     // onerror: the browser reconnects on its own; the poll timers cover the gap
     // meanwhile, so there is nothing to do but note it.
     _sse.onerror = () => { /* auto-reconnect; polling is the fallback */ };

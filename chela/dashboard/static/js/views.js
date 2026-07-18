@@ -17,6 +17,7 @@
 // ---------------------------------------------------------------------------
 import { refreshAgents } from './agents.js';
 import { refreshCost } from './cost.js';
+import { enterDecisions, tickDecisions } from './decisions.js';
 import { enterFeed, tickFeed } from './feed.js';
 import { _kn, knBackToGlance, refreshKnowledge } from './knowledge.js';
 import { renderAgentDetail } from './nav.js';
@@ -89,8 +90,13 @@ export const VIEWS = [
         // lucide `drama` — the theatre masks: the declared persona layer (judge · critic ·
         // orchestrator). Read-only: it renders the registry, it never launches a persona.
         lucide: 'drama',
-        enter: () => refreshPersonas(),
-        tick: () => refreshPersonas(),
+        // The decisions log rides alongside the persona cards — it is the operational
+        // half of the orchestrator persona: who owns the pane-title toggle right now,
+        // and the durable, owner-independent record of every dispatch outcome ever
+        // queued (see decisions.js). Entering does a fresh read of both; the SSE `log`/
+        // `orchestrator` deltas (sse.js) accelerate it while the tab is open.
+        enter: () => { refreshPersonas(); enterDecisions(); },
+        tick: () => { refreshPersonas(); tickDecisions(); },
     },
     {
         id: 'cost',

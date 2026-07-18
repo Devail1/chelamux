@@ -2,6 +2,7 @@
 import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util.js';
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { PORT_GLYPH, applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
+import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -690,6 +691,55 @@ function _shareBtnHTML(wid) {
       title="Share this session">${lucideIcon('share-2', 13)}<span class="gs-share-count" hidden></span></button>`;
 }
 
+// The pane-title toggle: "⊙ Orchestrator" — one click registers THIS pane's
+// session as the decisions-inbox recipient (an atomic take-over of the single
+// slot, chela/inbox.py::register via /api/orchestrator/subscribe), one click
+// releases it (falls back to the decisions panel — chela/dashboard/static/js/
+// decisions.js). `.on` reflects the LIVE owner, kept current across every pane
+// via onOrchestratorChange (fired on our own clicks, other panes' clicks, and
+// the SSE `orchestrator` delta — sse.js).
+const ORCH_GLYPH = '⊙';   // ⊙
+
+function _orchBtnHTML(wid) {
+    const on = orchestratorState().wid === wid;
+    const title = on
+        ? 'This pane receives the decisions inbox — click to release'
+        : 'Click to receive the decisions inbox in this pane';
+    return `<button class="gs-orch-btn${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
+      onclick="chela.orchestratorBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
+      title="${attrEsc(title)}">${ORCH_GLYPH}</button>`;
+}
+
+function _updateOrchBtns() {
+    const owner = orchestratorState().wid;
+    document.querySelectorAll('.gs-orch-btn').forEach(btn => {
+        const wid = btn.getAttribute('data-wid');
+        const on = owner === wid;
+        btn.classList.toggle('on', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        btn.title = on
+            ? 'This pane receives the decisions inbox — click to release'
+            : 'Click to receive the decisions inbox in this pane';
+    });
+}
+
+// Fires on our own clicks, every other pane's clicks (subscribe is a global
+// take-over) and the SSE `orchestrator` delta — one state, every button in sync.
+onOrchestratorChange(_updateOrchBtns);
+
+async function orchestratorBtnClick(btn, wid) {
+    const on = orchestratorState().wid === wid;
+    btn.disabled = true;
+    try {
+        const result = on ? await orchestratorRelease(wid) : await orchestratorSubscribe(wid);
+        if (!result || !result.ok) {
+            console.error('orchestrator toggle failed', result && result.error);
+        }
+    } finally {
+        btn.disabled = false;
+    }
+}
+
 function paneHead(wid, draggable) {
     const j = _jsStr(wid);
     const title = `<span class="pane-title" title="double-click to rename" ondblclick="chela.renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
@@ -728,6 +778,7 @@ function paneHead(wid, draggable) {
         <span class="gs-win-ctl">
           ${port}
           ${_shareBtnHTML(wid)}
+          ${_orchBtnHTML(wid)}
           ${min}
           <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
           ${kill}
@@ -2352,4 +2403,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabe
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termScrollToggle, toggleDockChip, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termScrollToggle, toggleDockChip, toggleWallLock, wireDragStart, wireRoomClick });
