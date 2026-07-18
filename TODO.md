@@ -2,6 +2,25 @@
 
 ## Open — CI drives the loop
 
+- [ ] **📥🎛️ ORCHESTRATOR SUBSCRIBE — a 1-click pane-title toggle for "receive the decisions inbox here", a durable dashboard decisions-log that never orphans, and exactly ONE active orchestrator at a time.**
+
+  **WHY.** Today the inbox pushes to a single registered session (`chela watch` → identity + self-heal, CMX-77/84). It self-heals across tmux renumbers, but when the registered session *dies* (a restart killed the persona window) there is no live window to re-resolve to → it goes correctly "dangling-and-loud" and the ONLY signal is Telegram spam; recovery needs a human who knows to run `chela watch`. Make delegation a click and give decisions a home that can't orphan.
+
+  **OBJECTIVE.**
+  1. **Durable decisions log (default home).** A dashboard panel (extend the existing personas/feed area, live via `sse.js`) that **always tails the full decisions stream** — recording whether a live session or nobody is the active orchestrator. When no session holds the role, this panel IS the home, so the queue never orphans and "no recipient" is *visible in the UI*, not Telegram-only.
+  2. **1-click pane-title toggle.** Each agent pane's title bar (`terminals.js`/`agents.js` header) gets a "⊙ Orchestrator" toggle: one click registers **that pane's session identity** as the inbox recipient (drives the existing `inbox.watch`-by-identity via a new `POST /api/orchestrator/subscribe`), one click releases it (`/release` → falls back to the durable panel). The button shows live state: this pane **is / isn't** the orchestrator.
+
+  **INVARIANTS (state them, then make each corrupt-→-RED):**
+  - **Exactly one active orchestrator.** `orchestrator_wid` is already singular; subscribe is an **atomic take-over** — registering a new identity supersedes the prior holder, never two live recipients. Guard: two subscribes in a row ⇒ only the second is the owner; the first is released.
+  - **The log is owner-independent.** The decisions panel tails the stream regardless of who (or nothing) owns the role — logging and owning are separate. Guard: a decision is recorded in the log even when the active owner is the panel/none.
+  - **No silent orphan.** With no live owner, the state surfaces in the dashboard (dangling/gone/none chip) — the existing loud-Telegram path stays as backstop, not the only signal.
+
+  **SURFACES.** Backend: `chela/inbox.py` (panel as a first-class subscriber + single-owner take-over), `chela/orchestrator.py` (identity/self_wid), `chela/dashboard/app.py` (new `/api/orchestrator/{subscribe,release,status}` + decisions-stream feed). Frontend: `terminals.js`/`agents.js` (title-bar toggle + state chip), `personas.js`/`feed.js` (decisions panel), `sse.js` (live). Reuse the identity/self-heal machinery — don't reinvent it.
+
+  **BOUNDARIES.** PR → `dev` (chelamux `main` sacrosanct). Don't break existing `chela watch`/self-heal or the CMX-90 auto-launch persona path (the button is the human, in-UI equivalent of `watch`; auto-launch still works). Colorblind-safe state chip (non-hue cue, not red/green alone — the orchestrator is red-weak). `tmux -L <socket>` ONLY in any test that touches tmux (a bare kill-server has killed the fleet).
+
+  **VERIFY.** chela suite green + each invariant guard RED under corruption. Manual: click the toggle on a pane → `/api/orchestrator/status` shows that identity as owner; click a second pane → ownership moves, first releases; kill the owner → panel shows dangling + still logs; no two owners ever.
+
 - [x] **📊🔒 DISPATCHER-OWNED TRIAL LEDGER — the multiple-testing trial count `N` must reflect EVERY dispatched trial (including ones that DIE / abandon / fail), git-visibly, so a fan-out of many probes can't hide its losers to keep the deflation bar low. The prerequisite for safe agent-autonomous fan-out (lean-alpha).**
 
   **WHY.** lean-alpha's honesty harness deflates a probe's Sharpe by `N` = number of trials run ("run 100, keep the best" is the classic false-positive machine — the bar must rise with N). Today N is a HAND-MAINTAINED count of rows in the repo's `PROBES.md`, written by the probe agent. That is exactly what a fan-out would game: dispatch 20 probes, register only the 1 winner → N stays low → every other probe's bar stays low → false positives graduate. To be honest under fan-out, N must be **owned by the dispatcher (which the agent can't undercount) and must count trials that never merged** (a died/abandoned probe leaves no PR, no `PROBES.md` row — but it WAS a trial). chela already has the ground truth: the `runs` table records every dispatched run. This task projects that ground truth into a **committed, git-visible** artifact a repo's guards can consume.
