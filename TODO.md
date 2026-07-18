@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **📥🎛️ ORCHESTRATOR SUBSCRIBE — a 1-click pane-title toggle for "receive the decisions inbox here", a durable dashboard decisions-log that never orphans, and exactly ONE active orchestrator at a time.**
+- [x] **📥🎛️ ORCHESTRATOR SUBSCRIBE — a 1-click pane-title toggle for "receive the decisions inbox here", a durable dashboard decisions-log that never orphans, and exactly ONE active orchestrator at a time.**
 
   **WHY.** Today the inbox pushes to a single registered session (`chela watch` → identity + self-heal, CMX-77/84). It self-heals across tmux renumbers, but when the registered session *dies* (a restart killed the persona window) there is no live window to re-resolve to → it goes correctly "dangling-and-loud" and the ONLY signal is Telegram spam; recovery needs a human who knows to run `chela watch`. Make delegation a click and give decisions a home that can't orphan.
 
