@@ -84,6 +84,12 @@ test('a dangling/gone owner is a visibly BAD chip, not a quiet green one', async
 
     assert.equal(chip().className, 'decisions-chip decisions-chip-bad');
     assert.ok(chip().textContent.includes('no claude running'));
+    // 🔴 COLOURBLIND CUE (the orchestrator is red-weak): the BAD state must be
+    // distinguishable WITHOUT relying on the -bad colour class — a non-colour glyph
+    // carries it. Empty the glyph in CHIP_META and this assert goes red, even though
+    // the class above still says "bad".
+    assert.ok(chip().textContent.includes('✕'),
+        'the dangling/gone chip carries no non-colour glyph — indistinguishable from OK without colour');
 });
 
 test('🔴 GUARD: the log fetch is scoped to decision kinds, not the whole firehose', async () => {
