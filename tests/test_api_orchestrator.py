@@ -181,3 +181,36 @@ def test_status_reports_the_queue_depth(client, windows):
     with inbox.locked_store() as store:
         store["queue"].append({"kind": "finished", "summary": "x", "payload": {}})
     assert _status(client)["queued"] == 1
+
+
+# --- the SSE `orchestrator` delta ---------------------------------------------
+#
+# terminals.js's pane buttons and decisions.js's owner chip both repaint off the
+# SSE `orchestrator` event (orchestrator_ui.test.mjs proves the CLIENT half: a
+# frame arriving repaints them). This proves the SERVER half — that a takeover
+# actually PUSHES that frame — which the route tests above never touch: they call
+# inbox.register directly, not the polling loop in app.py::_sse_stream.
+#
+# 🔴 GUARD: stub the diff (`if cur_orch != prev_orch:`) to never fire — e.g.
+# `if False and cur_orch != prev_orch:` — and this goes red: a real take-over
+# happens, but the generator never yields the frame that would tell a live
+# client's SSE listener to repaint.
+
+def test_a_takeover_pushes_an_sse_orchestrator_frame(client, windows, monkeypatch):
+    monkeypatch.setattr(dash, "_sse_windows_snapshot", lambda: {})
+    monkeypatch.setattr(dash, "_sse_runs_snapshot", lambda: {})
+    monkeypatch.setattr(dash, "_sse_terms_snapshot", lambda: set())
+    monkeypatch.setattr(dash, "_sse_log_snapshot", lambda: {})
+    monkeypatch.setattr(dash.time, "sleep", lambda _s: None)
+
+    stream = dash._sse_stream()
+    assert next(stream).startswith("event: hello")   # baseline, no owner yet
+
+    _subscribe(client, PANE_A)
+    frame = next(stream)
+
+    assert frame.startswith("event: orchestrator\n"), (
+        f"a pane took over the slot but the SSE loop never pushed the frame that "
+        f"tells a live client to repaint (got: {frame!r})"
+    )
+    assert f'"wid": "{PANE_A}"' in frame
