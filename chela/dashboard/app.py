@@ -26,7 +26,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, event_log, gateanswer, hold, hooks, judge, launcher, messenger, notify, okf, personas, rooms, scheduler, spawn, starter, transcripts, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, rooms, scheduler, spawn, starter, transcripts, userconfig
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
@@ -2377,6 +2377,94 @@ def api_personas():
     return jsonify({"personas": out})
 
 
+# ---------------------------------------------------------------------------
+# API: orchestrator subscribe — the pane-title toggle for "receive the
+# decisions inbox here", and exactly ONE active orchestrator at a time.
+# ---------------------------------------------------------------------------
+#
+# ``chela watch`` (no window) already does an atomic take-over of the single
+# ``orchestrator`` slot (chela/inbox.py::register) — registering a new identity
+# supersedes whoever held it, never two live recipients. These routes are the
+# in-UI, one-click equivalent: a human clicking a pane's "⊙ Orchestrator" toggle
+# is doing exactly what an agent does by running `chela watch` from its own
+# session, just from the dashboard instead of a shell.
+#
+# The DECISIONS LOG stays independent of any of this: chela/inbox.py::tick()
+# appends every event to event_log regardless of whether an orchestrator is
+# registered (see inbox.tick's unconditional `event_log.from_inbox` loop), so
+# /api/log already IS the durable, owner-independent log — no new storage here.
+
+def _orchestrator_status_payload() -> dict:
+    """The pane-toggle's whole picture: who owns the slot, and is it any good.
+
+    One read shared by ``/api/orchestrator/status`` and the subscribe/release
+    responses, so a click's response and a poll's response are never two
+    different shapes of the same fact.
+    """
+    store = inbox.load()
+    statuses = agent_manager.status_by_wid()
+    now_epoch = epoch.current()
+    wid = inbox.orchestrator_wid(store)
+    state, why = inbox.address_state(store, statuses, now_epoch)
+    return {
+        "wid": wid,
+        "name": store.get("orchestrator_name"),
+        "state": state,
+        "why": why,
+        "queued": len(store.get("queue") or []),
+    }
+
+
+@app.route("/api/orchestrator/status")
+@require_auth
+def api_orchestrator_status():
+    """Who (if anyone) currently receives the decisions inbox, and whether that
+    address is actually deliverable — the fact the pane toggle and the decisions
+    panel's owner chip both render from."""
+    return jsonify(_orchestrator_status_payload())
+
+
+@app.route("/api/orchestrator/subscribe", methods=["POST"])
+@require_auth
+def api_orchestrator_subscribe():
+    """Register ``wid`` as THE orchestrator — an ATOMIC take-over.
+
+    Wraps ``chela.inbox.register``, which unconditionally overwrites the single
+    ``orchestrator`` slot: registering here supersedes whoever held it before
+    (there is never a moment with two live recipients — the prior holder's next
+    status poll simply reports it is no longer the owner). ``wid`` must be a
+    live window (``inbox.register`` checks); a dead/unknown one is refused.
+    """
+    data = request.get_json(silent=True) or {}
+    wid = (data.get("wid") or "").strip()
+    if not wid:
+        return jsonify({"ok": False, "error": "wid required"}), 400
+    result = inbox.register(wid)
+    if not result.get("ok"):
+        return jsonify(result), 404
+    return jsonify({**result, **_orchestrator_status_payload()})
+
+
+@app.route("/api/orchestrator/release", methods=["POST"])
+@require_auth
+def api_orchestrator_release():
+    """Release ``wid`` from the orchestrator role — falls back to the durable
+    decisions-log panel (the queue keeps flowing into the log either way).
+
+    Wraps ``chela.inbox.unregister``, which is a GUARDED no-op unless the slot
+    currently names ``wid`` — a stale/duplicate release click can never clear a
+    different pane's live registration out from under it.
+    """
+    data = request.get_json(silent=True) or {}
+    wid = (data.get("wid") or "").strip()
+    if not wid:
+        return jsonify({"ok": False, "error": "wid required"}), 400
+    result = inbox.unregister(wid)
+    if not result.get("ok"):
+        return jsonify(result), 409
+    return jsonify({**result, **_orchestrator_status_payload()})
+
+
 @app.route("/api/dispatcher")
 @require_auth
 def api_dispatcher():
@@ -3278,6 +3366,25 @@ def _sse_terms_snapshot() -> set:
         return set()
 
 
+def _sse_orchestrator_snapshot() -> dict:
+    """``{wid, state}`` — cheap enough to diff every SSE tick (one JSON read, no
+    tmux). Diffed to push an ``orchestrator`` delta so the pane toggle and the
+    decisions panel's owner chip update live, without waiting on their own poll.
+    """
+    try:
+        store = inbox.load()
+        wid = inbox.orchestrator_wid(store)
+        # `statuses`/`now_epoch` are what turns a bare wid into ok/dangling/gone —
+        # skipped here on purpose: they cost a tmux round-trip each, and the SSE
+        # loop already polls every second. The full state (with `why`) is one
+        # cheap follow-up fetch to /api/orchestrator/status, same as every other
+        # frame on this stream being a notification, not a payload.
+        return {"wid": wid}
+    except Exception:
+        log.exception("SSE: orchestrator snapshot failed")
+        return {}
+
+
 def _sse_log_snapshot() -> dict:
     """``{"boot_id", "seq"}`` — the event log's position. Diffed to push a `log` delta.
 
@@ -3304,6 +3411,7 @@ def _sse_stream():
     prev_runs = _sse_runs_snapshot()
     prev_terms = _sse_terms_snapshot()
     prev_log = _sse_log_snapshot()
+    prev_orch = _sse_orchestrator_snapshot()
 
     # An initial 'hello' lets the client confirm the stream is live (it may
     # optionally lengthen its poll timers; default behavior leaves them as-is).
@@ -3357,6 +3465,16 @@ def _sse_stream():
             yield f"event: log\ndata: {json.dumps(cur_log)}\n\n"
             last_sent = time.monotonic()
         prev_log = cur_log or prev_log
+
+        cur_orch = _sse_orchestrator_snapshot()
+        if cur_orch != prev_orch:
+            # Who owns the pane toggle changed (a subscribe/release/self-heal took
+            # over the slot, or it went to nobody). A NOTIFICATION like every other
+            # frame here: the client re-fetches /api/orchestrator/status for the
+            # full state (state/why/queued), so a dropped frame costs it nothing.
+            yield f"event: orchestrator\ndata: {json.dumps(cur_orch)}\n\n"
+            last_sent = time.monotonic()
+        prev_orch = cur_orch
 
         cur_terms = _sse_terms_snapshot()
         newly_ready = sorted(cur_terms - prev_terms)

@@ -246,6 +246,21 @@
         declares them; it does not launch them.
       </div>
       <div class="personas-list" id="personas-list"></div>
+
+      <!-- Decisions inbox — the durable, owner-independent record of every dispatch
+           outcome chela/inbox.py has ever queued, plus who (if anyone) currently
+           receives it live. This panel IS the fallback home: with no live owner, the
+           chip below says so and the log keeps recording — nothing is ever silently
+           orphaned. See chela/dashboard/static/js/decisions.js + orchestrator.js. -->
+      <div class="decisions-panel">
+        <div class="decisions-intro">
+          <strong>Decisions inbox.</strong> Every dispatch outcome, ever — recorded here
+          whether or not a live session is receiving it. Click a pane's ⊙ toggle on the
+          Wall to have it delivered straight into that session instead of landing only here.
+        </div>
+        <div id="decisions-chip"></div>
+        <div class="decisions-list" id="decisions-list"></div>
+      </div>
     </div>
 
     <!-- Cost — fleet spend, from the cost chela already ingests (the statusLine

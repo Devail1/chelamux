@@ -311,6 +311,15 @@ body {
     background: var(--accent); color: #0d1117; border: 1px solid var(--surface);
     font-size: 9px; font-weight: 700; line-height: 12px; text-align: center;
 }
+
+/* --- orchestrator subscribe: the pane-title "⊙" toggle --------------------- */
+/* Same neutral-until-active pattern as .gs-share-btn (above), but a distinct
+   colour (--ok-blue, not --accent) so a shared pane and an orchestrator-owning
+   pane never read as the same state at a glance. */
+.gs-keys button.gs-orch-btn { padding: 4px 6px; font-size: 13px; line-height: 1; }
+.gs-orch-btn.on {
+    color: #0d1117; background: var(--ok-blue); border-color: var(--ok-blue);
+}
 /* Facepile: sits between the title and the window controls (title flexes, so it
    rides to the right). Compact initial-dots + overflow + agent gear pip. */
 .gs-presence { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; }
@@ -2981,6 +2990,28 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .persona-docs { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
 .persona-doc { font-size: 10.5px; color: var(--text-dim); background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
+
+/* Decisions inbox — the durable, owner-independent log (decisions.js). Rows reuse
+   the Feed's .feed-row/.feed-cls-*/.feed-glyph classes verbatim (feed.js), so a
+   decision reads identically whether you meet it here or in the Feed. */
+.decisions-panel { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 18px; }
+.decisions-intro { color: var(--text-dim); font-size: 13px; line-height: 1.5;
+    margin: 4px 0 12px; max-width: 720px; }
+.decisions-intro strong { color: var(--text); }
+.decisions-chip { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); font-size: 12.5px; margin-bottom: 12px; }
+.decisions-chip-glyph { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Colour is decoration on top of the glyph + word above — never the only signal
+   (Liav is red-weak). */
+.decisions-chip-ok .decisions-chip-glyph { color: var(--ok-green); }
+.decisions-chip-none .decisions-chip-glyph { color: var(--text-dim); }
+.decisions-chip-bad .decisions-chip-glyph { color: var(--ok-vermillion); }
+.decisions-chip-warn .decisions-chip-glyph { color: var(--ok-orange); }
+.decisions-chip-who { color: var(--text); font-weight: 600; }
+.decisions-chip-queued { color: var(--text-dim); }
+.decisions-chip-why { color: var(--text-dim); }
+.decisions-list { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 
 /* Cost — fleet spend table (current-snapshot, v1; see cost.js). */
 .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }

@@ -8,6 +8,7 @@ import { startWorkPoll } from './work.js';
 import { VIEWS } from './views.js';
 import { findView } from './viewreg.js';
 import { initSSE } from './sse.js';
+import { refreshOrchestratorStatus } from './orchestrator.js';
 
 // ---------------------------------------------------------------------------
 // Refresh loop
@@ -49,6 +50,11 @@ setInterval(refresh, REFRESH_MS);
 // App-level, not view-level: the badges are on screen from every view.
 startWorkPoll();
 initSSE();
+// Seeds the pane-title toggle (terminals.js) with who owns the decisions inbox
+// right now — without this, every button reads "off" until the Personas tab
+// (whose enter() does the same fetch) is first opened or a takeover fires the
+// SSE `orchestrator` delta.
+refreshOrchestratorStatus();
 
 // --- Stage 0: ES-module exports ---
 export { refresh };
