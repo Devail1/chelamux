@@ -2,6 +2,21 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🎛️➡️📂 DECISIONS PANEL → PERSISTENT SIDEBAR SECTION — move the decisions log out of the Personas view into an always-visible left-sidebar section, so decisions truly always have a visible home.**
+
+  **WHY.** cmx-106 shipped the decisions log inside `panel-personas` (the "drama masks" nav view) — so you must navigate there to see it. That undercuts the "durable home" premise: it should be *always on screen*, like the sidebar's Sessions list.
+
+  **OBJECTIVE.** Relocate the decisions render (owner chip + decisions list, `decisions.js`) from `panel-personas` into a **new third `side-section` in `aside.sidebar`** ("Decisions"), below Navigate + Sessions. Always-visible + always-live:
+  - Move the render target out of `#decisions-list`/`#decisions-chip` in the personas panel into the new sidebar section's elements.
+  - **Wiring change:** the log currently seeds/ticks on *personas-view enter/tick* (views.js) and its SSE `log` delta is gated `if (currentTab === 'personas')` (sse.js). In the sidebar it must seed **once on page load** and stay live off the SSE `log`/`orchestrator` deltas **continuously** (not tab-gated) — mirror how `sidebar-agents`/Sessions stays live. Remove `enterDecisions`/`tickDecisions` from the personas VIEW (personas goes back to just persona cards).
+  - Keep the pane-title toggle and ALL backend (`inbox.py`, `/api/orchestrator/*`, the SSE emit) unchanged.
+
+  **BOUNDARIES.** PR → `dev`. No backend/inbox changes. Don't regress the pane toggle or the single-owner/no-orphan invariants. **Colorblind-safe** owner chip — non-hue glyph for owned/dangling/gone (the `✕` for bad is already there; keep it). Sidebar section must collapse gracefully on the phone-width sidebar.
+
+  **GUARDS (corrupt-each-→-RED, and ⏱️ FAIL FAST — the cmx-106 lesson):** (a) the sidebar "Decisions" section renders the owner chip + rows from `/api/log` (drop the render → RED); (b) it seeds on page load with NO tab-open and NO SSE frame (drop the load-time seed → RED — mirror `orchestrator_seed.test.mjs`); (c) a live SSE `log`/`orchestrator` delta repaints it while it's on screen — now tab-independent (stub the handler → RED; mirror `decisions_sse.test.mjs`). Any timing/SSE test **must fail in milliseconds**, not spin to a keepalive.
+
+  **VERIFY.** `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green; each new guard RED under corruption AND fast; personas view no longer shows decisions; sidebar shows it always.
+
 - [x] **📥🎛️ ORCHESTRATOR SUBSCRIBE — a 1-click pane-title toggle for "receive the decisions inbox here", a durable dashboard decisions-log that never orphans, and exactly ONE active orchestrator at a time.**
 
   **WHY.** Today the inbox pushes to a single registered session (`chela watch` → identity + self-heal, CMX-77/84). It self-heals across tmux renumbers, but when the registered session *dies* (a restart killed the persona window) there is no live window to re-resolve to → it goes correctly "dangling-and-loud" and the ONLY signal is Telegram spam; recovery needs a human who knows to run `chela watch`. Make delegation a click and give decisions a home that can't orphan.
