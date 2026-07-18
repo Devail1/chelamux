@@ -1,16 +1,24 @@
 // ---------------------------------------------------------------------------
 // DECISIONS LOG — the durable, owner-independent home for what the decisions
-// inbox has ever said. Lives in the Personas panel, next to the persona layer
-// it is the operational half of (docs/PERSONA_PATTERN.md).
+// inbox has ever said. Lives in its own always-visible sidebar section
+// (index.html `#side-decisions`), not gated behind any nav tab (cmx-106 first
+// shipped it inside the Personas panel — cmx-107 moved it here so it is
+// genuinely always on screen, like the sidebar's Sessions list).
 //
 // This is deliberately NOT a second store. chela/inbox.py::tick() appends every
 // event to event_log (chela/event_log.py) whether or not a live session is
 // registered as the orchestrator — "the log is owner-independent" is already
 // true of the write path (see inbox.tick's unconditional `event_log.from_inbox`
-// loop). So this panel is a FILTERED READ of the same /api/log the Feed reads
+// loop). So this section is a FILTERED READ of the same /api/log the Feed reads
 // (feed.js), narrowed to the kinds chela/inbox.py actually queues/logs, plus an
 // owner chip (orchestrator.js) — a decision is never lost here even when the
-// chip reads "nobody": that IS this panel being the fallback home.
+// chip reads "nobody": that IS this section being the fallback home.
+//
+// Wiring (cmx-107): main.js seeds it ONCE on page load (`enterDecisions()`,
+// unconditional — no tab-open needed) and keeps it live off the SSE
+// `log`/`orchestrator` deltas (sse.js) continuously, plus a `tickDecisions()`
+// fallback poll each refresh() tick — the same pattern refreshSidebar() uses
+// for Sessions. Nothing here is gated on `currentTab` any more.
 //
 // The cursor/drain contract is identical to the Feed's (feedmodel.js:
 // drainLog) — resume from `next_seq`, never `last_seq`; a rotted cursor comes
@@ -67,18 +75,21 @@ async function _refreshLog(reset = false) {
     _render();
 }
 
-// Entering the panel: a fresh read of both the owner and the log.
+// The one-time page-load seed (main.js) — a fresh read of both the owner and
+// the log, from scratch (reset=true). Nothing else calls this with reset=true.
 async function enterDecisions() {
     await Promise.all([refreshOrchestratorStatus(), _refreshLog(true)]);
 }
 
-// The fallback poll under the SSE deltas.
+// The fallback poll under the SSE deltas — runs every refresh() tick (main.js),
+// unconditionally, regardless of which nav tab is on screen.
 async function tickDecisions() {
     await Promise.all([refreshOrchestratorStatus(), _refreshLog()]);
 }
 
-// The SSE `log` delta, while this panel is on screen: the log's seq moved, so
-// fetch from our own cursor (the frame itself carries no events).
+// The SSE `log` delta: the log's seq moved, so fetch from our own cursor (the
+// frame itself carries no events). Fired for every frame, tab-independent —
+// this section is always on screen (sse.js).
 function onDecisionsLogDelta() {
     _refreshLog();
 }

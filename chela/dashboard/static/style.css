@@ -2991,16 +2991,17 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .persona-doc { font-size: 10.5px; color: var(--text-dim); background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
 
-/* Decisions inbox — the durable, owner-independent log (decisions.js). Rows reuse
-   the Feed's .feed-row/.feed-cls-*/.feed-glyph classes verbatim (feed.js), so a
-   decision reads identically whether you meet it here or in the Feed. */
-.decisions-panel { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 18px; }
-.decisions-intro { color: var(--text-dim); font-size: 13px; line-height: 1.5;
-    margin: 4px 0 12px; max-width: 720px; }
-.decisions-intro strong { color: var(--text); }
-.decisions-chip { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
-    background: var(--surface); font-size: 12.5px; margin-bottom: 12px; }
+/* Decisions — the durable, owner-independent log (decisions.js), an always-visible
+   THIRD sidebar section (index.html #side-decisions, below Navigate + Sessions;
+   cmx-106 first shipped this inside the Personas panel, cmx-107 relocated it).
+   Rows reuse the Feed's .feed-row/.feed-cls-*/.feed-glyph classes verbatim
+   (feed.js), so a decision reads identically whether you meet it here or in the
+   Feed — but the sidebar column (264px, .app) is far narrower than the Feed's
+   canvas, so the row grid is overridden below into a stacked, wrapping layout. */
+#side-decisions { padding: 0 10px 4px; }
+.decisions-chip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); font-size: 11.5px; margin-bottom: 10px; }
 .decisions-chip-glyph { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 /* Colour is decoration on top of the glyph + word above — never the only signal
    (Liav is red-weak). */
@@ -3010,8 +3011,19 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .decisions-chip-warn .decisions-chip-glyph { color: var(--ok-orange); }
 .decisions-chip-who { color: var(--text); font-weight: 600; }
 .decisions-chip-queued { color: var(--text-dim); }
-.decisions-chip-why { color: var(--text-dim); }
-.decisions-list { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.decisions-chip-why { color: var(--text-dim); width: 100%; }
+.decisions-list { border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    max-height: 38vh; overflow-y: auto; }
+/* Sidebar-width row: the Feed's 5-column grid (56px 72px 108px auto 1fr, ~250px
+   minimum) does not fit a 264px column with its own padding — stack ts+glyph on
+   one line and let wid/summary wrap onto their own, dropping the seq number
+   (not load-bearing at this width; it is still on the Feed's full row). */
+.decisions-list .feed-row {
+    display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 2px;
+    padding: 6px 10px; font-size: 11px;
+}
+.decisions-list .feed-seq { display: none; }
+.decisions-list .feed-summary { flex: 1 1 100%; font-size: 12px; }
 
 /* Cost — fleet spend table (current-snapshot, v1; see cost.js). */
 .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }

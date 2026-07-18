@@ -1,24 +1,23 @@
-// The Decisions sidebar section live-updates off the SSE `log` delta — and, since
-// cmx-107 moved it out of the Personas VIEW into an always-visible sidebar section
-// (index.html #side-decisions), that repaint is now TAB-INDEPENDENT (sse.js::_sseLog
-// calls `onDecisionsLogDelta(d)` unconditionally, no `currentTab` gate). Before
-// cmx-107 this suite proved the opposite — that a `log` frame only reached the
-// panel while the Personas tab was active, and NOT otherwise. That gate is gone by
-// design: the whole point of the sidebar relocation is that Decisions is always on
-// screen, so it must always live-update, not just while some particular tab happens
-// to be open.
+// main.js's INITIAL SEED of the Decisions sidebar section — the page-load half of
+// cmx-107 ("always visible", not gated behind opening the Personas tab).
 //
-// Both tests below assert the delta reaches /api/log with NO tab gate at all:
-//   - fires while an unrelated tab ('agents') is active
-//   - fires while the (now decisions-free) Personas tab is active too
-// Reintroducing any `currentTab === '...'` guard around `onDecisionsLogDelta` in
-// sse.js's `_sseLog` makes one of these red.
-// Drives the REAL sse.js through a fake EventSource (jsdom has none), same harness as
-// orchestrator_seed.test.mjs / orchestrator_ui.test.mjs.
+// decisions_sse.test.mjs proves the SSE `log`-delta repaint path is tab-independent.
+// It does NOT prove main.js's own top-level `enterDecisions()` call (main.js) ever
+// fires: that suite's `before()` already flushes one microtask turn before each test
+// runs, so a mutation that drops the seed call entirely (e.g. `enterDecisions();` ->
+// `void 0;`) would still leave that suite green — nothing there asserts the section
+// is non-empty BEFORE any SSE frame or tab-open.
 //
-// Run: node --test tests/decisions_sse.test.mjs (tests/test_js_suites.py runs every
+// Here the server already has one decision logged BEFORE the page even loads (as it
+// would for any real page load — the log is durable, dispatch has been running).
+// Nothing in this test opens the Personas tab, dispatches an SSE frame, or calls
+// enterDecisions/tickDecisions itself — the only thing that can paint a row into
+// #decisions-list is main.js's own unconditional seed call. Drop that call and this
+// test is the one that goes red.
+//
+// Run: node --test tests/decisions_seed.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest; needs `npm ci` for jsdom).
-import { before, beforeEach, test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 
@@ -45,13 +44,15 @@ const AGENTS = [
     { name: 'shell', window_id: '@2', online: true },
 ];
 const ORCH_STATUS = { wid: null, name: null, state: 'unregistered', why: '', queued: 0 };
-const LOG_RESPONSE = { boot_id: 'b1', events: [], gap: null, first_seq: 0, last_seq: 0, next_seq: 0 };
-
-let requests;
+// A decision already in the durable log BEFORE this page loads — as it always is
+// once chela/inbox.py has queued/logged anything at all.
+const LOG_RESPONSE = {
+    boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+    events: [{ seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review', payload: {} }],
+};
 
 function fakeFetch(url) {
     const path = String(url);
-    requests.push(path);
     const body =
         path.endsWith('/api/agents') ? AGENTS
             : path.endsWith('/api/agents/context') ? {}
@@ -74,12 +75,10 @@ function fakeGridStack() {
 }
 
 class FakeEventSource {
-    constructor(url) { this.url = url; this.listeners = {}; FakeEventSource.last = this; }
+    constructor(url) { this.url = url; this.listeners = {}; }
     addEventListener(type, cb) { (this.listeners[type] ||= []).push(cb); }
     close() {}
 }
-
-let util;
 
 before(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -94,7 +93,6 @@ before(async () => {
     }
     globalThis.GridStack = fakeGridStack();
     globalThis.fetch = fakeFetch;
-    // Must exist BEFORE main.js's initSSE() runs, on the SAME window it resolves.
     globalThis.EventSource = FakeEventSource;
     dom.window.EventSource = FakeEventSource;
     dom.window.document.elementFromPoint = () => null;
@@ -105,42 +103,23 @@ before(async () => {
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
 
-    // Browser load order: index.html -> main.js -> everything else. main.js's top-level
-    // initSSE() wires the REAL `log` listener onto our FakeEventSource.
+    // Same load order as the browser (index.html -> main.js -> everything else).
+    // currentTab defaults to 'agents' (util.js) and main.js's top-level
+    // selectView('terminals') only changes it to 'terminals' — never 'personas' —
+    // so nothing here ever opens the tab that used to gate this render pre-cmx-107.
     await import('../chela/dashboard/static/js/main.js');
-    util = await import('../chela/dashboard/static/js/util.js');
-    util.setAgentsCache(AGENTS);
-    // Flush main.js's own load-time fetches (agents/status/decisions seed) so they
-    // don't bleed into a per-test `requests` window.
+
+    // Flush the seed fetch's microtask chain (fetch -> res.json() -> render)
+    // without dispatching any SSE frame or opening any tab.
+    await new Promise(resolve => setTimeout(resolve, 0));
     await new Promise(resolve => setTimeout(resolve, 0));
 });
 
-beforeEach(() => { requests = []; });
-
-function dispatchLogFrame() {
-    const src = FakeEventSource.last;
-    assert.ok(src, 'no EventSource was ever constructed — initSSE() bailed out');
-    const handlers = src.listeners['log'];
-    assert.ok(handlers && handlers.length > 0,
-        'nothing is listening for the `log` SSE event — the live-update claim is dead');
-    // The real frame is a NOTIFICATION carrying only the new seq; the reader refetches
-    // /api/log from its own cursor.
-    handlers.forEach(cb => cb({ data: JSON.stringify({ boot_id: 'b1', seq: 9 }) }));
-}
-
-test('a `log` SSE frame refetches Decisions while an UNRELATED tab is active (no tab gate)', async () => {
-    util.setCurrentTab('agents');
-    dispatchLogFrame();
-    await new Promise(resolve => setTimeout(resolve, 0));
-    assert.ok(requests.some(r => r.includes('/api/log')),
-        'a log frame on a non-Personas tab did not refetch /api/log — Decisions is ' +
-        'supposed to be tab-independent now (cmx-107), not gated to one view');
-});
-
-test('a `log` SSE frame refetches Decisions while the Personas tab is active too', async () => {
-    util.setCurrentTab('personas');
-    dispatchLogFrame();
-    await new Promise(resolve => setTimeout(resolve, 0));
-    assert.ok(requests.some(r => r.includes('/api/log')),
-        'a log frame on the Personas tab did not refetch /api/log');
+test('main.js seeds the Decisions sidebar section on load, with no tab-open and no SSE frame', () => {
+    const rows = document.querySelectorAll('#decisions-list .feed-row');
+    assert.equal(rows.length, 1,
+        'the durable log already had a decision logged before page load, but the ' +
+        'sidebar Decisions section never rendered it — main.js\'s load-time ' +
+        'enterDecisions() call never ran (or its result was discarded)');
+    assert.ok(rows[0].textContent.includes('cmx-9 awaiting review'));
 });

@@ -1,8 +1,12 @@
-// THE DECISIONS PANEL, IN A REAL DOM — owner-independent, and scoped to decisions.
+// THE DECISIONS SIDEBAR SECTION, IN A REAL DOM — owner-independent, and scoped to
+// decisions. (cmx-106 first shipped this inside the Personas panel; cmx-107 moved
+// it into its own always-visible sidebar section — the ids this test drives,
+// #decisions-chip/#decisions-list, are unchanged by that move, so this suite
+// exercises the same renderer regardless of what wraps it.)
 //
 // Two properties this drives the REAL renderer to prove (jsdom, not a source grep):
 //
-//   1. THE LOG RENDERS REGARDLESS OF WHO OWNS THE ROLE. A decisions panel that only
+//   1. THE LOG RENDERS REGARDLESS OF WHO OWNS THE ROLE. A decisions section that only
 //      showed rows while a live orchestrator was registered would silently go blank
 //      at the exact moment it matters most (CMX-106's whole point: "no owner" must
 //      never mean "no visibility").
@@ -17,10 +21,10 @@ import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 
-const BODY = `<div class="panel" id="panel-personas">
+const BODY = `<section class="side-section" id="side-decisions">
   <div id="decisions-chip"></div>
   <div class="decisions-list" id="decisions-list"></div>
-</div>`;
+</section>`;
 
 let decisions, orchestrator;
 let requests;

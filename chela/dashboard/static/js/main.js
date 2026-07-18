@@ -9,6 +9,7 @@ import { VIEWS } from './views.js';
 import { findView } from './viewreg.js';
 import { initSSE } from './sse.js';
 import { refreshOrchestratorStatus } from './orchestrator.js';
+import { enterDecisions, tickDecisions } from './decisions.js';
 
 // ---------------------------------------------------------------------------
 // Refresh loop
@@ -22,10 +23,13 @@ import { refreshOrchestratorStatus } from './orchestrator.js';
 async function refresh() {
     try {
         await refreshSummary();
-        // The sidebar (agent list + WORK badges) is always visible, so refresh
-        // it on every tick regardless of which canvas view is active. The badges
-        // ride work.js's single /api/dispatcher poll, started below.
+        // The sidebar (agent list + WORK badges + the Decisions section) is always
+        // visible, so refresh it on every tick regardless of which canvas view is
+        // active. The badges ride work.js's single /api/dispatcher poll, started
+        // below; Decisions is the fallback poll under its own SSE `log`/
+        // `orchestrator` deltas (sse.js — no longer tab-gated, see decisions.js).
         await refreshSidebar();
+        await tickDecisions();
         if (typeof refreshLauncher === 'function') refreshLauncher();
         const view = findView(VIEWS, currentTab);
         if (view && view.tick) await view.tick();
@@ -51,10 +55,14 @@ setInterval(refresh, REFRESH_MS);
 startWorkPoll();
 initSSE();
 // Seeds the pane-title toggle (terminals.js) with who owns the decisions inbox
-// right now — without this, every button reads "off" until the Personas tab
-// (whose enter() does the same fetch) is first opened or a takeover fires the
-// SSE `orchestrator` delta.
+// right now — without this, every button reads "off" until a takeover fires
+// the SSE `orchestrator` delta.
 refreshOrchestratorStatus();
+// Seeds the sidebar Decisions section (chip + rows) on load — it is always
+// visible now (cmx-107), not gated behind opening the Personas tab, so this is
+// the ONLY thing that paints it before the first SSE `log`/`orchestrator` delta
+// or the next refresh() tick.
+enterDecisions();
 
 // --- Stage 0: ES-module exports ---
 export { refresh };

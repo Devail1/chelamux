@@ -76,6 +76,22 @@
       </div>
     </section>
 
+    <!-- Decisions — the durable, owner-independent record of every dispatch outcome
+         chela/inbox.py has ever queued, plus who (if anyone) currently receives it
+         live. Always visible (not gated behind the Personas tab, unlike cmx-106):
+         with no live owner, the chip below says so and the log keeps recording —
+         nothing is ever silently orphaned. Seeded once on page load (main.js) and
+         kept live off the SSE `log`/`orchestrator` deltas continuously, the same
+         way Sessions above stays live — see chela/dashboard/static/js/decisions.js. -->
+    <section class="side-section" id="side-decisions">
+      <div class="side-head">
+        <span class="side-title"
+              title="Every dispatch outcome, ever — recorded here whether or not a live session is receiving it. Click a pane's ⊙ toggle on the Wall to have it delivered straight into that session instead of landing only here.">Decisions</span>
+      </div>
+      <div id="decisions-chip"></div>
+      <div class="decisions-list" id="decisions-list"></div>
+    </section>
+
   </aside>
 
   <!-- Main canvas: context-driven by sidebar selection -->
@@ -238,7 +254,9 @@
 
     <!-- Personas — the declared persona layer (judge · critic · orchestrator), rendered
          read-only from the Python registry (/api/personas). It SHOWS the personas embedded
-         in chela; it never launches or drives one. -->
+         in chela; it never launches or drives one. The decisions log used to ride along
+         here (cmx-106) — it now lives in the always-visible sidebar section instead
+         (cmx-107), so this panel is persona cards only. -->
     <div class="panel" id="panel-personas">
       <div class="personas-intro">
         <strong>The persona layer.</strong> Mechanical facts in code, judgment in the LLM —
@@ -246,21 +264,6 @@
         declares them; it does not launch them.
       </div>
       <div class="personas-list" id="personas-list"></div>
-
-      <!-- Decisions inbox — the durable, owner-independent record of every dispatch
-           outcome chela/inbox.py has ever queued, plus who (if anyone) currently
-           receives it live. This panel IS the fallback home: with no live owner, the
-           chip below says so and the log keeps recording — nothing is ever silently
-           orphaned. See chela/dashboard/static/js/decisions.js + orchestrator.js. -->
-      <div class="decisions-panel">
-        <div class="decisions-intro">
-          <strong>Decisions inbox.</strong> Every dispatch outcome, ever — recorded here
-          whether or not a live session is receiving it. Click a pane's ⊙ toggle on the
-          Wall to have it delivered straight into that session instead of landing only here.
-        </div>
-        <div id="decisions-chip"></div>
-        <div class="decisions-list" id="decisions-list"></div>
-      </div>
     </div>
 
     <!-- Cost — fleet spend, from the cost chela already ingests (the statusLine
