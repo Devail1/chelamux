@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **📊🔒 DISPATCHER-OWNED TRIAL LEDGER — the multiple-testing trial count `N` must reflect EVERY dispatched trial (including ones that DIE / abandon / fail), git-visibly, so a fan-out of many probes can't hide its losers to keep the deflation bar low. The prerequisite for safe agent-autonomous fan-out (lean-alpha).**
+- [x] **📊🔒 DISPATCHER-OWNED TRIAL LEDGER — the multiple-testing trial count `N` must reflect EVERY dispatched trial (including ones that DIE / abandon / fail), git-visibly, so a fan-out of many probes can't hide its losers to keep the deflation bar low. The prerequisite for safe agent-autonomous fan-out (lean-alpha).**
 
   **WHY.** lean-alpha's honesty harness deflates a probe's Sharpe by `N` = number of trials run ("run 100, keep the best" is the classic false-positive machine — the bar must rise with N). Today N is a HAND-MAINTAINED count of rows in the repo's `PROBES.md`, written by the probe agent. That is exactly what a fan-out would game: dispatch 20 probes, register only the 1 winner → N stays low → every other probe's bar stays low → false positives graduate. To be honest under fan-out, N must be **owned by the dispatcher (which the agent can't undercount) and must count trials that never merged** (a died/abandoned probe leaves no PR, no `PROBES.md` row — but it WAS a trial). chela already has the ground truth: the `runs` table records every dispatched run. This task projects that ground truth into a **committed, git-visible** artifact a repo's guards can consume.
 
