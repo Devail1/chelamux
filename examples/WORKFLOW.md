@@ -18,6 +18,14 @@ tracker:
   kind: markdown          # markdown TODO.md (also: gh_issues)
   path: TODO.md           # relative to this file
 
+# Optional. Opts into a git-visible, append-only ledger of EVERY dispatched run
+# for this workflow (task_id, dispatch time, terminal outcome — merged/died/
+# abandoned), committed to base_branch alongside the tracker strike. Owned by
+# chela: an agent worktree never writes it, so a fan-out of many trials can't
+# hide its losers to undercount a multiple-testing trial N. Unset by default —
+# no key, no ledger, no extra git writes.
+# trial_ledger: TRIALS.jsonl
+
 workspace:
   # Where per-task git worktrees are created. ~ and $VARS expand.
   root: ~/.chela/worktrees/proj
