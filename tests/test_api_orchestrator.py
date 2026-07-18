@@ -17,6 +17,8 @@ who owns delivery.
 """
 from __future__ import annotations
 
+import itertools
+
 import pytest
 
 from chela import agent_manager, epoch, inbox
@@ -192,9 +194,19 @@ def test_status_reports_the_queue_depth(client, windows):
 # inbox.register directly, not the polling loop in app.py::_sse_stream.
 #
 # 🔴 GUARD: stub the diff (`if cur_orch != prev_orch:`) to never fire — e.g.
-# `if False and cur_orch != prev_orch:` — and this goes red: a real take-over
+# `if False and cur_orch != prev_orch:` — and this goes red FAST: a real take-over
 # happens, but the generator never yields the frame that would tell a live
-# client's SSE listener to repaint.
+# client's SSE listener to repaint, so the very next frame is the idle keepalive.
+#
+# ⏱️ WHY monotonic is mocked to jump the keepalive interval every call: without it,
+# under the corruption above the loop has nothing to yield and spins in real time
+# until `time.monotonic()` naturally crosses SSE_KEEPALIVE_INTERVAL (15s) — the
+# assert still fires, but ~15s later. A judge that time-boxes each mutation reads
+# that slow fail as a hang ("SURVIVED") rather than a clean RED, and the 15s stall
+# poisons the shared suite run for sibling guards too. Advancing monotonic makes the
+# keepalive fire on the FIRST idle iteration, so the corruption fails in milliseconds.
+# The real path is unaffected: the orchestrator frame is yielded earlier in the loop
+# body than the keepalive check, so a genuine take-over still returns it first.
 
 def test_a_takeover_pushes_an_sse_orchestrator_frame(client, windows, monkeypatch):
     monkeypatch.setattr(dash, "_sse_windows_snapshot", lambda: {})
@@ -202,6 +214,10 @@ def test_a_takeover_pushes_an_sse_orchestrator_frame(client, windows, monkeypatc
     monkeypatch.setattr(dash, "_sse_terms_snapshot", lambda: set())
     monkeypatch.setattr(dash, "_sse_log_snapshot", lambda: {})
     monkeypatch.setattr(dash.time, "sleep", lambda _s: None)
+    # Each call jumps past the keepalive interval, so an idle iteration emits the
+    # keepalive immediately instead of spinning ~15 real seconds for it.
+    ticks = itertools.count(0.0, dash.SSE_KEEPALIVE_INTERVAL + 1.0)
+    monkeypatch.setattr(dash.time, "monotonic", lambda: next(ticks))
 
     stream = dash._sse_stream()
     assert next(stream).startswith("event: hello")   # baseline, no owner yet
