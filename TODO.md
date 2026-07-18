@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **🎛️➡️📂 DECISIONS PANEL → PERSISTENT SIDEBAR SECTION — move the decisions log out of the Personas view into an always-visible left-sidebar section, so decisions truly always have a visible home.**
+- [x] **🎛️➡️📂 DECISIONS PANEL → PERSISTENT SIDEBAR SECTION — move the decisions log out of the Personas view into an always-visible left-sidebar section, so decisions truly always have a visible home.**
 
   **WHY.** cmx-106 shipped the decisions log inside `panel-personas` (the "drama masks" nav view) — so you must navigate there to see it. That undercuts the "durable home" premise: it should be *always on screen*, like the sidebar's Sessions list.
 
