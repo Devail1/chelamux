@@ -62,12 +62,13 @@ function _sseRuns(d) {
 
 function _sseLog(d) {
     // The event log's seq moved. The frame is a NOTIFICATION — it carries the new
-    // seq, not the events — so the reader fetches /api/log from its OWN cursor. Only
-    // while its view is on screen: off it, the view's entry does a fresh read, so a
-    // background fetch per appended event would buy nothing. Two readers share this
-    // one delta — the Feed (everything) and the decisions panel (a filtered tail).
+    // seq, not the events — so the reader fetches /api/log from its OWN cursor. Two
+    // readers share this one delta: the Feed (everything), gated to its own tab
+    // since off it the view's entry does a fresh read on re-entry — and the
+    // Decisions sidebar section (a filtered tail), which is ALWAYS on screen
+    // (cmx-107), so it repaints on every frame regardless of currentTab.
     if (currentTab === 'feed') onLogDelta(d);
-    if (currentTab === 'personas') onDecisionsLogDelta(d);
+    onDecisionsLogDelta(d);
 }
 
 function _sseOrchestrator() {
