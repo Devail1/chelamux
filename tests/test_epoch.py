@@ -143,7 +143,7 @@ def test_a_queue_addressed_to_a_dead_server_is_NOT_delivered_to_whoever_holds_th
 
 
 def test_the_undeliverable_alarm_is_loud_but_not_a_flood(store, sends, monkeypatch):
-    """It must shout, and it must not become wallpaper: one row per address state, not per
+    """It must shout, and it must not become wallpaper: one row per dead address, not per
     tick (a 30s tick would put 2,880 identical rows a day in the Feed, and a queue nobody
     reads is the same silence with more steps)."""
     _registered_under_the_old_server()
@@ -154,6 +154,43 @@ def test_the_undeliverable_alarm_is_loud_but_not_a_flood(store, sends, monkeypat
         inbox.tick({}, runs=_runs())
 
     assert _kinds().count("inbox_undeliverable") == 1
+
+
+def test_the_alarm_does_not_re_fire_when_the_SAME_address_flips_between_gone_and_dangling(
+        store, sends, monkeypatch):
+    """CMX-110: `gone` and `dangling` are two READINGS of the same dead address, not two
+    failures. A churning fleet (worker windows spawning/dying, a status map that hiccups
+    empty for a tick) can flip which reading `address_state` returns for `@1` from one tick
+    to the next even though nothing about the address actually changed — it is still `@1`,
+    still unreachable. The old key (`f"{state}:{wid}"`) changed on every flip and re-armed the
+    alarm each time, which is exactly the burst of alternating "is gone" / "is dangling"
+    phone pushes observed live for one days-old address. De-duping on the address alone must
+    survive the flap: one durable event for the whole outage, regardless of how many times the
+    classification of WHY flips underneath it.
+    """
+    _registered_under_the_old_server()
+
+    # Tick 1: epoch mismatch -> dangling.
+    _tmux(monkeypatch, now=NEW, windows={"@6": "orchestrator"})
+    _statuses(monkeypatch, {"@6": inbox.IDLE})
+    inbox.tick({}, runs=_runs())
+    first = [e for e in event_log.read()["events"] if e["type"] == "inbox_undeliverable"]
+    assert first[0]["payload"]["state"] == "dangling"
+
+    # Tick 2: epoch now reads as matching (a momentary/flaky read), and the orchestrator's
+    # own address is simply absent from the status map -> gone. Still `@1`; still dead.
+    _tmux(monkeypatch, now=OLD, windows={AGENT: "cmx-9"})
+    _statuses(monkeypatch, {AGENT: inbox.BUSY})
+    inbox.tick({}, runs=_runs())
+
+    # Tick 3: flips back to dangling.
+    _tmux(monkeypatch, now=NEW, windows={"@6": "orchestrator"})
+    _statuses(monkeypatch, {"@6": inbox.IDLE})
+    inbox.tick({}, runs=_runs())
+
+    assert sends == []
+    assert _kinds().count("inbox_undeliverable") == 1, \
+        "the flap between gone and dangling re-armed the alarm for the same dead address"
 
 
 def test_re_registering_after_the_restart_drains_the_queue_that_piled_up(
