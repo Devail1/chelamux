@@ -184,9 +184,20 @@ def _empty() -> dict:
     # label for the alarm when even the identity cannot be re-resolved. `address_alarm`
     # de-dups the undeliverable alarm — it must be loud, not a per-tick flood of identical
     # rows in the event log.
+    # `address_alarm_since`/`address_alarm_pushed` are the CMX-113 grace window: the durable
+    # event still fires the instant the address is seen dead (below), but the phone push waits
+    # to see whether the SAME outage is still true after `config.INBOX_ALARM_GRACE_SECONDS` —
+    # a reboot/tmux-restart/handoff self-heals in seconds and should never buzz a pocket.
     return {"orchestrator": None, "orchestrator_epoch": None, "orchestrator_session": None,
             "orchestrator_name": None, "watches": {}, "queue": [], "runs_seen": {},
-            "address_alarm": None}
+            "address_alarm": None, "address_alarm_since": None, "address_alarm_pushed": False}
+
+
+def _clear_address_alarm(store: dict) -> None:
+    """The failure is over — the next one (even the same kind) is news again, from scratch."""
+    store["address_alarm"] = None
+    store["address_alarm_since"] = None
+    store["address_alarm_pushed"] = False
 
 
 def load() -> dict:
@@ -409,7 +420,7 @@ def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:
             store["orchestrator_epoch"] = now
             store["orchestrator_session"] = session
             store["orchestrator_name"] = names.get(by)
-            store["address_alarm"] = None          # a fresh address: any old alarm is spent
+            _clear_address_alarm(store)            # a fresh address: any old alarm is spent
         target = orchestrator_wid(store)
         if target and wid == target:
             return {"ok": False, "error": "refusing to watch the orchestrator's own window"}
@@ -440,7 +451,7 @@ def register(by: str) -> dict:
         store["orchestrator_epoch"] = now
         store["orchestrator_session"] = session
         store["orchestrator_name"] = names.get(by)
-        store["address_alarm"] = None
+        _clear_address_alarm(store)
         queued = len(store["queue"])
     return {"ok": True, "orchestrator": by, "epoch": now, "session": session, "queued": queued}
 
@@ -464,7 +475,7 @@ def unregister(wid: str) -> dict:
         store["orchestrator_epoch"] = None
         store["orchestrator_session"] = None
         store["orchestrator_name"] = None
-        store["address_alarm"] = None
+        _clear_address_alarm(store)
     return {"ok": True, "wid": wid}
 
 
@@ -1004,7 +1015,7 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
 
 
 def _undeliverable(store: dict, state: str, wid: str, why: str,
-                   queued: int, alarms: list | None) -> None:
+                   queued: int, alarms: list | None, now: float | None = None) -> None:
     """An address that cannot take the work SHOUTS. This is CMX-77's whole point.
 
     The 2026-07-14 outage was not that the address rotted — addresses rot; a tmux server can
@@ -1016,15 +1027,16 @@ def _undeliverable(store: dict, state: str, wid: str, why: str,
     * ``ERROR`` in the daemon log — every tick, for as long as it is true: this is not a
       transient, it does not fix itself, and a once-only line scrolls away in a minute;
     * a durable ``inbox_undeliverable`` event — the Feed and the audit trail;
-    * a phone push, if notifications are configured — the human who "had to notice" is told;
-    * a red ``chela doctor`` (``inbox.address``), which is what any of this is checked with.
+    * a red ``chela doctor`` (``inbox.address``), which is what any of this is checked with;
+    * a phone push, if notifications are configured AND the address is still dead after
+      ``config.INBOX_ALARM_GRACE_SECONDS`` — see the CMX-113 note below.
 
-    The log line repeats; the event and the push do NOT — they are de-duped on the address
-    ITSELF, in the store, so an alarm that stays true for a day is one row in the Feed and one
-    buzz in a pocket, not 2,880 of each. Both are handed back to the caller (``alarms``)
-    rather than sent from here: this runs under the store lock, and a push is an HTTP POST
-    with a ten-second timeout — doing it here would hold the lock across the network and
-    block the very command that FIXES this (``chela watch``, which takes the same lock).
+    The log line repeats; the durable event does NOT — it is de-duped on the address ITSELF,
+    in the store, so an alarm that stays true for a day is one row in the Feed, not 2,880.
+    Handed back to the caller (``alarms``) rather than sent from here: this runs under the
+    store lock, and a push is an HTTP POST with a ten-second timeout — doing it here would
+    hold the lock across the network and block the very command that FIXES this
+    (``chela watch``, which takes the same lock).
 
     **De-duped on ``wid`` alone — never on ``state`` too.** ``gone`` and ``dangling`` are not
     two different failures; they are two READINGS of the SAME dead address, and a live fleet
@@ -1035,35 +1047,77 @@ def _undeliverable(store: dict, state: str, wid: str, why: str,
     (``f"{state}:{wid}"``) changed on every flip and re-armed the alarm. The address is what
     the human has to go fix (``chela watch``); the reading is commentary on why, and belongs
     in ``why``/the log line, never in the de-dup key.
+
+    **CMX-113: the push has its OWN, later, gate — the durable record does not.** A reboot /
+    tmux-restart / orchestrator handoff makes the address dangle for exactly as long as it
+    takes the next session to run ``chela watch`` (or any dispatch) — CMX-82's self-heal often
+    beats that anyway. That is an EXPECTED, SELF-HEALING blip, and Liav ate a phone buzz for
+    every single one of them on 2026-07-19, even with CMX-110's per-address de-dup, because the
+    old code pushed on the very first tick that saw the address dead. The durable event / log
+    ERROR / doctor still fire on that same first tick, unconditionally — a human mid-debugging
+    session must still see this instantly, which is CMX-77's whole point and is NOT being
+    loosened here. Only the proactive, phone-in-pocket push waits: the first sighting of a dead
+    address stamps ``address_alarm_since`` and pushes nothing; every later tick re-checks the
+    SAME address and fires the push (once — ``address_alarm_pushed`` latches it) only once it
+    has stayed dead for the whole grace window, i.e. only once it has stopped looking like the
+    blip it usually is.
     """
     log.error("inbox: UNDELIVERABLE (%s) — %d event(s) queued for %s: %s",
               state, queued, wid, why)
+    now = time.time() if now is None else now
     key = wid
-    if store.get("address_alarm") == key:
-        return                             # same address: already announced, whatever it reads as now
-    store["address_alarm"] = key
+    payload = {"orchestrator": wid, "state": state, "detail": why, "queued": queued,
+               "epoch": store.get("orchestrator_epoch"),
+               "orchestrator_name": store.get("orchestrator_name")}
+    if store.get("address_alarm") != key:
+        # First sighting of THIS dead address: the durable record fires now, unconditionally —
+        # the Feed/audit-trail/doctor must never wait on the grace window. The push does not;
+        # it only starts the clock.
+        store["address_alarm"] = key
+        store["address_alarm_since"] = now
+        store["address_alarm_pushed"] = False
+        if alarms is not None:
+            alarms.append({
+                "summary": f"📥 THE DECISIONS INBOX CANNOT DELIVER — {queued} event(s) are "
+                           f"queued for {wid} and that address is {state}. {why}",
+                "payload": payload,
+                "durable": True,
+                "push": False,
+            })
+        return
+    # Same address as last tick: already durably recorded. The only open question is whether
+    # it has now outlasted the grace window and earns the (one-time) phone push.
+    if store.get("address_alarm_pushed"):
+        return                             # already buzzed for this outage
+    since = store.get("address_alarm_since")
+    if since is None or now - since < config.INBOX_ALARM_GRACE_SECONDS:
+        return                             # still inside the grace window — could be the blip
+    store["address_alarm_pushed"] = True
     if alarms is None:
         return
+    elapsed = int(now - since)
     alarms.append({
-        "summary": f"📥 THE DECISIONS INBOX CANNOT DELIVER — {queued} event(s) are queued "
-                   f"for {wid} and that address is {state}. {why}",
-        "payload": {"orchestrator": wid, "state": state, "detail": why, "queued": queued,
-                    "epoch": store.get("orchestrator_epoch"),
-                    "orchestrator_name": store.get("orchestrator_name")},
+        "summary": f"📥 THE DECISIONS INBOX STILL CANNOT DELIVER after {elapsed}s — "
+                   f"{queued} event(s) are queued for {wid} and that address is {state}. {why}",
+        "payload": {**payload, "elapsed_seconds": elapsed},
+        "durable": False,
+        "push": True,
     })
 
 
 def raise_alarms(alarms: list[dict]) -> None:
     """Publish the undeliverable alarms a tick raised — OUTSIDE the store lock.
 
-    The durable record first (it is the one that cannot be missed: it survives a restart and
-    lands in the Feed), then the phone. ``notify.send`` swallows its own failures, and
-    ``event_log.append`` never raises, so an alarm about a broken inbox cannot itself take the
-    daemon down.
+    Each alarm says which surface it is for (:func:`_undeliverable`): the durable Feed/audit
+    record fires the instant the address is seen dead, the phone push only once it has stayed
+    dead past ``config.INBOX_ALARM_GRACE_SECONDS`` (CMX-113) — never both from the same alarm.
+    ``notify.send`` swallows its own failures, and ``event_log.append`` never raises, so an
+    alarm about a broken inbox cannot itself take the daemon down.
     """
     for alarm in alarms:
-        event_log.append("inbox_undeliverable", alarm["summary"], alarm["payload"])
-        if notify.enabled():
+        if alarm.get("durable"):
+            event_log.append("inbox_undeliverable", alarm["summary"], alarm["payload"])
+        if alarm.get("push") and notify.enabled():
             notify.send(alarm["summary"],
                         title="chela: the decisions inbox is not being delivered")
 
@@ -1116,7 +1170,7 @@ def deliver(store: dict, statuses: dict[str, str],
         return []
     # A real, idle window at the address: whatever it was alarming about is over, and the
     # next failure — even the same kind — is news again rather than a de-duped repeat.
-    store["address_alarm"] = None
+    _clear_address_alarm(store)
     runs = runs or []
 
     sent: list[dict] = []
@@ -1203,7 +1257,7 @@ def _apply_heal(store: dict, heal: tuple[str, str], statuses: dict[str, str],
     store["orchestrator"] = wid
     store["orchestrator_epoch"] = now_epoch
     store["orchestrator_name"] = windows.get(wid) or store.get("orchestrator_name")
-    store["address_alarm"] = None          # the failure is over — the next one is news again
+    _clear_address_alarm(store)            # the failure is over — the next one is news again
     return old
 
 
