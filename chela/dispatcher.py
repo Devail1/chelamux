@@ -238,6 +238,24 @@ AGENT_MODEL_KEY = "agent_model"
 # ``role``). It is not read from userconfig, so no Settings write can touch it.
 DEFAULT_JUDGE_MODEL = "opus"
 
+# CMX-115: the daemon carries this so PRODUCTION can push real phone notifications
+# (~/.chela/chela.env), but a dispatched agent or judge window is spawned inside the
+# same tmux session and inherits that same environment. Neither may ever hold it — a
+# worker that runs inbox/notify code (or the judge's full pytest pass) would otherwise
+# fire a REAL ntfy at the human's phone with whatever test fixture is lying around.
+AGENT_ENV_STRIP = ("CHELA_NOTIFY_URL",)
+
+
+def _strip_agent_env_cmd() -> str:
+    """The shell line sent into a fresh agent/judge window before its agent command.
+
+    A plain ``unset`` in THAT window's own shell — surgical (only the named vars,
+    nothing else the agent needs) and scoped to this one pane, not the tmux
+    session's stored environment, so it never touches any other window (including
+    ones a human opens by hand) or the daemon's own process.
+    """
+    return " ".join(("unset", *AGENT_ENV_STRIP))
+
 
 def settings_permission_mode() -> str | None:
     """The permission mode set from Settings, or None if unset/invalid.
@@ -2819,6 +2837,10 @@ def _launch_agent(
       that makes the venv real (``uv sync --all-extras``, the CMX-21 trap). ⛔ Skipping it
       on a rework hands the agent phantom test failures — and the rework prompt orders it
       to re-run the CI gates and believe them.
+    * :data:`AGENT_ENV_STRIP` (CMX-115) — sent via ``unset`` into the window's own shell
+      before anything else, so this agent (and the judge, which calls this same function)
+      never holds ``CHELA_NOTIFY_URL``. Both run notify.py-touching code (inbox repros, the
+      judge's full pytest pass) that would otherwise push a REAL ntfy to the human's phone.
 
     TMUX (every rule below was paid for once already; a hand-rolled copy relearns them):
 
@@ -2882,6 +2904,15 @@ def _launch_agent(
     # its capable model regardless of the coding-agent Settings choice.
     agent_cmd, cmd_source = resolve_agent_cmd(wf, role)
     log.info("Launching %s with %r (source: %s)", task_id, agent_cmd, cmd_source)
+    # CMX-115: strip daemon-only secrets from THIS window's shell before anything else
+    # runs in it — must land before the CHELA_WID export and the agent command below,
+    # so nothing launched in this pane (the agent itself, a repro, `chela` subcommands)
+    # ever sees them.
+    subprocess.run(
+        ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}",
+         _strip_agent_env_cmd(), "Enter"],
+        check=True, capture_output=True,
+    )
     # Export CHELA_WID first so the worktree agent knows its own window id (self-identity
     # for peek/read/drive), then launch.
     if re.fullmatch(r"@\d+", target_id):
