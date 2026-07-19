@@ -418,6 +418,16 @@ WALL_TILE_DISPATCHED = os.environ.get("CHELA_WALL_TILE_DISPATCHED", "false").str
 # defaults ON safely; set CHELA_INBOX_ENABLED=false to disable it outright.
 INBOX_ENABLED = os.environ.get("CHELA_INBOX_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 
+# How long an undeliverable orchestrator address must stay dead before the inbox buzzes
+# the phone about it (chela/inbox.py `_undeliverable`). A reboot / tmux-restart / handoff
+# makes the address dangle for a few ticks and then SELF-HEALS (CMX-82) the moment the next
+# session runs `chela watch` (or any dispatch) — that is expected and fixes itself, so
+# buzzing the phone for it is noise (CMX-113). The durable event / log ERROR / red doctor
+# still fire the INSTANT the address is seen dead, unconditionally: those are the surfaces a
+# human checks WHILE DEBUGGING (CMX-77's whole point), and this grace window only delays the
+# proactive push, never the record.
+INBOX_ALARM_GRACE_SECONDS = int(os.environ.get("CHELA_INBOX_ALARM_GRACE_SECONDS", "120"))
+
 # Explicit opt-in to serve the writable terminal wall on a NON-loopback bind
 # (e.g. --host 0.0.0.0 or a LAN/tailnet IP). Off by default: a public bind would
 # otherwise hand out unauthenticated remote shells (RCE). Loopback binds, fronted

@@ -60,6 +60,22 @@ def sends(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def pushes(monkeypatch):
+    """The phone. CMX-113's grace window gates THIS, never the durable Feed record."""
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(inbox.notify, "enabled", lambda: True)
+    monkeypatch.setattr(inbox.notify, "send",
+                        lambda message, title=None: (calls.append((message, title)), True)[1])
+    return calls
+
+
+def _at(monkeypatch, t):
+    """Freeze `_undeliverable`'s clock. The grace window is real elapsed seconds, not a tick
+    count, so these tests move time explicitly instead of ticking 120 times."""
+    monkeypatch.setattr(inbox.time, "time", lambda: t)
+
+
 def _tmux(monkeypatch, *, now, windows):
     """The tmux server that is running RIGHT NOW, and the windows it is serving."""
     monkeypatch.setattr(epoch, "current", lambda: now)
@@ -191,6 +207,99 @@ def test_the_alarm_does_not_re_fire_when_the_SAME_address_flips_between_gone_and
     assert sends == []
     assert _kinds().count("inbox_undeliverable") == 1, \
         "the flap between gone and dangling re-armed the alarm for the same dead address"
+
+
+# --- CMX-113: the phone push has its own, later, gate — the durable record does not ------
+
+GRACE = inbox.config.INBOX_ALARM_GRACE_SECONDS
+
+
+def test_the_phone_push_waits_out_the_grace_window_but_the_durable_record_never_does(
+        store, sends, pushes, monkeypatch):
+    """A reboot/tmux-restart self-heals within seconds — Liav ate a phone buzz for every single
+    one of those on 2026-07-19. The durable Feed row (what a human checks WHILE DEBUGGING, and
+    CMX-77's whole point) must still fire on the FIRST tick that sees the address dead; only the
+    proactive push waits to see whether this outage outlasts the grace window."""
+    _registered_under_the_old_server()
+    _tmux(monkeypatch, now=NEW, windows={"@6": "orchestrator"})
+    _statuses(monkeypatch, {"@6": inbox.IDLE})
+
+    _at(monkeypatch, 1_000_000)
+    inbox.tick({}, runs=_runs())
+    assert _kinds().count("inbox_undeliverable") == 1, "durable record fires on first sighting"
+    assert pushes == [], "no buzz on first sighting — that is exactly the self-healing blip case"
+
+    # Still inside the grace window: same dead address, no push yet.
+    _at(monkeypatch, 1_000_000 + GRACE - 1)
+    inbox.tick({}, runs=_runs())
+    assert pushes == []
+    assert _kinds().count("inbox_undeliverable") == 1, "no second durable row for the same outage"
+
+    # Past the grace window and STILL dead: this has stopped looking like a blip.
+    _at(monkeypatch, 1_000_000 + GRACE + 1)
+    inbox.tick({}, runs=_runs())
+    assert len(pushes) == 1, "the outage outlasted the grace window — now it may buzz"
+    assert _kinds().count("inbox_undeliverable") == 1, "the push is not a second durable row"
+
+    # And it latches: no re-buzz on every subsequent tick past the grace window.
+    _at(monkeypatch, 1_000_000 + GRACE + 30)
+    inbox.tick({}, runs=_runs())
+    assert len(pushes) == 1, "the push fires once per outage, not once per tick"
+
+
+def test_the_phone_never_buzzes_when_chela_watch_re_registers_inside_the_grace_window(
+        store, sends, pushes, monkeypatch):
+    """The scenario CMX-113 exists for: the address dangles for a couple of ticks and then a
+    human (or any dispatch) runs `chela watch` well before the grace window would have expired.
+    That outage must never earn a phone push, no matter how long the daemon keeps ticking
+    afterwards."""
+    _registered_under_the_old_server(queued=1)
+    _tmux(monkeypatch, now=NEW, windows={"@6": "orchestrator"})
+    _statuses(monkeypatch, {"@6": inbox.IDLE})
+
+    _at(monkeypatch, 3_000_000)
+    inbox.tick({}, runs=_runs())
+    assert _kinds().count("inbox_undeliverable") == 1
+    assert pushes == []
+
+    _at(monkeypatch, 3_000_000 + GRACE - 5)              # still inside the grace window
+    inbox.tick({}, runs=_runs())
+    assert pushes == []
+
+    assert inbox.register("@6")["queued"] == 1            # the human fixes it, in time
+
+    _at(monkeypatch, 3_000_000 + GRACE + 60)               # long past the grace window now
+    inbox.tick({}, runs=_runs())
+    assert pushes == [], "fixed before the grace window elapsed — never buzz for it retroactively"
+
+
+def test_the_phone_never_buzzes_when_the_address_self_heals_inside_the_grace_window(
+        store, sends, pushes, monkeypatch):
+    """The other recovery path (CMX-82's automatic self-heal, no human involved): the resolver
+    takes a couple of ticks to find the session live again (the ordinary case — the next
+    session has to start up first), and heals with only seconds of grace to spare. Because the
+    heal is applied BEFORE `deliver()` re-checks the address in that same tick, it must win the
+    race even that close to the deadline — the push must never fire."""
+    _registered_under_the_old_server(queued=1, session=SESSION)
+    _tmux(monkeypatch, now=NEW, windows={"@6": "orchestrator"})
+    _statuses(monkeypatch, {"@6": inbox.IDLE})
+    _heals_to(monkeypatch, None)               # not resolvable yet — nobody has started `@6`
+
+    _at(monkeypatch, 2_000_000)
+    inbox.tick({}, runs=_runs())
+    assert inbox.load()["orchestrator"] == ORCH, "still dangling — nothing to heal from yet"
+    assert pushes == [], "first sighting — never buzzes"
+
+    _at(monkeypatch, 2_000_000 + GRACE - 1)     # one second of grace left
+    _heals_to(monkeypatch, "@6")                # ...and NOW the session is found live
+    inbox.tick({}, runs=_runs())
+    assert inbox.load()["orchestrator"] == "@6", "healed with a second of grace to spare"
+    assert pushes == [], "healed before the deadline — must not buzz no matter how close"
+
+    # Time marches on well past the grace window — a healed address must never retroactively buzz.
+    _at(monkeypatch, 2_000_000 + GRACE + 60)
+    inbox.tick({}, runs=_runs())
+    assert pushes == []
 
 
 def test_re_registering_after_the_restart_drains_the_queue_that_piled_up(
