@@ -2408,14 +2408,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 
 /* --- Command palette (⌘K) --- */
-.palette-trigger {
-    display: inline-flex; align-items: center; gap: 7px;
-    background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
-    border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px;
-    transition: border-color 0.12s, color 0.12s, background 0.12s;
-}
-.palette-trigger:hover { border-color: var(--accent); color: var(--text); }
-.palette-trigger svg { width: 14px; height: 14px; display: block; }
+/* .pt-kbd: the small "⌘K" hint badge, now inside the primary menu's "Jump to…"
+   row (index.html #primary-menu) — its own dedicated .palette-trigger topbar
+   button folded away in CMX-109 / CMX-108 Part A re-filed. */
 .pt-kbd {
     font-size: 10px; font-weight: 600; color: var(--text-dim);
     border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; line-height: 16px;
@@ -2712,12 +2707,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .icon-btn svg { width: 20px; height: 20px; }
     .topbar .brand .brand-mark { height: 26px; }
     /* Phone topbar: logo mark only (drop the "chela" wordmark — the hamburger
-       anchors the left). Secondary readouts (usage / Next / upd) + Notifications
-       / Settings now live in the overflow menu, so the bar is just the primaries
-       (jump · New · overflow), plus the safety shares indicator when active. */
+       anchors the left). Jump/New/overflow now live behind the one primary
+       menu button, plus the safety shares indicator when active. */
     .topbar .brand span { display: none; }
-    .palette-trigger .pt-kbd { display: none; }   /* icon-only on phones */
-    .palette-trigger { padding: 7px 8px; }
     .topbar-actions { gap: 6px; }
 
     /* Off-canvas drawer: slides in over the canvas, above the scrim (z 40),
