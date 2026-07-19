@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **🪟 TOPBAR PRIMARIES → ONE MENU (CMX-108 Part A, re-filed) — fold the MAIN topbar's three primary buttons into a single dropdown.** cmx-108/PR #122 shipped the per-pane pin + Alt+1..9 pane switcher, but its "Part A" folded the *Wall toolbar* (grid presets + lock) — a different, valid consolidation — instead of the *main topbar* primaries this asks for. So the original Part A is still open; re-filed here unchanged and standalone.
+- [x] **🪟 TOPBAR PRIMARIES → ONE MENU (CMX-108 Part A, re-filed) — fold the MAIN topbar's three primary buttons into a single dropdown.** cmx-108/PR #122 shipped the per-pane pin + Alt+1..9 pane switcher, but its "Part A" folded the *Wall toolbar* (grid presets + lock) — a different, valid consolidation — instead of the *main topbar* primaries this asks for. So the original Part A is still open; re-filed here unchanged and standalone.
 
   **WHY.** The topbar's three primary buttons are visual clutter that a single menu subsumes.
 
