@@ -199,6 +199,15 @@ body {
 }
 .gs-grip { cursor: move; }
 
+/* Keyboard-fast pane switcher badge (CMX-108): Alt+N jumps straight to this
+   tile. Painted/hidden by _refreshPaneIdx, tmux-window-number style. */
+.gs-idx {
+    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+    min-width: 15px; height: 15px; padding: 0 3px; border-radius: 4px;
+    background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
+    font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+
 /* Per-tile context-window bar, pinned to the tile's bottom edge. Ambient: scan
    the wall and read each agent's context fill at a glance; hover for the exact
    numbers. Sits above the iframe; pointer-events confined to the thin strip so
@@ -256,6 +265,14 @@ body {
     border: 0; color: var(--accent);
     background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
+
+/* Wall toolbar "Layout" menu button — folds the grid presets + lock (formerly
+   inline primaries) behind one trigger (CMX-108). Needs its own padding/gap
+   since the base .gl-btn is icon-only-sized (line-height:0). */
+#term-layout-btn { padding: 5px 9px; gap: 5px; line-height: normal; font-size: 11px; }
+.layout-menu { min-width: 168px; }
+.layout-menu-presets { display: block; margin: 2px 0 6px; }
+.layout-menu .layout-menu-lock { width: 100%; justify-content: flex-start; gap: 6px; padding: 6px 8px; }
 
 /* Pane title: rename target. Subtle dotted underline on hover hints it's
    editable; the inline edit input matches the dark header. */
@@ -319,6 +336,16 @@ body {
 .gs-keys button.gs-orch-btn { padding: 4px 6px; font-size: 13px; line-height: 1; }
 .gs-orch-btn.on {
     color: #0d1117; background: var(--ok-blue); border-color: var(--ok-blue);
+}
+
+/* --- per-pane layout pin: exempt from grid-preset auto-reflow (CMX-108) ---- */
+.gs-keys button.gs-pin-btn { padding: 4px 6px; font-size: 12px; line-height: 1; }
+.gs-pin-btn.on { color: #0d1117; background: var(--yellow); border-color: var(--yellow); }
+/* A dashed accent border on the tile itself — distinct from the solid
+   focus/waiting rings above, so "pinned" reads at a glance without hunting
+   for the header button. */
+.grid-stack-item.pane-pinned > .grid-stack-item-content {
+    border-style: dashed; border-color: var(--yellow);
 }
 /* Facepile: sits between the title and the window controls (title flexes, so it
    rides to the right). Compact initial-dots + overflow + agent gear pip. */
