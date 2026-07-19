@@ -755,6 +755,10 @@ function paneHead(wid, draggable) {
     // nothing to dock it beside) — only render it for draggable wall tiles.
     const min = draggable
         ? `<button class="gs-min-btn" onclick="chela.termMinFor(this)" title="Minimize to dock">&#128469;</button>` : '';
+    // Pin is also wall-only: it exempts this tile from applyGridLayout's
+    // auto-reflow (grid presets), so single mode (no reflow to opt out of) gets
+    // no button either.
+    const pin = draggable ? _pinBtnHTML(wid) : '';
     // No PgUp/PgDn/scroll/Esc/^C here: with focus in the pane those keys reach the
     // terminal natively (wheel/keys scroll, Esc and Ctrl-C pass through), so the
     // header carries only the window controls (minimize / maximize / kill).
@@ -767,7 +771,12 @@ function paneHead(wid, draggable) {
              aria-label="Wire this agent to another">${PORT_GLYPH}</button>` : '';
     const roomBadge = draggable
         ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden></button>` : '';
+    // Keyboard-fast pane switcher badge (Alt+1..9 jumps here) — filled in and
+    // shown/hidden by _refreshPaneIdx, never here, since a pane's index depends
+    // on the whole wall's order, not just this one tile.
+    const idx = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
     return `<div class="gs-head">
+      ${idx}
       ${_statusDot(wid)}
       ${label}
       ${roomBadge}
@@ -779,6 +788,7 @@ function paneHead(wid, draggable) {
           ${port}
           ${_shareBtnHTML(wid)}
           ${_orchBtnHTML(wid)}
+          ${pin}
           ${min}
           <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
           ${kill}
@@ -880,6 +890,44 @@ function _loadMinimized() {
 }
 function _saveMinimized() {
     localStorage.setItem('pc_wall_minimized', JSON.stringify([..._minimized]));
+}
+
+// ---- Per-pane layout pin ----------------------------------------------------
+// A pinned pane sits out of applyGridLayout's auto-reflow (grid presets): its
+// x/y/w/h are left exactly as the user placed them while every other pane
+// rearranges around it. Persisted by wid so a pin survives a wall rebuild.
+let _pinned = _loadPinned();
+
+function _loadPinned() {
+    try { return new Set(JSON.parse(localStorage.getItem('pc_wall_pinned') || '[]')); }
+    catch (e) { return new Set(); }
+}
+function _savePinned() {
+    localStorage.setItem('pc_wall_pinned', JSON.stringify([..._pinned]));
+}
+
+function _pinBtnHTML(wid) {
+    const on = _pinned.has(wid);
+    const title = on
+        ? "Pinned — this pane keeps its spot when a grid layout is applied. Click to unpin"
+        : "Pin — keep this pane's position when a grid layout is applied";
+    return `<button class="gs-pin-btn${on ? ' on' : ''}" onclick="chela.termPinToggle(this,'${_jsStr(wid)}')"
+      aria-pressed="${on ? 'true' : 'false'}" title="${attrEsc(title)}">&#128204;</button>`;
+}
+
+// Toggle a pane's pin state. applyGridLayout reads _pinned directly (no
+// rebuild needed here) — this only flips the button + tile visuals and persists.
+function termPinToggle(btn, wid) {
+    if (_pinned.has(wid)) _pinned.delete(wid); else _pinned.add(wid);
+    _savePinned();
+    const on = _pinned.has(wid);
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.title = on
+        ? "Pinned — this pane keeps its spot when a grid layout is applied. Click to unpin"
+        : "Pin — keep this pane's position when a grid layout is applied";
+    const item = btn.closest('.grid-stack-item');
+    if (item) item.classList.toggle('pane-pinned', on);
 }
 
 // Hide a tile element + pull it out of the grid engine. Idempotent.
@@ -1564,6 +1612,47 @@ function _refreshPaneLabels() {
     renderMobileSwitcher();   // reflect renames / added / dropped agents in the pills
 }
 
+// ---- Keyboard-fast pane switcher (Alt+1..9) --------------------------------
+// The first 9 panes in stable wall order get a jump key. Shared by the badge
+// painter and the shortcut handler so "what a tile shows" and "what Alt+N
+// jumps to" can never drift apart.
+function _switcherOrder() {
+    return _orderedWids(_renderedWids).slice(0, 9);
+}
+
+// Paint (or hide) each tile's index badge. Cheap — only touches tiles whose
+// number actually changed — call freely after anything that can reorder the
+// wall (a build, a surgical append, a pane drop).
+function _refreshPaneIdx() {
+    if (!TERMINALS_ON || _termMode !== 'wall') return;
+    const order = _switcherOrder();
+    $('#term-stage').querySelectorAll('.grid-stack-item .gs-idx').forEach(el => {
+        if (!el.hidden) { el.hidden = true; el.textContent = ''; }
+    });
+    order.forEach((wid, i) => {
+        const el = _gridItemEl(wid);
+        const idx = el && el.querySelector('.gs-idx');
+        if (!idx) return;
+        idx.textContent = String(i + 1);
+        idx.hidden = false;
+    });
+}
+
+// Alt+1..9: jump straight to that pane, tmux-prefix style — no menu, no
+// typing. Ignored while the user is typing anywhere (an input, a live
+// terminal iframe never reaches this document-level listener in the first
+// place) or while the palette is open, so it never steals a keystroke.
+document.addEventListener('keydown', e => {
+    if (!TERMINALS_ON || _termMode !== 'wall' || !e.altKey || e.ctrlKey || e.metaKey) return;
+    if (!/^[1-9]$/.test(e.key)) return;
+    const target = e.target;
+    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+    const wid = _switcherOrder()[Number(e.key) - 1];
+    if (!wid) return;
+    e.preventDefault();
+    focusPaneByWid(wid);
+});
+
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
 // the current selection. Options carry the wid as value + the friendly label as
 // text. Does NOT touch the displayed pane or its iframe — so a newly spawned
@@ -1616,6 +1705,7 @@ function dropTerminalPane(wid) {
     _forgetAutoDock(wid);   // the window is gone: its lazy-dock decision dies with it
     renderMinDock();        // taskbar lists every pane → refresh whenever one drops
     _refitWallForDock();    // taskbar may have shrunk a row → re-fit the wall above it
+    _refreshPaneIdx();      // Alt+N badges (keyboard-fast pane switcher)
     _syncTermSig();
 }
 
@@ -1633,7 +1723,8 @@ function _wallTileHTML(wid, x, y, w, h) {
     const body = _termReady.has(wid)
         ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termSrc(wid)}" title="${escHtml(_paneTitle(wid))}"></iframe>`
         : _termPlaceholder(wid);
-    return `<div class="grid-stack-item" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
+    const pinnedCls = _pinned.has(wid) ? ' pane-pinned' : '';
+    return `<div class="grid-stack-item${pinnedCls}" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
     ${paneHead(wid, true)}
     ${body}
@@ -1726,6 +1817,7 @@ function buildWall(wids) {
     _applyWallLock();   // restore the locked (swap-on-drag) feel across reloads
     renderMinDock();
     _replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
+    _refreshPaneIdx();      // Alt+N badges (keyboard-fast pane switcher)
 }
 
 // Surgically append new tiles to an existing wall WITHOUT touching the live
@@ -1769,6 +1861,7 @@ async function addWallTiles(wids) {
     renderMinDock();            // taskbar lists every pane → add the new chip(s)
     _refitWallForDock();        // taskbar may have grown a row → re-fit the wall above it
     _replayRoomAccents();       // a fresh tile already in a room wears its accent at once
+    _refreshPaneIdx();          // Alt+N badges (keyboard-fast pane switcher)
     _syncTermSig();
     return true;
 }
@@ -1881,6 +1974,28 @@ function _buildGridPicker() {
         b.classList.toggle('active', !!(_wallPreset && p.cols === _wallPreset.cols && p.rows === _wallPreset.rows));
     });
     _reflectLockBtn();
+}
+
+// Wall toolbar "Layout" menu: grid presets + lock, folded behind one button
+// instead of sitting inline as separate primaries. Anchored + light-dismiss,
+// same pattern as nav.js's openOverflowMenu/openNewMenu.
+function openLayoutMenu(ev) {
+    if (ev) ev.stopPropagation();
+    const m = $('#layout-menu');
+    if (!m) return;
+    _buildGridPicker();
+    const anchor = (ev && ev.currentTarget) || $('#term-layout-btn');
+    if (!anchor) return;
+    m.style.display = 'block';
+    const r = anchor.getBoundingClientRect();
+    m.style.top = (r.bottom + 6) + 'px';
+    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
+    setTimeout(() => document.addEventListener('click', hideLayoutMenu, { once: true }), 0);
+}
+
+function hideLayoutMenu() {
+    const m = $('#layout-menu');
+    if (m) m.style.display = 'none';
 }
 
 // ---- Layout lock (swap-on-drop) --------------------------------------------
@@ -2195,8 +2310,12 @@ function applyGridLayout(cols, rows, btn) {
     const { rows: total, cellPx } = _wallFill();
     _grid.cellHeight(cellPx);                  // exact divisor so `total` rows fill the height
     // Lay panes out in the taskbar order (pc_pane_order); fall back to current
-    // column-order so an un-reordered wall keeps its existing positions.
+    // column-order so an un-reordered wall keeps its existing positions. Pinned
+    // panes are excluded entirely — a preset reflows every OTHER pane around
+    // them, leaving a pinned tile's x/y/w/h exactly where the user put it
+    // (per-pane layout pin, CMX-108).
     const nodes = _grid.engine.nodes.slice()
+        .filter(n => !_pinned.has(n.id))
         .sort((a, b) => (_orderIndex(a.id) - _orderIndex(b.id)) || (a.x - b.x) || (a.y - b.y));
     const N = nodes.length;
     if (!N) return;
@@ -2403,4 +2522,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabe
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termScrollToggle, toggleDockChip, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, hideLayoutMenu, kbCtrlKey, kbCtrlTap, kbToggle, openLayoutMenu, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleWallLock, wireDragStart, wireRoomClick });
