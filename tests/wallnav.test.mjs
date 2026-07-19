@@ -1,7 +1,9 @@
-// WALL NAV UX, IN A REAL DOM (CMX-108) — three small polish parts on top of the Wall's
-// toolbar and pane headers: a "Layout" menu folding the grid-preset picker + lock button
-// off the bar, a per-pane layout PIN that opts a tile out of applyGridLayout's auto-reflow,
-// and an Alt+1..9 keyboard-fast pane switcher.
+// WALL NAV UX, IN A REAL DOM. Started as CMX-108's three polish parts on the Wall's
+// toolbar and pane headers; CMX-111 corrected which cluster actually gets folded —
+// Liav wanted the PER-PANE title-bar's Wire/Share/Orchestrator/Pin folded behind one
+// "⋯", not the wall TOOLBAR's grid-preset picker + lock (that fold is reverted: the
+// toolbar is back to inline, same as before CMX-108). The per-pane layout PIN and the
+// Alt+1..9 keyboard-fast pane switcher are unrelated to either fold and are unchanged.
 //
 // Runs the REAL terminals.js in jsdom (same approach as tests/wall.test.mjs and
 // tests/walldock.test.mjs): real `renderTerminals` -> `buildWall` -> real
@@ -10,15 +12,18 @@
 // back onto the DOM's gs-x/gs-y/gs-w/gs-h attributes) because the pin test needs to
 // observe applyGridLayout's real reflow decisions, not just "did it not crash".
 //
-// Three properties, each a regression that would ship silently:
+// Four properties, each a regression that would ship silently:
 //
-//   1. 🔴 THE LAYOUT MENU ACTUALLY GATES THE CONTROLS. #layout-menu starts hidden;
-//      openLayoutMenu/hideLayoutMenu toggle it, and the grid-preset picker + lock
-//      button live INSIDE it (not still floating loose on the toolbar — the whole
-//      point of the fold).
-//   2. 🔴 A PINNED PANE'S GEOMETRY IS NEVER TOUCHED BY A GRID PRESET. applyGridLayout
+//   1. 🔴 THE PANE "⋯" ACTUALLY GATES WIRE/SHARE/ORCHESTRATOR/PIN. Each pane's overflow
+//      menu starts hidden; togglePaneOverflow reveals .gs-port/.gs-share-btn/
+//      .gs-orch-btn/.gs-pin-btn INSIDE it (not loose in .gs-win-ctl — the whole point
+//      of the fold), and they stay real, working buttons — not decoration.
+//   2. 🔴 THE WALL TOOLBAR'S GRID PRESETS + LOCK STAYED INLINE. No "Layout" menu to open
+//      — #term-grid-presets and #term-lock-btn are directly reachable in the toolbar,
+//      proving the CMX-108 toolbar fold was actually reverted, not just hidden.
+//   3. 🔴 A PINNED PANE'S GEOMETRY IS NEVER TOUCHED BY A GRID PRESET. applyGridLayout
 //      reflows every OTHER pane; a pinned one keeps its exact gs-x/gs-y/gs-w/gs-h.
-//   3. 🔴 ALT+N JUMPS TO THE RIGHT PANE, PLAIN "N" DOES NOT. The badge numbering and
+//   4. 🔴 ALT+N JUMPS TO THE RIGHT PANE, PLAIN "N" DOES NOT. The badge numbering and
 //      the shortcut's target must never drift apart, and the shortcut must be gated on
 //      Alt (a bare digit is normal terminal input and must reach the pane untouched).
 //
@@ -28,25 +33,22 @@ import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 
-// The terminals panel + the layout-menu popover, as index.html emits them (only the
-// ids terminals.js / nav.js reach for).
+// The terminals panel, as index.html emits it (only the ids terminals.js / nav.js
+// reach for) — grid presets + lock sit directly on the toolbar, inline (no Layout menu).
 const PANEL = `
 <div class="panel" id="panel-terminals">
   <button id="term-mode-single"></button>
   <button id="term-mode-wall"></button>
   <select id="term-agent"></select>
   <span id="term-wall-grid">
-    <button id="term-layout-btn" onclick="chela.openLayoutMenu(event)"></button>
+    <span id="term-grid-presets"></span>
+    <button id="term-lock-btn" onclick="chela.toggleWallLock(this)"></button>
   </span>
   <button id="term-new-shell"></button>
   <div id="term-switcher"></div>
   <div id="term-stage"></div>
   <div id="term-min-dock"></div>
   <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
-</div>
-<div class="popover" id="layout-menu" style="display:none;">
-  <span id="term-grid-presets"></span>
-  <button id="term-lock-btn" onclick="chela.toggleWallLock(this)"></button>
 </div>`;
 
 const AGENTS = [
@@ -150,7 +152,8 @@ before(async () => {
 });
 
 beforeEach(() => {
-    window.chela.hideLayoutMenu();
+    // No pane overflow menu should carry over open between tests.
+    document.querySelectorAll('.pane-overflow-menu').forEach(m => { m.hidden = true; });
 });
 
 const tile = wid => document.querySelector(`#term-stage .grid-stack-item[gs-id="${wid}"]`);
@@ -159,23 +162,64 @@ const geom = wid => {
     return el && ['x', 'y', 'w', 'h'].map(k => el.getAttribute('gs-' + k)).join(',');
 };
 
-// 1 — THE FOLD. One trigger; the picker + lock live behind it, not loose on the bar.
-test('the Layout menu is hidden by default, and opening it reveals the real controls', () => {
-    const menu = document.getElementById('layout-menu');
-    assert.equal(menu.style.display, 'none', 'starts closed');
+// 1 — THE PANE FOLD. One "⋯" trigger per pane; Wire/Share/Orchestrator/Pin live
+// behind it, not loose in the header — and stay the SAME real buttons, just moved.
+test('a pane\'s "⋯" overflow is hidden by default, and opening it reveals Wire/Share/Orchestrator/Pin', () => {
+    const wid = '@1';
+    const overflowBtn = tile(wid).querySelector('.gs-overflow-btn');
+    const menu = tile(wid).querySelector('.pane-overflow-menu');
+    assert.ok(overflowBtn, 'every wall tile gets a "⋯" trigger');
+    assert.ok(menu, 'every wall tile gets an overflow menu');
+    assert.equal(menu.hidden, true, 'starts closed');
+    assert.equal(overflowBtn.getAttribute('aria-expanded'), 'false');
 
-    window.chela.openLayoutMenu();
-    assert.equal(menu.style.display, 'block', 'opens on click');
-    // The controls the toolbar used to show inline now live INSIDE the menu.
-    assert.ok(menu.querySelector('#term-grid-presets'), 'grid presets are inside the menu');
-    assert.ok(menu.querySelector('#term-grid-presets .gl-btn'), 'presets are actually populated, not an empty shell');
-    assert.ok(menu.querySelector('#term-lock-btn'), 'lock button is inside the menu');
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, overflowBtn);
+    assert.equal(menu.hidden, false, 'opens on click');
+    assert.equal(overflowBtn.getAttribute('aria-expanded'), 'true');
+    // The controls the header used to show inline now live INSIDE this pane's menu.
+    assert.ok(menu.querySelector('.gs-port'), 'wire port is inside the menu');
+    assert.ok(menu.querySelector('.gs-share-btn'), 'share toggle is inside the menu');
+    assert.ok(menu.querySelector('.gs-orch-btn'), 'orchestrator toggle is inside the menu');
+    assert.ok(menu.querySelector('.gs-pin-btn'), 'pin toggle is inside the menu');
 
-    window.chela.hideLayoutMenu();
-    assert.equal(menu.style.display, 'none', 'closes on hideLayoutMenu');
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, overflowBtn);
+    assert.equal(menu.hidden, true, 'closes on a second click');
+    assert.equal(overflowBtn.getAttribute('aria-expanded'), 'false');
 });
 
-// 2 — THE PIN. Reflowing the wall must never touch a pinned pane's geometry.
+// 1b — Only one pane's overflow is open at a time (opening a second closes the first).
+test('opening one pane\'s "⋯" overflow closes any other pane\'s open overflow', () => {
+    const btn1 = tile('@1').querySelector('.gs-overflow-btn');
+    const btn2 = tile('@2').querySelector('.gs-overflow-btn');
+    const menu1 = tile('@1').querySelector('.pane-overflow-menu');
+    const menu2 = tile('@2').querySelector('.pane-overflow-menu');
+
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, btn1);
+    assert.equal(menu1.hidden, false);
+
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, btn2);
+    assert.equal(menu2.hidden, false, 'the second pane\'s menu opens');
+    assert.equal(menu1.hidden, true, 'the first pane\'s menu must close — only one open at a time');
+});
+
+// 2 — THE TOOLBAR REVERT. No Layout menu: the grid presets + lock are directly on the
+// toolbar, same as before CMX-108 folded them.
+test('the wall toolbar has no Layout menu — grid presets and lock are inline', () => {
+    assert.equal(document.getElementById('layout-menu'), null, 'the Layout popover must not exist');
+    assert.equal(window.chela.openLayoutMenu, undefined, 'openLayoutMenu must not be exposed');
+    assert.equal(window.chela.hideLayoutMenu, undefined, 'hideLayoutMenu must not be exposed');
+
+    const presets = document.getElementById('term-grid-presets');
+    const lock = document.getElementById('term-lock-btn');
+    assert.ok(presets, '#term-grid-presets exists on the toolbar');
+    assert.ok(lock, '#term-lock-btn exists on the toolbar');
+    assert.ok(presets.querySelector('.gl-btn'), 'presets are actually populated, not an empty shell');
+    // Neither sits inside a hidden popover — both are reachable from the toolbar itself.
+    assert.equal(presets.closest('.popover'), null, 'presets are not folded behind a popover');
+    assert.equal(lock.closest('.popover'), null, 'lock is not folded behind a popover');
+});
+
+// 3 — THE PIN. Reflowing the wall must never touch a pinned pane's geometry.
 test('a pinned pane keeps its exact geometry through a grid-preset reflow', () => {
     const PINNED = '@2', OTHER = '@1';
     const pinBtn = tile(PINNED).querySelector('.gs-pin-btn');
@@ -206,7 +250,7 @@ test('a pinned pane keeps its exact geometry through a grid-preset reflow', () =
     assert.notEqual(geom(PINNED), before.pinned, 'once unpinned, a reflow may move it again');
 });
 
-// 3 — THE KEYBOARD SWITCHER. Alt+N jumps to the pane the badge shows; bare N does not.
+// 4 — THE KEYBOARD SWITCHER. Alt+N jumps to the pane the badge shows; bare N does not.
 test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alone', async () => {
     const idx = wid => tile(wid).querySelector('.gs-idx');
     assert.equal(idx('@1').textContent, '1');

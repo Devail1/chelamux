@@ -266,14 +266,6 @@ body {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
-/* Wall toolbar "Layout" menu button — folds the grid presets + lock (formerly
-   inline primaries) behind one trigger (CMX-108). Needs its own padding/gap
-   since the base .gl-btn is icon-only-sized (line-height:0). */
-#term-layout-btn { padding: 5px 9px; gap: 5px; line-height: normal; font-size: 11px; }
-.layout-menu { min-width: 168px; }
-.layout-menu-presets { display: block; margin: 2px 0 6px; }
-.layout-menu .layout-menu-lock { width: 100%; justify-content: flex-start; gap: 6px; padding: 6px 8px; }
-
 /* Pane title: rename target. Subtle dotted underline on hover hints it's
    editable; the inline edit input matches the dark header. */
 .pane-title { cursor: text; }
@@ -307,6 +299,19 @@ body {
     color: var(--red); border-color: var(--red); background: rgba(248, 81, 73, 0.1);
 }
 
+/* --- per-pane "⋯" overflow: Wire / Share / Orchestrator / Pin (CMX-111) ----- */
+/* The trigger is sized like the other icon-only window controls (share/pin). */
+.gs-overflow { position: relative; }
+.gs-overflow-btn { display: inline-flex; align-items: center; justify-content: center; }
+.gs-keys button.gs-overflow-btn { padding: 4px 5px; }
+.gs-overflow-btn > svg { display: block; }
+.gs-overflow-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+/* Reuses .popover (position:fixed — top/left set by togglePaneOverflow) so it
+   escapes .grid-stack-item-content's overflow:hidden clip; laid out as one
+   icon-button row rather than the usual text .popover-item list. */
+.pane-overflow-menu { display: flex; align-items: center; gap: 4px; padding: 5px; min-width: 0; }
+.pane-overflow-menu[hidden] { display: none; }
+
 /* --- collab: share button + presence facepile ------------------------------ */
 /* Share toggle: neutral like the other window controls; accent + link glyph
    when live. The count badge (human viewers) rides the top-right corner. */
@@ -339,7 +344,11 @@ body {
 }
 
 /* --- per-pane layout pin: exempt from grid-preset auto-reflow (CMX-108) ---- */
-.gs-keys button.gs-pin-btn { padding: 4px 6px; font-size: 12px; line-height: 1; }
+/* Icon-button sizing matches .gs-share-btn (above) — a lucide `pin` svg, not
+   text, so it needs the same centred-block treatment (CMX-111). */
+.gs-pin-btn { display: inline-flex; align-items: center; justify-content: center; }
+.gs-keys button.gs-pin-btn { padding: 4px 6px; }
+.gs-pin-btn > svg { display: block; }
 .gs-pin-btn.on { color: #0d1117; background: var(--yellow); border-color: var(--yellow); }
 /* A dashed accent border on the tile itself — distinct from the solid
    focus/waiting rings above, so "pinned" reads at a glance without hunting

@@ -300,14 +300,12 @@
             <button id="term-mode-single" onclick="chela.setTermMode('single')" style="display:none;">Single</button>
             <button id="term-mode-wall" onclick="chela.setTermMode('wall')" style="display:none;">Wall</button>
             <select id="term-agent" onchange="chela.renderTerminals()" style="display:none;"></select>
-            <!-- Layout: grid presets + lock, folded behind one menu button instead of
-                 sitting inline as separate primaries (Wall toolbar polish, CMX-108). -->
-            <span id="term-wall-grid" style="display:none;">
-                <button id="term-layout-btn" class="gl-btn" onclick="chela.openLayoutMenu(event)"
-                        title="Layout — grid presets &amp; lock" aria-label="Layout menu" aria-haspopup="true">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
-                    <span>Layout</span>
-                </button>
+            <span id="term-wall-grid" style="display:none; gap:6px; align-items:center;">
+                <span style="color:var(--text-dim); font-size:11px;">Grid:</span>
+                <span id="term-grid-presets" style="display:inline-flex; gap:4px; align-items:center;"></span>
+                <button id="term-lock-btn" class="gl-btn" onclick="chela.toggleWallLock(this)"
+                        title="Lock layout — drag swaps panes, resize off" aria-label="Lock layout"
+                        style="margin-left:6px;"></button>
             </span>
             <button id="term-new-shell" onclick="chela.spawnShell(this)" title="Spawn a new plain-shell window" style="margin-left:auto;">+ New shell</button>
         </div>
@@ -404,20 +402,6 @@
   </main>
 
 </div>
-
-{% if terminals_enabled %}
-<!-- Wall layout menu: grid presets + lock, folded off the toolbar into one menu
-     button (chela.openLayoutMenu). Anchored + light-dismiss like #new-menu /
-     #primary-menu. term-grid-presets/term-lock-btn ids are unchanged — only
-     their container moved. -->
-<div class="popover layout-menu" id="layout-menu" style="display:none;">
-    <div class="popover-item popover-note">Grid</div>
-    <span id="term-grid-presets" class="layout-menu-presets"></span>
-    <div class="popover-sep"></div>
-    <button id="term-lock-btn" class="gl-btn layout-menu-lock" onclick="chela.toggleWallLock(this)"
-            title="Lock layout — drag swaps panes, resize off" aria-label="Lock layout"></button>
-</div>
-{% endif %}
 
 <!-- Command palette (⌘K / Ctrl-K): fuzzy jump to any agent, view, or project -->
 <div class="palette-overlay" id="palette" onclick="if(event.target===this)chela.closePalette()">
