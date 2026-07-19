@@ -1020,17 +1020,27 @@ def _undeliverable(store: dict, state: str, wid: str, why: str,
     * a red ``chela doctor`` (``inbox.address``), which is what any of this is checked with.
 
     The log line repeats; the event and the push do NOT — they are de-duped on the address
-    state, in the store, so an alarm that stays true for a day is one row in the Feed and one
+    ITSELF, in the store, so an alarm that stays true for a day is one row in the Feed and one
     buzz in a pocket, not 2,880 of each. Both are handed back to the caller (``alarms``)
     rather than sent from here: this runs under the store lock, and a push is an HTTP POST
     with a ten-second timeout — doing it here would hold the lock across the network and
     block the very command that FIXES this (``chela watch``, which takes the same lock).
+
+    **De-duped on ``wid`` alone — never on ``state`` too.** ``gone`` and ``dangling`` are not
+    two different failures; they are two READINGS of the SAME dead address, and a live fleet
+    flips between them (a status map that hiccups empty for one tick reads as ``dangling``
+    instead of ``gone``, an epoch probe that momentarily fails to compare reads the other way).
+    Observed live 2026-07-19: one stale ``@1`` produced a burst of alternating "is gone" /
+    "is dangling" pushes for a single days-old address because the OLD key
+    (``f"{state}:{wid}"``) changed on every flip and re-armed the alarm. The address is what
+    the human has to go fix (``chela watch``); the reading is commentary on why, and belongs
+    in ``why``/the log line, never in the de-dup key.
     """
     log.error("inbox: UNDELIVERABLE (%s) — %d event(s) queued for %s: %s",
               state, queued, wid, why)
-    key = f"{state}:{wid}"
+    key = wid
     if store.get("address_alarm") == key:
-        return                             # same address, same failure: already announced
+        return                             # same address: already announced, whatever it reads as now
     store["address_alarm"] = key
     if alarms is None:
         return
