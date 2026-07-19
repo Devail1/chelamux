@@ -15,6 +15,18 @@
 
   **VERIFY.** `uv run ruff check chela tests` + `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green; the guard RED under each corruption + fast. Manual (pm2-restart `chela-dashboard`, tailnet): the main topbar shows ONE menu button, all of jump/New/overflow/Share/Notifications/Settings reachable inside it, `#btn-shares` still visible when a share is live, and `⌘K` still opens the palette.
 
+- [ ] **📵🔑 INBOX UNDELIVERABLE ALARM DE-DUPS ON THE FLAPPING STATE, NOT THE ADDRESS — one stale orchestrator address floods the phone.** When the decisions-inbox orchestrator address goes stale (a reboot / tmux restart renumbers the fleet), `_undeliverable` (`chela/inbox.py:1006`) is meant to alert ONCE — its docstring promises "one buzz in a pocket, not 2,880." But the de-dup key is `key = f"{state}:{wid}"` (`chela/inbox.py:1031`), and `state` FLAPS between `gone` (no window at that wid) and `dangling` (a window from a stale tmux epoch) as the fleet churns spawning/killing worker windows. Each flip changes the key → resets `store["address_alarm"]` → re-emits the durable `inbox_undeliverable` event AND re-fires the phone push. **Observed live 2026-07-19:** a burst of ntfy pushes alternating "@1 … is gone" / "@1 … is dangling" for a single days-old dead address.
+
+  **OBJECTIVE.** De-dup the alarm on **the address being un-deliverable**, not on the volatile gone/dangling `state`. Fire exactly ONE durable `inbox_undeliverable` event + ONE phone push per stale orchestrator address; re-fire ONLY after a fresh registration (which already clears `address_alarm → None` at `chela/inbox.py:412/443/467`) followed by a NEW failure — never on gone↔dangling flapping or a changing queued-count. Suggested: key on the address identity alone (`wid`, or the orchestrator epoch/session) so `gone:@1` and `dangling:@1` collapse to one alarm. **Keep the per-tick `ERROR` log line (`:1029`) exactly as-is** — it is deliberately loud and de-dup-free; only the durable event + phone push must be throttled.
+
+  **BOUNDARIES.** PR → `dev` (chelamux `main` sacrosanct). Backend only (`chela/inbox.py`). Don't weaken CMX-77's intent — a genuinely registered-then-died address MUST still shout once (durable event + phone push + red `chela doctor inbox.address`); this only stops the SAME dead address from re-shouting as it flaps. Don't touch the ERROR-every-tick log.
+
+  **GUARDS (corrupt-each → RED; pytest beside the existing `tests/` inbox suites; mock `notify.send` / capture appended events):**
+  - Drive one registered orchestrator address through `gone → dangling → gone → dangling` across several ticks; assert exactly ONE `inbox_undeliverable` event is appended and exactly ONE alarm is raised (→ one `notify.send`). Revert the fix (put `state` back in the key) → the flap raises >1 → RED.
+  - A genuinely DIFFERENT stale address (re-register to a live wid, let it die under a new epoch) MUST raise a fresh alarm — assert the second distinct address re-fires. Corrupt (de-dup so broadly it never re-fires) → RED.
+
+  **VERIFY.** `uv run ruff check chela tests` + `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green; each guard RED under its corruption. Manual sanity: with a stale orchestrator address, `chela watching` + `chela doctor` still flag it, but the phone gets ONE push, not a stream.
+
 - [x] **🎛️➡️📂 DECISIONS PANEL → PERSISTENT SIDEBAR SECTION — move the decisions log out of the Personas view into an always-visible left-sidebar section, so decisions truly always have a visible home.**
 
   **WHY.** cmx-106 shipped the decisions log inside `panel-personas` (the "drama masks" nav view) — so you must navigate there to see it. That undercuts the "durable home" premise: it should be *always on screen*, like the sidebar's Sessions list.
