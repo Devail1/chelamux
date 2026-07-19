@@ -24,7 +24,10 @@ workspace:
   base_branch: dev          # active branch — worktrees fork from dev, PRs target dev
 
 concurrency:
-  max: 1                    # pilot: one task in flight
+  max: 2                    # 2 in flight — light dashboard/JS coding agents. NOTE: the
+                            # dispatcher's active-count is GLOBAL across workflows, so this
+                            # also caps total box-wide agents; lean-alpha stays at max:1 so
+                            # two heavy LEAN backtests never run in parallel (memcap/OOM).
 
 agent:
   # No `cmd:` here on purpose. An explicit agent.cmd is an authoritative

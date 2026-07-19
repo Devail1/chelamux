@@ -2,6 +2,19 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🪟 TOPBAR PRIMARIES → ONE MENU (CMX-108 Part A, re-filed) — fold the MAIN topbar's three primary buttons into a single dropdown.** cmx-108/PR #122 shipped the per-pane pin + Alt+1..9 pane switcher, but its "Part A" folded the *Wall toolbar* (grid presets + lock) — a different, valid consolidation — instead of the *main topbar* primaries this asks for. So the original Part A is still open; re-filed here unchanged and standalone.
+
+  **WHY.** The topbar's three primary buttons are visual clutter that a single menu subsumes.
+
+  **OBJECTIVE — Fold the three topbar primaries into ONE dropdown.** `templates/index.html:26-47` renders three icon buttons in `.topbar-actions` — `#btn-palette` (jump 🔍), `#btn-new` (➕, `openNewMenu`), `#btn-overflow` (⋮, `openOverflowMenu`) — the "primaries (jump · New · overflow)" the `nav.js:951-956` comment names. Collapse them into a **single menu button** whose menu offers Jump to…, New…, and the existing overflow items (Share current · Notifications · Settings). The trigger MAY sit on the **left** (by the brand/hamburger `#btn-menu`) instead of the right — Liav's fine with either side. Reuse the `#new-menu`/`#overflow-menu` anchored + light-dismiss pattern (`openNewMenu`/`openOverflowMenu`, `nav.js:927-971`); don't invent a third dropdown mechanism. Keep the `#btn-shares` safety kill-switch OUTSIDE the menu (always visible when a share is live — the existing invariant, `index.html:27-35`) and keep the **`⌘K`/`Ctrl-K`** direct-open shortcut working (`nav.js:1155`). NOTE: this is the *main app topbar* (`.topbar-actions`), NOT the Wall toolbar `#term-wall-grid` (already folded by cmx-108).
+
+  **BOUNDARIES.** PR → `dev` (chelamux `main` sacrosanct). Frontend-only (dashboard static JS + template + CSS); **no backend/route changes**. Don't regress: the `#btn-shares` always-visible kill-switch, `⌘K` open, or the `_termSig`/iframe-reload discipline (CMX-67/71). Reuse existing menu machinery (`openNewMenu`/`openOverflowMenu`); don't reinvent it. Pure consolidation — every action stays reachable.
+
+  **GUARDS (corrupt-each → RED; new `.mjs` DOM test beside `wall.test.mjs`/`views.test.mjs`, must fail in ms):**
+  - after fold, the single menu exposes Jump/New/overflow actions AND `⌘K` still opens the palette; drop an action from the menu → RED; break the `⌘K` handler → RED. `#btn-shares` stays rendered OUTSIDE the menu (assert it's not inside; move it in → RED).
+
+  **VERIFY.** `uv run ruff check chela tests` + `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green; the guard RED under each corruption + fast. Manual (pm2-restart `chela-dashboard`, tailnet): the main topbar shows ONE menu button, all of jump/New/overflow/Share/Notifications/Settings reachable inside it, `#btn-shares` still visible when a share is live, and `⌘K` still opens the palette.
+
 - [x] **🎛️➡️📂 DECISIONS PANEL → PERSISTENT SIDEBAR SECTION — move the decisions log out of the Personas view into an always-visible left-sidebar section, so decisions truly always have a visible home.**
 
   **WHY.** cmx-106 shipped the decisions log inside `panel-personas` (the "drama masks" nav view) — so you must navigate there to see it. That undercuts the "durable home" premise: it should be *always on screen*, like the sidebar's Sessions list.
