@@ -306,50 +306,48 @@ body {
 .gs-keys button.gs-overflow-btn { padding: 4px 5px; }
 .gs-overflow-btn > svg { display: block; }
 .gs-overflow-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
-/* Reuses .popover (position:fixed — top/left set by togglePaneOverflow) so it
-   escapes .grid-stack-item-content's overflow:hidden clip; laid out as one
-   icon-button row rather than the usual text .popover-item list. */
-.pane-overflow-menu { display: flex; align-items: center; gap: 4px; padding: 5px; min-width: 0; }
+/* CMX-114: restyled to a LABELED VERTICAL list — the topbar `#primary-menu`'s
+   look (nav.js/index.html), reused verbatim via the same `overflow-menu`
+   (min-width) and `.popover-item.ov-item` (icon+label row) classes, rather
+   than the old icon-only horizontal strip. `.popover` (position:fixed — top/
+   left set by togglePaneOverflow) still supplies the fixed box that escapes
+   .grid-stack-item-content's overflow:hidden clip; this just stacks rows. */
+.pane-overflow-menu { display: flex; flex-direction: column; align-items: stretch; gap: 1px; }
 .pane-overflow-menu[hidden] { display: none; }
+/* Each row IS the real state-bearing .gs-share-btn/.gs-orch-btn/.gs-pin-btn/
+   .gs-port button (not a wrapper around it), which makes it a descendant of
+   `.gs-keys` — override that ancestor's bordered icon-button chrome
+   (`.gs-keys button`, above) back to a plain full-width popover row. Same
+   specificity pattern as the old `.gs-keys button.gs-kill-btn` override. */
+.gs-keys button.popover-item {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 7px 10px; font-size: 12px; text-align: left; line-height: 1.3;
+    border: 0; background: none; border-radius: 4px; color: var(--text);
+}
+.gs-keys button.popover-item:hover { background: var(--accent); color: #fff; }
+.gs-keys button.popover-item:hover .ov-ic { color: #fff; }
 
 /* --- collab: share button + presence facepile ------------------------------ */
-/* Share toggle: neutral like the other window controls; accent + link glyph
-   when live. The count badge (human viewers) rides the top-right corner. */
-/* Match the sibling window controls (−/□/×): the share glyph is an SVG whose
-   fixed width/height ignore font-size, so centre it as a block to drop the
-   inline-SVG descender that otherwise makes this button taller than the rest. */
-.gs-share-btn { position: relative; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
-/* Needs button-level specificity to beat `.gs-keys button { padding: 4px 7px }`
-   (same pattern as .gs-keys button.gs-kill-btn) — tighter horizontal padding
-   compensates for the squarer icon so the box matches the −/□/× controls. */
-.gs-keys button.gs-share-btn { padding: 4px 5px; }
-.gs-share-btn > svg { display: block; }
-.gs-share-btn.on {
-    color: #0d1117; background: var(--accent); border-color: var(--accent);
-}
+/* Share/Orchestrator/Pin: neutral until active, then a solid colour fill so
+   the live state reads at a glance in the row list (distinct colours per
+   row so a shared pane and an orchestrator-owning pane never look the same:
+   --accent for share, --ok-blue for orchestrator, --yellow for pin). */
+.gs-share-btn.on { color: #0d1117; background: var(--accent); }
+.gs-orch-btn.on { color: #0d1117; background: var(--ok-blue); }
+.gs-pin-btn.on { color: #0d1117; background: var(--yellow); }
+.gs-share-btn.on .ov-ic, .gs-orch-btn.on .ov-ic, .gs-pin-btn.on .ov-ic { color: inherit; }
+/* The peer-count badge used to float over a small square icon button (the
+   old horizontal strip); in a full-width row it just rides the row's right
+   edge instead, after the label. */
 .gs-share-count {
-    position: absolute; top: -6px; right: -6px; min-width: 14px; height: 14px;
+    margin-left: auto; min-width: 14px; height: 14px;
     padding: 0 3px; border-radius: 999px; box-sizing: border-box;
-    background: var(--accent); color: #0d1117; border: 1px solid var(--surface);
+    background: var(--accent); color: #0d1117;
     font-size: 9px; font-weight: 700; line-height: 12px; text-align: center;
 }
-
-/* --- orchestrator subscribe: the pane-title "⊙" toggle --------------------- */
-/* Same neutral-until-active pattern as .gs-share-btn (above), but a distinct
-   colour (--ok-blue, not --accent) so a shared pane and an orchestrator-owning
-   pane never read as the same state at a glance. */
-.gs-keys button.gs-orch-btn { padding: 4px 6px; font-size: 13px; line-height: 1; }
-.gs-orch-btn.on {
-    color: #0d1117; background: var(--ok-blue); border-color: var(--ok-blue);
-}
+.gs-share-btn.on .gs-share-count { border: 1px solid #0d1117; }
 
 /* --- per-pane layout pin: exempt from grid-preset auto-reflow (CMX-108) ---- */
-/* Icon-button sizing matches .gs-share-btn (above) — a lucide `pin` svg, not
-   text, so it needs the same centred-block treatment (CMX-111). */
-.gs-pin-btn { display: inline-flex; align-items: center; justify-content: center; }
-.gs-keys button.gs-pin-btn { padding: 4px 6px; }
-.gs-pin-btn > svg { display: block; }
-.gs-pin-btn.on { color: #0d1117; background: var(--yellow); border-color: var(--yellow); }
 /* A dashed accent border on the tile itself — distinct from the solid
    focus/waiting rings above, so "pinned" reads at a glance without hunting
    for the header button. */
@@ -683,11 +681,11 @@ body.term-dragging { overflow: hidden; }
    The gesture reuses `.gs-dragging` (above) to neutralise the iframes' pointer
    events — it must NOT hide the terminals (`.term-dragging`): watching them while
    you wire them is the whole point. */
-.gs-port {
-    flex: 0 0 auto; cursor: crosshair; background: none; border: 0; padding: 0 2px;
-    color: var(--text-dim); font-size: 13px; line-height: 1; opacity: 0.75;
-}
-.gs-port:hover { color: var(--accent); opacity: 1; }
+/* Layout/colour come from `.gs-keys button.popover-item` (above, higher
+   specificity) — this just keeps the drag affordance: dimmed until hovered,
+   crosshair cursor for the drag-to-wire gesture. */
+.gs-port { cursor: crosshair; opacity: 0.75; }
+.gs-port:hover { opacity: 1; }
 /* The live wire: an SVG over the whole stage. Above the tiles and gridstack's own
    dragged item (z 100), below a maximized pane's own chrome (z 150 → 160 sits over
    it, which is fine: the wire is transient and never intercepts a click). */

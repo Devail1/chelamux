@@ -25,6 +25,13 @@ const _LUCIDE = {
     // `pin` — the per-pane layout pin toggle (terminals.js _pinBtnHTML), replacing
     // the old pushpin emoji so it matches the rest of the pane header's icon set.
     'pin': '<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>',
+    // `link-2` — the per-pane "Wire to…" row (terminals.js paneHead's `port`
+    // button), replacing the bare PORT_GLYPH circle now that the overflow menu
+    // is a labeled row list, not an icon-only strip (CMX-114).
+    'link-2': '<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>',
+    // `circle-dot` — the per-pane "Orchestrator" row (terminals.js _orchBtnHTML),
+    // replacing the bare "⊙" text glyph for the same reason (CMX-114).
+    'circle-dot': '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>',
 };
 function lucideIcon(name, size = 16) {
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" `

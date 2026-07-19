@@ -6,7 +6,14 @@
 // Alt+1..9 keyboard-fast pane switcher are unrelated to either fold and are unchanged.
 // CMX-112 adds properties 5 and 6 below: the switcher used to be cosmetic (it flashed
 // a border but never routed keystrokes into the terminal) and one-shot (it never
-// re-armed once focus moved into a pane's iframe).
+// re-armed once focus moved into a pane's iframe). CMX-114 corrects two things Liav
+// found live-broken after testing cmx-111/cmx-112 (properties 7 and 8): the overflow
+// menu was icon-only instead of a labeled list like the topbar's, and — the sharper
+// bug — cmx-112's jsdom guards for 5/6 were GREEN while Alt+N was DEAD in a real
+// browser (a synthetic dispatchEvent reaches a bubble-phase listener; a real keydown
+// into xterm's helper textarea does not). Properties 5 and 6 below are corrected in
+// place to assert the ACTUAL fix (both focus calls; capture phase +
+// stopImmediatePropagation), not the old, provably-insufficient behaviour.
 //
 // Runs the REAL terminals.js in jsdom (same approach as tests/wall.test.mjs and
 // tests/walldock.test.mjs): real `renderTerminals` -> `buildWall` -> real
@@ -15,12 +22,15 @@
 // back onto the DOM's gs-x/gs-y/gs-w/gs-h attributes) because the pin test needs to
 // observe applyGridLayout's real reflow decisions, not just "did it not crash".
 //
-// Six properties, each a regression that would ship silently:
+// Eight properties, each a regression that would ship silently:
 //
-//   1. 🔴 THE PANE "⋯" ACTUALLY GATES WIRE/SHARE/ORCHESTRATOR/PIN. Each pane's overflow
-//      menu starts hidden; togglePaneOverflow reveals .gs-port/.gs-share-btn/
-//      .gs-orch-btn/.gs-pin-btn INSIDE it (not loose in .gs-win-ctl — the whole point
-//      of the fold), and they stay real, working buttons — not decoration.
+//   1. 🔴 THE PANE "⋯" ACTUALLY GATES WIRE/SHARE/ORCHESTRATOR/PIN, AS LABELED ROWS.
+//      Each pane's overflow menu starts hidden; togglePaneOverflow reveals
+//      .gs-port/.gs-share-btn/.gs-orch-btn/.gs-pin-btn INSIDE it (not loose in
+//      .gs-win-ctl — the whole point of the fold), and they stay real, working
+//      buttons — not decoration. CMX-114: each is now a `.popover-item.ov-item` row
+//      (icon + TEXT LABEL), the same classes the topbar's `#primary-menu` uses — not
+//      the old icon-only horizontal strip.
 //   2. 🔴 THE WALL TOOLBAR'S GRID PRESETS + LOCK STAYED INLINE. No "Layout" menu to open
 //      — #term-grid-presets and #term-lock-btn are directly reachable in the toolbar,
 //      proving the CMX-108 toolbar fold was actually reverted, not just hidden.
@@ -30,14 +40,25 @@
 //      the shortcut's target must never drift apart, and the shortcut must be gated on
 //      Alt (a bare digit is normal terminal input and must reach the pane untouched).
 //   5. 🔴 ALT+N ROUTES ACTUAL KEYSTROKES, NOT JUST A HIGHLIGHT. `focusPaneByWid` must
-//      reach into the ttyd iframe and call the xterm Terminal's OWN `.focus()`
-//      (exposed as `contentWindow.term`) — merely focusing the iframe window flashes
-//      a border but leaves every keystroke going nowhere.
-//   6. 🔴 ALT+N RE-ARMS AFTER FOCUS MOVES INTO A PANE. A same-origin iframe's keydown
-//      never bubbles to the parent document, so the parent-level listener alone goes
-//      deaf to the next Alt+N once a pane has focus. The switcher must also be wired
-//      inside each pane's own document (re-wired on every navigation) so a SECOND
-//      Alt+N actually switches again instead of getting stuck on the first pick.
+//      call BOTH the iframe ELEMENT'S own `.focus()` AND the xterm Terminal's OWN
+//      `.focus()` (exposed as `contentWindow.term`) — CMX-114: contentWindow.focus()
+//      alone flashes a border but leaves every keystroke going nowhere when switching
+//      FROM another focused pane; `ifr.focus()` is required, not a same-tick fallback.
+//   6. 🔴 ALT+N RE-ARMS AFTER FOCUS MOVES INTO A PANE, PREEMPTING XTERM. A same-origin
+//      iframe's keydown never bubbles to the parent document, so the parent-level
+//      listener alone goes deaf to the next Alt+N once a pane has focus — the switcher
+//      must also be wired inside each pane's own document. CMX-114: that iframe-side
+//      listener must be CAPTURE-phase with `stopImmediatePropagation`, because a real
+//      keydown reaches xterm's own handler FIRST on the bubble phase (a synthetic
+//      dispatchEvent does not — the exact green-but-dead trap this corrects).
+//   7. 🔴 THE OVERFLOW ROWS ARE ICON + LABEL, NOT ICON-ONLY. Dropping either the
+//      lucide `<svg>` or the text label on any row is a silent regression to the old
+//      (rejected) icon-only strip.
+//   8. 🔴 THE IFRAME LISTENER'S CAPTURE REGISTRATION IS OBSERVABLE, NOT ASSUMED. A
+//      jsdom guard cannot prove a real xterm gets preempted (no real xterm in jsdom)
+//      — it can only assert the WIRING: capture=true at registration, and
+//      preventDefault + stopImmediatePropagation on a matched Alt-digit. The runtime
+//      preemption itself is manually verified on the live wall (see the PR).
 //
 // Run: node --test tests/wallnav.test.mjs (pytest runs it via tests/test_js_suites.py;
 // it needs `npm ci` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
@@ -203,6 +224,52 @@ test('a pane\'s "⋯" overflow is hidden by default, and opening it reveals Wire
     assert.equal(overflowBtn.getAttribute('aria-expanded'), 'false');
 });
 
+// 7 — THE RESTYLE (CMX-114). Liav wanted the fold to look like the topbar's labeled
+// #primary-menu, not the icon-only strip cmx-111 shipped: a vertical list of
+// `.popover-item.ov-item` rows, each a lucide icon PLUS a text label, still wired to
+// the same state-bearing buttons.
+test('the "⋯" overflow renders a labeled vertical list, like the topbar #primary-menu — not an icon-only strip', () => {
+    const wid = '@3';
+    const overflowBtn = tile(wid).querySelector('.gs-overflow-btn');
+    const menu = tile(wid).querySelector('.pane-overflow-menu');
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, overflowBtn);
+
+    // Reuses the topbar's exact classes, not a bespoke lookalike.
+    assert.ok(menu.classList.contains('overflow-menu'),
+        'the menu must carry the topbar #primary-menu\'s `overflow-menu` class');
+
+    const rows = menu.querySelectorAll('.popover-item.ov-item');
+    assert.equal(rows.length, 4, 'all four actions (Wire/Share/Orchestrator/Pin) render as labeled rows');
+    rows.forEach(row => {
+        assert.ok(row.querySelector('svg'), 'every row must carry a lucide icon — dropping it is the icon-only regression');
+        assert.ok(row.textContent.trim().length > 0, 'every row must carry a non-empty text label, not just an icon');
+    });
+
+    // The state-bearing elements are the SAME rows (restyled in place), not a
+    // decorative wrapper around a still-hidden original button — a relabel that
+    // dropped the real element (breaking _updateShareBtns/_updateOrchBtns/the pin
+    // toggle's DOM queries) would fail here.
+    const share = menu.querySelector('.gs-share-btn.popover-item.ov-item');
+    const orch = menu.querySelector('.gs-orch-btn.popover-item.ov-item');
+    const pinRow = menu.querySelector('.gs-pin-btn.popover-item.ov-item');
+    assert.ok(share, 'the Share row must still BE .gs-share-btn (the state-bearing element)');
+    assert.ok(orch, 'the Orchestrator row must still BE .gs-orch-btn (the state-bearing element)');
+    assert.ok(pinRow, 'the Pin row must still BE .gs-pin-btn (the state-bearing element)');
+    assert.equal(share.getAttribute('data-wid'), wid);
+    assert.equal(orch.getAttribute('data-wid'), wid);
+
+    // Toggling still flips aria-pressed/`.on` on the right element (the relabel must
+    // not have broken the wiring _updateShareBtns/_updateOrchBtns/termPinToggle rely on).
+    assert.equal(pinRow.getAttribute('aria-pressed'), 'false');
+    window.chela.termPinToggle(pinRow, wid);
+    assert.equal(pinRow.getAttribute('aria-pressed'), 'true', 'pin row still toggles aria-pressed on itself');
+    assert.ok(pinRow.classList.contains('on'), 'pin row still gets the `.on` state class');
+    window.chela.termPinToggle(pinRow, wid);   // leave state as found for later tests
+    assert.equal(pinRow.getAttribute('aria-pressed'), 'false');
+
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, overflowBtn);
+});
+
 // 1b — Only one pane's overflow is open at a time (opening a second closes the first).
 test('opening one pane\'s "⋯" overflow closes any other pane\'s open overflow', () => {
     const btn1 = tile('@1').querySelector('.gs-overflow-btn');
@@ -286,10 +353,14 @@ test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alon
     assert.ok(!flashed('@1'), 'a bare digit (no Alt) must be ignored — it is normal terminal input');
 });
 
-// 5 — REAL INPUT ROUTING (CMX-112). A flashed border is not enough: Alt+N must call
-// the xterm Terminal's OWN .focus() (ttyd exposes it as `contentWindow.term`) so
-// keystrokes actually land in the pane, not just the iframe window.
-test('Alt+N focuses the pane\'s own xterm terminal, not just the iframe window', async () => {
+// 5 — REAL INPUT ROUTING (CMX-112, corrected by CMX-114). A flashed border is not
+// enough: Alt+N must call BOTH the iframe ELEMENT's own `.focus()` and the xterm
+// Terminal's OWN `.focus()` (ttyd exposes it as `contentWindow.term`). CMX-114:
+// contentWindow.focus() alone ("border moves, typing doesn't follow") does not
+// reliably move real browser keyboard focus into the frame when switching FROM
+// another focused pane — `ifr.focus()` is required, not skipped once term.focus()
+// succeeds (the old cmx-112 fallback-only behaviour this replaces).
+test('Alt+N focuses BOTH the pane\'s own iframe element and its xterm terminal', async () => {
     const wid = '@2';
     const ifr = tile(wid).querySelector('iframe.term-frame');
     assert.ok(ifr, 'the pane must have a real ttyd iframe, or this test is vacuous');
@@ -303,8 +374,9 @@ test('Alt+N focuses the pane\'s own xterm terminal, not just the iframe window',
     await new Promise(r => setTimeout(r, 120));   // focusPaneByWid defers by 60ms
 
     assert.ok(termFocused, 'Alt+2 must call the xterm Terminal\'s own .focus() so keystrokes are routed into it');
-    assert.ok(!ifrFocusCalled,
-        'the iframe-window fallback must not fire once the terminal itself accepted focus');
+    assert.ok(ifrFocusCalled,
+        'Alt+2 must ALSO call the iframe ELEMENT\'s own .focus() — contentWindow.focus() alone does not ' +
+        'reliably move real browser keyboard focus into the frame when switching from another focused pane');
 
     delete ifr.contentWindow.term;
 });
@@ -327,4 +399,43 @@ test('Alt+N still switches panes once focus has moved into a pane\'s own iframe 
     await new Promise(r => setTimeout(r, 120));
 
     assert.ok(flashed('@2'), 'Alt+2 fired inside the focused pane\'s own iframe must still switch panes');
+});
+
+// 8 — THE IFRAME LISTENER IS CAPTURE-PHASE AND PREEMPTS XTERM (CMX-114). jsdom has no
+// real xterm, so this cannot prove the runtime preemption itself (see property 8's
+// disclaimer above and the PR) — it asserts the WIRING: the keydown listener is
+// registered with capture=true (so it runs before a bubble-phase handler like xterm's
+// own could), and a matched Alt-digit is preventDefaulted + stopImmediatePropagation'd
+// so it can't reach the shell as a stray character.
+test('the iframe alt-switch listener is registered in the CAPTURE phase and stops propagation on a match', () => {
+    const ifr = tile('@3').querySelector('iframe.term-frame');
+    assert.ok(ifr, 'the pane must have a real ttyd iframe, or this test is vacuous');
+    const doc = ifr.contentDocument;
+
+    let capturedOpts = null;
+    let handler = null;
+    const origAdd = doc.addEventListener.bind(doc);
+    doc.addEventListener = (type, fn, opts) => {
+        if (type === 'keydown' && !handler) { handler = fn; capturedOpts = opts; }
+        return origAdd(type, fn, opts);
+    };
+
+    ifr.dispatchEvent(new window.Event('load'));   // re-wires _wireIframeAltSwitch with the spy in place
+    doc.addEventListener = origAdd;
+
+    assert.equal(capturedOpts, true,
+        'the iframe keydown listener must be registered with capture=true — a bubble-phase listener ' +
+        'never reliably preempts xterm\'s own real-keydown handling');
+    assert.ok(handler, 'the listener must actually have been registered');
+
+    let prevented = false;
+    let stoppedImmediate = false;
+    const evt = new window.KeyboardEvent('keydown', { key: '1', altKey: true });
+    Object.defineProperty(evt, 'preventDefault', { value: () => { prevented = true; }, configurable: true });
+    Object.defineProperty(evt, 'stopImmediatePropagation', { value: () => { stoppedImmediate = true; }, configurable: true });
+    handler(evt);
+
+    assert.ok(prevented, 'a matched Alt-digit must be preventDefaulted so it never reaches the shell as input');
+    assert.ok(stoppedImmediate,
+        'a matched Alt-digit must call stopImmediatePropagation so this listener wins the race against xterm\'s own');
 });

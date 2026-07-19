@@ -1,7 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util.js';
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
-import { PORT_GLYPH, applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
+import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
 
 // ---------------------------------------------------------------------------
@@ -686,9 +686,9 @@ function _updateShareBtns(wid) {
 
 function _shareBtnHTML(wid) {
     const on = _sharedWids.has(wid);
-    return `<button class="gs-share-btn${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
+    return `<button class="gs-share-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
       onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
-      title="Share this session">${lucideIcon('share-2', 13)}<span class="gs-share-count" hidden></span></button>`;
+      title="Share this session"><span class="ov-ic">${lucideIcon('share-2', 14)}</span><span>Share current session</span><span class="gs-share-count" hidden></span></button>`;
 }
 
 // The pane-title toggle: "⊙ Orchestrator" — one click registers THIS pane's
@@ -698,16 +698,14 @@ function _shareBtnHTML(wid) {
 // decisions.js). `.on` reflects the LIVE owner, kept current across every pane
 // via onOrchestratorChange (fired on our own clicks, other panes' clicks, and
 // the SSE `orchestrator` delta — sse.js).
-const ORCH_GLYPH = '⊙';   // ⊙
-
 function _orchBtnHTML(wid) {
     const on = orchestratorState().wid === wid;
     const title = on
         ? 'This pane receives the decisions inbox — click to release'
         : 'Click to receive the decisions inbox in this pane';
-    return `<button class="gs-orch-btn${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
+    return `<button class="gs-orch-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
       onclick="chela.orchestratorBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
-      title="${attrEsc(title)}">${ORCH_GLYPH}</button>`;
+      title="${attrEsc(title)}"><span class="ov-ic">${lucideIcon('circle-dot', 14)}</span><span>Orchestrator</span></button>`;
 }
 
 function _updateOrchBtns() {
@@ -766,9 +764,9 @@ function paneHead(wid, draggable) {
     // header but no gs-id (nothing to wire to, nothing to resolve a drop against),
     // so it simply gets neither — degrade, don't crash.
     const port = draggable
-        ? `<button class="gs-port" onmousedown="chela.wireDragStart(event, this, '${j}')"
+        ? `<button class="gs-port popover-item ov-item" onmousedown="chela.wireDragStart(event, this, '${j}')"
              title="Wire this agent to another — drag onto a peer"
-             aria-label="Wire this agent to another">${PORT_GLYPH}</button>` : '';
+             aria-label="Wire this agent to another"><span class="ov-ic">${lucideIcon('link-2', 14)}</span><span>Wire to…</span></button>` : '';
     const roomBadge = draggable
         ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden></button>` : '';
     // Keyboard-fast pane switcher badge (Alt+1..9 jumps here) — filled in and
@@ -784,13 +782,19 @@ function paneHead(wid, draggable) {
     // _updateOrchBtns) keep finding these buttons regardless of the menu's open
     // state. Positioned via togglePaneOverflow (fixed + measured, same pattern
     // as nav.js's openPrimaryMenu/openNewMenu) so `.grid-stack-item-content`'s
-    // overflow:hidden never clips it.
+    // overflow:hidden never clips it. Rows are a LABELED VERTICAL list — the
+    // `overflow-menu`/`.popover-item.ov-item` classes are the exact ones the
+    // topbar's `#primary-menu` uses (nav.js/index.html), reused verbatim rather
+    // than the old icon-only horizontal strip (CMX-114 — Liav wanted it to look
+    // like the topbar's ⋮ menu). Each row IS the state-bearing button
+    // (.gs-share-btn/.gs-orch-btn/.gs-pin-btn/.gs-port) — restyled, not wrapped,
+    // so the click wiring and `.on`/aria-pressed state never move.
     const overflow = `<span class="gs-overflow">
         <button class="gs-overflow-btn" onclick="chela.togglePaneOverflow(event, this)"
                 aria-haspopup="true" aria-expanded="false" title="More actions" aria-label="More actions">
           ${lucideIcon('more-vertical', 14)}
         </button>
-        <div class="popover pane-overflow-menu" hidden>
+        <div class="popover pane-overflow-menu overflow-menu" hidden>
           ${port}
           ${_shareBtnHTML(wid)}
           ${_orchBtnHTML(wid)}
@@ -956,8 +960,8 @@ function _pinBtnHTML(wid) {
     const title = on
         ? "Pinned — this pane keeps its spot when a grid layout is applied. Click to unpin"
         : "Pin — keep this pane's position when a grid layout is applied";
-    return `<button class="gs-pin-btn${on ? ' on' : ''}" onclick="chela.termPinToggle(this,'${_jsStr(wid)}')"
-      aria-pressed="${on ? 'true' : 'false'}" title="${attrEsc(title)}">${lucideIcon('pin', 12)}</button>`;
+    return `<button class="gs-pin-btn popover-item ov-item${on ? ' on' : ''}" onclick="chela.termPinToggle(this,'${_jsStr(wid)}')"
+      aria-pressed="${on ? 'true' : 'false'}" title="${attrEsc(title)}"><span class="ov-ic">${lucideIcon('pin', 14)}</span><span>Pin</span></button>`;
 }
 
 // Toggle a pane's pin state. applyGridLayout reads _pinned directly (no
@@ -1501,18 +1505,21 @@ function focusPaneByWid(wid) {
         const ifr = item.querySelector('iframe.term-frame');
         if (ifr) {
             try { ifr.contentWindow.focus(); } catch (e) { /* cross-doc guard */ }
-            // ifr.focus() alone lights the focus ring but leaves keystrokes going
-            // nowhere — the iframe WINDOW isn't xterm's actual input. Route focus
-            // into the terminal's own textarea (exposed as `term` by ttyd's page,
-            // same global _paneTermDims already reaches for) so typing lands in
-            // the pane, not just highlights it. Fall back to ifr.focus() only
-            // while the terminal isn't wired up yet (still starting).
-            let routed = false;
+            // CMX-114 (live-broken in the real browser, cmx-112's jsdom guard was
+            // green while the feature was dead): contentWindow.focus() alone does
+            // NOT reliably move the browser's actual keyboard focus into this frame
+            // when switching FROM another focused pane — the border moves but
+            // typing doesn't follow. Focus the iframe ELEMENT itself too, and route
+            // focus into the terminal's own textarea (exposed as `term` by ttyd's
+            // page, same global _paneTermDims already reaches for) so typing lands
+            // in the pane, not just highlights it. Both are called unconditionally
+            // (not one-as-fallback-for-the-other) — that's what actually moves live
+            // browser focus.
+            try { ifr.focus(); } catch (e) { /* cross-doc guard */ }
             try {
                 const t = ifr.contentWindow.term;
-                if (t && typeof t.focus === 'function') { t.focus(); routed = true; }
+                if (t && typeof t.focus === 'function') t.focus();
             } catch (e) { /* cross-doc guard */ }
-            if (!routed) ifr.focus();
         }
         const content = item.querySelector('.grid-stack-item-content') || item;
         content.classList.add('pane-flash');
@@ -1707,6 +1714,9 @@ function _altSwitchWid(e) {
     return _switcherOrder()[Number(e.key) - 1] || null;
 }
 
+// Capture phase for consistency with the iframe-side listener below (which is
+// the load-bearing one — see its comment): harmless here since the parent
+// document IS the dispatch target for these keydowns either way.
 document.addEventListener('keydown', e => {
     const target = e.target;
     if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
@@ -1714,7 +1724,7 @@ document.addEventListener('keydown', e => {
     if (!wid) return;
     e.preventDefault();
     focusPaneByWid(wid);
-});
+}, true);
 
 // Once Alt+N focuses a pane, keystrokes land in that ttyd iframe's OWN
 // document — a same-origin iframe's keydown never bubbles to the parent, so
@@ -1723,6 +1733,15 @@ document.addEventListener('keydown', e => {
 // soon as it (re)loads. Unlike the parent, no INPUT/TEXTAREA guard is needed:
 // ttyd's DOM holds nothing but the terminal, and its own input IS a textarea
 // (the xterm helper) — excluding it would defeat the whole point.
+//
+// CMX-114 (live-broken in the real browser, cmx-112's jsdom guard was green
+// while the feature was dead): a real keydown targets xterm's helper textarea
+// and xterm handles/consumes it FIRST, so it never reliably reaches a
+// bubble-phase listener on `doc` — only a synthetic `dispatchEvent` does,
+// which is exactly why the old jsdom guard passed on a dead feature. Register
+// in the CAPTURE phase with `stopImmediatePropagation` so this fires BEFORE
+// xterm's own handler, both switching panes AND stopping the stray Alt-digit
+// from reaching the shell.
 function _wireIframeAltSwitch(ifr) {
     let doc;
     try { doc = ifr.contentDocument; } catch (e) { return; }   // cross-doc guard
@@ -1731,8 +1750,9 @@ function _wireIframeAltSwitch(ifr) {
         const wid = _altSwitchWid(e);
         if (!wid) return;
         e.preventDefault();
+        e.stopImmediatePropagation();
         focusPaneByWid(wid);
-    });
+    }, true);
 }
 
 // 'load' doesn't bubble, but it still traverses ancestors during the CAPTURE
