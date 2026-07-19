@@ -948,27 +948,42 @@ function hideNewMenu() {
     if (m) m.style.display = 'none';
 }
 
-// Topbar overflow menu (Lucide more-vertical): consolidates the secondary actions
-// — Share current, Notifications, Settings — plus the usage/updated readouts, so
-// the bar stays to its primaries (jump · New · overflow) on both desktop and
-// mobile. The safety kill-switch (#btn-shares) is deliberately NOT in here — it
-// stays visible whenever a share is live. Anchored + light-dismiss like #new-menu.
-function openOverflowMenu(ev) {
+// Topbar primary menu (Lucide more-vertical): folds the three former topbar
+// primaries — Jump to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow)
+// — behind ONE button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122 folded the
+// WALL toolbar's primaries instead — see openLayoutMenu in terminals.js). Jump to…
+// and the old overflow's secondary actions (Share current, Notifications,
+// Settings) plus the usage/updated readouts are flat items here; New… reopens
+// the existing #new-menu (openNewMenuFromPrimary below) rather than duplicating
+// it, since #new-menu already serves the sidebar's own "+" trigger from a
+// different anchor. The safety kill-switch (#btn-shares) is deliberately NOT in
+// here — it stays visible whenever a share is live. Anchored + light-dismiss,
+// same pattern as the old openNewMenu/openOverflowMenu.
+function openPrimaryMenu(ev) {
     if (ev) ev.stopPropagation();
-    const m = document.getElementById('overflow-menu');
+    const m = document.getElementById('primary-menu');
     if (!m) return;
-    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-overflow');
+    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-primary-menu');
     m.style.display = 'block';
     const r = anchor.getBoundingClientRect();
     m.style.top = (r.bottom + 6) + 'px';
     // Right-align to the button; clamp so it never runs off the left edge.
     m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
-    setTimeout(() => document.addEventListener('click', hideOverflowMenu, { once: true }), 0);
+    setTimeout(() => document.addEventListener('click', hidePrimaryMenu, { once: true }), 0);
 }
 
-function hideOverflowMenu() {
-    const m = document.getElementById('overflow-menu');
+function hidePrimaryMenu() {
+    const m = document.getElementById('primary-menu');
     if (m) m.style.display = 'none';
+}
+
+// The primary menu's "New…" row: close the primary menu and reopen #new-menu
+// (Favorites/Recent + Init a repo/Scheduled task/Shell window) anchored at
+// #btn-primary-menu — the exact same popover the sidebar's "+" trigger opens
+// from its own anchor, just from a second entry point.
+function openNewMenuFromPrimary() {
+    hidePrimaryMenu();
+    openNewMenu({ stopPropagation() {}, currentTarget: document.getElementById('btn-primary-menu') });
 }
 
 // Spawn a plain shell window. The backend spawn endpoint is currently behind
@@ -1175,4 +1190,4 @@ export { openPalette, refreshSidebar, renderAgentDetail, renderNav, renderSideba
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hideOverflowMenu, newShellWindow, openNewMenu, openOverflowMenu, openPalette, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });

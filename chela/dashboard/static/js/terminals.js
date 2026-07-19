@@ -1978,7 +1978,7 @@ function _buildGridPicker() {
 
 // Wall toolbar "Layout" menu: grid presets + lock, folded behind one button
 // instead of sitting inline as separate primaries. Anchored + light-dismiss,
-// same pattern as nav.js's openOverflowMenu/openNewMenu.
+// same pattern as nav.js's openPrimaryMenu/openNewMenu.
 function openLayoutMenu(ev) {
     if (ev) ev.stopPropagation();
     const m = $('#layout-menu');

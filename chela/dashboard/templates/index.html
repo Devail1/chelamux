@@ -27,22 +27,17 @@
       <!-- Global active-shares indicator (safety kill-switch): shown on EVERY tab +
            mobile whenever any session is shared, so a forgotten live share (= an
            exposed terminal via a public link) is always one tap from Stop. NOT in
-           the overflow — it must stay visible whenever a share is live. -->
+           the menu below — it must stay visible whenever a share is live. -->
       <button class="shares-indicator" id="btn-shares" hidden onclick="chela.openSharesSheet()"
               title="Active shares — tap to manage or stop" aria-label="Active shares">
         <span class="si-dot" aria-hidden="true"></span>
         <span class="si-text">0 sharing</span>
       </button>
-      <button class="palette-trigger" id="btn-palette" title="Jump to… (⌘K / Ctrl-K)" aria-label="Open command palette" onclick="chela.openPalette()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-        <span class="pt-kbd">⌘K</span>
-      </button>
-      <button class="icon-btn" id="btn-new" title="New…" aria-label="New" onclick="chela.openNewMenu(event)">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-      </button>
-      <!-- Overflow: secondary actions (Share current · Notifications · Settings) +
-           the usage/updated readouts, consolidated off the bar on desktop + mobile. -->
-      <button class="icon-btn" id="btn-overflow" title="More" aria-label="More actions" aria-haspopup="true" onclick="chela.openOverflowMenu(event)">
+      <!-- The three former primaries (Jump to… #btn-palette, New… #btn-new, overflow
+           #btn-overflow) fold into this ONE button (CMX-109 / CMX-108 Part A
+           re-filed) — #primary-menu below. ⌘K still opens the palette directly
+           (nav.js's global keydown listener, unrelated to this menu). -->
+      <button class="icon-btn" id="btn-primary-menu" title="Menu" aria-label="Open menu" aria-haspopup="true" onclick="chela.openPrimaryMenu(event)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>
       </button>
     </div>
@@ -413,7 +408,7 @@
 {% if terminals_enabled %}
 <!-- Wall layout menu: grid presets + lock, folded off the toolbar into one menu
      button (chela.openLayoutMenu). Anchored + light-dismiss like #new-menu /
-     #overflow-menu. term-grid-presets/term-lock-btn ids are unchanged — only
+     #primary-menu. term-grid-presets/term-lock-btn ids are unchanged — only
      their container moved. -->
 <div class="popover layout-menu" id="layout-menu" style="display:none;">
     <div class="popover-item popover-note">Grid</div>
@@ -465,21 +460,38 @@
   <div class="popover-item" id="new-shell-item" onclick="chela.hideNewMenu(); chela.newShellWindow()">Shell window</div>
 </div>
 
-<!-- Topbar overflow menu: secondary actions + usage readouts. The rate-limit /
-     Next / Updated elements keep their #hdr-* ids so the existing updaters
-     (agents.js _updateRlPill, header.js) drive them here, visibility-agnostic. -->
-<div class="popover overflow-menu" id="overflow-menu" style="display:none;">
+<!-- Topbar primary menu: Jump to… + New… + the old overflow's secondary actions +
+     usage readouts, folded off three separate topbar buttons into one (CMX-109 /
+     CMX-108 Part A re-filed — cmx-108/#122 folded the WALL toolbar's primaries
+     instead; #new-menu above is the Wall's un-touched sibling). "New…" reopens
+     the existing #new-menu (Favorites/Recent + Init a repo/Scheduled task/Shell
+     window) anchored at #btn-primary-menu — reused unchanged rather than
+     duplicated, since #new-menu already serves the sidebar's own "+" trigger from
+     a different anchor. The rate-limit / Next / Updated elements keep their
+     #hdr-* ids so the existing updaters (agents.js _updateRlPill, header.js)
+     drive them here, visibility-agnostic. -->
+<div class="popover overflow-menu" id="primary-menu" style="display:none;">
+  <div class="popover-item ov-item" onclick="chela.hidePrimaryMenu(); chela.openPalette()">
+    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></span>
+    <span>Jump to…</span>
+    <span class="pt-kbd" style="margin-left:auto;">⌘K</span>
+  </div>
+  <div class="popover-item ov-item" onclick="chela.openNewMenuFromPrimary()">
+    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span>
+    <span>New…</span>
+  </div>
+  <div class="popover-sep"></div>
   {% if terminals_enabled %}
-  <div class="popover-item ov-item" onclick="chela.hideOverflowMenu(); chela.shareCurrentAgent()">
+  <div class="popover-item ov-item" onclick="chela.hidePrimaryMenu(); chela.shareCurrentAgent()">
     <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg></span>
     <span>Share current session</span>
   </div>
   {% endif %}
-  <div class="popover-item ov-item" onclick="chela.hideOverflowMenu(); chela.toggleSettings('notify')">
+  <div class="popover-item ov-item" onclick="chela.hidePrimaryMenu(); chela.toggleSettings('notify')">
     <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
     <span>Notifications</span>
   </div>
-  <div class="popover-item ov-item" onclick="chela.hideOverflowMenu(); chela.toggleSettings()">
+  <div class="popover-item ov-item" onclick="chela.hidePrimaryMenu(); chela.toggleSettings()">
     <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>
     <span>Settings</span>
   </div>
