@@ -950,8 +950,9 @@ function hideNewMenu() {
 
 // Topbar primary menu (Lucide more-vertical): folds the three former topbar
 // primaries — Jump to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow)
-// — behind ONE button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122 folded the
-// WALL toolbar's primaries instead — see openLayoutMenu in terminals.js). Jump to…
+// — behind ONE button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122's WALL
+// toolbar fold — grid presets + lock behind openLayoutMenu — was reverted in
+// CMX-111: Liav never asked for that one folded, only this topbar). Jump to…
 // and the old overflow's secondary actions (Share current, Notifications,
 // Settings) plus the usage/updated readouts are flat items here; New… reopens
 // the existing #new-menu (openNewMenuFromPrimary below) rather than duplicating

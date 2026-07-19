@@ -775,6 +775,28 @@ function paneHead(wid, draggable) {
     // shown/hidden by _refreshPaneIdx, never here, since a pane's index depends
     // on the whole wall's order, not just this one tile.
     const idx = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
+    // Wire / Share / Orchestrator / Pin fold behind one "⋯" trigger per pane
+    // (CMX-111): these four are session-level actions, not literal window
+    // controls, unlike minimize/maximize/kill which stay inline below. Kept as
+    // a sibling INSIDE this tile's own head — not a shared global popover like
+    // the wall toolbar's (reverted) Layout menu — so the existing
+    // `.grid-stack-item[gs-id] .gs-xxx-btn` selectors (tests, _updateShareBtns,
+    // _updateOrchBtns) keep finding these buttons regardless of the menu's open
+    // state. Positioned via togglePaneOverflow (fixed + measured, same pattern
+    // as nav.js's openPrimaryMenu/openNewMenu) so `.grid-stack-item-content`'s
+    // overflow:hidden never clips it.
+    const overflow = `<span class="gs-overflow">
+        <button class="gs-overflow-btn" onclick="chela.togglePaneOverflow(event, this)"
+                aria-haspopup="true" aria-expanded="false" title="More actions" aria-label="More actions">
+          ${lucideIcon('more-vertical', 14)}
+        </button>
+        <div class="popover pane-overflow-menu" hidden>
+          ${port}
+          ${_shareBtnHTML(wid)}
+          ${_orchBtnHTML(wid)}
+          ${pin}
+        </div>
+      </span>`;
     return `<div class="gs-head">
       ${idx}
       ${_statusDot(wid)}
@@ -785,16 +807,39 @@ function paneHead(wid, draggable) {
       <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
       <span class="gs-keys">
         <span class="gs-win-ctl">
-          ${port}
-          ${_shareBtnHTML(wid)}
-          ${_orchBtnHTML(wid)}
-          ${pin}
+          ${overflow}
           ${min}
           <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
           ${kill}
         </span>
       </span>
     </div>`;
+}
+
+// Toggle this pane's "⋯" overflow menu (Wire/Share/Orchestrator/Pin). Only one
+// open at a time — opening a second closes the first — and light-dismisses on
+// the next outside click, same pattern as nav.js's openPrimaryMenu/openNewMenu.
+function togglePaneOverflow(ev, btn) {
+    if (ev) ev.stopPropagation();
+    const menu = btn.nextElementSibling;
+    if (!menu) return;
+    const opening = menu.hidden;
+    _closeAllPaneOverflows();
+    if (!opening) return;
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    const r = btn.getBoundingClientRect();
+    menu.style.top = (r.bottom + 6) + 'px';
+    menu.style.left = Math.max(8, r.right - menu.offsetWidth) + 'px';
+    setTimeout(() => document.addEventListener('click', _closeAllPaneOverflows, { once: true }), 0);
+}
+
+function _closeAllPaneOverflows() {
+    document.querySelectorAll('.pane-overflow-menu:not([hidden])').forEach(m => {
+        m.hidden = true;
+        const btn = m.previousElementSibling;
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+    });
 }
 
 // Inline kill-confirm — same plain-DOM affordance as the kanban delete button
@@ -912,7 +957,7 @@ function _pinBtnHTML(wid) {
         ? "Pinned — this pane keeps its spot when a grid layout is applied. Click to unpin"
         : "Pin — keep this pane's position when a grid layout is applied";
     return `<button class="gs-pin-btn${on ? ' on' : ''}" onclick="chela.termPinToggle(this,'${_jsStr(wid)}')"
-      aria-pressed="${on ? 'true' : 'false'}" title="${attrEsc(title)}">&#128204;</button>`;
+      aria-pressed="${on ? 'true' : 'false'}" title="${attrEsc(title)}">${lucideIcon('pin', 12)}</button>`;
 }
 
 // Toggle a pane's pin state. applyGridLayout reads _pinned directly (no
@@ -1976,28 +2021,6 @@ function _buildGridPicker() {
     _reflectLockBtn();
 }
 
-// Wall toolbar "Layout" menu: grid presets + lock, folded behind one button
-// instead of sitting inline as separate primaries. Anchored + light-dismiss,
-// same pattern as nav.js's openPrimaryMenu/openNewMenu.
-function openLayoutMenu(ev) {
-    if (ev) ev.stopPropagation();
-    const m = $('#layout-menu');
-    if (!m) return;
-    _buildGridPicker();
-    const anchor = (ev && ev.currentTarget) || $('#term-layout-btn');
-    if (!anchor) return;
-    m.style.display = 'block';
-    const r = anchor.getBoundingClientRect();
-    m.style.top = (r.bottom + 6) + 'px';
-    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
-    setTimeout(() => document.addEventListener('click', hideLayoutMenu, { once: true }), 0);
-}
-
-function hideLayoutMenu() {
-    const m = $('#layout-menu');
-    if (m) m.style.display = 'none';
-}
-
 // ---- Layout lock (swap-on-drop) --------------------------------------------
 // GridStack's native swap only fires for equal-sized, touching tiles, so it
 // can't "swap and resize" different-sized panes. Instead, lock just turns
@@ -2522,4 +2545,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabe
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, hideLayoutMenu, kbCtrlKey, kbCtrlTap, kbToggle, openLayoutMenu, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleWallLock, wireDragStart, wireRoomClick });
