@@ -1499,7 +1499,21 @@ function focusPaneByWid(wid) {
         if (!item) return;
         item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         const ifr = item.querySelector('iframe.term-frame');
-        if (ifr) { try { ifr.contentWindow.focus(); } catch (e) { /* cross-doc guard */ } ifr.focus(); }
+        if (ifr) {
+            try { ifr.contentWindow.focus(); } catch (e) { /* cross-doc guard */ }
+            // ifr.focus() alone lights the focus ring but leaves keystrokes going
+            // nowhere — the iframe WINDOW isn't xterm's actual input. Route focus
+            // into the terminal's own textarea (exposed as `term` by ttyd's page,
+            // same global _paneTermDims already reaches for) so typing lands in
+            // the pane, not just highlights it. Fall back to ifr.focus() only
+            // while the terminal isn't wired up yet (still starting).
+            let routed = false;
+            try {
+                const t = ifr.contentWindow.term;
+                if (t && typeof t.focus === 'function') { t.focus(); routed = true; }
+            } catch (e) { /* cross-doc guard */ }
+            if (!routed) ifr.focus();
+        }
         const content = item.querySelector('.grid-stack-item-content') || item;
         content.classList.add('pane-flash');
         setTimeout(() => content.classList.remove('pane-flash'), 1100);
@@ -1684,19 +1698,54 @@ function _refreshPaneIdx() {
 }
 
 // Alt+1..9: jump straight to that pane, tmux-prefix style — no menu, no
-// typing. Ignored while the user is typing anywhere (an input, a live
-// terminal iframe never reaches this document-level listener in the first
-// place) or while the palette is open, so it never steals a keystroke.
+// typing. Ignored while the user is typing anywhere (an input) or while the
+// palette is open, so it never steals a keystroke. Shared with the
+// iframe-side wiring below so "what counts as a switch key" can't drift.
+function _altSwitchWid(e) {
+    if (!TERMINALS_ON || _termMode !== 'wall' || !e.altKey || e.ctrlKey || e.metaKey) return null;
+    if (!/^[1-9]$/.test(e.key)) return null;
+    return _switcherOrder()[Number(e.key) - 1] || null;
+}
+
 document.addEventListener('keydown', e => {
-    if (!TERMINALS_ON || _termMode !== 'wall' || !e.altKey || e.ctrlKey || e.metaKey) return;
-    if (!/^[1-9]$/.test(e.key)) return;
     const target = e.target;
     if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
-    const wid = _switcherOrder()[Number(e.key) - 1];
+    const wid = _altSwitchWid(e);
     if (!wid) return;
     e.preventDefault();
     focusPaneByWid(wid);
 });
+
+// Once Alt+N focuses a pane, keystrokes land in that ttyd iframe's OWN
+// document — a same-origin iframe's keydown never bubbles to the parent, so
+// the listener above goes deaf to the next Alt+N until focus manually returns
+// to the parent. Wire the same shortcut inside each pane's document too, as
+// soon as it (re)loads. Unlike the parent, no INPUT/TEXTAREA guard is needed:
+// ttyd's DOM holds nothing but the terminal, and its own input IS a textarea
+// (the xterm helper) — excluding it would defeat the whole point.
+function _wireIframeAltSwitch(ifr) {
+    let doc;
+    try { doc = ifr.contentDocument; } catch (e) { return; }   // cross-doc guard
+    if (!doc) return;
+    doc.addEventListener('keydown', e => {
+        const wid = _altSwitchWid(e);
+        if (!wid) return;
+        e.preventDefault();
+        focusPaneByWid(wid);
+    });
+}
+
+// 'load' doesn't bubble, but it still traverses ancestors during the CAPTURE
+// phase, so a single capturing listener on `document` catches every
+// `.term-frame` iframe's load — including future ones — with no per-tile
+// wiring needed at creation time. Re-running on every load (not just the
+// first) is required: each navigation swaps in a brand-new Document, which
+// discards whatever listener was attached to the one before it.
+document.addEventListener('load', e => {
+    const ifr = e.target;
+    if (!ifr || ifr.tagName !== 'IFRAME' || !ifr.classList.contains('term-frame')) return;
+    _wireIframeAltSwitch(ifr);
+}, true);
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
 // the current selection. Options carry the wid as value + the friendly label as

@@ -4,6 +4,9 @@
 // "⋯", not the wall TOOLBAR's grid-preset picker + lock (that fold is reverted: the
 // toolbar is back to inline, same as before CMX-108). The per-pane layout PIN and the
 // Alt+1..9 keyboard-fast pane switcher are unrelated to either fold and are unchanged.
+// CMX-112 adds properties 5 and 6 below: the switcher used to be cosmetic (it flashed
+// a border but never routed keystrokes into the terminal) and one-shot (it never
+// re-armed once focus moved into a pane's iframe).
 //
 // Runs the REAL terminals.js in jsdom (same approach as tests/wall.test.mjs and
 // tests/walldock.test.mjs): real `renderTerminals` -> `buildWall` -> real
@@ -12,7 +15,7 @@
 // back onto the DOM's gs-x/gs-y/gs-w/gs-h attributes) because the pin test needs to
 // observe applyGridLayout's real reflow decisions, not just "did it not crash".
 //
-// Four properties, each a regression that would ship silently:
+// Six properties, each a regression that would ship silently:
 //
 //   1. 🔴 THE PANE "⋯" ACTUALLY GATES WIRE/SHARE/ORCHESTRATOR/PIN. Each pane's overflow
 //      menu starts hidden; togglePaneOverflow reveals .gs-port/.gs-share-btn/
@@ -26,6 +29,15 @@
 //   4. 🔴 ALT+N JUMPS TO THE RIGHT PANE, PLAIN "N" DOES NOT. The badge numbering and
 //      the shortcut's target must never drift apart, and the shortcut must be gated on
 //      Alt (a bare digit is normal terminal input and must reach the pane untouched).
+//   5. 🔴 ALT+N ROUTES ACTUAL KEYSTROKES, NOT JUST A HIGHLIGHT. `focusPaneByWid` must
+//      reach into the ttyd iframe and call the xterm Terminal's OWN `.focus()`
+//      (exposed as `contentWindow.term`) — merely focusing the iframe window flashes
+//      a border but leaves every keystroke going nowhere.
+//   6. 🔴 ALT+N RE-ARMS AFTER FOCUS MOVES INTO A PANE. A same-origin iframe's keydown
+//      never bubbles to the parent document, so the parent-level listener alone goes
+//      deaf to the next Alt+N once a pane has focus. The switcher must also be wired
+//      inside each pane's own document (re-wired on every navigation) so a SECOND
+//      Alt+N actually switches again instead of getting stuck on the first pick.
 //
 // Run: node --test tests/wallnav.test.mjs (pytest runs it via tests/test_js_suites.py;
 // it needs `npm ci` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
@@ -154,6 +166,10 @@ before(async () => {
 beforeEach(() => {
     // No pane overflow menu should carry over open between tests.
     document.querySelectorAll('.pane-overflow-menu').forEach(m => { m.hidden = true; });
+    // focusPaneByWid's flash clears itself after 1100ms, but tests only wait 120ms —
+    // without this a later test's flashed(wid) assertion could pass on a PRIOR
+    // test's leftover flash instead of its own dispatch (a vacuous pass).
+    document.querySelectorAll('.pane-flash').forEach(el => el.classList.remove('pane-flash'));
 });
 
 const tile = wid => document.querySelector(`#term-stage .grid-stack-item[gs-id="${wid}"]`);
@@ -268,4 +284,47 @@ test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alon
     document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '1', bubbles: true }));   // no altKey
     await new Promise(r => setTimeout(r, 120));
     assert.ok(!flashed('@1'), 'a bare digit (no Alt) must be ignored — it is normal terminal input');
+});
+
+// 5 — REAL INPUT ROUTING (CMX-112). A flashed border is not enough: Alt+N must call
+// the xterm Terminal's OWN .focus() (ttyd exposes it as `contentWindow.term`) so
+// keystrokes actually land in the pane, not just the iframe window.
+test('Alt+N focuses the pane\'s own xterm terminal, not just the iframe window', async () => {
+    const wid = '@2';
+    const ifr = tile(wid).querySelector('iframe.term-frame');
+    assert.ok(ifr, 'the pane must have a real ttyd iframe, or this test is vacuous');
+
+    let termFocused = false;
+    ifr.contentWindow.term = { cols: 80, rows: 24, focus() { termFocused = true; } };
+    let ifrFocusCalled = false;
+    ifr.focus = () => { ifrFocusCalled = true; };
+
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '2', altKey: true, bubbles: true }));
+    await new Promise(r => setTimeout(r, 120));   // focusPaneByWid defers by 60ms
+
+    assert.ok(termFocused, 'Alt+2 must call the xterm Terminal\'s own .focus() so keystrokes are routed into it');
+    assert.ok(!ifrFocusCalled,
+        'the iframe-window fallback must not fire once the terminal itself accepted focus');
+
+    delete ifr.contentWindow.term;
+});
+
+// 6 — RE-ARM AFTER FOCUS MOVES INTO A PANE (CMX-112). A same-origin iframe's keydown
+// never bubbles to the parent document, so the shortcut must also be wired inside
+// each pane's OWN document — otherwise the very first Alt+N leaves the switcher deaf
+// to every Alt+N that follows.
+test('Alt+N still switches panes once focus has moved into a pane\'s own iframe document', async () => {
+    const from = tile('@1').querySelector('iframe.term-frame');
+    assert.ok(from, 'the pane must have a real ttyd iframe, or this test is vacuous');
+
+    from.dispatchEvent(new window.Event('load'));   // as the browser fires on navigation
+
+    const flashed = wid => tile(wid).querySelector('.grid-stack-item-content').classList.contains('pane-flash');
+
+    // Fired on the IFRAME'S OWN document, not the parent — what a keypress looks
+    // like once xterm's helper textarea has focus inside that pane.
+    from.contentDocument.dispatchEvent(new window.KeyboardEvent('keydown', { key: '2', altKey: true, bubbles: true }));
+    await new Promise(r => setTimeout(r, 120));
+
+    assert.ok(flashed('@2'), 'Alt+2 fired inside the focused pane\'s own iframe must still switch panes');
 });
