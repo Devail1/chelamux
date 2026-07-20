@@ -266,23 +266,24 @@ const geom = wid => {
     return el && ['x', 'y', 'w', 'h'].map(k => el.getAttribute('gs-' + k)).join(',');
 };
 
-// 1 — THE PANE FOLD (CMX-117: the trigger is now the left-edge badge, not a
-// standalone "⋯"). Wire/Share/Orchestrator/Pin live behind it, not loose in
+// 1 — THE PANE FOLD (CMX-117 folded the trigger into the left-edge badge; CMX-119
+// split it back apart into a standalone "⋯" (.gs-menu-btn) beside a plain status
+// dot (.gs-dot)). Wire/Share/Orchestrator/Pin live behind the "⋯", not loose in
 // the header — and stay the SAME real buttons, just moved.
-test('a pane\'s badge menu is hidden by default, and opening it reveals Wire/Share/Orchestrator/Pin', () => {
+test('a pane\'s "⋯" menu is hidden by default, and opening it reveals Wire/Share/Orchestrator/Pin', () => {
     const wid = '@1';
-    const badge = tile(wid).querySelector('.gs-badge');
+    const badge = tile(wid).querySelector('.gs-menu-btn');
     const menu = tile(wid).querySelector('.pane-overflow-menu');
-    assert.ok(badge, 'every wall tile gets a badge trigger');
+    assert.ok(badge, 'every wall tile gets a menu trigger');
     assert.ok(menu, 'every wall tile gets an overflow menu');
     assert.equal(menu.hidden, true, 'starts closed');
     assert.equal(badge.getAttribute('aria-expanded'), 'false');
-    // The badge itself must be wired as the trigger — jsdom doesn't execute inline
-    // onclick attributes without runScripts:"dangerously" (not set here), so calling
-    // togglePaneOverflow directly below would still pass even if this wiring were
-    // stripped from the markup. Assert the wiring as a source fact instead.
+    // The trigger itself must be wired to togglePaneOverflow — jsdom doesn't execute
+    // inline onclick attributes without runScripts:"dangerously" (not set here), so
+    // calling togglePaneOverflow directly below would still pass even if this wiring
+    // were stripped from the markup. Assert the wiring as a source fact instead.
     assert.match(badge.getAttribute('onclick'), /chela\.togglePaneOverflow\(event,\s*this\)/,
-        'the badge must carry the togglePaneOverflow onclick itself — it IS the menu trigger, ' +
+        'the "⋯" must carry the togglePaneOverflow onclick itself — it IS the menu trigger, ' +
         'not a menu that merely opens when the handler happens to be invoked directly');
 
     window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
@@ -305,7 +306,7 @@ test('a pane\'s badge menu is hidden by default, and opening it reveals Wire/Sha
 // the same state-bearing buttons.
 test('the "⋯" overflow renders a labeled vertical list, like the topbar #primary-menu — not an icon-only strip', () => {
     const wid = '@3';
-    const badge = tile(wid).querySelector('.gs-badge');
+    const badge = tile(wid).querySelector('.gs-menu-btn');
     const menu = tile(wid).querySelector('.pane-overflow-menu');
     window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
 
@@ -347,8 +348,8 @@ test('the "⋯" overflow renders a labeled vertical list, like the topbar #prima
 
 // 1b — Only one pane's overflow is open at a time (opening a second closes the first).
 test('opening one pane\'s "⋯" overflow closes any other pane\'s open overflow', () => {
-    const btn1 = tile('@1').querySelector('.gs-badge');
-    const btn2 = tile('@2').querySelector('.gs-badge');
+    const btn1 = tile('@1').querySelector('.gs-menu-btn');
+    const btn2 = tile('@2').querySelector('.gs-menu-btn');
     const menu1 = tile('@1').querySelector('.pane-overflow-menu');
     const menu2 = tile('@2').querySelector('.pane-overflow-menu');
 
@@ -637,8 +638,8 @@ test('typing a query drops the panes-first section and fuzzy-matches everything,
 // resolving the cascade. A source-text guard can only read the stylesheet as text; the judge
 // proved across four rounds (3→8) that any hand-rolled source parse leaves a hole — the
 // cascade resolves by specificity, then order, then !important, and a mutation can empty a
-// cue with a higher-specificity rule (`.gs-head .gs-badge.working`), a reordered selector
-// (`.waiting.gs-badge`), an attribute qualifier, or an `!important` the parse can't rank.
+// cue with a higher-specificity rule (`.gs-head .gs-dot.working`), a reordered selector
+// (`.waiting.gs-dot`), an attribute qualifier, or an `!important` the parse can't rank.
 // Chasing each form just narrows the hole and grows a proof-that-cannot-fail. So per Liav's
 // call, these cues are verified by MANUAL live-browser check (the badge actually renders
 // filled vs hollow, the ring shows, the bar is opaque), NOT by a jsdom guard that would only
@@ -690,24 +691,25 @@ test('the pane-menu ON-state fill rules repeat the `.pane-overflow-menu button` 
         'a stale `.gs-keys button.popover-item` base rule must not exist — .gs-keys no longer wraps the menu');
 });
 
-// 11b — THE PANE BADGE MUST NEVER LOSE ITS OWN GEOMETRY TO THE STANDALONE-DOT RULE
-// (CMX-118 fix 1). `.term-status-dot`'s 8px-round-dot geometry/fill rules and the
-// `.gs-badge`'s ~22x18 rounded geometry are equal specificity (single class each);
-// `:not(.gs-badge)` is what keeps the dot rule from winning on source order alone
+// 11b — THE PANE HEADER'S OWN STATUS DOT MUST NEVER LOSE ITS HOLLOW-IDLE STYLING TO
+// THE STANDALONE-DOT RULE (CMX-118 fix 1, CMX-119 rescoped the badge onto `.gs-dot`).
+// `.term-status-dot`'s generic 8px-round-dot geometry/fill rules and `.gs-dot`'s own
+// idle/working/waiting/orch rules are equal specificity (single class each);
+// `:not(.gs-dot)` is what keeps the generic rule from winning on source order alone
 // (see the comment above test 11's block). jsdom can't resolve which of two
 // equal-specificity rules a browser applies, but it CAN prove the static text fact
 // that only the excluded form exists — the same kind of guard test 11 already uses.
-test('every .term-status-dot geometry/fill rule carries :not(.gs-badge); a bare form does not exist', () => {
+test('every generic .term-status-dot geometry/fill rule carries :not(.gs-dot); a bare form does not exist', () => {
     ['', '.working', '.waiting', '.idle'].forEach(suffix => {
-        const guarded = new RegExp(String.raw`^\.term-status-dot${suffix}:not\(\.gs-badge\)\s*\{`, 'm');
+        const guarded = new RegExp(String.raw`^\.term-status-dot${suffix}:not\(\.gs-dot\)\s*\{`, 'm');
         assert.ok(guarded.test(CSS),
-            `.term-status-dot${suffix}:not(.gs-badge) { ... } must exist`);
+            `.term-status-dot${suffix}:not(.gs-dot) { ... } must exist`);
 
         const bare = new RegExp(String.raw`^\.term-status-dot${suffix}\s*\{`, 'm');
         assert.ok(!bare.test(CSS),
-            `a bare .term-status-dot${suffix} { ... } rule must not exist — equal specificity to .gs-badge ` +
-            'and later in the file, so it would win the cascade and squish the ~22x18 badge into an 8px dot ' +
-            '(idle: fill it grey instead of leaving it hollow)');
+            `a bare .term-status-dot${suffix} { ... } rule must not exist — equal specificity to .gs-dot ` +
+            'and later in the file, so it would win the cascade and override the header dot\'s own idle/working ' +
+            '/waiting styling (idle: fill it grey instead of leaving it hollow)');
     });
 });
 
@@ -734,16 +736,17 @@ test('--term-ctx-bar-h is non-zero and both .term-frame margins + .term-ctx-bar 
         'so the reservation and the bar can never drift apart');
 });
 
-// 12 — THE BADGE CARRIES LIVE STATUS BY SHAPE, NOT HUE ALONE (CMX-117 A). The badge
-// wears `.term-status-dot` (the same class the old standalone dot wore), so the
-// exact same working/waiting/idle classes _colorTermDots paints now land on the
-// whole badge — a working pane's badge must carry different markup than an idle
-// one's, not just a different colour jsdom can't see.
-test('the badge is painted by live status (working vs idle carry different classes) — CMX-117 A', async () => {
+// 12 — THE HEADER DOT CARRIES LIVE STATUS BY SHAPE, NOT HUE ALONE (CMX-117 A,
+// CMX-119 split the dot back out of the combined badge). The dot wears
+// `.term-status-dot` (the same class every other status dot wears), so the exact
+// same working/waiting/idle classes _colorTermDots paints now land on it — a
+// working pane's dot must carry different markup than an idle one's, not just a
+// different colour jsdom can't see.
+test('the header dot is painted by live status (working vs idle carry different classes) — CMX-117 A', async () => {
     const wid = '@1';
-    const badge = tile(wid).querySelector('.gs-badge');
+    const badge = tile(wid).querySelector('.gs-dot');
     assert.ok(badge.classList.contains('term-status-dot'),
-        'the badge must wear .term-status-dot, or _colorTermDots never finds it to paint it');
+        'the dot must wear .term-status-dot, or _colorTermDots never finds it to paint it');
     assert.equal(badge.getAttribute('data-status-for'), wid);
 
     // Sanity: no fixture agent carries session_status, so the initial paint is idle.
@@ -752,12 +755,12 @@ test('the badge is painted by live status (working vs idle carry different class
 
     AGENTS[0].session_status = 'busy';
     await terminals.termTick();
-    assert.ok(badge.classList.contains('working'), 'a busy agent\'s badge must gain the working (filled) class');
+    assert.ok(badge.classList.contains('working'), 'a busy agent\'s dot must gain the working (filled) class');
     assert.ok(!badge.classList.contains('idle'), 'and lose the idle (hollow) class — shape must actually change');
 
     delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
     await terminals.termTick();
-    assert.ok(badge.classList.contains('idle'), 'reverting session_status must repaint the badge back to idle');
+    assert.ok(badge.classList.contains('idle'), 'reverting session_status must repaint the dot back to idle');
 });
 
 // 13 — THE ☰ GLYPH IS GONE; .gs-grip STAYS THE DRAG HANDLE (CMX-117 B). GridStack's
@@ -780,7 +783,7 @@ test('the right control cluster holds exactly minimize, maximize, kill — nothi
     // Every child, not just BUTTON tags: the pre-CMX-117 "⋯" this guards against
     // was a SPAN wrapper (`.gs-overflow`) around a button, not a bare button — a
     // tagName==='BUTTON' filter is blind to exactly that shape sneaking back in
-    // (e.g. the badge's own `.gs-badge-wrap` span landing here by accident).
+    // (e.g. the "⋯" trigger's own `.gs-menu-wrap` span landing here by accident).
     const children = Array.from(winCtl.children);
     const kinds = children.map(el => ['gs-min-btn', 'gs-max-btn', 'gs-kill-btn'].find(c => el.classList.contains(c)));
     assert.equal(children.length, 3,
@@ -820,24 +823,25 @@ test('branch + context render inside the bottom .term-ctx-bar, and the live poll
 });
 
 // 16 — THE ORCHESTRATOR RING IS A NON-HUE CUE, DRIVEN OFF THE SAME SIGNAL AS THE MENU
-// ROW (CMX-117 E). Ownership is exclusive: only the owning pane's badge wears it, and
-// it moves live with a real subscribe/release round-trip — never a hardcoded paint.
-test('the badge gains a ring iff its pane owns the decisions inbox, in lockstep with the menu row — CMX-117 E', async () => {
+// ROW (CMX-117 E, CMX-119 rescoped it onto the standalone `.gs-dot`). Ownership is
+// exclusive: only the owning pane's dot wears it, and it moves live with a real
+// subscribe/release round-trip — never a hardcoded paint.
+test('the header dot gains a ring iff its pane owns the decisions inbox, in lockstep with the menu row — CMX-117 E', async () => {
     const owner = '@2', other = '@1';
-    const ownerBadge = tile(owner).querySelector('.gs-badge');
-    const otherBadge = tile(other).querySelector('.gs-badge');
+    const ownerBadge = tile(owner).querySelector('.gs-dot');
+    const otherBadge = tile(other).querySelector('.gs-dot');
     const orchBtn = tile(owner).querySelector('.gs-orch-btn');
-    assert.equal(ownerBadge.classList.contains('gs-badge-orch'), false, 'sanity: nobody owns the slot yet');
+    assert.equal(ownerBadge.classList.contains('gs-dot-orch'), false, 'sanity: nobody owns the slot yet');
 
     await window.chela.orchestratorBtnClick(orchBtn, owner);
-    assert.equal(ownerBadge.classList.contains('gs-badge-orch'), true,
+    assert.equal(ownerBadge.classList.contains('gs-dot-orch'), true,
         'subscribing must add the ring — the same onOrchestratorChange signal the menu row repaints from');
     assert.equal(orchBtn.classList.contains('on'), true, 'sanity: the menu row agrees it is now owned');
-    assert.equal(otherBadge.classList.contains('gs-badge-orch'), false,
-        'ownership is exclusive — a non-owning pane\'s badge must never also show the ring');
+    assert.equal(otherBadge.classList.contains('gs-dot-orch'), false,
+        'ownership is exclusive — a non-owning pane\'s dot must never also show the ring');
 
     await window.chela.orchestratorBtnClick(orchBtn, owner);   // release, leave state as found
-    assert.equal(ownerBadge.classList.contains('gs-badge-orch'), false, 'releasing must remove the ring');
+    assert.equal(ownerBadge.classList.contains('gs-dot-orch'), false, 'releasing must remove the ring');
 });
 
 // 17 — WIRE-FROM-MENU: THE POPOVER CLOSES THE INSTANT THE DRAG STARTS, AND CLEANUP IS
@@ -853,7 +857,7 @@ test('the badge gains a ring iff its pane owns the decisions inbox, in lockstep 
 // for a layout question jsdom cannot see.
 test('starting a wire from the badge menu closes the menu immediately, and Escape fully cleans up — CMX-117 F', () => {
     const wid = '@1';
-    const badge = tile(wid).querySelector('.gs-badge');
+    const badge = tile(wid).querySelector('.gs-menu-btn');
     const menu = tile(wid).querySelector('.pane-overflow-menu');
     const gsEl = document.querySelector('.grid-stack');
     const stage = document.getElementById('term-stage');
