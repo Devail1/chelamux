@@ -2,6 +2,21 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🎨 BAR BG = TERMINAL'S REAL COLOR (`#0d1117`), TOKEN-SYNCED / DRIFT-GUARDED (Liav-approved 2026-07-20).** CMX-123 set `--term-bg: #000` on a WRONG assumption ("xterm content is transparent so the frame's black shows through"). Measured live: the ttyd terminal paints its **own** xterm theme background = **`#0d1117`** (set in `scripts/agent-terminals.sh` `TERM_THEME`, deliberately matching the dashboard `--bg` GitHub-Dark). So the bar/frame (`#000`) are actually *blacker* than the terminal (`#0d1117`) — a real seam, the reverse of what CMX-123 intended. The bar must be **whatever the terminal actually is**, from a single synced source so it can't drift again.
+
+  **OBJECTIVE.** Point `--term-bg` at the terminal's real background and lock the two together:
+    - `style.css` ~15: `--term-bg: #000` → **`--term-bg: #0d1117`** (the xterm `TERM_THEME.background`). Keep it a **single fixed `:root` value** — the ttyd terminal theme is theme-INDEPENDENT (always `#0d1117`), so `--term-bg` must NOT be per-theme and must NOT be `var(--bg)` (the dashboard themes redeclare `--bg`, which would drift from the fixed terminal). Frame + bar then sit seamlessly on the terminal across every dashboard theme.
+    - **Anti-drift:** add cross-ref comments — on `--term-bg` in `style.css` pointing to `scripts/agent-terminals.sh` `TERM_THEME.background` as the authoritative color, and vice-versa — plus the guard below so they can never silently diverge.
+    - If the № chip (`.gs-idx`, `background: var(--bg)` = `#0d1117` in dark theme) loses contrast once the bar is also `#0d1117`, give it a legible treatment (its `1px var(--border)` outline already helps; consider `--surface` bg) — minimal, don't redesign the chip.
+
+  **BOUNDARIES.** `style.css` `--term-bg` value + cross-ref comments + one guard test (+ a comment in `agent-terminals.sh`). Do NOT change the xterm `TERM_THEME` itself (terminal STAYS `#0d1117`), CMX-124 (bar order), CMX-125 (shell gating), CMX-118 (`--term-ctx-bar-h`), or CMX-120 (wire-live `absolute`). PR → `dev`.
+
+  **GUARDS (`tests/term_bg_sync.test.mjs` — new; node; reads files, source-structure, jsdom-independent; corrupt→RED).**
+    - `--term-bg` in `style.css` **equals** the `background` hex in `scripts/agent-terminals.sh` `TERM_THEME` (parse both, compare case-insensitively). Change EITHER hex so they differ → RED. This is the "synced to the terminal token" invariant made mechanical.
+    - `--term-bg` is declared **exactly once**, at `:root` (not redeclared inside any theme block) — so it stays fixed to the fixed terminal. Add a per-theme `--term-bg` override → RED.
+
+  **VERIFY (live).** Bar bg, frame bg, and the xterm terminal content all read the same `rgb(13, 17, 23)` (`#0d1117`) — no seam between terminal and footer; the № chip stays legible.
+
 - [ ] **🐚 SHELL PANES — BOTTOM BAR SHOWS ONLY №, NO CONTEXT/BRANCH (Liav-approved 2026-07-20).** A plain shell pane isn't a Claude session, so its context meter (`77% · 153K/200K`) and branch are meaningless noise — a shell shows a stale/estimated reading because `context.live_snapshot` still derives one from a prior session's statusline/transcript cache. Suppress both on shells; keep only the № chip (for Alt+N jumping).
 
   **OBJECTIVE.** Gate the context feed on a **live** Claude session. In `/api/agents/context` (`app.py` ~1887), for each window resolve `agent_manager.claude_pid(window_id)` — **`None` means a plain shell (or dead session)**, the exact signal `/api/agents` already uses at ~209 — and for such windows do NOT append a result row (or append with `used_pct: None`). The client bottom bar ALREADY hides the context text, branch, and fill strip when a window has no context entry / `used_pct == null` (`terminals.js` ~1236), while the № chip (`.gs-idx`) is rendered independently of context — so a shell then shows only its №, no client change required.
