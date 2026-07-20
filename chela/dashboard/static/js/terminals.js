@@ -1678,10 +1678,11 @@ function _refreshPaneLabels() {
     renderMobileSwitcher();   // reflect renames / added / dropped agents in the pills
 }
 
-// ---- Keyboard-fast pane switcher (Alt+1..9) --------------------------------
+// ---- Keyboard-fast pane switcher (Alt+1..9) + palette-first (Ctrl/⌘+K) -----
 // The first 9 panes in stable wall order get a jump key. Shared by the badge
 // painter and the shortcut handler so "what a tile shows" and "what Alt+N
-// jumps to" can never drift apart.
+// jumps to" can never drift apart. CMX-116: the palette is the primary,
+// discoverable pane switcher — Alt+N stays as the power-user fallback.
 function _switcherOrder() {
     return _orderedWids(_renderedWids).slice(0, 9);
 }
@@ -1714,6 +1715,12 @@ function _altSwitchWid(e) {
     return _switcherOrder()[Number(e.key) - 1] || null;
 }
 
+// Ctrl/⌘+K — the same combo the parent chrome's palette shortcut uses
+// (nav.js). Matched the same way here so a pane's own keydown can trigger it.
+function _isPaletteKey(e) {
+    return (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K');
+}
+
 // Capture phase for consistency with the iframe-side listener below (which is
 // the load-bearing one — see its comment): harmless here since the parent
 // document IS the dispatch target for these keydowns either way.
@@ -1728,11 +1735,12 @@ document.addEventListener('keydown', e => {
 
 // Once Alt+N focuses a pane, keystrokes land in that ttyd iframe's OWN
 // document — a same-origin iframe's keydown never bubbles to the parent, so
-// the listener above goes deaf to the next Alt+N until focus manually returns
-// to the parent. Wire the same shortcut inside each pane's document too, as
-// soon as it (re)loads. Unlike the parent, no INPUT/TEXTAREA guard is needed:
-// ttyd's DOM holds nothing but the terminal, and its own input IS a textarea
-// (the xterm helper) — excluding it would defeat the whole point.
+// the listener above goes deaf to the next Alt+N (or Ctrl/⌘+K) until focus
+// manually returns to the parent. Wire the same shortcuts inside each pane's
+// document too, as soon as it (re)loads. Unlike the parent, no INPUT/TEXTAREA
+// guard is needed: ttyd's DOM holds nothing but the terminal, and its own
+// input IS a textarea (the xterm helper) — excluding it would defeat the
+// whole point.
 //
 // CMX-114 (live-broken in the real browser, cmx-112's jsdom guard was green
 // while the feature was dead): a real keydown targets xterm's helper textarea
@@ -1740,18 +1748,32 @@ document.addEventListener('keydown', e => {
 // bubble-phase listener on `doc` — only a synthetic `dispatchEvent` does,
 // which is exactly why the old jsdom guard passed on a dead feature. Register
 // in the CAPTURE phase with `stopImmediatePropagation` so this fires BEFORE
-// xterm's own handler, both switching panes AND stopping the stray Alt-digit
-// from reaching the shell.
-function _wireIframeAltSwitch(ifr) {
+// xterm's own handler, both switching panes/opening the palette AND stopping
+// the stray Alt-digit or Ctrl+K from reaching the shell (xterm otherwise
+// treats Ctrl+K as readline's kill-to-end-of-line).
+//
+// CMX-116: a SET of shortcuts, not a second bespoke injector — Ctrl/⌘+K is
+// the primary, discoverable pane switcher (the palette floats open panes to
+// the top, see nav.js `_openPaneItems`); Alt+1..9 stays as the direct-jump
+// power-user fallback. Was `_wireIframeAltSwitch`, generalized in place so
+// "what shortcuts reach a focused pane" can't drift between the two.
+function _wireIframeShortcuts(ifr) {
     let doc;
     try { doc = ifr.contentDocument; } catch (e) { return; }   // cross-doc guard
     if (!doc) return;
     doc.addEventListener('keydown', e => {
         const wid = _altSwitchWid(e);
-        if (!wid) return;
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        focusPaneByWid(wid);
+        if (wid) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            focusPaneByWid(wid);
+            return;
+        }
+        if (_isPaletteKey(e)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (typeof openPalette === 'function') openPalette();
+        }
     }, true);
 }
 
@@ -1764,7 +1786,7 @@ function _wireIframeAltSwitch(ifr) {
 document.addEventListener('load', e => {
     const ifr = e.target;
     if (!ifr || ifr.tagName !== 'IFRAME' || !ifr.classList.contains('term-frame')) return;
-    _wireIframeAltSwitch(ifr);
+    _wireIframeShortcuts(ifr);
 }, true);
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
@@ -2610,7 +2632,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, renderTerminals, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, renderTerminals, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

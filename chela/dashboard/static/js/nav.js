@@ -3,7 +3,7 @@ import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
-import { _displayLabel, _sharedWids, _stopShare, focusPaneByWid, shareBtnClick } from './terminals.js';
+import { _displayLabel, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, shareBtnClick } from './terminals.js';
 import { _isFav, _launcherData, launchProject, refreshLauncher } from './launcher.js';
 import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
@@ -1056,7 +1056,10 @@ async function newShellWindow() {
 // handful of sessions. Built fresh each open from live caches.
 let _palItems = [], _palSel = 0;
 
-function _paletteItems() {
+// skipWids (optional): sessions to leave out of the "session ·" rows below —
+// used with an EMPTY query so a pane already floated to the top (CMX-116's
+// `_openPaneItems`) doesn't also show up a second time further down the list.
+function _paletteItems(skipWids) {
     const items = [];
     // The palette's own hardcoded copy of the view list is gone — it reads the
     // registry, so a view added or removed there is added or removed here.
@@ -1065,6 +1068,7 @@ function _paletteItems() {
     }));
 
     (_agentsCache || []).forEach(a => {
+        if (skipWids && a.window_id && skipWids.has(a.window_id)) return;
         const word = _AGENT_STATUS_WORD[agentDotColor(a)] || 'idle';
         items.push({ dot: _SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle', title: _agentLabel(a),
                      sub: 'session · ' + word, run: () => selectAgent(a.name) });
@@ -1118,24 +1122,62 @@ function _fuzzyScore(q, s) {
     return score - first * 0.1;
 }
 
+// CMX-116: palette-first pane switcher. On an EMPTY query, float every live,
+// unminimized wall pane to the TOP — wall order (`_orderedWids`), with a pane
+// wanting attention (waiting > working > idle) bubbling ahead of its peers,
+// same status word the sidebar uses — so ⌘K instantly answers "what's open,
+// what needs me". Once the user types, this section is gone: `_paletteItems()`
+// alone (agents already included there) drives the usual fuzzy match over
+// everything, so a query never traps you in "open panes only".
+const _PANE_ATTENTION_RANK = { yellow: 0, green: 1, grey: 2 };
+
+function _openPaneItems() {
+    if (!TERMINALS_ON || typeof _renderedWids === 'undefined') return [];
+    const live = _renderedWids.filter(w => !(_minimized && _minimized.has(w)));
+    if (!live.length) return [];
+    const wallOrder = _orderedWids(live);
+    const rankOf = wid => {
+        const a = (_agentsCache || []).find(x => x.window_id === wid);
+        return _PANE_ATTENTION_RANK[a ? agentDotColor(a) : 'grey'] ?? 2;
+    };
+    // Array.prototype.sort is stable — same-rank panes keep wall order.
+    const byAttention = wallOrder.slice().sort((a, b) => rankOf(a) - rankOf(b));
+    return byAttention.map(wid => {
+        const a = (_agentsCache || []).find(x => x.window_id === wid);
+        const word = a ? (_AGENT_STATUS_WORD[agentDotColor(a)] || 'idle') : 'open';
+        return {
+            wid, dot: a ? (_SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle') : 'idle',
+            title: a ? _agentLabel(a) : wid,
+            sub: 'open pane · ' + word,
+            run: () => focusPaneByWid(wid),
+        };
+    });
+}
+
 function _renderPalette(q) {
     const list = document.getElementById('palette-list');
     if (!list) return;
-    let items = _paletteItems();
+    let items, paneCount = 0;
     if (q) {
-        items = items
+        items = _paletteItems()
             .map(it => ({ it, sc: _fuzzyScore(q, it.title + ' ' + it.sub) }))
             .filter(x => x.sc >= 0)
             .sort((a, b) => b.sc - a.sc)
             .map(x => x.it);
+    } else {
+        const panes = _openPaneItems();
+        paneCount = panes.length;
+        items = panes.concat(_paletteItems(new Set(panes.map(p => p.wid))));
     }
     _palItems = items;
     if (_palSel >= items.length) _palSel = 0;
     list.innerHTML = items.map((it, i) => {
+        const divider = (paneCount > 0 && i === paneCount)
+            ? '<div class="palette-divider" role="separator"></div>' : '';
         const icon = it.dot
             ? `<span class="term-status-dot ${it.dot}"></span>`
             : `<span class="pi-glyph">${it.icon || ''}</span>`;
-        return `<div class="palette-item${i === _palSel ? ' sel' : ''}" data-i="${i}"
+        return divider + `<div class="palette-item${i === _palSel ? ' sel' : ''}" data-i="${i}"
                   onmouseenter="_palHover(${i})" onclick="chela._palRun(${i})">
             <span class="pi-icon">${icon}</span>
             <span class="pi-title">${escHtml(it.title)}</span>
