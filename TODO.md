@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **📐 BOTTOM BAR v3 — `branch · context ··· №` (branch+context LEFT-grouped, № pinned FAR-RIGHT). SUPERSEDES CMX-124 (Liav changed his mind 2026-07-21: № reads better far-right).** CMX-124 put № far-left (`№ → branch → context`); revert to № on the right, with branch and context grouped on the left.
+- [x] **📐 BOTTOM BAR v3 — `branch · context ··· №` (branch+context LEFT-grouped, № pinned FAR-RIGHT). SUPERSEDES CMX-124 (Liav changed his mind 2026-07-21: № reads better far-right).** CMX-124 put № far-left (`№ → branch → context`); revert to № on the right, with branch and context grouped on the left.
 
   **OBJECTIVE.** Fixed order: **branch (far-left) → context (immediately after branch, `·`-separated) → № (pinned FAR-RIGHT edge).** Undo CMX-124's markup+CSS and re-pin:
     - **Markup** (`_ctxBarHTML`, `terminals.js`): order `gs-branch` → `gs-ctx` → `gs-idx` (№ LAST again; `.term-ctx-fill` stays the absolutely-positioned strip).
