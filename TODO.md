@@ -15,7 +15,7 @@
 
   **VERIFY.** `uv run ruff check chela tests` + `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green; each guard RED under its corruption. Manual: dispatch a task that runs inbox/notify code → the agent's runs produce NO phone push (only the daemon can).
 
-- [ ] **🪟⌨️ PANE `⋯` MENU RESTYLE + ALT+N REAL-BROWSER FIX — two live corrections after Liav tested cmx-111/cmx-112.** Both frontend, both `terminals.js`/CSS; one PR.
+- [x] **🪟⌨️ PANE `⋯` MENU RESTYLE + ALT+N REAL-BROWSER FIX — two live corrections after Liav tested cmx-111/cmx-112.** Both frontend, both `terminals.js`/CSS; one PR.
 
   **A. The pane `⋯` overflow must be a LABELED VERTICAL dropdown, like the topbar `#primary-menu` — not the current icon-only horizontal strip.** cmx-111 shipped `.pane-overflow-menu` as a flex row of bare icon buttons (Wire/Share/Orchestrator/Pin). Liav wants it to look like `#primary-menu` (nav.js / index.html — the topbar ⋮ menu): a **vertical list of `.popover-item` rows, each = lucide icon + a TEXT LABEL** ("Wire to…", "Share current session", "Orchestrator", "Pin"). Reuse `#primary-menu`'s `.popover` / `.popover-item.ov-item` styling verbatim. ⚠️ **Keep the live state + real actions:** the Share/Orchestrator/Pin rows must still carry the state-bearing `.gs-share-btn`/`.gs-orch-btn`/`.gs-pin-btn` elements (their `aria-pressed`/`.on` classes are driven by `_updateShareBtns`/`_updateOrchBtns` and the pin toggle — a relabel must NOT break that wiring), and clicking a row must fire the same action (`shareBtnClick`/`orchestratorBtnClick`/`termPinToggle`/`wireDragStart`). Row shows the current state (e.g. Orchestrator row highlighted when this pane is the live orchestrator, Pin row when pinned).
 
