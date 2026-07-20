@@ -29,7 +29,7 @@
 
   **VERIFY (live).** The `shell-1` pane's bottom bar shows only its № (e.g. `3`) — no `77% · …`, no branch; a Claude agent pane still shows context + branch.
 
-- [ ] **📐 BOTTOM BAR — CONSTANT `№ · branch · context` ORDER, BRANCH-AGNOSTIC (Liav-approved 2026-07-20).** The pane bottom bar (`.term-ctx-bar`) shifts depending on whether the pane has a branch: today `.gs-branch` is `flex: 1 1 auto` and the bar uses `justify-content: space-between`, so a **branch-less** pane (e.g. nautilus) lets the context slide to the LEFT. Lock the layout so nothing moves.
+- [x] **📐 BOTTOM BAR — CONSTANT `№ · branch · context` ORDER, BRANCH-AGNOSTIC (Liav-approved 2026-07-20).** The pane bottom bar (`.term-ctx-bar`) shifts depending on whether the pane has a branch: today `.gs-branch` is `flex: 1 1 auto` and the bar uses `justify-content: space-between`, so a **branch-less** pane (e.g. nautilus) lets the context slide to the LEFT. Lock the layout so nothing moves.
 
   **OBJECTIVE.** Fixed order regardless of branch presence: **№ (pane number) pinned FAR-LEFT → branch immediately right of it → context pinned to the FAR-RIGHT edge.** Two coordinated edits:
     - **Markup** (`terminals.js` `_ctxBarHTML` ~1889): reorder to `gs-idx` (№) FIRST, then `gs-branch`, then `gs-ctx`. (`.term-ctx-fill` stays the absolutely-positioned 2px strip — order-independent.)
