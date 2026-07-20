@@ -263,13 +263,15 @@ body {
    file's `--bg`), so nothing "shows through" at all; `--term-bg` must equal that
    real color exactly or the bar/frame are a visibly blacker seam sitting on top
    of it. tests/test_term_bg_sync.py drift-guards the two literals. */
-/* CMX-124: fixed order, branch-agnostic — № pinned far-left, context pinned
-   far-right via `.gs-ctx`'s own `margin-left: auto`, branch packs immediately
-   after № and simply leaves empty space when absent. No more
+/* CMX-124 pinned № far-left with context pinned far-right via `.gs-ctx`'s own
+   `margin-left: auto`. CMX-127 (Liav changed his mind: № reads better
+   far-right) supersedes that — branch + context are LEFT-grouped in normal
+   flow, and `.gs-idx` (below) now carries the `margin-left: auto` instead, so
+   № is pinned to the bar's far-right edge no matter what else is present. No
    `justify-content: space-between`: on a branch-less pane (`.gs-branch`
-   hidden) space-between used to let `.gs-ctx` slide left to fill the gap —
-   the auto-margin keeps it pinned to the right edge no matter what else in
-   the bar is present. */
+   hidden) space-between used to let whatever came next slide left to fill the
+   gap — the auto-margin on the pinned element keeps it at the right edge
+   regardless. */
 .term-ctx-bar {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
     display: flex; align-items: center; gap: 8px;
@@ -286,32 +288,35 @@ body {
 .term-ctx-fill.est { opacity: 0.55; }
 
 /* Branch + exact context "74% · 147.5K/1M" — dim, subtle, tabular-nums; the
-   fill strip (above) still carries the at-a-glance colour. `.gs-ctx` is
-   pinned to the bar's far-right edge via its own auto left-margin (CMX-124)
-   so it never drifts regardless of what else in the bar is present/hidden.
-   `.gs-branch` may shrink/ellipsis but must NOT grow past its own content —
-   growth is what let it (and by extension the space-between layout) push
-   `.gs-ctx` around. */
+   fill strip (above) still carries the at-a-glance colour. Both sit in normal
+   flow, LEFT-grouped, immediately after each other; `.gs-idx` (below) carries
+   the auto left-margin now, so it's what stays pinned to the bar's far-right
+   edge regardless of what else in the bar is present/hidden. `.gs-branch`
+   may shrink/ellipsis but must NOT grow past its own content — growth is
+   what let it (and by extension the space-between layout) push things
+   around. */
 .gs-ctx, .gs-branch {
     flex: 0 0 auto; font-weight: 500; line-height: 1;
     white-space: nowrap; font-variant-numeric: tabular-nums;
 }
 .gs-branch { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
-.gs-ctx { margin-left: auto; }
 .gs-ctx.ctx-warn { color: var(--yellow); }
 .gs-ctx.ctx-danger { color: var(--red); }
 
 /* Pane № (Alt+N jump target) — CMX-119 originally tucked it at the far right
-   of the bottom bar, after the context numbers; CMX-124 moves it back to the
-   FAR LEFT (leading the bar, before branch) as part of a fixed
-   № → branch → context order that stays constant whether or not the pane
-   has a branch. */
+   of the bottom bar, after the context numbers; CMX-124 moved it to the FAR
+   LEFT instead; CMX-127 (Liav changed his mind: № reads better far-right)
+   supersedes that and restores the far-right position — branch and context
+   are LEFT-grouped, and this chip is pinned to the bar's far-right edge via
+   its own auto left-margin, so it never drifts regardless of what else in
+   the bar is present. */
 .gs-idx {
     flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
     min-width: 15px; height: 14px; padding: 0 4px; box-sizing: border-box;
     border-radius: 4px; background: var(--bg); border: 1px solid var(--border);
     color: var(--text); font-weight: 700; font-size: 9.5px; line-height: 1;
     font-variant-numeric: tabular-nums;
+    margin-left: auto;
 }
 
 /* Inline split-glyph layout picker. Icon-only buttons; active preset is
