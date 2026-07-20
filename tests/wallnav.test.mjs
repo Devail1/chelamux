@@ -845,6 +845,45 @@ test('branch + context render inside the bottom .term-ctx-bar, and the live poll
     await terminals.termTick();
 });
 
+// 15b — THE BOTTOM BAR'S ORDER IS CONSTANT REGARDLESS OF BRANCH PRESENCE (CMX-124).
+// CMX-119 put № last, after context; a branch-less pane (`.gs-branch` hidden) then let
+// `justify-content: space-between` slide `.gs-ctx` left to fill the gap, so the context
+// numbers landed in a different x-position than on a branched pane. CMX-124 fixes the
+// ORDER to № → branch → context (branch simply leaves empty space when absent) and pins
+// context to the far-right edge via its own `margin-left: auto` instead of relying on
+// space-between at all. These are static source-structure facts jsdom can prove; the
+// actual rendered x-positions stay a manual live-verify (see the honest-scoping
+// disclaimer above test 11c).
+test('the bottom bar renders № -> branch -> context, in that DOM order — CMX-124', () => {
+    const ctxBar = tile('@1').querySelector('.term-ctx-bar');
+    const kinds = Array.from(ctxBar.children)
+        .map(el => ['gs-idx', 'gs-branch', 'gs-ctx', 'term-ctx-fill'].find(c => el.classList.contains(c)))
+        .filter(Boolean);
+    assert.deepEqual(kinds, ['gs-idx', 'gs-branch', 'gs-ctx', 'term-ctx-fill'],
+        'the bar\'s children must be № , branch, context, then the absolutely-positioned fill strip, in ' +
+        'that order — any other order breaks the CONSTANT № -> branch -> context layout');
+});
+
+test('.gs-ctx is pinned to the far right via its own margin-left: auto', () => {
+    assert.match(CSS, /\.gs-ctx\s*\{[^}]*margin-left:\s*auto/s,
+        '.gs-ctx must declare margin-left: auto — this is what pins context to the bar\'s far-right edge ' +
+        'independent of whatever else in the bar is present or hidden; without it a branch-less pane lets ' +
+        'context drift left');
+});
+
+test('.gs-branch never grows past its own content — no flex-grow, no flex: 1', () => {
+    // Negative lookbehind excludes the shared `.gs-ctx, .gs-branch { ... }` rule (which only
+    // sets shared font/whitespace props) so this isolates .gs-branch's OWN standalone rule —
+    // the one that actually declares its flex-basis/grow/shrink.
+    const branchRule = CSS.match(/(?<!,\s)\.gs-branch\s*\{[^}]*\}/s);
+    assert.ok(branchRule, '.gs-branch standalone rule must exist');
+    assert.doesNotMatch(branchRule[0], /flex:\s*1(\s|;|\b)/,
+        '.gs-branch must not carry flex: 1 (or any positive flex-grow) — growth is what let branch (and by ' +
+        'extension the old space-between layout) push the context chip around when branch text is short/absent');
+    assert.doesNotMatch(branchRule[0], /flex-grow:\s*[1-9]/,
+        '.gs-branch must not carry a positive flex-grow');
+});
+
 // 16 — THE ORCHESTRATOR RING IS A NON-HUE CUE, DRIVEN OFF THE SAME SIGNAL AS THE MENU
 // ROW (CMX-117 E, CMX-119 rescoped it onto the standalone `.gs-dot`). Ownership is
 // exclusive: only the owning pane's dot wears it, and it moves live with a real
