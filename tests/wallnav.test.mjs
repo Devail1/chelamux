@@ -785,6 +785,23 @@ test('the badge gains a ring iff its pane owns the decisions inbox, in lockstep 
     assert.equal(ownerBadge.classList.contains('gs-badge-orch'), false, 'releasing must remove the ring');
 });
 
+// 16b — the class toggle above only proves the RING TURNS ON; the property being
+// claimed is that it is a non-colliding cue — an outline, never a box-shadow, because
+// .gs-badge.waiting (above) already owns a box-shadow on this same element, and two
+// box-shadows on one element don't stack, they replace each other. jsdom can't resolve
+// the cascade (Property 11's precedent), so this asserts the CSS source directly, the
+// same technique Property 11 and 12b use.
+test('the orchestrator ring is an OUTLINE, not a box-shadow, as a CSS-source fact — CMX-117 E', () => {
+    const orchRule = /\.gs-badge\.gs-badge-orch\s*\{([^}]*)\}/m.exec(CSS);
+    assert.ok(orchRule, '.gs-badge.gs-badge-orch rule must exist');
+    assert.match(orchRule[1], /outline:\s*2px solid/,
+        'the orchestrator ring must be painted with `outline`, not any other property');
+    assert.doesNotMatch(orchRule[1], /box-shadow/,
+        'the ring must never be a box-shadow — .gs-badge.waiting already puts a box-shadow on this same ' +
+        'element, and a second box-shadow here would silently replace (not combine with) the waiting glow ' +
+        'instead of coexisting with it, which is exactly the collision the outline choice guards against');
+});
+
 // 17 — WIRE-FROM-MENU: THE POPOVER CLOSES THE INSTANT THE DRAG STARTS, AND CLEANUP IS
 // COMPLETE (CMX-117 F). Liav reported that clicking Wire from the (badge-anchored)
 // menu shrinks every pane and drops the wall's grid gaps. Root-causing it needed a
