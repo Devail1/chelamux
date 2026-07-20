@@ -719,11 +719,11 @@ function _updateOrchBtns() {
             ? 'This pane receives the decisions inbox — click to release'
             : 'Click to receive the decisions inbox in this pane';
     });
-    // CMX-117: the pane's badge (paneHead) carries a non-hue ring while it owns
-    // the decisions inbox — driven off this SAME signal as the menu row above,
-    // so the ring and the row's `.on` state can never disagree.
-    document.querySelectorAll('.gs-badge[data-wid]').forEach(badge => {
-        badge.classList.toggle('gs-badge-orch', badge.getAttribute('data-wid') === owner);
+    // CMX-119: the pane's status dot (paneHead) carries a non-hue ring while
+    // it owns the decisions inbox — driven off this SAME signal as the menu
+    // row above, so the ring and the row's `.on` state can never disagree.
+    document.querySelectorAll('.gs-dot[data-wid]').forEach(dot => {
+        dot.classList.toggle('gs-dot-orch', dot.getAttribute('data-wid') === owner);
     });
 }
 
@@ -778,33 +778,26 @@ function paneHead(wid, draggable) {
              aria-label="Wire this agent to another"><span class="ov-ic">${lucideIcon('link-2', 14)}</span><span>Wire to…</span></button>` : '';
     const roomBadge = draggable
         ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden></button>` : '';
-    // Keyboard-fast pane switcher NUMBER (Alt+1..9 jumps here) — filled in and
-    // shown/hidden by _refreshPaneIdx, never here, since a pane's index depends
-    // on the whole wall's order, not just this one tile. Now lives INSIDE the
-    // badge below rather than as its own standalone chip.
-    const idxNum = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
-    // CMX-117: the pane № chip, the busy/idle/waiting status dot, and the "⋯"
-    // overflow trigger (CMX-111/114) used to be THREE separate atoms competing
-    // for top-bar space. Collapsed into ONE left-edge badge: it carries the
-    // number (Alt+N target) and shows LIVE STATUS BY SHAPE, not hue alone (Liav
-    // is red-weak) — `_colorTermDots` (this file) targets `.term-status-dot`,
-    // which this badge also wears, so the SAME working/waiting/idle classes
-    // that used to paint the standalone dot now paint the whole badge:
-    // filled = working, hollow = idle, filled+glow ring = waiting/wants-human
-    // (see the .gs-badge rules in style.css). Clicking the badge opens the same
-    // Wire/Share/Orchestrator/Pin menu the old standalone "⋯" (`.gs-overflow-btn`,
-    // now REMOVED) used to — same togglePaneOverflow, same `menu =
+    // CMX-119: pane header v2 — split the CMX-117 combined badge back apart
+    // now that every pane has a bottom bar to hold its numbers. `.gs-dot` is a
+    // plain status-by-SHAPE indicator (filled = working, hollow = idle, filled
+    // + glow ring = waiting/wants-human — Liav is red-weak, so shape carries
+    // the signal, not hue alone) — `_colorTermDots` (this file) targets
+    // `.term-status-dot`, which this dot also wears, so the same
+    // working/waiting/idle classes paint it same as everywhere else (see the
+    // .gs-dot rules in style.css). The orchestrator ring (_updateOrchBtns,
+    // below) is a SEPARATE non-hue outline on this same dot. The "⋯" trigger
+    // (lucide `more-vertical`) opens the same Wire/Share/Orchestrator/Pin menu
+    // the old combined badge used to — same togglePaneOverflow, same `menu =
     // btn.nextElementSibling` contract, so the menu's rows and all their live
     // state wiring (_updateShareBtns/_updateOrchBtns/the pin toggle) are
-    // untouched, just anchored at a different trigger. The orchestrator ring
-    // (_updateOrchBtns, below) is a SEPARATE non-hue cue on this same badge.
-    const badge = `<span class="gs-badge-wrap">
-        <button class="gs-badge term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}"
-                onclick="chela.togglePaneOverflow(event, this)"
-                aria-haspopup="true" aria-expanded="false" title="Session actions">
-          ${idxNum}
-          <span class="gs-badge-caret" aria-hidden="true">&#9662;</span>
-        </button>
+    // untouched, just anchored at a plain button instead of the pill. The
+    // pane № (Alt+N jump target) moved OUT of the header entirely, down to
+    // the bottom bar — see _ctxBarHTML.
+    const dot = `<span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span>`;
+    const menu = `<span class="gs-menu-wrap">
+        <button class="gs-menu-btn" onclick="chela.togglePaneOverflow(event, this)"
+                aria-haspopup="true" aria-expanded="false" title="Session actions">${lucideIcon('more-vertical', 14)}</button>
         <div class="popover pane-overflow-menu overflow-menu" hidden>
           ${port}
           ${_shareBtnHTML(wid)}
@@ -813,7 +806,8 @@ function paneHead(wid, draggable) {
         </div>
       </span>`;
     return `<div class="gs-head">
-      ${badge}
+      ${dot}
+      ${menu}
       ${label}
       ${roomBadge}
       <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
@@ -841,7 +835,12 @@ function togglePaneOverflow(ev, btn) {
     btn.setAttribute('aria-expanded', 'true');
     const r = btn.getBoundingClientRect();
     menu.style.top = (r.bottom + 6) + 'px';
-    menu.style.left = Math.max(8, r.right - menu.offsetWidth) + 'px';
+    // CMX-119: LEFT-anchored to the trigger (not right-anchored off it) — the
+    // trigger sits near the pane's left edge, between the dot and the name, so
+    // anchoring the menu's right edge to the trigger's right edge (the old
+    // math) could park it far from the pane on a wide wall. Opening rightward
+    // from the trigger's own left edge keeps it over the pane it belongs to.
+    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
     setTimeout(() => document.addEventListener('click', _closeAllPaneOverflows, { once: true }), 0);
 }
 
@@ -1431,7 +1430,7 @@ async function renderTerminals() {
         destroyGrid();
         stage.className = 'term-single';
         const sw = sel.value || wids[0];
-        stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}${_ctxBarHTML(sw)}</div>`;
+        stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}${_ctxBarHTML(sw, false)}</div>`;
         _renderedWids = [sw];
     }
     // Seed readiness pollers for whatever placeholders we just rendered.
@@ -1874,7 +1873,7 @@ function _wallTileHTML(wid, x, y, w, h) {
   <div class="grid-stack-item-content">
     ${paneHead(wid, true)}
     ${body}
-    ${_ctxBarHTML(wid)}
+    ${_ctxBarHTML(wid, true)}
   </div>
 </div>`;
 }
@@ -1882,11 +1881,17 @@ function _wallTileHTML(wid, x, y, w, h) {
 // Per-tile context-window bar pinned to the tile bottom edge (CMX-117: now the
 // subtle home for branch + context, folded together with the ambient fill strip
 // — previously two top-header chips PLUS this bar). Filled/coloured by
-// _applyTermContext from /api/agents/context, keyed by window_id.
-function _ctxBarHTML(wid) {
+// _applyTermContext from /api/agents/context, keyed by window_id. CMX-119:
+// also the new home for the pane № (Alt+N jump target) chip, moved out of the
+// header — filled in and shown/hidden by _refreshPaneIdx, same as before, just
+// a different resting place; `draggable` gates it exactly like paneHead's own
+// wall-only controls (single mode has no Alt+N switcher to target).
+function _ctxBarHTML(wid, draggable) {
+    const idxNum = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
+      ${idxNum}
       <i class="term-ctx-fill"></i>
     </div>`;
 }

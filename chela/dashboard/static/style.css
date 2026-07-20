@@ -206,39 +206,44 @@ body {
 }
 .gs-grip { cursor: move; }
 
-/* --- CMX-117: the left-edge pane badge — number + live status (by SHAPE) +
-   the Wire/Share/Orchestrator/Pin menu trigger, all in one control. Replaces
-   three former atoms: the standalone .gs-idx chip, the colour-only status dot,
-   and the separate .gs-overflow-btn "⋯" trigger. */
-.gs-badge-wrap { position: relative; flex: 0 0 auto; }
-.gs-badge {
-    display: inline-flex; align-items: center; justify-content: center; gap: 3px;
-    min-width: 22px; height: 18px; padding: 0 5px; box-sizing: border-box;
-    background: transparent; border: 1.5px solid var(--text-dim); border-radius: 5px;
-    color: var(--text-dim); cursor: pointer;
+/* --- CMX-119: pane header v2 — split the CMX-117 combined badge back apart
+   now that every pane has a bottom bar to hold its numbers (see .term-ctx-bar
+   / .gs-idx below). `.gs-dot` is back to a plain circle carrying LIVE STATUS
+   BY SHAPE, not hue alone (Liav is red-weak): filled = working, hollow
+   outline = idle, filled + glow ring = waiting/wants-the-human. Driven by
+   _colorTermDots (terminals.js), which targets .term-status-dot — a class
+   this dot also wears, so the same working/waiting/idle classes that used
+   to paint the combined badge now paint just this dot. `.gs-menu-btn` is the
+   separate "⋯" (lucide more-vertical) trigger for the
+   Wire/Share/Orchestrator/Pin menu. */
+.gs-dot {
+    flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; box-sizing: border-box;
+    border: 1.5px solid var(--text-dim); background: transparent;
+    transition: background 0.3s, box-shadow 0.3s;
 }
-.gs-badge:hover, .gs-badge[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
-.gs-badge .gs-idx {
-    font-size: 10px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+.gs-dot.idle { background: transparent; border-color: var(--text-dim); }
+.gs-dot.working {
+    background: var(--green); border-color: var(--green); box-shadow: 0 0 6px var(--green);
+    animation: term-status-pulse 1.2s ease-in-out infinite;
 }
-.gs-badge-caret { display: inline-flex; font-size: 8px; line-height: 1; opacity: 0.75; }
-/* Status is SHAPE-coded, not hue-only (Liav is red-weak): filled = working,
-   hollow outline = idle, filled + glow ring = waiting/wants-the-human. Driven
-   by _colorTermDots (terminals.js), which targets .term-status-dot — a class
-   this badge also wears, so the same working/waiting/idle classes that used
-   to paint the old standalone dot now paint the whole badge. */
-.gs-badge.idle { background: transparent; border-color: var(--text-dim); color: var(--text-dim); }
-.gs-badge.working {
-    background: var(--green); border-color: var(--green); color: #06240f;
-}
-.gs-badge.waiting {
-    background: var(--yellow); border-color: var(--yellow); color: #241c02;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--yellow) 55%, transparent);
+.gs-dot.waiting {
+    background: var(--yellow); border-color: var(--yellow);
+    animation: term-status-pulse-waiting 1s ease-in-out infinite;
 }
 /* Orchestrator ownership: a SEPARATE non-hue ring (an outline, not a box-shadow,
    so it never collides with the waiting-state glow above) — updated in lockstep
    with the menu's Orchestrator row by _updateOrchBtns (terminals.js). */
-.gs-badge.gs-badge-orch { outline: 2px solid var(--ok-blue); outline-offset: 1px; }
+.gs-dot.gs-dot-orch { outline: 2px solid var(--ok-blue); outline-offset: 1px; }
+
+.gs-menu-wrap { position: relative; flex: 0 0 auto; }
+.gs-menu-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; padding: 0; box-sizing: border-box;
+    background: transparent; border: 0; border-radius: 4px;
+    color: var(--text-dim); cursor: pointer;
+}
+.gs-menu-btn svg { display: block; }
+.gs-menu-btn:hover, .gs-menu-btn[aria-expanded="true"] { background: var(--bg); color: var(--accent); }
 
 /* --- Per-tile context-window bar (CMX-117: now also the home for branch +
    context — previously two separate top-header chips). Ambient: scan the wall
@@ -275,6 +280,17 @@ body {
 .gs-branch { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .gs-ctx.ctx-warn { color: var(--yellow); }
 .gs-ctx.ctx-danger { color: var(--red); }
+
+/* Pane № (Alt+N jump target) — CMX-119: moved out of the header badge, now a
+   small chip tucked at the far right of the bottom bar, after the context
+   numbers. */
+.gs-idx {
+    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+    min-width: 15px; height: 14px; padding: 0 4px; box-sizing: border-box;
+    border-radius: 4px; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); font-weight: 700; font-size: 9.5px; line-height: 1;
+    font-variant-numeric: tabular-nums;
+}
 
 /* Inline split-glyph layout picker. Icon-only buttons; active preset is
    accent-tinted. The glyph inherits color via fill:currentColor. */
@@ -336,8 +352,8 @@ body {
 }
 
 /* --- per-pane menu: Wire / Share / Orchestrator / Pin (CMX-111) ------------- */
-/* CMX-117: the trigger is now the left-edge .gs-badge (above) — the standalone
-   "⋯" (.gs-overflow-btn) is GONE. CMX-114: rows render as a LABELED VERTICAL
+/* CMX-119: the trigger is the standalone .gs-menu-btn "⋯" (above), sitting
+   between the status dot and the name. CMX-114: rows render as a LABELED VERTICAL
    list — the topbar `#primary-menu`'s look (nav.js/index.html), reused
    verbatim via the same `overflow-menu` (min-width) and `.popover-item.ov-item`
    (icon+label row) classes. `.popover` (position:fixed — top/left set by
@@ -647,26 +663,25 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 /* Live session-activity dot on pane headers + dock chips. Driven by
    `claude agents --json` status: busy = green pulse, waiting = amber (needs
    input), idle/unknown = dim.
-   :not(.gs-badge) is load-bearing: the CMX-117 pane badge (.gs-badge, above)
-   also wears this class so _colorTermDots (terminals.js) can paint it, but
-   these two selectors have EQUAL specificity (single class) and this rule
+   :not(.gs-dot) is load-bearing: the pane header's own status dot (.gs-dot,
+   above) also wears this class so _colorTermDots (terminals.js) can paint it,
+   but these two selectors have EQUAL specificity (single class) and this rule
    comes later in the file — without the exclusion it wins the cascade on
-   every shared property (width/height/border-radius/background), squishing
-   the ~22x18 rounded badge into an 8px round dot and filling its idle state
-   grey instead of leaving it hollow. */
-.term-status-dot:not(.gs-badge) {
+   every shared property (border-radius/background/box-shadow), filling
+   .gs-dot's idle state solid grey instead of leaving it hollow (CMX-118). */
+.term-status-dot:not(.gs-dot) {
     flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
     display: inline-block; background: var(--text-dim); transition: background 0.3s;
 }
-.term-status-dot.working:not(.gs-badge) {
+.term-status-dot.working:not(.gs-dot) {
     background: var(--green); box-shadow: 0 0 6px var(--green);
     animation: term-status-pulse 1.2s ease-in-out infinite;
 }
-.term-status-dot.waiting:not(.gs-badge) {
+.term-status-dot.waiting:not(.gs-dot) {
     background: var(--yellow);
     animation: term-status-pulse-waiting 1s ease-in-out infinite;
 }
-.term-status-dot.idle:not(.gs-badge) { background: var(--text-dim); box-shadow: none; }
+.term-status-dot.idle:not(.gs-dot) { background: var(--text-dim); box-shadow: none; }
 @keyframes term-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 /* Waiting-on-input throbs its halo (stronger than the busy opacity fade). */
 @keyframes term-status-pulse-waiting {
