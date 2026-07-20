@@ -699,10 +699,15 @@ test('.gs-badge.working is FILLED and .gs-badge.idle stays hollow, as a CSS-sour
     assert.ok(idleRule, '.gs-badge.idle rule must exist');
     assert.ok(workingRule, '.gs-badge.working rule must exist');
     assert.match(idleRule[1], /background:\s*transparent/, '.gs-badge.idle must be hollow (transparent fill)');
-    assert.doesNotMatch(workingRule[1], /background:\s*transparent/,
-        '.gs-badge.working must be FILLED (non-transparent) — an empty fill would collapse working/idle ' +
-        'to border-colour (hue) alone, which is exactly the accessibility regression this guards against ' +
-        '(Liav is red-weak)');
+    // PIN the fill to its actual token — don't merely EXCLUDE the literal string
+    // "transparent". `doesNotMatch(/transparent/)` stays green for `background: none`,
+    // `background: var(--surface)`, or anything else that renders just as hollow as
+    // idle (judge round-2 finding). The only mutation that keeps this green is a real,
+    // visible colour fill, which is the whole shape claim (filled vs hollow).
+    assert.match(workingRule[1], /background:\s*var\(--green\)/,
+        '.gs-badge.working must be FILLED with a real colour token (var(--green)) — not `none`, not ' +
+        '`transparent`, not the surface colour; anything hollow collapses working/idle to border-colour ' +
+        '(hue) alone, the accessibility regression this guards against (Liav is red-weak)');
 });
 
 // 13 — THE ☰ GLYPH IS GONE; .gs-grip STAYS THE DRAG HANDLE (CMX-117 B). GridStack's
@@ -794,8 +799,13 @@ test('the badge gains a ring iff its pane owns the decisions inbox, in lockstep 
 test('the orchestrator ring is an OUTLINE, not a box-shadow, as a CSS-source fact — CMX-117 E', () => {
     const orchRule = /\.gs-badge\.gs-badge-orch\s*\{([^}]*)\}/m.exec(CSS);
     assert.ok(orchRule, '.gs-badge.gs-badge-orch rule must exist');
-    assert.match(orchRule[1], /outline:\s*2px solid/,
-        'the orchestrator ring must be painted with `outline`, not any other property');
+    // PIN the outline COLOUR to its token, not just `2px solid`: a bare `/outline:\s*2px
+    // solid/` match stays green for `outline: 2px solid transparent`, an invisible ring
+    // (judge round-2 finding). The only mutation that keeps this green paints a visible
+    // ring in the ok-blue cue token.
+    assert.match(orchRule[1], /outline:\s*2px solid var\(--ok-blue\)/,
+        'the orchestrator ring must be a VISIBLE outline in the ok-blue token — not `transparent`, ' +
+        'not `none`; an emptied outline still satisfies a bare `2px solid` match while showing no ring');
     assert.doesNotMatch(orchRule[1], /box-shadow/,
         'the ring must never be a box-shadow — .gs-badge.waiting already puts a box-shadow on this same ' +
         'element, and a second box-shadow here would silently replace (not combine with) the waiting glow ' +
