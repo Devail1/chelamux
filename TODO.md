@@ -2,6 +2,24 @@
 
 ## Open — CI drives the loop
 
+- [ ] **⌨️🗺️ KEYBOARD SHORTCUTS CHEATSHEET — a `⌨ Keyboard shortcuts` entry in the ⌘K command palette that opens a grouped keybind overlay (Liav-approved mock 2026-07-20, PALETTE-ONLY).** Now that there are several injected keybinds (Alt+1..9, ⌘K) that aren't otherwise discoverable, add a cheatsheet. **Palette-only trigger — NO new global keybind, NO iframe injection** (Liav's call: `Alt+/` dropped; `Ctrl+M` would be Enter in a terminal). Mock: **https://claude.ai/code/artifact/baafb9a2-12c4-4701-a5f8-2bc622c47eae**. **Frontend-only** (`nav.js` for the palette entry + the overlay; CSS; `util.js` if a lucide glyph is needed).
+
+  **OBJECTIVE.** Add a palette command (in the ⌘K palette `_paletteItems`, `nav.js`) labelled **"Keyboard shortcuts"** (lucide `keyboard` glyph) that opens a **modal overlay** — palette-styled (reuse the palette/popover look + tokens) — listing the REAL keybinds, grouped. `Esc` closes it (like the palette). The list must reflect what ACTUALLY exists (do NOT invent shortcuts):
+    - **Navigate panes:** `Alt`+`1`…`9` = jump to pane N (wall); `Ctrl`/`⌘`+`K` = command palette.
+    - **In the palette:** `↑`/`↓` move · `Enter` open/run · `Esc` close.
+    - **Panes & wall (gestures, label as such):** double-click a pane name = rename; `Esc` = cancel a wire drag; the pane `⋮` menu = Wire/Share/Orchestrator/Pin; toolbar/header = grid presets, lock, min/max/kill.
+    - **Help:** the map itself is reachable from the palette (self-documenting row).
+  Prefer a **data-driven** list (one source array of {keys,label,group}) so it can't drift from reality silently. Each key renders as a `<kbd>` chip; colorblind-safe (chips + labels, NO hue coding — Liav is red-weak).
+
+  **BOUNDARIES.** `nav.js` + CSS (+ `util.js` glyph) only; no backend/routes. Do NOT add a global keydown for it (palette-only), do NOT touch the iframe shortcut injector (`_wireIframeShortcuts`), the existing ⌘K/Alt+N handlers, or the palette's panes-on-top behavior (CMX-116). PR → `dev`.
+
+  **GUARDS (extend the palette/nav test suite; corrupt→RED — DOM/behavioral + source-STRUCTURE facts, jsdom-provable).** Per [[reference_chela_judge_css_render_ceiling]]: guard behaviour, not rendered pixels.
+    - The ⌘K palette's item list INCLUDES a "Keyboard shortcuts" command (assert it's present among `_paletteItems`); running it opens the overlay (the overlay element appears / is un-hidden), and `Esc` closes it — drive it through the real palette-run path, corrupt→RED.
+    - The overlay's keybind list is sourced from the shortcuts data array and renders a row per entry (assert row count == data length, so dropping an entry → RED); assert the real keys appear as text (e.g. an `Alt`+digit row and a `⌘/Ctrl`+`K` row exist).
+    - Do NOT assert rendered geometry/colour (manual live-verify).
+
+  **VERIFY.** `uv run ruff check` + `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green; guards RED under corruption. **Manual:** restart `chela-dashboard`, hard-refresh — `⌘K` → "Keyboard shortcuts" → the grouped overlay opens listing the real keybinds; `Esc` closes it; it reads correctly in both light/dark theme.
+
 - [x] **🪢🩹 WIRE-IN-DRAG COLLAPSES PANE CONTENT (the real CMX-117 part-F bug, root-caused live 2026-07-20).** Starting a wire (dragging from a pane's ⋮-menu "Wire to…") collapses every pane's *content* to ~200px at the top while the tile keeps full height — Liav's clue: the **resize handles stay at full-height position** (the `.grid-stack-item` is unchanged; only `.grid-stack-item-content` shrinks). ROOT CAUSE (confirmed by toggling the class directly): `style.css:763` — `#term-stage.wire-live .grid-stack-item > .grid-stack-item-content { position: relative; }` — overrides GridStack's default `position: absolute; inset:0` (which fills the item), so the content falls back to its INTRINSIC flex-column height (~header+min-term+bar ≈ 200px) instead of filling the tile. CMX-117 shipped this as "couldn't reproduce" because synthetic/CDP drags didn't surface it and the item-height (not content) looks fine.
 
   **OBJECTIVE.** Wiring must NOT resize any pane's content. **Remove the `position: relative` override** on `#term-stage.wire-live .grid-stack-item > .grid-stack-item-content` (style.css:763) so the content stays `position: absolute` and keeps filling the tile during a wire drag. The rule was added only so the drop-socket `::after` (`inset:0`, lines ~764/773) would anchor to the content — but an ABSOLUTE element is already a positioning context, so the `::after` still anchors correctly without it. (If some browser path leaves the content non-positioned, the safe fix is to KEEP it absolute — never `relative` — not to re-add this rule.)
