@@ -17,7 +17,7 @@
 
   **VERIFY (live).** Bar bg, frame bg, and the xterm terminal content all read the same `rgb(13, 17, 23)` (`#0d1117`) — no seam between terminal and footer; the № chip stays legible.
 
-- [ ] **🐚 SHELL PANES — BOTTOM BAR SHOWS ONLY №, NO CONTEXT/BRANCH (Liav-approved 2026-07-20).** A plain shell pane isn't a Claude session, so its context meter (`77% · 153K/200K`) and branch are meaningless noise — a shell shows a stale/estimated reading because `context.live_snapshot` still derives one from a prior session's statusline/transcript cache. Suppress both on shells; keep only the № chip (for Alt+N jumping).
+- [x] **🐚 SHELL PANES — BOTTOM BAR SHOWS ONLY №, NO CONTEXT/BRANCH (Liav-approved 2026-07-20).** A plain shell pane isn't a Claude session, so its context meter (`77% · 153K/200K`) and branch are meaningless noise — a shell shows a stale/estimated reading because `context.live_snapshot` still derives one from a prior session's statusline/transcript cache. Suppress both on shells; keep only the № chip (for Alt+N jumping).
 
   **OBJECTIVE.** Gate the context feed on a **live** Claude session. In `/api/agents/context` (`app.py` ~1887), for each window resolve `agent_manager.claude_pid(window_id)` — **`None` means a plain shell (or dead session)**, the exact signal `/api/agents` already uses at ~209 — and for such windows do NOT append a result row (or append with `used_pct: None`). The client bottom bar ALREADY hides the context text, branch, and fill strip when a window has no context entry / `used_pct == null` (`terminals.js` ~1236), while the № chip (`.gs-idx`) is rendered independently of context — so a shell then shows only its №, no client change required.
 
