@@ -1883,18 +1883,20 @@ function _wallTileHTML(wid, x, y, w, h) {
 // — previously two top-header chips PLUS this bar). Filled/coloured by
 // _applyTermContext from /api/agents/context, keyed by window_id. CMX-119
 // moved the pane № (Alt+N jump target) chip here, far-right after context;
-// CMX-124 pins it back to the FAR-LEFT instead (№ → branch → context, a
-// CONSTANT order regardless of whether the pane has a branch — see the CSS
-// comment above .gs-idx) — filled in and shown/hidden by _refreshPaneIdx,
-// same as before, just a different resting place; `draggable` gates it
-// exactly like paneHead's own wall-only controls (single mode has no Alt+N
-// switcher to target).
+// CMX-124 pinned it to the FAR-LEFT instead (№ → branch → context). CMX-127
+// (Liav changed his mind: № reads better far-right) supersedes that — back to
+// branch → context → №, with branch+context LEFT-grouped and № pinned to the
+// bar's far-right edge via its own auto left-margin (see the CSS comment
+// above .gs-idx) — filled in and shown/hidden by _refreshPaneIdx, same as
+// before, just a different resting place; `draggable` gates it exactly like
+// paneHead's own wall-only controls (single mode has no Alt+N switcher to
+// target).
 function _ctxBarHTML(wid, draggable) {
     const idxNum = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
-      ${idxNum}
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
+      ${idxNum}
       <i class="term-ctx-fill"></i>
     </div>`;
 }

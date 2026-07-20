@@ -845,30 +845,31 @@ test('branch + context render inside the bottom .term-ctx-bar, and the live poll
     await terminals.termTick();
 });
 
-// 15b — THE BOTTOM BAR'S ORDER IS CONSTANT REGARDLESS OF BRANCH PRESENCE (CMX-124).
-// CMX-119 put № last, after context; a branch-less pane (`.gs-branch` hidden) then let
-// `justify-content: space-between` slide `.gs-ctx` left to fill the gap, so the context
-// numbers landed in a different x-position than on a branched pane. CMX-124 fixes the
-// ORDER to № → branch → context (branch simply leaves empty space when absent) and pins
-// context to the far-right edge via its own `margin-left: auto` instead of relying on
-// space-between at all. These are static source-structure facts jsdom can prove; the
-// actual rendered x-positions stay a manual live-verify (see the honest-scoping
-// disclaimer above test 11c).
-test('the bottom bar renders № -> branch -> context, in that DOM order — CMX-124', () => {
+// 15b — THE BOTTOM BAR'S ORDER IS CONSTANT REGARDLESS OF BRANCH PRESENCE (CMX-127,
+// supersedes CMX-124). CMX-119 put № last, after context; a branch-less pane
+// (`.gs-branch` hidden) then let `justify-content: space-between` slide `.gs-ctx` left
+// to fill the gap, so the context numbers landed in a different x-position than on a
+// branched pane. CMX-124 fixed the order to № → branch → context; CMX-127 (Liav changed
+// his mind: № reads better far-right) supersedes that with branch → context → №, branch
+// and context LEFT-grouped in normal flow and № pinned to the far-right edge via its own
+// `margin-left: auto` instead of relying on space-between at all. These are static
+// source-structure facts jsdom can prove; the actual rendered x-positions stay a manual
+// live-verify (see the honest-scoping disclaimer above test 11c).
+test('the bottom bar renders branch -> context -> №, in that DOM order — CMX-127', () => {
     const ctxBar = tile('@1').querySelector('.term-ctx-bar');
     const kinds = Array.from(ctxBar.children)
         .map(el => ['gs-idx', 'gs-branch', 'gs-ctx', 'term-ctx-fill'].find(c => el.classList.contains(c)))
         .filter(Boolean);
-    assert.deepEqual(kinds, ['gs-idx', 'gs-branch', 'gs-ctx', 'term-ctx-fill'],
-        'the bar\'s children must be № , branch, context, then the absolutely-positioned fill strip, in ' +
-        'that order — any other order breaks the CONSTANT № -> branch -> context layout');
+    assert.deepEqual(kinds, ['gs-branch', 'gs-ctx', 'gs-idx', 'term-ctx-fill'],
+        'the bar\'s children must be branch, context, № , then the absolutely-positioned fill strip, in ' +
+        'that order — any other order breaks the CONSTANT branch -> context -> № layout');
 });
 
-test('.gs-ctx is pinned to the far right via its own margin-left: auto', () => {
-    assert.match(CSS, /\.gs-ctx\s*\{[^}]*margin-left:\s*auto/s,
-        '.gs-ctx must declare margin-left: auto — this is what pins context to the bar\'s far-right edge ' +
+test('.gs-idx is pinned to the far right via its own margin-left: auto', () => {
+    assert.match(CSS, /\.gs-idx\s*\{[^}]*margin-left:\s*auto/s,
+        '.gs-idx must declare margin-left: auto — this is what pins № to the bar\'s far-right edge ' +
         'independent of whatever else in the bar is present or hidden; without it a branch-less pane lets ' +
-        'context drift left');
+        '№ drift left');
 });
 
 test('.gs-branch never grows past its own content — no flex-grow, no flex: 1', () => {
