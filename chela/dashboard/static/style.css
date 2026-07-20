@@ -759,8 +759,16 @@ body.term-dragging { overflow: hidden; }
     stroke-dasharray: 7 5;
 }
 /* Discoverability: while a wire is in flight EVERY other tile sprouts a drop
-   socket. Without it, nobody finds out the gesture exists. */
-#term-stage.wire-live .grid-stack-item > .grid-stack-item-content { position: relative; }
+   socket. Without it, nobody finds out the gesture exists.
+   NOTE: the drop-socket `::after` below is `position: absolute`, which needs a
+   positioned ancestor — but `.grid-stack-item-content` already IS one (gridstack's
+   own vendor CSS sets `position: absolute; inset: 0` on it to fill the tile). Adding
+   an explicit `position: relative` here (as a prior version of this rule did) wins
+   the cascade via the `#term-stage` id and clobbers that `absolute`, so the content
+   falls back to its intrinsic flex-column height (~200px) instead of filling the
+   tile — the tile box itself stays full height, so only the content visibly
+   collapses. Never re-add a `position` here; `.grid-stack-item-content` is already
+   positioned. */
 #term-stage.wire-live .grid-stack-item:not(.wire-source) > .grid-stack-item-content::after {
     content: '\25C9'; position: absolute; inset: 0; z-index: 3;
     display: flex; align-items: center; justify-content: center;
