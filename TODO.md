@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **📐 № CHIP — BALANCED 8px CORNER INSET (bottom gap = right gap) (Liav, frontend eye, 2026-07-21).** The № chip hugs the bar's bottom edge: its gap to the RIGHT is 8px (`.term-ctx-bar` `padding: 0 8px`) but its gap to the BOTTOM is only ~2–3px (a 14px chip centered in the 19px `--term-ctx-bar-h` bar). It looks unbalanced in the corner.
+- [x] **📐 № CHIP — BALANCED 8px CORNER INSET (bottom gap = right gap) (Liav, frontend eye, 2026-07-21).** The № chip hugs the bar's bottom edge: its gap to the RIGHT is 8px (`.term-ctx-bar` `padding: 0 8px`) but its gap to the BOTTOM is only ~2–3px (a 14px chip centered in the 19px `--term-ctx-bar-h` bar). It looks unbalanced in the corner.
 
   **OBJECTIVE.** Make the № box's **distance to the bar's bottom edge equal its distance to the right edge = 8px** — a symmetric corner inset. Increase `--term-ctx-bar-h` to create the vertical room (keep `.term-ctx-bar` content vertically centered so the chip's top gap = bottom gap = 8px; a 14px chip centered → bar height ≈ `14 + 2×8 = 30px`, tune to hit exactly 8px). **Keep branch + context vertically aligned with the №** (all centered together — do NOT lift only the chip and leave the text hugging the bottom). Bumping the bar taller trims the terminal iframe slightly — acceptable, Liav OK'd increasing the height.
 
