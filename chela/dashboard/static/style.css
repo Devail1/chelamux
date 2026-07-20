@@ -258,9 +258,16 @@ body {
    bleeding through) is unnecessary — flat `--term-bg` matches the terminal's
    own background (xterm content is transparent, so `.term-frame`'s bg shows
    through) for a seamless footer instead of a visibly separate strip. */
+/* CMX-124: fixed order, branch-agnostic — № pinned far-left, context pinned
+   far-right via `.gs-ctx`'s own `margin-left: auto`, branch packs immediately
+   after № and simply leaves empty space when absent. No more
+   `justify-content: space-between`: on a branch-less pane (`.gs-branch`
+   hidden) space-between used to let `.gs-ctx` slide left to fill the gap —
+   the auto-margin keeps it pinned to the right edge no matter what else in
+   the bar is present. */
 .term-ctx-bar {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    display: flex; align-items: center; gap: 8px;
     height: var(--term-ctx-bar-h); padding: 0 8px; font-size: 10px; color: var(--text-dim);
     background: var(--term-bg);
     pointer-events: none;   /* never intercept gridstack's bottom resize handle */
@@ -274,18 +281,26 @@ body {
 .term-ctx-fill.est { opacity: 0.55; }
 
 /* Branch + exact context "74% · 147.5K/1M" — dim, subtle, tabular-nums; the
-   fill strip (above) still carries the at-a-glance colour. */
+   fill strip (above) still carries the at-a-glance colour. `.gs-ctx` is
+   pinned to the bar's far-right edge via its own auto left-margin (CMX-124)
+   so it never drifts regardless of what else in the bar is present/hidden.
+   `.gs-branch` may shrink/ellipsis but must NOT grow past its own content —
+   growth is what let it (and by extension the space-between layout) push
+   `.gs-ctx` around. */
 .gs-ctx, .gs-branch {
     flex: 0 0 auto; font-weight: 500; line-height: 1;
     white-space: nowrap; font-variant-numeric: tabular-nums;
 }
-.gs-branch { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.gs-branch { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.gs-ctx { margin-left: auto; }
 .gs-ctx.ctx-warn { color: var(--yellow); }
 .gs-ctx.ctx-danger { color: var(--red); }
 
-/* Pane № (Alt+N jump target) — CMX-119: moved out of the header badge, now a
-   small chip tucked at the far right of the bottom bar, after the context
-   numbers. */
+/* Pane № (Alt+N jump target) — CMX-119 originally tucked it at the far right
+   of the bottom bar, after the context numbers; CMX-124 moves it back to the
+   FAR LEFT (leading the bar, before branch) as part of a fixed
+   № → branch → context order that stays constant whether or not the pane
+   has a branch. */
 .gs-idx {
     flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
     min-width: 15px; height: 14px; padding: 0 4px; box-sizing: border-box;
