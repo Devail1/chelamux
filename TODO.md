@@ -2,6 +2,16 @@
 
 ## Open — CI drives the loop
 
+- [ ] **📐 № CHIP — BALANCED 8px CORNER INSET (bottom gap = right gap) (Liav, frontend eye, 2026-07-21).** The № chip hugs the bar's bottom edge: its gap to the RIGHT is 8px (`.term-ctx-bar` `padding: 0 8px`) but its gap to the BOTTOM is only ~2–3px (a 14px chip centered in the 19px `--term-ctx-bar-h` bar). It looks unbalanced in the corner.
+
+  **OBJECTIVE.** Make the № box's **distance to the bar's bottom edge equal its distance to the right edge = 8px** — a symmetric corner inset. Increase `--term-ctx-bar-h` to create the vertical room (keep `.term-ctx-bar` content vertically centered so the chip's top gap = bottom gap = 8px; a 14px chip centered → bar height ≈ `14 + 2×8 = 30px`, tune to hit exactly 8px). **Keep branch + context vertically aligned with the №** (all centered together — do NOT lift only the chip and leave the text hugging the bottom). Bumping the bar taller trims the terminal iframe slightly — acceptable, Liav OK'd increasing the height.
+
+  **BOUNDARIES.** `style.css` only — `--term-ctx-bar-h` (the token, so the CMX-118 `.term-frame` bottom-margin reservation tracks it automatically), `.term-ctx-bar`, `.gs-idx`. Do NOT change the bar background (CMX-126 `--term-bg`), the `branch · context ··· №` order (CMX-127), shell-gating (CMX-125), or wire-live (CMX-120). PR → `dev`.
+
+  **GUARDS.** The rendered pixel-symmetry is **MANUAL live-verify** (per [[reference_chela_judge_css_render_ceiling]] — jsdom can't compute geometry; the orchestrator measures `bar.right − idx.right ≈ bar.bottom − idx.bottom ≈ 8px` in the real DOM). Source side: the EXISTING wallnav test (`--term-ctx-bar-h is non-zero and both .term-frame margins + .term-ctx-bar height reference the same token`) already guards that the height token drives both the bar and the terminal's reservation — **keep it green** (bump the token, never hardcode a height that would drift the reservation and re-overlap the terminal). If you must touch that test, its corrupt→RED property must survive.
+
+  **VERIFY (live, wall mode).** Measure the № box: gap to the pane's right edge == gap to the pane's bottom edge (≈8px each); branch + context sit on the same vertical center as №.
+
 - [x] **📐 BOTTOM BAR v3 — `branch · context ··· №` (branch+context LEFT-grouped, № pinned FAR-RIGHT). SUPERSEDES CMX-124 (Liav changed his mind 2026-07-21: № reads better far-right).** CMX-124 put № far-left (`№ → branch → context`); revert to № on the right, with branch and context grouped on the left.
 
   **OBJECTIVE.** Fixed order: **branch (far-left) → context (immediately after branch, `·`-separated) → № (pinned FAR-RIGHT edge).** Undo CMX-124's markup+CSS and re-pin:
