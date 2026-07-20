@@ -872,6 +872,40 @@ test('.gs-idx is pinned to the far right via its own margin-left: auto', () => {
         '№ drift left');
 });
 
+// CMX-128 — № CHIP'S BOTTOM INSET MUST MATCH ITS RIGHT INSET (8px each), NOT JUST LOOK
+// CLOSE. Before this, `.term-ctx-bar`'s `align-items: center` centered the 14px chip in
+// the (then) 19px bar, leaving only a ~2-3px bottom gap against the 8px right gap (from
+// the bar's own `padding: 0 8px`) — visibly unbalanced in the corner. The fix opts
+// `.gs-idx` OUT of that shared centering with its own `align-self: flex-end` +
+// `margin-bottom: 8px`, and `--term-ctx-bar-h` grows to give that 8px room without the
+// chip overflowing the bar's own top edge (which would repaint over the terminal's live
+// last row — the exact bug CMX-118 reserved this margin to prevent). All three facts are
+// asserted together: any one alone (e.g. just the margin-bottom) can't prove the chip
+// actually ends up inset, not overflowing.
+test('.gs-idx sits a balanced 8px off the bar\'s bottom edge — matching its 8px right inset — CMX-128', () => {
+    const idxRule = CSS.match(/\.gs-idx\s*\{[^}]*\}/s);
+    assert.ok(idxRule, '.gs-idx rule must exist');
+    assert.match(idxRule[0], /align-self:\s*flex-end/,
+        '.gs-idx must opt out of the bar\'s shared `align-items: center` with its own align-self: flex-end, ' +
+        'or its bottom inset stays tied to (and drifts with) whatever the bar\'s other content does');
+    assert.match(idxRule[0], /margin-bottom:\s*8px/,
+        '.gs-idx must declare margin-bottom: 8px — this IS the balanced corner inset the right-edge ' +
+        'padding (.term-ctx-bar padding: 0 8px) already gives it horizontally');
+
+    const heightMatch = CSS.match(/\.gs-idx\s*\{[^}]*\bheight:\s*([0-9.]+)px/s);
+    assert.ok(heightMatch, '.gs-idx must declare an explicit height');
+    const chipHeight = parseFloat(heightMatch[1]);
+
+    const varMatch = CSS.match(/--term-ctx-bar-h:\s*([0-9.]+)px/);
+    assert.ok(varMatch, '--term-ctx-bar-h must be declared as a px length');
+    const barHeight = parseFloat(varMatch[1]);
+
+    assert.ok(barHeight >= chipHeight + 8,
+        `--term-ctx-bar-h (${barHeight}px) must be at least the chip's own height (${chipHeight}px) plus ` +
+        'its 8px margin-bottom, or the 8px bottom inset pushes the chip above the bar\'s own top edge — ' +
+        'back onto the terminal\'s live last row, the overlap CMX-118 reserved this margin to prevent');
+});
+
 test('.gs-branch never grows past its own content — no flex-grow, no flex: 1', () => {
     // Negative lookbehind excludes the shared `.gs-ctx, .gs-branch { ... }` rule (which only
     // sets shared font/whitespace props) so this isolates .gs-branch's OWN standalone rule —

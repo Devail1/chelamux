@@ -11,7 +11,7 @@
     --yellow: #d29922;
     --red: #f85149;
     --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-    --term-ctx-bar-h: 19px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space */
+    --term-ctx-bar-h: 22px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space. CMX-128: 8px (the bar's own right padding) + the 14px № chip, so .gs-idx can sit a balanced 8px off the bottom edge too — see .gs-idx below */
     --term-bg: #0d1117;   /* the ttyd terminal's OWN xterm.js background (scripts/agent-terminals.sh TERM_THEME, tests/test_term_bg_sync.py guards the two stay identical) — NOT an arbitrary black; shared with .term-ctx-bar so the bar reads as a seamless footer, not a separate strip */
 }
 
@@ -309,7 +309,14 @@ body {
    supersedes that and restores the far-right position — branch and context
    are LEFT-grouped, and this chip is pinned to the bar's far-right edge via
    its own auto left-margin, so it never drifts regardless of what else in
-   the bar is present. */
+   the bar is present. CMX-128: the bar's own `align-items: center` used to
+   also center this chip vertically, which — in the pre-CMX-128 19px bar —
+   gave it only a ~2-3px gap to the bottom edge against the 8px gap to the
+   right edge (from the bar's `padding: 0 8px`), reading unbalanced in the
+   corner. `align-self: flex-end` + `margin-bottom: 8px` pins its OWN bottom
+   inset to match, independent of the other bar content's centering; the
+   `--term-ctx-bar-h` bump above exists so that inset has room without the
+   chip overflowing the bar's top edge. */
 .gs-idx {
     flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
     min-width: 15px; height: 14px; padding: 0 4px; box-sizing: border-box;
@@ -317,6 +324,7 @@ body {
     color: var(--text); font-weight: 700; font-size: 9.5px; line-height: 1;
     font-variant-numeric: tabular-nums;
     margin-left: auto;
+    align-self: flex-end; margin-bottom: 8px;
 }
 
 /* Inline split-glyph layout picker. Icon-only buttons; active preset is
