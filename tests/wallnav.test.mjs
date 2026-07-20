@@ -690,6 +690,50 @@ test('the pane-menu ON-state fill rules repeat the `.pane-overflow-menu button` 
         'a stale `.gs-keys button.popover-item` base rule must not exist — .gs-keys no longer wraps the menu');
 });
 
+// 11b — THE PANE BADGE MUST NEVER LOSE ITS OWN GEOMETRY TO THE STANDALONE-DOT RULE
+// (CMX-118 fix 1). `.term-status-dot`'s 8px-round-dot geometry/fill rules and the
+// `.gs-badge`'s ~22x18 rounded geometry are equal specificity (single class each);
+// `:not(.gs-badge)` is what keeps the dot rule from winning on source order alone
+// (see the comment above test 11's block). jsdom can't resolve which of two
+// equal-specificity rules a browser applies, but it CAN prove the static text fact
+// that only the excluded form exists — the same kind of guard test 11 already uses.
+test('every .term-status-dot geometry/fill rule carries :not(.gs-badge); a bare form does not exist', () => {
+    ['', '.working', '.waiting', '.idle'].forEach(suffix => {
+        const guarded = new RegExp(String.raw`^\.term-status-dot${suffix}:not\(\.gs-badge\)\s*\{`, 'm');
+        assert.ok(guarded.test(CSS),
+            `.term-status-dot${suffix}:not(.gs-badge) { ... } must exist`);
+
+        const bare = new RegExp(String.raw`^\.term-status-dot${suffix}\s*\{`, 'm');
+        assert.ok(!bare.test(CSS),
+            `a bare .term-status-dot${suffix} { ... } rule must not exist — equal specificity to .gs-badge ` +
+            'and later in the file, so it would win the cascade and squish the ~22x18 badge into an 8px dot ' +
+            '(idle: fill it grey instead of leaving it hollow)');
+    });
+});
+
+// 11c — THE CTX-BAR RESERVATION AND THE BAR'S OWN HEIGHT MUST SHARE ONE VARIABLE
+// (CMX-118 fix 2). `--term-ctx-bar-h` must be a positive length (zeroing it silently
+// disables the whole reservation), both `.term-frame` rules (single view + wall tile)
+// must reserve it via `margin-bottom`, and `.term-ctx-bar`'s own `height` must read the
+// same var rather than a re-hardcoded literal that could drift out of sync with the
+// reservation — a static source-text fact jsdom can prove, unlike the rendered overlap
+// itself (see the honest-scoping disclaimer above).
+test('--term-ctx-bar-h is non-zero and both .term-frame margins + .term-ctx-bar height read the same var', () => {
+    const varDecl = CSS.match(/--term-ctx-bar-h:\s*([0-9.]+)px/);
+    assert.ok(varDecl, '--term-ctx-bar-h must be declared as a px length');
+    assert.ok(parseFloat(varDecl[1]) > 0,
+        '--term-ctx-bar-h must not be zeroed — a zeroed var silently disables the whole reservation');
+
+    assert.match(CSS, /\.term-single \.term-pane \.term-frame\s*\{[^}]*margin-bottom:\s*var\(--term-ctx-bar-h\)/s,
+        'the single-view .term-frame rule must reserve margin-bottom: var(--term-ctx-bar-h)');
+    assert.match(CSS, /\.grid-stack-item-content \.term-frame\s*\{[^}]*margin-bottom:\s*var\(--term-ctx-bar-h\)/s,
+        'the wall-tile .term-frame rule must reserve margin-bottom: var(--term-ctx-bar-h)');
+
+    assert.match(CSS, /\.term-ctx-bar\s*\{[^}]*height:\s*var\(--term-ctx-bar-h\)/s,
+        ".term-ctx-bar's own height must read var(--term-ctx-bar-h), not a re-hardcoded literal, " +
+        'so the reservation and the bar can never drift apart');
+});
+
 // 12 — THE BADGE CARRIES LIVE STATUS BY SHAPE, NOT HUE ALONE (CMX-117 A). The badge
 // wears `.term-status-dot` (the same class the old standalone dot wore), so the
 // exact same working/waiting/idle classes _colorTermDots paints now land on the
