@@ -872,25 +872,32 @@ test('.gs-idx is pinned to the far right via its own margin-left: auto', () => {
         '№ drift left');
 });
 
-// CMX-128 — № CHIP'S BOTTOM INSET MUST MATCH ITS RIGHT INSET (8px each), NOT JUST LOOK
-// CLOSE. Before this, `.term-ctx-bar`'s `align-items: center` centered the 14px chip in
-// the (then) 19px bar, leaving only a ~2-3px bottom gap against the 8px right gap (from
-// the bar's own `padding: 0 8px`) — visibly unbalanced in the corner. The fix opts
-// `.gs-idx` OUT of that shared centering with its own `align-self: flex-end` +
-// `margin-bottom: 8px`, and `--term-ctx-bar-h` grows to give that 8px room without the
-// chip overflowing the bar's own top edge (which would repaint over the terminal's live
-// last row — the exact bug CMX-118 reserved this margin to prevent). All three facts are
-// asserted together: any one alone (e.g. just the margin-bottom) can't prove the chip
-// actually ends up inset, not overflowing.
-test('.gs-idx sits a balanced 8px off the bar\'s bottom edge — matching its 8px right inset — CMX-128', () => {
+// CMX-129 — № CHIP MUST SHARE THE BAR'S CENTERING, NOT OPT OUT OF IT. CMX-128 gave
+// `.gs-idx` its own `align-self: flex-end` + `margin-bottom: 8px` to balance its bottom
+// inset against its 8px right inset — but that pinned only the chip's OWN bottom edge,
+// independent of where the branch/context text's vertical center actually sits, so №
+// ended up riding ~4px above the text. The fix removes the per-element override so the
+// chip falls back to the bar's shared `align-items: center` (the exact same centering the
+// text uses — CENTER = correctness here, not a magic value), and grows
+// `--term-ctx-bar-h` so that shared centering ALSO reproduces the balanced 8px top/bottom
+// gap the corner needs. Both facts are asserted together: opting back into centering
+// alone doesn't prove the geometry lands on 8px, and the height alone doesn't prove the
+// chip isn't still pinned to the bottom by some other means.
+test('.gs-idx shares the bar\'s centering with the text and lands on a balanced 8px gap — CMX-129', () => {
     const idxRule = CSS.match(/\.gs-idx\s*\{[^}]*\}/s);
     assert.ok(idxRule, '.gs-idx rule must exist');
-    assert.match(idxRule[0], /align-self:\s*flex-end/,
-        '.gs-idx must opt out of the bar\'s shared `align-items: center` with its own align-self: flex-end, ' +
-        'or its bottom inset stays tied to (and drifts with) whatever the bar\'s other content does');
-    assert.match(idxRule[0], /margin-bottom:\s*8px/,
-        '.gs-idx must declare margin-bottom: 8px — this IS the balanced corner inset the right-edge ' +
-        'padding (.term-ctx-bar padding: 0 8px) already gives it horizontally');
+    assert.doesNotMatch(idxRule[0], /align-self/,
+        '.gs-idx must NOT declare its own align-self — it must fall back to the bar\'s shared ' +
+        '`align-items: center`, or it decouples from the branch/context text\'s vertical center line');
+    assert.doesNotMatch(idxRule[0], /margin-bottom/,
+        '.gs-idx must NOT declare its own margin-bottom — a per-element bottom inset is exactly the ' +
+        'CMX-128 mechanism that let № drift off the text\'s center line');
+
+    const barRule = CSS.match(/\.term-ctx-bar\s*\{[^}]*\}/s);
+    assert.ok(barRule, '.term-ctx-bar rule must exist');
+    assert.match(barRule[0], /align-items:\s*center/,
+        '.term-ctx-bar must keep align-items: center — this is the ONE centering both the text and ' +
+        '№ now share, which is what keeps them on the same line');
 
     const heightMatch = CSS.match(/\.gs-idx\s*\{[^}]*\bheight:\s*([0-9.]+)px/s);
     assert.ok(heightMatch, '.gs-idx must declare an explicit height');
@@ -900,10 +907,14 @@ test('.gs-idx sits a balanced 8px off the bar\'s bottom edge — matching its 8p
     assert.ok(varMatch, '--term-ctx-bar-h must be declared as a px length');
     const barHeight = parseFloat(varMatch[1]);
 
-    assert.ok(barHeight >= chipHeight + 8,
-        `--term-ctx-bar-h (${barHeight}px) must be at least the chip's own height (${chipHeight}px) plus ` +
-        'its 8px margin-bottom, or the 8px bottom inset pushes the chip above the bar\'s own top edge — ' +
-        'back onto the terminal\'s live last row, the overlap CMX-118 reserved this margin to prevent');
+    // Centered via align-items: center, the chip's top/bottom gap is each (barHeight -
+    // chipHeight) / 2 — this must equal the bar's 8px horizontal padding for the corner
+    // to read as balanced, exactly the geometry CMX-128 established.
+    const verticalGap = (barHeight - chipHeight) / 2;
+    assert.strictEqual(verticalGap, 8,
+        `centered, № gets a (barHeight - chipHeight) / 2 = ${verticalGap}px top/bottom gap ` +
+        `(barHeight=${barHeight}px, chipHeight=${chipHeight}px) — this must be exactly 8px to match ` +
+        'the bar\'s 8px right padding, or the corner inset reads unbalanced again');
 });
 
 test('.gs-branch never grows past its own content — no flex-grow, no flex: 1', () => {
