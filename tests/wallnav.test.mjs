@@ -60,11 +60,30 @@
 //      preventDefault + stopImmediatePropagation on a matched Alt-digit. The runtime
 //      preemption itself is manually verified on the live wall (see the PR).
 //
+// CMX-116 adds properties 9-11: the palette (not Alt+N) is now the PRIMARY, discoverable
+// pane switcher. 9 — Ctrl/⌘+K, injected the same way as Alt+N (property 6's iframe-side
+// listener, generalized to carry BOTH shortcuts rather than forking a second injector),
+// opens the palette from inside a focused pane. 10 — with an empty query the palette
+// floats live, unminimized wall panes to the top (wall order, attention-first), with a
+// divider before the rest of the list; typing falls back to the normal fuzzy match over
+// everything, panes included. 11 — a CMX-114 regression: the "⋯" dropdown's `.on` fill
+// (Orchestrator/Share/Pin) never painted because `.gs-keys button.popover-item`'s
+// `background: none` (specificity 0,2,1) outranked the plain `.on` rules (0,2,0); fixed by
+// repeating the `.gs-keys button` prefix on each `.on` rule (0,3,1) — asserted here as a
+// static CSS-source fact (jsdom can't resolve cascade specificity), per the honest
+// disclaimer in the PR: this is NOT a substitute for the manual live-wall check.
+//
 // Run: node --test tests/wallnav.test.mjs (pytest runs it via tests/test_js_suites.py;
 // it needs `npm ci` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+
+const CSS = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
 
 // The terminals panel, as index.html emits it (only the ids terminals.js / nav.js
 // reach for) — grid presets + lock sit directly on the toolbar, inline (no Layout menu).
@@ -82,6 +101,12 @@ const PANEL = `
   <div id="term-stage"></div>
   <div id="term-min-dock"></div>
   <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
+</div>
+<div class="palette-overlay" id="palette">
+  <div class="palette">
+    <input id="palette-input">
+    <div id="palette-list"></div>
+  </div>
 </div>`;
 
 const AGENTS = [
@@ -438,4 +463,141 @@ test('the iframe alt-switch listener is registered in the CAPTURE phase and stop
     assert.ok(prevented, 'a matched Alt-digit must be preventDefaulted so it never reaches the shell as input');
     assert.ok(stoppedImmediate,
         'a matched Alt-digit must call stopImmediatePropagation so this listener wins the race against xterm\'s own');
+});
+
+// 9 — CTRL/⌘+K OPENS THE PALETTE FROM INSIDE A FOCUSED PANE (CMX-116). The palette,
+// not Alt+N, is now the PRIMARY switcher — it must be reachable no matter where focus
+// is. Same iframe-side injection property 6/8 proved necessary for Alt+N, generalized
+// (not forked) to also carry this shortcut.
+test('Ctrl+K fired inside a focused pane\'s own iframe document opens the command palette', () => {
+    const ifr = tile('@1').querySelector('iframe.term-frame');
+    assert.ok(ifr, 'the pane must have a real ttyd iframe, or this test is vacuous');
+    ifr.dispatchEvent(new window.Event('load'));   // (re)wires the generalized iframe-side listener
+
+    assert.equal(document.getElementById('palette').classList.contains('open'), false,
+        'the palette must start closed, or this test is vacuous');
+
+    ifr.contentDocument.dispatchEvent(
+        new window.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+
+    assert.equal(document.getElementById('palette').classList.contains('open'), true,
+        'Ctrl+K fired inside the pane\'s own document must open the palette');
+    window.chela.closePalette();
+});
+
+// 9b — same wiring discipline as property 8, for the SAME injector (not a duplicate
+// one): capture=true at registration, preventDefault + stopImmediatePropagation on a
+// matched Ctrl+K, so xterm never sees it as readline's kill-to-end-of-line.
+test('the iframe listener also registers Ctrl+K in the CAPTURE phase and stops propagation on a match', () => {
+    const ifr = tile('@2').querySelector('iframe.term-frame');
+    assert.ok(ifr, 'the pane must have a real ttyd iframe, or this test is vacuous');
+    const doc = ifr.contentDocument;
+
+    let capturedOpts = null;
+    let handler = null;
+    const origAdd = doc.addEventListener.bind(doc);
+    doc.addEventListener = (type, fn, opts) => {
+        if (type === 'keydown' && !handler) { handler = fn; capturedOpts = opts; }
+        return origAdd(type, fn, opts);
+    };
+
+    ifr.dispatchEvent(new window.Event('load'));   // re-wires with the spy in place
+    doc.addEventListener = origAdd;
+
+    assert.equal(capturedOpts, true, 'the iframe keydown listener must be registered with capture=true');
+    assert.ok(handler, 'the listener must actually have been registered');
+
+    let prevented = false;
+    let stoppedImmediate = false;
+    const evt = new window.KeyboardEvent('keydown', { key: 'K', ctrlKey: true });
+    Object.defineProperty(evt, 'preventDefault', { value: () => { prevented = true; }, configurable: true });
+    Object.defineProperty(evt, 'stopImmediatePropagation', { value: () => { stoppedImmediate = true; }, configurable: true });
+    handler(evt);
+
+    assert.ok(prevented, 'a matched Ctrl+K must be preventDefaulted so it never reaches xterm as readline kill-line');
+    assert.ok(stoppedImmediate,
+        'a matched Ctrl+K must call stopImmediatePropagation so this listener wins the race against xterm\'s own');
+});
+
+// 10 — THE PALETTE FLOATS OPEN PANES TO THE TOP (CMX-116). With an empty query, live
+// unminimized wall panes lead the list in wall order, followed by a non-selectable
+// divider, then the normal views/projects/actions — and a pane already shown up top is
+// not ALSO repeated further down as a duplicate "session ·" row.
+test('an empty-query palette floats live wall panes to the top, in wall order, before a divider', () => {
+    window.chela.openPalette();
+    const rows = Array.from(document.getElementById('palette-list').children);
+
+    const paneRows = rows.slice(0, 3);
+    paneRows.forEach(r => assert.ok(r.classList.contains('palette-item'), 'pane rows are real selectable items'));
+    assert.deepEqual(paneRows.map(r => r.querySelector('.pi-title').textContent), ['alpha', 'bravo', 'charlie'],
+        'the 3 live panes must lead the list in wall order (@1, @2, @3)');
+    assert.deepEqual(paneRows.map(r => r.querySelector('.pi-sub').textContent),
+        ['open pane · idle', 'open pane · idle', 'open pane · idle']);
+
+    const divider = rows[3];
+    assert.ok(divider.classList.contains('palette-divider'), 'a divider row must separate panes from the rest');
+    assert.equal(divider.classList.contains('palette-item'), false, 'the divider must not be a selectable item');
+
+    const afterDivider = rows[4];
+    assert.equal(afterDivider.querySelector('.pi-sub').textContent, 'view',
+        'the row right after the divider must be a view (the normal list), not another pane');
+
+    const titles = rows.map(r => r.querySelector('.pi-title')).filter(Boolean).map(el => el.textContent);
+    assert.equal(titles.filter(t => t === 'alpha').length, 1,
+        'a pane already floated to the top must not ALSO repeat as a duplicate "session" row below the divider');
+
+    window.chela.closePalette();
+});
+
+// 10b — ATTENTION-FIRST WITHIN THE PANES SECTION. A pane waiting on the human bubbles
+// ahead of idle peers even though it trails them in wall order — the sidebar's own
+// status word/rank, reused so the two never disagree about what needs you.
+test('a pane that wants the human floats ahead of idle panes, still inside the panes section', () => {
+    util.setAgentsCache([
+        { name: 'alpha', window_id: '@1', online: true },
+        { name: 'bravo', window_id: '@2', online: true, session_status: 'waiting' },
+        { name: 'charlie', window_id: '@3', online: true },
+    ]);
+    window.chela.openPalette();
+    const paneRows = Array.from(document.getElementById('palette-list').children).slice(0, 3);
+    assert.deepEqual(paneRows.map(r => r.querySelector('.pi-title').textContent), ['bravo', 'alpha', 'charlie'],
+        'bravo (waiting on the human) must float ahead of idle alpha/charlie despite trailing them in wall order');
+    window.chela.closePalette();
+    util.setAgentsCache(AGENTS);   // restore for any test that runs after this one
+});
+
+// 10c — TYPING ESCAPES THE "PANES ONLY" TRAP. A non-empty query drops the panes-first
+// section entirely and falls back to the normal fuzzy match over everything a query
+// would have matched before this feature existed — a view must still be reachable by
+// name once the user types.
+test('typing a query drops the panes-first section and fuzzy-matches everything, views included', () => {
+    window.chela.openPalette();
+    window.chela._renderPalette('wall');   // "Wall" is a real registered view label
+    const rows = Array.from(document.getElementById('palette-list').children);
+    assert.ok(rows.every(r => !r.classList.contains('palette-divider')),
+        'a non-empty query must not render the panes-first divider');
+    assert.ok(rows.some(r => r.querySelector('.pi-sub') && r.querySelector('.pi-sub').textContent === 'view'),
+        'a view must still be reachable by fuzzy search once the user types — a query must never trap you in panes-only');
+    window.chela.closePalette();
+});
+
+// 11 — THE "⋯" DROPDOWN'S ON-FILL OUTRANKS THE POPOVER-ITEM BASE ROW (CMX-116 fixes a
+// CMX-114 regression). `.gs-keys button.popover-item { background: none }` (specificity
+// 0,2,1) overrode a plain `.gs-share-btn.on` / `.gs-orch-btn.on` / `.gs-pin-btn.on`
+// (0,2,0), so the active fill never painted. jsdom cannot resolve CSS cascade
+// specificity (see the honest disclaimer above and in the PR) — this is a STATIC
+// source-text fact: the higher-specificity form must exist, and the old
+// lower-specificity form (which the popover-item rule can still outrank) must be gone.
+test('the pane-menu ON-state fill rules repeat the `.gs-keys button` prefix so they outrank the popover-item base rule', () => {
+    ['gs-share-btn', 'gs-orch-btn', 'gs-pin-btn'].forEach(cls => {
+        const strong = new RegExp(String.raw`^\.gs-keys\s+button\.${cls}\.on\s*\{[^}]*background:`, 'm');
+        assert.ok(strong.test(CSS),
+            `.gs-keys button.${cls}.on { background: ... } must exist — higher specificity (0,3,1) than ` +
+            '.gs-keys button.popover-item (0,2,1)');
+
+        const bare = new RegExp(String.raw`^\.${cls}\.on\s*\{[^}]*background:`, 'm');
+        assert.ok(!bare.test(CSS),
+            `a bare .${cls}.on { background: ... } rule must not exist — it is the exact form (0,2,0) ` +
+            'the popover-item base rule already outranks, which is how this regressed');
+    });
 });

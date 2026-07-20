@@ -331,10 +331,15 @@ body {
 /* Share/Orchestrator/Pin: neutral until active, then a solid colour fill so
    the live state reads at a glance in the row list (distinct colours per
    row so a shared pane and an orchestrator-owning pane never look the same:
-   --accent for share, --ok-blue for orchestrator, --yellow for pin). */
-.gs-share-btn.on { color: #0d1117; background: var(--accent); }
-.gs-orch-btn.on { color: #0d1117; background: var(--ok-blue); }
-.gs-pin-btn.on { color: #0d1117; background: var(--yellow); }
+   --accent for share, --ok-blue for orchestrator, --yellow for pin).
+   CMX-116: `.gs-keys button.popover-item` (above, specificity 0,2,1) OVERRODE
+   a plain `.gs-share-btn.on` etc (0,2,0) — same node, same cascade, higher
+   specificity wins regardless of source order, so the ON fill never painted
+   in the folded "⋯" dropdown. Repeat the `.gs-keys button` prefix so each
+   `.on` rule outranks it (0,3,1). */
+.gs-keys button.gs-share-btn.on { color: #0d1117; background: var(--accent); }
+.gs-keys button.gs-orch-btn.on { color: #0d1117; background: var(--ok-blue); }
+.gs-keys button.gs-pin-btn.on { color: #0d1117; background: var(--yellow); }
 .gs-share-btn.on .ov-ic, .gs-orch-btn.on .ov-ic, .gs-pin-btn.on .ov-ic { color: inherit; }
 /* The peer-count badge used to float over a small square icon button (the
    old horizontal strip); in a full-width row it just rides the row's right
@@ -2450,6 +2455,10 @@ input[type="text"]:focus, textarea:focus, select:focus {
     border-radius: 8px; cursor: pointer;
 }
 .palette-item.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+/* CMX-116: separates the "open panes, floated to the top" section (empty
+   query only) from the rest of the list below it — non-selectable, so it
+   never enters _palItems / the arrow-key index. */
+.palette-divider { height: 1px; margin: 6px 4px; background: var(--border); }
 .pi-icon { flex: 0 0 18px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-dim); }
 .palette-item.sel .pi-icon, .palette-item.sel .pi-title { color: var(--accent); }
 .pi-glyph { font-size: 13px; }
