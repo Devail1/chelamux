@@ -277,6 +277,13 @@ test('a pane\'s badge menu is hidden by default, and opening it reveals Wire/Sha
     assert.ok(menu, 'every wall tile gets an overflow menu');
     assert.equal(menu.hidden, true, 'starts closed');
     assert.equal(badge.getAttribute('aria-expanded'), 'false');
+    // The badge itself must be wired as the trigger — jsdom doesn't execute inline
+    // onclick attributes without runScripts:"dangerously" (not set here), so calling
+    // togglePaneOverflow directly below would still pass even if this wiring were
+    // stripped from the markup. Assert the wiring as a source fact instead.
+    assert.match(badge.getAttribute('onclick'), /chela\.togglePaneOverflow\(event,\s*this\)/,
+        'the badge must carry the togglePaneOverflow onclick itself — it IS the menu trigger, ' +
+        'not a menu that merely opens when the handler happens to be invoked directly');
 
     window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
     assert.equal(menu.hidden, false, 'opens on click');
@@ -680,6 +687,24 @@ test('the badge is painted by live status (working vs idle carry different class
     assert.ok(badge.classList.contains('idle'), 'reverting session_status must repaint the badge back to idle');
 });
 
+// 12b — the classes above only prove _colorTermDots repoints onto the badge; the
+// property being claimed is SHAPE (filled vs hollow), and the only thing that
+// actually makes it a shape difference — not just a different-but-still-flat
+// swatch — is that .working's fill is non-transparent while .idle's is not.
+// jsdom can't resolve the cascade (Property 11's precedent), so this asserts the
+// CSS source directly, the same technique Property 11 uses.
+test('.gs-badge.working is FILLED and .gs-badge.idle stays hollow, as a CSS-source fact — CMX-117 A', () => {
+    const idleRule = /\.gs-badge\.idle\s*\{([^}]*)\}/m.exec(CSS);
+    const workingRule = /\.gs-badge\.working\s*\{([^}]*)\}/m.exec(CSS);
+    assert.ok(idleRule, '.gs-badge.idle rule must exist');
+    assert.ok(workingRule, '.gs-badge.working rule must exist');
+    assert.match(idleRule[1], /background:\s*transparent/, '.gs-badge.idle must be hollow (transparent fill)');
+    assert.doesNotMatch(workingRule[1], /background:\s*transparent/,
+        '.gs-badge.working must be FILLED (non-transparent) — an empty fill would collapse working/idle ' +
+        'to border-colour (hue) alone, which is exactly the accessibility regression this guards against ' +
+        '(Liav is red-weak)');
+});
+
 // 13 — THE ☰ GLYPH IS GONE; .gs-grip STAYS THE DRAG HANDLE (CMX-117 B). GridStack's
 // `handle`/`draggable.handle` option targets `.gs-grip` (buildWall) — dropping the
 // class, not just the glyph, would silently break dragging.
@@ -697,11 +722,18 @@ test('the right control cluster holds exactly minimize, maximize, kill — nothi
     const wid = '@3';
     const winCtl = tile(wid).querySelector('.gs-win-ctl');
     assert.ok(winCtl, 'every wall tile has a window-controls cluster');
-    const buttons = Array.from(winCtl.children).filter(el => el.tagName === 'BUTTON');
-    const kinds = buttons.map(b => ['gs-min-btn', 'gs-max-btn', 'gs-kill-btn'].find(c => b.classList.contains(c)));
+    // Every child, not just BUTTON tags: the pre-CMX-117 "⋯" this guards against
+    // was a SPAN wrapper (`.gs-overflow`) around a button, not a bare button — a
+    // tagName==='BUTTON' filter is blind to exactly that shape sneaking back in
+    // (e.g. the badge's own `.gs-badge-wrap` span landing here by accident).
+    const children = Array.from(winCtl.children);
+    const kinds = children.map(el => ['gs-min-btn', 'gs-max-btn', 'gs-kill-btn'].find(c => el.classList.contains(c)));
+    assert.equal(children.length, 3,
+        `the right cluster must contain exactly 3 elements, found ${children.length} — an extra ` +
+        'element of ANY tag (button, wrapped span, anything) landing here is the regression');
     assert.deepEqual(kinds, ['gs-min-btn', 'gs-max-btn', 'gs-kill-btn'],
         'the right cluster must be exactly minimize, maximize, kill, in that order — an extra or ' +
-        'unrecognised control means something (the old "⋯", a stray button) snuck back onto the right');
+        'unrecognised control means something (the old "⋯", a stray badge) snuck back onto the right');
 });
 
 // 15 — BRANCH + CONTEXT LIVE IN THE BOTTOM BAR, WIRED (CMX-117 D). Not just present
