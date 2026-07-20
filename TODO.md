@@ -2,6 +2,19 @@
 
 ## Open — CI drives the loop
 
+- [ ] **📐 № CHIP — CENTER EVERYTHING SO № ALIGNS WITH THE TEXT (keep the 8px corner symmetry). SUPERSEDES CMX-128 (Liav, 2026-07-21).** CMX-128 gave № an 8px bottom+right inset via `align-self: flex-end` + `margin-bottom: 8px`, but that lifted ONLY the chip — so it rides ~4px above the branch/context text center. Liav wants № on the SAME vertical center line as the text, still with the balanced 8px corner inset.
+
+  **OBJECTIVE.** Keep ALL `.term-ctx-bar` content vertically CENTERED (the bar's default `align-items: center`), and make the bar tall enough that a centered № chip lands 8px off the top AND bottom — matching its 8px right inset. For the 14px chip: **`--term-ctx-bar-h = 14 + 2×8 = 30px`.** Revert CMX-128's opt-out: **remove `align-self: flex-end` and `margin-bottom: 8px` from `.gs-idx`** so it centers with everything else. Result: № centered (8px top = 8px bottom = 8px right) AND on the same vertical center as branch + context.
+
+  **BOUNDARIES.** `style.css` only — `--term-ctx-bar-h` (22→30px; the CMX-118 `.term-frame` reservation tracks the token automatically) and `.gs-idx` (drop the CMX-128 flex-end/margin-bottom). Do NOT change the bar background (CMX-126), the `branch · context ··· №` order (CMX-127), shell-gating (CMX-125), or wire-live (CMX-120). PR → `dev`.
+
+  **GUARDS (`wallnav.test.mjs`; corrupt→RED — SOURCE-STRUCTURE; the rendered centering/symmetry stays MANUAL live-verify per [[reference_chela_judge_css_render_ceiling]]).** UPDATE CMX-128's test (it asserts the now-REMOVED `align-self: flex-end` + `margin-bottom: 8px` — those assertions must be replaced or the suite fails):
+    - `.gs-idx` does NOT carry `align-self: flex-end` or `margin-bottom` — it must center with the bar, not opt out. Re-add either → RED.
+    - `--term-ctx-bar-h` == `.gs-idx` height + 16 (so centered content gets 8px top+bottom, equal to the 8px right inset). Break the arithmetic (shrink the bar, or change the chip height without the token) → RED.
+    - The EXISTING "`--term-ctx-bar-h` drives both `.term-frame` margins + `.term-ctx-bar` height" test stays green (bump the token, never hardcode a drifting height).
+
+  **VERIFY (live, wall mode).** № chip: top gap ≈ bottom gap ≈ right gap ≈ 8px, AND its vertical center matches the branch/context text center (same line).
+
 - [x] **📐 № CHIP — BALANCED 8px CORNER INSET (bottom gap = right gap) (Liav, frontend eye, 2026-07-21).** The № chip hugs the bar's bottom edge: its gap to the RIGHT is 8px (`.term-ctx-bar` `padding: 0 8px`) but its gap to the BOTTOM is only ~2–3px (a 14px chip centered in the 19px `--term-ctx-bar-h` bar). It looks unbalanced in the corner.
 
   **OBJECTIVE.** Make the № box's **distance to the bar's bottom edge equal its distance to the right edge = 8px** — a symmetric corner inset. Increase `--term-ctx-bar-h` to create the vertical room (keep `.term-ctx-bar` content vertically centered so the chip's top gap = bottom gap = 8px; a 14px chip centered → bar height ≈ `14 + 2×8 = 30px`, tune to hit exactly 8px). **Keep branch + context vertically aligned with the №** (all centered together — do NOT lift only the chip and leave the text hugging the bottom). Bumping the bar taller trims the terminal iframe slightly — acceptable, Liav OK'd increasing the height.
