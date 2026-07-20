@@ -1894,6 +1894,14 @@ def api_agents_context():
 
     results = []
     for name in names:
+        # A plain shell (or dead session) has no live Claude process — the same
+        # `claude_pid is None` signal /api/agents already uses (~209) — so any
+        # snapshot here would only be a stale read of a PRIOR session that once
+        # ran in this same (reused) window name. Skip it: the bottom bar already
+        # hides context/branch on a missing row, leaving just the № chip.
+        window_id = windows.get(name)
+        if window_id is not None and agent_manager.claude_pid(window_id) is None:
+            continue
         s = context.live_snapshot(name)
         if not s:
             continue
