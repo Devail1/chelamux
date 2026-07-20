@@ -2,6 +2,25 @@
 
 ## Open — CI drives the loop
 
+- [ ] **📐 BOTTOM BAR v3 — `branch · context ··· №` (branch+context LEFT-grouped, № pinned FAR-RIGHT). SUPERSEDES CMX-124 (Liav changed his mind 2026-07-21: № reads better far-right).** CMX-124 put № far-left (`№ → branch → context`); revert to № on the right, with branch and context grouped on the left.
+
+  **OBJECTIVE.** Fixed order: **branch (far-left) → context (immediately after branch, `·`-separated) → № (pinned FAR-RIGHT edge).** Undo CMX-124's markup+CSS and re-pin:
+    - **Markup** (`_ctxBarHTML`, `terminals.js`): order `gs-branch` → `gs-ctx` → `gs-idx` (№ LAST again; `.term-ctx-fill` stays the absolutely-positioned strip).
+    - **CSS** (`style.css`): move `margin-left: auto` **from `.gs-ctx` to `.gs-idx`** (pins № to the right edge; branch+context pack left). Keep `.gs-branch { flex: 0 1 auto }` (no grow); `.gs-ctx` back to `flex: 0 0 auto` (drop its auto margin). No `justify-content: space-between`.
+    - **Separator** (the "[branch] dot [context]"): a subtle `·` between branch and context, shown ONLY when branch is present — cleanest as a `.gs-branch::after { content: ' · ' }` so it hides with the branch (which is `hidden` when empty), no JS. Do NOT add a separator before № (the gap to the edge is the separation there).
+    - Update the CMX-124 comments (`.gs-idx` far-left → far-right; `.gs-ctx` margin note) accordingly.
+
+  **CONSTANCY NOTE (intended, not a bug).** With branch+context left-grouped, a branch-less pane's context sits at the far-left (branch's ~40px collapses) — a small shift, acceptable per this design; № stays pinned right regardless. (Reserving the branch slot to freeze context is a possible later tweak — NOT this task.)
+
+  **BOUNDARIES.** `style.css` + the one `_ctxBarHTML` markup string in `terminals.js` only. Do NOT change the bar background (CMX-126 owns `--term-bg`), the `.term-ctx-fill` strip, `--term-ctx-bar-h` (CMX-118), CMX-125 shell-gating, or wire-live (CMX-120). Single-mode bars (no `gs-idx`) still read branch · context. PR → `dev`.
+
+  **GUARDS (`wallnav.test.mjs`; corrupt→RED — SOURCE-STRUCTURE; rendered positions stay MANUAL live-verify per [[reference_chela_judge_css_render_ceiling]]).** UPDATE the CMX-124 test 15b (its old `№ → branch → context` order assertion is now wrong):
+    - DOM order inside `.term-ctx-bar` is `gs-branch` → `gs-ctx` → `gs-idx` → `term-ctx-fill`. Any other order → RED.
+    - `.gs-idx` is right-pinned via `margin-left: auto` (its OWN standalone rule — reuse CMX-124's negative-lookbehind isolation so the shared `.gs-ctx, .gs-branch` rule isn't matched). Remove it → RED.
+    - `.gs-branch` carries no positive flex-grow (no `flex: 1` / `flex-grow: [1-9]`). Restore `flex: 1` → RED.
+
+  **VERIFY (live, wall mode).** branch far-left, context immediately right of it (`·`-separated), № at the far-right edge; a branch-less pane still shows № far-right (context sits at the left).
+
 - [ ] **🎨 BAR BG = TERMINAL'S REAL COLOR (`#0d1117`), TOKEN-SYNCED / DRIFT-GUARDED (Liav-approved 2026-07-20).** CMX-123 set `--term-bg: #000` on a WRONG assumption ("xterm content is transparent so the frame's black shows through"). Measured live: the ttyd terminal paints its **own** xterm theme background = **`#0d1117`** (set in `scripts/agent-terminals.sh` `TERM_THEME`, deliberately matching the dashboard `--bg` GitHub-Dark). So the bar/frame (`#000`) are actually *blacker* than the terminal (`#0d1117`) — a real seam, the reverse of what CMX-123 intended. The bar must be **whatever the terminal actually is**, from a single synced source so it can't drift again.
 
   **OBJECTIVE.** Point `--term-bg` at the terminal's real background and lock the two together:
