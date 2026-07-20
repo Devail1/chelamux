@@ -2,6 +2,18 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🐚 SHELL PANES — BOTTOM BAR SHOWS ONLY №, NO CONTEXT/BRANCH (Liav-approved 2026-07-20).** A plain shell pane isn't a Claude session, so its context meter (`77% · 153K/200K`) and branch are meaningless noise — a shell shows a stale/estimated reading because `context.live_snapshot` still derives one from a prior session's statusline/transcript cache. Suppress both on shells; keep only the № chip (for Alt+N jumping).
+
+  **OBJECTIVE.** Gate the context feed on a **live** Claude session. In `/api/agents/context` (`app.py` ~1887), for each window resolve `agent_manager.claude_pid(window_id)` — **`None` means a plain shell (or dead session)**, the exact signal `/api/agents` already uses at ~209 — and for such windows do NOT append a result row (or append with `used_pct: None`). The client bottom bar ALREADY hides the context text, branch, and fill strip when a window has no context entry / `used_pct == null` (`terminals.js` ~1236), while the № chip (`.gs-idx`) is rendered independently of context — so a shell then shows only its №, no client change required.
+
+  **BOUNDARIES.** `app.py` `/api/agents/context` only (a client no-op is acceptable ONLY if the existing null path genuinely doesn't cover it — it should). Do NOT change `context.live_snapshot`, the statusline, the `.gs-idx` rendering, or the behavior for panes that ARE running Claude — a live agent must keep its context + branch untouched. PR → `dev`.
+
+  **GUARDS (`tests/test_api_context.py` — new or extend; pytest; corrupt→RED).**
+    - With `agent_manager.claude_pid` mocked to return `None` for a window (a shell), `/api/agents/context` returns **no row** for it (or its `used_pct` is `None`) even when `context.live_snapshot` yields a stale reading. Remove the shell gate → the shell row reappears with a live `used_pct` → RED.
+    - With `claude_pid` returning a real pid AND a snapshot present, the row **is** returned with its `used_pct` intact — proves the gate doesn't nuke real agents. Gate on the wrong condition (hide live agents) → RED.
+
+  **VERIFY (live).** The `shell-1` pane's bottom bar shows only its № (e.g. `3`) — no `77% · …`, no branch; a Claude agent pane still shows context + branch.
+
 - [ ] **📐 BOTTOM BAR — CONSTANT `№ · branch · context` ORDER, BRANCH-AGNOSTIC (Liav-approved 2026-07-20).** The pane bottom bar (`.term-ctx-bar`) shifts depending on whether the pane has a branch: today `.gs-branch` is `flex: 1 1 auto` and the bar uses `justify-content: space-between`, so a **branch-less** pane (e.g. nautilus) lets the context slide to the LEFT. Lock the layout so nothing moves.
 
   **OBJECTIVE.** Fixed order regardless of branch presence: **№ (pane number) pinned FAR-LEFT → branch immediately right of it → context pinned to the FAR-RIGHT edge.** Two coordinated edits:
