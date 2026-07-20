@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **📐 № CHIP — CENTER EVERYTHING SO № ALIGNS WITH THE TEXT (keep the 8px corner symmetry). SUPERSEDES CMX-128 (Liav, 2026-07-21).** CMX-128 gave № an 8px bottom+right inset via `align-self: flex-end` + `margin-bottom: 8px`, but that lifted ONLY the chip — so it rides ~4px above the branch/context text center. Liav wants № on the SAME vertical center line as the text, still with the balanced 8px corner inset.
+- [x] **📐 № CHIP — CENTER EVERYTHING SO № ALIGNS WITH THE TEXT (keep the 8px corner symmetry). SUPERSEDES CMX-128 (Liav, 2026-07-21).** CMX-128 gave № an 8px bottom+right inset via `align-self: flex-end` + `margin-bottom: 8px`, but that lifted ONLY the chip — so it rides ~4px above the branch/context text center. Liav wants № on the SAME vertical center line as the text, still with the balanced 8px corner inset.
 
   **OBJECTIVE.** Keep ALL `.term-ctx-bar` content vertically CENTERED (the bar's default `align-items: center`), and make the bar tall enough that a centered № chip lands 8px off the top AND bottom — matching its 8px right inset. For the 14px chip: **`--term-ctx-bar-h = 14 + 2×8 = 30px`.** Revert CMX-128's opt-out: **remove `align-self: flex-end` and `margin-bottom: 8px` from `.gs-idx`** so it centers with everything else. Result: № centered (8px top = 8px bottom = 8px right) AND on the same vertical center as branch + context.
 
