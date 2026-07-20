@@ -12,7 +12,7 @@
     --red: #f85149;
     --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
     --term-ctx-bar-h: 19px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space */
-    --term-bg: #000;   /* terminal pane background; shared with .term-ctx-bar so the bar reads as a seamless footer, not a separate strip */
+    --term-bg: #0d1117;   /* the ttyd terminal's OWN xterm.js background (scripts/agent-terminals.sh TERM_THEME, tests/test_term_bg_sync.py guards the two stay identical) — NOT an arbitrary black; shared with .term-ctx-bar so the bar reads as a seamless footer, not a separate strip */
 }
 
 /* Themes — each re-declares the palette variables; everything else cascades.
@@ -256,8 +256,13 @@ body {
    higher z-index). CMX-122: since the bar no longer overlaps the terminal's
    live row, the CMX-118 fade-to-transparent gradient (a workaround for text
    bleeding through) is unnecessary — flat `--term-bg` matches the terminal's
-   own background (xterm content is transparent, so `.term-frame`'s bg shows
-   through) for a seamless footer instead of a visibly separate strip. */
+   own background for a seamless footer instead of a visibly separate strip.
+   CMX-126: CMX-122/123 assumed xterm content is transparent so `.term-frame`'s
+   bg shows through — measured live, ttyd paints its OWN opaque background from
+   scripts/agent-terminals.sh's TERM_THEME (`#0d1117`, deliberately matching this
+   file's `--bg`), so nothing "shows through" at all; `--term-bg` must equal that
+   real color exactly or the bar/frame are a visibly blacker seam sitting on top
+   of it. tests/test_term_bg_sync.py drift-guards the two literals. */
 /* CMX-124: fixed order, branch-agnostic — № pinned far-left, context pinned
    far-right via `.gs-ctx`'s own `margin-left: auto`, branch packs immediately
    after № and simply leaves empty space when absent. No more
