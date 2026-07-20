@@ -16,6 +16,14 @@
 // .grid-stack-item > .grid-stack-item-content` selector reintroduces the bug and
 // this goes red.
 //
+// Covers BOTH `.wire-live` rules that touch `.grid-stack-item-content` — the
+// plain (unhovered) tile AND the `.wire-target` tile (the one being hovered as a
+// drop target during the same gesture). They are separate selectors in style.css
+// and a `position` regression on either one independently collapses that tile's
+// content, so each needs its own fixture/assertion — a fixture that only ever
+// renders the plain-tile markup can't catch a regression added to the
+// `.wire-target` rule (and vice versa).
+//
 // Run: node --test tests/wire_live_css.test.mjs  (pytest runs it via
 // tests/test_js_suites.py; needs `npm ci` for jsdom).
 import { test } from 'node:test';
@@ -30,14 +38,14 @@ const staticDir = path.join(here, '..', 'chela', 'dashboard', 'static');
 const gridstackCss = fs.readFileSync(path.join(staticDir, 'vendor', 'gridstack.min.css'), 'utf8');
 const styleCss = fs.readFileSync(path.join(staticDir, 'style.css'), 'utf8');
 
-function wireLiveContentPosition() {
+function wireLiveContentPosition(itemClass) {
     const dom = new JSDOM(`<!doctype html><html><head>
 <style>${gridstackCss}</style>
 <style>${styleCss}</style>
 </head><body>
   <div id="term-stage" class="wire-live">
     <div class="grid-stack">
-      <div class="grid-stack-item">
+      <div class="${itemClass}">
         <div class="grid-stack-item-content">pane content</div>
       </div>
     </div>
@@ -47,13 +55,22 @@ function wireLiveContentPosition() {
     return dom.window.getComputedStyle(content).position;
 }
 
+function assertStaysAbsolute(position, label) {
+    assert.notEqual(position, 'relative',
+        `a \`position\` override on the ${label} selector clobbers gridstack's ` +
+        '`absolute; inset:0` and collapses pane content to its intrinsic ~200px ' +
+        'height — see CMX-120');
+    assert.equal(position, 'absolute',
+        `gridstack fills the tile via \`position: absolute; inset: 0\` on ` +
+        `.grid-stack-item-content — this must survive ${label} untouched`);
+}
+
 test('a live wire drag must not collapse pane content: .grid-stack-item-content ' +
      'stays `absolute` (gridstack\'s fill-the-tile default), never `relative`', () => {
-    const position = wireLiveContentPosition();
-    assert.notEqual(position, 'relative',
-        'a `position` override on this selector clobbers gridstack\'s `absolute; inset:0` ' +
-        'and collapses pane content to its intrinsic ~200px height — see CMX-120');
-    assert.equal(position, 'absolute',
-        'gridstack fills the tile via `position: absolute; inset: 0` on ' +
-        '.grid-stack-item-content — this must survive `.wire-live` untouched');
+    assertStaysAbsolute(wireLiveContentPosition('grid-stack-item'), '`.wire-live .grid-stack-item`');
+});
+
+test('a live wire drag must not collapse the HOVERED drop-target tile\'s content: ' +
+     '.grid-stack-item-content stays `absolute` on `.wire-target` too', () => {
+    assertStaysAbsolute(wireLiveContentPosition('grid-stack-item wire-target'), '`.wire-target`');
 });
