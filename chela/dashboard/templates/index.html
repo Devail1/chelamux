@@ -414,6 +414,47 @@
   </div>
 </div>
 
+<!-- Keyboard shortcuts cheatsheet (CMX-121) — reachable ONLY from the ⌘K palette's
+     "Keyboard shortcuts" row (nav.js _paletteItems). Deliberately no dedicated
+     global keybind: Alt+/ was considered and dropped, Ctrl+M would be Enter inside
+     a focused terminal — so this stays a palette-only surface, not another
+     iframe-injected shortcut. Static content: nothing here is config-driven. -->
+<div class="palette-overlay" id="shortcuts-overlay" onclick="if(event.target===this)chela.closeShortcuts()">
+  <div class="shortcuts-sheet" role="dialog" aria-label="Keyboard shortcuts">
+    <div class="shortcuts-head">
+      <span class="sc-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/></svg></span>
+      <h3>Keyboard shortcuts</h3>
+      <span class="sc-esc">close <kbd>Esc</kbd></span>
+      <button class="icon-btn" onclick="chela.closeShortcuts()">✕</button>
+    </div>
+    <div class="shortcuts-cols">
+      <div class="sc-grp">
+        <h4>Navigate panes</h4>
+        <div class="sc-row"><span class="sc-lbl">Jump to pane N</span><span class="sc-keys"><kbd>Alt</kbd><span class="sc-plus">+</span><kbd>1</kbd><span class="sc-plus">…</span><kbd>9</kbd></span></div>
+        <div class="sc-row"><span class="sc-lbl">Command palette / switcher</span><span class="sc-keys"><kbd>Ctrl</kbd><span class="sc-plus">/</span><kbd>⌘</kbd><span class="sc-plus">+</span><kbd>K</kbd></span></div>
+      </div>
+      <div class="sc-grp">
+        <h4>In the palette</h4>
+        <div class="sc-row"><span class="sc-lbl">Move selection</span><span class="sc-keys"><kbd>↑</kbd><kbd>↓</kbd></span></div>
+        <div class="sc-row"><span class="sc-lbl">Open / run</span><span class="sc-keys"><kbd>Enter</kbd></span></div>
+        <div class="sc-row"><span class="sc-lbl">Close</span><span class="sc-keys"><kbd>Esc</kbd></span></div>
+      </div>
+      <div class="sc-grp">
+        <h4>Panes &amp; wall</h4>
+        <div class="sc-row"><span class="sc-lbl">Rename a pane</span><span class="sc-gesture">double-click name</span></div>
+        <div class="sc-row"><span class="sc-lbl">Cancel a wire drag</span><span class="sc-keys"><kbd>Esc</kbd></span></div>
+        <div class="sc-row"><span class="sc-lbl">Wire · Share · Orchestrator · Pin</span><span class="sc-gesture">⋯ menu</span></div>
+        <div class="sc-row"><span class="sc-lbl">Grid preset · lock · min/max/kill</span><span class="sc-gesture">toolbar / header</span></div>
+      </div>
+      <div class="sc-grp">
+        <h4>Help</h4>
+        <div class="sc-row"><span class="sc-lbl">This shortcuts map</span><span class="sc-gesture">⌘K → Keyboard shortcuts</span></div>
+      </div>
+    </div>
+    <div class="shortcuts-foot">Grouped, colorblind-safe (chips + labels, no hue coding).</div>
+  </div>
+</div>
+
 <!-- Mobile sidebar scrim (off-canvas drawer backdrop) -->
 <div class="drawer-scrim" id="sidebar-scrim" onclick="chela.closeSidebar()"></div>
 

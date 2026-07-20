@@ -2538,6 +2538,58 @@ input[type="text"]:focus, textarea:focus, select:focus {
     border-radius: 4px; padding: 0 4px; margin-right: 2px;
 }
 
+/* --- Keyboard shortcuts cheatsheet (CMX-121) --- */
+/* #shortcuts-overlay reuses .palette-overlay for its backdrop (same dim + blur +
+   centering); only the sheet inside is its own thing — a static, grouped list
+   rather than a fuzzy-searchable one. */
+.shortcuts-sheet {
+    width: 640px; max-width: 92vw; max-height: 80vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 20px 60px -10px rgba(0, 0, 0, 0.7);
+    animation: palette-in 0.13s ease-out;
+}
+.shortcuts-head {
+    display: flex; align-items: center; gap: 10px; padding: 14px 16px;
+    border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+.shortcuts-head .sc-ic { color: var(--accent); display: flex; }
+.shortcuts-head h3 { font-size: 14px; font-weight: 600; color: var(--text); margin: 0; flex: 1; }
+.shortcuts-head .sc-esc { font-size: 11px; color: var(--text-dim); }
+.shortcuts-head .sc-esc kbd { margin-left: 2px; }
+.shortcuts-head .icon-btn { flex: 0 0 auto; }
+.shortcuts-cols {
+    display: grid; grid-template-columns: 1fr 1fr; overflow-y: auto;
+}
+@media (max-width: 560px) { .shortcuts-cols { grid-template-columns: 1fr; } }
+.sc-grp { padding: 14px 16px; border-top: 1px solid var(--border); }
+.sc-grp:nth-child(-n+2) { border-top: 0; }
+.sc-grp:nth-child(odd) { border-right: 1px solid var(--border); }
+@media (max-width: 560px) {
+    .sc-grp:nth-child(-n+2) { border-top: 1px solid var(--border); }
+    .sc-grp:first-child { border-top: 0; }
+    .sc-grp:nth-child(odd) { border-right: 0; }
+}
+.sc-grp h4 {
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-dim); margin: 0 0 10px;
+}
+.sc-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 12.5px; }
+.sc-row .sc-lbl { flex: 1; color: var(--text); }
+.sc-row .sc-keys { flex: 0 0 auto; display: flex; gap: 3px; align-items: center; white-space: nowrap; }
+.sc-row .sc-plus { color: var(--text-dim); font-size: 10px; }
+.sc-row .sc-gesture { flex: 0 0 auto; font-size: 10.5px; color: var(--text-dim); font-style: italic; white-space: nowrap; }
+.sc-row kbd {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px;
+    line-height: 1; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+    border-bottom-width: 2px; border-radius: 5px; padding: 3px 6px; min-width: 18px;
+    text-align: center; display: inline-block;
+}
+.shortcuts-foot {
+    flex: 0 0 auto; padding: 9px 16px; border-top: 1px solid var(--border);
+    color: var(--text-dim); font-size: 11px;
+}
+
 /* --- Canvas --- */
 .canvas { grid-row: 2; overflow-y: auto; padding: 18px 20px; }
 .canvas-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }

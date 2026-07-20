@@ -1103,6 +1103,10 @@ function _paletteItems(skipWids) {
     items.push({ icon: lucideIcon('terminal'), title: 'New shell window', sub: 'action', run: () => newShellWindow() });
     items.push({ icon: lucideIcon('clock'), title: 'Add scheduled task', sub: 'action',
                  run: () => { if (typeof showAddSchedule === 'function') showAddSchedule(); } });
+    // CMX-121: the injected keybinds (Alt+1..9, ⌘K) have no other discovery path —
+    // this is the ONLY entry point (palette-only, deliberately no dedicated global
+    // keybind — see index.html's #shortcuts-overlay comment).
+    items.push({ icon: lucideIcon('keyboard'), title: 'Keyboard shortcuts', sub: 'help', run: () => openShortcuts() });
     return items;
 }
 
@@ -1217,6 +1221,14 @@ document.addEventListener('keydown', e => {
         (ov && ov.classList.contains('open')) ? closePalette() : openPalette();
         return;
     }
+    // The shortcuts cheatsheet (CMX-121) is a plain, static overlay — Esc is its
+    // only keyboard wire (no arrow-key selection, nothing to run). Checked before
+    // the palette's own open-check below so Esc closes whichever overlay is on top.
+    const scOv = document.getElementById('shortcuts-overlay');
+    if (scOv && scOv.classList.contains('open')) {
+        if (e.key === 'Escape') { e.preventDefault(); closeShortcuts(); }
+        return;
+    }
     const ov = document.getElementById('palette');
     if (!ov || !ov.classList.contains('open')) return;
     if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
@@ -1225,12 +1237,26 @@ document.addEventListener('keydown', e => {
     else if (e.key === 'Enter') { e.preventDefault(); _palRun(_palSel); }
 });
 
+// --- Keyboard shortcuts cheatsheet (CMX-121) --------------------------------
+// Palette-only (⌘K → "Keyboard shortcuts", wired in _paletteItems above) — no
+// dedicated global keybind, see index.html's #shortcuts-overlay comment. Content
+// is static markup in index.html (nothing here is config-driven), so open/close
+// only toggle the overlay's visibility class.
+function openShortcuts() {
+    const ov = document.getElementById('shortcuts-overlay');
+    if (ov) ov.classList.add('open');
+}
+function closeShortcuts() {
+    const ov = document.getElementById('shortcuts-overlay');
+    if (ov) ov.classList.remove('open');
+}
+
 // Apply the saved theme immediately on load.
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { openPalette, refreshSidebar, renderAgentDetail, renderNav, renderSidebarAgents, selectView, updateCtxCache };
+export { closeShortcuts, openPalette, openShortcuts, refreshSidebar, renderAgentDetail, renderNav, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
