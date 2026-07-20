@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **🎨🔀 PANE HEADER v2 — split the combined badge: `● dot · ⋮ · name`; move the № to the bottom bar (Liav-approved mockup 2026-07-20).** CMX-117 folded №+status+menu into ONE badge; now that each pane has a bottom bar, split them back apart for a quieter header. Approved design (artifact **https://claude.ai/code/artifact/d23ed5f8-cdc9-4e39-a05a-e12b24641ef0**): header reads `● dot · ⋮ · name … _ □ ×`; bottom bar reads `⎇ branch … NN% · tokens  ②`. **Frontend-only** (`terminals.js` + CSS; `util.js` if a new lucide glyph is needed).
+- [x] **🎨🔀 PANE HEADER v2 — split the combined badge: `● dot · ⋮ · name`; move the № to the bottom bar (Liav-approved mockup 2026-07-20).** CMX-117 folded №+status+menu into ONE badge; now that each pane has a bottom bar, split them back apart for a quieter header. Approved design (artifact **https://claude.ai/code/artifact/d23ed5f8-cdc9-4e39-a05a-e12b24641ef0**): header reads `● dot · ⋮ · name … _ □ ×`; bottom bar reads `⎇ branch … NN% · tokens  ②`. **Frontend-only** (`terminals.js` + CSS; `util.js` if a new lucide glyph is needed).
 
   **A. Restore the simple CIRCLE activity indicator (leftmost in the header).** Replace the combined `.gs-badge` chip's status role with a plain small **circle** dot: **filled = working, hollow outline = idle, filled + glow = waiting** (shape, not hue alone — Liav is red-weak). This is just the classic `.term-status-dot` small circle — let `_colorTermDots` paint it exactly as it paints the sidebar dots (no `:not(.gs-badge)` exclusion needed here now: the header indicator is a real dot again, not a 22×18 chip). Keep the **orchestrator ring** (`--ok-blue`, non-hue) on this dot, driven by `_updateOrchBtns`/`onOrchestratorChange`.
 
