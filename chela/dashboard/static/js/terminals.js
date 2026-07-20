@@ -2323,10 +2323,14 @@ function wireDragStart(e, btn, wid) {
     svg.appendChild(path);
     stage.appendChild(svg);
 
-    const b = btn.getBoundingClientRect(), s = stage.getBoundingClientRect();
+    // CMX-123: origin from the SOURCE PANE's top-center, not `btn` — `btn` is the
+    // "Wire to…" row inside the badge/⋮ overflow menu, a `position:fixed` portal, so
+    // anchoring there made the wire visibly start from the floating menu instead of
+    // the pane it's wiring from.
+    const b = (src || btn).getBoundingClientRect(), s = stage.getBoundingClientRect();
     _wire = {
         fromWid: wid, svg, path, stage, gsEl, hoverWid: null,
-        x1: b.left + b.width / 2 - s.left, y1: b.top + b.height / 2 - s.top,
+        x1: b.left + b.width / 2 - s.left, y1: b.top - s.top,
     };
     _wireMove(e);
     document.addEventListener('mousemove', _wireMove);

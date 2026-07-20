@@ -399,3 +399,37 @@ test('Escape cancels a wire in flight', () => {
     document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
     assert.equal(dragging(), false);
 });
+
+// --- 3. 🔴 the wire must emanate from the PANE, not the fixed-position menu row ----
+//
+// `port('@1')` — the "Wire to…" row the gesture starts from — lives inside the
+// `⋮` overflow popover, which `togglePaneOverflow` anchors with inline
+// `position: fixed` top/left (CMX-117/119). Anchoring the wire's origin to THAT
+// row's rect makes the cable start wherever the popover happens to be floating,
+// not at the pane it is wiring from. Give the button and the pane deliberately
+// disjoint rects and prove the drawn path starts at the pane's top-center.
+
+test('the wire origin is the source PANE\'s top-center, not the "Wire to…" row', () => {
+    const pane = document.querySelector('.grid-stack-item[gs-id="@1"]');
+    const stageEl = document.querySelector('#term-stage');
+    const btn = port('@1');
+    const restore = [];
+    const stub = (el, rect) => {
+        const orig = el.getBoundingClientRect;
+        el.getBoundingClientRect = () => rect;
+        restore.push(() => { el.getBoundingClientRect = orig; });
+    };
+    stub(stageEl, { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 });
+    stub(pane, { left: 100, top: 50, right: 400, bottom: 250, width: 300, height: 200 });
+    // Deliberately far away — a popover row floating elsewhere on the screen.
+    stub(btn, { left: 900, top: 700, right: 940, bottom: 720, width: 40, height: 20 });
+    try {
+        startWire('@1');
+        const d = document.querySelector('.wire-overlay path').getAttribute('d');
+        assert.match(d, /^M 250 50 C /,
+            `wire must start at the pane's top-center (250, 50), not the button's — got: ${d}`);
+    } finally {
+        restore.forEach(fn => fn());
+        document.dispatchEvent(new window.MouseEvent('mouseup', { clientX: 10, clientY: 10 }));
+    }
+});
