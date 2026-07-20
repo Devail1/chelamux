@@ -2,7 +2,7 @@
 
 ## Open — CI drives the loop
 
-- [ ] **⌨️🎯 PALETTE-FIRST PANE SWITCHER — Ctrl+K from inside a focused pane, with open panes floated to the TOP.** Liav's UX call (2026-07-20) after living with Alt+N: the command palette is the nicer switcher — no per-pane escape-hatch — but it needs two things. (This is actually cmx-108's original Part C, which the agent substituted Alt+N for.) Alt+N now works (cmx-114) — keep it as a power-user fallback, but make the palette the primary, discoverable switcher.
+- [x] **⌨️🎯 PALETTE-FIRST PANE SWITCHER — Ctrl+K from inside a focused pane, with open panes floated to the TOP.** Liav's UX call (2026-07-20) after living with Alt+N: the command palette is the nicer switcher — no per-pane escape-hatch — but it needs two things. (This is actually cmx-108's original Part C, which the agent substituted Alt+N for.) Alt+N now works (cmx-114) — keep it as a power-user fallback, but make the palette the primary, discoverable switcher.
 
   **A. Ctrl+K must open the palette from INSIDE a focused terminal.** Today the ⌘K/Ctrl-K handler is a single **parent-`document` bubble** listener (`nav.js:1171`); when focus is in a ttyd terminal, xterm consumes Ctrl+K (kill-line) and the parent never fires — so the palette only opens from the page chrome, the exact limitation Liav hit with Alt+N. **Inject the palette-toggle shortcut into each same-origin pane iframe's document, CAPTURE-phase + `stopImmediatePropagation`**, reusing cmx-114's `_wireIframeAltSwitch` load-listener injection in `terminals.js` — ideally **generalize that injector to carry a SET of global shortcuts** (the Alt+1..9 switch it already does, PLUS Ctrl/⌘+K → openPalette) rather than a second bespoke injector. So Ctrl+K opens the palette no matter where focus is.
 
