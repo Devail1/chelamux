@@ -2,6 +2,21 @@
 
 ## Open — CI drives the loop
 
+- [ ] **📐 BOTTOM BAR — CONSTANT `№ · branch · context` ORDER, BRANCH-AGNOSTIC (Liav-approved 2026-07-20).** The pane bottom bar (`.term-ctx-bar`) shifts depending on whether the pane has a branch: today `.gs-branch` is `flex: 1 1 auto` and the bar uses `justify-content: space-between`, so a **branch-less** pane (e.g. nautilus) lets the context slide to the LEFT. Lock the layout so nothing moves.
+
+  **OBJECTIVE.** Fixed order regardless of branch presence: **№ (pane number) pinned FAR-LEFT → branch immediately right of it → context pinned to the FAR-RIGHT edge.** Two coordinated edits:
+    - **Markup** (`terminals.js` `_ctxBarHTML` ~1889): reorder to `gs-idx` (№) FIRST, then `gs-branch`, then `gs-ctx`. (`.term-ctx-fill` stays the absolutely-positioned 2px strip — order-independent.)
+    - **CSS** (`style.css` ~261–295): pin context right with `margin-left: auto` on `.gs-ctx`; change `.gs-branch` from `flex: 1 1 auto` to `flex: 0 1 auto` (may shrink/ellipsis, must NOT grow); the bar no longer relies on `justify-content: space-between` (№+branch pack left, context pushed right by the auto margin). Result is CONSTANT: № always leftmost, context always rightmost, branch between — the middle simply empties when there's no branch. Update the CMX-119 `.gs-idx` comment ("far right … after the context numbers") to reflect the new leading-left position.
+
+  **BOUNDARIES.** `style.css` + the single `_ctxBarHTML` markup string in `terminals.js` only. Do NOT change the bar background (stays `var(--term-bg)` seamless, CMX-123), the `.term-ctx-fill` progress strip, the branch/context text-building logic (~1226–1265), `--term-ctx-bar-h` (CMX-118), or wire-live (CMX-120). Single-mode bars (no `gs-idx`) must still read branch-left / context-right. This **reverses CMX-119's far-right №** — that is intended. PR → `dev`.
+
+  **GUARDS (`wallnav.test.mjs`; corrupt→RED — SOURCE-STRUCTURE facts, jsdom-provable; the rendered flex positions stay MANUAL live-verify per [[reference_chela_judge_css_render_ceiling]]).**
+    - DOM order inside `.term-ctx-bar` is `gs-idx` → `gs-branch` → `gs-ctx` (assert the child index order on real markup). Swap the order → RED.
+    - `.gs-ctx` is right-pinned via `margin-left: auto` (the rule declares it). Remove `margin-left:auto` → RED.
+    - `.gs-branch` does NOT grow (no `flex: 1 1 auto` / positive flex-grow). Restore `flex: 1` → RED.
+
+  **VERIFY (live).** A branch pane (`dev`) and a branch-less pane (`nautilus`) both show № at the far-left and context at the far-right in the SAME x-positions; branch sits between; nothing shifts between the two.
+
 - [x] **🎨🧵 BOTTOM BAR = SEAMLESS TERMINAL FOOTER — match `.term-ctx-bar` bg to the terminal bg via a shared `--term-bg` token (Liav-approved 2026-07-20).** The bottom bar (branch · context · №) reads as a *separate* strip because it uses a leftover `linear-gradient(0deg, rgba(0,0,0,.94)…)` — that gradient was a CMX-118 workaround for when the bar OVERLAPPED the terminal's last row; CMX-118 also reserved the bar's height (`--term-ctx-bar-h`) so it **no longer overlaps** (it sits on blank space below the terminal). So the gradient is now unnecessary and the bar can be a flat color matching the terminal → seamless footer. (Verified live: xterm content is transparent, so the visible terminal bg is `.term-frame`'s `#000`.)
 
   **OBJECTIVE.** Introduce a **`--term-bg` token** (root/theme scope) set to the terminal background — currently `#000` (the `.term-frame` / `.term-single` / pane-content colour). Point BOTH at it (single source of truth): (a) the terminal frame/pane-content backgrounds that are hardcoded `#000` (`style.css` ~153/157/194) → `var(--term-bg)`, and (b) **`.term-ctx-bar` background → `var(--term-bg)` SOLID**, replacing the `linear-gradient(…rgba(0,0,0,.94)…)`. Result: the bar is the same flat colour as the terminal, so it looks like the terminal's own footer. Keep the branch/context text `--dim` + legible on `--term-bg`, keep the ambient `.term-ctx-fill` strip, keep the CMX-118 height reservation (no overlap) and CMX-120 (no `position:relative` on wire-live content). (Bonus: a single `--term-bg` token also makes a future light-terminal theme a one-line change — but that's NOT this task; do not add light-mode terminal colours here.)
