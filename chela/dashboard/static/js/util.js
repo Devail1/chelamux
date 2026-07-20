@@ -32,6 +32,9 @@ const _LUCIDE = {
     // `circle-dot` — the per-pane "Orchestrator" row (terminals.js _orchBtnHTML),
     // replacing the bare "⊙" text glyph for the same reason (CMX-114).
     'circle-dot': '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>',
+    // `keyboard` — the command palette's "Keyboard shortcuts" row (nav.js
+    // _paletteItems), opening the shortcuts cheatsheet overlay (CMX-121).
+    'keyboard': '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>',
 };
 function lucideIcon(name, size = 16) {
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" `
