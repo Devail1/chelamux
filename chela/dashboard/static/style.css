@@ -12,6 +12,7 @@
     --red: #f85149;
     --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
     --term-ctx-bar-h: 19px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space */
+    --term-bg: #000;   /* terminal pane background; shared with .term-ctx-bar so the bar reads as a seamless footer, not a separate strip */
 }
 
 /* Themes — each re-declares the palette variables; everything else cascades.
@@ -150,11 +151,11 @@ body {
 .panel.active { display: block; }
 
 /* ---- Embedded terminals ---- */
-.term-frame { width: 100%; border: 1px solid #333; border-radius: 6px; background: #000; }
+.term-frame { width: 100%; border: 1px solid #333; border-radius: 6px; background: var(--term-bg); }
 /* Single view: same header+iframe wrapper as a wall tile */
 .term-single .term-pane {
     display: flex; flex-direction: column; height: 78vh; overflow: hidden;
-    background: #000; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--term-bg); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 .term-single .term-pane .term-frame {
@@ -191,7 +192,7 @@ body {
 .grid-stack { background: transparent; }
 .grid-stack-item-content {
     display: flex; flex-direction: column; overflow: hidden;
-    background: #000; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--term-bg); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 .gs-head {
@@ -252,15 +253,16 @@ body {
    --term-ctx-bar-h of margin-bottom so this bar lands on blank tile
    background, not the terminal's live last row); pointer-events confined so
    it doesn't fight gridstack's bottom resize handle (which overlays at a
-   higher z-index). */
+   higher z-index). CMX-122: since the bar no longer overlaps the terminal's
+   live row, the CMX-118 fade-to-transparent gradient (a workaround for text
+   bleeding through) is unnecessary — flat `--term-bg` matches the terminal's
+   own background (xterm content is transparent, so `.term-frame`'s bg shows
+   through) for a seamless footer instead of a visibly separate strip. */
 .term-ctx-bar {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     height: var(--term-ctx-bar-h); padding: 0 8px; font-size: 10px; color: var(--text-dim);
-    /* Near-opaque where the text sits (bottom), fading out toward the top edge —
-       a translucent strip left the terminal's own last row bleeding through and
-       garbling the branch/context text underneath it. */
-    background: linear-gradient(0deg, rgba(0, 0, 0, 0.94) 60%, transparent);
+    background: var(--term-bg);
     pointer-events: none;   /* never intercept gridstack's bottom resize handle */
 }
 .term-ctx-fill {

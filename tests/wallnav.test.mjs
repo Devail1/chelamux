@@ -736,6 +736,29 @@ test('--term-ctx-bar-h is non-zero and both .term-frame margins + .term-ctx-bar 
         'so the reservation and the bar can never drift apart');
 });
 
+// 11d — THE CTX-BAR IS A SEAMLESS TERMINAL FOOTER, NOT A SEPARATE STRIP (CMX-122).
+// CMX-118 reserved --term-ctx-bar-h of margin so the bar sits on blank tile background
+// below the terminal instead of overlapping its live last row — which made the old
+// near-opaque `linear-gradient(0deg, rgba(0,0,0,.94)…)` backdrop (a fix for text bleeding
+// through an overlap that no longer happens) unnecessary. `.term-ctx-bar` must now read
+// the SAME `--term-bg` token the terminal panes themselves use, as a flat color — a
+// static source-text fact jsdom can prove (unlike the rendered seamlessness itself, which
+// belongs with the honest-scoping disclaimer above).
+test('.term-ctx-bar shares --term-bg with the terminal panes as a flat color; the old opaque gradient backdrop is gone', () => {
+    assert.match(CSS, /--term-bg:\s*[^;]+;/, '--term-bg must be declared');
+
+    assert.match(CSS, /\.term-ctx-bar\s*\{[^}]*background:\s*var\(--term-bg\)/s,
+        '.term-ctx-bar must read background: var(--term-bg) — the same token the terminal pane backgrounds use, ' +
+        'so the bar reads as a seamless extension of the terminal rather than a separately-colored strip');
+    assert.doesNotMatch(CSS, /\.term-ctx-bar\s*\{[^}]*linear-gradient/s,
+        'the CMX-118 fade-to-transparent gradient must be gone from .term-ctx-bar — it was a workaround for an ' +
+        'overlap that --term-ctx-bar-h margin already prevents, and a flat --term-bg replaces it');
+
+    assert.match(CSS, /\.term-frame\s*\{[^}]*background:\s*var\(--term-bg\)/s,
+        '.term-frame must read background: var(--term-bg), not a re-hardcoded literal that could drift out of ' +
+        'sync with the ctx-bar it must match');
+});
+
 // 12 — THE HEADER DOT CARRIES LIVE STATUS BY SHAPE, NOT HUE ALONE (CMX-117 A,
 // CMX-119 split the dot back out of the combined badge). The dot wears
 // `.term-status-dot` (the same class every other status dot wears), so the exact
