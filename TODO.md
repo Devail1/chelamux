@@ -2,6 +2,16 @@
 
 ## Open — CI drives the loop
 
+- [ ] **🪢📍 WIRE ORIGIN SHOULD EMANATE FROM THE SOURCE PANE'S TOP-CENTER, not the dropdown menu portal (2026-07-20).** The wire is now triggered from the "Wire to…" row inside the badge/⋮ overflow menu — a `position:fixed` portal — and `wireDragStart` computes the wire's start point from THAT row's rect, so the dashed line visibly emanates from the floating menu (disconnected-looking). It should start from the **top-center of the source pane**.
+
+  **OBJECTIVE.** In `wireDragStart` (`terminals.js` ~2326): the origin `_wire.x1/x1` is `b = btn.getBoundingClientRect()` center (the menu row). Change it to derive from the SOURCE TILE — `src = _gridItemEl(wid)` (already computed a few lines above) — as **top-center**: `x1 = src.left + src.width/2 - stage.left`, `y1 = src.top - stage.top` (the pane's top edge, optionally +a few px so it sits just inside the header). So the wire emanates from the top-center of the pane being wired, regardless of where the (now-closed) menu was. Keep everything else (the drop-socket, target detection, cleanup, the `_closeAllPaneOverflows` on start) unchanged.
+
+  **BOUNDARIES.** `terminals.js` only — just the origin computation in `wireDragStart`. Don't touch `_wireMove`/`_wireDrop`/`_wireCleanup`, the overlay CSS, or the menu. Don't regress CMX-120 (no `position:relative` on wire-live content). PR → `dev`.
+
+  **GUARDS (`wallnav.test.mjs` or the wire suite; corrupt→RED — jsdom-provable via mocked rects).** jsdom has no layout, so MOCK `getBoundingClientRect` to return DISTINCT rects for the source tile vs the trigger button, call `wireDragStart`, and assert `_wire.x1/y1` derive from the SOURCE TILE's top-center — NOT the button's rect. Reverting the origin to `btn` → RED. (This is a real behavioral guard: the exact regressing form is "origin from the trigger button".)
+
+  **VERIFY.** `uv run ruff check` + `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green; the origin guard RED under corruption. **Manual:** restart `chela-dashboard`, hard-refresh — open a pane's ⋮ menu, click "Wire to…", and the dashed wire starts from the **top-center of that pane** (not the spot where the menu was); dropping on a peer still wires them.
+
 - [ ] **⌨️🗺️ KEYBOARD SHORTCUTS CHEATSHEET — a `⌨ Keyboard shortcuts` entry in the ⌘K command palette that opens a grouped keybind overlay (Liav-approved mock 2026-07-20, PALETTE-ONLY).** Now that there are several injected keybinds (Alt+1..9, ⌘K) that aren't otherwise discoverable, add a cheatsheet. **Palette-only trigger — NO new global keybind, NO iframe injection** (Liav's call: `Alt+/` dropped; `Ctrl+M` would be Enter in a terminal). Mock: **https://claude.ai/code/artifact/baafb9a2-12c4-4701-a5f8-2bc622c47eae**. **Frontend-only** (`nav.js` for the palette entry + the overlay; CSS; `util.js` if a lucide glyph is needed).
 
   **OBJECTIVE.** Add a palette command (in the ⌘K palette `_paletteItems`, `nav.js`) labelled **"Keyboard shortcuts"** (lucide `keyboard` glyph) that opens a **modal overlay** — palette-styled (reuse the palette/popover look + tokens) — listing the REAL keybinds, grouped. `Esc` closes it (like the palette). The list must reflect what ACTUALLY exists (do NOT invent shortcuts):
