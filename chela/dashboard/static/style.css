@@ -11,6 +11,7 @@
     --yellow: #d29922;
     --red: #f85149;
     --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    --term-ctx-bar-h: 19px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space */
 }
 
 /* Themes — each re-declares the palette variables; everything else cascades.
@@ -159,6 +160,12 @@ body {
 .term-single .term-pane .term-frame {
     flex: 1 1 auto; width: 100%; height: 100%;
     min-height: 0; border: 0; border-radius: 0;
+    /* Reserve room for the absolutely-positioned .term-ctx-bar sitting below —
+       margin (not padding) so the flex column shrinks the iframe's own box
+       instead of growing it past the container, and ttyd's xterm inside
+       simply fits the smaller viewport it's handed. Without this the bar
+       overlaid the terminal's live last row instead of blank space. */
+    margin-bottom: var(--term-ctx-bar-h);
 }
 .term-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px; }
 .term-grid .term-frame { height: 42vh; }
@@ -236,12 +243,15 @@ body {
 /* --- Per-tile context-window bar (CMX-117: now also the home for branch +
    context — previously two separate top-header chips). Ambient: scan the wall
    and read each agent's context fill at a glance; hover for exact numbers.
-   Sits above the iframe; pointer-events confined so it doesn't fight
-   gridstack's bottom resize handle (which overlays at a higher z-index). */
+   Sits BELOW the iframe now (CMX-118: the .term-frame rules reserve
+   --term-ctx-bar-h of margin-bottom so this bar lands on blank tile
+   background, not the terminal's live last row); pointer-events confined so
+   it doesn't fight gridstack's bottom resize handle (which overlays at a
+   higher z-index). */
 .term-ctx-bar {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    height: 19px; padding: 0 8px; font-size: 10px; color: var(--text-dim);
+    height: var(--term-ctx-bar-h); padding: 0 8px; font-size: 10px; color: var(--text-dim);
     /* Near-opaque where the text sits (bottom), fading out toward the top edge —
        a translucent strip left the terminal's own last row bleeding through and
        garbling the branch/context text underneath it. */
@@ -636,20 +646,27 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 
 /* Live session-activity dot on pane headers + dock chips. Driven by
    `claude agents --json` status: busy = green pulse, waiting = amber (needs
-   input), idle/unknown = dim. */
-.term-status-dot {
+   input), idle/unknown = dim.
+   :not(.gs-badge) is load-bearing: the CMX-117 pane badge (.gs-badge, above)
+   also wears this class so _colorTermDots (terminals.js) can paint it, but
+   these two selectors have EQUAL specificity (single class) and this rule
+   comes later in the file — without the exclusion it wins the cascade on
+   every shared property (width/height/border-radius/background), squishing
+   the ~22x18 rounded badge into an 8px round dot and filling its idle state
+   grey instead of leaving it hollow. */
+.term-status-dot:not(.gs-badge) {
     flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
     display: inline-block; background: var(--text-dim); transition: background 0.3s;
 }
-.term-status-dot.working {
+.term-status-dot.working:not(.gs-badge) {
     background: var(--green); box-shadow: 0 0 6px var(--green);
     animation: term-status-pulse 1.2s ease-in-out infinite;
 }
-.term-status-dot.waiting {
+.term-status-dot.waiting:not(.gs-badge) {
     background: var(--yellow);
     animation: term-status-pulse-waiting 1s ease-in-out infinite;
 }
-.term-status-dot.idle { background: var(--text-dim); box-shadow: none; }
+.term-status-dot.idle:not(.gs-badge) { background: var(--text-dim); box-shadow: none; }
 @keyframes term-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 /* Waiting-on-input throbs its halo (stronger than the busy opacity fade). */
 @keyframes term-status-pulse-waiting {
@@ -677,6 +694,9 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 .grid-stack-item-content .term-frame {
     flex: 1 1 auto; width: 100%; height: 100%;
     min-height: 0; border: 0; border-radius: 0;
+    /* Reserve room for the absolutely-positioned .term-ctx-bar below — see
+       the .term-single .term-pane .term-frame rule above for why margin. */
+    margin-bottom: var(--term-ctx-bar-h);
 }
 /* iframes eat the mouse mid-drag; neutralise them while dragging/resizing */
 .grid-stack.gs-dragging .term-frame { pointer-events: none; }
