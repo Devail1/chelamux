@@ -199,46 +199,72 @@ body {
 }
 .gs-grip { cursor: move; }
 
-/* Keyboard-fast pane switcher badge (CMX-108): Alt+N jumps straight to this
-   tile. Painted/hidden by _refreshPaneIdx, tmux-window-number style. */
-.gs-idx {
-    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
-    min-width: 15px; height: 15px; padding: 0 3px; border-radius: 4px;
-    background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
-    font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums;
+/* --- CMX-117: the left-edge pane badge — number + live status (by SHAPE) +
+   the Wire/Share/Orchestrator/Pin menu trigger, all in one control. Replaces
+   three former atoms: the standalone .gs-idx chip, the colour-only status dot,
+   and the separate .gs-overflow-btn "⋯" trigger. */
+.gs-badge-wrap { position: relative; flex: 0 0 auto; }
+.gs-badge {
+    display: inline-flex; align-items: center; justify-content: center; gap: 3px;
+    min-width: 22px; height: 18px; padding: 0 5px; box-sizing: border-box;
+    background: transparent; border: 1.5px solid var(--text-dim); border-radius: 5px;
+    color: var(--text-dim); cursor: pointer;
 }
+.gs-badge:hover, .gs-badge[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+.gs-badge .gs-idx {
+    font-size: 10px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+}
+.gs-badge-caret { display: inline-flex; font-size: 8px; line-height: 1; opacity: 0.75; }
+/* Status is SHAPE-coded, not hue-only (Liav is red-weak): filled = working,
+   hollow outline = idle, filled + glow ring = waiting/wants-the-human. Driven
+   by _colorTermDots (terminals.js), which targets .term-status-dot — a class
+   this badge also wears, so the same working/waiting/idle classes that used
+   to paint the old standalone dot now paint the whole badge. */
+.gs-badge.idle { background: transparent; border-color: var(--text-dim); color: var(--text-dim); }
+.gs-badge.working {
+    background: var(--green); border-color: var(--green); color: #06240f;
+}
+.gs-badge.waiting {
+    background: var(--yellow); border-color: var(--yellow); color: #241c02;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--yellow) 55%, transparent);
+}
+/* Orchestrator ownership: a SEPARATE non-hue ring (an outline, not a box-shadow,
+   so it never collides with the waiting-state glow above) — updated in lockstep
+   with the menu's Orchestrator row by _updateOrchBtns (terminals.js). */
+.gs-badge.gs-badge-orch { outline: 2px solid var(--ok-blue); outline-offset: 1px; }
 
-/* Per-tile context-window bar, pinned to the tile's bottom edge. Ambient: scan
-   the wall and read each agent's context fill at a glance; hover for the exact
-   numbers. Sits above the iframe; pointer-events confined to the thin strip so
-   it doesn't fight gridstack's bottom resize handle (which overlays at a higher
-   z-index). */
+/* --- Per-tile context-window bar (CMX-117: now also the home for branch +
+   context — previously two separate top-header chips). Ambient: scan the wall
+   and read each agent's context fill at a glance; hover for exact numbers.
+   Sits above the iframe; pointer-events confined so it doesn't fight
+   gridstack's bottom resize handle (which overlays at a higher z-index). */
 .term-ctx-bar {
-    position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
-    background: rgba(110, 118, 129, 0.25); z-index: 4;
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    height: 19px; padding: 0 8px; font-size: 10px; color: var(--text-dim);
+    /* Near-opaque where the text sits (bottom), fading out toward the top edge —
+       a translucent strip left the terminal's own last row bleeding through and
+       garbling the branch/context text underneath it. */
+    background: linear-gradient(0deg, rgba(0, 0, 0, 0.94) 60%, transparent);
     pointer-events: none;   /* never intercept gridstack's bottom resize handle */
 }
 .term-ctx-fill {
-    display: block; height: 100%; width: 0;
+    position: absolute; left: 0; right: 0; bottom: 0; height: 2px; width: 0;
     background: var(--green); transition: width 0.4s ease;
 }
 .term-ctx-fill.ctx-warn { background: var(--yellow); }
 .term-ctx-fill.ctx-danger { background: var(--red); }
 .term-ctx-fill.est { opacity: 0.55; }
 
-/* Tile-header chips: exact context "74% · 147.5K/1M" + git branch. The 3px
-   bottom bar is too thin for text, so the readable numbers live up here next to
-   the window controls. Both are pushed right by the flex:1 label. */
+/* Branch + exact context "74% · 147.5K/1M" — dim, subtle, tabular-nums; the
+   fill strip (above) still carries the at-a-glance colour. */
 .gs-ctx, .gs-branch {
-    flex: 0 0 auto; font-size: 10px; font-weight: 600; line-height: 16px;
-    color: var(--text-dim); padding: 0 6px; border-radius: 999px;
-    background: var(--surface); white-space: nowrap;
+    flex: 0 0 auto; font-weight: 500; line-height: 1;
+    white-space: nowrap; font-variant-numeric: tabular-nums;
 }
-.gs-ctx.ctx-warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
-.gs-ctx.ctx-danger { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
-.gs-branch {
-    font-weight: 500;
-}
+.gs-branch { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.gs-ctx.ctx-warn { color: var(--yellow); }
+.gs-ctx.ctx-danger { color: var(--red); }
 
 /* Inline split-glyph layout picker. Icon-only buttons; active preset is
    accent-tinted. The glyph inherits color via fill:currentColor. */
@@ -299,47 +325,42 @@ body {
     color: var(--red); border-color: var(--red); background: rgba(248, 81, 73, 0.1);
 }
 
-/* --- per-pane "⋯" overflow: Wire / Share / Orchestrator / Pin (CMX-111) ----- */
-/* The trigger is sized like the other icon-only window controls (share/pin). */
-.gs-overflow { position: relative; }
-.gs-overflow-btn { display: inline-flex; align-items: center; justify-content: center; }
-.gs-keys button.gs-overflow-btn { padding: 4px 5px; }
-.gs-overflow-btn > svg { display: block; }
-.gs-overflow-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
-/* CMX-114: restyled to a LABELED VERTICAL list — the topbar `#primary-menu`'s
-   look (nav.js/index.html), reused verbatim via the same `overflow-menu`
-   (min-width) and `.popover-item.ov-item` (icon+label row) classes, rather
-   than the old icon-only horizontal strip. `.popover` (position:fixed — top/
-   left set by togglePaneOverflow) still supplies the fixed box that escapes
+/* --- per-pane menu: Wire / Share / Orchestrator / Pin (CMX-111) ------------- */
+/* CMX-117: the trigger is now the left-edge .gs-badge (above) — the standalone
+   "⋯" (.gs-overflow-btn) is GONE. CMX-114: rows render as a LABELED VERTICAL
+   list — the topbar `#primary-menu`'s look (nav.js/index.html), reused
+   verbatim via the same `overflow-menu` (min-width) and `.popover-item.ov-item`
+   (icon+label row) classes. `.popover` (position:fixed — top/left set by
+   togglePaneOverflow) still supplies the fixed box that escapes
    .grid-stack-item-content's overflow:hidden clip; this just stacks rows. */
 .pane-overflow-menu { display: flex; flex-direction: column; align-items: stretch; gap: 1px; }
 .pane-overflow-menu[hidden] { display: none; }
 /* Each row IS the real state-bearing .gs-share-btn/.gs-orch-btn/.gs-pin-btn/
-   .gs-port button (not a wrapper around it), which makes it a descendant of
-   `.gs-keys` — override that ancestor's bordered icon-button chrome
-   (`.gs-keys button`, above) back to a plain full-width popover row. Same
-   specificity pattern as the old `.gs-keys button.gs-kill-btn` override. */
-.gs-keys button.popover-item {
+   .gs-port button (not a wrapper around it) — reset its UA button chrome back
+   to a plain full-width popover row, scoped to this menu (not `.gs-keys`,
+   which now holds only the window controls — CMX-117 moved the menu out from
+   under it). */
+.pane-overflow-menu button.popover-item {
     display: flex; align-items: center; gap: 10px; width: 100%;
     padding: 7px 10px; font-size: 12px; text-align: left; line-height: 1.3;
-    border: 0; background: none; border-radius: 4px; color: var(--text);
+    font: inherit; border: 0; background: none; border-radius: 4px; color: var(--text);
 }
-.gs-keys button.popover-item:hover { background: var(--accent); color: #fff; }
-.gs-keys button.popover-item:hover .ov-ic { color: #fff; }
+.pane-overflow-menu button.popover-item:hover { background: var(--accent); color: #fff; }
+.pane-overflow-menu button.popover-item:hover .ov-ic { color: #fff; }
 
 /* --- collab: share button + presence facepile ------------------------------ */
 /* Share/Orchestrator/Pin: neutral until active, then a solid colour fill so
    the live state reads at a glance in the row list (distinct colours per
    row so a shared pane and an orchestrator-owning pane never look the same:
    --accent for share, --ok-blue for orchestrator, --yellow for pin).
-   CMX-116: `.gs-keys button.popover-item` (above, specificity 0,2,1) OVERRODE
-   a plain `.gs-share-btn.on` etc (0,2,0) — same node, same cascade, higher
-   specificity wins regardless of source order, so the ON fill never painted
-   in the folded "⋯" dropdown. Repeat the `.gs-keys button` prefix so each
-   `.on` rule outranks it (0,3,1). */
-.gs-keys button.gs-share-btn.on { color: #0d1117; background: var(--accent); }
-.gs-keys button.gs-orch-btn.on { color: #0d1117; background: var(--ok-blue); }
-.gs-keys button.gs-pin-btn.on { color: #0d1117; background: var(--yellow); }
+   CMX-116 lesson (do not regress): the base row rule above and this `.on` fill
+   are the SAME node, so the higher-specificity selector wins regardless of
+   source order — `.pane-overflow-menu button.X.on` (0,3,1) outranks
+   `.pane-overflow-menu button.popover-item` (0,2,1) unconditionally, unlike a
+   bare `.X.on` (0,2,0) would. */
+.pane-overflow-menu button.gs-share-btn.on { color: #0d1117; background: var(--accent); }
+.pane-overflow-menu button.gs-orch-btn.on { color: #0d1117; background: var(--ok-blue); }
+.pane-overflow-menu button.gs-pin-btn.on { color: #0d1117; background: var(--yellow); }
 .gs-share-btn.on .ov-ic, .gs-orch-btn.on .ov-ic, .gs-pin-btn.on .ov-ic { color: inherit; }
 /* The peer-count badge used to float over a small square icon button (the
    old horizontal strip); in a full-width row it just rides the row's right
@@ -686,9 +707,9 @@ body.term-dragging { overflow: hidden; }
    The gesture reuses `.gs-dragging` (above) to neutralise the iframes' pointer
    events — it must NOT hide the terminals (`.term-dragging`): watching them while
    you wire them is the whole point. */
-/* Layout/colour come from `.gs-keys button.popover-item` (above, higher
-   specificity) — this just keeps the drag affordance: dimmed until hovered,
-   crosshair cursor for the drag-to-wire gesture. */
+/* Layout/colour come from `.pane-overflow-menu button.popover-item` (above,
+   higher specificity) — this just keeps the drag affordance: dimmed until
+   hovered, crosshair cursor for the drag-to-wire gesture. */
 .gs-port { cursor: crosshair; opacity: 0.75; }
 .gs-port:hover { opacity: 1; }
 /* The live wire: an SVG over the whole stage. Above the tiles and gridstack's own
@@ -2805,6 +2826,10 @@ input[type="text"]:focus, textarea:focus, select:focus {
        give the rows back to the terminal. (Kill/rename move out of reach on mobile
        — switch agents via the pills.) */
     .gs-head { display: none; }
+    /* CMX-117: branch + context text moved out of .gs-head into the bottom
+       .term-ctx-bar, which is NOT part of .gs-head — hide just the text on
+       phones (same declutter intent as above) and keep the ambient fill. */
+    .term-ctx-bar .gs-branch, .term-ctx-bar .gs-ctx { display: none; }
 
     .term-keybar {
         display: flex;

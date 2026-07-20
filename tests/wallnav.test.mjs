@@ -73,6 +73,31 @@
 // static CSS-source fact (jsdom can't resolve cascade specificity), per the honest
 // disclaimer in the PR: this is NOT a substitute for the manual live-wall check.
 //
+// CMX-117 adds properties 12-17, the pane-header redesign: the top row used to cram
+// № + status dot + ☰ grip + name + branch + ctx% + "⋯" + min/max/kill into one line.
+// 12 — the № chip, the status dot, and the "⋯" trigger collapse into ONE left-edge
+// badge: it carries the Alt+N number, shows live status by SHAPE not hue alone
+// (working=filled, idle=hollow — Liav is red-weak), and is itself the menu trigger
+// (the standalone `.gs-overflow-btn` is gone). 13 — the "☰" glyph is dropped but
+// `.gs-grip` (GridStack's drag handle) stays on the name span, so dragging still
+// works. 14 — the right cluster is min/max/kill ONLY now that the badge/menu moved
+// left. 15 — branch + context move into the bottom `.term-ctx-bar`, which already
+// carried the ambient context-fill strip. 16 — a pane that owns the decisions inbox
+// gets a non-hue ring (an outline, not a colour swap) on its badge, driven off the
+// same onOrchestratorChange signal the menu's Orchestrator row uses. 17 — a real bug
+// Liav hit live: clicking Wire from the (badge-anchored) menu allegedly shrinks
+// every pane and drops the wall's grid gaps. Root-causing it needed a real browser
+// (jsdom has no layout engine); live testing — synthetic DOM events AND real CDP-
+// level mouse input, against both the pre- and post-redesign trigger, run against
+// this exact worktree's dashboard on a scratch port — could NOT reproduce a shrink
+// or gap loss. What's fixed regardless (a real, if unrelated, improvement): the
+// popover used to stay open — a `position:fixed` menu floating over the wall — for
+// the whole drag, only closing on the next unrelated document click. Property 17
+// asserts what jsdom CAN prove (the popover now closes the instant the drag starts;
+// Escape fully tears down the wire's transient DOM state) — the "no shrink" finding
+// itself is a live-browser fact belonging in the PR, not a jsdom guard for a layout
+// question jsdom cannot see.
+//
 // Run: node --test tests/wallnav.test.mjs (pytest runs it via tests/test_js_suites.py;
 // it needs `npm ci` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
 import { before, beforeEach, test } from 'node:test';
@@ -115,11 +140,28 @@ const AGENTS = [
     { name: 'charlie', window_id: '@3', online: true },
 ];
 
-function fakeFetch(url) {
+// CMX-117 property 15 (the bottom context bar) drives a real /api/agents/context
+// round-trip through termTick — empty by default (no fill), set per-test.
+let CTX = {};
+
+function fakeFetch(url, opts) {
     const path = String(url);
+    // CMX-117 property 16 (the orchestrator ring) drives real subscribe/release
+    // round-trips through window.chela.orchestratorBtnClick — echo back whatever
+    // wid the POST body named, the same contract chela/dashboard/app.py's real
+    // routes have (orchestrator.js only applies a response with `ok: true`).
+    if (path.endsWith('/api/orchestrator/subscribe') && opts && opts.body) {
+        const { wid } = JSON.parse(opts.body);
+        const body = { ok: true, wid, name: wid, state: 'ok', why: '', queued: 0 };
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+    }
+    if (path.endsWith('/api/orchestrator/release')) {
+        const body = { ok: true, wid: null, name: null, state: 'unregistered', why: '', queued: 0 };
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+    }
     const body =
         path.endsWith('/api/agents') ? AGENTS
-            : path.endsWith('/api/agents/context') ? {}
+            : path.endsWith('/api/agents/context') ? CTX
                 : path.endsWith('/api/rooms') ? { rooms: {}, pending: [] }
                     : path.startsWith('/api/term/ready') ? { ready: true }
                         : {};
@@ -224,29 +266,30 @@ const geom = wid => {
     return el && ['x', 'y', 'w', 'h'].map(k => el.getAttribute('gs-' + k)).join(',');
 };
 
-// 1 — THE PANE FOLD. One "⋯" trigger per pane; Wire/Share/Orchestrator/Pin live
-// behind it, not loose in the header — and stay the SAME real buttons, just moved.
-test('a pane\'s "⋯" overflow is hidden by default, and opening it reveals Wire/Share/Orchestrator/Pin', () => {
+// 1 — THE PANE FOLD (CMX-117: the trigger is now the left-edge badge, not a
+// standalone "⋯"). Wire/Share/Orchestrator/Pin live behind it, not loose in
+// the header — and stay the SAME real buttons, just moved.
+test('a pane\'s badge menu is hidden by default, and opening it reveals Wire/Share/Orchestrator/Pin', () => {
     const wid = '@1';
-    const overflowBtn = tile(wid).querySelector('.gs-overflow-btn');
+    const badge = tile(wid).querySelector('.gs-badge');
     const menu = tile(wid).querySelector('.pane-overflow-menu');
-    assert.ok(overflowBtn, 'every wall tile gets a "⋯" trigger');
+    assert.ok(badge, 'every wall tile gets a badge trigger');
     assert.ok(menu, 'every wall tile gets an overflow menu');
     assert.equal(menu.hidden, true, 'starts closed');
-    assert.equal(overflowBtn.getAttribute('aria-expanded'), 'false');
+    assert.equal(badge.getAttribute('aria-expanded'), 'false');
 
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, overflowBtn);
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
     assert.equal(menu.hidden, false, 'opens on click');
-    assert.equal(overflowBtn.getAttribute('aria-expanded'), 'true');
+    assert.equal(badge.getAttribute('aria-expanded'), 'true');
     // The controls the header used to show inline now live INSIDE this pane's menu.
     assert.ok(menu.querySelector('.gs-port'), 'wire port is inside the menu');
     assert.ok(menu.querySelector('.gs-share-btn'), 'share toggle is inside the menu');
     assert.ok(menu.querySelector('.gs-orch-btn'), 'orchestrator toggle is inside the menu');
     assert.ok(menu.querySelector('.gs-pin-btn'), 'pin toggle is inside the menu');
 
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, overflowBtn);
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
     assert.equal(menu.hidden, true, 'closes on a second click');
-    assert.equal(overflowBtn.getAttribute('aria-expanded'), 'false');
+    assert.equal(badge.getAttribute('aria-expanded'), 'false');
 });
 
 // 7 — THE RESTYLE (CMX-114). Liav wanted the fold to look like the topbar's labeled
@@ -255,9 +298,9 @@ test('a pane\'s "⋯" overflow is hidden by default, and opening it reveals Wire
 // the same state-bearing buttons.
 test('the "⋯" overflow renders a labeled vertical list, like the topbar #primary-menu — not an icon-only strip', () => {
     const wid = '@3';
-    const overflowBtn = tile(wid).querySelector('.gs-overflow-btn');
+    const badge = tile(wid).querySelector('.gs-badge');
     const menu = tile(wid).querySelector('.pane-overflow-menu');
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, overflowBtn);
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
 
     // Reuses the topbar's exact classes, not a bespoke lookalike.
     assert.ok(menu.classList.contains('overflow-menu'),
@@ -292,13 +335,13 @@ test('the "⋯" overflow renders a labeled vertical list, like the topbar #prima
     window.chela.termPinToggle(pinRow, wid);   // leave state as found for later tests
     assert.equal(pinRow.getAttribute('aria-pressed'), 'false');
 
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, overflowBtn);
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
 });
 
 // 1b — Only one pane's overflow is open at a time (opening a second closes the first).
 test('opening one pane\'s "⋯" overflow closes any other pane\'s open overflow', () => {
-    const btn1 = tile('@1').querySelector('.gs-overflow-btn');
-    const btn2 = tile('@2').querySelector('.gs-overflow-btn');
+    const btn1 = tile('@1').querySelector('.gs-badge');
+    const btn2 = tile('@2').querySelector('.gs-badge');
     const menu1 = tile('@1').querySelector('.pane-overflow-menu');
     const menu2 = tile('@2').querySelector('.pane-overflow-menu');
 
@@ -581,23 +624,167 @@ test('typing a query drops the panes-first section and fuzzy-matches everything,
     window.chela.closePalette();
 });
 
-// 11 — THE "⋯" DROPDOWN'S ON-FILL OUTRANKS THE POPOVER-ITEM BASE ROW (CMX-116 fixes a
-// CMX-114 regression). `.gs-keys button.popover-item { background: none }` (specificity
-// 0,2,1) overrode a plain `.gs-share-btn.on` / `.gs-orch-btn.on` / `.gs-pin-btn.on`
-// (0,2,0), so the active fill never painted. jsdom cannot resolve CSS cascade
-// specificity (see the honest disclaimer above and in the PR) — this is a STATIC
-// source-text fact: the higher-specificity form must exist, and the old
-// lower-specificity form (which the popover-item rule can still outrank) must be gone.
-test('the pane-menu ON-state fill rules repeat the `.gs-keys button` prefix so they outrank the popover-item base rule', () => {
+// 11 — THE PANE-MENU ON-FILL OUTRANKS THE POPOVER-ITEM BASE ROW (CMX-116 fixed a
+// CMX-114 regression this way; CMX-117 moved the menu OUT from under `.gs-keys`
+// entirely — the left badge now anchors it, and `.gs-keys` holds only the
+// window controls — so the fix is RESCOPED onto `.pane-overflow-menu`, the
+// menu's own wrapper, rather than dropped). jsdom cannot resolve CSS cascade
+// specificity (see the honest disclaimer above and in the PR) — this is a
+// STATIC source-text fact: the higher-specificity form must exist, and a bare
+// lower-specificity form (which the popover-item rule can still outrank
+// regardless of source order) must be gone.
+test('the pane-menu ON-state fill rules repeat the `.pane-overflow-menu button` prefix so they outrank the popover-item base rule', () => {
     ['gs-share-btn', 'gs-orch-btn', 'gs-pin-btn'].forEach(cls => {
-        const strong = new RegExp(String.raw`^\.gs-keys\s+button\.${cls}\.on\s*\{[^}]*background:`, 'm');
+        const strong = new RegExp(String.raw`^\.pane-overflow-menu\s+button\.${cls}\.on\s*\{[^}]*background:`, 'm');
         assert.ok(strong.test(CSS),
-            `.gs-keys button.${cls}.on { background: ... } must exist — higher specificity (0,3,1) than ` +
-            '.gs-keys button.popover-item (0,2,1)');
+            `.pane-overflow-menu button.${cls}.on { background: ... } must exist — higher specificity ` +
+            '(0,3,1) than .pane-overflow-menu button.popover-item (0,2,1)');
 
         const bare = new RegExp(String.raw`^\.${cls}\.on\s*\{[^}]*background:`, 'm');
         assert.ok(!bare.test(CSS),
             `a bare .${cls}.on { background: ... } rule must not exist — it is the exact form (0,2,0) ` +
-            'the popover-item base rule already outranks, which is how this regressed');
+            'the popover-item base rule already outranks, which is how this regressed before');
+
+        // The old `.gs-keys button.X.on` form must also be gone — .gs-keys no longer
+        // wraps the menu (CMX-117), so a leftover copy of that selector would be dead
+        // CSS that silently never matches anything.
+        const stale = new RegExp(String.raw`^\.gs-keys\s+button\.${cls}\.on\s*\{`, 'm');
+        assert.ok(!stale.test(CSS),
+            `a stale .gs-keys button.${cls}.on rule must not exist — .gs-keys no longer contains the menu`);
     });
+});
+
+// 12 — THE BADGE CARRIES LIVE STATUS BY SHAPE, NOT HUE ALONE (CMX-117 A). The badge
+// wears `.term-status-dot` (the same class the old standalone dot wore), so the
+// exact same working/waiting/idle classes _colorTermDots paints now land on the
+// whole badge — a working pane's badge must carry different markup than an idle
+// one's, not just a different colour jsdom can't see.
+test('the badge is painted by live status (working vs idle carry different classes) — CMX-117 A', async () => {
+    const wid = '@1';
+    const badge = tile(wid).querySelector('.gs-badge');
+    assert.ok(badge.classList.contains('term-status-dot'),
+        'the badge must wear .term-status-dot, or _colorTermDots never finds it to paint it');
+    assert.equal(badge.getAttribute('data-status-for'), wid);
+
+    // Sanity: no fixture agent carries session_status, so the initial paint is idle.
+    assert.ok(badge.classList.contains('idle'), 'sanity: an agent with no session_status paints idle');
+    assert.ok(!badge.classList.contains('working'));
+
+    AGENTS[0].session_status = 'busy';
+    await terminals.termTick();
+    assert.ok(badge.classList.contains('working'), 'a busy agent\'s badge must gain the working (filled) class');
+    assert.ok(!badge.classList.contains('idle'), 'and lose the idle (hollow) class — shape must actually change');
+
+    delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
+    await terminals.termTick();
+    assert.ok(badge.classList.contains('idle'), 'reverting session_status must repaint the badge back to idle');
+});
+
+// 13 — THE ☰ GLYPH IS GONE; .gs-grip STAYS THE DRAG HANDLE (CMX-117 B). GridStack's
+// `handle`/`draggable.handle` option targets `.gs-grip` (buildWall) — dropping the
+// class, not just the glyph, would silently break dragging.
+test('the "☰" grip glyph is gone, but .gs-grip (the drag handle) and the title stay — CMX-117 B', () => {
+    const wid = '@2';
+    const grip = tile(wid).querySelector('.gs-grip');
+    assert.ok(grip, 'GridStack needs a .gs-grip element as its drag handle, or dragging breaks');
+    assert.ok(!grip.textContent.includes('☰'), 'the old "☰" hamburger glyph must be gone from the handle');
+    assert.ok(grip.querySelector('.pane-title'), 'the handle must still wrap the renameable title');
+});
+
+// 14 — THE RIGHT CLUSTER IS WINDOW CONTROLS ONLY (CMX-117 C). The badge/menu moved
+// to the left edge; nothing but minimize/maximize/kill may remain on the right.
+test('the right control cluster holds exactly minimize, maximize, kill — nothing else — CMX-117 C', () => {
+    const wid = '@3';
+    const winCtl = tile(wid).querySelector('.gs-win-ctl');
+    assert.ok(winCtl, 'every wall tile has a window-controls cluster');
+    const buttons = Array.from(winCtl.children).filter(el => el.tagName === 'BUTTON');
+    const kinds = buttons.map(b => ['gs-min-btn', 'gs-max-btn', 'gs-kill-btn'].find(c => b.classList.contains(c)));
+    assert.deepEqual(kinds, ['gs-min-btn', 'gs-max-btn', 'gs-kill-btn'],
+        'the right cluster must be exactly minimize, maximize, kill, in that order — an extra or ' +
+        'unrecognised control means something (the old "⋯", a stray button) snuck back onto the right');
+});
+
+// 15 — BRANCH + CONTEXT LIVE IN THE BOTTOM BAR, WIRED (CMX-117 D). Not just present
+// in the right spot statically — the real /api/agents/context poll (termTick) must
+// actually fill THESE elements, proving the updater was repointed, not just that a
+// second copy happens to sit in the new markup unused.
+test('branch + context render inside the bottom .term-ctx-bar, and the live poll fills them — CMX-117 D', async () => {
+    const wid = '@1';
+    const head = tile(wid).querySelector('.gs-head');
+    const ctxBar = tile(wid).querySelector('.term-ctx-bar');
+    assert.ok(ctxBar, 'every wall tile has a bottom context bar');
+    assert.equal(head.querySelector('.gs-branch'), null, '.gs-branch must not live in the top header anymore');
+    assert.equal(head.querySelector('.gs-ctx'), null, '.gs-ctx must not live in the top header anymore');
+    assert.ok(ctxBar.querySelector('.gs-branch'), '.gs-branch must live in the bottom bar');
+    assert.ok(ctxBar.querySelector('.gs-ctx'), '.gs-ctx must live in the bottom bar');
+    assert.ok(ctxBar.querySelector('.term-ctx-fill'), 'the ambient fill strip stays folded into the same bar');
+
+    CTX = [{ window_id: wid, used_pct: 42, used: '84.0K', total: '200K', estimated: false, branch: 'cmx-117' }];
+    await terminals.termTick();
+    const ctxChip = ctxBar.querySelector('.gs-ctx');
+    const branchChip = ctxBar.querySelector('.gs-branch');
+    assert.equal(ctxChip.hidden, false, 'the live poll must reveal the context chip in its new home');
+    assert.equal(ctxChip.textContent, '42% · 84.0K/200K');
+    assert.equal(branchChip.hidden, false);
+    assert.equal(branchChip.textContent, '⎇ cmx-117');
+
+    CTX = {};   // leave the fixture as other tests expect it
+    await terminals.termTick();
+});
+
+// 16 — THE ORCHESTRATOR RING IS A NON-HUE CUE, DRIVEN OFF THE SAME SIGNAL AS THE MENU
+// ROW (CMX-117 E). Ownership is exclusive: only the owning pane's badge wears it, and
+// it moves live with a real subscribe/release round-trip — never a hardcoded paint.
+test('the badge gains a ring iff its pane owns the decisions inbox, in lockstep with the menu row — CMX-117 E', async () => {
+    const owner = '@2', other = '@1';
+    const ownerBadge = tile(owner).querySelector('.gs-badge');
+    const otherBadge = tile(other).querySelector('.gs-badge');
+    const orchBtn = tile(owner).querySelector('.gs-orch-btn');
+    assert.equal(ownerBadge.classList.contains('gs-badge-orch'), false, 'sanity: nobody owns the slot yet');
+
+    await window.chela.orchestratorBtnClick(orchBtn, owner);
+    assert.equal(ownerBadge.classList.contains('gs-badge-orch'), true,
+        'subscribing must add the ring — the same onOrchestratorChange signal the menu row repaints from');
+    assert.equal(orchBtn.classList.contains('on'), true, 'sanity: the menu row agrees it is now owned');
+    assert.equal(otherBadge.classList.contains('gs-badge-orch'), false,
+        'ownership is exclusive — a non-owning pane\'s badge must never also show the ring');
+
+    await window.chela.orchestratorBtnClick(orchBtn, owner);   // release, leave state as found
+    assert.equal(ownerBadge.classList.contains('gs-badge-orch'), false, 'releasing must remove the ring');
+});
+
+// 17 — WIRE-FROM-MENU: THE POPOVER CLOSES THE INSTANT THE DRAG STARTS, AND CLEANUP IS
+// COMPLETE (CMX-117 F). Liav reported that clicking Wire from the (badge-anchored)
+// menu shrinks every pane and drops the wall's grid gaps. Root-causing it needed a
+// REAL browser (jsdom has no layout engine) — live testing (synthetic DOM events AND
+// real CDP-level mouse input, against both the pre- and post-redesign trigger, driven
+// against this exact worktree's dashboard on a scratch port) could NOT reproduce a
+// shrink or gap loss. What's fixed regardless: the popover used to stay open — a
+// `position:fixed` menu floating over the wall — for the whole drag, only closing on
+// the NEXT unrelated document click. This asserts what jsdom CAN prove; the "no
+// shrink" finding itself is a live-browser fact, stated in the PR, not a jsdom guard
+// for a layout question jsdom cannot see.
+test('starting a wire from the badge menu closes the menu immediately, and Escape fully cleans up — CMX-117 F', () => {
+    const wid = '@1';
+    const badge = tile(wid).querySelector('.gs-badge');
+    const menu = tile(wid).querySelector('.pane-overflow-menu');
+    const gsEl = document.querySelector('.grid-stack');
+    const stage = document.getElementById('term-stage');
+
+    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
+    assert.equal(menu.hidden, false, 'sanity: the menu is open before the drag starts');
+
+    const port = menu.querySelector('.gs-port');
+    window.chela.wireDragStart({ preventDefault() {}, stopPropagation() {} }, port, wid);
+
+    assert.equal(menu.hidden, true, 'the popover must close the instant the wire gesture starts');
+    assert.ok(gsEl.classList.contains('gs-dragging'), 'the grid enters the wire-drag state');
+    assert.ok(stage.classList.contains('wire-live'), 'every tile sprouts a drop socket');
+    assert.ok(stage.querySelector('.wire-overlay'), 'the wire SVG overlay is appended above the grid');
+
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+
+    assert.equal(gsEl.classList.contains('gs-dragging'), false, 'Escape must fully clean up the drag state');
+    assert.equal(stage.classList.contains('wire-live'), false, 'Escape must fully clean up the drop-socket state');
+    assert.equal(stage.querySelector('.wire-overlay'), null, 'Escape must remove the SVG overlay');
 });
