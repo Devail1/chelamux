@@ -1014,8 +1014,9 @@ test('CMX-130: mobile keeps the pane header (shorter) instead of hiding it, and 
 });
 
 test('CMX-130: --term-keybar-h reserves the fixed mobile keybar\'s footprint, and .term-single .term-pane subtracts it', () => {
-    const varDecl = CSS.match(/--term-keybar-h:\s*([0-9.]+)px/);
-    assert.ok(varDecl, '--term-keybar-h must be declared as a px length');
+    const varDecl = CSS.match(/:root\s*\{\s*--term-keybar-h:\s*([0-9.]+)px/);
+    assert.ok(varDecl, '--term-keybar-h must be declared as a px length on :root — declaring it on a ' +
+        'selector nothing matches leaves the text intact but silently falls back var(--term-keybar-h, 0px) to 0');
     assert.ok(parseFloat(varDecl[1]) > 0,
         '--term-keybar-h must not be zeroed — a zeroed var silently disables the reservation, letting the ' +
         'fixed keybar paint back over the terminal\'s own bottom row');
