@@ -987,3 +987,119 @@ test('starting a wire from the badge menu closes the menu immediately, and Escap
     assert.equal(stage.classList.contains('wire-live'), false, 'Escape must fully clean up the drop-socket state');
     assert.equal(stage.querySelector('.wire-overlay'), null, 'Escape must remove the SVG overlay');
 });
+
+// 18 — CMX-130: MOBILE PANE CHROME. Two bundled fixes in the `@media (max-width: 768px)`
+// rules. (a) A prior pass hid `.gs-head` outright on phones reasoning the agent name/
+// status already live in the switcher pills — but that also hid the header's own dot/
+// menu (Share/Orchestrator/Pin), the only place those live on mobile. It's back, just
+// shorter (tighter padding/font) than the desktop bar; the window-control keys (drag/
+// min/max/kill) genuinely don't apply to the forced single pane, so those stay hidden.
+// (b) The persistent v2 keybar is `position: fixed` — it paints OVER whatever flow
+// content sits at the bottom of the viewport rather than pushing it up. `.term-single
+// .term-pane`'s mobile height (70vh) was tuned against the OLD collapsible #term-bar
+// and never updated for the new fixed bar, so it painted over the pane's own bottom
+// row (the input box + the TUI's own "auto mode on" status line). `--term-keybar-h`
+// is the fixed bar's measured footprint; the pane must subtract it. Static
+// source-text facts, same honest-scoping as the ctx-bar-h guards above — jsdom can't
+// resolve the rendered overlap itself.
+test('CMX-130: mobile keeps the pane header (shorter) instead of hiding it, and hides only the inapplicable window-control keys', () => {
+    // Parse non-nested rule blocks (selector list + body) out of the raw CSS text.
+    // A plain /\.gs-head\s*\{\s*display:\s*none;?\s*\}/ doesNotMatch only catches
+    // `.gs-head` as a SOLE selector — folding it into a neighbouring grouped
+    // `display: none` rule (e.g. `.foo, .gs-head { display: none }`) re-hides the
+    // header while leaving that exact substring absent from the source text.
+    // Strip comments first — an uncommaed comment sitting directly above a rule
+    // (common in this file) otherwise gets swallowed into the captured selector
+    // text, and a comma inside the comment's prose then breaks the split-on-comma
+    // selector-list check below.
+    const cssNoComments = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+    const ruleBlocks = [];
+    const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+    let ruleMatch;
+    while ((ruleMatch = ruleRe.exec(cssNoComments))) {
+        ruleBlocks.push({ selector: ruleMatch[1].trim(), body: ruleMatch[2] });
+    }
+    const selectorsIn = (block) => block.selector.split(',').map((s) => s.trim());
+
+    const hidesGsHead = ruleBlocks.some((b) =>
+        selectorsIn(b).includes('.gs-head') && /display:\s*none/.test(b.body));
+    assert.equal(hidesGsHead, false,
+        '.gs-head must not be hidden on mobile, alone or grouped into another selector\'s ' +
+        '`display: none` — the header\'s dot/menu (Share/Orchestrator/Pin) must stay reachable on phones');
+
+    // The shape-only regex this replaced (`padding: Npx Npx; font-size: Npx;`) never
+    // compared magnitudes to the desktop rule, so inflating the mobile numbers past
+    // desktop's satisfied it while making the "shorter" bar taller than desktop.
+    const gsHeadBlocks = ruleBlocks.filter((b) => selectorsIn(b).includes('.gs-head'));
+    assert.equal(gsHeadBlocks.length, 2,
+        'expected exactly one desktop .gs-head rule and one mobile override — found ' + gsHeadBlocks.length);
+    const dims = (body) => {
+        const pad = body.match(/padding:\s*([0-9.]+)px\s+([0-9.]+)px/);
+        const fs = body.match(/font-size:\s*([0-9.]+)px/);
+        assert.ok(pad && fs, 'each .gs-head rule must declare both padding: Npx Npx and font-size: Npx');
+        return { v: parseFloat(pad[1]), h: parseFloat(pad[2]), fs: parseFloat(fs[1]) };
+    };
+    const desktop = dims(gsHeadBlocks[0].body);
+    const mobile = dims(gsHeadBlocks[1].body);
+    assert.ok(mobile.v < desktop.v && mobile.h < desktop.h,
+        `the mobile .gs-head padding (${mobile.v}px ${mobile.h}px) must be smaller than desktop's ` +
+        `(${desktop.v}px ${desktop.h}px) on both axes — this is the "shorter bar" the PR claims`);
+    assert.ok(mobile.fs < desktop.fs,
+        `the mobile .gs-head font-size (${mobile.fs}px) must be smaller than desktop's (${desktop.fs}px)`);
+
+    assert.match(CSS, /\.gs-keys\s*\{\s*display:\s*none;?\s*\}/,
+        '.gs-keys (drag/min/max/kill) must stay hidden on mobile — those controls do not apply to the ' +
+        'forced single pane');
+});
+
+test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in .term-single .term-pane\'s height calc, which also subtracts the safe-area inset', () => {
+    // Parse rule blocks (same approach as the .gs-head guard above) so we match on the
+    // ACTUAL variable name, not a text prefix. Prior rounds fell to boundary tricks:
+    // unbinding the declaration from :root (var falls back to 0px), then renaming only
+    // the CONSUMER to `var(--term-keybar-height)` — a longer name a prefix regex
+    // `var(--term-keybar-h` still matches, but which references an UNDECLARED var (→ 0px
+    // fallback) and silently reverts the keybar-overlap fix. Both sides are pinned here
+    // to the exact name `--term-keybar-h`, terminated by a real boundary.
+    const cssNoComments = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+    const ruleBlocks = [];
+    const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+    let m;
+    while ((m = ruleRe.exec(cssNoComments))) ruleBlocks.push({ selector: m[1].trim(), body: m[2] });
+    const hasSelector = (b, sel) => b.selector.split(',').map((s) => s.trim()).includes(sel);
+
+    // --- DECLARATION: --term-keybar-h on :root, px > 0. The `:` terminates the name,
+    //     so `--term-keybar-height:` cannot satisfy `--term-keybar-h\s*:`. ---
+    let declPx = null;
+    for (const b of ruleBlocks.filter((b) => hasSelector(b, ':root'))) {
+        const d = b.body.match(/--term-keybar-h\s*:\s*([0-9.]+)px/);
+        if (d) { declPx = parseFloat(d[1]); break; }
+    }
+    assert.ok(declPx !== null, '--term-keybar-h must be declared on :root as a px length (so the pane inherits it)');
+    assert.ok(declPx > 0, '--term-keybar-h must be > 0 — a zeroed reservation lets the fixed keybar paint over the pane bottom');
+
+    // --- CONSUMER: the mobile .term-single .term-pane rule whose height is a calc() ---
+    const paneCalc = ruleBlocks
+        .filter((b) => hasSelector(b, '.term-single .term-pane'))
+        .map((b) => b.body)
+        .find((body) => /height:\s*calc\(/.test(body));
+    assert.ok(paneCalc, '.term-single .term-pane must set height: calc(...) on mobile, not a bare 70vh');
+
+    // Extract every var() by its FULL name (--[\w-]+ is greedy and terminated by `,` or
+    // `)`), then require the exact `--term-keybar-h` — a renamed/longer consumer captures
+    // a different name and fails this, closing the prefix-match hole.
+    const consumedVars = [...paneCalc.matchAll(/var\(\s*(--[\w-]+)\s*(?:,[^)]*)?\)/g)].map((x) => x[1]);
+    assert.ok(consumedVars.includes('--term-keybar-h'),
+        `.term-single .term-pane height must consume var(--term-keybar-h) by exact name — captured: ` +
+        `${consumedVars.join(', ') || '(none)'}. A longer/renamed name references an undeclared var ` +
+        '(→ 0px fallback) and silently reverts the keybar-overlap fix.');
+
+    // --- OPERATORS + STRUCTURE: both terms must be SUBTRACTED from a 70vh base, exact names.
+    //     "contains var(--term-keybar-h)" and "contains env(safe-area-inset-bottom)" both stay
+    //     true if you flip a `-` to `+` (adds the footprint → TALLER pane, WORSE overlap) or
+    //     change the 70vh base. Pin the whole shape so the sign and base can't drift. ---
+    assert.match(paneCalc,
+        /height:\s*calc\(\s*70vh\s*-\s*var\(\s*--term-keybar-h\s*(?:,[^)]*)?\)\s*-\s*env\(\s*safe-area-inset-bottom\s*\)\s*\)/,
+        '.term-single .term-pane height must be exactly `calc(70vh - var(--term-keybar-h[, fallback]) - ' +
+        'env(safe-area-inset-bottom))` — base 70vh, BOTH terms SUBTRACTED (a flipped + grows the pane and ' +
+        'worsens the overlap), exact var name. Any of those silently reverts the keybar-overlap fix.');
+});
