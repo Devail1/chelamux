@@ -1063,4 +1063,16 @@ test('CMX-130: --term-keybar-h reserves the fixed mobile keybar\'s footprint, an
     assert.match(CSS, /\.term-single \.term-pane\s*\{\s*height:\s*calc\(70vh - var\(--term-keybar-h/,
         '.term-single .term-pane on mobile must shrink its height by var(--term-keybar-h), not a bare 70vh — ' +
         'a bare 70vh is exactly what let the fixed keybar overlap the pane\'s bottom rows');
+
+    // CMX-130 (safe-area): --term-keybar-h is only the FIXED 47px footprint; the keybar's
+    // own bottom padding is `calc(6px + env(safe-area-inset-bottom))`, so on a
+    // home-indicator phone the bar is 47px + inset tall. The pane's calc must therefore
+    // ALSO subtract env(safe-area-inset-bottom), or the inset's worth of the bottom row
+    // (input box + "auto mode on") stays painted under the bar. Dropping the inset term
+    // silently re-introduces exactly that partial overlap → RED.
+    assert.match(CSS,
+        /\.term-single \.term-pane\s*\{\s*height:\s*calc\(70vh - var\(--term-keybar-h[^)]*\)\s*-\s*env\(safe-area-inset-bottom\)/,
+        '.term-single .term-pane must subtract env(safe-area-inset-bottom) IN ADDITION to var(--term-keybar-h) ' +
+        '— the keybar\'s footprint is 47px PLUS the home-indicator inset, and subtracting only the 47px leaves ' +
+        'the inset\'s worth of the pane\'s bottom row under the fixed bar');
 });

@@ -2243,8 +2243,12 @@ input[type="text"]:focus, textarea:focus, select:focus {
        CMX-130: this 70vh was tuned against the old collapsible #term-bar and never
        updated when the v2 keybar (fixed, always-on) replaced it below — the fixed
        bar painted over the pane's own bottom slice instead of sitting past it.
-       Subtract --term-keybar-h so the pane's bottom edge clears the fixed bar. */
-    .term-single .term-pane { height: calc(70vh - var(--term-keybar-h, 0px)); }
+       Subtract --term-keybar-h AND env(safe-area-inset-bottom) so the pane's bottom
+       edge clears the fixed bar's FULL footprint: the keybar's own bottom padding is
+       `calc(6px + env(safe-area-inset-bottom))`, so on a home-indicator phone the bar
+       is 47px + inset tall — subtracting only the 47px would leave the inset's worth
+       of the pane's bottom row (input box + "auto mode on") still under the bar. */
+    .term-single .term-pane { height: calc(70vh - var(--term-keybar-h, 0px) - env(safe-area-inset-bottom)); }
     #term-bar { max-height: 60vh; overflow-y: auto; }
 
     /* Dense layout: Special & Ctrl as full-width rows; D-pad + Nav + Scroll
