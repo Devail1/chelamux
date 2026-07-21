@@ -15,6 +15,23 @@ Each item is a four-field brief the judge can enforce mechanically:
 
 ## Open — CI drives the loop
 
+- [ ] **🐛⌨️ HARDEN THE SEED SUBMIT — re-send Enter (not re-paste) so any startup redraw can't strand the prompt (Liav, 2026-07-21; residual after CMX-131).** CMX-131's MCP isolation removed the "MCP servers need authentication" notice, but dispatched windows STILL hang: a SECOND late startup notice (`gh auth login for PR status`) — and generically ANY startup redraw — lands after `send_tmux` (`messenger.py`) pastes the prompt and **eats its separately-sent Enter**, stranding the seed on the `❯` line unsubmitted. Confirmed live: judge launched with `--strict-mcp-config` (no MCP notice) yet still sat idle with the prompt typed.
+
+  **ROOT CAUSE.** `_send_seed` (`dispatcher.py` ~1031) mis-recovers: on "agent still idle after the seed" it re-sends the **whole prompt** via `send_tmux` again — but the paste almost always DID land, so re-pasting **doubles the prompt** in the input box; and when `_seed_landed` reads the session status as `None` (unreadable — which is exactly what a mid-redraw window returns) it **fails open** ("assuming the seed landed"), so the Enter is never re-sent. The real failure is "paste landed, Enter eaten," but the code treats it as "paste dropped."
+
+  **OBJECTIVE.** Make the submit notice-agnostic:
+    1. When the agent hasn't gone busy after the initial `send_tmux`, **re-send JUST Enter** — a bare `tmux send-keys <target> Enter` (add a small `send_enter(window_id)` helper, e.g. in `messenger.py`), NOT another full paste. The paste is already in the box; a redraw only ate the Enter. Confirm busy; repeat up to `SEED_MAX_SENDS` with the settle gap. **Only if** every Enter-only re-send fails, fall back to ONE full `send_tmux` re-paste (covers the rarer genuinely-dropped-paste case).
+    2. **Drop the fail-open on unreadable status:** `_seed_landed` returning `None` must NOT count as landed — keep retrying the Enter within the send budget (the observed hangs read `None` mid-redraw).
+
+  **BOUNDARIES.** `dispatcher.py` (`_send_seed` + the recovery path) and `messenger.py` (a bare-Enter helper). Do NOT change `send_tmux`'s load-buffer/paste-buffer mechanism, the launch command / MCP isolation (CMX-131), `_wait_for_ready`, or `refuses_paste`. Keep the `SEED_*` constants (tune only if clearly needed). PR → `dev`.
+
+  **GUARDS (pytest; corrupt→RED; mock the tmux sends + `_agent_status`).**
+    - "Paste landed, agent still idle" (Enter eaten): the recovery's next send is a **bare Enter**, not a re-paste — assert the 2nd send carries NO prompt text (a re-paste would show the prompt again). Corrupt (make recovery re-paste) → RED.
+    - `_seed_landed` → `None` (unreadable): `_send_seed` must **retry**, not return success. Corrupt (restore the fail-open) → RED.
+    - Agent goes busy after an Enter re-send → `_send_seed` returns True (it converges, doesn't loop forever or fall through).
+
+  **VERIFY.** A freshly dispatched agent AND judge submit their seed on their own — **no manual nudge, no watchdog trigger** — even with the `gh auth login for PR status` notice present. This is the real end of the hang saga; the external watchdog becomes a safety net, not a necessity.
+
 - [x] **🐛🔌 DISPATCH STARTUP RACE — isolate MCP for dispatched agents + judge (fixes the "prompt pasted but not submitted" hang) (Liav, 2026-07-21).** Every dispatched window (agent AND judge, plus reworks) launches idle with its seed prompt typed but **unsubmitted**, needing a manual Enter — breaking unattended dispatch.
 
   **ROOT CAUSE.** `resolve_agent_cmd` (dispatcher.py ~308–346) builds the default `claude --permission-mode <mode> --model <model>` (via `AGENT_BASE_CMD`) with **no MCP isolation**, so dispatched agents + the judge inherit the orchestrator's interactive MCP servers (chrome-devtools, Gmail/Calendar/Drive). On startup those can't auth → Claude Code paints a "⚠ N MCP servers need authentication" notice whose **redraw lands after the pane first looked ready and eats the seed's submit Enter** — the paste stays in the input box, unsent. The `_send_seed`/`_seed_landed` recovery then reads the agent's status as `None` (unreadable) *during that redraw* and **fails open** ("assuming the seed landed"), so it's never re-sent.
