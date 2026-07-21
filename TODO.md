@@ -15,7 +15,19 @@ Each item is a four-field brief the judge can enforce mechanically:
 
 ## Open — CI drives the loop
 
-_No open tasks._
+- [ ] **🐛📱 MOBILE PANE CHROME — restore the pane title bar (shorter) + fix the terminal bottom-row cutoff (Liav, 2026-07-21).** Two fixes in the `@media (max-width: 768px)` block of `style.css`. They're bundled because they touch the same block and the cutoff is the *real* reason the pane bottom (input box + the TUI's own "auto mode on" line) isn't visible on mobile — fixing it gives the mode natively, no indicator needed.
+
+  **OBJECTIVE.**
+  1. **Restore the pane title bar on mobile.** It's currently `.gs-head { display: none }` (deliberate declutter). Show it instead at a **reduced height vs desktop** — desktop `.gs-head` is `padding: 4px 9px; font-size: 12px`; tighten to roughly `padding: 2px 8px` + `font-size: 11px` (aim ~70–75% of desktop height). Carry only the **mobile-relevant controls: the status dot, the pane name, and the ⋮ menu.** The wall-only controls (drag grip, min/max, resize handles, kill/rename buttons) stay hidden on mobile — they don't apply to the forced single pane; pane actions live in the ⋮ menu. If un-hiding `.gs-head` would surface any of those wall-only buttons, keep *those specific buttons* `display:none` on mobile so only dot · name · ⋮ show.
+  2. **Fix the terminal bottom-row cutoff.** The fixed bottom keybar's real height is `~47px + env(safe-area-inset-bottom)` (6px top pad + 34px `.kb2-key` min-height + `calc(6px + env(safe-area-inset-bottom))` bottom pad + 1px border-top), but the reservation is a **bare `#term-stage { margin-bottom: 46px }`** — no inset. So on a phone with a home-indicator safe area, the keybar **overlaps the terminal's last rows** (input box + status line hidden). Change it to `#term-stage { margin-bottom: calc(47px + env(safe-area-inset-bottom)); }` so the reservation matches the keybar's true footprint. NOTE: restoring the title bar (part 1) also eats vertical space at the *top* of the pane — that's expected/fine on mobile.
+
+  **BOUNDARIES.** `style.css` `@media (max-width: 768px)` block only (+ minimal mobile `.gs-head` height rules). Do NOT change the **desktop** `.gs-head`, the keybar's own styling, the `_kbPin` JS, or the bottom bar (`.term-ctx-bar` — CMX-127/129). Don't regress the mobile keybar or the agent-switcher pills. PR → `dev`.
+
+  **GUARDS (`wallnav.test.mjs`; corrupt→RED — SOURCE-STRUCTURE parse of the media block; rendered layout stays MANUAL live-verify per [[reference_chela_judge_css_render_ceiling]]).**
+    - Within the `@media (max-width: 768px)` block, `.gs-head` is **NOT** `display: none` (the title bar is restored). Isolate that media block and assert no `.gs-head { display: none }` in it; re-add it → RED.
+    - The mobile `#term-stage` bottom reservation **references `env(safe-area-inset-bottom)`** (not a bare px). Assert its `margin-bottom` contains `safe-area-inset-bottom`; revert to a bare `46px` → RED.
+
+  **VERIFY (live, narrow / mobile viewport).** (1) The pane shows a compact title bar — dot · name · ⋮ — visibly shorter than desktop, with no wall-only controls. (2) The terminal's **bottom rows are fully visible above the keybar** — the input box and the TUI status line ("auto mode on") are not cut off, including on a viewport emulating a home-indicator safe area.
 
 ## Backlog
 
