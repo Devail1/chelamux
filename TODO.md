@@ -15,7 +15,7 @@ Each item is a four-field brief the judge can enforce mechanically:
 
 ## Open — CI drives the loop
 
-- [ ] **🐛🔌 DISPATCH STARTUP RACE — isolate MCP for dispatched agents + judge (fixes the "prompt pasted but not submitted" hang) (Liav, 2026-07-21).** Every dispatched window (agent AND judge, plus reworks) launches idle with its seed prompt typed but **unsubmitted**, needing a manual Enter — breaking unattended dispatch.
+- [x] **🐛🔌 DISPATCH STARTUP RACE — isolate MCP for dispatched agents + judge (fixes the "prompt pasted but not submitted" hang) (Liav, 2026-07-21).** Every dispatched window (agent AND judge, plus reworks) launches idle with its seed prompt typed but **unsubmitted**, needing a manual Enter — breaking unattended dispatch.
 
   **ROOT CAUSE.** `resolve_agent_cmd` (dispatcher.py ~308–346) builds the default `claude --permission-mode <mode> --model <model>` (via `AGENT_BASE_CMD`) with **no MCP isolation**, so dispatched agents + the judge inherit the orchestrator's interactive MCP servers (chrome-devtools, Gmail/Calendar/Drive). On startup those can't auth → Claude Code paints a "⚠ N MCP servers need authentication" notice whose **redraw lands after the pane first looked ready and eats the seed's submit Enter** — the paste stays in the input box, unsent. The `_send_seed`/`_seed_landed` recovery then reads the agent's status as `None` (unreadable) *during that redraw* and **fails open** ("assuming the seed landed"), so it's never re-sent.
 
