@@ -15,6 +15,19 @@ Each item is a four-field brief the judge can enforce mechanically:
 
 ## Open — CI drives the loop
 
+- [ ] **📩 TELEGRAM BRIDGE — add `/compact` to the "/" menu as a passthrough command (Liav, 2026-07-21).** `/compact` is a **Claude Code** slash command (compacts the session's context), so the bridge should surface it in Telegram's "/" autocomplete and **forward** it to the bridged session — NOT intercept it. Mirrors the existing `/clear`.
+
+  **OBJECTIVE.** In `chela/telegram/inbound.py`, add `("compact", "Compact the agent's context (forwarded to Claude Code)")` to **`PASSTHROUGH_COMMANDS`** (the list of Claude-Code commands surfaced in the "/" menu but forwarded via the catch-all send_tmux path — right next to the existing `("clear", …)`). Because it's a passthrough, do NOT register a `CommandHandler` for it and do NOT add it to `BRIDGE_COMMANDS` (that would make the bridge intercept it instead of forwarding to Claude Code). `MENU_COMMANDS` auto-includes it (it's `BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS`), and the existing `resolve_command_for_window` already strips the `@botname` suffix Telegram appends in groups, so `/compact@chelamuxbot` forwards as `/compact`.
+
+  **BOUNDARIES.** `chela/telegram/inbound.py` only (+ a test). Do NOT touch `BRIDGE_COMMANDS`, `resolve_command_for_window`, or register a handler for compact. PR → `dev`.
+
+  **GUARDS (pytest; corrupt→RED).**
+    - `("compact", …)` is present in `PASSTHROUGH_COMMANDS` (and therefore in `MENU_COMMANDS`, so it publishes to the "/" menu). Remove it → RED.
+    - `compact` is NOT in `BRIDGE_COMMANDS` — it must be forwarded to Claude Code, not intercepted by the bridge. Move it into `BRIDGE_COMMANDS` → RED. (Guards the exact "intercept instead of forward" mistake.)
+    - `resolve_command_for_window("/compact@somebot", "somebot")` returns `"/compact"` (the group `@botname` suffix is stripped, so Claude Code receives its own command, not a stray prompt). Break the stripping for compact → RED.
+
+  **VERIFY.** In a Telegram forum topic bound to a session, `/compact` appears in the "/" autocomplete menu, and tapping/sending it forwards `/compact` to the pane so Claude Code compacts its context.
+
 - [x] **📱✕ MOBILE TITLE BAR — restore the ✕ close (kill) button (Liav, 2026-07-21).** CMX-130 restored the pane title bar on phones but hid ALL window controls with `.gs-keys { display: none }` in the `@media (max-width: 768px)` block — which also dropped the **✕ close/kill** button. Bring just the ✕ back.
 
   **OBJECTIVE.** In the `@media (max-width: 768px)` block of `style.css`: instead of `.gs-keys { display: none }`, **show `.gs-keys`** (its default `display: flex`) and hide only the wall-only **maximize** button (`.gs-max-btn { display: none }`) — maximize doesn't apply to the forced single pane. The **✕ kill button `.gs-kill-btn` stays visible** → the mobile title bar becomes `● · ⋮ · name · … · ✕`. (The minimize button `.gs-min-btn` is only rendered for *draggable wall tiles* — `terminals.js` ~764 gates it on `draggable` — so it's already absent on the mobile single pane; no rule needed for it.) The ✕ still only renders for **non-managed** sessions (existing behavior, `terminals.js` ~759 — managed personas keep no ✕), and its tap→confirm→kill flow (`termKillClick`/`termKillConfirm`) works as-is. If the ✕ looks oversized in the compact 27px mobile bar (`.gs-kill-btn` is `font-size: 12px; padding: 4px 7px`), tighten it slightly on mobile so it fits — small, judgment call.
