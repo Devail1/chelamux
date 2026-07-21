@@ -141,8 +141,13 @@ const AGENTS = [
 ];
 
 // CMX-117 property 15 (the bottom context bar) drives a real /api/agents/context
-// round-trip through termTick — empty by default (no fill), set per-test.
-let CTX = {};
+// round-trip through termTick — empty by default (no fill), set per-test. The real
+// endpoint always returns a list (app.py's api_agents_context builds `results = []`)
+// — `_applyTermContext` does `ctx.forEach` with no Array.isArray guard, so an empty
+// OBJECT here (rather than an empty array) permanently poisons `_ctxCache` the first
+// time it round-trips through termTick, and the next renderTerminals() throws for
+// real. Keep this shaped like the real contract.
+let CTX = [];
 
 function fakeFetch(url, opts) {
     const path = String(url);
@@ -841,7 +846,7 @@ test('branch + context render inside the bottom .term-ctx-bar, and the live poll
     assert.equal(branchChip.hidden, false);
     assert.equal(branchChip.textContent, '⎇ cmx-117');
 
-    CTX = {};   // leave the fixture as other tests expect it
+    CTX = [];   // leave the fixture as other tests expect it (real shape: an array)
     await terminals.termTick();
 });
 
@@ -1005,34 +1010,78 @@ test('starting a wire from the badge menu closes the menu immediately, and Escap
 // source-text facts, same honest-scoping as the ctx-bar-h guards above — jsdom can't
 // resolve the rendered overlap itself.
 test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and hides only the inapplicable window-control keys (not the × kill button)', () => {
-    // Parse non-nested rule blocks (selector list + body) out of the raw CSS text.
-    // A plain /\.gs-head\s*\{\s*display:\s*none;?\s*\}/ doesNotMatch only catches
-    // `.gs-head` as a SOLE selector — folding it into a neighbouring grouped
-    // `display: none` rule (e.g. `.foo, .gs-head { display: none }`) re-hides the
-    // header while leaving that exact substring absent from the source text.
-    // Strip comments first — an uncommaed comment sitting directly above a rule
-    // (common in this file) otherwise gets swallowed into the captured selector
-    // text, and a comma inside the comment's prose then breaks the split-on-comma
-    // selector-list check below.
+    // A media-aware rule parser — source-text parsing, jsdom can't resolve the actual
+    // cascade (see the honest-scoping note above the keybar-h test below), but tracking
+    // the FULL nested @media stack per leaf rule rather than flattening it away. A
+    // flattened /([^{}]+)\{([^{}]*)\}/g always matches the INNERMOST `{...}`, so it
+    // can't tell `.foo { display: none }` sitting directly in `@media (max-width:
+    // 768px)` apart from that same rule further wrapped in `@media (min-width:
+    // 769px)` — a condition that never overlaps `max-width: 768px`, so on any real
+    // phone the rule simply never applies. (This file has no legitimate nested
+    // @media anywhere — see the flat top-level `@media` list — so a nested one
+    // showing up here is itself the tell.) Strip comments first, same reason as
+    // before: an uncommaed comment directly above a rule otherwise gets swallowed
+    // into the captured selector text.
     const cssNoComments = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
-    const ruleBlocks = [];
-    const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
-    let ruleMatch;
-    while ((ruleMatch = ruleRe.exec(cssNoComments))) {
-        ruleBlocks.push({ selector: ruleMatch[1].trim(), body: ruleMatch[2] });
+    const rules = [];
+    function walk(css, pos, mediaStack, sink) {
+        while (pos < css.length) {
+            while (pos < css.length && /\s/.test(css[pos])) pos++;
+            if (pos >= css.length) return pos;
+            if (css[pos] === '}') return pos + 1;
+            let i = pos;
+            while (i < css.length && css[i] !== '{' && css[i] !== '}') i++;
+            if (css[i] === '}') return i + 1;
+            const head = css.slice(pos, i).trim();
+            if (head.startsWith('@media')) {
+                pos = walk(css, i + 1, mediaStack.concat(head.replace(/^@media\s*/, '')), sink);
+                continue;
+            }
+            if (head.startsWith('@')) {
+                pos = walk(css, i + 1, mediaStack, []);   // @keyframes/@font-face/… — parse & discard
+                continue;
+            }
+            const close = css.indexOf('}', i + 1);
+            sink.push({ selector: head, body: css.slice(i + 1, close), media: mediaStack });
+            pos = close + 1;
+        }
+        return pos;
     }
-    const selectorsIn = (block) => block.selector.split(',').map((s) => s.trim());
+    walk(cssNoComments, 0, [], rules);
 
-    const hidesGsHead = ruleBlocks.some((b) =>
-        selectorsIn(b).includes('.gs-head') && /display:\s*none/.test(b.body));
-    assert.equal(hidesGsHead, false,
-        '.gs-head must not be hidden on mobile, alone or grouped into another selector\'s ' +
-        '`display: none` — the header\'s dot/menu (Share/Orchestrator/Pin) must stay reachable on phones');
+    // A media stack is compatible with an actual phone (<=768px wide) unless one of
+    // its enclosing conditions demands a min-width a <=768px viewport can't meet.
+    const activeOnMobile = (mediaStack) => !mediaStack.some((cond) => {
+        const m = cond.match(/min-width:\s*([0-9.]+)px/);
+        return m && parseFloat(m[1]) > 768;
+    });
+
+    // Does this one selector (an entry from a comma-separated list) TARGET an element
+    // carrying `cls` — i.e. is `cls` part of its rightmost (subject) compound selector
+    // — as opposed to merely being an ancestor in a descendant selector? `.term-single
+    // .gs-keys` targets `.gs-keys`; `.gs-keys .foo` does not.
+    const targets = (selector, cls) => {
+        const tokens = selector.trim().replace(/[>+~]/g, ' ').split(/\s+/).filter(Boolean);
+        const subject = tokens[tokens.length - 1] || '';
+        return new RegExp(`\\.${cls}(?![\\w-])`).test(subject);
+    };
+
+    // True if ANY rule that could actually apply on a real phone hides `cls` — reached
+    // via an exact `.cls { display: none }`, a MORE SPECIFIC descendant form (`.term-
+    // single .cls { display: none }`), or a rule neutered by a contradictory @media.
+    const hiddenOnMobile = (cls) => rules.some((r) =>
+        activeOnMobile(r.media) &&
+        /display:\s*none/.test(r.body) &&
+        r.selector.split(',').some((s) => targets(s, cls)));
+
+    assert.equal(hiddenOnMobile('gs-head'), false,
+        '.gs-head must not be hidden on mobile — alone, via a more specific selector, or via a rule ' +
+        'neutered by @media — the header\'s dot/menu (Share/Orchestrator/Pin) must stay reachable on phones');
 
     // The shape-only regex this replaced (`padding: Npx Npx; font-size: Npx;`) never
     // compared magnitudes to the desktop rule, so inflating the mobile numbers past
     // desktop's satisfied it while making the "shorter" bar taller than desktop.
-    const gsHeadBlocks = ruleBlocks.filter((b) => selectorsIn(b).includes('.gs-head'));
+    const gsHeadBlocks = rules.filter((r) => r.selector.split(',').map((s) => s.trim()).includes('.gs-head'));
     assert.equal(gsHeadBlocks.length, 2,
         'expected exactly one desktop .gs-head rule and one mobile override — found ' + gsHeadBlocks.length);
     const dims = (body) => {
@@ -1049,23 +1098,52 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
     assert.ok(mobile.fs < desktop.fs,
         `the mobile .gs-head font-size (${mobile.fs}px) must be smaller than desktop's (${desktop.fs}px)`);
 
-    // CMX-133: `.gs-keys` itself must NOT be blanket-hidden any more — that also
-    // swallowed the × kill button, the only way to tear a session down on phones.
-    const hidesGsKeys = ruleBlocks.some((b) =>
-        selectorsIn(b).includes('.gs-keys') && /display:\s*none/.test(b.body));
-    assert.equal(hidesGsKeys, false,
-        '.gs-keys must not be display:none on mobile any more — that hides the × kill button along ' +
-        'with the inapplicable drag/min/max controls');
+    // CMX-133: `.gs-keys` — and its `.gs-win-ctl` wrapper, which is where min/max/kill
+    // actually live — must NOT be hidden on mobile any more, by any route. Hiding
+    // either one swallows the × kill button, the only way to tear a session down on
+    // phones, while leaving every individual-button assertion below satisfied.
+    assert.equal(hiddenOnMobile('gs-keys'), false,
+        '.gs-keys must not be hidden on mobile — directly, via a more specific descendant selector like ' +
+        '`.term-single .gs-keys`, or via a rule nested in a @media that never actually matches a phone — ' +
+        'any of those hides the × kill button along with the inapplicable drag/min/max controls');
+    assert.equal(hiddenOnMobile('gs-win-ctl'), false,
+        '.gs-win-ctl (the wrapper `.gs-keys` holds — min/max/kill all live inside it) must not be hidden ' +
+        'on mobile either; hiding the wrapper drops the × kill button while every `.gs-keys`/`.gs-min-btn`/' +
+        '`.gs-max-btn`/`.gs-kill-btn` assertion here stays satisfied');
 
     // The individual window-control buttons that genuinely don't apply to a forced
     // single pane (drag has nothing to drag onto, minimize has no dock, maximize is
-    // already full-screen) must still be hidden — but NOT gs-kill-btn.
-    const hidesSelector = (sel) => ruleBlocks.some((b) =>
-        selectorsIn(b).includes(sel) && /display:\s*none/.test(b.body));
-    assert.ok(hidesSelector('.gs-min-btn'), '.gs-min-btn must stay hidden on mobile — no dock to minimize to');
-    assert.ok(hidesSelector('.gs-max-btn'), '.gs-max-btn must stay hidden on mobile — already full-screen');
-    assert.equal(hidesSelector('.gs-kill-btn'), false,
+    // already full-screen) must still be hidden ON AN ACTUAL PHONE — but NOT gs-kill-btn.
+    assert.ok(hiddenOnMobile('gs-min-btn'), '.gs-min-btn must stay hidden on mobile — no dock to minimize to');
+    assert.ok(hiddenOnMobile('gs-max-btn'), '.gs-max-btn must stay hidden on mobile — already full-screen');
+    assert.equal(hiddenOnMobile('gs-kill-btn'), false,
         '.gs-kill-btn must NOT be hidden on mobile — it is the only way to close/kill a session there');
+});
+
+// 133-WIRING — the CSS guard above only proves the mobile stylesheet keeps `.gs-keys`
+// visible and never hides `.gs-kill-btn`; it says nothing about whether the mobile
+// header actually RENDERS a kill button in the first place. Every other DOM test in
+// this file builds WALL tiles (paneHead(wid, draggable=true) via buildWall) — none of
+// them ever construct the single-pane header (draggable=false) that phones force
+// renderTerminals into. Gating `kill` on `draggable` (wall-only) would leave the CSS
+// un-hiding a button that is never there, and every guard above would stay green.
+test('CMX-133: the single-pane header (the only header a phone ever renders) includes the × kill button, not gated on draggable', async () => {
+    window.chela.setTermMode('single');
+    await new Promise((r) => setTimeout(r, 120));   // let the in-flight renderTerminals settle
+    try {
+        const stage = document.querySelector('#term-stage');
+        assert.equal(stage.className, 'term-single',
+            'setTermMode("single") must force the single-pane layout for this assertion to be meaningful');
+        const head = stage.querySelector('.gs-head');
+        assert.ok(head, 'single-pane mode must still render a pane header');
+        assert.ok(head.querySelector('.gs-kill-btn'),
+            'the single-pane header must include the × kill button — gating it on `draggable` (true only ' +
+            'for wall tiles) silently drops it on mobile while every wall-only DOM test stays green');
+    } finally {
+        // Restore wall mode so any test appended after this one still sees wall tiles.
+        window.chela.setTermMode('wall');
+        await new Promise((r) => setTimeout(r, 120));
+    }
 });
 
 test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in .term-single .term-pane\'s height calc, which also subtracts the safe-area inset', () => {

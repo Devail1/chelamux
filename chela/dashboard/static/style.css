@@ -2965,8 +2965,8 @@ input[type="text"]:focus, textarea:focus, select:focus {
        the agent name/status already live in the switcher pills, but losing it
        also loses the only place the header's dot/menu (Share/Orchestrator/Pin)
        live on phones. Keep it, just shorter (tighter padding/font) than the
-       desktop bar. The window-control keys (drag/min/max/kill) genuinely don't
-       apply to the forced single pane — those stay hidden below. */
+       desktop bar. See CMX-133 below for what happens to the window-control
+       keys (drag/min/max/kill) themselves. */
     .gs-head { padding: 2px 8px; font-size: 11px; }
     /* CMX-133: drag/minimize/maximize genuinely don't apply to the forced
        single pane, but × kill is the only way to tear a session down on
