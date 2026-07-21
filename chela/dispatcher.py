@@ -101,7 +101,10 @@ GIT_NET_TIMEOUT_SECONDS = 60
 # the text is already sitting there and a second paste would type it twice.
 SEED_CONFIRM_TIMEOUT_SECONDS = 8.0
 SEED_CONFIRM_POLL_INTERVAL = 1.0
-SEED_MAX_SENDS = 3
+# 5 sends × ~8s each ≈ 40s of resend coverage — enough to outlast a slow startup
+# notice (MCP-auth, `gh auth login`) whose redraw window can run 20-30s before the
+# pane accepts keystrokes again. (Was 3 ≈ 24s, which gave up too early — CMX-133.)
+SEED_MAX_SENDS = 5
 SEED_RESEND_SETTLE_SECONDS = 1.0
 
 # Claude Code TUI ready indicators, matched against `tmux capture-pane -p`.
@@ -1007,25 +1010,31 @@ def _seed_landed(
     window_id: str,
     timeout: float = SEED_CONFIRM_TIMEOUT_SECONDS,
     poll: float = SEED_CONFIRM_POLL_INTERVAL,
-) -> bool | None:
+) -> bool:
     """Did the seed prompt actually reach the agent?
 
-    True once the agent flips to "busy" (it only does that with a prompt in
-    hand), False if it is still "idle" when the window closes (the paste was
-    swallowed — a splash redraw landing after the ready glyph does exactly
-    that), and None when the status is unreadable, in which case delivery is
-    unverifiable and the caller should fail open rather than re-send blindly.
+    True once the agent flips to "busy" (it only does that with a prompt in hand);
+    False if it never goes busy within `timeout` — the paste's Enter was swallowed
+    (a splash redraw landing after the ready glyph does exactly that) and needs a
+    resend. Transient unreadable reads (None from `_agent_status`, a window
+    mid-redraw) are treated as "not yet" and polled through, NOT reported as a
+    verdict — bailing on the first one burned the resend budget before the notice
+    cleared (the CMX-133 hang).
 
     A freshly-booted agent reads "idle" until the seed makes it busy, so this
-    watches for the idle → busy transition, not for "is it idle right now".
+    watches for the → busy transition, not for "is it idle right now".
     """
     deadline = time.monotonic() + timeout
     while True:
-        status = _agent_status(window_id)
-        if status is None:
-            return None
-        if status == "busy":
+        if _agent_status(window_id) == "busy":
             return True
+        # Anything other than "busy" — "idle", "waiting", or None (status UNREADABLE,
+        # exactly what a window mid-redraw returns while a startup notice eats
+        # keystrokes) — means "not landed yet, keep waiting". Bailing on the first None
+        # (the old behaviour) made the caller's resend loop burn its whole budget in ~2s,
+        # before the notice cleared — the CMX-133 hang. Poll the full window for the
+        # → busy transition instead; a genuinely unaddressable window is caught by the
+        # send itself failing (send_tmux/resend_enter return False), not here.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False

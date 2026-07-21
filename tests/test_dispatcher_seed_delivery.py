@@ -63,10 +63,23 @@ def test_seed_landed_false_when_agent_stays_idle():
         assert dispatcher._seed_landed("@1", timeout=0.02, poll=0.01) is False
 
 
-def test_seed_landed_none_when_status_unreadable():
-    """No claude pid / no session listing → unverifiable, NOT "idle"."""
-    with patch.object(dispatcher, "_agent_status", return_value=None):
-        assert dispatcher._seed_landed("@1", timeout=1, poll=0.01) is None
+def test_seed_landed_polls_through_unreadable_status_to_false():
+    """A persistently unreadable status (None — a window stuck mid-redraw) is NOT a
+    verdict: poll through it for the whole window and report False (not landed, needs
+    a resend), never bail on the first None. Bailing early was the CMX-133 hang — it
+    let the caller's resend loop give up in ~2s before the startup notice cleared."""
+    with patch.object(dispatcher, "_agent_status", return_value=None), \
+         patch.object(dispatcher.time, "sleep"):
+        assert dispatcher._seed_landed("@1", timeout=0.02, poll=0.01) is False
+
+
+def test_seed_landed_catches_busy_after_a_transient_unreadable_read():
+    """A transient None (mid-redraw) followed by busy still returns True — the resent
+    Enter landed once the notice cleared."""
+    reads = iter([None, None, "busy"])
+    with patch.object(dispatcher, "_agent_status", side_effect=lambda _w: next(reads)), \
+         patch.object(dispatcher.time, "sleep"):
+        assert dispatcher._seed_landed("@1", timeout=1, poll=0.01) is True
 
 
 def test_agent_status_reads_the_native_session_map():
