@@ -106,6 +106,7 @@ BRIDGE_COMMANDS: list[tuple[str, str]] = [
 # BRIDGE_COMMANDS so the operator gets autocomplete without the bridge owning them.
 PASSTHROUGH_COMMANDS: list[tuple[str, str]] = [
     ("clear", "Clear the agent's conversation (forwarded to Claude Code)"),
+    ("compact", "Compact the agent's context (forwarded to Claude Code)"),
 ]
 
 # Everything published to Telegram's "/" menu: bridge-intercepted + passthrough.
