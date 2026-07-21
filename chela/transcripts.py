@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -40,11 +41,18 @@ _READ_BLOCK = 64 * 1024
 def encode_cwd(cwd: str) -> str:
     """Encode a cwd into Claude Code's `~/.claude/projects/<dir>` name.
 
-    Claude Code replaces both `/` and `.` with `-`, so
-    `/home/alice/.chela/worktrees/myproj/abc` becomes
-    `-home-alice--chela-worktrees-myproj-abc`.
+    Claude Code replaces `/`, `.` **and `_`** with `-`, so
+    `/home/alice/.chela/worktrees/my_proj/abc` becomes
+    `-home-alice--chela-worktrees-my-proj-abc`.
+
+    The `_` was missing until CMX-70, and it was not cosmetic: a directory with an
+    underscore in its name (`~/projects/analytics/data_prep`) encoded to a project dir
+    that CANNOT EXIST, so every cwd-keyed lookup for that agent — the transcript, and the
+    hook correlation that compares this encoding against the slug in a payload's
+    `transcript_path` — silently found nothing. Measured against Claude Code 2.1.209, not
+    inferred: a headless session run from `…/enc_probe` writes to `…-enc-probe`.
     """
-    return cwd.replace("/", "-").replace(".", "-")
+    return cwd.replace("/", "-").replace(".", "-").replace("_", "-")
 
 
 def transcript_path(cwd: str, session_id: str, base: Path | None = None) -> Path:
@@ -169,28 +177,164 @@ def latest_pr(path: Path) -> PRLink | None:
 # Dashboard-facing helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_agent_transcript(agent_name: str) -> Path | None:
-    """Resolve agent_name → transcript path, tmux-natively.
+def _last_record_ts(path: Path) -> datetime | None:
+    """Timestamp of the newest JSONL record that carries one, or None.
 
-    Claude Code does not surface its session id over tmux, so rather than rely
-    on any external session-id map we derive the transcript directory from the
-    window's live cwd (``~/.claude/projects/<encoded-cwd>/``) and pick the
-    most-recently-modified ``<session-id>.jsonl`` in it — that is the session
-    actively writing for this agent. Returns None if the window has no cwd, the
-    project dir is absent, or it holds no transcripts yet.
+    Reverse-scans the transcript for the most recent record with a string
+    ``timestamp`` field and parses it. This measures the session's *content*
+    recency, which is what we want — distinct from the file mtime, which a
+    ``/clear`` marker appended to an otherwise-stale pre-clear transcript can
+    momentarily bump ahead of the fresh session that is actually current.
     """
-    cwd = discovery.get_window_cwd(agent_name)
+    rec = latest_record(path, lambda o: isinstance(o.get("timestamp"), str))
+    if not rec:
+        return None
+    try:
+        return datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def transcript_for_cwd(cwd: str | None, base: Path | None = None) -> Path | None:
+    """Resolve a working directory → its active transcript path — the LAST RESORT.
+
+    ⚠️ **A cwd is not a session id, and this function cannot be more right than that.**
+    :mod:`chela.sessions` is the authority for "which transcript is this window writing":
+    it resolves by ``session_id`` (from the event log's hook-borne records, or the pane's
+    own ``claude --resume``) and only falls back to here for a window that has fired no
+    hook and was not resumed. This is kept for that case, and for callers that genuinely
+    have nothing but a directory. It answers the wrong question in three others — a
+    ``--resume`` from a different directory, an agent that ``cd``s, and two windows sharing
+    one cwd — see that module for what each of them cost.
+
+    Within its limits: derive the transcript directory from the cwd
+    (``~/.claude/projects/<encoded-cwd>/``) and pick the ``*.jsonl`` in it whose newest
+    *record* is latest — that is the session most recently writing from that directory.
+    Returns None if cwd is empty, the project dir is absent, or it holds no transcripts
+    yet.
+
+    We rank by newest-record timestamp rather than file mtime because a
+    ``/clear`` starts a new session (new jsonl) while writing a marker into the
+    old one: for an instant the pre-clear file is newest by *mtime* even though
+    the fresh session is current. Ranking by the last record's timestamp binds
+    the right transcript, and ``monitor.py`` re-resolves each poll so it rebinds
+    as soon as the new session writes. A candidate with no timestamped record
+    yet (e.g. a just-created session) sorts below any that has one, with mtime
+    only breaking genuine ties.
+    """
     if not cwd:
         return None
-    proj_dir = CLAUDE_PROJECTS_DIR / encode_cwd(cwd)
+    proj_dir = (base or CLAUDE_PROJECTS_DIR) / encode_cwd(cwd)
     if not proj_dir.is_dir():
         return None
-    transcripts = sorted(
-        proj_dir.glob("*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return transcripts[0] if transcripts else None
+    found = list(proj_dir.glob("*.jsonl"))
+    if not found:
+        return None
+
+    def _key(p: Path) -> tuple[bool, float, float]:
+        ts = _last_record_ts(p)
+        return (ts is not None, ts.timestamp() if ts is not None else 0.0, p.stat().st_mtime)
+
+    return max(found, key=_key)
+
+
+def last_assistant_activity(cwd: str | None, base: Path | None = None) -> float | None:
+    """Epoch seconds of the newest ASSISTANT record in ``cwd``'s active transcript.
+
+    "Did this agent actually do work, and by when?" — the evidence the decisions inbox
+    uses to detect a completion it never sampled (see chela.inbox). ASSISTANT, not just
+    any record: the orchestrator's own dispatched prompt lands as a *user* record, so
+    counting that would read "your prompt arrived" as "the agent replied".
+
+    Content-derived (the record's timestamp), not the file mtime — same reasoning as
+    :func:`_last_record_ts`. Sidechains (sub-agent turns) are skipped: a finished task
+    always ends with a main-chain assistant turn. None when there is no transcript, no
+    assistant turn yet, or the timestamp is unparseable.
+    """
+    path = transcript_for_cwd(cwd, base=base)
+    if path is None:
+        return None
+    rec = latest_record(path, lambda o: (
+        o.get("type") == "assistant"
+        and not o.get("isSidechain")
+        and isinstance(o.get("timestamp"), str)
+    ))
+    if not rec:
+        return None
+    try:
+        return datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _resolve_agent_transcript(agent_name: str) -> Path | None:
+    """Resolve agent_name → transcript path via its window's live cwd."""
+    return transcript_for_cwd(discovery.get_window_cwd(agent_name))
+
+
+def summary_for_path(path: Path | None) -> dict:
+    """`{"recap", "recap_ts", "pr"}` for a resolved transcript path (or all None)."""
+    if path is None:
+        return {"recap": None, "recap_ts": None, "pr": None}
+    rec = _latest_recap_record(path)
+    pr = latest_pr(path)
+    return {
+        "recap": rec.get("content") if rec else None,
+        "recap_ts": rec.get("timestamp") if rec else None,
+        "pr": pr.to_dict() if pr else None,
+    }
+
+
+def iter_turns(path: Path, include_sidechain: bool = False) -> Iterator[dict]:
+    """Distil a transcript JSONL into readable conversation turns (forward order).
+
+    Yields ``{"ts", "role", "text", "tools"}`` for each user/assistant turn:
+      - user   → the human/orchestrator prompt (string-content records only;
+                 tool-result carrier records, whose content is a list, are skipped).
+      - assistant → joined ``text`` blocks; ``tools`` lists any tool_use names on
+                    that turn (so a tool-only turn still shows as activity).
+    Meta records (``isMeta``) and, by default, sub-agent sidechains
+    (``isSidechain``) are skipped so the digest reads as the main conversation,
+    not raw JSON.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if o.get("type") not in ("user", "assistant"):
+                    continue
+                if o.get("isMeta") or (o.get("isSidechain") and not include_sidechain):
+                    continue
+                msg = o.get("message") or {}
+                content = msg.get("content")
+                ts = o.get("timestamp")
+                if o["type"] == "user":
+                    if isinstance(content, str) and content.strip():
+                        yield {"ts": ts, "role": "user", "text": content.strip(), "tools": []}
+                    continue
+                # assistant: join text blocks, collect tool_use names
+                texts, tools = [], []
+                if isinstance(content, list):
+                    for b in content:
+                        if not isinstance(b, dict):
+                            continue
+                        if b.get("type") == "text" and b.get("text"):
+                            texts.append(b["text"])
+                        elif b.get("type") == "tool_use" and b.get("name"):
+                            tools.append(b["name"])
+                elif isinstance(content, str):
+                    texts.append(content)
+                text = "\n".join(t.strip() for t in texts if t.strip()).strip()
+                if text or tools:
+                    yield {"ts": ts, "role": "assistant", "text": text, "tools": tools}
+    except OSError:
+        return
 
 
 def latest_context_usage(path: Path) -> dict | None:
@@ -236,13 +380,4 @@ def agent_transcript_summary(agent_name: str) -> dict:
     occasionally, so a displayed recap can legitimately lag by hours).
     All fields are None if the transcript can't be found.
     """
-    path = _resolve_agent_transcript(agent_name)
-    if path is None:
-        return {"recap": None, "recap_ts": None, "pr": None}
-    rec = _latest_recap_record(path)
-    pr = latest_pr(path)
-    return {
-        "recap": rec.get("content") if rec else None,
-        "recap_ts": rec.get("timestamp") if rec else None,
-        "pr": pr.to_dict() if pr else None,
-    }
+    return summary_for_path(_resolve_agent_transcript(agent_name))

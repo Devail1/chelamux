@@ -1,3 +1,6 @@
+// --- Stage 0: ES-module imports ---
+import { $, _agentsCache, api, attrEsc, closeModal, escHtml, humanSchedule, relativeTime, shortTime, showModal } from './util.js';
+
 // ---------------------------------------------------------------------------
 // Render: Schedules
 // ---------------------------------------------------------------------------
@@ -23,8 +26,8 @@ async function refreshSchedules() {
             <td class="ts">${t.next_run ? relativeTime(t.next_run) : '-'}</td>
             <td><span class="badge ${t.enabled ? 'badge-on' : 'badge-off'}">${t.enabled ? 'ON' : 'OFF'}</span></td>
             <td>
-                <button onclick="toggleSchedule(${t.id}, ${!t.enabled})">${t.enabled ? 'Disable' : 'Enable'}</button>
-                <button class="btn-danger" onclick="deleteSchedule(${t.id})">Del</button>
+                <button onclick="chela.toggleSchedule(${t.id}, ${!t.enabled})">${t.enabled ? 'Disable' : 'Enable'}</button>
+                <button class="btn-danger" onclick="chela.deleteSchedule(${t.id})">Del</button>
             </td>
         </tr>
     `).join('');
@@ -68,7 +71,24 @@ function showAddSchedule() {
         .sort((a, b) => a.name.localeCompare(b.name))
         .map(a => `<option value="${escHtml(a.name)}">${escHtml(a.name)}</option>`)
         .join('');
+    onSchedTypeChange();   // sync the value label/placeholder to the current type
     showModal('modal-sched');
+}
+
+// Swap the value label + placeholder to match the selected schedule type so the
+// user knows what format #sched-value expects (see chela/models.py schedule_value).
+function onSchedTypeChange() {
+    const type = $('#sched-type').value;
+    const hints = {
+        interval: ['Interval (e.g. 30s, 5m, 1h)', '5m'],
+        cron: ['Cron expression (5 fields: min hr dom mon dow)', '0 */8 * * *'],
+        once: ['Run at (ISO 8601, e.g. 2026-01-15T09:00)', 'YYYY-MM-DDTHH:MM'],
+    };
+    const [text, placeholder] = hints[type] || hints.interval;
+    const label = $('#sched-value-label');
+    const input = $('#sched-value');
+    if (label) label.textContent = text;
+    if (input) input.placeholder = placeholder;
 }
 
 async function doAddSchedule() {
@@ -103,3 +123,10 @@ async function deleteSchedule(id) {
     refreshSchedules();
 }
 
+
+// --- Stage 0: ES-module exports ---
+export { refreshSchedules, showAddSchedule };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { deleteSchedule, doAddSchedule, onSchedTypeChange, showAddSchedule, toggleSchedule });

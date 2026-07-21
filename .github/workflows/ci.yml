@@ -24,8 +24,30 @@ jobs:
       - name: Sync (with dev + dashboard extras)
         run: uv sync --extra dev --extra dashboard --python ${{ matrix.python-version }}
 
+      # PIN node — do not take the runner's default. It drifted to a version where
+      # `globalThis.navigator` is a getter-only accessor, so wall.test.mjs's plain
+      # assignment threw and all 10 DOM tests died in CI while passing on a node-20
+      # laptop. An unpinned runtime means the thing you tested is not the thing that
+      # governs. Bumping this is now a deliberate act with a visible diff.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The DOM suites (tests/wall.test.mjs) run the real dashboard JS in a real DOM.
+      # jsdom is the ONLY npm dependency in the repo and it is dev-only — nothing is
+      # bundled or shipped. Without it those suites cannot run, and CHELA_REQUIRE_JS_TESTS
+      # below makes "cannot run" a FAILURE, never a silent green.
+      - name: Install jsdom (DOM test suites)
+        run: npm ci
+
       - name: Ruff
         run: uv run ruff check chela tests
 
       - name: Pytest
+        # The JS suites (every *.test.mjs) run inside pytest via tests/test_js_suites.py and
+        # need `node`. It is preinstalled on the runner — and CHELA_REQUIRE_JS_TESTS makes a
+        # missing one a FAILURE rather than a skip, because a suite CI never executed must
+        # never be reported as green. That is the bug this whole file's suite just fixed.
+        env:
+          CHELA_REQUIRE_JS_TESTS: "1"
         run: uv run pytest -q

@@ -27,18 +27,11 @@ _HOOK = "echo {{workspace_path}}"
 
 
 def _conn() -> sqlite3.Connection:
+    # The PRODUCTION schema, not a hand-copy of it — a copy drifts, and a drifted
+    # copy fails the test for a column the code is right to have added.
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute(
-        """CREATE TABLE runs (
-            task_id TEXT PRIMARY KEY, workflow_path TEXT, title TEXT, status TEXT,
-            window_name TEXT, worktree_path TEXT, branch_name TEXT,
-            started_at TEXT, ended_at TEXT, attempt INTEGER, last_error TEXT,
-            pr_url TEXT, pr_state TEXT, pr_mergeable TEXT, task_number INTEGER,
-            idle_nudged_at TEXT
-        )"""
-    )
-    return conn
+    return dispatcher.ensure_schema(conn)
 
 
 def _wf(tmp_path: Path, after_create: str | None) -> WorkflowDef:
@@ -108,7 +101,11 @@ def test_after_create_nonzero_exit_aborts_dispatch(tmp_path):
     def _run(cmd, *a, **kw):
         if kw.get("shell"):
             raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
-        return None
+
+        class R:
+            returncode = 0
+            stdout = ""
+        return R()
 
     with patch.object(dispatcher, "ensure_worktree", return_value=(worktree, True)), \
          patch.object(dispatcher.subprocess, "run", side_effect=_run) as run, \

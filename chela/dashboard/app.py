@@ -11,6 +11,7 @@ core CLI never imports this module at top level.
 """
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import logging
@@ -18,18 +19,19 @@ import os
 import re
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, collab, collab_stream, context, discovery, dispatcher, launcher, messenger, notify, okf, scheduler, starter, transcripts, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, rooms, scheduler, spawn, starter, transcripts, userconfig
+from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
-from chela.workflow import load_workflow
+from chela.workflow import load_workflow, workflow_error, PROJECT_KEY_RE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,27 +85,9 @@ def require_auth(f):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _liveness(claude_running: bool, session_status: str | None) -> tuple[str, str]:
-    """Derive (liveness, health_color) from native session state — no heartbeat.
-
-    discovery only ever lists LIVE windows (tmux list-windows), so a listed
-    window is never "dead" — the dot reflects what KIND of live it is, not
-    presence. A plain shell or dev-server window is genuinely live; showing it
-    red/"offline" reads as broken when it isn't.
-
-      - "waiting" → claude blocked on input (needs attention) — yellow
-      - "alive"   → claude running / busy / idle — green
-      - "live"    → no claude in the pane (a shell or dev server), but present
-                    and streaming — grey (neutral; the window-type icon says
-                    which). Red is reserved for a genuinely unreachable window.
-
-    health_color is the agent-row dot: green / yellow / grey.
-    """
-    if session_status == "waiting":
-        return "waiting", "yellow"
-    if claude_running or session_status in ("busy", "idle"):
-        return "alive", "green"
-    return "live", "grey"
+# Shared status derivation lives in agent_manager so the agent-facing `chela
+# peek` reads identical liveness/health off the same data layer as this endpoint.
+_liveness = agent_manager.liveness
 
 
 def _require_terminals() -> None:
@@ -124,18 +108,79 @@ def _require_terminals() -> None:
 @app.route("/")
 @require_auth
 def index():
-    return render_template("index.html", terminals_enabled=config.TERMINALS_ENABLED)
+    return render_template(
+        "index.html",
+        terminals_enabled=config.TERMINALS_ENABLED,
+        wall_tile_dispatched=config.WALL_TILE_DISPATCHED,
+    )
 
 
 # ---------------------------------------------------------------------------
 # API: Agents
 # ---------------------------------------------------------------------------
 
+def _dispatched_wids(windows: dict[str, str]) -> set[str]:
+    """The window ids the DISPATCHER owns — the SAME authority the Telegram bridge uses.
+
+    :func:`chela.telegram.reconcile.dispatched_window_ids` reads the ``runs`` table (the
+    row owns the ``window_id``, recorded at spawn; a window's *name* is only a label a
+    human is free to change). It is deliberately reused verbatim rather than re-derived
+    here: two surfaces now decide "is this a dispatched worker?" — the forum topic
+    (CMX-73) and the Wall tile (CMX-76) — and a second implementation is a second answer.
+
+    It lives in the telegram package only because that is where it was first needed; it
+    reads sqlite, not Telegram, and imports no optional dependency. Imported lazily all
+    the same, so the dashboard's import graph does not grow a bridge-shaped branch.
+
+    ``windows`` is discovery's ``{name: window_id}``; the helper wants the inverse (it
+    compares each run row's recorded window *name* against what tmux calls that id now,
+    which is what stops a recycled ``@N`` from disowning a human's window).
+    """
+    from chela.telegram.reconcile import dispatched_window_ids
+
+    live = {wid: name for name, wid in windows.items()}
+    return dispatched_window_ids(live_windows=live)
+
+
+def _needs_human(wid: str, sess_status: str | None, dispatched: bool) -> bool:
+    """Is this window BLOCKED on a human right now — i.e. does it want your attention?
+
+    Two sources, cheapest first, and the second one is why this is not just
+    ``session_status == "waiting"``:
+
+    * **Claude's own view** (``claude agents --json``, already read once per request and
+      cached) — free, and true for the gates it knows about;
+    * **the hook log OR the pane** (:func:`chela.telegram.reconcile.blocked_on_human`) —
+      one tmux capture. It exists because a **permission gate** on a Bash/Edit (the
+      likeliest thing to stop a worktree worker: one non-allowlisted command and it sits
+      there) is not in the transcript at all and is visible *only* as pixels.
+
+    Over-reporting here is cheap — a tile pops onto the Wall that did not strictly need
+    to, and a human glances at it. Under-reporting is the failure this whole feature must
+    not have: a dispatched worker frozen behind a gate, minimized, forever, with nobody
+    told. So the two sources are OR'd, never traded off.
+
+    The pane probe runs **only for dispatched windows**, which is what bounds its cost to
+    the fleet's concurrency cap (a handful of captures per poll, not one per window):
+    they are the only windows the Wall ever hides, so they are the only ones whose answer
+    is load-bearing. Every other window is on the Wall unconditionally and reports
+    Claude's free view.
+    """
+    if sess_status == "waiting":
+        return True
+    if not dispatched:
+        return False
+    from chela.telegram.reconcile import blocked_on_human
+
+    return blocked_on_human(wid) is not None
+
+
 @app.route("/api/agents")
 @require_auth
 def api_agents():
     windows = discovery.get_all_windows()
     tasks = scheduler.list_tasks()
+    dispatched = _dispatched_wids(windows)
 
     # Build set of agents with enabled schedules + schedule summary
     scheduled_agents = {t.agent_name for t in tasks if t.enabled}
@@ -169,6 +214,7 @@ def api_agents():
 
         liveness, health = _liveness(claude_running, sess_status)
         win_type = agent_manager.window_type(window_id, claude_running)
+        is_dispatched = window_id in dispatched
 
         agents.append({
             "name": name,
@@ -179,6 +225,13 @@ def api_agents():
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
             "session_status": sess_status,
+            # The Wall's lazy-tile pair (CMX-76). `dispatched` = the dispatcher owns this
+            # window (run-row derived); `needs_human` = it is blocked on you right now.
+            # Together they are the whole rule: a dispatched worker opens MINIMIZED and
+            # pops out the moment it wants a human. Both are facts about the window, so
+            # they ship on every row — the *behaviour* they drive is the client's.
+            "dispatched": is_dispatched,
+            "needs_human": _needs_human(window_id, sess_status, is_dispatched),
             "liveness": liveness,
             "health": health,
             "status": sess_status,
@@ -205,13 +258,14 @@ def api_agents_msg():
     message = data.get("message", "")
     if not agent or not message:
         return jsonify({"error": "agent and message required"}), 400
-    if message.startswith("/"):
-        wid = discovery.get_window_id(agent)
-        if not wid:
-            return jsonify({"error": f"agent {agent} not found"}), 404
-        ok = messenger.send_tmux(wid, message)
-    else:
-        ok = messenger.send_message("dashboard", agent, message)
+    # One resolver for both branches — the same live-window authority /api/agents
+    # itself reports from, so a window this API calls "busy" is always messageable.
+    wid = messenger.resolve_window(agent)
+    if not wid:
+        return jsonify({"error": f"agent {agent} not found"}), 404
+    # A slash command goes in raw (a "[sender] /foo" prefix would not be a command).
+    ok = (messenger.send_tmux(wid, message) if message.startswith("/")
+          else messenger.send_message("dashboard", wid, message))
     return jsonify({"sent": ok, "agent": agent})
 
 
@@ -408,7 +462,8 @@ _TERM_PALETTE_KEY_SHIM = (
     "if(e.key!=='k'&&e.key!=='K')return;"
     "if(!window.parent||window.parent===window)return;"
     "e.preventDefault();e.stopImmediatePropagation();"
-    "try{if(typeof window.parent.openPalette==='function')window.parent.openPalette();}"
+    # Stage 0: dashboard fns moved to the window.chela namespace under ES modules.
+    "try{var c=window.parent.chela;if(c&&typeof c.openPalette==='function')c.openPalette();}"
     "catch(err){}}"
     "document.addEventListener('keydown',onKey,true);"
     "})();</script>"
@@ -1080,6 +1135,119 @@ def api_agents_broadcast():
 
 
 # ---------------------------------------------------------------------------
+# API: Rooms — the HTTP half of the Wall's wire gesture
+#
+# `chela/rooms.py` owns rooms: membership, the typed ledger, the loop guard. This
+# is a THIN transport over it — the wall drags a wire between two tiles, and these
+# two routes are what that drag calls. There is no second membership store here
+# (there must never be one): the read is `rooms.status()`, verbatim — the exact
+# dict `chela room status` prints, so the API and the CLI cannot disagree — and the
+# write is `rooms.create` + `rooms.join`, the same calls `chela room join` makes.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/rooms")
+@require_auth
+def api_rooms():
+    """Rooms and their members, keyed by tmux window id — which is what the Wall has."""
+    return jsonify(rooms.status())
+
+
+# A wire is a gesture between TILES, so the list is small by construction. It is also
+# untrusted input, and every wid in it is resolved against the live window table — i.e.
+# tmux subprocesses. Bound it at the door.
+MAX_WIRE_WIDS = 8
+
+
+def _auto_room_name(wids: list[str]) -> str:
+    """Name a room from the agents being wired — a DROP MUST COMPLETE IN ONE MOTION.
+
+    A modal text prompt on drop would make the gesture two acts and kill it, so the
+    name is derived (``wire-researcher-executor-1f9c02``) and the room can be renamed
+    later by whoever cares. Slugged to `rooms._ROOM_RE`'s alphabet, capped at its 40.
+
+    **The tail is not decoration — it is the identity.** The readable part comes from
+    the window DISPLAY NAMES, and names COLLIDE: ``discovery.get_windows_by_id`` says
+    so in its own docstring (two shells; two repos with the same basename). Window
+    *ids* never do. Name-only, a later unrelated pair of ``shell``s would derive the
+    same ``wire-shell-shell`` — and since ``rooms.create`` is idempotent it would not
+    fork a room, it would SILENTLY JOIN THE FIRST PAIR'S. A room does active dispatch,
+    so that pair's handoffs would be pasted into the first pair's terminals. Salting
+    with the sorted wids makes the id name the PAIR; sorted, so either drag direction
+    derives the same room and re-wiring stays idempotent.
+    """
+    live = discovery.get_windows_by_id()
+    parts = []
+    for wid in wids[:2]:
+        slug = re.sub(r"[^a-z0-9]+", "-", live.get(wid, wid).lower()).strip("-")
+        parts.append(slug or wid.lstrip("@") or "x")
+    salt = hashlib.sha256("|".join(sorted(wids)).encode()).hexdigest()[:6]
+    stem = ("wire-" + "-".join(parts))[:33].rstrip("-.")
+    return f"{stem}-{salt}"          # ≤ 33 + 1 + 6 = 40, rooms._ROOM_RE's cap
+
+
+@app.route("/api/rooms/join", methods=["POST"])
+@require_auth
+def api_rooms_join():
+    """Put two (or more) live windows in a room. `{"wids": ["@1", "@2"], "room"?: "..."}`
+
+    Idempotent: re-wiring a pair that is already roomed re-joins the same room and
+    changes nothing. Wiring onto a tile that is ALREADY in a room JOINS THAT ROOM —
+    a third agent joins the conversation rather than forking a second one beside it.
+
+    A wire onto a window that died mid-drag writes NOTHING — no room of one behind it.
+    That is `rooms.join_all`, which resolves every window before its single locked
+    write; the pre-check below is only there to answer 404 (and to know which rooms
+    the drop target is already in). `rooms.join` in a loop would NOT do: it re-resolves
+    each window as it writes it, so a window dying partway leaves the earlier members
+    written and rolls back nothing.
+    """
+    data = request.get_json(force=True) or {}
+    raw = data.get("wids") or []
+    if not isinstance(raw, list):
+        # A bare string here would iterate CHARACTERS ("@1@2" -> "@", "1", "@", "2").
+        return jsonify({"error": "wids must be a list of window ids"}), 400
+    if len(raw) > MAX_WIRE_WIDS:
+        return jsonify({"error": f"at most {MAX_WIRE_WIDS} windows in one wire"}), 400
+    wids = [w for w in dict.fromkeys(raw) if w and isinstance(w, str)]   # dedupe, order kept
+    if len(wids) < 2:
+        return jsonify({"error": "two distinct windows required"}), 400
+    resolved = []
+    for wid in wids:
+        target = messenger.resolve_window(wid)
+        if target is None:
+            return jsonify({"error": f"{wid} is not a live window — cannot join"}), 404
+        resolved.append(target)
+
+    room = (data.get("room") or "").strip()
+    if not room:
+        # The DROP TARGET is the last wid: its room wins (drag a third agent onto a
+        # roomed peer -> it joins that room), then the source's, else a fresh name.
+        for wid in reversed(resolved):
+            existing = rooms.rooms_for(wid)
+            if existing:
+                room = existing[0]
+                break
+    if not room:
+        room = _auto_room_name(resolved)
+
+    result = rooms.join_all(room, resolved)   # all of them, or none of them
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error", "join failed"), "room": room}), 400
+    return jsonify({"ok": True, "room": room, "wids": result["wids"]})
+
+
+@app.route("/api/rooms/leave", methods=["POST"])
+@require_auth
+def api_rooms_leave():
+    """Drop one window out of one room — the click on a tile's room badge."""
+    data = request.get_json(force=True) or {}
+    wid, room = (data.get("wid") or "").strip(), (data.get("room") or "").strip()
+    if not wid or not room:
+        return jsonify({"error": "wid and room required"}), 400
+    return jsonify(rooms.leave(room, wid))
+
+
+# ---------------------------------------------------------------------------
 # API: Agent lifecycle
 # ---------------------------------------------------------------------------
 
@@ -1129,12 +1297,53 @@ _WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _LAUNCH_CMD_RE = re.compile(r"^claude(\s.+)?$")
 
 
-def _next_shell_name(existing: set[str]) -> str:
-    """Smallest ``shell-N`` (N >= 1) not already a live window name."""
-    n = 1
-    while f"shell-{n}" in existing:
-        n += 1
-    return f"shell-{n}"
+@app.route("/api/agents/<wid>/rename", methods=["POST"])
+@require_auth
+def api_agents_rename(wid):
+    """Rename a window. The tmux window name is the SINGLE SOURCE OF TRUTH.
+
+    Renaming the tmux window IS the rename — there is no per-client label to keep
+    in sync. Everything that shows an agent's name reads it back from tmux, so one
+    rename lands everywhere: wall panes, agent cards, nav, tmux itself, and the
+    bound Telegram topic (the telegram daemon's reconcile tick renames the forum
+    topic to match — see chela.telegram.reconcile.reconcile_bindings). This
+    replaced a localStorage-only label that never left the browser it was typed in.
+
+    Keyed by WINDOW ID, never by name: ids are stable across renames and unique,
+    while names collide (two repos with the same basename). Body: ``{"name": ...}``.
+
+    The name must survive a reconcile tick, which it does because it isn't generic
+    (agent_manager.is_generic_name) — the auto-namers only fill in blanks. We also
+    lock the window against tmux's own renamers, so a shell-out can't clobber it.
+    """
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not _WINDOW_NAME_RE.match(name):
+        return jsonify({"ok": False,
+                        "error": "name must be letters, digits, '-' or '_'"}), 400
+
+    windows = discovery.get_windows_by_id()   # {wid: name}
+    if wid not in windows:
+        return jsonify({"ok": False, "error": f"no such window: {wid}"}), 404
+    # Names are an identity users read AND that name→id lookups resolve on, so keep
+    # them unique: a duplicate would make two tiles indistinguishable and could send
+    # a by-name lookup to the wrong window.
+    if any(n == name and w != wid for w, n in windows.items()):
+        return jsonify({"ok": False, "error": f"another window is already named {name}"}), 409
+
+    target = f"{TMUX_SESSION}:{wid}"
+    try:
+        proc = subprocess.run(["tmux", "rename-window", "-t", target, name],
+                              capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "tmux rename-window failed").strip()
+        return jsonify({"ok": False, "error": err}), 500
+
+    agent_manager.lock_window_name(target)
+    log.info("renamed %s: %s -> %s", wid, windows[wid], name)
+    return jsonify({"ok": True, "wid": wid, "name": name})
 
 
 @app.route("/api/agents/spawn", methods=["POST"])
@@ -1147,6 +1356,12 @@ def api_agents_spawn():
       command — a command to run once the shell is up. Only `claude` (with
                 optional args) is accepted; omit it for a bare interactive shell.
 
+    The window-open itself is the shared :func:`chela.spawn.spawn_window` (the ONE
+    path the Telegram `/new` bridge uses too, so the two can't drift — see that
+    module). This endpoint owns only what is dashboard-specific: validating the
+    user-supplied `command` against the `claude`-only allowlist BEFORE spawning, and
+    recording an explicit cwd in the launcher's Recent list after.
+
     The ttyd supervisor (scripts/agent-terminals.sh) discovers the new window on
     its own poll and assigns a port within ~12s; until then the pane's iframe
     404s (known latency). When an explicit cwd is given, it's recorded in the
@@ -1156,61 +1371,26 @@ def api_agents_spawn():
     body = request.get_json(silent=True) or {}
 
     cwd_arg = (body.get("cwd") or "").strip()
-    launched_dir = None
-    if cwd_arg:
-        cwd = os.path.realpath(os.path.expanduser(cwd_arg))
-        if not os.path.isdir(cwd):
-            return jsonify({"ok": False, "error": f"no such directory: {cwd_arg}"}), 400
-        launched_dir = cwd
-    else:
-        cwd = str(Path.home())
-
     command = (body.get("command") or "").strip()
+    # Validate the untrusted command at the door, before spawning anything: only
+    # `claude` (with optional args) may be auto-launched into a fresh window.
     if command and not _LAUNCH_CMD_RE.match(command):
         return jsonify({"ok": False, "error": "only `claude` may be auto-launched"}), 400
 
-    existing = set(discovery.get_all_windows())
-    name = _next_shell_name(existing)
-    if not _WINDOW_NAME_RE.match(name):
-        return jsonify({"ok": False, "error": f"invalid window name: {name}"}), 500
-    try:
-        # Trailing ':' forces session resolution. A bare session name is
-        # ambiguous to tmux when a *window* shares that name (e.g. a Claude
-        # window opened in a dir whose basename == the session name); tmux then
-        # targets that window's index and fails with "index N in use".
-        proc = subprocess.run(
-            ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "tmux new-window failed").strip()
-        return jsonify({"ok": False, "error": err}), 500
+    result = spawn.spawn_window(cwd_arg or str(Path.home()), command=command or None)
+    if not result.ok:
+        # A missing directory is the caller's fault (400); anything else — tmux
+        # unreachable, a rejected name, a failed new-window — is ours (500).
+        status = 400 if (result.error or "").startswith("no such directory") else 500
+        return jsonify({"ok": False, "error": result.error}), status
 
-    if command:
-        # Send the command literally (-l, no key-name lookup) then Enter. tmux
-        # buffers send-keys into the pty, so this lands even before the shell has
-        # finished drawing its prompt. We start a shell and *send* `claude` rather
-        # than running it as the window command so the pane survives claude exiting.
-        target = f"{TMUX_SESSION}:{name}"
+    if cwd_arg:  # record only an explicitly-chosen target in the Recent list
         try:
-            subprocess.run(["tmux", "send-keys", "-t", target, "-l", command],
-                           capture_output=True, text=True, timeout=10)
-            subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
-                           capture_output=True, text=True, timeout=10)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            log.warning("spawned %s but could not send %r: %s", name, command, e)
-
-    if launched_dir:
-        try:
-            launcher.record_recent(launched_dir)
+            launcher.record_recent(result.cwd)
         except Exception:  # noqa: BLE001 — a store hiccup must never fail the spawn
-            log.warning("launcher.record_recent failed for %s", launched_dir, exc_info=True)
+            log.warning("launcher.record_recent failed for %s", result.cwd, exc_info=True)
 
-    log.info("spawned window %s in %s%s", name, cwd,
-             f" running {command!r}" if command else "")
-    return jsonify({"ok": True, "name": name, "cwd": cwd})
+    return jsonify({"ok": True, "name": result.name, "cwd": result.cwd})
 
 
 # ---------------------------------------------------------------------------
@@ -1232,21 +1412,295 @@ def api_launcher_suggest():
     return jsonify(launcher.suggest())
 
 
+def _agent_cmd_overrides() -> list[dict]:
+    """Discovered workflows that pin ``agent.cmd`` — i.e. that SHADOW the Settings
+    permission mode (see dispatcher.resolve_agent_cmd). Surfaced so the drawer can
+    say which source is actually winning instead of implying the setting always
+    applies. Best-effort: an unreadable workflow is skipped, not fatal."""
+    out: list[dict] = []
+    try:
+        paths = _discover_dispatch_workflows(dispatcher.list_runs())
+    except Exception:
+        return out
+    for p in paths:
+        try:
+            cmd = load_workflow(p).get("agent", "cmd", default=None)
+        except Exception:
+            continue
+        if isinstance(cmd, str) and cmd.strip():
+            out.append({"workflow": p.name, "path": str(p), "cmd": cmd.strip()})
+    return out
+
+
 @app.route("/api/config", methods=["GET", "POST"])
 @require_auth
 def api_config():
     """Dashboard-editable user prefs (userconfig.json). GET reports the stored
     projects_dir plus the effective dir the launcher will scan (after env/default
-    fallback); POST {projects_dir} sets or (empty) clears it."""
+    fallback), the dispatcher's agent permission mode, and the coding-agent model
+    (each stored + effective + the closed enum of valid values + any WORKFLOW.md
+    that overrides them). POST {projects_dir}, {agent_permission_mode}, and/or
+    {agent_model} sets or (empty) clears them.
+
+    ``agent_permission_mode`` and ``agent_model`` are validated against
+    dispatcher.PERMISSION_MODES / dispatcher.AGENT_MODELS HERE, server-side — the
+    UI's <select> is a convenience, not the gate. An unknown value is rejected
+    400 and the stored value is left untouched (fail closed): both are
+    interpolated into the shell command that spawns an agent, so only the enum
+    may ever reach it. There is deliberately no endpoint to set the command
+    itself. The JUDGE's model is fixed (dispatcher.DEFAULT_JUDGE_MODEL) and not
+    settable here — a fleet-wide coding-model choice must not downgrade it."""
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
+        if "agent_permission_mode" in data:
+            mode = (data.get("agent_permission_mode") or "").strip()
+            if mode and mode not in dispatcher.PERMISSION_MODES:
+                return jsonify({
+                    "error": "invalid permission mode",
+                    "valid": list(dispatcher.PERMISSION_MODES),
+                }), 400
+            userconfig.set_(dispatcher.PERMISSION_MODE_KEY, mode)
+        if "agent_model" in data:
+            model = (data.get("agent_model") or "").strip()
+            if model and model not in dispatcher.AGENT_MODELS:
+                return jsonify({
+                    "error": "invalid agent model",
+                    "valid": list(dispatcher.AGENT_MODELS),
+                }), 400
+            userconfig.set_(dispatcher.AGENT_MODEL_KEY, model)
         if "projects_dir" in data:
             userconfig.set_("projects_dir", (data.get("projects_dir") or "").strip())
+    stored_mode = dispatcher.settings_permission_mode()
+    stored_model = dispatcher.settings_agent_model()
     return jsonify({
         "projects_dir": userconfig.get("projects_dir", ""),
         "projects_dir_effective": str(launcher._projects_dir()),
         "collab_relay": config.COLLAB_RELAY,
+        "agent_permission_mode": stored_mode or "",
+        "agent_permission_mode_effective": stored_mode or dispatcher.DEFAULT_PERMISSION_MODE,
+        "agent_permission_mode_default": dispatcher.DEFAULT_PERMISSION_MODE,
+        "agent_permission_modes": list(dispatcher.PERMISSION_MODES),
+        # The coding-agent model — same shape as the mode fields. The judge's
+        # model is a fixed capable default and deliberately NOT surfaced here:
+        # it is not user-selectable in v1 (see dispatcher.DEFAULT_JUDGE_MODEL).
+        "agent_model": stored_model or "",
+        "agent_model_effective": stored_model or dispatcher.DEFAULT_AGENT_MODEL,
+        "agent_model_default": dispatcher.DEFAULT_AGENT_MODEL,
+        "agent_models": list(dispatcher.AGENT_MODELS),
+        "agent_cmd_overrides": _agent_cmd_overrides(),
     })
+
+
+def _notify_host(url: str) -> str:
+    """Host of the notify URL for display — never the path/query, which for a
+    Telegram sendMessage URL carries the bot token. Status surface, not secrets."""
+    try:
+        return urllib.parse.urlparse(url).netloc or "configured"
+    except Exception:
+        return "configured"
+
+
+def _telegram_bridge_running() -> bool:
+    """True if a ``chela telegram`` bridge daemon is running.
+
+    Detected by process (``pgrep``), NOT env vars — the dashboard process does
+    not carry the bridge's credentials (they live in ``~/.chela/telegram.env``,
+    sourced only by the telegram wrapper), so an env check would false-negative.
+    """
+    try:
+        return subprocess.run(
+            ["pgrep", "-f", "chela telegram"], capture_output=True, timeout=3
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+def _settings_status() -> dict:
+    """READ-ONLY aggregation for the Settings drawer's "Connections & Status"
+    surface. Every probe is best-effort and independently guarded: one failing
+    source (e.g. tmux not running) degrades that single row to "Unknown" rather
+    than blanking the whole panel. Nothing here mutates state.
+
+    Each item is ``{label, on, state, detail}`` — ``on`` drives a colorblind-safe
+    ●/○ SHAPE badge in the drawer (never colour alone) and ``state`` is its text
+    label (e.g. "Connected" / "Off"). Grouped into sections the drawer renders
+    in order."""
+    session = config.current_session()
+
+    # Connections — live/external things the dashboard depends on.
+    try:
+        windows = discovery.get_windows_by_id()
+        session_on = True
+        session_state = "Connected"
+        n = len(windows)
+        session_detail = f"{session} · {n} window{'' if n == 1 else 's'}"
+    except Exception:
+        session_on, session_state, session_detail = False, "Unknown", session
+
+    collab_on = bool(config.COLLAB_RELAY) and config.COLLAB_PRESENCE
+    if not config.COLLAB_PRESENCE:
+        collab_state, collab_detail = "Off", "presence disabled (CHELA_COLLAB=false)"
+    elif config.COLLAB_RELAY:
+        collab_state, collab_detail = "Configured", config.COLLAB_RELAY
+    else:
+        collab_state, collab_detail = "Off", "set CHELA_COLLAB_RELAY to enable"
+
+    notify_on = notify.enabled()
+    if notify_on:
+        notify_state = notify._detect_kind(config.NOTIFY_URL)
+        notify_detail = _notify_host(config.NOTIFY_URL)
+    else:
+        notify_state, notify_detail = "Off", "set CHELA_NOTIFY_URL to enable"
+
+    # Telegram bridge — remote control of the fleet over Telegram forum topics.
+    # Detected by the RUNNING daemon (pgrep), NOT env vars: the dashboard process
+    # does not carry the bridge's credentials (they live in ~/.chela/telegram.env,
+    # sourced only by the telegram wrapper), so an env check would read "Off" while
+    # it runs. The token/chat_id are secrets and never ride along in the detail.
+    tg_on = _telegram_bridge_running()
+    if tg_on:
+        tg_state = "Connected"
+        try:
+            from chela.telegram.bindings import BindingRegistry
+            n_bind = len(BindingRegistry.load())
+            tg_detail = f"{n_bind} agent{'' if n_bind == 1 else 's'} bound" if n_bind else "no agents bound yet"
+        except Exception:
+            tg_detail = "running"
+    else:
+        tg_state, tg_detail = "Off", "start `chela telegram` to enable"
+
+    # The daemon (`chela run`) — the process that ticks the scheduler, the dispatcher and
+    # reconciliation. Read from what it publishes at startup ($CHELA_DIR/daemon.json,
+    # pid-checked), never from this process's config: the dashboard is a DIFFERENT process
+    # and its env is not evidence about the daemon's. Nothing published = nothing running,
+    # and that is worth a row of its own — the fleet looks identical either way.
+    daemon_live = capabilities.live()
+    if daemon_live:
+        n_on = sum(1 for c in daemon_live["capabilities"] if c.get("on"))
+        n_all = len(daemon_live["capabilities"])
+        daemon_state = "Running"
+        daemon_detail = f"pid {daemon_live.get('pid')} · {n_on}/{n_all} capabilities on"
+    else:
+        daemon_state, daemon_detail = "Off", "not running — start it with `chela run`"
+
+    connections = [
+        {"label": "tmux session", "on": session_on, "state": session_state, "detail": session_detail},
+        {"label": "Daemon", "on": bool(daemon_live), "state": daemon_state, "detail": daemon_detail},
+        {"label": "Telegram bridge", "on": tg_on, "state": tg_state, "detail": tg_detail},
+        {"label": "Collaboration relay", "on": collab_on, "state": collab_state, "detail": collab_detail},
+        {"label": "Needs-input notifications", "on": notify_on, "state": notify_state, "detail": notify_detail},
+    ]
+
+    # Features — feature toggles / scheduled work inside the daemon.
+    wall_detail = "loopback-served" if config.TERMINALS_ENABLED else "CHELA_TERMINALS_ENABLED=false"
+    if config.TERMINALS_ENABLED and config.TERMINALS_EXPOSE:
+        wall_detail = "exposed on non-loopback binds (CHELA_TERMINALS_EXPOSE)"
+
+    # Match /api/dispatcher: count AUTO-DISCOVERED workflows (explicit config +
+    # repo-root WORKFLOW.md + any workflow that has runs) — not the raw
+    # CHELA_DISPATCH_WORKFLOWS env, which CMX-3's auto-discovery made obsolete
+    # (env-only would read "Off" while the Kanban shows live runs).
+    # A workflow that no longer parses is the one dispatcher fault an operator
+    # MUST see: the daemon keeps reconciling on its last known-good config, but
+    # it will not start new work until the file is fixed, and a log line nobody
+    # reads is not a notification. The check is stat-gated (see
+    # workflow.load_workflow_cached) — polling it from the drawer is cheap, and
+    # the error is a property of the file on disk, so this process observes the
+    # same fault the daemon does without sharing memory with it.
+    wf_errors: list[dict] = []
+    try:
+        wf_paths = _discover_dispatch_workflows(dispatcher.list_runs())
+        n_wf = len(wf_paths)
+        for p in wf_paths:
+            err = workflow_error(p)
+            if err:
+                wf_errors.append({"workflow": p.name, "path": str(p), "error": err})
+    except Exception:
+        n_wf = len(config.DISPATCH_WORKFLOWS)
+    dispatch_on = n_wf > 0 and not wf_errors
+    dispatch_state = f"{n_wf} workflow{'' if n_wf == 1 else 's'}" if n_wf else "Off"
+    dispatch_detail = (f"every {config.DISPATCH_TICK_INTERVAL}s · auto-discovered" if n_wf
+                       else "no workflows yet — run `chela dispatch`")
+    if wf_errors:
+        dispatch_state = "Blocked"
+        dispatch_detail = ("new dispatches paused, still reconciling on the last good config — "
+                           + "; ".join(f"{e['workflow']}: {e['error']}" for e in wf_errors))
+
+    # ...and the fault that beats every one of the above: the daemon that would DO the
+    # dispatching has it turned off. Auto-discovery finds a WORKFLOW.md on disk and runs
+    # show in the Kanban, so this row read "1 workflow · On" for nine hours while the
+    # daemon dispatched nothing and reconciled nothing. What the file system says is not
+    # what the daemon does — so ask the daemon (it publishes its effective capabilities),
+    # and let that answer win. `None` = no daemon has published: don't guess, don't lie.
+    daemon_dispatch = next(
+        (c for c in (daemon_live["capabilities"] if daemon_live else [])
+         if c.get("key") == "dispatch"),
+        None,
+    )
+    daemon_dispatch_off = daemon_dispatch is not None and not daemon_dispatch.get("on")
+    if daemon_dispatch_off:
+        dispatch_on = False
+        dispatch_state = "Off"
+        dispatch_detail = ("the RUNNING daemon has dispatch AND reconcile off — "
+                           "CHELA_DISPATCH_WORKFLOWS is empty in its environment")
+    elif daemon_live is None and n_wf:
+        dispatch_detail += " · no daemon running (`chela run`)"
+
+    # A HELD queue (chela.hold) is the third way this row can be lying about work getting
+    # done: everything is configured, the daemon is up — and it is claiming nothing,
+    # deliberately, because someone is rewriting the queue. Read the hold FILE, not the
+    # daemon's startup snapshot: a hold taken since it booted is not in there, and the
+    # file is the shared truth between the two processes on purpose. A daemon that is off
+    # entirely is the worse fault, so it keeps the row.
+    dispatch_hold = None if daemon_dispatch_off else hold.active()
+    if dispatch_hold is not None:
+        dispatch_on = False
+        dispatch_state = "Held"
+        dispatch_detail = (
+            f"queue hold — {dispatch_hold.summary()}; NO task will be claimed until it is "
+            "released (`chela dispatch --resume`). Reconciliation continues."
+        )
+
+    try:
+        n_tasks = len(scheduler.list_tasks())
+        sched_detail = f"every {config.SCHEDULER_POLL_INTERVAL}s · {n_tasks} task{'' if n_tasks == 1 else 's'}"
+    except Exception:
+        sched_detail = f"every {config.SCHEDULER_POLL_INTERVAL}s"
+
+    features = [
+        {"label": "Terminal wall", "on": config.TERMINALS_ENABLED,
+         "state": "Enabled" if config.TERMINALS_ENABLED else "Off", "detail": wall_detail},
+        {"label": "Work dispatcher", "on": dispatch_on, "state": dispatch_state, "detail": dispatch_detail},
+        {"label": "Scheduler", "on": True, "state": "Polling", "detail": sched_detail},
+        {"label": "Tool-call relay", "on": config.SHOW_TOOL_CALLS,
+         "state": "On" if config.SHOW_TOOL_CALLS else "Hidden",
+         "detail": "every tool_use/tool_result relayed" if config.SHOW_TOOL_CALLS
+                   else "text + interactive prompts only (CHELA_SHOW_TOOL_CALLS)"},
+    ]
+
+    return {
+        "sections": [
+            {"title": "Connections", "items": connections},
+            {"title": "Features", "items": features},
+        ],
+        # Machine-readable twins of the "Work dispatcher" row above, for anything that
+        # wants to act on a broken workflow (or a held queue) rather than render a
+        # sentence.
+        "workflow_errors": wf_errors,
+        "dispatch_hold": dispatch_hold.as_dict() if dispatch_hold else None,
+    }
+
+
+@app.route("/api/settings")
+@require_auth
+def api_settings():
+    """READ-ONLY status aggregation for the Settings drawer. Reports live
+    connection + feature status (see ``_settings_status``); mutates nothing.
+
+    Also the operator-visible surface for a WORKFLOW.md that no longer parses:
+    the "Work dispatcher" row reads *Blocked*, and ``workflow_errors`` carries
+    the parse error per workflow."""
+    return jsonify(_settings_status())
 
 
 @app.route("/api/launcher/pin", methods=["POST"])
@@ -1320,6 +1774,101 @@ def api_agents_kill():
 
 
 # ---------------------------------------------------------------------------
+# Hooks — Claude Code hooks -> the event log, and (for a question) back again.
+# ---------------------------------------------------------------------------
+
+def _session_start_recap(body: dict):
+    """Hand a starting session the shared context its rooms hold — or NOTHING.
+
+    A restarted agent has forgotten every handoff, question and blocker its room ever
+    injected into it: that text lived in the dead session's context and nowhere else, and
+    a dispatched agent is a fresh session every run. The room ledger survives, so this is
+    where it is handed back (:func:`chela.rooms.recap`).
+
+    The window is resolved the CMX-48 way — off the session's ORIGIN, never its ``cwd``
+    (:func:`chela.hooks.wid_for_session`) — and an unresolvable one gets nothing rather
+    than someone else's rooms. An agent in **no** room gets an EMPTY BODY: the hook is a
+    ``command`` hook whose stdout IS the injected context, so a byte here is a byte in
+    every fresh context in the fleet, and most agents are in no room.
+
+    Fails open, always. A raise here would be a hook that prints its stack trace into an
+    agent's context window.
+    """
+    empty = app.response_class("", mimetype="application/json")
+    try:
+        transcript = body.get("transcript_path")
+        wid = hooks.wid_for_session(
+            body.get("session_id") if isinstance(body.get("session_id"), str) else None,
+            transcript if isinstance(transcript, str) else None,
+        )
+        text = rooms.recap(wid) if wid else ""
+    except Exception:  # noqa: BLE001 — a bug in OUR code must not wedge a starting agent
+        log.exception("rooms: building the SessionStart recap failed — no recap")
+        return empty
+    if not text:
+        return empty
+    return jsonify({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                           "additionalContext": text}})
+
+
+@app.route("/hooks/<event>", methods=["POST"])
+@require_auth
+def api_hooks(event):
+    """Receive one Claude Code hook: append it to the event log, and — for exactly one
+    event — hand the agent an answer back.
+
+    The plugin (``plugin/hooks/hooks.json``, rendered by :func:`chela.hooks.hooks_spec`)
+    POSTs each event here as an ``http`` hook, so there is no shell script and no process
+    spawn per tool call. Correlation to a window is off the session's origin, not the pane.
+
+    **Every event but one returns ``{}``.** An agent is *blocked* on this request and
+    Claude Code reads what comes back, so a ``permissionDecision`` or a
+    ``hookSpecificOutput`` here is chela answering a prompt on the human's behalf. That is
+    now a thing chela deliberately does — for ``PermissionRequest`` on an
+    ``AskUserQuestion``, and only when a human has actually tapped an answer on the bound
+    Telegram topic within the wait budget (:func:`chela.gateanswer.answer_permission_request`).
+    It is the ONLY safe way to answer a multi-question / ``multiSelect`` picker: the
+    keystroke path has no cursor to read for those shapes, and the one time it guessed it
+    silently answered the wrong option (CMX-32). Nothing else here decides anything.
+
+    **A blocked request is bounded and fails OPEN.** The wait is at most
+    ``CHELA_GATE_WAIT_S`` and the number of simultaneously-held gates is capped; past
+    either, the response is ``{}`` — which is not a deny, it is *no answer*: the picker is
+    still on the pane, still answerable in tmux, and the run is no worse off than it was
+    before this feature existed.
+
+    It never fails the caller. A malformed payload, an unparseable body, a full disk: 200
+    and an empty object, every time. The agent's tool call is not ours to break, and the
+    daemon being down at all is already a fail-OPEN path (the connection is refused, the
+    agent proceeds, the event is lost).
+    """
+    if event not in hooks.HOOK_EVENTS:
+        abort(404)
+    if (request.content_length or 0) > hooks.MAX_BODY:
+        log.warning("hooks: %s body over %d bytes — not read", event, hooks.MAX_BODY)
+        return jsonify({})
+    body = request.get_json(force=True, silent=True)
+    hooks.ingest(event, body)
+    if event == "SessionStart" and isinstance(body, dict):
+        return _session_start_recap(body)
+    if event == "PostToolUse" and isinstance(body, dict):
+        # The gate is over — whoever answered it. A ⏎ driven into the mirrored pane answers
+        # the TUI directly, so a hook we are holding for that same call would otherwise wait
+        # out its whole budget for an answer that is never coming, holding a wait slot the
+        # next gate needs (CMX-54). This is the one signal that fires on BOTH answer routes.
+        gateanswer.gate_resolved(body.get("tool_use_id"))
+    if event == "PermissionRequest" and isinstance(body, dict):
+        try:
+            answer = gateanswer.answer_permission_request(body)
+        except Exception:  # noqa: BLE001 — a bug in OUR code must not wedge a live agent
+            log.exception("gateanswer: answering %s failed — failing open", event)
+            answer = None
+        if answer is not None:
+            return jsonify(answer)
+    return jsonify({})
+
+
+# ---------------------------------------------------------------------------
 # API: Context Usage
 # ---------------------------------------------------------------------------
 
@@ -1345,6 +1894,14 @@ def api_agents_context():
 
     results = []
     for name in names:
+        # A plain shell (or dead session) has no live Claude process — the same
+        # `claude_pid is None` signal /api/agents already uses (~209) — so any
+        # snapshot here would only be a stale read of a PRIOR session that once
+        # ran in this same (reused) window name. Skip it: the bottom bar already
+        # hides context/branch on a missing row, leaving just the № chip.
+        window_id = windows.get(name)
+        if window_id is not None and agent_manager.claude_pid(window_id) is None:
+            continue
         s = context.live_snapshot(name)
         if not s:
             continue
@@ -1371,6 +1928,54 @@ def api_agents_context():
             "ts": s.get("ts"),
         })
     return jsonify(results)
+
+
+# Window keys the Cost tab's selector offers, and the lookback each implies.
+# "live" isn't a lookback at all — it's the current-snapshot read the Cost tab
+# always did, kept as the default so a DB with no history yet (capture_all not
+# wired in, or freshly deployed) still shows today's running totals instead of
+# a blank table.
+_COST_WINDOWS = ("live", "today", "7d", "30d")
+
+
+@app.route("/api/cost")
+@require_auth
+def api_cost():
+    """Per-agent spend for the Cost tab: a live snapshot, or a period rollup.
+
+    ``window=live`` (default) is the same current-snapshot read the tab always
+    did — no dependency on context_snapshots history. ``today``/``7d``/``30d``
+    sum each agent's spend over that lookback via context.windowed_cost, which
+    handles multiple Claude Code sessions per agent and cumulative-per-session
+    cost_usd correctly (see context.py's windowed_cost docstring).
+    """
+    window = request.args.get("window", "live")
+    if window not in _COST_WINDOWS:
+        window = "live"
+
+    if window == "live":
+        windows = discovery.get_all_windows()
+        rows = []
+        for name in windows:
+            s = context.live_snapshot(name)
+            if not s:
+                continue
+            rows.append({
+                "name": s["name"],
+                "model": s.get("model"),
+                "cost_usd": round(s["cost_usd"], 2) if s.get("cost_usd") else None,
+            })
+        return jsonify(rows)
+
+    now = datetime.now(timezone.utc)
+    if window == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif window == "7d":
+        start = now - timedelta(days=7)
+    else:  # 30d
+        start = now - timedelta(days=30)
+
+    return jsonify(context.windowed_cost(start, now))
 
 
 # ---------------------------------------------------------------------------
@@ -1593,21 +2198,103 @@ def api_cron():
 def _runs_for_workflow(
     all_runs: list[dict], wf_path: str
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    """Split runs into (active, awaiting_review, recent_completed) for a workflow.
+    """Split runs into (active, in-review, recent_completed) for a workflow.
 
     Match is by resolved-path equality so different env spellings still align
     with the path stored by dispatcher.tick() (which writes str(wf.path) where
     wf.path is already resolved). Returns at most 10 awaiting / completed.
+
+    The middle bucket is every run parked in the review loop — ``awaiting_review``,
+    ``changes_requested`` and ``needs_human`` (``dispatcher.REVIEW_STATUSES``). A run the
+    reviewer sent back is not done, not active, and not failed: with the old
+    ``== 'awaiting_review'`` test it appeared in NO column of the Kanban at all — it simply
+    vanished from the board while its agent was being re-spawned. Each card keeps its OWN
+    status (see kanban.js), so the column never claims a rejected PR is awaiting review.
     """
     try:
         target = str(Path(wf_path).expanduser().resolve())
     except OSError:
         target = wf_path
     matching = [r for r in all_runs if r.get("workflow_path") == target]
-    active = [r for r in matching if r.get("status") in ("claimed", "running")]
-    awaiting = [r for r in matching if r.get("status") == "awaiting_review"][:10]
+    active = [r for r in matching if r.get("status") in dispatcher.ACTIVE_STATUSES]
+    awaiting = [r for r in matching if r.get("status") in dispatcher.REVIEW_STATUSES][:10]
     recent = [r for r in matching if r.get("status") in ("done", "failed")][:10]
     return active, awaiting, recent
+
+
+def _repo_root_workflow() -> Path | None:
+    """Auto-discover a ``WORKFLOW.md`` at the repo root, if present.
+
+    The dashboard package lives at ``<root>/chela/dashboard/app.py``, so the
+    repo root is two parents up. Dogfooding chelamux seeds a ``WORKFLOW.md``
+    there, so this surfaces the project's own dispatcher with zero env config.
+    Returns ``None`` when the file is absent (e.g. an installed wheel with no
+    repo checkout, or a repo that never seeded a workflow).
+    """
+    try:
+        candidate = Path(__file__).resolve().parents[2] / "WORKFLOW.md"
+    except IndexError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _discover_dispatch_workflows(all_runs: list[dict]) -> list[Path]:
+    """Ordered, de-duplicated workflow paths to surface in the Dispatcher view.
+
+    Union of three session-independent sources, config first:
+      1. explicit ``CHELA_DISPATCH_WORKFLOWS`` config (kept, never replaced);
+      2. an auto-discovered repo-root ``WORKFLOW.md``;
+      3. every distinct ``workflow_path`` recorded in the runs DB — so dogfood
+         dispatch runs appear regardless of which tmux session ran them (runs
+         are session-independent; the daemon on this host need never have been
+         pointed at that workflow).
+
+    De-dup is by resolved-path string, matching how ``dispatcher.tick()`` stores
+    ``workflow_path`` and how ``_runs_for_workflow()`` matches it.
+    """
+    ordered: list[Path] = []
+    seen: set[str] = set()
+
+    def add(p: Path) -> None:
+        try:
+            resolved = p.expanduser().resolve()
+        except OSError:
+            resolved = p
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(resolved)
+
+    for wf in DISPATCH_WORKFLOWS:
+        add(wf)
+    repo_wf = _repo_root_workflow()
+    if repo_wf is not None:
+        add(repo_wf)
+    for run in all_runs:
+        wf_path = run.get("workflow_path")
+        if wf_path:
+            add(Path(wf_path))
+    return ordered
+
+
+def _project_key_from_runs(*run_groups: list[dict]) -> str | None:
+    """Best-effort ``project_key`` derived from a run's branch name.
+
+    Dispatched branches are ``{project_key.lower()}-{task_number}`` (see
+    ``dispatcher._spawn``), so the prefix recovers the key when the workflow
+    file itself is unavailable (a run-discovered workflow whose file no longer
+    exists in this checkout). Pre-migration ``dogfood/<sha>`` branches don't
+    match and yield ``None``, which the frontend already handles.
+    """
+    for group in run_groups:
+        for r in group:
+            branch = (r.get("branch_name") or "").strip()
+            if "-" not in branch:
+                continue
+            prefix = branch.rsplit("-", 1)[0].upper()
+            if PROJECT_KEY_RE.match(prefix):
+                return prefix
+    return None
 
 
 @app.route("/api/dispatcher/init", methods=["POST"])
@@ -1627,17 +2314,185 @@ def api_dispatcher_init():
     return jsonify(result)
 
 
+def _judge_live_status() -> str | None:
+    """A cheap "reviewing cmx-N" note when the judge is mid-review, or None.
+
+    The judge writes ``judge_state='running'`` on the run it is adjudicating
+    (``dispatcher.set_judge_state``); we read it back so the panel can show the
+    persona as live. Best-effort and non-fatal — a DB hiccup just means no note.
+    """
+    try:
+        running = [
+            r for r in dispatcher.list_runs()
+            if r.get("judge_state") == judge.J_RUNNING
+        ]
+    except Exception:
+        return None
+    if not running:
+        return None
+    labels = []
+    for r in running:
+        label = r.get("branch_name")
+        if not label and r.get("task_number") is not None:
+            label = f"cmx-{r['task_number']}"
+        if not label and r.get("task_id"):
+            label = str(r["task_id"])[:8]
+        if label:
+            labels.append(label)
+    if not labels:
+        return "reviewing a run"
+    return "reviewing " + ", ".join(labels)
+
+
+def _orchestrator_live_status() -> str | None:
+    """A cheap live note for the orchestrator persona, or None when it is off.
+
+    Reflects the CMX-90 auto-launch state: whether an attended-lease is open (the supervision
+    gate). ``armed`` = flag on but nobody attending; ``attended`` = a human's lease is active, so
+    an inbox-woken auto-launch would fire. Best-effort — a read failure just means no note.
+    """
+    try:
+        if not autolaunch.enabled():
+            return None
+        active = lease.active()
+    except Exception:
+        return None
+    if active is None:
+        return "armed — needs `chela orchestrator attend`"
+    return f"attended · {active.summary()}"
+
+
+@app.route("/api/personas")
+@require_auth
+def api_personas():
+    """The declared persona layer (judge · critic · orchestrator), read-only.
+
+    Single source of truth is ``chela/personas`` — this route serializes the
+    registry and stamps a cheap live status where one is available (the judge
+    while mid-review; the orchestrator's attended-lease state). It DECLARES the
+    personas and reports their live state; the auto-launch itself runs in the daemon.
+    """
+    judge_status = _judge_live_status()
+    orch_status = _orchestrator_live_status()
+    out = []
+    for p in personas.registry():
+        entry = p.as_dict()
+        if p.key == "judge" and judge_status:
+            entry["status"] = judge_status
+        if p.key == "orchestrator" and orch_status:
+            entry["status"] = orch_status
+        out.append(entry)
+    return jsonify({"personas": out})
+
+
+# ---------------------------------------------------------------------------
+# API: orchestrator subscribe — the pane-title toggle for "receive the
+# decisions inbox here", and exactly ONE active orchestrator at a time.
+# ---------------------------------------------------------------------------
+#
+# ``chela watch`` (no window) already does an atomic take-over of the single
+# ``orchestrator`` slot (chela/inbox.py::register) — registering a new identity
+# supersedes whoever held it, never two live recipients. These routes are the
+# in-UI, one-click equivalent: a human clicking a pane's "⊙ Orchestrator" toggle
+# is doing exactly what an agent does by running `chela watch` from its own
+# session, just from the dashboard instead of a shell.
+#
+# The DECISIONS LOG stays independent of any of this: chela/inbox.py::tick()
+# appends every event to event_log regardless of whether an orchestrator is
+# registered (see inbox.tick's unconditional `event_log.from_inbox` loop), so
+# /api/log already IS the durable, owner-independent log — no new storage here.
+
+def _orchestrator_status_payload() -> dict:
+    """The pane-toggle's whole picture: who owns the slot, and is it any good.
+
+    One read shared by ``/api/orchestrator/status`` and the subscribe/release
+    responses, so a click's response and a poll's response are never two
+    different shapes of the same fact.
+    """
+    store = inbox.load()
+    statuses = agent_manager.status_by_wid()
+    now_epoch = epoch.current()
+    wid = inbox.orchestrator_wid(store)
+    state, why = inbox.address_state(store, statuses, now_epoch)
+    return {
+        "wid": wid,
+        "name": store.get("orchestrator_name"),
+        "state": state,
+        "why": why,
+        "queued": len(store.get("queue") or []),
+    }
+
+
+@app.route("/api/orchestrator/status")
+@require_auth
+def api_orchestrator_status():
+    """Who (if anyone) currently receives the decisions inbox, and whether that
+    address is actually deliverable — the fact the pane toggle and the decisions
+    panel's owner chip both render from."""
+    return jsonify(_orchestrator_status_payload())
+
+
+@app.route("/api/orchestrator/subscribe", methods=["POST"])
+@require_auth
+def api_orchestrator_subscribe():
+    """Register ``wid`` as THE orchestrator — an ATOMIC take-over.
+
+    Wraps ``chela.inbox.register``, which unconditionally overwrites the single
+    ``orchestrator`` slot: registering here supersedes whoever held it before
+    (there is never a moment with two live recipients — the prior holder's next
+    status poll simply reports it is no longer the owner). ``wid`` must be a
+    live window (``inbox.register`` checks); a dead/unknown one is refused.
+    """
+    data = request.get_json(silent=True) or {}
+    wid = (data.get("wid") or "").strip()
+    if not wid:
+        return jsonify({"ok": False, "error": "wid required"}), 400
+    result = inbox.register(wid)
+    if not result.get("ok"):
+        return jsonify(result), 404
+    return jsonify({**result, **_orchestrator_status_payload()})
+
+
+@app.route("/api/orchestrator/release", methods=["POST"])
+@require_auth
+def api_orchestrator_release():
+    """Release ``wid`` from the orchestrator role — falls back to the durable
+    decisions-log panel (the queue keeps flowing into the log either way).
+
+    Wraps ``chela.inbox.unregister``, which is a GUARDED no-op unless the slot
+    currently names ``wid`` — a stale/duplicate release click can never clear a
+    different pane's live registration out from under it.
+    """
+    data = request.get_json(silent=True) or {}
+    wid = (data.get("wid") or "").strip()
+    if not wid:
+        return jsonify({"ok": False, "error": "wid required"}), 400
+    result = inbox.unregister(wid)
+    if not result.get("ok"):
+        return jsonify(result), 409
+    return jsonify({**result, **_orchestrator_status_payload()})
+
+
 @app.route("/api/dispatcher")
 @require_auth
 def api_dispatcher():
-    """Per-workflow view: open tasks + active runs + recent completed runs."""
+    """Per-workflow view: open tasks + active runs + recent completed runs.
+
+    Workflows come from three unioned, session-independent sources (see
+    ``_discover_dispatch_workflows``): the explicit ``CHELA_DISPATCH_WORKFLOWS``
+    config, an auto-discovered repo-root ``WORKFLOW.md``, and every workflow
+    that has runs recorded in the runs DB. That last source is why dogfood
+    dispatch runs surface here even when this dashboard's daemon was never
+    pointed at the workflow — runs are keyed by file path, not tmux session.
+    """
     workflows_payload = []
     all_runs = dispatcher.list_runs()
 
-    for wf_path in DISPATCH_WORKFLOWS:
+    for wf_path in _discover_dispatch_workflows(all_runs):
+        exists = wf_path.exists()
         entry: dict = {
             "path": str(wf_path),
-            "exists": wf_path.exists(),
+            "exists": exists,
             "project_key": None,
             "open_tasks": [],
             "backlog_items": [],
@@ -1646,10 +2501,6 @@ def api_dispatcher():
             "recent_runs": [],
             "error": None,
         }
-        if not wf_path.exists():
-            entry["error"] = "workflow file not found"
-            workflows_payload.append(entry)
-            continue
 
         active, awaiting, recent = _runs_for_workflow(all_runs, str(wf_path))
         # Hide tasks from Open if they already have an in-flight run, so a
@@ -1664,29 +2515,40 @@ def api_dispatcher():
         )
         project_key: str | None = None
 
-        try:
-            wf = load_workflow(wf_path)
-            project_key = wf.project_key
-            entry["project_key"] = project_key
-            source = get_source(wf)
-            open_tasks = source.list_open_tasks()
-            entry["open_tasks"] = [
-                {
-                    "id": t.id,
-                    "title": t.title,
-                    "file": t.file,
-                    "line_number": t.line_number,
-                }
-                for t in open_tasks
-                if t.id not in in_flight_ids
-            ]
-            backlog_path = (wf.path.parent / "BACKLOG.md").resolve()
-            entry["backlog_items"] = [
-                {"section": item.section, "text": item.text, "file": str(backlog_path)}
-                for item in parse_backlog(backlog_path)
-            ]
-        except Exception as e:
-            entry["error"] = f"{type(e).__name__}: {e}"
+        if exists:
+            try:
+                wf = load_workflow(wf_path)
+                project_key = wf.project_key
+                source = get_source(wf)
+                open_tasks = source.list_open_tasks()
+                entry["open_tasks"] = [
+                    {
+                        "id": t.id,
+                        "title": t.title,
+                        "file": t.file,
+                        "line_number": t.line_number,
+                    }
+                    for t in open_tasks
+                    if t.id not in in_flight_ids
+                ]
+                backlog_path = (wf.path.parent / "BACKLOG.md").resolve()
+                entry["backlog_items"] = [
+                    {"section": item.section, "text": item.text, "file": str(backlog_path)}
+                    for item in parse_backlog(backlog_path)
+                ]
+            except Exception as e:
+                entry["error"] = f"{type(e).__name__}: {e}"
+        else:
+            # Run-discovered (or configured-but-missing) workflow whose file is
+            # absent in this checkout. We still surface its runs; only the
+            # open-task / backlog columns are unavailable.
+            entry["error"] = "workflow file not found"
+
+        # When the file couldn't supply a project_key, recover it from a run
+        # branch so run-discovered workflows still group + label correctly.
+        if project_key is None:
+            project_key = _project_key_from_runs(active, awaiting, recent)
+        entry["project_key"] = project_key
 
         # Stamp project_key onto each run dict — task_number already comes from
         # the row (column added via idempotent migration); pre-migration rows
@@ -1697,13 +2559,20 @@ def api_dispatcher():
         for r in (*active, *awaiting, *recent):
             r["project_key"] = project_key
             r.setdefault("pr_mergeable", None)
+            # The CI check state (CMX-69) rides along the same way. A pre-migration row —
+            # or one the tick has not asked GitHub about yet — carries None, and the
+            # frontend renders that as "ci ?", never as green: not-yet-read is not a pass.
+            r.setdefault("pr_checks", None)
         entry["active_runs"] = active
         entry["awaiting_review_runs"] = awaiting
         entry["recent_runs"] = recent
         workflows_payload.append(entry)
 
     return jsonify({
-        "configured": bool(DISPATCH_WORKFLOWS),
+        # True whenever there's anything to show — explicit config, a discovered
+        # repo-root workflow, or workflows with recorded runs. The frontend
+        # gates its empty state on this, so run-only discovery must flip it on.
+        "configured": bool(workflows_payload),
         "workflows": workflows_payload,
     })
 
@@ -1902,7 +2771,7 @@ def _pr_mergeable(pr_number: str, repo_dir: str) -> str | None:
             ["gh", "pr", "view", pr_number, "--json", "mergeable", "-q", ".mergeable"],
             cwd=repo_dir, capture_output=True, text=True, timeout=15,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
@@ -2044,7 +2913,7 @@ def _auto_resolve_todo_conflict(
         if push.returncode != 0:
             # Already committed locally; nothing to abort. Surface the push error.
             return {"ok": False, "error": (push.stderr or push.stdout or "git push failed").strip()}
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         return _abort_manual(f"git operation failed during auto-resolve: {e}")
 
     # Wait for GitHub to recompute mergeability after the push.
@@ -2090,6 +2959,35 @@ def _merge_one(row: dict) -> dict:
     if not repo_dir or not repo_dir.is_dir():
         return {"ok": False, "error": f"workflow repo dir not found: {wf_path}", "status": 400}
 
+    # ⛔ THE GATE: a PR whose CI is RED does not merge from this dashboard. On 2026-07-14 one
+    # did — PR #80 was merged with its checks failing, and the base branch was broken until a
+    # hotfix — because nothing in chela knew a CI run existed. The state is read back from
+    # GITHUB right here, at the moment of merging, and not from the run row: the row is a
+    # 60s-old cache, and this is the one call where a stale answer is the whole bug.
+    #
+    # UNKNOWN is refused too. A check state that could not be read is never a pass — that is
+    # the doctor rule, and treating it as green would re-open the exact hole this closes.
+    # PENDING is refused for the same reason it is not a `changes_requested`: the checks have
+    # not settled, so nobody yet knows what merging this means. NONE (a repo with no CI at
+    # all) merges, and says so in the log — no checks is not the same as failing checks.
+    ci = dispatcher._read_pr_checks(pr_url, str(repo_dir))
+    if ci.state == dispatcher.CI_FAILING:
+        return {"ok": False, "status": 409,
+                "error": "CI is RED on this PR — refusing to merge it. Failing: "
+                         f"{', '.join(ci.failing) or 'unnamed check(s)'}. The dispatcher "
+                         "sends it back to its agent on the next tick."}
+    if ci.state == dispatcher.CI_PENDING:
+        return {"ok": False, "status": 409,
+                "error": "the checks on this PR have not settled yet — refusing to merge "
+                         "until GitHub has finished saying whether it passes."}
+    if ci.state == dispatcher.CI_UNKNOWN:
+        return {"ok": False, "status": 409,
+                "error": f"could not read this PR's checks ({ci.detail}) — and a check state "
+                         "nobody could read is NOT a pass. Refusing to merge."}
+    if ci.state == dispatcher.CI_NONE:
+        log.warning("merge: PR %s has NO checks at all — merging it, but no checks is not "
+                    "the same as passing checks", pr_url)
+
     # Pre-merge: if GitHub reports CONFLICTING, attempt a strictly-guarded
     # auto-resolve of a TODO.md-ONLY bookkeeping conflict in the run's
     # worktree. Anything beyond TODO.md (or an ambiguous strike) aborts to
@@ -2111,13 +3009,30 @@ def _merge_one(row: dict) -> dict:
         if not resolved.get("ok"):
             return {"ok": False, "error": resolved.get("error", "auto-resolve failed"), "status": 409}
 
+        # ⛔ THE GATE ABOVE IS NOW STALE, AND IT IS THE ONE THAT MATTERS. The auto-resolve
+        # merged base into the branch AND PUSHED — the head is a NEW commit, and it is the
+        # kind of commit most likely to be red: it carries everything base has moved by since
+        # this branch left it. We verified X and were about to ship Y. That is the PR-#80
+        # hole re-opened INSIDE the feature built to close it, so this path never merges: the
+        # honest answer right after a push is "the checks have not run yet", and the honest
+        # thing to do with it is to stop. The PR is now MERGEABLE and its new head is under
+        # CI; the next Merge (or the dispatcher's next tick, which sends it back if that
+        # merge commit is red) picks it up.
+        after = dispatcher._read_pr_checks(pr_url, str(repo_dir))
+        return {"ok": False, "status": 409, "error": (
+            "the TODO.md conflict was auto-resolved and PUSHED — the head of this PR is now "
+            f"a NEW commit ({(after.head_sha or 'unknown')[:12]}), which the green checks you "
+            f"saw did not cover (its own checks read: {after.state}). Refusing to merge a "
+            "commit nothing has verified. Re-run Merge once CI has finished on the new head."
+        )}
+
     try:
         merge = subprocess.run(
             ["gh", "pr", "merge", pr_number, "--squash"],
             cwd=str(repo_dir), capture_output=True, text=True, timeout=60,
         )
-    except FileNotFoundError:
-        return {"ok": False, "error": "gh CLI not found on PATH", "status": 500}
+    except OSError as e:
+        return {"ok": False, "error": f"gh CLI could not be run: {e}", "status": 500}
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "gh pr merge timed out", "status": 504}
     if merge.returncode != 0:
@@ -2132,7 +3047,7 @@ def _merge_one(row: dict) -> dict:
         )
         if sha_proc.returncode == 0:
             merge_sha = sha_proc.stdout.strip() or None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
     repo_cwd = str(repo_dir)
@@ -2181,10 +3096,11 @@ def api_dispatcher_merge_all():
     Optional ``{workflow_path}`` filter restricts to one workflow — the Kanban
     passes the active filter unless it's "all". A run is eligible only when
     ``status == 'awaiting_review'`` AND ``pr_state in ('open', None)`` AND
-    ``pr_mergeable == 'MERGEABLE'``; anything CONFLICTING / UNKNOWN / non-open
-    lands under ``skipped`` and is never merged. Each eligible run goes through
-    the shared ``_merge_one`` helper, so each merge gets the same cleanup as the
-    single-card button.
+    ``pr_mergeable == 'MERGEABLE'`` AND its checks are green (or the repo has no
+    CI at all); anything CONFLICTING / UNKNOWN / non-open, and anything whose CI
+    is red, pending or unread, lands under ``skipped`` and is never merged. Each
+    eligible run goes through the shared ``_merge_one`` helper, so each merge
+    gets the same cleanup — and the same live CI gate — as the single-card button.
 
     Returns ``{ok, merged: [task_id...], skipped: [{task_id, reason}],
     failed: [{task_id, error}]}``.
@@ -2213,6 +3129,17 @@ def api_dispatcher_merge_all():
             continue
         if row.get("pr_mergeable") != "MERGEABLE":
             skipped.append({"task_id": task_id, "reason": f"mergeable={row.get('pr_mergeable')}"})
+            continue
+        # Cheap pre-filter on the run row's cached check state, so a red PR is SKIPPED
+        # (reported, batch continues) instead of counted as a failure. _merge_one re-reads
+        # the checks from GitHub anyway and is the actual gate — this only keeps the batch's
+        # own report honest. ⛔ Anything that is not a green cache is skipped here, including
+        # a check state nobody has read yet: a batch merge must never be the thing that finds
+        # out what CI thought. A repo with NO CI at all (`none`) is not red and still merges
+        # — no checks is not the same as failing checks — and _merge_one logs that it did.
+        checks = row.get("pr_checks")
+        if checks not in (dispatcher.CI_PASSING, dispatcher.CI_NONE):
+            skipped.append({"task_id": task_id, "reason": f"checks={checks or 'unread'}"})
             continue
         result = _merge_one(row)
         if result.get("ok"):
@@ -2336,6 +3263,41 @@ def api_summary():
 
 
 # ---------------------------------------------------------------------------
+# API: the event log (READ)
+# ---------------------------------------------------------------------------
+#
+# ⛔ NOT /api/events — that path is TAKEN, and it is not this. /api/events is the
+# SSE delta-notification stream below: a notify-then-refetch pipe that carries no
+# data. The log is a different thing (durable, ordered, replayable), so it gets a
+# different path, and there is exactly ONE reader behind it: event_log.read(), the
+# same call `chela events` makes. Two readers would be two truths.
+
+LOG_DEFAULT_LIMIT = 200          # a cursorless read must not hand back the whole ring
+
+
+@app.route("/api/log")
+@require_auth
+def api_log():
+    """Replay the event log from a cursor. A thin wrapper over ``event_log.read``.
+
+    ``gap`` and ``next_seq`` are passed straight through, unflattened: a client resumes
+    from ``next_seq`` (never ``last_seq`` — a bounded read truncates), and a cursor that
+    cannot be honoured comes back as a ``gap`` object rather than a plausible-looking
+    wrong continuation.
+    """
+    limit = request.args.get("limit", type=int)
+    if limit is None:
+        limit = LOG_DEFAULT_LIMIT
+    return jsonify(event_log.read(
+        request.args.get("after_seq", type=int),
+        after_boot=request.args.get("after_boot") or None,
+        types=request.args.getlist("type") or None,
+        wid=request.args.get("wid") or None,
+        limit=max(0, limit),
+    ))
+
+
+# ---------------------------------------------------------------------------
 # API: Server-Sent Events (reactive UI accelerator)
 # ---------------------------------------------------------------------------
 #
@@ -2365,13 +3327,37 @@ def _sse_windows_snapshot() -> dict:
         return {}
 
 
+def _sse_run_label(r: dict) -> str:
+    """Human display id for a run — mirrors the frontend's ``_runDisplayId``:
+    ``PROJECT_KEY-N`` when derivable, else the raw task id. Carried in the SSE
+    frame so the run-state toast names the run the viewer recognizes."""
+    key = _project_key_from_runs([r])
+    task_number = r.get("task_number")
+    if key and task_number is not None:
+        return f"{key}-{task_number}"
+    return r.get("task_id") or ""
+
+
 def _sse_runs_snapshot() -> dict:
+    """Per-run view diffed by the SSE loop. Values carry ``status`` + PR fields
+    (change-detection) plus ``pr_url`` + ``label`` so the ``runs`` frame can name
+    the run and link its PR without the client issuing a second fetch. Mirrors
+    the same source (``dispatcher.list_runs``) the REST ``/api/dispatcher`` uses."""
     try:
-        return {
-            r.get("task_id"): (r.get("status"), r.get("pr_state"), r.get("pr_mergeable"))
-            for r in dispatcher.list_runs()
-            if r.get("task_id")
-        }
+        snap: dict = {}
+        for r in dispatcher.list_runs():
+            tid = r.get("task_id")
+            if not tid:
+                continue
+            snap[tid] = {
+                "status": r.get("status"),
+                "pr_state": r.get("pr_state"),
+                "pr_mergeable": r.get("pr_mergeable"),
+                "pr_checks": r.get("pr_checks"),
+                "pr_url": r.get("pr_url"),
+                "label": _sse_run_label(r),
+            }
+        return snap
     except Exception:
         log.exception("SSE: list_runs failed")
         return {}
@@ -2388,6 +3374,40 @@ def _sse_terms_snapshot() -> set:
         return set()
 
 
+def _sse_orchestrator_snapshot() -> dict:
+    """``{wid, state}`` — cheap enough to diff every SSE tick (one JSON read, no
+    tmux). Diffed to push an ``orchestrator`` delta so the pane toggle and the
+    decisions panel's owner chip update live, without waiting on their own poll.
+    """
+    try:
+        store = inbox.load()
+        wid = inbox.orchestrator_wid(store)
+        # `statuses`/`now_epoch` are what turns a bare wid into ok/dangling/gone —
+        # skipped here on purpose: they cost a tmux round-trip each, and the SSE
+        # loop already polls every second. The full state (with `why`) is one
+        # cheap follow-up fetch to /api/orchestrator/status, same as every other
+        # frame on this stream being a notification, not a payload.
+        return {"wid": wid}
+    except Exception:
+        log.exception("SSE: orchestrator snapshot failed")
+        return {}
+
+
+def _sse_log_snapshot() -> dict:
+    """``{"boot_id", "seq"}`` — the event log's position. Diffed to push a `log` delta.
+
+    Deliberately the sidecar read (``event_log.tip``), not a read of the events: the SSE
+    frame is a NOTIFICATION, not a payload — it carries the new ``seq`` and the client
+    fetches ``/api/log?after_seq=…`` for the events themselves, from its OWN cursor. A
+    client that missed a frame therefore misses nothing; the delta is an accelerator over
+    its poll, exactly like every other frame on this stream."""
+    try:
+        return event_log.tip()
+    except Exception:
+        log.exception("SSE: event-log tip failed")
+        return {}
+
+
 def _sse_stream():
     """Generator yielding SSE frames on relevant state change. Never raises out;
     a disconnected client surfaces as GeneratorExit on the next yield, which
@@ -2398,10 +3418,19 @@ def _sse_stream():
     prev_windows = _sse_windows_snapshot()
     prev_runs = _sse_runs_snapshot()
     prev_terms = _sse_terms_snapshot()
+    prev_log = _sse_log_snapshot()
+    prev_orch = _sse_orchestrator_snapshot()
 
     # An initial 'hello' lets the client confirm the stream is live (it may
     # optionally lengthen its poll timers; default behavior leaves them as-is).
-    yield "event: hello\ndata: {}\n\n"
+    # It also carries the current per-run status baseline so the client's
+    # run-state toasts stay edge-triggered across reconnects: a run already in
+    # awaiting_review is recorded here (no toast), so only a later transition
+    # INTO a review state fires one.
+    hello = {
+        "runs": [{"task_id": tid, "status": v["status"]} for tid, v in prev_runs.items()]
+    }
+    yield f"event: hello\ndata: {json.dumps(hello)}\n\n"
 
     last_sent = time.monotonic()
     while True:
@@ -2418,13 +3447,42 @@ def _sse_stream():
 
         cur_runs = _sse_runs_snapshot()
         if cur_runs != prev_runs:
+            # Present-and-changed runs ride along with status + pr_url + label so
+            # the client can toast a → awaiting_review transition (and link its
+            # PR) without a second fetch. Removed runs need no payload — any diff
+            # still re-renders the board via the client's existing refresh path.
             changed = [
-                tid for tid, v in cur_runs.items() if prev_runs.get(tid) != v
-            ] + [tid for tid in prev_runs if tid not in cur_runs]
-            payload = json.dumps({"changed": len(changed)})
+                {
+                    "task_id": tid,
+                    "status": v["status"],
+                    "pr_url": v["pr_url"],
+                    "label": v["label"],
+                }
+                for tid, v in cur_runs.items()
+                if prev_runs.get(tid) != v
+            ]
+            payload = json.dumps({"changed": len(changed), "runs": changed})
             yield f"event: runs\ndata: {payload}\n\n"
             last_sent = time.monotonic()
         prev_runs = cur_runs
+
+        cur_log = _sse_log_snapshot()
+        if cur_log and cur_log != prev_log:
+            # The seq the log is AT — not the events. The client resumes from its own
+            # cursor via /api/log, so a dropped frame costs it nothing.
+            yield f"event: log\ndata: {json.dumps(cur_log)}\n\n"
+            last_sent = time.monotonic()
+        prev_log = cur_log or prev_log
+
+        cur_orch = _sse_orchestrator_snapshot()
+        if cur_orch != prev_orch:
+            # Who owns the pane toggle changed (a subscribe/release/self-heal took
+            # over the slot, or it went to nobody). A NOTIFICATION like every other
+            # frame here: the client re-fetches /api/orchestrator/status for the
+            # full state (state/why/queued), so a dropped frame costs it nothing.
+            yield f"event: orchestrator\ndata: {json.dumps(cur_orch)}\n\n"
+            last_sent = time.monotonic()
+        prev_orch = cur_orch
 
         cur_terms = _sse_terms_snapshot()
         newly_ready = sorted(cur_terms - prev_terms)
@@ -2492,8 +3550,8 @@ def main():
     # Binds 127.0.0.1 by default — ZERO auth (see module docstring); put it
     # behind a tailnet / SSH tunnel for remote access. Override host/port with
     # CHELA_DASH_HOST / CHELA_DASHBOARD_PORT.
-    host = os.environ.get("CHELA_DASH_HOST", "127.0.0.1")
-    port = int(os.environ.get("CHELA_DASHBOARD_PORT", "5001"))
+    host = config.dashboard_host()
+    port = config.dashboard_port()
 
     # Loopback guard for the writable terminal wall. The wall is ON by default,
     # but it serves unauthenticated, writable shells — so if we're binding a
@@ -2514,7 +3572,17 @@ def main():
     scheduler.init()  # open the WAL scheduler DB + init schema once, before serving
     _start_notifier()
     collab.start()  # P3: publish running agents as presence peers (to shared viewers)
-    app.run(host=host, port=port, debug=False, threaded=True)
+
+    # Write down the port we are really binding, so another process (`chela plugin`,
+    # `chela doctor`) can address us without guessing. A hook `url` is a literal baked
+    # into the plugin manifest at render time — get this wrong and every hook POSTs into
+    # a closed socket, fails open, and the feature does nothing at all, quietly.
+    config.publish_dashboard_port(port, host)
+    atexit.register(config.clear_dashboard_port)
+    try:
+        app.run(host=host, port=port, debug=False, threaded=True)
+    finally:
+        config.clear_dashboard_port()
 
 
 if __name__ == "__main__":

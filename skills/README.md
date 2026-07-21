@@ -1,0 +1,51 @@
+# chelamux skills
+
+[Claude Code skills](https://docs.claude.com/en/docs/claude-code/skills) that ship with chelamux — onboarding plus a small curated set of agent-driven workflow habits (planning, elicitation, and session-continuity) that make a multi-agent setup productive.
+
+## Install
+
+Copy any skill directory into your skills folder:
+
+```bash
+# user-level (available everywhere)
+cp -r skills/handoff ~/.claude/skills/
+
+# or project-level
+cp -r skills/handoff <your-project>/.claude/skills/
+```
+
+Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
+
+## Setup
+
+| Skill | What it does |
+|-------|--------------|
+| **chela-setup** | Install chela and wire its work-item dispatcher into a git repo — scaffold a starter `WORKFLOW.md` + `TODO.md` so each `- [ ] task` becomes an agent → PR. Use to onboard a repo to chela. |
+| **telegram-setup** | Wire Telegram for chela — get a bot token from @BotFather, find the chat id (via `getUpdates`) and forum topic id, and set `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_TOPIC_ID`. The one-time config behind `telegram-send`. |
+
+## Orchestration
+
+| Skill | What it does |
+|-------|--------------|
+| **orchestrate** | Act as the orchestrator over a fleet of sibling agents — discover who's live, observe status/work (`peek`/`read`), dispatch scoped tasks (`drive`), review results, and surface decisions to the human. The operating manual for chela's agent-facing toolkit. |
+
+## Agent workflow
+
+| Skill | What it does |
+|-------|--------------|
+| **handoff** | Generate a structured handoff document so a future Claude session can resume a workstream cold — no shared context needed. Core to multi-session orchestration. |
+| **blindspot-pass** | Surface the unknowns *before* doing the work: explore the territory, restate the plan, and report the questions you didn't know to ask. |
+| **implementation-plan** | Produce an implementation plan ordered by likelihood-of-change / blast-radius, not chronology — load-bearing decisions first. |
+| **interview-me** | Elicit requirements one question at a time, highest-impact first, then emit a paste-ready decision record. |
+
+## Communication
+
+| Skill | What it does |
+|-------|--------------|
+| **telegram-send** | Send a message or file to Telegram from any agent (Bot API, stdlib-only, env-configured) — push a result, chart, log, or a surfaced decision to your phone. Composes with `orchestrate` so the fleet can reach you proactively. |
+
+## Credits
+
+`blindspot-pass`, `implementation-plan`, and `interview-me` are derived from Thariq Shihipar's **"A Field Guide to Fable: Finding Your Unknowns."** Full credit to the original work; these are adaptations packaged as Claude Code skills.
+
+`handoff`, `chela-setup`, `telegram-setup`, `orchestrate`, and `telegram-send` are original to this project.

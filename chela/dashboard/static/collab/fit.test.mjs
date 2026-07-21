@@ -4,6 +4,8 @@
 // instead of silently spiraling the font to 6px on a real screen.
 //
 //   node --test chela/dashboard/static/collab/
+// It is also run by `uv run pytest -q` — tests/test_js_suites.py globs the WHOLE repo for
+// *.test.mjs, precisely because this file sat outside tests/ and nothing ran it for weeks.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { computeFit } from './fit.js';

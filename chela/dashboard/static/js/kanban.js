@@ -1,18 +1,25 @@
+// --- Stage 0: ES-module imports ---
+import { $, BASE_PATH, attrEsc, escHtml } from './util.js';
+import { _runDisplayId, _runPrCell } from './dispatcher.js';
+import { pollWork, postWorkDelete } from './work.js';
+
 // ---------------------------------------------------------------------------
-// Render: Kanban (global cross-workflow board)
+// Render: the Board segment of WORK (the global cross-workflow kanban)
 //
-// Reuses /api/dispatcher and flattens its per-workflow payload into a single
-// board: Open (open_tasks), Claimed / Running / Failed / Done (runs). The
+// Flattens the /api/dispatcher payload into a single board: Backlog, Open
+// (open_tasks), Claimed / Running / Awaiting Review / Failed / Done (runs). The
 // workflow chip + filter chips let one board surface state across every
-// configured workflow. Self-polls every KANBAN_REFRESH_MS, same pattern as
-// the Dispatcher tab.
+// configured workflow.
+//
+// It no longer FETCHES: work.js owns the one poll of /api/dispatcher and hands the
+// same payload here and to the runs tables (this module used to run a second timer
+// against that endpoint, and the sidebar badges a third).
 //
 // Note: dispatcher.tick() currently deletes done rows on reconcile, so the
 // Done column is typically empty — recent_runs surfaces failed runs instead
 // (tracked in BACKLOG; see TODO comment for the underlying limitation).
 // ---------------------------------------------------------------------------
 
-const KANBAN_REFRESH_MS = 30000;
 const KANBAN_DONE_LIMIT = 20;
 const KANBAN_COLS = ['backlog', 'open', 'claimed', 'running', 'awaiting_review', 'failed', 'done'];
 const KANBAN_COL_LABELS = {
@@ -24,9 +31,53 @@ const KANBAN_COL_LABELS = {
     failed: 'Failed',
     done: 'Done',
 };
-let _kanbanTimer = null;
+// The rework loop's states (CMX-68). They ride in the Awaiting Review column — a run the
+// reviewer sent back has an open PR and is nowhere near done — but they are NOT awaiting
+// review, and the card must not pretend otherwise. Text, deliberately: a border colour is
+// a secondary cue, never the whole message.
+const REVIEW_STATE_CHIPS = {
+    changes_requested: '🔁 changes requested',
+    needs_human: '🛑 needs a human',
+};
+// What GitHub says about a card's checks. Every one of these is a WORD plus a glyph — the
+// colour is a secondary cue and never the signal (Liav is red-weak, and "is this PR red?"
+// is precisely the question a hue-only answer would get wrong). The three non-failing
+// states are the interesting ones and each says something different: `pending` has not
+// settled, `none` has no CI at all (which is NOT the same as passing), and a card with no
+// recorded state at all renders as `ci ?` — not-yet-read is never a pass.
+const CI_CHIPS = {
+    passing: { label: '✓ ci green',   cls: 'ci-passing' },
+    failing: { label: '✗ CI RED',     cls: 'ci-failing' },
+    pending: { label: '● ci pending', cls: 'ci-pending' },
+    none:    { label: '– no ci',      cls: 'ci-none' },
+    unknown: { label: '? ci unknown', cls: 'ci-unknown' },
+};
+// Columns that start collapsed in the mobile "Rows" accordion — low-traffic
+// buckets the user rarely needs open at a glance. Overridden + persisted per
+// user once they tap a caret.
+const KANBAN_DEFAULT_COLLAPSED = ['backlog', 'failed', 'done'];
+
 let _kanbanFilter = 'all';    // workflow path or 'all'
-let _kanbanCol = 'open';      // mobile-only: which column is visible
+
+// Mobile-only layout: 'swipe' (default, scroll-snap carousel) or 'rows'
+// (collapsible accordion). Persisted so it survives the 30s self-poll and
+// return visits. Desktop ignores it entirely (the 7-col grid is unchanged).
+function _loadKanbanLayout() {
+    try { return localStorage.getItem('chela_kanban_mlayout') === 'rows' ? 'rows' : 'swipe'; }
+    catch (e) { return 'swipe'; }
+}
+let _kanbanLayout = _loadKanbanLayout();
+
+// Per-user collapsed-column set for the Rows accordion. Missing key → the
+// KANBAN_DEFAULT_COLLAPSED defaults (backlog / failed / done).
+function _loadKanbanCollapsed() {
+    try {
+        const raw = localStorage.getItem('chela_kanban_collapsed');
+        if (raw === null) return new Set(KANBAN_DEFAULT_COLLAPSED);
+        return new Set(JSON.parse(raw));
+    } catch (e) { return new Set(KANBAN_DEFAULT_COLLAPSED); }
+}
+let _kanbanCollapsed = _loadKanbanCollapsed();
 
 function _wfName(path) {
     if (!path) return '?';
@@ -48,14 +99,14 @@ function _kCardDeleteBtn(card) {
                        data-del-kind="source-line"
                        data-file="${attrEsc(card.file)}"
                        data-text="${attrEsc(card.title)}"
-                       onclick="kanbanDeleteClick(this)"
+                       onclick="chela.kanbanDeleteClick(this)"
                        title="Delete this card" aria-label="Delete">&times;</button>`;
     }
     if (!card.task_id) return '';
     return `<button class="kanban-delete-btn" type="button"
                    data-del-kind="run"
                    data-task-id="${attrEsc(card.task_id)}"
-                   onclick="kanbanDeleteClick(this)"
+                   onclick="chela.kanbanDeleteClick(this)"
                    title="Delete this card" aria-label="Delete">&times;</button>`;
 }
 
@@ -75,7 +126,7 @@ function _kCard(card) {
             ? `<button class="kanban-promote-btn" type="button"
                        data-wf="${attrEsc(card.workflow_path)}"
                        data-text="${attrEsc(card.title)}"
-                       onclick="kanbanPromoteBacklog(this)">Promote</button>`
+                       onclick="chela.kanbanPromoteBacklog(this)">Promote</button>`
             : '';
         return `
     <div class="kanban-card kanban-card-backlog">
@@ -107,24 +158,42 @@ function _kCard(card) {
         branchOrLine = `<span class="ts">${escHtml(card.file.split('/').pop())}:${card.line_number}</span>`;
     }
     const pr = _runPrCell(card.pr_url);
+    // The Awaiting Review column also holds the rework loop's other two states, so a card
+    // that is NOT awaiting review says which one it is — in words. (Liav is red-weak: hue
+    // is never the only signal, here or anywhere.)
+    const stateChip = REVIEW_STATE_CHIPS[card.status]
+        ? `<span class="kanban-state-chip">${escHtml(REVIEW_STATE_CHIPS[card.status])}</span>`
+        : '';
     // Merge button rides next to the PR badge on Awaiting Review cards —
     // that's where cards with open, unmerged PRs live. dispatcher.tick()
     // refreshes pr_state via `gh pr view` for any row carrying a pr_url, so the
     // renderer gates on it: 'open' (or NULL — older rows / transient gh
     // failure) shows the button, 'merged' shows a badge, 'closed' shows nothing.
     const mergeable = (card.status === 'awaiting_review' && card.pr_url && card.task_id);
+    // The CI chip rides on every card that has a PR — including the merged ones, where it
+    // is the receipt: this is what shipped, and this is what its checks said.
+    const ciState = card.pr_url ? (card.pr_checks || 'unread') : '';
+    const ciMeta = CI_CHIPS[ciState] || { label: '? ci', cls: 'ci-unknown' };
+    const ci = card.pr_url
+        ? `<span class="kanban-ci-chip ${ciMeta.cls}" title="GitHub's checks on this PR">${escHtml(ciMeta.label)}</span>`
+        : '';
     let merge = '';
     if (mergeable) {
         if (card.pr_state === 'merged') {
             merge = `<span class="kanban-merged-badge" title="PR already merged">Merged ✓</span>`;
         } else if (card.pr_state === 'closed') {
             merge = '';
-        } else {
+        } else if (ciState === 'passing' || ciState === 'none') {
             merge = `<button class="kanban-merge-btn" type="button"
                    data-task-id="${tid}"
                    data-pr-url="${attrEsc(card.pr_url)}"
-                   onclick="kanbanMergePR(this)">Merge</button>`;
+                   onclick="chela.kanbanMergePR(this)">Merge</button>`;
         }
+        // ⛔ No button at all while CI is red, pending or unread. The server refuses those
+        // merges too (it re-reads the checks from GitHub at merge time — this button is a
+        // cache and the gate is not), but the orchestrator must not be ABLE to click it by
+        // accident, because on 2026-07-14 it did exactly that and the base branch broke.
+        // The chip beside it says which of the three it is.
     }
     return `
     <div class="kanban-card kanban-card-${card.status}" data-task-id="${tid}">
@@ -134,7 +203,9 @@ function _kCard(card) {
             <span class="kanban-wf-chip">${wf}</span>
             <span class="kanban-card-id" title="${tid}">${displayId}</span>
             ${branchOrLine}
+            ${stateChip}
             ${pr}
+            ${ci}
             ${merge}
         </div>
         ${err}
@@ -156,8 +227,8 @@ function kanbanDeleteClick(btn) {
     confirmEl.dataset.text = btn.dataset.text || '';
     confirmEl.innerHTML = `
         <span class="kanban-confirm-msg">Delete this?</span>
-        <button class="btn-confirm" type="button" onclick="kanbanDeleteConfirm(this, true)">Delete</button>
-        <button type="button" onclick="kanbanDeleteConfirm(this, false)">Cancel</button>`;
+        <button class="btn-confirm" type="button" onclick="chela.kanbanDeleteConfirm(this, true)">Delete</button>
+        <button type="button" onclick="chela.kanbanDeleteConfirm(this, false)">Cancel</button>`;
     card.appendChild(confirmEl);
     btn.style.visibility = 'hidden';
 }
@@ -180,31 +251,15 @@ async function kanbanDeleteConfirm(actionBtn, ok) {
         payload.text = confirmEl.dataset.text;
     }
     confirmEl.innerHTML = '<span class="kanban-confirm-msg">Deleting…</span>';
-    let resp, data = {};
-    try {
-        resp = await fetch(BASE_PATH + '/api/dispatcher/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        try { data = await resp.json(); } catch (_) { data = {}; }
-    } catch (e) {
-        _kanbanDeleteShowError(confirmEl, xBtn, String(e));
-        return;
-    }
-    if (!resp.ok || !data.ok) {
-        _kanbanDeleteShowError(confirmEl, xBtn, data.error || `HTTP ${resp.status}`);
-        return;
-    }
-    // Idempotent on the server, so we don't distinguish "no match" / "already
-    // gone" from a real delete here — let the next poll redraw the board.
-    refreshKanban();
+    // Shared with the runs table's × (work.js) — one delete action, two confirm UIs.
+    const err = await postWorkDelete(payload);
+    if (err) _kanbanDeleteShowError(confirmEl, xBtn, err);
 }
 
 function _kanbanDeleteShowError(confirmEl, xBtn, msg) {
     confirmEl.innerHTML = `
         <span class="kanban-confirm-msg" style="color:var(--red);">${escHtml(msg)}</span>
-        <button type="button" onclick="kanbanDeleteConfirm(this, false)">Close</button>`;
+        <button type="button" onclick="chela.kanbanDeleteConfirm(this, false)">Close</button>`;
     // Leave the × hidden — Close button drives dismissal.
     if (xBtn) xBtn.style.visibility = 'hidden';
 }
@@ -238,7 +293,7 @@ async function kanbanMergePR(btn) {
         return;
     }
     // Don't optimistically mutate UI state — let the next poll move the card.
-    refreshKanban();
+    pollWork();
 }
 
 function _kanbanMergeToast(btn, msg) {
@@ -297,7 +352,7 @@ async function kanbanMergeAll(btn) {
     if (detail.length) msg += '\n' + detail.join('\n');
     _kanbanToast(msg);
     // Don't optimistically mutate cards — let the next poll redraw the board.
-    refreshKanban();
+    pollWork();
 }
 
 function _kanbanToast(msg) {
@@ -342,7 +397,7 @@ async function kanbanPromoteBacklog(btn) {
     }
     // Don't optimistically mutate — let the next /api/dispatcher poll move the
     // card from Backlog → Open once the daemon re-reads BACKLOG.md + TODO.md.
-    refreshKanban();
+    pollWork();
 }
 
 function _kanbanPromoteToast(btn, msg) {
@@ -363,13 +418,21 @@ function _kCol(key, label, cards) {
     const body = cards.length
         ? cards.map(_kCard).join('')
         : `<div class="kanban-empty-col">—</div>`;
-    // kanban-col-mobile-active flips the column on at phone widths; ignored
-    // by the desktop grid layout, which shows all six.
-    const mobileActive = _kanbanCol === key ? ' kanban-col-mobile-active' : '';
+    // kanban-col-collapsed drives the mobile "Rows" accordion (CSS hides
+    // .kanban-cards when set, scoped to ≤768px + rows layout). Desktop and the
+    // swipe carousel ignore it, so the class is harmless everywhere else.
+    const collapsed = _kanbanCollapsed.has(key) ? ' kanban-col-collapsed' : '';
+    // The head is a tap toggle in the Rows accordion; toggleKanbanCol no-ops
+    // above 768px so desktop/swipe clicks do nothing. aria-expanded reflects
+    // collapsed state for the accordion; the caret is a pure CSS ▸/▾ marker.
     return `
-    <div class="kanban-col kanban-col-${key}${mobileActive}" data-col="${key}">
-        <div class="kanban-col-head">
-            <span>${label}</span>
+    <div class="kanban-col kanban-col-${key}${collapsed}" data-col="${key}">
+        <div class="kanban-col-head" role="button" tabindex="0"
+             aria-expanded="${_kanbanCollapsed.has(key) ? 'false' : 'true'}"
+             onclick="chela.toggleKanbanCol('${key}')"
+             onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();chela.toggleKanbanCol('${key}');}">
+            <span class="kanban-col-caret" aria-hidden="true"></span>
+            <span class="kanban-col-label">${label}</span>
             <span class="col-count">${cards.length}</span>
         </div>
         <div class="kanban-cards">${body}</div>
@@ -411,7 +474,12 @@ function _kanbanFlatten(data) {
             buckets[status].push({ ...r, status });
         }
         for (const r of (wf.awaiting_review_runs || [])) {
-            buckets.awaiting_review.push({ ...r, status: 'awaiting_review' });
+            // The column holds the whole review loop — awaiting_review, changes_requested
+            // (sent back by the reviewer) and needs_human (the loop hit its cap). Each card
+            // KEEPS ITS OWN STATUS: overwriting it with 'awaiting_review' would put a
+            // Merge button on a PR that just failed review and tell the reader a run that
+            // stopped is still waiting on them.
+            buckets.awaiting_review.push({ ...r, status: r.status || 'awaiting_review' });
         }
         for (const r of (wf.recent_runs || [])) {
             const status = (r.status === 'done' || r.status === 'failed') ? r.status : 'done';
@@ -440,7 +508,7 @@ function _renderKanbanFilters(workflows, mergeableCount = 0) {
     const chip = (val, label) => {
         const active = _kanbanFilter === val ? ' active' : '';
         return `<button class="kanban-filter-chip${active}" data-wf="${escHtml(val)}"
-                       onclick="setKanbanFilter('${escHtml(val).replace(/'/g, "\\'")}')">${escHtml(label)}</button>`;
+                       onclick="chela.setKanbanFilter('${escHtml(val).replace(/'/g, "\\'")}')">${escHtml(label)}</button>`;
     };
     let html = chip('all', `All (${workflows.length})`);
     for (const wf of workflows) {
@@ -452,55 +520,105 @@ function _renderKanbanFilters(workflows, mergeableCount = 0) {
     if (mergeableCount > 0) {
         html += `<button class="kanban-merge-btn kanban-merge-all-btn" type="button"
                        data-count="${mergeableCount}"
-                       onclick="kanbanMergeAll(this)">Merge all mergeable (${mergeableCount})</button>`;
+                       onclick="chela.kanbanMergeAll(this)">Merge all mergeable (${mergeableCount})</button>`;
     }
     wrap.innerHTML = html;
 }
 
 function setKanbanFilter(wf) {
     _kanbanFilter = wf || 'all';
-    // Re-render against the last fetched payload via a fresh fetch — keeps
-    // the filter responsive without caching the prior response shape.
-    refreshKanban();
+    // Re-render through the one poll — the filter is a client-side view of the
+    // payload, so this is a redraw, not a second data source.
+    pollWork();
 }
 
-// Mobile column selector: pick which of the five status columns the phone
-// view shows. No-op on desktop, where all columns are visible by default.
-function setKanbanCol(col) {
-    if (!KANBAN_COLS.includes(col)) col = 'open';
-    _kanbanCol = col;
-    document.querySelectorAll('.kanban-col').forEach(el => {
-        el.classList.toggle('kanban-col-mobile-active', el.dataset.col === col);
+// --- Mobile layout: Swipe carousel vs. Rows accordion ---
+//
+// The mobile board offers two layouts, gated entirely behind the ≤768px media
+// query; desktop (≥769px) keeps its 7-column grid untouched. The active layout
+// is a class on #work-board so both the board and the nav strip react to it.
+
+function _applyKanbanLayout() {
+    const panel = $('#work-board');
+    if (panel) {
+        panel.classList.toggle('kanban-mobile-swipe', _kanbanLayout === 'swipe');
+        panel.classList.toggle('kanban-mobile-rows', _kanbanLayout === 'rows');
+    }
+    // Reflect the active toggle button (colorblind-safe: aria + a fill/weight
+    // style class, never hue alone).
+    document.querySelectorAll('.kanban-layout-btn').forEach(btn => {
+        const on = btn.dataset.layout === _kanbanLayout;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
 }
 
-function _renderKanbanColSelect(buckets) {
-    // Rebuild the mobile <select> with counts in the labels so the user knows
-    // which buckets have anything before picking. Driven off the *filtered*
-    // buckets so workflow filter + column selector compose correctly. Includes
-    // the Backlog column so phones get to it via the same single-col selector.
-    const sel = $('#kanban-col-select');
-    if (!sel) return;
+// Swipe ⇄ Rows toggle. Persists the choice so it survives the 30s self-poll
+// and return visits. No board re-fetch needed — both layouts render from the
+// same DOM, so we just re-apply the class + refresh the nav strip.
+function setKanbanLayout(layout) {
+    _kanbanLayout = layout === 'rows' ? 'rows' : 'swipe';
+    try { localStorage.setItem('chela_kanban_mlayout', _kanbanLayout); } catch (e) { /* ignore */ }
+    _applyKanbanLayout();
+}
+
+// Rows accordion: collapse/expand a column's cards. No-ops above 768px so a
+// stray desktop/swipe click on a head does nothing. Persists per user.
+function toggleKanbanCol(col) {
+    if (typeof window.matchMedia === 'function'
+        && !window.matchMedia('(max-width: 768px)').matches) return;
+    if (_kanbanCollapsed.has(col)) _kanbanCollapsed.delete(col);
+    else _kanbanCollapsed.add(col);
+    try { localStorage.setItem('chela_kanban_collapsed', JSON.stringify([..._kanbanCollapsed])); }
+    catch (e) { /* ignore */ }
+    const el = document.querySelector(`.kanban-col[data-col="${col}"]`);
+    if (el) {
+        const collapsed = _kanbanCollapsed.has(col);
+        el.classList.toggle('kanban-col-collapsed', collapsed);
+        const head = el.querySelector('.kanban-col-head');
+        if (head) head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    }
+}
+
+// Quick-nav strip (swipe layout only): one chip per column with its live
+// count; tapping snap-scrolls the carousel to that column.
+function _renderKanbanNav(buckets) {
+    const strip = $('#kanban-nav-strip');
+    if (!strip) return;
     const apply = arr => _kanbanFilter === 'all' ? arr : arr.filter(c => c.workflow_path === _kanbanFilter);
-    sel.innerHTML = KANBAN_COLS.map(k => {
+    strip.innerHTML = KANBAN_COLS.map(k => {
         const n = apply(buckets[k] || []).length;
-        const sel = k === _kanbanCol ? ' selected' : '';
-        return `<option value="${k}"${sel}>${KANBAN_COL_LABELS[k]} (${n})</option>`;
+        return `<button class="kanban-nav-chip" type="button" data-col="${k}"
+                       onclick="chela.kanbanNavTo('${k}')">
+                    <span class="kanban-nav-label">${KANBAN_COL_LABELS[k]}</span>
+                    <span class="kanban-nav-count">${n}</span>
+                </button>`;
     }).join('');
 }
 
-async function refreshKanban() {
-    let data;
-    try {
-        data = await api('/api/dispatcher');
-    } catch (e) {
-        console.error('refreshKanban', e);
-        return;
+// Snap the carousel to a column and mark its nav chip active (colorblind-safe:
+// active chip gets fill + weight + border, not hue alone).
+function kanbanNavTo(col) {
+    const board = $('#kanban-board');
+    const el = board && board.querySelector(`.kanban-col[data-col="${col}"]`);
+    if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' });
     }
+    document.querySelectorAll('.kanban-nav-chip').forEach(chip => {
+        const on = chip.dataset.col === col;
+        chip.classList.toggle('active', on);
+        chip.setAttribute('aria-current', on ? 'true' : 'false');
+    });
+}
+
+// Render the board from a payload work.js already fetched — the SAME object the
+// runs tables render and the sidebar badges count.
+function renderKanban(data) {
     const board = $('#kanban-board');
     const empty = $('#kanban-empty');
     const filters = $('#kanban-filters');
-    if (!data.configured || !data.workflows || !data.workflows.length) {
+    if (!board || !empty || !filters) return;
+    if (!data || !data.configured || !data.workflows || !data.workflows.length) {
         board.innerHTML = '';
         filters.innerHTML = '';
         empty.style.display = 'block';
@@ -514,11 +632,20 @@ async function refreshKanban() {
     const apply = arr => _kanbanFilter === 'all' ? arr : arr.filter(c => c.workflow_path === _kanbanFilter);
 
     // Merge-all count = awaiting_review cards that GitHub reports MERGEABLE in
-    // the active filter. Drives the toolbar button's label + visibility.
+    // the active filter. Drives the toolbar button's label + visibility. The status test
+    // is load-bearing since the rework loop shares this column: a `changes_requested` PR
+    // is perfectly MERGEABLE and must never be counted into a Merge-all — it is the PR a
+    // reviewer just REJECTED. (The server refuses it too; this keeps the count honest.)
+    // ⛔ And a PR whose CI is RED (or pending, or never read) is never counted either — the
+    // server skips it in the batch, and a count that included it would be promising a merge
+    // that cannot happen. `none` (a repo with no CI at all) still counts: no checks is not
+    // the same as failing checks.
     const mergeableCount = apply(buckets.awaiting_review)
-        .filter(c => c.pr_mergeable === 'MERGEABLE').length;
+        .filter(c => c.status === 'awaiting_review' && c.pr_mergeable === 'MERGEABLE'
+                     && (c.pr_checks === 'passing' || c.pr_checks === 'none')).length;
     _renderKanbanFilters(workflows, mergeableCount);
-    _renderKanbanColSelect(buckets);
+    _renderKanbanNav(buckets);
+    _applyKanbanLayout();
 
     board.innerHTML = [
         _kCol('backlog',         'Backlog',         apply(buckets.backlog)),
@@ -531,12 +658,10 @@ async function refreshKanban() {
     ].join('');
 }
 
-function startKanbanTimer() {
-    stopKanbanTimer();
-    _kanbanTimer = setInterval(refreshKanban, KANBAN_REFRESH_MS);
-}
 
-function stopKanbanTimer() {
-    if (_kanbanTimer) { clearInterval(_kanbanTimer); _kanbanTimer = null; }
-}
+// --- Stage 0: ES-module exports ---
+export { renderKanban };
 
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { kanbanDeleteClick, kanbanDeleteConfirm, kanbanMergeAll, kanbanMergePR, kanbanNavTo, kanbanPromoteBacklog, setKanbanFilter, setKanbanLayout, toggleKanbanCol });

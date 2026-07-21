@@ -14,7 +14,7 @@ import os
 import sqlite3
 import time
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from chela import transcripts
@@ -208,6 +208,20 @@ def capture_all() -> list[dict]:
     return results
 
 
+def prune_snapshots(older_than_days: int = 30) -> int:
+    """Delete context_snapshots rows older than `older_than_days`. Returns rows deleted.
+
+    `capture_all` accrues history on a daemon cadence with no natural cap, so this
+    keeps scheduler.db bounded — called on its own coarser cadence from the daemon
+    loop, independent of how often capture runs.
+    """
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    with closing(_get_db()) as conn:
+        cur = conn.execute("DELETE FROM context_snapshots WHERE ts < ?", (cutoff_iso,))
+        conn.commit()
+        return cur.rowcount
+
+
 def get_latest() -> list[dict]:
     """Get most recent context snapshot for each agent from DB. Instant.
 
@@ -291,3 +305,62 @@ def live_snapshot(agent_name: str) -> dict | None:
     transcript-derived estimate, else None.
     """
     return _cache_snapshot(agent_name) or _transcript_snapshot(agent_name)
+
+
+# ---------------------------------------------------------------------------
+# Windowed cost (Today / 7d / 30d) — a period-spend rollup over the history
+# `capture_all` accrues in context_snapshots.
+#
+# cost_usd is CUMULATIVE per session (Claude Code's own running session
+# total), and session_name is unique per session — a restarted agent gets a
+# new session_name starting near 0. So each session_name's readings are
+# MONOTONIC: there are no in-session resets to fight, only session boundaries.
+# Windowed spend for one session = max(0, last_cum(<= window_end) -
+# last_cum(< window_start)), reading the baseline as 0 when the session has
+# no snapshot before window_start (it started inside, or right at, the
+# window). An agent (tmux window) can span more than one session within a
+# window if it restarted, so we sum across all of an agent's sessions.
+# ---------------------------------------------------------------------------
+
+def windowed_cost(window_start: datetime, window_end: datetime) -> list[dict]:
+    """Per-agent spend within [window_start, window_end], summed across sessions."""
+    start_iso = window_start.isoformat()
+    end_iso = window_end.isoformat()
+
+    with closing(_get_db()) as conn:
+        rows = conn.execute(
+            "SELECT agent, session_name, ts, cost_usd, model FROM context_snapshots "
+            "WHERE session_name IS NOT NULL AND ts <= ? "
+            "ORDER BY agent, session_name, ts",
+            (end_iso,),
+        ).fetchall()
+
+    sessions: dict[tuple[str, str], list] = {}
+    for r in rows:
+        sessions.setdefault((r["agent"], r["session_name"]), []).append(r)
+
+    agent_totals: dict[str, float] = {}
+    agent_model: dict[str, str] = {}
+    for (agent, _session_name), recs in sessions.items():
+        # recs are ts-ascending and already ts <= end_iso (filtered in SQL), so
+        # the last cost_usd seen is last_cum(<= window_end), and the last one
+        # seen with ts < start_iso is last_cum(< window_start).
+        baseline = 0.0
+        endval = None
+        for r in recs:
+            if r["cost_usd"] is None:
+                continue
+            if r["ts"] < start_iso:
+                baseline = r["cost_usd"]
+            endval = r["cost_usd"]
+            if r["model"]:
+                agent_model[agent] = r["model"]
+        if endval is None:
+            continue
+        spend = max(0.0, endval - baseline)
+        agent_totals[agent] = agent_totals.get(agent, 0.0) + spend
+
+    return [
+        {"name": agent, "model": agent_model.get(agent), "cost_usd": round(total, 2)}
+        for agent, total in agent_totals.items()
+    ]

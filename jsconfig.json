@@ -1,0 +1,15 @@
+{
+  "//": "EDITOR AID ONLY — this is NOT a check that runs, and it does NOT pass. Stage 0 gave the dashboard JS checkJs/JSDoc hints in the editor; nothing has ever run tsc in CI, and today it reports ~108 errors (untyped DOM lookups, window.chela). The command this line used to advertise did not even work ('npx -y typescript tsc …' feeds 'tsc' to tsc as a source file: TS5042). Kept because the in-editor hints have caught real bugs, but stated plainly: a check nobody runs buys confidence without doing the work. Green it (a globals.d.ts + the DOM casts) and gate it in CI, or drop the file. Correct invocation: npx -y -p typescript tsc -p jsconfig.json --noEmit",
+  "compilerOptions": {
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "module": "esnext",
+    "target": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "strict": false
+  },
+  "include": ["chela/dashboard/static/js/**/*.js"],
+  "exclude": ["chela/dashboard/static/vendor/**", "chela/dashboard/static/js/collab/**", "collab/**", "node_modules"]
+}

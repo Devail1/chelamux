@@ -1,3 +1,6 @@
+// --- Stage 0: ES-module imports ---
+import { $, api, attrEsc, escHtml, relativeTime } from './util.js';
+
 // ---------------------------------------------------------------------------
 // Render: Knowledge (OKF viewer)
 //
@@ -12,7 +15,7 @@
 // self-contained so the portable viewer.html (Phase 4) can reuse them verbatim.
 // ---------------------------------------------------------------------------
 
-const _kn = { tree: null, view: 'glance', path: null, q: '' };
+const _kn = { tree: null, view: 'glance', path: null, q: '', sigma: null };
 
 // Entry point — called by the global refresh loop while the Knowledge tab is
 // active. Loads the tree once; never clobbers a concept the user is reading.
@@ -39,6 +42,7 @@ async function knRefresh(btn) {
 }
 
 function knBackToGlance() {
+    knKillGraph();
     _kn.view = 'glance';
     _kn.path = null;
     const s = $('#kn-search'); if (s) s.value = '';
@@ -62,7 +66,7 @@ function knRenderGlance() {
               target="_blank" rel="noopener">Open Knowledge Format</a> bundle: typed markdown you can
               glance at, browse, and follow by backlink.
             </div>
-            <span class="work-empty-cta" onclick="knRefresh()">Export the bundle →</span>
+            <span class="work-empty-cta" onclick="chela.knRefresh()">Export the bundle →</span>
           </div>`;
         return;
     }
@@ -139,7 +143,7 @@ function knRenderGlance() {
 function knCardRow(c) {
     const ts = c.timestamp ? `<span class="kn-card-ts ts">${relativeTime(c.timestamp)}</span>` : '';
     return `
-      <div class="kn-card" onclick="knOpen('${attrEsc(c.path)}')">
+      <div class="kn-card" onclick="chela.knOpen('${attrEsc(c.path)}')">
         <span class="kn-badge kn-badge-${knTypeClass(c.type)}">${escHtml(c.type || 'concept')}</span>
         <span class="kn-card-title">${escHtml(c.title)}</span>
         ${c.description ? `<span class="kn-card-desc">${escHtml(c.description)}</span>` : ''}
@@ -153,7 +157,7 @@ function knAgentRow(a, projByTitle) {
     const projPath = a.project && projByTitle[a.project];
     const proj = a.project
         ? (projPath
-            ? `<a class="kn-feed-proj" onclick="event.stopPropagation();knOpen('${attrEsc(projPath)}')">${escHtml(a.project)}</a>`
+            ? `<a class="kn-feed-proj" onclick="event.stopPropagation();chela.knOpen('${attrEsc(projPath)}')">${escHtml(a.project)}</a>`
             : `<span class="kn-feed-proj">${escHtml(a.project)}</span>`)
         : '';
     const ts = a.timestamp ? `<span class="kn-card-ts ts">${relativeTime(a.timestamp)}</span>` : '';
@@ -161,7 +165,7 @@ function knAgentRow(a, projByTitle) {
         ? `<a class="kn-pr" href="${attrEsc(a.pr_url)}" target="_blank" rel="noopener"
              onclick="event.stopPropagation()">PR ↗</a>` : '';
     return `
-      <div class="kn-feed-row" onclick="knOpen('${attrEsc(a.path)}')">
+      <div class="kn-feed-row" onclick="chela.knOpen('${attrEsc(a.path)}')">
         <span class="kn-badge kn-badge-agent">Agent</span>
         <div class="kn-feed-main">
           <div class="kn-feed-top">
@@ -177,7 +181,7 @@ function knAgentRow(a, projByTitle) {
 
 function knProjectChip(p) {
     return `
-      <button class="kn-pchip" onclick="knOpen('${attrEsc(p.path)}')">
+      <button class="kn-pchip" onclick="chela.knOpen('${attrEsc(p.path)}')">
         <span class="kn-pchip-name">${escHtml(p.title)}</span>
         ${p.description ? `<span class="kn-dim">${escHtml(p.description)}</span>` : ''}
       </button>`;
@@ -186,6 +190,7 @@ function knProjectChip(p) {
 // --- Concept detail (frontmatter card + body + backlinks) ------------------
 
 async function knOpen(path) {
+    knKillGraph();
     _kn.view = 'concept';
     _kn.path = path;
     const el = $('#kn-content');
@@ -199,7 +204,7 @@ async function knOpen(path) {
     }
     if (!el) return;
     if (c.error || !c.path) {
-        el.innerHTML = `<div class="kn-detail"><a class="kn-back" onclick="knBackToGlance()">← Knowledge</a>
+        el.innerHTML = `<div class="kn-detail"><a class="kn-back" onclick="chela.knBackToGlance()">← Knowledge</a>
             <div class="kn-dim">Concept not found.</div></div>`;
         return;
     }
@@ -215,7 +220,7 @@ async function knOpen(path) {
     // Backlinks — the headline feature: what links TO this concept.
     const back = (c.backlinks || []).length
         ? c.backlinks.map(b => `
-            <div class="kn-card" onclick="knOpen('${attrEsc(b.path)}')">
+            <div class="kn-card" onclick="chela.knOpen('${attrEsc(b.path)}')">
               <span class="kn-badge kn-badge-${knTypeClass(b.type)}">${escHtml(b.type || 'concept')}</span>
               <span class="kn-card-title">${escHtml(b.title)}</span>
             </div>`).join('')
@@ -227,7 +232,7 @@ async function knOpen(path) {
 
     el.innerHTML = `
       <div class="kn-detail">
-        <a class="kn-back" onclick="knBackToGlance()">← Knowledge</a>
+        <a class="kn-back" onclick="chela.knBackToGlance()">← Knowledge</a>
         <div class="kn-head-card">
           <div class="kn-head-top">
             <span class="kn-badge kn-badge-${knTypeClass(c.type)}">${escHtml(c.type || 'concept')}</span>
@@ -268,6 +273,7 @@ function knFilterType(type) {
 
 async function knRunSearch(q, type) {
     if (!q && !type) { knBackToGlance(); return; }
+    knKillGraph();
     _kn.view = 'search';
     const el = $('#kn-content');
     let params = '/api/knowledge/search?q=' + encodeURIComponent(q || '');
@@ -276,9 +282,9 @@ async function knRunSearch(q, type) {
     if (!el) return;
     const head = `<div class="kn-section-title">Search
         <span class="kn-dim">· ${rows.length} result${rows.length === 1 ? '' : 's'}${type ? ' · type ' + escHtml(type) : ''}</span>
-        <a class="kn-back" style="float:right" onclick="knBackToGlance()">← Knowledge</a></div>`;
+        <a class="kn-back" style="float:right" onclick="chela.knBackToGlance()">← Knowledge</a></div>`;
     const body = rows.length ? rows.map(r => `
-        <div class="kn-card" onclick="knOpen('${attrEsc(r.path)}')">
+        <div class="kn-card" onclick="chela.knOpen('${attrEsc(r.path)}')">
           <span class="kn-badge kn-badge-${knTypeClass(r.type)}">${escHtml(r.type || 'concept')}</span>
           <span class="kn-card-title">${escHtml(r.title)}</span>
           ${r.description ? `<span class="kn-card-desc">${escHtml(r.description)}</span>` : ''}
@@ -287,53 +293,186 @@ async function knRunSearch(q, type) {
     el.innerHTML = `<div class="kn-glance">${head}${body}</div>`;
 }
 
-// --- Graph -----------------------------------------------------------------
+// --- Graph -------------------------------------------------------------
+//
+// Renderer = sigma.js + graphology (WebGL), vendored+minified at
+// static/vendor/sigma-graph.min.js and loaded as a global (window.chelaGraphLibs)
+// — the same pattern as gridstack. graphology-layout-forceatlas2 gives an actual
+// force-directed layout instead of the old hand-rolled circular SVG.
+//
+// The DOM/WebGL glue (knRenderSigma) is not unit-tested — sigma needs a real
+// WebGL context, which jsdom doesn't provide. What IS tested is the pure data
+// step (knGraphModel/knNodeColor below): seeding node positions, resolving
+// per-type colors, and filtering edges — no graphology/Sigma/DOM involved.
+
+const _KN_GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+// Deterministic, non-overlapping seed layout (golden-angle spiral). forceAtlas2
+// needs a starting position per node before it can spread them; a symmetric seed
+// (e.g. a plain circle) leaves force-directed layout stuck at a degenerate fixed
+// point, so this is a correctness requirement, not cosmetic.
+function knGraphSeed(i) {
+    const r = Math.sqrt(i + 1);
+    const a = i * _KN_GOLDEN_ANGLE;
+    return { x: r * Math.cos(a), y: r * Math.sin(a) };
+}
+
+// type -> fixed Okabe-Ito colorblind-safe hex (https://jfly.uni-koeln.de/color/,
+// verified distinguishable under deuteranopia/protanopia). NOT theme CSS vars —
+// a theme's --green/--accent/--yellow are picked for contrast, not colorblind
+// separability, so resolving through them risked two node types landing on
+// hues a red-weak viewer can't tell apart. `other` stays the theme-dim grey:
+// achromatic, so it's colorblind-safe by construction and still reads as "no
+// strong category" across every theme.
+const _KN_TYPE_COLOR = {
+    agent: '#009E73',   // bluish green
+    run: '#0072B2',     // blue
+    sched: '#E69F00',   // orange
+    project: '#CC79A7', // reddish purple
+    other: { varName: '--text-dim', fallback: '#8b949e' },
+};
+
+// type -> a short glyph rendered as a label prefix. Colour is reinforcement
+// only — Liav is red-weak (deuteranomaly), so the type must also be legible
+// from a non-hue cue, and the row must stay identifiable in greyscale.
+const _KN_TYPE_GLYPH = {
+    agent: 'A', run: 'R', sched: 'S', project: 'P', other: '•',
+};
+
+function knNodeGlyph(type) {
+    return _KN_TYPE_GLYPH[knTypeClass(type)] || _KN_TYPE_GLYPH.other;
+}
+
+// Rendered node label: glyph prefix + title, so the type is legible even with
+// colour stripped out (greyscale, colorblind, or a monochrome print of a demo).
+function knNodeLabel(type, title) {
+    return `[${knNodeGlyph(type)}] ${title}`;
+}
+
+// Resolve a concept type to a render color. `cssVar(name, fallback)` is injected
+// so this stays pure/testable (production passes knCssVar, which reads the DOM).
+// Only `other` still resolves through a theme var; every named type is a fixed
+// Okabe-Ito hex, deliberately not theme-dependent (see _KN_TYPE_COLOR above).
+function knNodeColor(type, cssVar) {
+    const c = _KN_TYPE_COLOR[knTypeClass(type)] || _KN_TYPE_COLOR.other;
+    if (typeof c === 'string') return c;
+    return cssVar(c.varName, c.fallback);
+}
+
+// Build a plain-data graph model from the /api/knowledge/graph response: seeded
+// node positions + resolved colors, edges filtered to known node pairs (mirrors
+// the old SVG renderer's dangling-edge guard), self-loops dropped, deduped. Pure
+// — no graphology/Sigma/DOM — so it's unit-testable without a WebGL context.
+function knGraphModel(g, cssVar) {
+    const nodes = g.nodes || [];
+    const known = new Set(nodes.map(n => n.id));
+    const outNodes = nodes.map((n, i) => {
+        const seed = knGraphSeed(i);
+        return {
+            id: n.id, title: n.title, type: n.type,
+            x: seed.x, y: seed.y,
+            color: knNodeColor(n.type, cssVar),
+            label: knNodeLabel(n.type, n.title),
+        };
+    });
+    const seen = new Set();
+    const outEdges = [];
+    for (const e of (g.edges || [])) {
+        if (!known.has(e.source) || !known.has(e.target) || e.source === e.target) continue;
+        const key = e.source + '\0' + e.target;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        outEdges.push({ source: e.source, target: e.target });
+    }
+    return { nodes: outNodes, edges: outEdges };
+}
+
+// Read a theme CSS var with a fallback (same pattern as util.js's amber lookup).
+function knCssVar(name, fallback) {
+    const v = (getComputedStyle(document.body).getPropertyValue(name) || '').trim();
+    return v || fallback;
+}
+
+// The WebGL glue: graphology Graph -> forceAtlas2 layout -> Sigma renderer.
+// Click a node to open its concept; hover swaps the cursor.
+function knRenderSigma(container, model) {
+    const libs = window.chelaGraphLibs;
+    if (!libs || !container) return null;
+    const { Graph, Sigma, forceAtlas2 } = libs;
+    const graph = new Graph();
+    model.nodes.forEach(n => {
+        graph.addNode(n.id, { x: n.x, y: n.y, size: 5, label: n.label, color: n.color });
+    });
+    model.edges.forEach(e => {
+        graph.addEdge(e.source, e.target, { size: 1, color: knCssVar('--border', '#21262d') });
+    });
+    forceAtlas2.assign(graph, {
+        iterations: 120,
+        settings: { gravity: 1, scalingRatio: 8, barnesHutOptimize: model.nodes.length > 200 },
+    });
+    const renderer = new Sigma(graph, container, {
+        renderLabels: true,
+        labelRenderedSizeThreshold: 0,
+        labelColor: { color: knCssVar('--text-dim', '#8b949e') },
+        defaultEdgeColor: knCssVar('--border', '#21262d'),
+    });
+    renderer.on('clickNode', ({ node }) => knOpen(node));
+    renderer.on('enterNode', () => { container.style.cursor = 'pointer'; });
+    renderer.on('leaveNode', () => { container.style.cursor = 'default'; });
+    return renderer;
+}
+
+// Tear down the live Sigma instance — must run before every view change away
+// from 'graph' (knBackToGlance/knOpen/knRunSearch) or its WebGL context leaks.
+function knKillGraph() {
+    if (_kn.sigma) {
+        _kn.sigma.kill();
+        _kn.sigma = null;
+    }
+}
+
+// A visible failure state (back link + message) for knShowGraph. Never leave
+// the "Building graph…" spinner frozen or an empty <div id="kn-graph-canvas">
+// on screen with nothing explaining why — both read as "still working" or
+// "no data" when the real story is "this broke".
+function knGraphError(msg) {
+    return `<div class="kn-glance"><a class="kn-back" onclick="chela.knBackToGlance()">← Knowledge</a>
+        <div class="kn-dim kn-graph-error">⚠ ${escHtml(msg)}</div></div>`;
+}
 
 async function knShowGraph() {
+    knKillGraph();
     _kn.view = 'graph';
     const el = $('#kn-content');
     if (el) el.innerHTML = '<div class="kn-loading">Building graph…</div>';
-    const g = await api('/api/knowledge/graph');
+    let g;
+    try {
+        g = await api('/api/knowledge/graph');
+    } catch (e) {
+        if (el) el.innerHTML = knGraphError('Could not load the graph data.');
+        return;
+    }
     if (!el) return;
     const nodes = g.nodes || [], edges = g.edges || [];
     if (!nodes.length) {
-        el.innerHTML = '<div class="kn-glance"><a class="kn-back" onclick="knBackToGlance()">← Knowledge</a>'
+        el.innerHTML = '<div class="kn-glance"><a class="kn-back" onclick="chela.knBackToGlance()">← Knowledge</a>'
             + '<div class="kn-dim">No concepts to graph.</div></div>';
         return;
     }
-    // Circular layout: cheap, deterministic, dependency-free. Position nodes on a
-    // ring, draw edges as lines, label each node; click to open the concept.
-    const W = 760, H = 520, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 70;
-    const pos = {};
-    nodes.forEach((n, i) => {
-        const a = (i / nodes.length) * 2 * Math.PI - Math.PI / 2;
-        pos[n.id] = { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) };
-    });
-    const lines = edges.map(e => {
-        const a = pos[e.source], b = pos[e.target];
-        if (!a || !b) return '';
-        return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" class="kn-edge"/>`;
-    }).join('');
-    const dots = nodes.map(n => {
-        const p = pos[n.id];
-        const anchor = p.x < cx - 20 ? 'end' : (p.x > cx + 20 ? 'start' : 'middle');
-        const dx = p.x < cx - 20 ? -8 : (p.x > cx + 20 ? 8 : 0);
-        return `<g class="kn-node kn-node-${knTypeClass(n.type)}" onclick="knOpen('${attrEsc(n.id)}')">
-            <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="6"/>
-            <text x="${(p.x + dx).toFixed(1)}" y="${(p.y + 4).toFixed(1)}" text-anchor="${anchor}">${escHtml(n.title)}</text>
-          </g>`;
-    }).join('');
     el.innerHTML = `
       <div class="kn-glance">
         <div class="kn-section-title">Graph
           <span class="kn-dim">· ${nodes.length} concepts · ${edges.length} links</span>
-          <a class="kn-back" style="float:right" onclick="knBackToGlance()">← Knowledge</a></div>
-        <div class="kn-graph-wrap">
-          <svg viewBox="0 0 ${W} ${H}" class="kn-graph" preserveAspectRatio="xMidYMid meet">
-            <g class="kn-edges">${lines}</g>${dots}
-          </svg>
-        </div>
+          <a class="kn-back" style="float:right" onclick="chela.knBackToGlance()">← Knowledge</a></div>
+        <div class="kn-graph-wrap"><div id="kn-graph-canvas" class="kn-graph-canvas"></div></div>
       </div>`;
+    const model = knGraphModel(g, knCssVar);
+    const renderer = knRenderSigma($('#kn-graph-canvas'), model);
+    if (!renderer) {
+        el.innerHTML = knGraphError('Graph renderer failed to load.');
+        return;
+    }
+    _kn.sigma = renderer;
 }
 
 // --- Shared helpers (also reused by the portable viewer, Phase 4) ----------
@@ -376,7 +515,7 @@ function knLink(text, href, base) {
     }
     if (href.startsWith('#')) return text;
     if (href.split('#')[0].endsWith('.md')) {
-        return `<a class="kn-link" onclick="knOpen('${attrEsc(knResolve(base, href))}')">${text}</a>`;
+        return `<a class="kn-link" onclick="chela.knOpen('${attrEsc(knResolve(base, href))}')">${text}</a>`;
     }
     return `<a href="${attrEsc(href)}" target="_blank" rel="noopener">${text}</a>`;
 }
@@ -418,3 +557,10 @@ function knMd(src, base) {
     if (inCode) html += '</code></pre>';
     return html;
 }
+
+// --- Stage 0: ES-module exports ---
+export { _kn, knBackToGlance, refreshKnowledge, knGraphModel, knNodeColor, knNodeGlyph, knNodeLabel, knGraphError };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { knBackToGlance, knOnSearch, knOpen, knRefresh, knShowGraph });

@@ -1,14 +1,18 @@
-// ---------------------------------------------------------------------------
-// Render: Dispatcher (work-item dispatcher per-workflow view)
-//
-// Polls /api/dispatcher every DISPATCHER_REFRESH_MS on its own timer so the
-// panel updates even when the global refresh loop fires another tab. The
-// timer is owned here, not by the tab switch — flipping back into the
-// Dispatcher tab does a one-shot fetch; the interval keeps it fresh after.
-// ---------------------------------------------------------------------------
+// --- Stage 0: ES-module imports ---
+import { $, api, attrEsc, escHtml, shortTime, showModal } from './util.js';
+import { _launcherData } from './launcher.js';
+import { runStatusBadgeClass } from './runstate.js';
+import { pollWork, postWorkDelete } from './work.js';
 
-const DISPATCHER_REFRESH_MS = 30000;
-let _dispatcherTimer = null;
+// ---------------------------------------------------------------------------
+// Render: the Runs segment of WORK (the per-workflow dispatch tables)
+//
+// This module no longer FETCHES: work.js owns the single /api/dispatcher poll for
+// the whole app and hands the payload here (renderDispatcher) and to the board
+// (renderKanban). It used to run its own 30s timer against that endpoint while
+// kanban.js ran a second one and the sidebar badges a third — three pollers, one
+// dataset. Rendering is all that is left here, which is all it ever was.
+// ---------------------------------------------------------------------------
 
 // --- Init a repo -----------------------------------------------------------
 // Seed a starter WORKFLOW.md + TODO.md into a repo via POST /api/dispatcher/init
@@ -52,15 +56,15 @@ async function doInitRepo() {
     lines.push('Next: add ' + res.path + '/WORKFLOW.md to CHELA_DISPATCH_WORKFLOWS and restart the'
         + ' daemon, or run:  chela dispatch ' + res.path + '/WORKFLOW.md');
     setMsg('ok', lines.join('\n'));
-    if (typeof refreshDispatcher === 'function') refreshDispatcher();
+    pollWork();
 }
 
+// The class table lives in runstate.js — pure, and therefore TESTED (node --test). This
+// used to be an inline ternary chain, which is how CMX-68's two new run states shipped
+// without badges: `needs_human`, the one state that means a human must look at this run,
+// rendered in the same grey as an unknown status.
 function _runStatusBadge(status) {
-    const cls = (status === 'running' || status === 'claimed') ? 'badge-on'
-              : (status === 'failed') ? 'badge-off'
-              : (status === 'awaiting_review') ? 'badge-awaiting'
-              : 'badge-priority-low';
-    return `<span class="badge ${cls}">${escHtml(status || '?')}</span>`;
+    return `<span class="badge ${runStatusBadgeClass(status)}">${escHtml(status || '?')}</span>`;
 }
 
 function _runPrCell(prUrl) {
@@ -98,7 +102,7 @@ function _runDeleteBtn(r) {
     return `<button class="dispatcher-delete-btn" type="button"
                    data-del-kind="run"
                    data-task-id="${attrEsc(r.task_id)}"
-                   onclick="dispatcherDeleteClick(this)"
+                   onclick="chela.dispatcherDeleteClick(this)"
                    title="Delete this row" aria-label="Delete">&times;</button>`;
 }
 
@@ -108,7 +112,7 @@ function _openDeleteBtn(t) {
                    data-del-kind="source-line"
                    data-file="${attrEsc(t.file)}"
                    data-text="${attrEsc(t.title)}"
-                   onclick="dispatcherDeleteClick(this)"
+                   onclick="chela.dispatcherDeleteClick(this)"
                    title="Delete this row" aria-label="Delete">&times;</button>`;
 }
 
@@ -169,8 +173,8 @@ function dispatcherDeleteClick(btn) {
     td.innerHTML = `
       <div class="kanban-confirm">
         <span class="kanban-confirm-msg">Delete this row?</span>
-        <button class="btn-confirm" type="button" onclick="dispatcherDeleteConfirm(this, true)">Delete</button>
-        <button type="button" onclick="dispatcherDeleteConfirm(this, false)">Cancel</button>
+        <button class="btn-confirm" type="button" onclick="chela.dispatcherDeleteConfirm(this, true)">Delete</button>
+        <button type="button" onclick="chela.dispatcherDeleteConfirm(this, false)">Cancel</button>
       </div>`;
     row.appendChild(td);
 }
@@ -192,29 +196,16 @@ async function dispatcherDeleteConfirm(actionBtn, ok) {
         payload.text = td.dataset.text;
     }
     td.querySelector('.kanban-confirm').innerHTML = '<span class="kanban-confirm-msg">Deleting…</span>';
-    let resp, data = {};
-    try {
-        resp = await fetch(BASE_PATH + '/api/dispatcher/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        try { data = await resp.json(); } catch (_) { data = {}; }
-    } catch (e) {
-        _dispatcherDeleteShowError(td, String(e));
-        return;
-    }
-    if (!resp.ok || !data.ok) {
-        _dispatcherDeleteShowError(td, data.error || `HTTP ${resp.status}`);
-        return;
-    }
-    refreshDispatcher();
+    // The POST + redraw is shared with the board's × (work.js) — one delete action,
+    // two confirm UIs (a table row here, a card there).
+    const err = await postWorkDelete(payload);
+    if (err) _dispatcherDeleteShowError(td, err);
 }
 
 function _dispatcherDeleteShowError(td, msg) {
     td.querySelector('.kanban-confirm').innerHTML = `
         <span class="kanban-confirm-msg" style="color:var(--red);">${escHtml(msg)}</span>
-        <button type="button" onclick="dispatcherDeleteConfirm(this, false)">Close</button>`;
+        <button type="button" onclick="chela.dispatcherDeleteConfirm(this, false)">Close</button>`;
 }
 
 function _renderWorkflowCard(wf) {
@@ -247,17 +238,14 @@ function _renderWorkflowCard(wf) {
     </div>`;
 }
 
-async function refreshDispatcher() {
-    let data;
-    try {
-        data = await api('/api/dispatcher');
-    } catch (e) {
-        console.error('refreshDispatcher', e);
-        return;
-    }
+// Render the Runs segment from a payload work.js already fetched. No fetch here:
+// the same object is what the board renders, which is why the two can no longer
+// drift apart or double-poll.
+function renderDispatcher(data) {
     const list = $('#dispatcher-list');
     const empty = $('#dispatcher-empty');
-    if (!data.configured || !data.workflows || !data.workflows.length) {
+    if (!list || !empty) return;
+    if (!data || !data.configured || !data.workflows || !data.workflows.length) {
         list.innerHTML = '';
         empty.style.display = 'block';
         return;
@@ -266,12 +254,10 @@ async function refreshDispatcher() {
     list.innerHTML = data.workflows.map(_renderWorkflowCard).join('');
 }
 
-function startDispatcherTimer() {
-    stopDispatcherTimer();
-    _dispatcherTimer = setInterval(refreshDispatcher, DISPATCHER_REFRESH_MS);
-}
 
-function stopDispatcherTimer() {
-    if (_dispatcherTimer) { clearInterval(_dispatcherTimer); _dispatcherTimer = null; }
-}
+// --- Stage 0: ES-module exports ---
+export { _runDisplayId, _runPrCell, renderDispatcher };
 
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { dispatcherDeleteClick, dispatcherDeleteConfirm, doInitRepo, openInitRepo });

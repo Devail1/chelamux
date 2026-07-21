@@ -25,6 +25,11 @@
 set -o pipefail
 
 cd "$(dirname "$0")/.."
+
+# Config comes from $CHELA_DIR/chela.env, like every other chela process — never from a
+# PM2 `env:` block (that second copy is what drifted). An exported value still wins.
+# shellcheck source=scripts/chela-env.sh
+. scripts/chela-env.sh
 if [[ -n "${PYTHON:-}" ]]; then :;
 elif [[ -x .venv/bin/python ]]; then PYTHON=".venv/bin/python";
 else PYTHON="python3"; fi
@@ -209,6 +214,16 @@ trap cleanup EXIT
 trap 'exit 143' TERM   # 128+15
 trap 'exit 130' INT    # 128+2
 
+# Interruptible sleep. A bare `sleep N` is a FOREGROUND child, and bash defers trap
+# handlers until the current foreground child exits — so a plain `sleep` swallows
+# SIGTERM for its whole duration. With `sleep 3600` (the disabled-wall idle below)
+# that meant pm2's stop hung until its kill-timeout and then SIGKILLed us, so the
+# EXIT trap never ran and cleanup() never reaped the ttyds or the webterm_* mirror
+# sessions. Backgrounding the sleep and `wait`-ing on it makes the signal land at
+# once: `wait` is interruptible, the trap fires, cleanup runs. Every sleep in this
+# script must go through here.
+nap() { sleep "$1" & wait $!; }
+
 # Feature flag (mirrors chela/config.py TERMINALS_ENABLED). When disabled we
 # spawn NO ttyds: write one empty map so the dashboard sees "no terminals",
 # then idle forever. Checked BEFORE the tmux-session guard so a disabled
@@ -220,14 +235,70 @@ case "$(printf '%s' "${TERMINALS_ENABLED}" | tr '[:upper:]' '[:lower:]')" in
     false|0|no|off)
         echo "agent-terminals: CHELA_TERMINALS_ENABLED=${TERMINALS_ENABLED} — terminals disabled, spawning no ttyds"
         write_map           # empty {} map so consumers see no terminals
-        while true; do sleep 3600; done
+        while true; do nap 3600; done
         ;;
 esac
 
-if ! tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
-    echo "error: tmux session '${TMUX_SESSION}' not found." >&2
-    exit 1
-fi
+# SELF-HEAL, NEVER EXIT. This used to be `has-session || { echo error; exit 1; }`,
+# which made a missing session FATAL. It isn't: the session is chela's own, nothing
+# outside chela recreates it, and after a reboot (or `wsl --shutdown`, which takes the
+# whole tmux server with it) we simply come up before it exists. Under a process
+# manager with autorestart, exiting instantly means being restarted instantly — on
+# 2026-07-13 that hot-looped 14,501 times in a few hours, spamming ~14.7k identical
+# error lines and burning CPU, while the dashboard just showed "Spawn failed: error
+# connecting to /tmp/tmux-1000/default". A recoverable boot-ordering condition must
+# never be a crash-loop source, so:
+#   - session missing  -> CREATE it (idempotent, race-safe) and carry on;
+#   - tmux unreachable -> WAIT with capped exponential backoff, still never exiting.
+# Mirrors chela.discovery.ensure_session() (the dashboard's spawn path uses that).
+BACKOFF_MAX="${CHELA_TERM_BACKOFF_MAX:-30}"
+ANCHOR_WINDOW="shell-1"   # a session needs >=1 window; match the wall's shell-N scheme
+
+# CREATE-ONLY, NEVER CLOBBER. This function runs every poll tick against the session
+# the user's live agents are sitting in, so it must be impossible for it to destroy
+# one. Two rules keep it that way:
+#
+#   1. `-A` (attach-or-create) is the ONLY safe create primitive. Plain `new-session
+#      -s X` on a live X fails with "duplicate session"; `-A` makes it a genuine
+#      no-op instead (verified headless: session id and window list unchanged). So
+#      even if the has-session gate below false-negatives — a transient client error,
+#      a busy server — the worst case is a no-op, never a recreate. Belt AND braces:
+#      the gate is an optimisation, `-A` is the guarantee.
+#   2. We touch NOTHING that already exists. No set-window-option, no kill, no rename
+#      of a window we didn't just create: `-n` alone already turns automatic-rename
+#      off for the anchor window (tmux does this whenever the name is given), so the
+#      tile stays pinned without us ever reaching into a live session.
+#
+# `-A -d` on an EXISTING session exits NONZERO in a daemon ("open terminal failed:
+# not a terminal" — with -A, tmux treats -d as attach-session's -d and there is no
+# tty to attach). That is a success, not a failure, so the exit code is deliberately
+# ignored: has-session alone decides. That also makes the create race-safe — whoever
+# wins, we agree the session is there.
+ensure_session() {
+    tmux has-session -t "${TMUX_SESSION}" 2>/dev/null && return 0
+    tmux new-session -A -d -s "${TMUX_SESSION}" -n "${ANCHOR_WINDOW}" </dev/null >/dev/null 2>&1
+    if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
+        echo "agent-terminals: tmux session '${TMUX_SESSION}' was missing — created it"
+        return 0
+    fi
+    return 1   # tmux itself is unreachable (no binary / unwritable socket dir)
+}
+
+# Block until the session is there. Backs off 1s -> BACKOFF_MAX so an unreachable
+# tmux costs one log line per 30s instead of a hot loop, and returns the instant it
+# heals. Called on startup AND on every poll tick, so a `tmux kill-server` under a
+# running supervisor is recovered from too (not just a cold boot).
+wait_for_session() {
+    local delay=1
+    until ensure_session; do
+        echo "agent-terminals: tmux unreachable, cannot create session '${TMUX_SESSION}'; retrying in ${delay}s" >&2
+        nap "${delay}"
+        delay=$(( delay * 2 ))
+        (( delay > BACKOFF_MAX )) && delay="${BACKOFF_MAX}"
+    done
+}
+
+wait_for_session
 
 echo "agent-terminals: dynamic supervisor (poll ${POLL}s, base port ${BASE_PORT})"
 
@@ -246,6 +317,12 @@ write_map               # write an (empty) map even before any agent is seen
 # tmux detaches it — which frees the slot. --max-clients headroom absorbs the rest.
 declare -A CUR NAME_OF
 while :; do
+    # The session can vanish under us (tmux kill-server, a crashed server). Heal it
+    # BEFORE discovery, so the tick that follows sees the fresh session rather than
+    # an empty window set — otherwise the "discovery returned empty" guard below
+    # would hold the stale ttyd set forever and the wall would never come back.
+    wait_for_session
+
     # snapshot the live window set, keyed by stable window id
     CUR=()
     NAME_OF=()
@@ -260,7 +337,7 @@ while :; do
     # "every agent vanished" — skip this tick rather than nuke everything.
     if (( ${#CUR[@]} == 0 && ${#PID_OF[@]} > 0 )); then
         echo "agent-terminals: discovery returned empty; keeping current set"
-        sleep "${POLL}"; continue
+        nap "${POLL}"; continue
     fi
 
     changed=0
@@ -288,5 +365,5 @@ while :; do
     fi
 
     (( changed )) && write_map
-    sleep "${POLL}"
+    nap "${POLL}"
 done

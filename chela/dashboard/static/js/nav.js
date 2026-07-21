@@ -1,22 +1,69 @@
+// --- Stage 0: ES-module imports ---
+import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util.js';
+import { refreshSummary } from './header.js';
+import { checkContext } from './agents.js';
+import { showAddSchedule } from './schedules.js';
+import { _displayLabel, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, shareBtnClick } from './terminals.js';
+import { _isFav, _launcherData, launchProject, refreshLauncher } from './launcher.js';
+import { VIEWS } from './views.js';
+import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
+import { refresh } from './main.js';
+
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
 //
 // The canvas is a set of .panel elements (one per view) kept from the tab
 // layout, so every existing renderer (refreshAgents -> #agent-grid,
-// refreshDispatcher -> #dispatcher-content, ...) works unchanged. `currentTab`
-// (declared in util.js) is still the active-view variable, so main.js and
-// sse.js keep dispatching on it; only the *chrome* that sets it changed from a
-// tab bar to this sidebar.
+// renderKanban -> #kanban-board, ...) works unchanged. `currentTab` (declared in
+// util.js) is still the active-view variable, so main.js and sse.js keep
+// dispatching on it; only the *chrome* that sets it changed from a tab bar to
+// this sidebar.
+//
+// The set of views is NOT declared here. It is views.js — the registry — and this
+// file reads it: renderNav() builds the .side-item rows from it, and selectView
+// takes each view's enter/exit hooks from it instead of the per-view if/else
+// chain that used to live below. Same for the command palette (which carried a
+// third hardcoded copy of the view list).
 // ---------------------------------------------------------------------------
 
-let _agentFilter = 'all';   // all | claude | shell | server  (sidebar filter)
 let _detailAgent = null;    // window name focused in the agent-detail view
 
-// --- Mobile sidebar drawer -------------------------------------------------
-// On phone widths the 264px sidebar is off-canvas (see the @media block in
-// style.css); a hamburger in the topbar slides it in over a scrim. No-op on
-// desktop, where the sidebar is a static grid column and `.open` does nothing.
+// --- Sidebar: one control, two behaviours ----------------------------------
+// PHONE (≤768px): the 264px sidebar is off-canvas (see the @media block in
+// style.css); the topbar hamburger slides it in over a scrim.
+// DESKTOP: the sidebar is a static grid column, so there is nothing to slide —
+// the SAME control collapses it to an icon rail instead, handing the width to the
+// canvas. The state is persisted (a collapse that forgets itself on reload is an
+// annoyance, not a feature); the rail is pure CSS off a body class, so no row is
+// re-rendered and nothing the wall caches on can see it.
+const SIDEBAR_COLLAPSED_KEY = 'chela_sidebar_collapsed';
+
+function _isPhoneWidth() { return window.matchMedia('(max-width: 768px)').matches; }
+
+function _setSidebarCollapsed(collapsed) {
+    document.body.classList.toggle('sidebar-collapsed', collapsed);
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
+    const btn = document.getElementById('btn-menu');
+    if (btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    // The canvas just changed width without a window RESIZE, so the listeners that
+    // re-fit the terminal wall never fired — poke them. The rail snaps (there is no
+    // width transition to wait out); the delay is only to let the grid settle after
+    // the reflow, and the wall debounces the event anyway. This is a RE-FIT, not a
+    // rebuild: buildWall's cache key (_termSig) is the live wid set — sidebar state
+    // never enters it — so the iframes stay put and no terminal reloads. That
+    // property is held by a real-DOM test (tests/wall.test.mjs), not by this comment.
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 220);
+}
+
+// force: true = "show the sidebar" (drawer open / rail expanded), false = hide it.
 function toggleSidebar(force) {
+    if (!_isPhoneWidth()) {
+        const collapsed = (force === undefined)
+            ? !document.body.classList.contains('sidebar-collapsed')
+            : !force;
+        _setSidebarCollapsed(collapsed);
+        return;
+    }
     const sb = document.querySelector('.sidebar');
     const scrim = document.getElementById('sidebar-scrim');
     if (!sb) return;
@@ -24,30 +71,65 @@ function toggleSidebar(force) {
     sb.classList.toggle('open', open);
     if (scrim) scrim.classList.toggle('open', open);
 }
-function closeSidebar() { toggleSidebar(false); }
+
+// Navigating dismisses the mobile drawer. It must NOT collapse the desktop rail —
+// selectView() calls this on every click, and a sidebar that folds itself away
+// whenever you use it is not a sidebar.
+function closeSidebar() { if (_isPhoneWidth()) toggleSidebar(false); }
+
+// Restore the persisted desktop state before first paint (mobile CSS ignores the
+// class, so a phone that inherits it from a desktop session is unaffected).
+if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1') {
+    document.body.classList.add('sidebar-collapsed');
+    const _menuBtn = document.getElementById('btn-menu');
+    if (_menuBtn) _menuBtn.setAttribute('aria-expanded', 'false');
+}
+
+// --- The nav, rendered from the registry ------------------------------------
+// One .side-item per registered, enabled, non-virtual view — including its badge
+// slots. Adding a view to views.js puts it here; deleting it from views.js takes
+// it out of here. There is no second list.
+
+function _viewCtx() { return { terminalsOn: TERMINALS_ON }; }
+
+function _navItemHtml(v) {
+    const badges = (v.badges || []).map(b =>
+        `<span class="badge ${b.cls || ''}" id="${attrEsc(b.id)}" title="${attrEsc(b.title || '')}">${escHtml(b.text || '')}</span>`
+    ).join('');
+    // The title is the label — it is the only thing left to read once the sidebar
+    // is collapsed to its icon rail.
+    return `<div class="side-item" data-view="${attrEsc(v.id)}" title="${attrEsc(v.label || v.id)}"
+        onclick="chela.selectView(this.dataset.view)">
+        <span class="side-item-icon">${v.lucide ? lucideIcon(v.lucide) : escHtml(v.icon || '')}</span>
+        <span class="side-item-label">${escHtml(v.label || v.id)}</span>
+        ${badges ? `<span class="side-badges">${badges}</span>` : ''}
+    </div>`;
+}
+
+function renderNav() {
+    const host = document.getElementById('side-nav');
+    if (!host) return;
+    host.innerHTML = navViews(VIEWS, _viewCtx()).map(_navItemHtml).join('');
+}
 
 // --- View switching --------------------------------------------------------
 
 function selectView(view) {
-    currentTab = view;
+    const v = findView(VIEWS, view);
+    setCurrentTab(view);
     _detailAgent = null;
 
     $$('.panel').forEach(p => p.classList.remove('active'));
-    const panel = document.getElementById('panel-' + view);
+    const panel = document.getElementById(panelId(view));
     if (panel) panel.classList.add('active');
 
     _syncSidebarActive(view, null);
 
-    // Per-view poll timers (dispatcher / kanban own their own cadence).
-    if (view === 'dispatcher') { refreshDispatcher(); startDispatcherTimer(); }
-    else { stopDispatcherTimer(); }
-    if (view === 'kanban') { refreshKanban(); startKanbanTimer(); }
-    else { stopKanbanTimer(); }
-    if (TERMINALS_ON && view === 'terminals') startTermTimer();
-    else if (TERMINALS_ON) stopTermTimer();
-    // Entering Knowledge from the nav lands on the glance overview, not whatever
-    // concept was last open.
-    if (view === 'knowledge' && typeof knBackToGlance === 'function' && _kn.tree) knBackToGlance();
+    // Per-view lifecycle, from the registry. Every OTHER view is told to let go
+    // (stop its timer) and the one being entered gets its enter hook — so a new
+    // view is one registry entry, not an extra branch in an if/else chain here.
+    otherViews(VIEWS, view).forEach(o => { if (o.exit) o.exit(); });
+    if (v && v.enter) v.enter();
 
     closeSidebar();   // navigating dismisses the mobile drawer (no-op on desktop)
     refresh();
@@ -67,15 +149,15 @@ function selectAgent(name) {
 
 // Focus a single agent in the canvas (metadata detail / transcript).
 function showAgentDetail(name) {
-    currentTab = 'agent-detail';
+    setCurrentTab('agent-detail');
     _detailAgent = name;
     $$('.panel').forEach(p => p.classList.remove('active'));
-    const panel = document.getElementById('panel-agent-detail');
+    const panel = document.getElementById(panelId('agent-detail'));
     if (panel) panel.classList.add('active');
     _syncSidebarActive('agent-detail', name);
-    stopDispatcherTimer();
-    stopKanbanTimer();
-    if (TERMINALS_ON) stopTermTimer();
+    // Drilling in is leaving every other view — same registry-driven teardown as
+    // selectView (agent-detail is a registered, virtual view).
+    otherViews(VIEWS, 'agent-detail').forEach(o => { if (o.exit) o.exit(); });
     renderAgentDetail();
     refreshSummary();
     checkContext();   // fills the detail context bar via ctx-<name>
@@ -91,19 +173,28 @@ function _syncSidebarActive(view, agentName) {
     $$('.agent-row').forEach(el => el.classList.toggle('active', el.dataset.agent === agentName));
 }
 
-// --- Window type (icon + filter) -------------------------------------------
+// --- Window type (per-row cue) ---------------------------------------------
 // window_type is authoritative once the backend provides it; until then fall
 // back to claude_running.
+//
+// The type used to be a 4-chip filter row above the list. It isn't one any more:
+// a live fleet is a handful of windows that always fit the viewport, so filtering
+// hid nothing and cost a permanent row (and ⌘K is the real jump-to). The type
+// survives as a CUE on the row itself.
+//
+// That cue is a GLYPH first — C / $ / ⚙ — with colour only reinforcing it, from
+// the Okabe-Ito colourblind-safe palette. Three coloured dots would encode the
+// type in hue alone, which is unreadable for a red-weak (deuteranomalous) viewer
+// and invisible in greyscale. Read the row with the colour taken away and it
+// still says which kind of window this is.
 function _agentType(a) {
     return a.window_type || (a.claude_running ? 'claude' : 'shell');
 }
-// --- Sidebar agent list ----------------------------------------------------
 
-function setAgentFilter(f) {
-    _agentFilter = f;
-    $$('#agent-filter button').forEach(b => b.classList.toggle('active', b.dataset.filter === f));
-    renderSidebarAgents(_agentsCache || []);
-}
+const _TYPE_GLYPH = { claude: 'C', shell: '$', server: '⚙' };
+function _typeGlyph(t) { return _TYPE_GLYPH[t] || (t ? t[0].toUpperCase() : '?'); }
+
+// --- Sidebar agent list ----------------------------------------------------
 
 // Per-window context cache (used_pct etc.), fed by both the sidebar refresh and
 // the wall tick so rows can show ctx% even when the wall isn't open.
@@ -113,14 +204,6 @@ function updateCtxCache(ctx) {
     const m = {};
     ctx.forEach(c => { if (c && c.window_id) m[c.window_id] = c; });
     _ctxByWid = m;
-}
-
-// Project key for grouping = basename of the session's cwd. Shells / sessions
-// with no resolved cwd collect under one "other" group.
-function _agentProject(a) {
-    if (!a || !a.cwd) return null;
-    const parts = String(a.cwd).replace(/\/+$/, '').split('/');
-    return parts[parts.length - 1] || null;
 }
 
 // Friendly label, shared with the wall panes (_displayLabel): a custom rename
@@ -177,11 +260,14 @@ function _agentRowHtml(a) {
     const pin = canPin
         ? `<button class="agent-pin${faved ? ' pinned' : ''}" data-cwd="${attrEsc(a.cwd)}"
              title="${faved ? 'Unpin from Launch favorites' : 'Pin this directory to Launch favorites'}"
-             onclick="event.stopPropagation(); toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
+             onclick="event.stopPropagation(); chela.toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
         : '';
 
-    return `<div class="agent-row rich${active}" data-agent="${attrEsc(a.name)}" onclick="selectAgent(this.dataset.agent)">
-        <span class="term-status-dot ${stCls}" title="${attrEsc(_agentType(a))} · ${stWord}"></span>
+    const type = _agentType(a);
+
+    return `<div class="agent-row rich${active}" data-agent="${attrEsc(a.name)}" onclick="chela.selectAgent(this.dataset.agent)">
+        <span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>
+        <span class="ar-type ${attrEsc(type)}" title="${attrEsc(type)} window">${escHtml(_typeGlyph(type))}</span>
         <div class="ar-main">
             <div class="ar-top">
                 <span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span>
@@ -194,13 +280,11 @@ function _agentRowHtml(a) {
 }
 
 function renderSidebarAgents(agents) {
-    // Keep the tab title/favicon in lockstep with the agent list, off the full
-    // set (not the type-filtered rows) so the "needs you" count is global.
+    // Keep the tab title/favicon in lockstep with the agent list.
     updateTabSignal(agents);
     const host = document.getElementById('sidebar-agents');
     if (!host) return;
-    const rows = (agents || [])
-        .filter(a => _agentFilter === 'all' || _agentType(a) === _agentFilter);
+    const rows = agents || [];
     if (!rows.length) {
         host.innerHTML = '<div class="side-empty">No agents</div>';
         return;
@@ -209,9 +293,9 @@ function renderSidebarAgents(agents) {
     // Triage: agents waiting on input float into a "Needs you" cluster above the
     // project groups. Each agent shows in exactly one place — lifted out of its
     // group while it's blocked, like a starred item.
-    const waiting = rows.filter(a => a.session_status === 'waiting')
+    const waiting = rows.filter(wantsHuman)
         .sort((a, b) => a.name.localeCompare(b.name));
-    const rest = rows.filter(a => a.session_status !== 'waiting');
+    const rest = rows.filter(a => !wantsHuman(a));
 
     let html = '';
     if (waiting.length) {
@@ -250,7 +334,7 @@ function renderSidebarAgents(agents) {
         const isColl = collapsed.has(e.key);
         const working = e.list.filter(a => agentDotColor(a) === 'green').length;
         html += `<div class="side-group${isColl ? ' collapsed' : ''}">
-            <div class="group-head" data-g="${attrEsc(e.key)}" onclick="toggleGroup(this.dataset.g)">
+            <div class="group-head" data-g="${attrEsc(e.key)}" onclick="chela.toggleGroup(this.dataset.g)">
                 <span class="group-caret">▾</span>
                 <span class="group-name" title="${attrEsc(e.key)}">${escHtml(e.key)}</span>
                 ${working ? `<span class="group-dot working" title="${working} working"></span>` : ''}
@@ -280,7 +364,7 @@ async function refreshSidebar() {
             api('/api/agents'),
             TERMINALS_ON ? api('/api/agents/context').catch(() => null) : Promise.resolve(null),
         ]);
-        _agentsCache = agents || [];
+        setAgentsCache(agents || []);
         if (ctx) updateCtxCache(ctx);
         renderSidebarAgents(_agentsCache);
     } catch (e) {
@@ -288,23 +372,10 @@ async function refreshSidebar() {
     }
 }
 
-// WORK badges: in-flight runs + open PRs (awaiting review), across workflows.
-async function updateWorkBadges() {
-    const runsEl = document.getElementById('side-runs-count');
-    const prEl = document.getElementById('side-pr-count');
-    if (!runsEl && !prEl) return;
-    try {
-        const d = await api('/api/dispatcher');
-        const wfs = (d && d.workflows) || [];
-        let runs = 0, prs = 0;
-        for (const wf of wfs) {
-            runs += (wf.active_runs || []).length;
-            prs += (wf.awaiting_review_runs || []).length;
-        }
-        if (runsEl) runsEl.textContent = runs;
-        if (prEl) prEl.textContent = prs + ' PR';
-    } catch (e) { /* leave prior values */ }
-}
+// The WORK badges used to be a THIRD independent poller of /api/dispatcher, right
+// here — fetching the same payload the Dispatch and Kanban views were each already
+// fetching on their own timers. They are now filled by work.js's single poll (the
+// slots themselves are declared on the Work view in views.js).
 
 // --- Agent detail view -----------------------------------------------------
 
@@ -314,7 +385,7 @@ function renderAgentDetail() {
     const a = (_agentsCache || []).find(x => x.name === _detailAgent);
     if (!a) {
         host.innerHTML = `<div class="detail-head">
-            <span class="detail-back" onclick="selectView('agents')">← Agents</span>
+            <span class="detail-back" onclick="chela.selectView('agents')">← Agents</span>
             <span class="detail-title">${escHtml(_detailAgent || '')}</span>
         </div>
         <div class="side-empty">This agent's window is no longer present.</div>`;
@@ -326,14 +397,14 @@ function renderAgentDetail() {
     // "Message" only when there's no wall to type into directly (terminals off).
     const actions = [];
     if (!(typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON)) {
-        actions.push(`<button onclick="openSendMsg('${attrEsc(a.name)}')">Message</button>`);
+        actions.push(`<button onclick="chela.openSendMsg('${attrEsc(a.name)}')">Message</button>`);
     }
-    if (a.has_schedules) actions.push(`<button onclick="triggerSchedule('${attrEsc(a.name)}')">Trigger</button>`);
+    if (a.has_schedules) actions.push(`<button onclick="chela.triggerSchedule('${attrEsc(a.name)}')">Trigger</button>`);
     if (a.claude_running) {
-        actions.push(`<button onclick="restartAgent('${attrEsc(a.name)}')">Restart</button>`);
-        actions.push(`<button class="btn-danger" onclick="stopAgent('${attrEsc(a.name)}')">Stop</button>`);
+        actions.push(`<button onclick="chela.restartAgent('${attrEsc(a.name)}')">Restart</button>`);
+        actions.push(`<button class="btn-danger" onclick="chela.stopAgent('${attrEsc(a.name)}')">Stop</button>`);
     } else {
-        actions.push(`<button class="btn-accent" onclick="startAgent('${attrEsc(a.name)}')">Start</button>`);
+        actions.push(`<button class="btn-accent" onclick="chela.startAgent('${attrEsc(a.name)}')">Start</button>`);
     }
 
     const rows = [
@@ -361,7 +432,7 @@ function renderAgentDetail() {
 
     host.innerHTML = `
         <div class="detail-head">
-            <span class="detail-back" onclick="selectView('agents')">← Agents</span>
+            <span class="detail-back" onclick="chela.selectView('agents')">← Agents</span>
             <span class="health-dot ${dot}"></span>
             <span class="detail-title">${escHtml(a.name)}</span>${pr}
         </div>
@@ -397,25 +468,71 @@ function renderSettings(focus) {
     const termSize = localStorage.getItem('chela_term_fontsize') || '14';
     const collabName = localStorage.getItem('chela_collab_name') || '';
     const collabAuto = localStorage.getItem('chela_collab_autoname') || 'auto-assigned';
+    const runToastsMuted = localStorage.getItem('chela_mute_run_toasts') === '1';
     body.innerHTML = `
+        <section class="settings-section" id="settings-status">
+            <h4>Connections &amp; Status</h4>
+            <div class="s-status-list"><div class="s-desc">Loading…</div></div>
+        </section>
+
         <section class="settings-section">
             <h4>Projects folder</h4>
-            <p class="s-desc">Scanned for git repos to suggest in the <strong>Launch</strong>
-            sidebar. Defaults to <code>~/projects</code> (or the <code>CHELA_PROJECTS_DIR</code>
+            <p class="s-desc">Scanned for git repos to suggest in the <strong>+</strong> launch
+            menu. Defaults to <code>~/projects</code> (or the <code>CHELA_PROJECTS_DIR</code>
             env var). Takes effect immediately — no restart.</p>
             <div class="s-row">
                 <input id="cfg-projects-dir" class="s-input" type="text"
                        placeholder="~/projects" autocomplete="off"
-                       onkeydown="if(event.key==='Enter')saveProjectsDir()">
-                <button class="btn-accent" onclick="saveProjectsDir()">Save</button>
+                       onkeydown="if(event.key==='Enter')chela.saveProjectsDir()">
+                <button class="btn-accent" onclick="chela.saveProjectsDir()">Save</button>
             </div>
             <div id="cfg-projects-msg" class="s-savemsg"></div>
+        </section>
+
+        <section class="settings-section" id="settings-agentmode">
+            <h4>Dispatcher agent mode</h4>
+            <p class="s-desc">Permission mode for agents the <strong>dispatcher</strong> spawns.
+            Applies to the <strong>next</strong> dispatch — an agent already running keeps the
+            mode it started with. Only the mode is settable; the rest of the launch command is
+            fixed in code.</p>
+            <div class="s-row">
+                <span class="s-rowlabel">Permission mode</span>
+                <select id="agent-mode-select" class="s-select"
+                        onchange="chela.setAgentPermissionMode(this.value)">
+                    <option value="">Loading…</option>
+                </select>
+            </div>
+            <div id="agent-mode-msg" class="s-savemsg"></div>
+            <p class="s-desc" id="agent-mode-source"></p>
+            <div class="s-row">
+                <span class="s-rowlabel">Model</span>
+                <select id="agent-model-select" class="s-select"
+                        onchange="chela.setAgentModel(this.value)">
+                    <option value="">Loading…</option>
+                </select>
+            </div>
+            <div id="agent-model-msg" class="s-savemsg"></div>
+            <p class="s-desc" id="agent-model-source"></p>
+            <p class="s-desc">The <strong>coding</strong> model — cmx tasks rarely need Opus,
+            so Sonnet is the default (cheaper/faster). The <strong>judge</strong> (the
+            adversarial reviewer) always runs on a capable model and is not affected by this
+            setting.</p>
         </section>
 
         <section class="settings-section">
             <h4>Needs-input notifications</h4>
             <p class="s-desc">Fires a one-shot ping when an agent's pane enters
             <code>waiting</code> (blocked on a prompt or question).</p>
+            <div class="s-row">
+                <span class="s-rowlabel">Review toasts</span>
+                <select id="run-toasts-select" class="s-select" onchange="chela.setRunToastsMuted(this.value)">
+                    <option value="show"${runToastsMuted ? '' : ' selected'}>Show</option>
+                    <option value="muted"${runToastsMuted ? ' selected' : ''}>Muted</option>
+                </select>
+            </div>
+            <p class="s-desc">Pop a dashboard toast when a dispatcher run turns
+            <code>awaiting_review</code> (or done / failed) — so you learn a run
+            needs review without watching the board.</p>
             <p class="s-desc">Set on the daemon (env), then restart <code>chela run</code>:</p>
             <div class="s-kv"><code>CHELA_NOTIFY_URL</code><span>ntfy / Telegram / webhook (auto-detected)</span></div>
             <div class="s-examples">
@@ -441,7 +558,7 @@ function renderSettings(focus) {
             <h4>Theme</h4>
             <div class="s-row">
                 <span class="s-rowlabel">Appearance</span>
-                <select id="theme-select" class="s-select" onchange="setTheme(this.value)">
+                <select id="theme-select" class="s-select" onchange="chela.setTheme(this.value)">
                     ${['dark','dim','midnight','nord','gruvbox','solarized','rose']
                         .map(t => `<option value="${t}"${theme === t ? ' selected' : ''}>${THEME_LABELS[t]}</option>`)
                         .join('')}
@@ -457,7 +574,7 @@ function renderSettings(focus) {
             other Hebrew faces are proportional: nicer letters, slight drift in the fixed cells.</p>
             <div class="s-row">
                 <span class="s-rowlabel">English font</span>
-                <select id="term-latin-select" class="s-select" onchange="setTermLatin(this.value)">
+                <select id="term-latin-select" class="s-select" onchange="chela.setTermLatin(this.value)">
                     ${Object.keys(TERM_LATIN_LABELS)
                         .map(k => `<option value="${k}"${termLatin === k ? ' selected' : ''}>${TERM_LATIN_LABELS[k]}</option>`)
                         .join('')}
@@ -465,7 +582,7 @@ function renderSettings(focus) {
             </div>
             <div class="s-row">
                 <span class="s-rowlabel">Hebrew font</span>
-                <select id="term-font-select" class="s-select" onchange="setTermFont(this.value)">
+                <select id="term-font-select" class="s-select" onchange="chela.setTermFont(this.value)">
                     ${Object.keys(TERM_FONT_LABELS)
                         .map(k => `<option value="${k}"${termFont === k ? ' selected' : ''}>${TERM_FONT_LABELS[k]}</option>`)
                         .join('')}
@@ -473,7 +590,7 @@ function renderSettings(focus) {
             </div>
             <div class="s-row">
                 <span class="s-rowlabel">Size</span>
-                <select id="term-size-select" class="s-select" onchange="setTermSize(this.value)">
+                <select id="term-size-select" class="s-select" onchange="chela.setTermSize(this.value)">
                     ${['12', '13', '14', '15', '16', '18']
                         .map(s => `<option value="${s}"${termSize === s ? ' selected' : ''}>${s}px</option>`)
                         .join('')}
@@ -490,7 +607,7 @@ function renderSettings(focus) {
                 <span class="s-rowlabel">Display name</span>
                 <input id="collab-name" class="s-input" type="text" maxlength="24"
                        autocomplete="off" placeholder="${escHtml(collabAuto)}"
-                       value="${attrEsc(collabName)}" oninput="setCollabName(this.value)">
+                       value="${attrEsc(collabName)}" oninput="chela.setCollabName(this.value)">
             </div>
             <div class="s-row">
                 <span class="s-rowlabel">Relay</span>
@@ -500,19 +617,186 @@ function renderSettings(focus) {
             is a zero-knowledge fan-out that only ever sees ciphertext (keys are derived in your
             browser from the pairing code). It does see room names + traffic timing (metadata) —
             run your own relay for full metadata privacy.</p>
-        </section>
-
-        <section class="settings-section">
-            <h4>Terminal wall</h4>
-            <div class="s-row">
-                <span class="s-rowlabel">Embedded ttyd wall</span>
-                <span class="s-badge ${TERMINALS_ON ? 'on' : 'off'}">${TERMINALS_ON ? 'Enabled' : 'Off'}</span>
-            </div>
-            <p class="s-desc">Streams live when on. Toggle with <code>CHELA_TERMINALS_ENABLED</code>.</p>
         </section>`;
     if (focus === 'notify') body.scrollTop = 0;
     _loadProjectsSetting();
     _loadCollabSetting();
+    _loadAgentModeSetting();
+    _loadAgentModelSetting();
+    _loadSettingsStatus();
+}
+
+// Dispatcher agent permission mode. The <select> is populated from the server's
+// enum (/api/config → agent_permission_modes) rather than a hardcoded list here,
+// so the UI can never offer a mode the server would reject — and the server
+// re-validates anyway (the gate is there, not here). Annotations are only given
+// for the modes whose behaviour is documented; the rest show the raw CLI name.
+const AGENT_MODE_NOTES = {
+    auto: 'safe ops auto-approved, risky ones gated',
+    bypassPermissions: '⚠ no prompts at all',
+};
+
+function _agentModeLabel(m, dflt) {
+    const note = AGENT_MODE_NOTES[m];
+    return m + (m === dflt ? ' · built-in default' : '') + (note ? ' · ' + note : '');
+}
+
+// Renders "which source is winning" honestly: a WORKFLOW.md that pins agent.cmd
+// SHADOWS this setting for that workflow (dispatcher.resolve_agent_cmd), so say
+// so rather than letting the drawer imply the mode always applies.
+function _renderAgentModeSource(cfg) {
+    const el = document.getElementById('agent-mode-source');
+    if (!el) return;
+    const overrides = (cfg && cfg.agent_cmd_overrides) || [];
+    const eff = (cfg && cfg.agent_permission_mode_effective) || '';
+    const stored = (cfg && cfg.agent_permission_mode) || '';
+    const src = stored ? 'this setting' : 'the built-in default';
+    let html = `In effect: <code>claude --permission-mode ${escHtml(eff)}</code> — from ${src}.`;
+    if (overrides.length) {
+        html += ' <strong>Overridden</strong> for ' + overrides.map(o =>
+            `<code>${escHtml(o.workflow)}</code> (<code>${escHtml(o.cmd)}</code>)`).join(', ') +
+            ' — a workflow that pins <code>agent.cmd</code> wins over this setting.';
+    }
+    el.innerHTML = html;
+}
+
+async function _loadAgentModeSetting() {
+    const sel = document.getElementById('agent-mode-select');
+    if (!sel) return;
+    let cfg;
+    try {
+        cfg = await api('/api/config');
+    } catch (e) { sel.innerHTML = '<option value="">(unavailable)</option>'; return; }
+    const modes = (cfg && cfg.agent_permission_modes) || [];
+    const dflt = (cfg && cfg.agent_permission_mode_default) || '';
+    const stored = (cfg && cfg.agent_permission_mode) || '';
+    sel.innerHTML = modes.map(m =>
+        `<option value="${attrEsc(m)}"${stored === m ? ' selected' : ''}>${escHtml(_agentModeLabel(m, dflt))}</option>`
+    ).join('');
+    // Unset reads as the built-in default — select it without storing anything.
+    if (!stored && dflt) sel.value = dflt;
+    _renderAgentModeSource(cfg);
+}
+
+async function setAgentPermissionMode(v) {
+    const msg = document.getElementById('agent-mode-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    setMsg('', 'Saving…');
+    let cfg;
+    try {
+        cfg = await api('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_permission_mode: v }),
+        });
+    } catch (e) { setMsg('err', 'Save failed — mode unchanged.'); return; }
+    // api() resolves on a 4xx too, so the server's rejection arrives as a body,
+    // not a throw. Fail closed: report it and re-read the mode that IS stored.
+    if (!cfg || cfg.error) {
+        setMsg('err', 'Rejected — mode unchanged.');
+        _loadAgentModeSetting();
+        return;
+    }
+    setMsg('ok', 'Saved · next dispatch launches in ' + (cfg.agent_permission_mode_effective || v));
+    _renderAgentModeSource(cfg);
+}
+
+// Coding-agent model. Same rails as the permission mode: the <select> is
+// populated from the server's enum (/api/config → agent_models) so it can never
+// offer a value the server would reject, and the server re-validates anyway. The
+// JUDGE's model is a fixed capable default, decoupled from this — not surfaced.
+function _agentModelLabel(m, dflt) {
+    return m + (m === dflt ? ' · default' : '');
+}
+
+// The model rides on the permission-mode command, so a WORKFLOW.md that pins
+// agent.cmd shadows it too — the mode-source line already says which workflows
+// override, so here we only state the effective coding model.
+function _renderAgentModelSource(cfg) {
+    const el = document.getElementById('agent-model-source');
+    if (!el) return;
+    const eff = (cfg && cfg.agent_model_effective) || '';
+    const stored = (cfg && cfg.agent_model) || '';
+    const src = stored ? 'this setting' : 'the built-in default';
+    el.innerHTML = `Coding agents launch with <code>--model ${escHtml(eff)}</code> — from ${src}.`;
+}
+
+async function _loadAgentModelSetting() {
+    const sel = document.getElementById('agent-model-select');
+    if (!sel) return;
+    let cfg;
+    try {
+        cfg = await api('/api/config');
+    } catch (e) { sel.innerHTML = '<option value="">(unavailable)</option>'; return; }
+    const models = (cfg && cfg.agent_models) || [];
+    const dflt = (cfg && cfg.agent_model_default) || '';
+    const stored = (cfg && cfg.agent_model) || '';
+    sel.innerHTML = models.map(m =>
+        `<option value="${attrEsc(m)}"${stored === m ? ' selected' : ''}>${escHtml(_agentModelLabel(m, dflt))}</option>`
+    ).join('');
+    // Unset reads as the built-in default — select it without storing anything.
+    if (!stored && dflt) sel.value = dflt;
+    _renderAgentModelSource(cfg);
+}
+
+async function setAgentModel(v) {
+    const msg = document.getElementById('agent-model-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    setMsg('', 'Saving…');
+    let cfg;
+    try {
+        cfg = await api('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_model: v }),
+        });
+    } catch (e) { setMsg('err', 'Save failed — model unchanged.'); return; }
+    // api() resolves on a 4xx too, so a server rejection arrives as a body, not
+    // a throw. Fail closed: report it and re-read the model that IS stored.
+    if (!cfg || cfg.error) {
+        setMsg('err', 'Rejected — model unchanged.');
+        _loadAgentModelSetting();
+        return;
+    }
+    setMsg('ok', 'Saved · next dispatch launches with --model ' + (cfg.agent_model_effective || v));
+    _renderAgentModelSource(cfg);
+}
+
+// Live "Connections & Status" surface (READ-ONLY). Fetches /api/settings and
+// renders each section's items as rows with a colorblind-safe status badge:
+// ●/○ SHAPE + a text label ("Connected" / "Off"), never colour alone — Liav is
+// red-weak, so the glyph and word carry the state and colour is only a hint.
+async function _loadSettingsStatus() {
+    const host = document.querySelector('#settings-status .s-status-list');
+    if (!host) return;
+    let data;
+    try {
+        data = await api('/api/settings');
+    } catch (e) {
+        host.innerHTML = '<div class="s-desc">Status unavailable.</div>';
+        return;
+    }
+    const sections = (data && data.sections) || [];
+    if (!sections.length) { host.innerHTML = '<div class="s-desc">No status.</div>'; return; }
+    host.innerHTML = sections.map(sec => `
+        <div class="s-status-group">
+            <div class="s-status-grouphead">${escHtml(sec.title || '')}</div>
+            ${(sec.items || []).map(_statusRowHtml).join('')}
+        </div>`).join('');
+}
+
+function _statusRowHtml(it) {
+    const on = !!it.on;
+    // ●/○ shape carries the on/off state independently of colour (Liav red-weak).
+    const glyph = on ? '●' : '○';
+    const detail = it.detail ? `<span class="s-status-detail" title="${attrEsc(it.detail)}">${escHtml(it.detail)}</span>` : '';
+    return `<div class="s-status-row">
+        <span class="s-status-badge ${on ? 'on' : 'off'}">
+            <span class="s-status-dot" aria-hidden="true">${glyph}</span>${escHtml(it.state || '')}
+        </span>
+        <span class="s-status-label">${escHtml(it.label || '')}</span>
+        ${detail}
+    </div>`;
 }
 
 // Persistent collab display name (per browser). Empty → clear → presence.js falls
@@ -563,7 +847,7 @@ async function saveProjectsDir() {
     } catch (e) { setMsg('err', 'Save failed.'); return; }
     if (cfg && cfg.projects_dir_effective) inp.placeholder = cfg.projects_dir_effective;
     setMsg('ok', 'Saved · scanning ' + ((cfg && cfg.projects_dir_effective) || inp.value.trim()));
-    // Refresh the Launch sidebar so new suggestions appear right away.
+    // Refresh the launch menu so new suggestions appear right away.
     if (typeof refreshLauncher === 'function') refreshLauncher();
 }
 
@@ -620,6 +904,12 @@ function setTermSize(v) {
     applyTermPrefsToIframes();
 }
 
+// Mute / unmute the dispatcher run-state review toasts (sse.js reads this key).
+function setRunToastsMuted(v) {
+    if (v === 'muted') localStorage.setItem('chela_mute_run_toasts', '1');
+    else localStorage.removeItem('chela_mute_run_toasts');
+}
+
 function applyTermPrefsToIframes() {
     document.querySelectorAll('iframe').forEach(f => {
         try {
@@ -631,15 +921,25 @@ function applyTermPrefsToIframes() {
 
 // --- "+ new" popover -------------------------------------------------------
 
+// The "+" menu is also the LAUNCH menu: Favorites + Recent live in it (launcher.js
+// fills #new-menu-launch). Re-render on open so a pin/launch from anywhere else is
+// already reflected when it appears.
 function openNewMenu(ev) {
     if (ev) ev.stopPropagation();
     const m = document.getElementById('new-menu');
     if (!m) return;
+    if (typeof refreshLauncher === 'function') refreshLauncher();
     const anchor = (ev && ev.currentTarget) || document.getElementById('btn-new');
+    // Show it BEFORE measuring: a display:none element has no offsetWidth.
+    m.style.display = 'block';
     const r = anchor.getBoundingClientRect();
     m.style.top = (r.bottom + 4) + 'px';
-    m.style.left = Math.max(8, r.right - 160) + 'px';
-    m.style.display = 'block';
+    // Right-align to the button off the MEASURED width, and clamp so it never runs
+    // off the left edge. A hardcoded width here (it used to be 160, from the old
+    // popover) silently sends the menu off the RIGHT edge the moment the CSS gets
+    // wider than the guess — which .launch-menu's 232px min-width did, on a button
+    // that sits ~55px from the viewport edge.
+    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
     setTimeout(() => document.addEventListener('click', hideNewMenu, { once: true }), 0);
 }
 
@@ -648,27 +948,43 @@ function hideNewMenu() {
     if (m) m.style.display = 'none';
 }
 
-// Topbar overflow menu (Lucide more-vertical): consolidates the secondary actions
-// — Share current, Notifications, Settings — plus the usage/updated readouts, so
-// the bar stays to its primaries (jump · New · overflow) on both desktop and
-// mobile. The safety kill-switch (#btn-shares) is deliberately NOT in here — it
-// stays visible whenever a share is live. Anchored + light-dismiss like #new-menu.
-function openOverflowMenu(ev) {
+// Topbar primary menu (Lucide more-vertical): folds the three former topbar
+// primaries — Jump to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow)
+// — behind ONE button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122's WALL
+// toolbar fold — grid presets + lock behind openLayoutMenu — was reverted in
+// CMX-111: Liav never asked for that one folded, only this topbar). Jump to…
+// and the old overflow's secondary actions (Share current, Notifications,
+// Settings) plus the usage/updated readouts are flat items here; New… reopens
+// the existing #new-menu (openNewMenuFromPrimary below) rather than duplicating
+// it, since #new-menu already serves the sidebar's own "+" trigger from a
+// different anchor. The safety kill-switch (#btn-shares) is deliberately NOT in
+// here — it stays visible whenever a share is live. Anchored + light-dismiss,
+// same pattern as the old openNewMenu/openOverflowMenu.
+function openPrimaryMenu(ev) {
     if (ev) ev.stopPropagation();
-    const m = document.getElementById('overflow-menu');
+    const m = document.getElementById('primary-menu');
     if (!m) return;
-    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-overflow');
+    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-primary-menu');
     m.style.display = 'block';
     const r = anchor.getBoundingClientRect();
     m.style.top = (r.bottom + 6) + 'px';
     // Right-align to the button; clamp so it never runs off the left edge.
     m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
-    setTimeout(() => document.addEventListener('click', hideOverflowMenu, { once: true }), 0);
+    setTimeout(() => document.addEventListener('click', hidePrimaryMenu, { once: true }), 0);
 }
 
-function hideOverflowMenu() {
-    const m = document.getElementById('overflow-menu');
+function hidePrimaryMenu() {
+    const m = document.getElementById('primary-menu');
     if (m) m.style.display = 'none';
+}
+
+// The primary menu's "New…" row: close the primary menu and reopen #new-menu
+// (Favorites/Recent + Init a repo/Scheduled task/Shell window) anchored at
+// #btn-primary-menu — the exact same popover the sidebar's "+" trigger opens
+// from its own anchor, just from a second entry point.
+function openNewMenuFromPrimary() {
+    hidePrimaryMenu();
+    openNewMenu({ stopPropagation() {}, currentTarget: document.getElementById('btn-primary-menu') });
 }
 
 // Spawn a plain shell window. The backend spawn endpoint is currently behind
@@ -677,7 +993,7 @@ function hideOverflowMenu() {
 async function newShellWindow() {
     try {
         const res = await api('/api/agents/spawn', { method: 'POST' });
-        if (res && res.ok) { _agentsCache = []; refreshSidebar(); }
+        if (res && res.ok) { setAgentsCache([]); refreshSidebar(); }
         else alert((res && res.error) || 'Could not spawn a window (enable terminals, or use tmux directly).');
     } catch (e) {
         alert('Could not spawn a window (enable terminals, or use tmux directly).');
@@ -740,14 +1056,19 @@ async function newShellWindow() {
 // handful of sessions. Built fresh each open from live caches.
 let _palItems = [], _palSel = 0;
 
-function _paletteItems() {
+// skipWids (optional): sessions to leave out of the "session ·" rows below —
+// used with an EMPTY query so a pane already floated to the top (CMX-116's
+// `_openPaneItems`) doesn't also show up a second time further down the list.
+function _paletteItems(skipWids) {
     const items = [];
-    const views = [];
-    if (TERMINALS_ON) views.push(['terminals', 'Wall']);
-    views.push(['agents', 'Agents'], ['dispatcher', 'Dispatch'], ['kanban', 'Kanban'], ['schedules', 'Schedules'], ['knowledge', 'Knowledge']);
-    views.forEach(([v, label]) => items.push({ icon: lucideIcon('layout-grid'), title: label, sub: 'view', run: () => selectView(v) }));
+    // The palette's own hardcoded copy of the view list is gone — it reads the
+    // registry, so a view added or removed there is added or removed here.
+    paletteViews(VIEWS, _viewCtx()).forEach(v => items.push({
+        icon: lucideIcon('layout-grid'), title: v.label, sub: 'view', run: () => selectView(v.id),
+    }));
 
     (_agentsCache || []).forEach(a => {
+        if (skipWids && a.window_id && skipWids.has(a.window_id)) return;
         const word = _AGENT_STATUS_WORD[agentDotColor(a)] || 'idle';
         items.push({ dot: _SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle', title: _agentLabel(a),
                      sub: 'session · ' + word, run: () => selectAgent(a.name) });
@@ -782,6 +1103,10 @@ function _paletteItems() {
     items.push({ icon: lucideIcon('terminal'), title: 'New shell window', sub: 'action', run: () => newShellWindow() });
     items.push({ icon: lucideIcon('clock'), title: 'Add scheduled task', sub: 'action',
                  run: () => { if (typeof showAddSchedule === 'function') showAddSchedule(); } });
+    // CMX-121: the injected keybinds (Alt+1..9, ⌘K) have no other discovery path —
+    // this is the ONLY entry point (palette-only, deliberately no dedicated global
+    // keybind — see index.html's #shortcuts-overlay comment).
+    items.push({ icon: lucideIcon('keyboard'), title: 'Keyboard shortcuts', sub: 'help', run: () => openShortcuts() });
     return items;
 }
 
@@ -801,25 +1126,63 @@ function _fuzzyScore(q, s) {
     return score - first * 0.1;
 }
 
+// CMX-116: palette-first pane switcher. On an EMPTY query, float every live,
+// unminimized wall pane to the TOP — wall order (`_orderedWids`), with a pane
+// wanting attention (waiting > working > idle) bubbling ahead of its peers,
+// same status word the sidebar uses — so ⌘K instantly answers "what's open,
+// what needs me". Once the user types, this section is gone: `_paletteItems()`
+// alone (agents already included there) drives the usual fuzzy match over
+// everything, so a query never traps you in "open panes only".
+const _PANE_ATTENTION_RANK = { yellow: 0, green: 1, grey: 2 };
+
+function _openPaneItems() {
+    if (!TERMINALS_ON || typeof _renderedWids === 'undefined') return [];
+    const live = _renderedWids.filter(w => !(_minimized && _minimized.has(w)));
+    if (!live.length) return [];
+    const wallOrder = _orderedWids(live);
+    const rankOf = wid => {
+        const a = (_agentsCache || []).find(x => x.window_id === wid);
+        return _PANE_ATTENTION_RANK[a ? agentDotColor(a) : 'grey'] ?? 2;
+    };
+    // Array.prototype.sort is stable — same-rank panes keep wall order.
+    const byAttention = wallOrder.slice().sort((a, b) => rankOf(a) - rankOf(b));
+    return byAttention.map(wid => {
+        const a = (_agentsCache || []).find(x => x.window_id === wid);
+        const word = a ? (_AGENT_STATUS_WORD[agentDotColor(a)] || 'idle') : 'open';
+        return {
+            wid, dot: a ? (_SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle') : 'idle',
+            title: a ? _agentLabel(a) : wid,
+            sub: 'open pane · ' + word,
+            run: () => focusPaneByWid(wid),
+        };
+    });
+}
+
 function _renderPalette(q) {
     const list = document.getElementById('palette-list');
     if (!list) return;
-    let items = _paletteItems();
+    let items, paneCount = 0;
     if (q) {
-        items = items
+        items = _paletteItems()
             .map(it => ({ it, sc: _fuzzyScore(q, it.title + ' ' + it.sub) }))
             .filter(x => x.sc >= 0)
             .sort((a, b) => b.sc - a.sc)
             .map(x => x.it);
+    } else {
+        const panes = _openPaneItems();
+        paneCount = panes.length;
+        items = panes.concat(_paletteItems(new Set(panes.map(p => p.wid))));
     }
     _palItems = items;
     if (_palSel >= items.length) _palSel = 0;
     list.innerHTML = items.map((it, i) => {
+        const divider = (paneCount > 0 && i === paneCount)
+            ? '<div class="palette-divider" role="separator"></div>' : '';
         const icon = it.dot
             ? `<span class="term-status-dot ${it.dot}"></span>`
             : `<span class="pi-glyph">${it.icon || ''}</span>`;
-        return `<div class="palette-item${i === _palSel ? ' sel' : ''}" data-i="${i}"
-                  onmouseenter="_palHover(${i})" onclick="_palRun(${i})">
+        return divider + `<div class="palette-item${i === _palSel ? ' sel' : ''}" data-i="${i}"
+                  onmouseenter="_palHover(${i})" onclick="chela._palRun(${i})">
             <span class="pi-icon">${icon}</span>
             <span class="pi-title">${escHtml(it.title)}</span>
             <span class="pi-sub">${escHtml(it.sub)}</span>
@@ -858,6 +1221,14 @@ document.addEventListener('keydown', e => {
         (ov && ov.classList.contains('open')) ? closePalette() : openPalette();
         return;
     }
+    // The shortcuts cheatsheet (CMX-121) is a plain, static overlay — Esc is its
+    // only keyboard wire (no arrow-key selection, nothing to run). Checked before
+    // the palette's own open-check below so Esc closes whichever overlay is on top.
+    const scOv = document.getElementById('shortcuts-overlay');
+    if (scOv && scOv.classList.contains('open')) {
+        if (e.key === 'Escape') { e.preventDefault(); closeShortcuts(); }
+        return;
+    }
     const ov = document.getElementById('palette');
     if (!ov || !ov.classList.contains('open')) return;
     if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
@@ -866,5 +1237,26 @@ document.addEventListener('keydown', e => {
     else if (e.key === 'Enter') { e.preventDefault(); _palRun(_palSel); }
 });
 
+// --- Keyboard shortcuts cheatsheet (CMX-121) --------------------------------
+// Palette-only (⌘K → "Keyboard shortcuts", wired in _paletteItems above) — no
+// dedicated global keybind, see index.html's #shortcuts-overlay comment. Content
+// is static markup in index.html (nothing here is config-driven), so open/close
+// only toggle the overlay's visibility class.
+function openShortcuts() {
+    const ov = document.getElementById('shortcuts-overlay');
+    if (ov) ov.classList.add('open');
+}
+function closeShortcuts() {
+    const ov = document.getElementById('shortcuts-overlay');
+    if (ov) ov.classList.remove('open');
+}
+
 // Apply the saved theme immediately on load.
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
+
+// --- Stage 0: ES-module exports ---
+export { closeShortcuts, openPalette, openShortcuts, refreshSidebar, renderAgentDetail, renderNav, renderSidebarAgents, selectView, updateCtxCache };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });

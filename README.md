@@ -13,12 +13,16 @@
 
 **A tiny control plane that puts a fleet of Claude Code agents to work — unattended.**
 
-chela runs as a small daemon over a single tmux session. It does two things:
+chela runs as a small daemon over a single tmux session. It does three things:
 
 - **Schedules** long-lived agents — poke an agent's pane on an interval or cron
   (`every 1h`, `0 */8 * * *`, a one-shot timestamp).
 - **Dispatches** work — turn a markdown `TODO.md` (or GitHub issues) into one
   **git worktree per task**, spawn an agent in it, and let it **open a PR**.
+- **Closes the loop** — when a delegated agent finishes (or blocks, or dies), the
+  daemon **pushes that into the orchestrator agent's own session**, so an agent
+  that gives out work learns when it comes back. See
+  [the orchestration loop](#the-orchestration-loop).
 
 Most tmux + Claude Code tools help you *talk to and supervise* agents; chela is
 for **putting them to work** and walking away. You watch them however you
@@ -71,6 +75,14 @@ already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
   dashboard tracks the 5h / 7d limits so you can see headroom at a glance.
 - **Needs-input alerts** — when an agent blocks on a prompt, chela fires a
   one-shot push (ntfy / Telegram / webhook) so you're not babysitting.
+- **Decisions inbox** — an *orchestrator* agent that hands work to other agents
+  gets told when that work finishes, blocks, or fails: the event is delivered
+  into its own session, but only while it's idle. Without this, agent completion
+  is invisible to an orchestrator (a Claude Code session only acts when something
+  messages it), and a human ends up being the message bus.
+- **Telegram bridge** — one forum topic per agent window: drive or supervise any
+  agent from your phone, two-way (`chela telegram`; see
+  [`skills/telegram-setup`](skills/telegram-setup/SKILL.md)).
 - **tmux-native discovery** — windows are agents; `tmux list-windows` is the
   single source of truth. No external registry, no heartbeat daemon.
 - **Lean core, optional dashboard** — a two-dependency headless core; the Flask
@@ -119,13 +131,29 @@ uv run chela status
 # 3. Schedule an agent:
 uv run chela schedule add researcher --every 1h --prompt "Run your research cycle."
 
-# 4. Start the daemon (scheduler + optional dispatcher + needs-input notify):
+# 4. Start the daemon. NOT OPTIONAL — it is what makes chela do anything on its
+#    own (see below). Run it under a process manager (pm2/systemd/tmux window):
 uv run chela run
 
 # 5. Dispatch work items from a repo's WORKFLOW.md (see examples/):
 uv run chela dispatch /path/to/repo/WORKFLOW.md --once    # one pass
 uv run chela dispatch /path/to/repo/WORKFLOW.md           # poll
 ```
+
+**`chela run` is the engine, not a helper.** Everything autonomous lives in its
+loop, so if it isn't running, chela is just a CLI. Each pass it:
+
+| It runs | Without the daemon |
+|---|---|
+| the **scheduler** tick | schedules never fire — no interval/cron pokes |
+| the **dispatcher** (for `CHELA_DISPATCH_WORKFLOWS`) | TODOs are never turned into worktrees/PRs |
+| the **needs-input** scan | no push when an agent blocks on a prompt |
+| the **decisions inbox** | a finished agent never wakes the orchestrator |
+| the **window-name reconciler** | windows stay stuck at `shell-N` instead of their project |
+
+The daemon is easy to *forget* you killed — the dashboard still works, agents
+still run, and nothing looks broken; the fleet just quietly stops doing anything
+by itself. If schedules seem "stuck", check that `chela run` is alive first.
 
 The **dispatcher** is the headline feature. Drop a `WORKFLOW.md` + `TODO.md` in
 a repo (copy `examples/`), and each `- [ ] task` becomes: a worktree on a fresh
@@ -136,6 +164,131 @@ that flips to `done` when you merge. See [`examples/WORKFLOW.md`](examples/WORKF
 > [`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/` and
 > a Claude Code agent can install chela and seed a starter `WORKFLOW.md` + `TODO.md`
 > for the current repo for you.
+
+---
+
+## The orchestration loop
+
+An **orchestrator** is just another agent — a Claude Code session whose job is to
+hand work to the others. It has a structural blind spot: a Claude Code session can
+only act when something messages it, so an agent *finishing* is invisible to it. It
+has to poll the pane, or a human has to walk over and say "he's done". The decisions
+inbox closes that: completion is pushed back into the orchestrator's session.
+
+```bash
+# in the orchestrator's session, after dispatching work to window @3:
+chela drive @3 "Fix the parser bug in src/lex.rs; commit when tests pass."
+chela watch @3 --note "parser bug"     # register interest — you'll be told
+chela watching                         # what's watched, what's queued, and whether
+                                       #   the address it delivers to is still real
+chela watch                            # no window: (re-)register THIS session as the
+                                       #   orchestrator — the fix after tmux restarts
+```
+
+The daemon then reports, once, when `@3` **finishes**, **blocks** on a prompt, or
+**dies** mid-task — plus dispatcher runs that hit `awaiting_review`, `failed`, or
+`needs_human` (the rework loop gave up — every verdict it was given rides along) —
+as one line typed into the orchestrator's session:
+
+```
+📥 @3 · chelamux finished the task you dispatched — verify + commit. — note: “parser bug”
+```
+
+Four rules make pushing into a live session safe:
+
+- **Delivery is gated on `idle`, strictly.** A `busy` session is mid-thought and is
+  never interrupted — the event queues durably and goes out on the next idle tick.
+  A **`waiting`** session is worse than busy: it's sitting on a permission prompt,
+  and a paste there would be read as the *answer to that prompt*. So `not busy` is
+  not good enough; only a genuinely idle session is ever written to.
+- **You must register interest.** Every agent turn ends busy→idle, including the
+  orchestrator's own replies, so only work you explicitly `chela watch`ed produces
+  an event. This also covers plain `chela drive` / `tmux send-keys` delegation,
+  which isn't a dispatcher run and has no run state of its own. The watch clears
+  when the completion fires: one dispatch, one report.
+- **The orchestrator is identified explicitly, never guessed.** Whichever session
+  runs `chela watch` registers itself (via `$CHELA_WID`); pin it with
+  `CHELA_ORCHESTRATOR_WID=@0`. Until something registers, the inbox is **inert** —
+  it can't push into a random agent's session. It never reports on the
+  orchestrator's own window either, so it can't notify itself in a loop.
+- **`@3` is an address, not an identity — so every stored one carries its tmux
+  epoch.** tmux issues window ids *per server*: restart it and the fleet comes back
+  renumbered from `@0`. On 2026-07-14 an OOM did exactly that, and the inbox spent the
+  day pushing at a `@0` that no longer existed — five finished PRs went unreviewed, in
+  total silence, with `chela doctor` green. Every persisted id (the orchestrator's
+  address, each watch, each run row, each Telegram binding) is now stamped with the
+  server that issued it; one from a dead server is **never acted on** — it names a
+  different agent now, and a wrong wid is worse than no wid — and being undeliverable
+  is **loud**: an ERROR every tick, an `inbox_undeliverable` event in the Feed, a phone
+  push, and a red `chela doctor` (`inbox.address`). Nothing is lost: the queue waits,
+  and `chela watch` (no arguments) re-registers the session that is really there.
+- **An idle prompt is not necessarily a *prose* prompt.** Claude Code's input line
+  has modes: `!` runs a shell command, `#` writes to memory. A session in `!` mode is
+  perfectly `idle` — and it will **execute** the next line it receives. (It did:
+  a notification built from an agent-authored PR title was run by `/bin/bash`.) So the
+  mode is read off the pane and an unsafe one is **refused** — the event is *held* in
+  the queue, never dropped — and, independently, every summary is **neutralised** of
+  shell metacharacters, control bytes and mode-switching prefixes before it is typed.
+  Agent-authored text must never be indistinguishable from something you typed.
+
+Kill it entirely with `CHELA_INBOX_ENABLED=false`.
+
+---
+
+## Agent rooms — agents that can actually talk to each other
+
+`chela msg` fires a string into a pane and vanishes: no record, no kind, no reply
+path. A **room** is the relationship that message never had — a typed, durable
+ledger two or more windows are members of, plus **active dispatch**: a *targeted*
+`handoff` / `question` / `blocker` is injected into the peer's terminal, so it wakes,
+answers, and the answer routes back to the asker **with no human in the middle**.
+
+```bash
+chela room create wire
+chela room join wire --wid @3            # no --wid: your own window
+chela room join wire --wid @4
+chela room post wire --kind question --from @3 --to @4 \
+  -- "Does the retry live in the parser or the client?"
+chela room digest wire                   # the ledger — read from the event log
+```
+
+`@4` finds this typed into its prompt, and the command it needs to answer with:
+
+```
+[chela room] question from @3 (parser) in room "wire" (post #128):
+> Does the retry live in the parser or the client?
+
+Answer by posting back to the asker — this wakes them, with no human in the middle:
+  chela room post wire --kind handoff --from @4 --to @3 --reply-to 128 -- "<your answer>"
+```
+
+- **A room is membership + a filter over the [event log](docs/EVENTS.md)** — every
+  post is one event (`room_<kind>`), so there is no second event store to drift.
+  Only the *membership* gets a file of its own (`$CHELA_DIR/rooms.json`): it is
+  mutable, and the log is append-only and rotates.
+- **Only a targeted `handoff`/`question`/`blocker` may interrupt.** Every other kind
+  (`status`, `finding`, `summary`, `task`, …) is recorded and never injected, and an
+  untargeted post is never injected at all — a fleet where any post can paste into
+  any pane is an interrupt storm.
+- **The inbox's rails, reused.** A `waiting` agent is *never* pasted into (that paste
+  would answer its gate) — the delivery is **parked** and goes out when the gate
+  clears. A dead or unknown recipient fails loudly, exit 1. Messaging yourself is
+  refused.
+- **The loop guard is structural, not advisory** — an echo between two live agents
+  burns a real machine. A relayed prompt can never be re-posted (every injected
+  prompt opens with a fixed `[chela room]` header), a reply chain is capped at 6
+  hops, and no window may be injected into by the same peer more than 6 times in 5
+  minutes. A tripped guard still *records* the post; it just wakes nobody.
+- **A body is untrusted input on its way into a terminal.** ANSI escapes and control
+  characters are stripped, the body is capped and **quoted**, so a `/slash-command`,
+  an `Escape` or a `Ctrl-C` in a message can't drive the recipient's TUI.
+- **A restarted agent is handed its rooms back.** Everything a room told an agent lived
+  in that *session's* context — and a dispatched agent is a fresh session every run, so a
+  restart forgot the lot, silently. The plugin's `SessionStart` hook now injects a short
+  recap (`chela room recap` prints the same thing): the last few posts per room, newest
+  first, sanitised, with the `--reply-to` cursor to answer on. An agent in **no** room
+  gets **nothing** — not a header, not a "no shared context" line — because this text is
+  prepended to every fresh context in the fleet. See [docs/HOOKS.md](docs/HOOKS.md).
 
 ---
 
@@ -166,6 +319,16 @@ To change the launcher/Start default, set the full command, e.g.
 restart the daemon. Prefer `auto` or `acceptEdits` for agents on a wall you don't
 babysit; reserve `bypassPermissions` for repos you fully trust.
 
+### Resource isolation — a known gap
+
+Permission modes bound what an agent may *do*; nothing bounds what it may *consume*. A
+dispatched agent runs `pytest` / `uv sync` / a backtest **unisolated**, and chela's
+supervisor shares a failure domain with the workers it spawns — a job that eats the box
+takes tmux, the daemon and the orchestrator down with it. chela does not put agents in
+cgroups; run heavy work under a **shared** memory slice instead. The failure mode, the
+measured numbers, and why a per-job cap does *not* protect the machine:
+**[docs/RESOURCE_ISOLATION.md](docs/RESOURCE_ISOLATION.md)**.
+
 ---
 
 ## CLI
@@ -173,37 +336,88 @@ babysit; reserve `bypassPermissions` for repos you fully trust.
 | Command | What it does |
 |---|---|
 | `chela status` | List the agent windows chela sees in the tmux session |
-| `chela run` | The daemon loop: scheduler tick + dispatcher + needs-input notify |
+| `chela run` | **The daemon.** Every pass: scheduler tick · dispatcher · needs-input scan · [decisions inbox](#the-orchestration-loop) · window-name reconcile. Required — see [Run](#run) |
 | `chela schedule add <agent> --every/--cron/--once --prompt ...` | Add a scheduled poke |
 | `chela schedule list` / `remove <id>` | Manage scheduled tasks |
 | `chela dispatch <WORKFLOW.md> [--once] [--interval N] [--dry-run]` | Run the work-item dispatcher |
-| `chela dispatch-runs` | List dispatcher runs and their status |
+| `chela dispatch --pause [--reason R] [--ttl 30m]` / `--resume` / `--hold-status` | **Hold the queue** while you reorder the tracker: claims stop, reconciliation continues, and the hold self-releases at its expiry |
+| `chela dispatch-runs [--awaiting]` | List dispatcher runs; `--awaiting` shows everything parked in review (awaiting review, sent back, needs a human) |
+| `chela review <run\|branch> --request-changes --body-file -` | **Fail a PR and send it back**: the run re-enters its *own* worktree and branch, with your verdict as the prompt. `--approve` records a pass and merges nothing |
 | `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
-| `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux |
+| `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux (by window id `@32` or name; non-zero exit if not delivered) |
 | `chela broadcast <text>` | Message every other live agent |
+| `chela telegram [--no-inbound]` | Bridge agent windows ↔ Telegram forum topics (see [`skills/telegram-setup`](skills/telegram-setup/SKILL.md)) |
 | `chela install-statusline [--write]` | Print/install the Claude Code statusLine hook for the context bar |
 | `chela dashboard [--host] [--port]` | Launch the dashboard + live terminal wall (needs the `[dashboard]` install) |
+| `chela knowledge export [--out DIR] [--since DATE]` | Write an [OKF](docs/OKF.md) bundle of runs / schedules / agents / projects |
+| `chela events [--after-seq N] [--type T] [--wid @N] [--follow]` | Replay / filter / tail the [event log](docs/EVENTS.md) — the durable record of what happened |
+| `chela events rotate [--yes]` | Retire the log to a `.bak` and start a fresh `boot_id` (an operator step — never silent) |
+| `chela plugin [--dir PATH] [--port N]` | Render the [Claude Code hooks plugin](docs/HOOKS.md) that feeds the event log |
+| `chela doctor` | Check the running config against `~/.chela/chela.env` — [drift is silent otherwise](docs/CONFIG.md) |
+
+**Agent-facing** — an agent runs these *about its siblings*, from inside its own
+window (it knows itself via `$CHELA_WID`, injected at spawn):
+
+| Command | What it does |
+|---|---|
+| `chela whoami` | Print this agent's own window id (`$CHELA_WID`) |
+| `chela peek [wid]` | Status of a window: liveness, cwd, latest recap, health (default: self) |
+| `chela read [wid] [--tail N \| --query Q \| --all]` | Distilled read of a sibling's Claude Code transcript |
+| `chela drive <wid> <message>` | Message a sibling window, keyed by window id (rename-proof) |
+| `chela watch <wid> [--note "..."]` | Delegated work to `<wid>`: tell me when it finishes / blocks / dies, and register me as the orchestrator |
+| `chela watching` | What's being watched, and what's queued for delivery |
+| `chela unwatch <wid>` | Stop watching a window |
+| `chela room create <room>` | Create a room (a shared, typed ledger some windows are members of) |
+| `chela room join <room> [--wid]` | Put a window in a room (default: your own) |
+| `chela room post <room> --kind K [--to @N] [--reply-to SEQ] <text>` | Post to a room — a *targeted* `handoff`/`question`/`blocker` **wakes** the peer; every other kind is recorded only |
+| `chela room digest <room>` | The room's ledger, read from the event log |
+| `chela room status [room]` | Rooms, their members, and any delivery parked at a gate |
+| `chela room leave <room> [--wid]` | Remove a window from a room |
 
 ---
 
 ## Config (environment)
 
+The environment is the single source of truth, and it is written down in **one file**:
+
+```bash
+cp examples/chela.env ~/.chela/chela.env    # sourced by chela and by scripts/run-chela.sh
+chela doctor                                # does what's RUNNING still match the file?
+```
+
+An exported variable beats the file; the file beats the defaults; and chela runs correctly
+from a plain shell with neither. Nothing else keeps a copy — a process manager's `env:`
+block is a second place for config to live, and that is where drift comes from. Start
+services with `scripts/run-chela.sh` (see `examples/ecosystem.config.js`), and read
+**[docs/CONFIG.md](docs/CONFIG.md)** for the precedence rules, the PM2 migration, and why
+the dashboard *publishes* the port it bound.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `CHELA_TMUX_SESSION` | `chela` | tmux session chela orchestrates |
 | `CHELA_DIR` | `~/.chela` | State dir (scheduler.db, worktrees, context) |
+| `CHELA_ENV_FILE` | `$CHELA_DIR/chela.env` | The env file itself. Empty = don't read one |
 | `CHELA_SCHEDULER_POLL_INTERVAL` | `30` | Daemon loop interval (s) |
 | `CHELA_DISPATCH_WORKFLOWS` | — | Colon-separated WORKFLOW.md paths the daemon dispatches |
 | `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick interval in the daemon (s) |
+| `CHELA_MAX_REWORKS` | `2` | How many times a PR that fails review is sent back to its agent before the run stops at `needs_human`. `0` = no rework at all |
+| `CHELA_JUDGE` | `true` | The **judge** — the adversarial pass on a green PR (corrupt each guard, re-run the suite, block only on one that survives). One extra agent per PR head, so this is the fleet-wide off switch; a workflow turns it off for itself with `judge: {enabled: false}`, and it is off anyway without a `judge.test_cmd` |
 | `CHELA_AGENT_CMD` | `claude` | Launch command for the dashboard Start button |
 | `CHELA_PROJECTS_DIR` | `~/projects` | Folder scanned for git repos to suggest in the Launch sidebar (also settable in dashboard **Settings → Projects folder**, which wins) |
 | `CHELA_NOTIFY_URL` | — | Needs-input notification target (ntfy / Telegram / webhook) |
 | `CHELA_NOTIFY_KIND` | auto | Force `ntfy` \| `telegram` \| `webhook` |
 | `CHELA_NOTIFY_CHAT_ID` | — | Telegram chat id (if not in the URL) |
 | `CHELA_NOTIFY_INTERVAL` | `20` | Pane-state scan interval (s) |
-| `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind |
+| `CHELA_INBOX_ENABLED` | `true` | [Decisions inbox](#the-orchestration-loop). Inert until a session registers as the orchestrator; `false` disables it outright |
+| `CHELA_ORCHESTRATOR_WID` | — | Pin the window the inbox pushes into (`@0`). Otherwise it's whichever session ran `chela watch` |
+| `CHELA_IGNORE_WINDOWS` | — | Comma-separated window names to hide from discovery (placeholder/keep-alive windows) |
+| `CHELA_SHOW_TOOL_CALLS` | `false` | Relay each agent's tool calls to Telegram too (noisy; off by default) |
+| `CHELA_TELEGRAM_BIND_DISPATCHED` | `false` | Give **dispatcher-spawned** agents a Telegram topic like any other agent. Off by default: a fleet of short-lived workers, each opening a topic on spawn and archiving it on exit, turns the forum into a changelog. With it off they're bound **lazily** — no topic while working, a topic the moment one **blocks** on a permission gate or a question — so the forum shows only the agents that want a human |
+| `CHELA_STATUS_LINE` | `true` | Relay the live "Claude is working" verb (`✻ Cerebrating… · 2 shells`) as one self-updating message per topic. It edits in place while the agent works and clears itself when the turn ends — so a phone can tell a *thinking* agent from a *dead* one. A finished turn is kept only when it still says something (shells still running, or a turn ≥30s); anything shorter poofs |
+| `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind. The hooks plugin POSTs to this port, so set it **here**, not with `chela dashboard --port` (a per-process override nothing else can see) |
 | `CHELA_TERMINALS_ENABLED` | `true` | Embedded ttyd terminal wall (streams live; loopback-guarded — see below) |
 | `CHELA_TERMINALS_EXPOSE` | `false` | Serve the writable wall on a **non-loopback** bind too (RCE risk — opt-in) |
+| `CHELA_WALL_TILE_DISPATCHED` | `false` | The same rule as `CHELA_TELEGRAM_BIND_DISPATCHED`, on the wall: give **dispatcher-spawned** agents a full tile on spawn. Off by default — a worker opens **minimized** (a chip in the dock, terminal live the whole time) and **pops out** the moment it blocks on a human, so five workers grinding through a backlog can't crowd out the session you're actually in |
 | `CHELA_DEFAULT_CONTEXT_WINDOW` | `200000` | Window size assumed by the transcript-based context estimate (fallback only) |
 
 ---
@@ -262,13 +476,19 @@ a mobile terminal — [Blink](https://blink.sh/) (iOS), [Termius](https://termiu
 or any Mosh-capable client — then `tmux attach -t chela` and you've got the live
 panes. A QR of the connect string makes this one tap.
 
-> **Pairs well with [ccbot](https://github.com/six-ddc/ccbot)** — a Telegram ↔ tmux
-> bridge for Claude Code (1 topic = 1 window = 1 session). It shares chela's model
-> — a tmux window per agent — so you can let chela put the fleet to work and
-> *drive or supervise any agent from a Telegram topic* on your phone (text,
-> images, and file attachments flow both ways). (chela's
-> built-in needs-input notifications just ping you; ccbot is a full two-way bridge.)
-> Independent project, not required by chela.
+**Or bridge the fleet to Telegram.** `chela telegram` maps each agent window to a
+**forum topic** in one supergroup — 1 topic = 1 window = 1 session — and relays
+both ways: the agent's output streams into its topic, and anything you type there
+lands in its pane. Topics are created, named after the agent's project, and closed
+as windows come and go; a rename of the window renames the topic. So you can drive
+or supervise any agent from your phone, not just get pinged by it. `/new` (from the
+General topic, or anywhere) browses to a folder and **starts a fresh Claude session
+there** — its topic appears a moment later, already bound. Setup (bot token, forum
+group, PM2): [`skills/telegram-setup`](skills/telegram-setup/SKILL.md).
+
+> The bridge is text/media over the Bot API — it needs no inbound port and doesn't
+> expose the wall. It's a supervision channel, not a substitute for the tailnet
+> boundary above.
 
 ### Collaborative terminals (end-to-end encrypted)
 
@@ -311,10 +531,13 @@ you'd hand the keyboard to.
 
 A first-class feature, shipped as a separate install to keep the core lean.
 `uv sync --extra dashboard && uv run chela dashboard` serves a web UI on
-`127.0.0.1:5001` with tabs for **agents** (liveness from `claude agents --json`:
-alive / waiting / offline), **schedules**, the **dispatcher**, and a **Kanban**
-of runs. Liveness is derived live from the native session status — no heartbeat
-daemon. An embedded ttyd **terminal wall** (a multi-pane view that streams the
+`127.0.0.1:5001` with five views — **Feed** (the [event log](docs/EVENTS.md)),
+**Agents** (liveness from `claude agents --json`: alive / waiting / offline),
+**Wall**, **Work** (the dispatcher, a Kanban of runs, and schedules, over one
+poll), and **Knowledge**. Every view is one entry in a registry
+(`static/js/views.js`), so a view is as cheap to delete as it is to add.
+Liveness is derived live from the native session status — no heartbeat daemon.
+An embedded ttyd **terminal wall** (a multi-pane view that streams the
 live panes) is **on by default**, but **loopback-guarded**: because it serves
 writable shells, the dashboard only serves it on a `127.0.0.1` bind. Bind to a
 non-loopback interface (e.g. `--host 0.0.0.0`) and the wall is refused — its
@@ -333,6 +556,13 @@ routes 404 and its UI is hidden — unless you explicitly set
   <br>
   <em>Schedules — interval, cron, and one-shot pokes that type a prompt into an agent's window.</em>
 </p>
+
+**Renaming an agent.** Double-click a pane's title on the wall. That renames the
+**tmux window** — the window name is the single source of truth for an agent's
+name — so it updates everywhere at once: the wall, the agent cards, the nav, tmux
+itself, and the agent's bound Telegram topic. It sticks: chela's auto-namer only
+fills in *blank* names (a placeholder `shell-N`, or a name tmux derived from the
+running command), and never overrides one you chose.
 
 **Keys not reaching the terminal?** If `Esc` (or other keys) never reaches an
 embedded terminal, a vim-style browser extension such as **Vimium** is almost
@@ -367,17 +597,124 @@ literal Escape.
   `claude --permission-mode auto` (a classifier auto-approves safe ops and gates
   dangerous ones); set `agent.cmd: claude --permission-mode bypassPermissions`
   in `WORKFLOW.md` for zero-hang autonomy on a repo you trust.
+- **A PR that fails review goes back to the agent that wrote it.** `awaiting_review` used
+  to be the end of the line: the reviewer found real defects and had nowhere to put them,
+  so a human climbed into the worktree and hand-started a fix agent. Now
+  `chela review <run> --request-changes --body-file -` writes the verdict on the run and
+  the next tick re-spawns that agent **in its original worktree, on its original branch**,
+  with the verdict as its prompt — so the branch history and the open PR survive, and the
+  PR simply updates when it pushes. The loop is **bounded** (`CHELA_MAX_REWORKS`, default
+  2): past the cap the run stops at `needs_human`, keeping its branch, worktree and PR, and
+  surfaces to you through the [decisions inbox](#the-orchestration-loop) carrying *every*
+  verdict it was given. A rework draws on the same `concurrency.max` slots as any other
+  work — it never preempts a running agent, and a run that has stopped never holds a slot.
+  ⚠️ **The run row is the authority, not GitHub**: `gh pr review --request-changes` is
+  refused on a PR your own account authored, and a fleet is one account — so the verdict
+  lives on the run and the PR comment is its human-readable copy.
+  ⚠️ **Rolling the daemon back is a ONE-WAY door while a run is parked.** `changes_requested`
+  and `needs_human` are new statuses, and an older dispatcher's claim filter has never heard
+  of them: it sees a parked run's task still open in the tracker, claims it as a **fresh**
+  one, forks a **second** worktree off the base branch and dispatches the *original* prompt
+  — telling an agent to branch and open a PR that is already open. Before downgrading, drain
+  the loop: `chela dispatch-runs --awaiting` lists every parked run; merge, close or
+  `chela runs delete` each one first.
+- **⚖️ The judge: every guard is corrupted, and one that survives sends the PR back.** CI
+  proves the suite passes. It cannot prove the suite *can fail* — it runs the tests, and the
+  tests are the thing that is broken. Measured here on 2026-07-14: of five CI-green PRs,
+  **four had a guard that survived deliberate corruption** — a "sidebar state must never
+  reach the render key" test that still passed with that state folded back in, a colourblind
+  cue whose glyph could be emptied with `0 failures`, a feature whose entire production
+  wiring could be **reverted** with `1112 passed`. Every feature worked; the proof that they
+  worked could not fail. So a PR reaching `awaiting_review` green gets one judge per head
+  commit. ⛔ **It is not "spawn a reviewer and trust it."** The agent proposes *experiments* —
+  `(file, before, after)` — and **chela** applies each one in a throwaway detached worktree,
+  reads the file back to prove it changed, parse-checks it, re-runs the repo's own
+  `judge.test_cmd`, restores it, and adjudicates. A guard that survives a **live, minimal,
+  syntactically valid** corruption is a **fact**, and it is the only thing allowed to block —
+  through the same carrier a human uses, spending a rework round like any other verdict.
+  Style, taste and "I'd have done it differently" go in `notes`: posted as a PR comment,
+  never blocking. **The judge is allowed to be useless; it is not allowed to be wrong.**
+  ⚠️ An unapplied mutation (the suite stays green — it would block a *good* PR) and one that
+  breaks the parse (red for the wrong reason — it would wave a *bad* PR through) are both
+  thrown out as `INVALID`; a red baseline, a dirty worktree or zero experiments is **CANNOT
+  VERIFY**, which blocks nothing and approves nothing. ⛔ **The judge never merges** — a clean
+  PR stays exactly where it was, in your inbox. Off with `CHELA_JUDGE=0`, or for a workflow
+  that sets no `judge.test_cmd` (no suite ⇒ no facts ⇒ nothing that may block).
+  ⛔ **`hooks.before_run` is the judge's environment, not just the agent's** — it runs on
+  every launch, and a judge worktree is a launch, so it has to build a worktree in which
+  `judge.test_cmd` can be **green**. Get that wrong and the judge is *inert*, not broken: it
+  is honest, correct, and it verifies nothing. Ours was, for its first PRs — the hook synced
+  the venv and never ran `npm ci`, so jsdom was missing, the DOM suites could not run, and
+  the baseline was red before a single mutation was applied. Every PR came back CANNOT
+  VERIFY. If your `test_cmd` needs it, your `before_run` installs it.
+- **The queue belongs to whoever holds it, not to whoever is faster.** The tracker
+  has two writers — you reorder it, the dispatcher claims from it — and you lose
+  that race every time: a merge frees the slot, and the next tick fires long before
+  you have finished writing the item you meant to put on top. So say it instead of
+  racing it: `chela dispatch --pause` stops **claims** (never reconciliation — a
+  merged PR still closes out and frees its slot), you rewrite and **push**, and
+  `--resume` lets the next tick claim the new top item. A hold expires on its own
+  (30m default), so a crash mid-rewrite can't strand the fleet. Claims are read from
+  `origin/<base_branch>` at the instant of claiming, so an unpushed edit is one the
+  dispatcher cannot see.
+- **Agent state is read on two channels — correlated, not screen-scraped.** chela
+  reads each agent's **transcript** (`~/.claude/projects/…jsonl`) as the
+  *structured* channel — tool calls, questions, plans and results arrive as typed
+  JSON records, not characters to parse off a screen — and the **tmux pane** as the
+  *liveness* channel: whether an agent is working, idle, or **waiting** on a prompt
+  right now. Neither is sufficient alone, so chela pairs them: the transcript says
+  *what* (which tool, which options, which pending call), the pane says *that it's
+  live and awaiting you*. Where the pane must be read at all, it's matched on
+  **shape, not wording** — a cursor glyph among sibling option lines — so a Claude
+  Code UI reword doesn't silently break detection.
+
+### Why not a structured agent protocol (e.g. ACP)?
+
+A protocol like the Agent Client Protocol would hand chela typed events directly,
+with no pane-reading at all — and in the abstract that's the cleaner interface.
+chela deliberately doesn't depend on one, because its whole value is that **an
+agent is a real `claude` process in a real terminal a human can also watch and
+grab** — the live wall, the collaborative terminals, `tmux attach`. A headless
+protocol session trades that away. So chela keeps the human-drivable PTY and
+recovers the *structure* a protocol would give from the channel that already has
+it — the transcript — reserving the pane for the one thing only it knows: that an
+agent is waiting for you right now.
+
+**And increasingly, not even that.** The transcript only records an interactive tool
+*when it is answered*, which is why a pending gate had to be read off the terminal at all.
+[Claude Code hooks](docs/HOOKS.md) — shipped as a plugin, POSTing into the daemon — close
+that gap from the other side: a permission request or an `AskUserQuestion` lands in the
+[event log](docs/EVENTS.md) **while the agent is still blocked on it**, typed, with every
+option's label and description attached. And the answer goes back the same way: chela
+holds that hook open (briefly, boundedly) while you tap the answer on your phone, so a
+question — even a multi-question, multi-select one — is answered with **zero keystrokes**
+at the terminal. The pane-scraped gates remain the fallback (hooks are read at agent
+startup, so a running fleet has none) — but the structure a protocol would have handed us
+is arriving anyway, without giving up the terminal.
+
+**And the surface you answer it on is the pane itself.** A card rendered from a payload
+can't show you a **cursor** — a cursor isn't an input, it's a render — so a blocked dialog
+arrives as the terminal region *verbatim*: box drawing, the `❯` cursor, the checkboxes, in
+**one message**, with the gate's answer buttons and a nine-key D-pad (`␣ ↑ ⇥ / ← ↓ → / ⎋ 🔄
+⏎`) on the one keyboard beneath it. Tap an option and the blocked hook hands it straight to
+the agent, no keystrokes; or steer the `❯` with the D-pad and press `⏎`, watching the cursor
+move in the chat as every tap re-draws that same message in place. The mirror needs no
+parser, which is why it also works on the dialogs hooks never describe — a checkpoint
+restore, a `/model` picker, a reworded prompt — and on agents that started before the plugin
+existed. The rich hook-rendered cards sit alongside it, carrying each option's full
+description and preview: they are what you *read*, the mirror is what you *steer*.
 
 ---
 
 ## Roadmap
 
-- **OKF knowledge layer + viewer** — export the fleet's accumulated knowledge
-  (dispatch runs, schedules, agent recaps, PR links) as a portable
-  [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
-  bundle (vendor-neutral markdown + YAML), with a glance / browse / search /
-  graph viewer — embedded in the dashboard and shipped self-contained inside
-  each bundle. Full design: [docs/OKF.md](docs/OKF.md).
+- **Portable OKF bundle viewer** — `chela knowledge export` already writes the
+  fleet's accumulated knowledge (dispatch runs, schedules, agent recaps, PR links)
+  as an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+  bundle (vendor-neutral markdown + YAML), and the dashboard has an embedded
+  **Knowledge** view over it (glance / browse / search / graph). Still to come: a
+  self-contained `viewer.html` shipped *inside* each bundle, so it travels without
+  the dashboard. Full design: [docs/OKF.md](docs/OKF.md).
 - Agent personas (customizable behavior templates).
 - Custom functions / harnesses (per-project agent config).
 - Scheduling integration.

@@ -1,0 +1,2106 @@
+"""Pane watcher — surface the live-TUI prompts that the transcript can't relay.
+
+Three blocked-agent prompts are rendered only in Claude Code's live TUI, so this
+watcher reads each bound window's tmux pane every tick and surfaces them to the
+window's topic with a tap-to-answer keyboard:
+
+  * a **permission gate** ("Do you want to proceed?" for a Bash/Edit) — never in
+    the transcript at all. Posts ``❓ Permission — <tool>: <command>`` with
+    ✅ Allow once / ❌ Deny (:func:`~chela.telegram.interactive.permission_reply_markup`).
+  * an **AskUserQuestion** selector — posts the scraped question with every option
+    numbered in full **in the message body** (the descriptions too), and a compact
+    numeric selector button per option
+    (:func:`~chela.telegram.interactive.scraped_reply_markup`; the nav row only for
+    the multi-tab / multi-select fallback). The options used to live *only* in the
+    button captions, which Telegram hard-truncates to one line — so on a phone the
+    human was handed four half-sentences and asked to decide (CMX-32). The body is
+    the only surface that wraps, so that is where the options belong.
+  * an **ExitPlanMode** plan approval — posts the scraped plan with
+    ✅ Approve / 📝 Keep planning (:func:`~chela.telegram.interactive.plan_reply_markup`).
+
+**For an AskUserQuestion, the pane is no longer the CONTENT authority — the HOOK
+payload is** (CMX-49). The scrape's option regexes were measured against one selector
+shape, and a **multi-question** selector (which draws a tab strip) or one whose options
+carry a **``preview``** (which re-lays the TUI out side-by-side) parses as *unparseable*:
+live, a 3-question preview-bearing question reached the phone as its question text and a
+bare nav row — zero options, nothing to tap — while ``hook.pre_tool_use`` already held
+every option's ``label``, ``description`` and ``preview`` in the event log. So when the
+pane says a selector is up **and** the log holds an unresolved ``AskUserQuestion``
+``PreToolUse`` for that window (:func:`~chela.telegram.hookgate.pending_gate`), the body
+is rendered from the payload — **one message per question** (the TUI walks them one at a
+time, and three questions × previews is a wall of text on a phone) — and the pane is
+demoted to what it is uniquely good for: saying the gate is on screen *right now*. With
+no hook events for the window (a **pre-plugin** agent — hooks are read at agent startup),
+the pane-scraped render below is unchanged and remains the fallback.
+
+**And the answer goes back the same way it came** (CMX-50). While the daemon holds an
+agent's ``PermissionRequest`` hook open (:mod:`chela.gateanswer`), a tap is handed straight
+back through it: **zero keystrokes**, no ``❯`` cursor to find, no Enter racing an arrow
+move. That is what makes the multi-question and ``multiSelect`` shapes answerable at all —
+they have no cursor semantics to inject against — and it retires the substrate that
+silently answered option 2 when the human tapped 3 (CMX-32). Keystroke injection survives
+for exactly one case: a pre-plugin agent, whose gate no hook ever announced.
+
+**All three are detected from the pane, with no transcript precondition.** Slice
+C1 originally gated the permission pane-read on the window having an *unpaired*
+``tool_use`` in the transcript, on the theory that the transcript says a call is
+pending and the pane then confirms it is blocked. Live testing (2026-07-12) showed
+that correlation can never fire: Claude Code appends the gated call's ``tool_use``
+to the JSONL only **once the human answers** — exactly as measured for
+AskUserQuestion (A2) and ExitPlanMode (B2) — so while a gate is pending there is
+*nothing* unpaired, the pane is never read, and the ``❓ Permission`` message never
+posts. The gate's identity therefore comes from the **pane** too
+(:func:`~chela.telegram.panescan.scrape_gate_identity` reads the "Bash command /
+<cmd>" header the dialog is drawn with); a transcript ``tool_use``, if one happens
+to be unpaired, is only a fallback.
+
+**And a surface you can SEE yourself driving** (CMX-52). The cards above are a *static*
+render: they say what the gate asks, but not what it currently looks like — so tapping an
+arrow on the nav row changed nothing on screen, and the human was driving a selector they
+could not see. Worse, the nav row has no ``Space``, no ``Tab`` and no ``←``/``→``, so a
+``multiSelect`` question could not be answered from a phone at all; and the three
+detectors above cover three dialog shapes out of eight, so a Bash approval, a checkpoint
+restore, ``/model`` or Settings relayed as *nothing*. The **mirror** (``_MIRROR``,
+:func:`format_mirror_card`) fixes all three the way ccbot did — by not parsing anything:
+it re-draws the pane region verbatim (:func:`~chela.telegram.panescan.detect_dialog`) into
+ONE message with a full nine-key D-pad under it, **edits that same message in place after
+every keypress** (:meth:`PermissionGateWatcher.refresh_mirror`, called from the tap
+handler), and deletes it when the dialog leaves the pane. The ``❯`` cursor is *in the
+render signature*, which is precisely why the edit fires and you watch the cursor move in
+the chat.
+
+**And the mirror is the PRIMARY surface** (CMX-54). CMX-52 suppressed it for any gate whose
+options were "already one tap away" — which, once the hook-answer path above started
+working, meant it disappeared exactly when it worked best. Liav drove it from his phone and
+chose it (*"i like this surface more"*), so the rule is inverted: **every** dialog is
+mirrored, and the hook's zero-keypress option buttons ride on the **same message**, above
+the D-pad (:func:`mirror_answer`). Watch the cursor and press ``⏎``, or just tap the answer.
+The decision, and how the two answer routes interleave without double-answering, is written
+out above :func:`format_mirror_card`.
+
+**And it is the ONLY message a gate posts** (CMX-57). The ❓ cards were still being posted
+*beside* the mirror, so a 2-question gate arrived as **three** messages and the surface Liav
+drives was buried under two he scrolls past. One gate, one message: the cards are not posted
+when the mirror carries the selector, and the content that was uniquely theirs — every
+option's ``description`` and ``preview``, **together**, which is the only way to compare them
+(the TUI, and therefore the pane, draws one preview at a time) — moves *behind* a ``📖``
+button on that same message (:func:`format_mirror_expansion`), toggled in place, keeping the
+answer buttons and the D-pad. The cards survive as the mirror's **fallback** for a selector
+the dialog detector cannot name, because a gate that arrives as nothing is worse than a gate
+that arrives as two messages.
+
+The same per-tick pane capture also feeds a fifth, non-interactive relay — the
+**ephemeral status line** (:class:`StatusRelay`): Claude Code's live working verb
+(``✻ Cerebrating… (2m 45s · ↓ 12.0k tokens) · 2 shells``) posted as one message
+that edits in place while the agent works and **deletes itself** when the turn
+ends, so a phone can tell a *thinking* agent from a *dead* one. It is a TUI render
+rather than an event — there is no ``Boondoggling`` hook and there cannot be — so
+unlike the three gates, the pane is its correct source permanently.
+
+All three prompt relays are **edge-triggered / de-duped per window** by a scraped-content
+signature: the first scrape posts one message, a changed scrape (the selector
+finished rendering) **edits it in place** rather than double-posting, and an
+unchanged scrape does nothing. When the prompt leaves the pane (answered), the
+tracked message is **deleted** — its buttons are dead the moment the prompt is
+gone (a stray tap would fire ``Enter`` at whatever the agent is doing next), and
+the transcript's ``tool_result`` is the durable record of what was chosen. The
+matching ``tool_result`` clears the tracking too, as belt-and-suspenders.
+"""
+from __future__ import annotations
+
+import html
+import logging
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Callable
+
+from chela.gateanswer import OpenGate
+from chela.telegram.hookgate import HookGate, Question
+from chela.telegram.interactive import (
+    hook_reply_markup,
+    mirror_markup,
+    nav_only_markup,
+    permission_reply_markup,
+    plan_reply_markup,
+    scraped_option_rows,
+    scraped_reply_markup,
+)
+from chela.telegram.panescan import (
+    AskUQ,
+    Dialog,
+    ExitPlan,
+    Gate,
+    Status,
+    detect_askuserquestion,
+    detect_dialog,
+    detect_exitplanmode,
+    detect_permission_gate,
+    detect_status,
+)
+
+log = logging.getLogger(__name__)
+
+# A sender posts one prompt to a topic:
+# ``send(text, parse_mode, thread, reply_markup=...) -> ok``. Every prompt body is
+# scraped pane text (shell/path characters, TUI glyphs), so all of them go as
+# plain text (``parse_mode=None``) — no MarkdownV2 escaping to get wrong. Only
+# used when no id-returning ``post`` is wired (plain-sender tests).
+Sender = Callable[..., bool]
+# A poster posts one prompt and returns its Telegram message_id (or None on
+# failure): ``post(text, parse_mode, thread, reply_markup) -> id``. The watcher
+# remembers that id so a re-scrape edits the same message and a resolved prompt
+# can be deleted.
+Poster = Callable[..., "int | None"]
+# An editor rewrites a tracked message by id (tolerating "not modified"):
+# ``edit(message_id, text, parse_mode, reply_markup) -> ok``.
+Editor = Callable[..., bool]
+# A deleter removes a tracked message by id: ``delete(message_id) -> ok``.
+Deleter = Callable[[int], bool]
+# A capture reads a window's visible pane text: ``capture(window_id) -> str``.
+Capture = Callable[[str], str]
+# A typing indicator: ``typing(thread) -> ok``. Fire-and-forget decoration.
+Typing = Callable[..., bool]
+
+# Longest command/arg detail we inline before truncating (keeps the line tidy;
+# the full command is one /screenshot away).
+_MAX_DETAIL = 300
+
+# Longest plan body inlined before truncating (the full plan is one /screenshot
+# away; a shorter cap keeps the approval message readable on a phone).
+_MAX_PLAN = 2000
+
+# Telegram rejects a message body over 4096 characters, so an AskUserQuestion body
+# (question + every option, in full) is budgeted against that cap: the question is
+# clipped first, then the remaining room is split evenly across the options, each
+# keeping at least _MIN_OPTION characters. ``_OPTION_PREFIX`` is the room the
+# "N. " numbering costs per line.
+_TG_TEXT_LIMIT = 4096
+_MAX_QUESTION = 700
+_MIN_OPTION = 80
+_MIN_DESC = 40
+_OPTION_PREFIX = 6
+
+# The prompt kinds this watcher tracks, one tracked message each per window.
+_GATE = "permission"
+_ASKUQ = "askuserquestion"
+_PLAN = "exitplanmode"
+_MIRROR = "mirror"
+
+# Every tap on the mirror's D-pad is a tmux capture AND a Telegram edit, so a fast thumb
+# is a rate-limit gun. Three things hold it down, and only the third is a clock:
+#
+#   1. the render is DE-DUPED on its signature — an unchanged pane makes no API call at
+#      all (:meth:`PermissionGateWatcher._sync` returns before it touches Telegram);
+#   2. the tap path sleeps :data:`~chela.telegram.interactive.MIRROR_SETTLE_S` before it
+#      re-captures, so a human thumb cannot outrun it by much;
+#   3. this floor, on the poll-driven edits, which is what a *repainting* pane (a spinner
+#      inside a dialog region) would otherwise walk straight into the flood limit.
+#
+# A throttled edit is **skipped, not lost**: the tracked signature is left stale on
+# purpose, so the very next poll renders the newest pane. And a TAP bypasses the floor
+# entirely (``force=True``) — a keypress that does not visibly move the cursor is the
+# exact bug this whole surface exists to kill, and no rate budget is worth reintroducing
+# it.
+MIRROR_EDIT_MIN_INTERVAL = 1.0
+_MIN_EDIT_INTERVAL: dict[str, float] = {_MIRROR: MIRROR_EDIT_MIN_INTERVAL}
+
+# Claude Code repaints its status line several times a second (the elapsed timer
+# ticks even when the verb doesn't), so the ephemeral status message is edited at
+# most once per this many seconds per window — otherwise a single working agent
+# would walk the topic straight into Telegram's per-chat flood limit. Ported from
+# ccbot's STATUS_EDIT_MIN_INTERVAL, which ran at this value in production. A
+# dropped update is free: the next poll sends the *latest* verb, not the stale one.
+STATUS_EDIT_MIN_INTERVAL = 4.0
+
+# A settled turn shorter than this, with nothing left running, is not worth a
+# permanent message — it poofs. Tunable: see :func:`should_keep`.
+STATUS_KEEP_MIN_SECONDS = 30
+
+# A gate Telegram would not take is re-posted by the next pane tick — but a gate is
+# *pending on a human*, so "the next tick" can mean every tick for hours, and that
+# traffic is fed straight back into the flood control it is trying to escape. So the
+# first retry is immediate (the common case is one 429 in a burst, gone a second
+# later), and every failure after that doubles the wait, up to this ceiling.
+#
+# The gate is never abandoned. A ceiling, not a try-count, is the bound: a live gate
+# that has failed nine times is still a human waiting for a question, and a watcher
+# that gives up on it is the very silence this file exists to end (CMX-74). What is
+# bounded is the *rate* — worst case one post per window per gate per five minutes.
+_REPOST_BACKOFF_BASE = 5.0    # seconds, after the first (immediate) retry
+_REPOST_BACKOFF_MAX = 300.0   # seconds — the ceiling the doubling walks up to
+
+# A poof that Telegram refuses is re-tried on a later drain, this many times, and then
+# dropped with a loud log. Unlike a gate, a delete has a natural expiry: the message it
+# would remove is already answered, so retrying it forever buys nothing.
+_MAX_POOF_TRIES = 5
+
+# The status is one line; a pathological verb is clipped rather than wrapped.
+_MAX_STATUS = 200
+
+
+@dataclass
+class _PendingTool:
+    """An unpaired ``tool_use`` awaiting its ``tool_result``."""
+
+    tool_name: str | None
+    tool_input: dict | None
+
+
+@dataclass(frozen=True)
+class Card:
+    """One Telegram message a prompt renders into — body, parse mode, keyboard.
+
+    A prompt is a *list* of these, not a string, because an AskUserQuestion rendered
+    from its hook payload is **one message per question** (see
+    :func:`format_hook_askuq_cards`). Every other prompt renders to exactly one card, so
+    the list is a generalisation, not a redesign.
+
+    ``plain`` is the same body with no markup at all. A card that carries a ``preview``
+    goes out as ``parse_mode="HTML"`` (a ``<pre>`` block scrolls horizontally on a phone
+    instead of wrapping, which is what keeps box-drawing ASCII legible), and Telegram
+    *rejects* a message whose entities it cannot parse — so a rejected HTML body falls
+    back to this rather than to silence. A dropped preview would be exactly the silent
+    degrade this whole change exists to end.
+    """
+
+    text: str
+    parse_mode: str | None = None
+    markup: dict | None = None
+    plain: str | None = None
+
+
+@dataclass
+class _Tracked:
+    """The prompt message(s) currently posted for one window + prompt kind.
+
+    ``signature`` is the content it was last rendered from (the edge-trigger / de-dup
+    marker); ``message_ids`` are the Telegram messages to edit as the prompt re-renders
+    and to delete once it resolves (empty when no id-returning poster is wired). It is a
+    *list* because a multi-question AskUserQuestion posts one message per question.
+
+    ``last_edit`` is the throttle clock for the kinds that have one (:data:`_MIN_EDIT_
+    INTERVAL` — the mirror). It advances only on an edit that actually went out.
+    """
+
+    signature: str
+    message_ids: list[int] = field(default_factory=list)
+    last_edit: float = 0.0
+
+
+@dataclass
+class _Undelivered:
+    """A prompt Telegram refused, and the clock that decides when to try it again.
+
+    ``attempts`` counts the posts that delivered nothing; ``next_at`` is the earliest
+    :meth:`PermissionGateWatcher._sync` may post this window+kind again (see
+    :data:`_REPOST_BACKOFF_BASE`). It is dropped the moment a post lands — or the gate
+    leaves the pane, whichever comes first.
+    """
+
+    attempts: int = 0
+    next_at: float = 0.0
+
+
+def _clip(text: str, limit: int = _MAX_DETAIL) -> str:
+    """One line, truncated with an ellipsis — safe to inline in a relay message."""
+    flat = " ".join(str(text).split())
+    return flat[: limit - 1] + "…" if len(flat) > limit else flat
+
+
+def _tool_detail(tool_name: str | None, tool_input: dict | None) -> str | None:
+    """The human-facing arg summary for a ``tool_use``, or None if there's none apt.
+
+    Bash → its ``command``; the file tools → their ``file_path``. Anything else
+    returns None. This is the *fallback* identity for a gate: the pane is the
+    primary source (the gated ``tool_use`` isn't in the transcript yet), so this
+    only fires when the dialog header couldn't be scraped and some tool_use
+    happened to be unpaired.
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    if tool_name == "Bash":
+        val = tool_input.get("command")
+    elif tool_name in ("Edit", "MultiEdit", "Write", "Read"):
+        val = tool_input.get("file_path")
+    elif tool_name == "NotebookEdit":
+        val = tool_input.get("notebook_path")
+    else:
+        val = None
+    return _clip(val) if val else None
+
+
+def format_gate_message(info: _PendingTool | None, gate: Gate) -> str:
+    """Build the enriched relay line for a detected gate.
+
+    Identity comes from the **pane** first (the gate dialog names the tool and the
+    command it wants to run — and while the gate is pending that is the only place
+    it exists), then from an unpaired transcript ``tool_use`` if the dialog wasn't
+    recognisable, and finally — with no identity at all — from the scraped gate
+    region itself, so a reworded dialog still relays something actionable.
+    """
+    tx_tool = info.tool_name if info else None
+    tool = gate.tool or tx_tool
+    detail = _clip(gate.detail) if gate.detail else None
+    if detail is None and tool == tx_tool and info is not None:
+        detail = _tool_detail(tx_tool, info.tool_input)
+    if tool and detail:
+        return f"❓ Permission — {tool}: {detail}"
+    if tool:
+        return f"❓ Permission — {tool}"
+    text = (gate.text or "").strip()
+    return f"❓ Permission\n{text}" if text else "❓ Permission"
+
+
+def _gate_signature(gate: Gate) -> str:
+    """A stable key for one gate instance — the de-dup / edge-trigger marker."""
+    return "\x00".join((gate.kind, gate.tool or "", gate.detail or "", gate.text))
+
+
+def format_askuq_message(uq: AskUQ) -> str:
+    """The plain-text relay body for a detected AskUserQuestion selector.
+
+    The scraped question, then the option labels **in full, numbered** — because
+    the message body is the only Telegram surface that *wraps*. The options used to
+    live solely in the button captions, and a button caption is the one surface
+    Telegram hard-truncates to a single line: a phone showed four half-sentences
+    ("Rotate the group, skip the …") and none of the reasoning, i.e. the human was
+    asked to decide with the basis for the decision structurally withheld. So the
+    body carries the meaning now and the buttons are bare numeric selectors
+    (:func:`~chela.telegram.interactive.scraped_reply_markup`) — the numbering here
+    is what they select, so it must stay 1:1 with the scraped option order.
+
+    Options are listed only for the shapes that get semantic buttons; the multi-tab
+    / multi-select fallback gets the nav row, so its body stays the question alone.
+    Each option's scraped description (the prose Claude Code draws under it — the
+    TUI renders one per option, not just for the focused one) is indented beneath
+    it, so the *reasoning* the decision hinges on travels with the choice.
+
+    A pathological option is **truncated, never dropped** (a dropped option would be
+    unpickable), and the whole body stays inside Telegram's 4096-char cap.
+    """
+    q = _clip(uq.question, _MAX_QUESTION) if (uq.question or "").strip() else ""
+    head = f"❓ {q}" if q else "❓ Claude is asking a question"
+    if uq.multi or not uq.options:
+        return head
+
+    # Split what's left of the message cap evenly across the options, so one verbose
+    # option can't crowd the others out — each keeps a readable slice, label first.
+    room = _TG_TEXT_LIMIT - len(head) - 2 * (len(uq.options) + 1)
+    per_option = max(_MIN_OPTION, room // len(uq.options))
+    descriptions = uq.descriptions or ()
+    lines = [head]
+    for i, label in enumerate(uq.options, start=1):
+        label_text = _clip(label, max(_MIN_OPTION, per_option - _OPTION_PREFIX))
+        lines.append(f"\n{i}. {label_text}")
+        desc = descriptions[i - 1] if i - 1 < len(descriptions) else ""
+        left = per_option - len(label_text) - _OPTION_PREFIX
+        if desc and left >= _MIN_DESC:
+            lines.append(f"   {_clip(desc, left)}")
+    body = "\n".join(lines)
+    return body if len(body) <= _TG_TEXT_LIMIT else body[: _TG_TEXT_LIMIT - 1] + "…"
+
+
+def _askuq_signature(uq: AskUQ) -> str:
+    """A stable key for one selector instance — the de-dup / edge-trigger marker.
+
+    Everything the message body renders is in here (question, options **and their
+    descriptions**), so a scrape that changes the body — e.g. the descriptions
+    landing a repaint after the option rows — edits the message in place instead of
+    being swallowed as a no-op.
+    """
+    return "\x00".join(
+        (uq.question, "|".join(uq.options), "|".join(uq.descriptions or ()))
+    )
+
+
+def _askuq_markup(uq: AskUQ) -> dict:
+    """The answer keyboard for a detected selector.
+
+    Semantic ``qa:<i>`` option buttons for a simple single-select; the nav row
+    only for the multi-tab / multi-select fallback (never a broken keyboard).
+    """
+    if uq.multi or not uq.options:
+        return nav_only_markup()
+    return scraped_reply_markup(uq.options)
+
+
+# ── AskUserQuestion, rendered from the HOOK payload (CMX-49) ─────────────────
+#
+# The scrape gives us a lossy render of the selector; the hook gives us the selector's
+# INPUT. Everything below reads the payload — nothing here is inferred from pixels.
+
+# Per-question budget. Telegram hard-rejects a body over 4096 chars and ``BotSender.post``
+# does not split (these messages carry keyboards), so a card is squeezed in this order:
+# the LABELS are never dropped (an option nobody can read is an option nobody can pick),
+# then descriptions, and the previews give way first — but never SILENTLY (see
+# :func:`_preview_block` / :data:`_PREVIEW_CLIPPED`).
+_MAX_HOOK_QUESTION = 900
+_MAX_HOOK_LABEL = 300
+_MAX_HOOK_DESC = 900
+# The preview budget, squeezed stage by stage until the card fits. 0 = previews dropped,
+# which costs an explicit warning line on the card.
+_PREVIEW_STAGES = (2400, 1200, 600, 250, 0)
+
+_PREVIEW_CLIPPED = "… [preview clipped — /screenshot for the full box]"
+# The zero-keypress promise, said on the card (CMX-50). A tap goes back through the
+# agent's own blocked `PermissionRequest` hook, so no key is sent to the pane at all —
+# which is why these buttons are safe for the shapes the keystroke path has to refuse.
+_ANSWER_BY_HOOK = "👆 Tap an option — chela hands it straight to the agent, no keystrokes."
+_ANSWER_BY_HOOK_MULTI = (
+    "👆 Tap to toggle as many as you want, then ✅ Send — chela hands them straight to the "
+    "agent, no keystrokes."
+)
+# And the honest half of it: the agent is FROZEN while it waits, so the wait is bounded.
+# On expiry nothing is denied — the picker is simply still there, in the terminal.
+_ANSWER_DEADLINE = (
+    "⏳ The agent is held for up to {budget:.0f}s. Miss that and nothing is lost — the "
+    "question is still on the pane, answerable in the terminal."
+)
+_PREVIEW_DROPPED = (
+    "⚠️ Previews were too long for one message and are NOT shown — /screenshot the pane "
+    "to read them."
+)
+# Said plainly, on the card, whenever chela cannot prove which option a tap would land
+# on. A button whose ordinal mapping we cannot prove is CMX-32 (the human taps 3, the
+# agent is told 2) and is strictly worse than no button — so for these shapes there are
+# none, and the message says why rather than looking merely unhelpful.
+_ANSWER_IN_TERMINAL = (
+    "⌨️ Answer this one in the terminal (or with the keys below) — chela can't yet map a "
+    "tap to the right option for this shape, and a button that picks the wrong one is "
+    "worse than no button."
+)
+
+
+def _esc(text: str) -> str:
+    return html.escape(text or "", quote=False)
+
+
+def _preview_block(preview: str, cap: int) -> tuple[str, bool]:
+    """The ``<pre>`` block for an option's preview, and whether it is COMPLETE.
+
+    ``<pre>`` is the one Telegram surface that scrolls horizontally instead of wrapping,
+    so box-drawing ASCII survives a phone screen. An **absent** preview renders nothing —
+    never an empty block. A preview that does not fit is clipped *visibly*
+    (:data:`_PREVIEW_CLIPPED`); the caller reports a dropped one on the card itself.
+    """
+    body = (preview or "").strip("\n")
+    if not body.strip():
+        return "", True
+    if cap <= 0:
+        return "", False
+    if len(body) > cap:
+        return f"<pre>{_esc(body[:cap].rstrip())}\n{_esc(_PREVIEW_CLIPPED)}</pre>", False
+    return f"<pre>{_esc(body)}</pre>", True
+
+
+def _hook_card_text(q: Question, index: int, total: int, preview_cap: int,
+                    answerable: bool, budget: float | None = None,
+                    warn: bool = True) -> tuple[str, bool]:
+    """One question's card body (HTML), and whether every preview it has is shown.
+
+    The heading names the question's place in the run (``Question 2/3``) and its
+    ``header``, because on a phone three messages land back to back and "which one is
+    this?" is otherwise unanswerable. Options are numbered 1..N **in payload order** —
+    the same order the TUI draws them, and the order any selector button must select in.
+
+    ``budget`` (not None) means the agent's hook is **blocked on this question right now**
+    and a tap will answer it with no keystrokes at all. The card says both halves of that:
+    that tapping answers the agent directly, and that the hold is time-bounded — because
+    an agent frozen on a human is the entire risk of this feature, and a human who does not
+    know the clock is running cannot make an informed decision about letting it run out.
+
+    ``warn=False`` suppresses this question's own "previews dropped" line — used by
+    :func:`format_mirror_expansion`, which stacks every question into ONE message and says
+    it once at the bottom instead of N times. The *fact* is never suppressed, only its
+    repetition: the flag returns it as the ``complete`` half of the tuple, and the caller
+    that turns it off is the caller that promises to say it itself.
+    """
+    parts: list[str] = []
+    head = "❓"
+    if total > 1:
+        head += f" Question {index + 1}/{total}"
+    if q.header:
+        head += f" · {_esc(_clip(q.header, 80))}" if total > 1 else f" {_esc(_clip(q.header, 80))}"
+    question = _clip(q.question, _MAX_HOOK_QUESTION)
+    parts.append(head)
+    parts.append(_esc(question) if question else _esc("(the asker left the question blank)"))
+    if q.multi_select:
+        parts.append("(multi-select — more than one option may be chosen)")
+
+    complete = True
+    for i, opt in enumerate(q.options, start=1):
+        parts.append("")
+        parts.append(f"{i}. {_esc(_clip(opt.label, _MAX_HOOK_LABEL))}")
+        if opt.description:
+            parts.append(_esc(_clip(opt.description, _MAX_HOOK_DESC)))
+        block, shown = _preview_block(opt.preview, preview_cap)
+        if block:
+            parts.append(block)
+        complete = complete and shown
+
+    if warn and not complete and preview_cap <= 0:
+        parts.append("")
+        parts.append(_esc(_PREVIEW_DROPPED))
+    if budget is not None:
+        parts.append("")
+        parts.append(_esc(_ANSWER_BY_HOOK_MULTI if q.multi_select else _ANSWER_BY_HOOK))
+        parts.append(_esc(_ANSWER_DEADLINE.format(budget=budget)))
+    elif not answerable:
+        parts.append("")
+        parts.append(_esc(_ANSWER_IN_TERMINAL))
+    return "\n".join(parts), complete
+
+
+def _strip_html(text: str) -> str:
+    """The card body with its ``<pre>`` markup removed — the plain-text fallback.
+
+    Only ever applied to text WE built, so this is a fixed reverse of a fixed encoding,
+    not a general HTML parser.
+    """
+    return html.unescape(text.replace("<pre>", "").replace("</pre>", ""))
+
+
+def _hook_markup(gate: HookGate, index: int, answerable: bool,
+                 held: bool) -> tuple[dict, bool]:
+    """The keyboard for question ``index``, and whether it can actually ANSWER the gate.
+
+    Three keyboards, in descending order of what we can prove:
+
+    1. **held** — the agent's ``PermissionRequest`` hook is blocked on this very gate, so a
+       tap is handed back through it (:func:`~chela.telegram.interactive.hook_reply_markup`):
+       zero keypresses, no cursor to race, and it works for **every** shape — multi-question
+       and ``multiSelect`` included, which keystrokes cannot answer at all.
+    2. **answerable** — no hook is holding it (a pre-plugin agent), but the scrape found a
+       cursor and the shape is the one keystroke injection can hit: the legacy numeric
+       selector.
+    3. neither — the nav row, and a card that says outright to answer this one in the
+       terminal. A button whose ordinal mapping cannot be proven is CMX-32 waiting to
+       happen, and no button is better than a wrong one.
+    """
+    if held:
+        q = gate.questions[index]
+        markup = hook_reply_markup(
+            [o.label for o in q.options], gate.tool_use_id, index,
+            multi_select=q.multi_select,
+        )
+        if markup is not None:
+            return markup, True
+        # Telegram's 64-byte callback_data cap could not fit this gate's id. Degrade
+        # loudly (nav row + "answer in the terminal"), never to a keyboard whose buttons
+        # Telegram would drop.
+        log.warning("gate %s does not fit a callback payload — falling back to the nav row",
+                    gate.tool_use_id)
+    if answerable:
+        return scraped_reply_markup([o.label for o in gate.questions[0].options]), False
+    return nav_only_markup(), False
+
+
+def format_hook_askuq_cards(gate: HookGate, answerable: bool,
+                            held: "OpenGate | None" = None) -> list[Card]:
+    """An AskUserQuestion rendered from its hook payload — **one card per question**.
+
+    Full fidelity, because full fidelity is *what the log already had*: every question,
+    every option's ``label`` **and** ``description`` **and** ``preview``, the ``header``,
+    and the ``multiSelect`` flag. Nothing is scraped, so nothing is lost to a TUI layout
+    the scraper was never measured against.
+
+    One message per question, because the alternative is a wall of text on a phone (three
+    questions × three options × a dozen preview lines) and because the TUI itself walks
+    the questions one at a time — so a question per message is also the only shape in
+    which the multi-question case is *readable* at all.
+
+    ``held`` (a :class:`chela.gateanswer.OpenGate`) means the agent's own hook is blocked on
+    this gate right now, so every question gets real answer buttons and a tap sends **no
+    keystroke at all** — the shapes the keystroke path had to refuse are now answerable, and
+    the card stops apologising. ``answerable`` is the fallback question (can a *keystroke*
+    land on the right row?) for an agent whose gate no hook announced.
+    """
+    cards: list[Card] = []
+    total = len(gate.questions)
+    for i, q in enumerate(gate.questions):
+        markup, by_hook = _hook_markup(gate, i, answerable, held is not None)
+        budget = held.budget if (held is not None and by_hook) else None
+        text = ""
+        for cap in _PREVIEW_STAGES:
+            text, _complete = _hook_card_text(
+                q, i, total, cap, answerable or by_hook, budget)
+            if len(text) <= _TG_TEXT_LIMIT:
+                break
+        if len(text) > _TG_TEXT_LIMIT:      # a pathological label/description set
+            text = text[: _TG_TEXT_LIMIT - 1] + "…"
+        cards.append(Card(text=text, parse_mode="HTML", markup=markup,
+                          plain=_strip_html(text)))
+    return cards
+
+
+def hook_askuq_signature(gate: HookGate, answerable: bool,
+                         held: "OpenGate | None" = None) -> str:
+    """The de-dup / edge-trigger marker for a payload-rendered selector.
+
+    Keyed on the gate's ``tool_use_id`` (its identity) plus everything the cards render,
+    so a *different* gate re-posts and an unchanged one is a no-op. The hook's *hold* is in
+    here too: a gate that was posted with keystroke buttons and is now being held open by a
+    blocked hook must re-render with real answer buttons, not keep the old ones. The hold's
+    **budget** is what the card prints (never a live countdown), so an unchanged gate keeps
+    an unchanged signature and the message is not edited on every tick.
+    """
+    body = "\x00".join(
+        "\x01".join([
+            q.question, q.header, str(q.multi_select),
+            *[f"{o.label}\x02{o.description}\x02{o.preview}" for o in q.options],
+        ])
+        for q in gate.questions
+    )
+    return f"{gate.tool_use_id}\x00{answerable}\x00{held is not None}\x00{body}"
+
+
+# ── The MIRROR — the pane, the D-pad, and the answer buttons, in ONE message ─
+#
+# **The composition rule, INVERTED (CMX-54). This is the primary surface.**
+#
+# CMX-52 shipped the mirror as the *conditional* surface: it was suppressed for any dialog
+# whose "every option is already a single tap away" — which, the moment CMX-50's held-gate
+# buttons work, means every gate a hook covers. Then Liav drove it from his phone
+# (2026-07-14): *"the cursor moved, and it was pretty nice, i like this surface more"*, and
+# answered a `multiSelect` from a phone for the first time. He only saw it because his
+# agent's hooks were latched at the OLD 2-second manifest, so no hook could hold the gate.
+# Every agent started since carries the 120s `PermissionRequest` manifest — so that rule was
+# a live regression: **the better the zero-keypress path worked, the more reliably it hid
+# the surface he had just chosen.** "The answer is already easy" is not a reason to withhold
+# the pane.
+#
+# The two are complementary and neither subsumes the other:
+#
+#   * the PANE is what the gate *looks like right now* — where the ``❯`` cursor is, which
+#     boxes are ticked, which tab is focused. No hook carries a cursor, because a cursor is
+#     a render, not an input. It is what tells the human WHERE THEY ARE.
+#   * the HOOK is what the gate *means*, and the only channel that can answer it with **no
+#     keystrokes at all** — no race, ``multiSelect`` as a real set, every question (CMX-50).
+#     The hook payload is also the only lossless source of an option's ``description`` and
+#     ``preview`` (CMX-49), which is what makes the question READABLE.
+#
+# So the human gets **both, on the same message**: the mirrored pane is the body, and the
+# hook's option buttons sit **above** the D-pad on the one keyboard
+# (:func:`~chela.telegram.interactive.mirror_markup`). Watch the cursor and press ``⏎``, or
+# just tap the answer — his choice, in one place.
+#
+#   **Every dialog is mirrored. The only thing that suppresses a mirror is having no pane
+#   region to show** (:func:`mirror_suppressed`).
+#
+# **And the mirror is the ONLY message a gate posts** (CMX-57). CMX-54 left the ❓ cards
+# posted *beside* it, so a 2-question gate arrived on the phone as THREE messages — ❓ 1/2,
+# ❓ 2/2, and the mirror — and the surface Liav actually drives was buried under two he
+# scrolls past. One gate is one message now: the cards are not posted at all when the mirror
+# is carrying the selector.
+#
+# ⛔ Their CONTENT is not deleted, it is RELOCATED — deleting it would take back exactly what
+# CMX-49 gave. The mirror renders the pane, and the TUI draws **one** preview at a time (the
+# one under the ``❯``); the cards rendered **every** option's description and preview
+# together, which is the only way to *compare* them — and comparison is what a preview is
+# FOR. So the mirror carries a 📖 button that swaps its body for the full option list, from
+# the payload, at full fidelity (:func:`format_mirror_expansion`), and 🎛️ swaps back. It is
+# an **edit-in-place toggle on the same message**, never a second one — a second message is
+# precisely the clutter being removed — and the expansion keeps the D-pad *and* the answer
+# buttons, because a human who expands to compare must be able to answer without collapsing
+# first.
+#
+# The cards remain wired for one case, and it is a real one: a selector the *dialog* detector
+# does not recognise as an ``AskUserQuestion`` has no mirror to carry it, and a gate that
+# arrives as **nothing** is worse than a gate that arrives as two messages. So
+# :func:`format_hook_askuq_cards` is the mirror's fallback, not its neighbour.
+#
+# The **permission** and **plan** cards keep their own message, deliberately. They are a
+# different shape: their bodies are the notification preview a phone actually shows
+# (``❓ Permission — Bash: rm -rf …`` is legible on a lock screen; a ``<pre>`` of a TUI box is
+# not), and their ✅/❌ buttons *name* what they do, where the mirror can only offer the ⏎ and
+# ⎋ glyphs that happen to mean allow and deny. Neither of those is true of the ❓ question
+# cards, which is why those are the ones that go.
+#
+# **The two answer paths, and how they do not collide.** A held gate can now be resolved
+# two ways: a tap on an option button (the hook returns the answer — no key is sent) or the
+# D-pad + ``⏎`` (keystrokes into the pane, exactly as a pre-plugin agent is answered). Both
+# are legitimate; the interleaving is:
+#
+#   * **a tap lands first.** :mod:`chela.gateanswer` writes the answer file, the blocked
+#     hook returns it, Claude Code resolves the tool. ``PostToolUse`` fires with that
+#     ``tool_use_id``; the pane repaints without the dialog, so the very next poll finds no
+#     dialog and no pending gate, and the mirror AND the cards are poofed together. A key
+#     tapped into the window afterwards lands on whatever the agent does next — which is
+#     precisely why a resolved prompt's message is *deleted* rather than left with dead
+#     buttons.
+#   * **a keystroke ⏎ lands first.** The TUI answers the agent directly, and the hook the
+#     daemon is holding is now waiting for an answer that will never come. It must not sit
+#     out its 90s budget — a corpse in a wait slot is a slot the next gate cannot have
+#     (``CHELA_GATE_MAX_WAITS``). So the gate's ``PostToolUse`` — which fires whichever way
+#     it was answered, and is the one signal that does — tears the rendezvous down
+#     (:func:`chela.gateanswer.gate_resolved`), the blocked hook gives up **immediately**
+#     and fails open (it returns no decision: the tool has already been answered), and the
+#     slot is released. A tap that arrives after that finds no open gate and is refused with
+#     "that question isn't waiting any more" — never re-aimed at whatever is on screen by
+#     then (CMX-32, from the other direction).
+#
+# What we cannot control is the sub-second overlap where both are already in flight; Claude
+# Code resolves the tool once and ignores the loser. Both routes carry the same answer
+# semantics, so the worst case is the human's own two taps racing, and the agent is never
+# told anything the human did not choose.
+
+# The mirrored region, budgeted against Telegram's 4096-char cap. A dialog region is
+# small (it is one TUI box), so this only ever bites on a pathological one — and then it
+# keeps the TAIL, because the cursor, the options and the footer hint all live at the
+# bottom and the top of a long dialog is prose you can /screenshot.
+_MAX_MIRROR = 3200
+_MIRROR_CLIPPED = "… [top of the dialog clipped — /screenshot for all of it]"
+
+# The pattern name → what to call it on the card. An unrecognised name (a shape added to
+# the table later) falls back to a generic heading rather than to nothing — the mirror's
+# whole promise is that it renders what it cannot name.
+_MIRROR_TITLES: dict[str, str] = {
+    "AskUserQuestion": "Question",
+    "ExitPlanMode": "Plan review",
+    "ToolApproval": "Approval",
+    "PermissionPrompt": "Permission",
+    "BashApproval": "Bash approval",
+    "RestoreCheckpoint": "Restore checkpoint",
+    "Settings": "Settings",
+}
+_MIRROR_HEAD = "🎛️ {title} — the live pane. Every key below re-draws it here."
+# The 📖 expansion's heading (CMX-57): the same message, showing the payload instead of the
+# pane. It says how to get back, because a body that has replaced itself with something else
+# must never leave the human wondering where the pane went.
+_EXPAND_HEAD = (
+    "📖 {title} — every option in full, side by side. 🎛️ goes back to the live pane."
+)
+# Said on the mirror when the option buttons ride on it: both journeys, one message.
+_MIRROR_ANSWER = (
+    "👆 The numbered buttons answer{which} with no keystrokes — or steer the ❯ with the "
+    "D-pad and press ⏎."
+)
+_MIRROR_ANSWER_MULTI = (
+    "👆 Tap to toggle as many as you want{which}, then ✅ Send — no keystrokes. Or steer "
+    "the ❯ with the D-pad, ␣ to tick, ⏎ to submit."
+)
+# And the honest version for a gate NO hook is holding (a pre-plugin agent): the numbered
+# buttons here do send keystrokes — they drive the ❯ and press ⏎ for you. Saying "no
+# keystrokes" on that keyboard would be a lie, and the whole point of this surface is that
+# what it shows you is what is really there.
+_MIRROR_ANSWER_KEYS = (
+    "👆 The numbered buttons drive the ❯ to that option and press ⏎ for you — or steer it "
+    "yourself with the D-pad."
+)
+# " question 2/3" reads right after "the buttons answer…", but needs the preposition after
+# "toggle as many as you want…". One question → no suffix at all: there is nothing to
+# disambiguate, and saying "question 1/1" would only add noise.
+_WHICH = " question {n}/{total}"
+_WHICH_MULTI = " on question {n}/{total}"
+
+
+@dataclass(frozen=True)
+class MirrorAnswer:
+    """The option buttons that ride on the mirror, for ONE question.
+
+    The mirror shows one question at a time (the TUI walks them), so the buttons on it can
+    only be the buttons of the question the pane is **currently** on — and which one that is
+    has to be *proven*, never assumed (:func:`mirror_answer`). ``index``/``total`` are what
+    the card says out loud, so the human is never left guessing which question a numbered
+    button belongs to.
+
+    ``by_hook`` distinguishes the two keyboards that can land here, and it exists so the card
+    cannot *claim* the wrong one: the hook buttons (:func:`mirror_answer`) answer with zero
+    keystrokes, while the legacy scraped selector (:func:`mirror_keystroke_answer`, a
+    pre-plugin agent) drives the ``❯`` and presses ⏎ for you. Both are real answer buttons;
+    only one of them is honest about being free of the terminal.
+    """
+
+    rows: list[list[dict]]
+    index: int
+    total: int
+    multi_select: bool = False
+    by_hook: bool = True
+
+
+def focused_question(gate: HookGate, dialog: Dialog) -> int | None:
+    """Which of the gate's questions is the pane showing? ``None`` if it cannot be PROVEN.
+
+    A single-question gate is trivially unambiguous. For a multi-question run the TUI draws
+    one question at a time under a tab strip, so the question's own text is on the pane —
+    and the payload is the same text the asker wrote. Whitespace is collapsed on both sides
+    (the pane wraps a long question across lines) and the match must be **unique**: two
+    questions whose text both appear, or none that does (the pane clipped it), resolve to
+    ``None`` and the mirror simply carries no option buttons.
+
+    That refusal is the ``_answerable`` guard applied to this surface (CMX-32): a numbered
+    button that answers a *different* question than the one under the cursor is exactly the
+    silent mis-answer, dressed in a new keyboard. The D-pad still works, and the CMX-49
+    cards still carry their own per-question buttons — nothing is lost by refusing.
+    """
+    total = len(gate.questions)
+    if total == 1:
+        return 0
+    pane = " ".join(dialog.text.split())
+    hits = [
+        i for i, q in enumerate(gate.questions)
+        if q.question.strip() and " ".join(q.question.split()) in pane
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
+def mirror_answer(gate: "HookGate | None", held: "OpenGate | None", dialog: Dialog,
+                  selected=()) -> MirrorAnswer | None:
+    """The option buttons to put on the mirror, or ``None`` — the whole proof chain.
+
+    All four must hold, and each one is a refusal we would rather make than guess:
+
+    * the mirrored dialog is an **AskUserQuestion** (its pattern name says so) — a Bash
+      approval has no ``answers`` map, and a stale pending gate must not dress one up;
+    * the log holds that gate's payload (:func:`~chela.telegram.hookgate.pending_gate`);
+    * a blocked hook is **holding** it right now (:func:`chela.gateanswer.open_gate`), so a
+      tap has somewhere to go — with no hold, a button would be refused on arrival;
+    * the question the pane is on can be **proven** (:func:`focused_question`).
+
+    ``selected`` are the option indices already toggled for that question (the draft book),
+    so the ticks on the mirror and on the card agree.
+    """
+    if dialog.name != "AskUserQuestion" or gate is None or held is None:
+        return None
+    index = focused_question(gate, dialog)
+    if index is None:
+        return None
+    question = gate.questions[index]
+    markup = hook_reply_markup(
+        [o.label for o in question.options], gate.tool_use_id, index,
+        multi_select=question.multi_select, selected=selected,
+    )
+    if markup is None:      # the gate id would not fit a 64-byte callback payload
+        return None
+    return MirrorAnswer(
+        rows=markup["inline_keyboard"], index=index, total=len(gate.questions),
+        multi_select=question.multi_select,
+    )
+
+
+def mirror_keystroke_answer(uq: "AskUQ | None", dialog: Dialog) -> "MirrorAnswer | None":
+    """The LEGACY scraped selector buttons, on the mirror — for a gate no hook is holding.
+
+    The mirror is the only message a gate posts now (CMX-57), so the numeric ``qa:<i>``
+    buttons that used to ride on the ❓ card have to ride here or they are gone — and for a
+    **pre-plugin** agent (hooks are read at agent startup, so a fleet launched before the
+    plugin emits none) they are the only zero-scroll answer that fleet has. Nothing about
+    the answer itself changes: a tap still re-reads the live ``❯`` at tap time and injects
+    the cursor-relative moves + ⏎ (:mod:`chela.telegram.inbound`), exactly as it did on the
+    card. Only the message it sits on is different.
+
+    The eligibility rule is copied verbatim from the card's (:func:`_askuq_markup`) — a
+    single-select selector whose options the scraper actually parsed — so the two surfaces
+    cannot disagree about which shapes get buttons. Everything else (a multi-tab strip, a
+    ``multiSelect``, a layout the scraper cannot read) gets the D-pad alone, which is what
+    the mirror was built for.
+    """
+    if dialog.name != "AskUserQuestion" or uq is None or uq.multi or not uq.options:
+        return None
+    rows = scraped_option_rows(uq.options)
+    if not rows:
+        return None
+    return MirrorAnswer(rows=rows, index=0, total=1, multi_select=False, by_hook=False)
+
+
+# The 📖 expansion is ONE message, and Telegram caps a message — and an *edit* of one — at
+# 4096 characters. There is no splitter to fall back on here (a split would post the second
+# message this task exists to remove), so the expansion is budgeted to fit, previews giving
+# way stage by stage (:data:`_PREVIEW_STAGES`) exactly as a card's do, and whatever cannot
+# fit is dropped **visibly**. The margin is for the heading + the answer line above it.
+_MAX_EXPANSION = _TG_TEXT_LIMIT - 400
+_EXPANSION_CLIPPED = (
+    "\n\n⚠️ Too long for one message — the rest is NOT shown. /screenshot the pane, or read "
+    "the questions in the terminal."
+)
+
+
+def format_mirror_expansion(gate: HookGate, room: int = _MAX_EXPANSION) -> str:
+    """The 📖 body: **every** question, **every** option — label, description, preview.
+
+    This is the CMX-49 cards' content, relocated (CMX-57). It is not a nicety and it is not
+    a duplicate of the pane: the TUI draws **one** preview at a time, the one under the
+    ``❯``, so the pane — and therefore the mirror — can never show two previews together.
+    Comparing by arrowing back and forth and holding the other option in your head is not
+    comparing, and comparing is what a preview is *for*. The payload is the only surface
+    that can put them side by side, so that is what this does.
+
+    Rendered from the **hook payload**, never the pane: full fidelity, all questions at once
+    (the pane can only be on one), and no ``✂ N lines hidden`` — the TUI's own clipping is a
+    thing the payload does not have. Each question reuses the card renderer
+    (:func:`_hook_card_text`), so the two surfaces cannot drift in how they show an option.
+
+    Squeezed to fit one message, in the order that costs least: previews shrink first, and
+    when even that is not enough they are dropped **and said to be dropped**. A silently
+    truncated expansion would be the same lie as the silently dropped preview CMX-49 ended.
+    """
+    total = len(gate.questions)
+    body = ""
+    for cap in _PREVIEW_STAGES:
+        parts: list[str] = []
+        complete = True
+        for i, q in enumerate(gate.questions):
+            text, shown = _hook_card_text(q, i, total, cap, answerable=True, warn=False)
+            parts.append(text)
+            complete = complete and shown
+        body = "\n\n".join(parts)
+        if not complete and cap <= 0:
+            body += "\n\n" + _esc(_PREVIEW_DROPPED)
+        if len(body) <= room:
+            return body
+
+    # Pathological: the labels and descriptions alone overflow a message, with no preview
+    # left to give up. Clip at a line boundary (so a half-written HTML entity cannot make
+    # Telegram reject the whole body) and SAY so.
+    keep = max(0, room - len(_EXPANSION_CLIPPED))
+    clipped = body[:keep]
+    cut = clipped.rfind("\n")
+    return (clipped[:cut] if cut > 0 else clipped) + _EXPANSION_CLIPPED
+
+
+def format_mirror_card(dialog: Dialog, answer: "MirrorAnswer | None" = None, *,
+                       expansion: str | None = None, can_expand: bool = False) -> Card:
+    """The pane region, mirrored verbatim into one message, with the D-pad under it.
+
+    **The formatting is load-bearing, so it is stated rather than assumed.** ccbot posted
+    this region as *plain text with no parse mode* (``interactive_ui.py``:225-236), which
+    hands box drawing and a ``❯`` cursor to Telegram's proportional font: the rows do not
+    line up, and a wide row wraps and shears the dialog in half. chela has a strictly
+    better surface and has already proven it on Liav's phone — the ``<pre>`` block CMX-49
+    ships previews in, which renders **monospaced** and **scrolls horizontally instead of
+    wrapping**. So the mirror goes in a ``<pre>``: the columns align, the cursor sits where
+    the terminal put it, and a wide dialog scrolls rather than shatters. ccbot's one
+    genuinely useful trick is kept — its ``─────`` rule-shortening
+    (:func:`~chela.telegram.panescan._shorten_separators`, applied at extraction), which
+    stops a full-width horizontal rule from setting the scroll width for the whole box.
+
+    ``Card.plain`` carries the same region with the markup stripped, so a body Telegram
+    refuses to parse degrades to ccbot's exact rendering rather than to silence.
+
+    ``answer`` (CMX-54) puts the gate's zero-keypress option buttons on this same message,
+    above the D-pad — and the card then SAYS which question they answer. A numbered button
+    beside a pane that is showing question 2 of 3 is only safe if the human can see that it
+    answers question 2; the proof that it does is :func:`focused_question`'s job, and saying
+    so out loud is this one's.
+
+    ``expansion`` (CMX-57) is the 📖 state: the same message, with the full option list
+    (:func:`format_mirror_expansion`) in place of the pane. **In place of**, not below it —
+    two full-fidelity renders of the same gate do not fit in 4096 characters, and the pane is
+    one tap away (🎛️) which is precisely what makes replacing it cheap. What the expansion
+    must NOT lose is the ability to act on what you just compared, so the answer buttons and
+    the D-pad ride through the toggle untouched; only the body changes. ``can_expand`` says
+    the payload exists to expand *into* — a pre-plugin agent has none, and gets no 📖 rather
+    than a button that opens an empty page.
+    """
+    title = _MIRROR_TITLES.get(dialog.name, "Terminal")
+    lines = [(_EXPAND_HEAD if expansion is not None else _MIRROR_HEAD).format(title=title)]
+    if answer is not None:
+        which = ""
+        if answer.total > 1:
+            which = (_WHICH_MULTI if answer.multi_select else _WHICH).format(
+                n=answer.index + 1, total=answer.total)
+        if not answer.by_hook:
+            lines.append(_MIRROR_ANSWER_KEYS)
+        else:
+            template = _MIRROR_ANSWER_MULTI if answer.multi_select else _MIRROR_ANSWER
+            lines.append(template.format(which=which))
+    head = "\n".join(lines)
+
+    if expansion is not None:
+        # Already HTML (the payload renderer escapes as it goes) — do not re-escape it.
+        body_html, body_plain = expansion, _strip_html(expansion)
+    else:
+        pane = "\n".join(line.rstrip() for line in dialog.text.split("\n")).strip("\n")
+        if len(pane) > _MAX_MIRROR:
+            pane = _MIRROR_CLIPPED + "\n" + pane[-_MAX_MIRROR:]
+        body_html, body_plain = f"<pre>{_esc(pane)}</pre>", pane
+
+    return Card(
+        text=f"{_esc(head)}\n{body_html}",
+        parse_mode="HTML",
+        markup=mirror_markup(
+            dialog.name, answer.rows if answer else None,
+            expand=(("collapse" if expansion is not None else "expand")
+                    if can_expand else None),
+        ),
+        plain=f"{head}\n{body_plain}",
+    )
+
+
+def _selector_on_screen(uq: "AskUQ | None", dialog: "Dialog | None") -> bool:
+    """Is an AskUserQuestion selector on the pane RIGHT NOW? The payload's corroboration.
+
+    The event log says a gate is *pending*; only the pane can say it is **on screen**, and
+    that check is load-bearing — an unresolved ``pre_tool_use`` could equally mean the agent
+    *died* at the gate (the false-``DIED`` mistake, CMX-35, from the other side). So the
+    payload is only ever rendered for a window whose pane is showing a selector.
+
+    **Either detector may vouch for it, and that matters.**
+    :func:`~chela.telegram.panescan.detect_askuserquestion` demands the literal
+    ``Enter to select`` footer — but the mirror's own pattern deliberately does not, because
+    (its own comment) *the footer varies by tab*. A ``multiSelect`` pane says ``Enter to
+    submit`` instead, and asking the fragile scraper for permission to use the payload would
+    have re-imported exactly the fragility CMX-49 was written to escape: measured live here,
+    a real preview-bearing multi-select selector mirrored correctly and yet got **no** answer
+    buttons and **no** 📖, because the footer was worded differently than the regex expected.
+
+    The dialog detector is the right authority for "a selector is up": it parses nothing, so
+    there is no wording for it to be wrong about. It stays a *corroboration* either way — a
+    region must be on the pane, and it must be named ``AskUserQuestion``, before one byte of
+    payload is drawn.
+    """
+    if uq is not None:
+        return True
+    return dialog is not None and dialog.name == "AskUserQuestion"
+
+
+def mirror_suppressed(dialog: "Dialog | None") -> bool:
+    """Is there NO pane region to show? That is the only thing that suppresses a mirror.
+
+    The inversion (CMX-54). This predicate used to answer "is every option already one tap
+    away?", and suppress the mirror when it was — which meant that the instant CMX-50's
+    held-gate buttons started working, the pane vanished from the phone. That is backwards:
+    the mirror is the **primary** surface (Liav, having driven it: *"i like this surface
+    more"*), and the zero-keypress buttons now ride on the mirror itself rather than
+    replacing it (:func:`mirror_answer`). **"The answer is already easy" is not a reason to
+    withhold the pane** — the pane is the only thing that shows the human where they are.
+
+    So what is left as a justification? Only this: **a dialog with no region to draw**. An
+    empty mirror is not a surface, it is a message with a blank ``<pre>`` in it. Everything
+    else — a permission gate, a plan approval, a held AskUserQuestion, a checkpoint restore,
+    a dialog no detector has ever heard of — is mirrored, and the semantic cards keep their
+    own buttons alongside.
+    """
+    return dialog is None or not dialog.text.strip()
+
+
+def mirror_signature(dialog: Dialog, answer: "MirrorAnswer | None" = None, *,
+                     expansion: str | None = None, can_expand: bool = False) -> str:
+    """The de-dup / edge-trigger marker for the mirror — **the pane region itself**.
+
+    The whole region, byte for byte, which means **the ``❯`` cursor is in the signature**.
+    That is the entire fix for the complaint that started this task. The hook-payload
+    signature (:func:`hook_askuq_signature`) is keyed on the gate's *content*, and content
+    does not change when you press ↑ — so the edit never fired, the message never moved,
+    and tapping an arrow did visibly nothing. Here, moving the cursor moves the render,
+    the signature changes, and the message is re-drawn in place. Do not "optimise" this
+    into a hash of the semantic fields: the pixels **are** the semantics for this surface.
+
+    The answer buttons are in here too, because they are part of what this message shows: a
+    gate that gains a hold (or whose ``multiSelect`` ticks move, or that walks on to the
+    next question) must re-render its keyboard rather than keep a stale one. An unchanged
+    pane wearing an unchanged keyboard still costs **zero** API calls — that is the rule
+    this signature exists to keep, and it is unchanged.
+
+    **And the 📖 body is in here too** (CMX-57), which is not optional: the toggle changes
+    only what the message *shows*, so a signature blind to it would see an unchanged pane,
+    de-dup the edit away, and the button would visibly do nothing — the exact "tapping it
+    changed nothing on screen" defect this whole surface was built to kill. ``can_expand``
+    is in as well, because it decides whether the 📖 button exists at all: a gate whose
+    payload arrives a tick late must grow the button without waiting for the pane to move.
+    """
+    keyboard = ""
+    if answer is not None:
+        buttons = "\x02".join(
+            f"{b['text']}\x03{b['callback_data']}" for row in answer.rows for b in row
+        )
+        keyboard = f"{answer.index}/{answer.total}\x02{buttons}"
+    return (f"{dialog.name}\x00{dialog.text}\x00{keyboard}"
+            f"\x00{can_expand}\x00{expansion or ''}")
+
+
+def format_plan_message(plan: ExitPlan) -> str:
+    """The plain-text relay body for a detected ExitPlanMode plan approval.
+
+    The scraped plan (the text above the options) under a 📋 header; the
+    approve / keep-planning buttons carry the choices, so the options are not
+    repeated. A long plan is truncated with a ``/screenshot`` pointer; an empty
+    scrape (plan scrolled off the pane) falls back to a generic prompt.
+    """
+    body = (plan.text or "").strip()
+    if not body:
+        return "📋 Claude has written up a plan — approve to proceed."
+    if len(body) > _MAX_PLAN:
+        body = body[:_MAX_PLAN].rstrip() + "\n… (/screenshot for full)"
+    return f"📋 Plan review:\n{body}"
+
+
+def _plan_signature(plan: ExitPlan) -> str:
+    """A stable key for one plan-approval instance — the de-dup / edge marker."""
+    return plan.text
+
+
+def format_status_message(st: Status) -> str:
+    """The one-line status body — the verb, plus the shells if the verb omits them.
+
+    Working: ``✻ Cerebrating… (2m 45s · ↓ 12.0k tokens) · 2 shells``.
+    Settled: ``✅ Worked for 1m 17s · 1 shell still running`` (the settled line
+    names its own shells, so they are not appended twice).
+
+    Plain text: the verb is scraped TUI content and an active message is rewritten
+    every few seconds, so there is no MarkdownV2 escaping to get wrong on a hot path.
+    """
+    text = f"{'✻' if st.active else '✅'} {st.verb}"
+    if st.shells and "shell" not in st.verb:
+        text += f" · {st.shells} shell{'' if st.shells == 1 else 's'}"
+    return _clip(text, _MAX_STATUS)
+
+
+def should_keep(st: Status) -> bool:
+    """Is this **settled** status worth leaving in the topic, rather than poofing?
+
+    The ticking verb is pure liveness and always stops. But the settled line it
+    turns into is not uniformly noise, so the message is kept *conditionally* — and
+    the whole rule lives here, in one function, so that "always keep" or "always
+    poof" stays a one-line change rather than a redesign:
+
+    * **shells still running** → KEEP. Background work that outlived the turn is a
+      *warning*, not a receipt — it is the one genuinely actionable thing the status
+      line ever says, and deleting it throws away the only part worth having.
+    * **a long turn** (≥ :data:`STATUS_KEEP_MIN_SECONDS`) → KEEP. How long the agent
+      actually worked is useful context to scroll back to.
+    * **otherwise** (a quick turn, nothing left running) → poof. A receipt for six
+      seconds of work is exactly the silt this message is designed not to leave.
+
+    Keeping costs nothing extra: it is the SAME tracked message, and "keep" simply
+    means stop editing it instead of deleting it. No second message, no extra call.
+    """
+    if st.shells:
+        return True
+    return st.seconds is not None and st.seconds >= STATUS_KEEP_MIN_SECONDS
+
+
+@dataclass
+class _StatusMsg:
+    """The ephemeral status message currently posted for one window.
+
+    Its own record rather than :class:`_Tracked` because its lifecycle needs two
+    things a prompt's does not: ``last_edit`` (the throttle clock) and ``thread``
+    (a window that moves to another topic must have its old status poofed, not
+    edited in place in a topic it no longer belongs to). ``text`` is the de-dup
+    marker — the equivalent of a prompt's ``signature``.
+    """
+
+    message_id: int
+    thread: object
+    text: str
+    last_edit: float
+
+
+class StatusRelay:
+    """The live "Claude is working" verb, as a self-deleting Telegram message.
+
+    On a phone, a **thinking** agent and a **dead** one look identical: the relay
+    ships finished turns, so a long tool run is indistinguishable from a crash.
+    This surfaces Claude Code's own status line as ONE tracked message per window
+    that is **posted** on first sight, **edited in place** as the verb changes, and
+    stops ticking the moment the turn ends — at which point it either **poofs** or
+    settles into its final summary, per :func:`should_keep`. The ticking always
+    stops (a topic must not silt up with live-looking corpses); what survives is
+    only the settled line that still *says* something — shells still running, or a
+    turn long enough to be worth the scrollback.
+
+    Three things make this safe to run every couple of seconds on a whole fleet:
+
+    * **It adds no tmux calls.** :meth:`sync` is handed the pane text
+      :class:`PermissionGateWatcher` already captured for the three gate detectors;
+      the status is a fourth read of the *same* string.
+    * **It throttles and de-dups.** At most one edit per
+      :data:`STATUS_EDIT_MIN_INTERVAL` per window, and an unchanged body makes no
+      API call at all. Claude repaints the line about once a second; posting that
+      through would rate-limit the topic within a minute.
+    * **Every failure is swallowed.** This is decoration. A 429, a message the user
+      deleted, a "not modified" — none of them may raise, wedge the relay, or delay
+      a real agent message (which is also why the status calls opt out of the 429
+      sleep-and-retry loop; see :meth:`~chela.telegram.relay.BotSender._call`).
+
+    The ``typing`` indicator (``sendChatAction``) rides the same tick, and is what
+    actually makes a phone feel live. ccbot fired it only while the pane said "esc
+    to interrupt" — but on 2.1.207 that hint is width-dependent chrome and is
+    simply absent on a narrow pane (measured: it appears nowhere on a 110-column
+    window), so keying on it would mean the indicator never fires. The presence of
+    a status line *is* the "agent is working" signal, so that is the trigger.
+    """
+
+    def __init__(
+        self,
+        registry,
+        *,
+        post: Poster,
+        edit: Editor,
+        delete: Deleter,
+        typing: Typing | None = None,
+        detect: Callable[[str], Status | None] = detect_status,
+        now: Callable[[], float] = time.monotonic,
+        min_interval: float = STATUS_EDIT_MIN_INTERVAL,
+    ):
+        self._registry = registry
+        self._post = post
+        self._edit = edit
+        self._delete = delete
+        self._typing = typing
+        self._detect = detect
+        self._now = now
+        self._min_interval = min_interval
+        self._tracked: dict[str, _StatusMsg] = {}
+
+    def sync(self, window_id: str, pane: str) -> None:
+        """Reconcile one window's status message against its freshly captured pane.
+
+        Working → post it (first sight), or edit it (the verb moved) subject to the
+        throttle, or do nothing (unchanged text / inside the throttle window).
+        **Settled** → stop ticking, and either keep the summary or poof it
+        (:meth:`_settle`). No status line at all → poof: there is nothing to settle
+        on.
+        """
+        try:
+            st = self._detect(pane)
+        except Exception:
+            log.exception("status scrape failed for %s", window_id)
+            return
+        if st is None:
+            self.resolve(window_id)
+            return
+
+        thread = self._registry.thread_for_window(window_id)
+        if thread is None:
+            return
+
+        tracked = self._tracked.get(window_id)
+        if tracked is not None and tracked.thread != thread:
+            # The window moved to another topic — its old message can't be edited
+            # into the new one, so poof it and post fresh below.
+            self.resolve(window_id)
+            tracked = None
+
+        if not st.active:
+            self._settle(window_id, st, tracked)
+            return
+
+        text = format_status_message(st)
+        now = self._now()
+
+        if tracked is None:
+            self._act(thread)
+            mid = self._swallow(self._post, text, None, thread, None)
+            if isinstance(mid, int):
+                self._tracked[window_id] = _StatusMsg(mid, thread, text, now)
+            return
+
+        if now - tracked.last_edit < self._min_interval:
+            return  # throttled — the next poll will carry a fresher verb anyway
+
+        # Keep the "typing…" bubble alive (Telegram expires it after ~5s) even on a
+        # tick whose text is unchanged, or a stalled verb would look like a death.
+        self._act(thread)
+        tracked.last_edit = now
+        if text == tracked.text:
+            return  # de-dup: identical body → no API call at all
+
+        if self._swallow(self._edit, tracked.message_id, text, None, None):
+            tracked.text = text
+        else:
+            # Gone from Telegram (deleted by the user, too old). Drop the tracking;
+            # the next tick posts a fresh one.
+            self._tracked.pop(window_id, None)
+
+    def _settle(self, window_id: str, st: Status, tracked: "_StatusMsg | None") -> None:
+        """The turn is over — stop ticking, then keep the summary or poof it.
+
+        Either way the window is dropped from tracking, so the message is never
+        edited again: the ticking noise stops unconditionally, which is the part of
+        the behaviour that is not negotiable. Whether the settled *summary* survives
+        is :func:`should_keep`'s call.
+
+        A turn that ended without ever posting a status (short enough to fall between
+        two polls) settles into nothing at all: we never post a message just to
+        announce that it finished.
+        """
+        self._tracked.pop(window_id, None)
+        if tracked is None:
+            return
+        if not should_keep(st):
+            self._swallow(self._delete, tracked.message_id)
+            return
+        # One last edit — the ticking verb becomes the settled summary and stays
+        # put (the shells-still-running warning is the whole reason to keep it).
+        text = format_status_message(st)
+        if text != tracked.text:
+            self._swallow(self._edit, tracked.message_id, text, None, None)
+
+    def resolve(self, window_id: str) -> None:
+        """Delete this window's status message outright. Idempotent.
+
+        Used when there is no settled summary to weigh — the pane shows no status
+        line at all, or the window is gone from the polled set entirely.
+        """
+        tracked = self._tracked.pop(window_id, None)
+        if tracked is not None:
+            self._swallow(self._delete, tracked.message_id)
+
+    def retain(self, window_ids) -> None:
+        """Poof the status of every window that is no longer being polled.
+
+        A window that dies or is unbound simply stops appearing in the polled set,
+        so its status message would otherwise hang in the topic forever — the exact
+        "dead status message" this whole design exists to prevent. Costs nothing:
+        it is a set difference over state we already hold, with no tmux call.
+        """
+        live = set(window_ids)
+        for wid in [w for w in self._tracked if w not in live]:
+            self.resolve(wid)
+
+    def forget(self, window_id: str) -> None:
+        """Drop (and poof) a window's status — e.g. after its window closes."""
+        self.resolve(window_id)
+
+    # -- internals ---------------------------------------------------------
+
+    def _act(self, thread) -> None:
+        """Refresh the typing indicator, if one is wired. Never raises."""
+        if self._typing is not None:
+            self._swallow(self._typing, thread)
+
+    @staticmethod
+    def _swallow(fn, *args):
+        """Call a Telegram op, swallowing every failure.
+
+        The status line is decoration: it must never propagate an exception into
+        the outbound loop, where it would take the *real* relay down with it.
+        """
+        try:
+            return fn(*args)
+        except Exception:
+            log.debug("status telegram call failed", exc_info=True)
+            return None
+
+
+class PermissionGateWatcher:
+    """Polls panes to surface the live-TUI prompts, and answers them from Telegram.
+
+    Call :meth:`poll` on its own cadence with the bound window ids: each window's pane
+    is captured **once** and run through all three detectors, and each newly-detected
+    prompt is relayed exactly once with its keyboard. Wire :meth:`observe` into the
+    monitor's ``on_message`` (alongside the relay) so an answered prompt's
+    ``tool_result`` also clears its tracking, and so an unpaired ``tool_use`` is
+    available as the gate's fallback identity.
+
+    **Never poll this behind the transcript relay** (CMX-74). It used to run in the same
+    tick, right after ``monitor.poll`` — and that relay *sleeps* through Telegram's flood
+    control, so the window whose burst had just earned a 429 was the very window whose
+    pane stopped being read. A gate lives for seconds and then it is answered in the
+    terminal and gone: a poll that arrives after the backlog drains arrives after the
+    gate. It gets its own thread (:func:`chela.main._pane_loop`), and :meth:`observe`
+    (the relay's thread) and :meth:`refresh_mirror` (the PTB tap) take the lock this
+    class already held for the tap-vs-tick race.
+    """
+
+    def __init__(
+        self,
+        sender: Sender,
+        registry,
+        *,
+        capture: Capture,
+        detect: Callable[[str], Gate | None] = detect_permission_gate,
+        detect_askuq: Callable[[str], AskUQ | None] = detect_askuserquestion,
+        detect_plan: Callable[[str], ExitPlan | None] = detect_exitplanmode,
+        detect_dialog: Callable[[str], Dialog | None] = detect_dialog,
+        post: Poster | None = None,
+        edit: Editor | None = None,
+        delete: Deleter | None = None,
+        status: "StatusRelay | None" = None,
+        pending: "Callable[[str], HookGate | None] | None" = None,
+        held: "Callable[[str], OpenGate | None] | None" = None,
+        selected: "Callable[[str, int], set[int]] | None" = None,
+        mirror: bool = True,
+        now: Callable[[], float] = time.monotonic,
+    ):
+        self._sender = sender
+        self._registry = registry
+        self._capture = capture
+        self._detect = detect
+        self._detect_askuq = detect_askuq
+        self._detect_plan = detect_plan
+        # The universal dialog detector (CMX-52) — the one that parses nothing and
+        # therefore relays the shapes the three above have never heard of.
+        self._detect_dialog = detect_dialog
+        self._mirror = mirror
+        self._now = now
+        # :meth:`refresh_mirror` is called from the PTB event loop (a D-pad tap) while
+        # :meth:`poll` runs in the outbound thread, and both mutate ``_prompts``. One lock
+        # over the whole reconcile keeps a tap and a tick from interleaving into a
+        # half-updated tracker (two posted mirrors, or an orphaned message id).
+        self._lock = threading.RLock()
+        # The event log's view of what this window is blocked on
+        # (:func:`~chela.telegram.hookgate.pending_gate`) — the CONTENT authority for an
+        # AskUserQuestion. ``None`` (the default) means pane-only: that is the correct
+        # behaviour for a fleet with no hook events, and it keeps this class free of a
+        # hard dependency on the log.
+        self._pending_gate = pending
+        # Is a blocked `PermissionRequest` hook waiting on this gate right now
+        # (:func:`chela.gateanswer.open_gate`)? If so the gate can be answered with ZERO
+        # keypresses and every shape gets real buttons. ``None`` (the default) means no
+        # answer channel — keystrokes or nothing, exactly as before.
+        self._held = held
+        # Which options of a question are already toggled (the draft book,
+        # :class:`chela.telegram.gateanswers.Drafts`) — so the ☑ ticks on the mirror's
+        # buttons and on the card's agree. ``None`` = nothing toggled anywhere.
+        self._selected = selected
+        # The ephemeral status line, when enabled: it reads the SAME pane text this
+        # watcher already captured (no extra tmux calls) but keeps its own tracked
+        # message and its own lifecycle — see :class:`StatusRelay`.
+        self._status = status
+        # Each relay edits its message in place as the prompt settles (a mid-render
+        # partial → the full option list is ONE message, not two) and deletes it
+        # once answered. Production wires ``post``/``edit``/``delete`` from
+        # :class:`BotSender`; when they're absent (plain-sender tests) it degrades
+        # to posting via ``sender`` with no id to edit or delete.
+        self._post = post
+        self._edit = edit
+        self._delete = delete
+        # window_id -> {tool_use_id: _PendingTool}, insertion-ordered so the most
+        # recently added is the last key.
+        self._pending: dict[str, dict[str, _PendingTool]] = {}
+        # window_id -> {prompt kind: _Tracked} — the edge-trigger markers + the
+        # message ids to edit / delete.
+        self._prompts: dict[str, dict[str, _Tracked]] = {}
+        # (window_id, kind) -> _Undelivered — the re-post backoff for a prompt Telegram
+        # would not take. Written under ``_lock`` with the tracker it stands in for.
+        self._undelivered: dict[tuple[str, str], _Undelivered] = {}
+        # Messages waiting to be deleted, as (message_id, attempts). NOTHING in this
+        # class calls Telegram to delete: :meth:`_poof` only appends here — it is called
+        # from deep inside the locked reconcile — and :meth:`_drain_poofs` does the
+        # network, always OUTSIDE the lock. That split is the whole point (CMX-74): a
+        # delete is a Bot API call like any other, so a flood-controlled one used to hold
+        # this lock while it retried, and the pane poll — which takes the same lock for
+        # every window — stopped for the duration. A gate-relaying loop that can be
+        # stalled fleet-wide by one answered gate is the bug this file just fixed,
+        # re-entering through its own cleanup path. ``deque`` is used for its atomic
+        # ``append``/``popleft``: the relay thread, the pane thread and the PTB loop all
+        # touch it, and none of them may block on the others to do so.
+        self._poofq: deque[tuple[int, int]] = deque()
+        # The windows whose mirror is currently showing the 📖 expansion instead of the pane
+        # (CMX-57). It is view state, not gate state, and it dies with the mirror message:
+        # :meth:`_resolve` drops it when the dialog leaves the pane, so the NEXT gate always
+        # opens on the pane — a human who expanded one question does not thereby ask to have
+        # every future gate opened expanded.
+        self._expanded: set[str] = set()
+
+    def observe(self, window_id: str, msg) -> None:
+        """Track ``tool_use``/``tool_result`` pairing for one parsed message.
+
+        The ``tool_use`` half is the gate's *fallback* identity (the gated call
+        itself is not in the transcript while it is gated, so this is whatever else
+        was in flight). The ``tool_result`` half is the belt-and-suspenders resolve
+        signal for a pane prompt: an AskUserQuestion / ExitPlanMode result lands at
+        answer-time, so it clears (and poofs) that window's tracked prompt even if
+        the pane hasn't repainted yet. Non-tool events are ignored.
+
+        This is the TRANSCRIPT relay's thread (:func:`chela.main._outbound_loop`), which
+        since CMX-74 is a *different* thread from the one :meth:`poll` runs on — and it
+        touches the same trackers, so it takes the same lock. It holds that lock for
+        BOOKKEEPING ONLY: the resolve it triggers *queues* the answered gate's messages
+        for deletion and the deletes go out after the lock is dropped
+        (:meth:`_drain_poofs`). This thread is the flood-controlled one — that is this
+        ticket's whole thesis — so a Telegram call it makes under the lock is a Telegram
+        call the pane poll waits behind, and the starvation is back with a new door.
+        """
+        ct = getattr(msg, "content_type", None)
+        uid = getattr(msg, "tool_use_id", None)
+        with self._lock:
+            if ct == "tool_use":
+                if uid:
+                    self._pending.setdefault(window_id, {})[uid] = _PendingTool(
+                        tool_name=getattr(msg, "tool_name", None),
+                        tool_input=getattr(msg, "tool_input", None),
+                    )
+            elif ct == "tool_result":
+                pend = self._pending.get(window_id)
+                if pend and uid:
+                    pend.pop(uid, None)
+                name = getattr(msg, "tool_name", None)
+                if name == "AskUserQuestion":
+                    self._resolve(window_id, _ASKUQ)
+                elif name == "ExitPlanMode":
+                    self._resolve(window_id, _PLAN)
+        self._drain_poofs()
+
+    def forget(self, window_id: str) -> None:
+        """Drop all state for a window (e.g. after it closes)."""
+        with self._lock:
+            self._pending.pop(window_id, None)
+            self._prompts.pop(window_id, None)
+            self._expanded.discard(window_id)
+            for key in [k for k in self._undelivered if k[0] == window_id]:
+                self._undelivered.pop(key, None)
+        if self._status is not None:
+            self._status.forget(window_id)
+
+    def poll(self, window_ids) -> None:
+        """Read each window's pane once and relay newly-detected prompts."""
+        window_ids = list(window_ids)
+        for wid in window_ids:
+            try:
+                # Held against a concurrent D-pad tap (:meth:`refresh_mirror`), which
+                # runs on the PTB loop and reconciles the same tracker.
+                with self._lock:
+                    self._poll_window(wid)
+            except Exception:
+                log.exception("pane-watch poll failed for %s", wid)
+        # Outside the lock, on purpose — see :meth:`_drain_poofs`.
+        self._drain_poofs()
+        if self._status is not None:
+            # A window that died or was unbound has just vanished from the polled
+            # set — poof its status message rather than leave it in the topic.
+            try:
+                self._status.retain(window_ids)
+            except Exception:
+                log.exception("status retain failed")
+
+    # -- internals ---------------------------------------------------------
+
+    def _poll_window(self, window_id: str) -> None:
+        # One capture per window per tick, shared by every detector.
+        pane = self._capture(window_id)
+        uq = self._detect_askuq(pane)
+        plan = self._detect_plan(pane)
+        # A plan-approval selector's "❯ 1. Yes, and auto-accept edits" row also
+        # matches the permission menu's signature, so look for a gate only when
+        # neither selector is up — otherwise one pane would relay two prompts.
+        gate = None if (uq is not None or plan is not None) else self._detect(pane)
+
+        # The pane says a selector is on screen; the LOG says what it actually asks. The
+        # payload only ever renders for a window whose pane is showing a selector *right
+        # now* — an unresolved `pre_tool_use` on its own could equally mean the agent
+        # died at the gate (the false-`DIED` mistake, CMX-35, from the other side).
+        dialog = self._dialog(pane, window_id)
+        hook = self._hook_askuq(window_id) if _selector_on_screen(uq, dialog) else None
+        held = self._held_gate(hook.tool_use_id) if hook is not None else None
+
+        # ONE MESSAGE PER GATE (CMX-57). When the mirror is carrying this selector — it is
+        # showing the pane, it wears the answer buttons, and its 📖 holds the full option
+        # list — the ❓ cards are not posted at all: they were the two messages Liav had to
+        # scroll past to reach the one he drives. ``None`` here also POOFS a card left over
+        # from an earlier tick (a payload that arrived a beat after the pane did).
+        #
+        # The cards stay wired as the mirror's FALLBACK, for the case where the dialog
+        # detector does not recognise the region as an ``AskUserQuestion`` and there is
+        # therefore no mirror to carry the gate. A gate that arrives as nothing at all would
+        # be a far worse regression than the clutter this removes.
+        carried = dialog is not None and dialog.name == "AskUserQuestion"
+        answerable = False
+        if hook is not None:
+            # Is the agent's own hook blocked on this gate? Then the answer goes back
+            # through it and the pane is never touched (CMX-50).
+            answerable = self._answerable(hook, uq)
+            self._sync(
+                window_id, _ASKUQ, None if carried else hook,
+                lambda h: hook_askuq_signature(h, answerable, held),
+                lambda h: format_hook_askuq_cards(h, answerable, held),
+            )
+        else:
+            self._sync(
+                window_id, _ASKUQ, None if carried else uq, _askuq_signature,
+                lambda u: [Card(format_askuq_message(u), None, _askuq_markup(u))],
+            )
+        self._sync(
+            window_id, _PLAN, plan, _plan_signature,
+            lambda p: [Card(format_plan_message(p), None, plan_reply_markup())],
+        )
+        self._sync(
+            window_id, _GATE, gate, _gate_signature,
+            lambda g: [Card(
+                format_gate_message(self._latest_pending(window_id), g),
+                None, permission_reply_markup(),
+            )],
+        )
+        # The mirror — the pane itself, the ❯ cursor included, with the gate's zero-keypress
+        # option buttons above a full D-pad on ONE keyboard, and the whole option list one
+        # 📖 tap away. Posted for EVERY dialog shape (the eight, not the three): it is the
+        # primary surface now, and the only thing that suppresses it is having no region to
+        # draw (:func:`mirror_suppressed` — the whole composition rule is written out above
+        # ``format_mirror_card``). The hook lookups this tick already did are reused rather
+        # than repeated.
+        #
+        # …with ONE exception (CMX-92): a **permission** gate is buttons-only. Its ❓ card
+        # already NAMES what is being permitted (``❓ Permission — Bash: rm -rf …`` — legible on
+        # a lock screen) and its ✅ Allow once / ❌ Deny buttons name what they DO, so a
+        # ``<pre>`` mirror of "1. Yes / 2. … / 3. No" beneath them only repeats two
+        # self-describing buttons. ``gate is not None`` is exactly "a permission gate is up and
+        # it is NOT an AskUserQuestion or a plan" (``gate`` above is forced to ``None`` whenever
+        # ``uq`` or ``plan`` is present), so passing ``dialog=None`` here suppresses ONLY the
+        # permission mirror and leaves every OTHER shape mirrored exactly as before — the
+        # AskUserQuestion mirror (which is a gate's ONLY message and carries its option
+        # descriptions), a plan review, a checkpoint restore, an unrecognised dialog.
+        self._sync_mirror(
+            window_id, None if gate is not None else dialog,
+            hook=hook, held=held, uq=uq,
+        )
+        # The fourth read of the same captured text (no extra tmux call). Last, and
+        # in its own try: a decoration must never cost us a gate relay.
+        if self._status is not None:
+            try:
+                self._status.sync(window_id, pane)
+            except Exception:
+                log.exception("status sync failed for %s", window_id)
+
+    def _dialog(self, pane: str, window_id: str) -> "Dialog | None":
+        """The mirrorable dialog region on this pane, or None. Never fatal.
+
+        ``None`` also means "do not carry a gate on the mirror": it is what tells
+        :meth:`_poll_window` to fall back to posting the ❓ cards, so a scrape failure costs
+        the mirror and not the gate.
+        """
+        if not self._mirror:
+            return None
+        try:
+            dialog = self._detect_dialog(pane)
+        except Exception:
+            log.exception("dialog scrape failed for %s", window_id)
+            return None
+        return None if mirror_suppressed(dialog) else dialog
+
+    def _sync_mirror(self, window_id: str, dialog: "Dialog | None", *,
+                     hook: "HookGate | None", held: "OpenGate | None",
+                     uq: "AskUQ | None", force: bool = False) -> None:
+        """Reconcile one window's mirror against a freshly detected dialog region.
+
+        ``hook``/``held``/``uq`` are this tick's already-made lookups — passed in rather than
+        re-made here, because :func:`~chela.telegram.hookgate.pending_gate` reads the event
+        log and the poll path has done it once already.
+
+        The body is the pane, or — while this window's 📖 is open — the full option list from
+        the payload (:func:`format_mirror_expansion`). Either way the keyboard is the same:
+        the answer buttons, the toggle, the D-pad. ``force`` skips the edit throttle: it is
+        set for a **tap**, where a delayed re-draw reads as a dead button.
+
+        A dialog with nothing to draw (:func:`mirror_suppressed` → ``None``) resolves the
+        mirror, which is also the "the dialog is gone" path — the message is deleted rather
+        than left wearing live buttons.
+        """
+        if not self._mirror:
+            return
+        answer = expansion = None
+        can_expand = False
+        if dialog is not None:
+            answer = self._mirror_answer(hook, held, dialog, uq)
+            # Only an AskUserQuestion region may be expanded, and only when the log actually
+            # holds its payload. That pane corroboration is what keeps a stale pending gate
+            # from being dressed onto a Bash approval (CMX-35, from the other side), and it
+            # is what leaves a pre-plugin window with no 📖 — there is nothing to show.
+            can_expand = hook is not None and dialog.name == "AskUserQuestion"
+            if can_expand and window_id in self._expanded:
+                expansion = self._expansion(hook)
+        self._sync(
+            window_id, _MIRROR, dialog,
+            lambda d: mirror_signature(d, answer, expansion=expansion,
+                                       can_expand=can_expand),
+            lambda d: [format_mirror_card(d, answer, expansion=expansion,
+                                          can_expand=can_expand)],
+            force=force,
+        )
+
+    def _expansion(self, hook: HookGate) -> str | None:
+        """The 📖 body for a gate — never fatal.
+
+        A failure here costs the expansion, never the mirror: the pane and the D-pad are the
+        surface's floor. Returning ``None`` collapses the message back to the pane, which is
+        a visible outcome rather than a silent one — the button will look like it did
+        nothing, and that is at least true.
+        """
+        try:
+            return format_mirror_expansion(hook)
+        except Exception:
+            log.exception("mirror expansion failed for %s", hook.tool_use_id)
+            return None
+
+    def _mirror_answer(self, hook: "HookGate | None", held: "OpenGate | None",
+                       dialog: Dialog, uq: "AskUQ | None") -> "MirrorAnswer | None":
+        """The mirror's option buttons for this dialog — never fatal.
+
+        The hook's zero-keypress buttons when a blocked hook is holding the gate and the
+        focused question can be proven (:func:`mirror_answer`); otherwise the legacy scraped
+        selector (:func:`mirror_keystroke_answer`), which is all a **pre-plugin** agent — or
+        a gate whose hold has expired — can be offered. The mirror is the only message a gate
+        posts now, so a surface that carried only the hook buttons would have taken the
+        pre-plugin fleet's answer buttons away with the cards.
+
+        A failure here costs the buttons, never the mirror: the pane render and the D-pad
+        are the surface's floor, and they must survive a bad draft lookup or a payload shape
+        we mis-read.
+        """
+        try:
+            selected = ()
+            if self._selected is not None and hook is not None and held is not None:
+                index = focused_question(hook, dialog) if dialog.name == "AskUserQuestion" \
+                    else None
+                if index is not None:
+                    selected = self._selected(hook.tool_use_id, index)
+            return (mirror_answer(hook, held, dialog, selected)
+                    or mirror_keystroke_answer(uq, dialog))
+        except Exception:
+            log.exception("mirror answer buttons failed for %s", dialog.name)
+            return None
+
+    def refresh_mirror(self, window_id: str) -> None:
+        """Re-capture the pane and re-draw this window's mirror **in place**. Never raises.
+
+        This is what a D-pad tap calls after its key lands (:mod:`chela.telegram.inbound`),
+        and it is the whole feature: one message, edited, so the human watches the ``❯``
+        cursor move *in the chat*. It runs on the PTB event loop's worker thread while
+        :meth:`poll` runs in the outbound thread, so it takes the same lock.
+
+        It re-consults the hook, because the option buttons now ride on this very message
+        (CMX-54): a re-draw that skipped the lookup would strip them off the keyboard for a
+        second, and a button that blinks out from under a thumb is worse than one that was
+        never there. A dialog that has left the pane — the key just answered it — resolves
+        the mirror, which deletes it.
+
+        Failures are swallowed. This is a redraw: it must never propagate into the tap
+        handler, where it would surface as a broken button on a gate that was, in fact,
+        answered.
+        """
+        self._redraw_mirror(window_id)
+
+    def toggle_mirror(self, window_id: str) -> None:
+        """📖 ⇄ 🎛️ — flip this window's mirror between the pane and the full option list.
+
+        The 📖 tap (CMX-57). It presses **no key** and answers nothing: it flips one bit of
+        view state and re-draws the SAME message, so the option list Liav needs in order to
+        *compare* two previews arrives without a second message and without giving up the
+        answer buttons or the D-pad that are sitting right there.
+
+        The flip is recorded before the re-draw so the re-render reads it, and it is dropped
+        when the mirror is poofed (:meth:`_resolve`) — the next gate opens on the pane.
+        """
+        with self._lock:
+            if window_id in self._expanded:
+                self._expanded.discard(window_id)
+            else:
+                self._expanded.add(window_id)
+        self._redraw_mirror(window_id)
+
+    def _redraw_mirror(self, window_id: str) -> None:
+        """Re-capture, re-look-up, re-render this window's mirror in place. Never raises."""
+        try:
+            with self._lock:
+                pane = self._capture(window_id)
+                uq = self._detect_askuq(pane)
+                dialog = self._dialog(pane, window_id)
+                # Same pane corroboration as the poll path: the payload is only ever read
+                # for a window whose pane is showing a selector RIGHT NOW.
+                hook = (self._hook_askuq(window_id)
+                        if _selector_on_screen(uq, dialog) else None)
+                held = self._held_gate(hook.tool_use_id) if hook is not None else None
+                self._sync_mirror(window_id, dialog, hook=hook, held=held, uq=uq, force=True)
+        except Exception:
+            log.exception("mirror refresh failed for %s", window_id)
+        # A tap that answered the dialog just queued the mirror for poofing — send the
+        # delete now that the lock is dropped, so the live buttons die at tap speed
+        # rather than at tick speed.
+        self._drain_poofs()
+
+    def _latest_pending(self, window_id: str) -> _PendingTool | None:
+        """The most recent unpaired ``tool_use`` for a window, if any."""
+        pend = self._pending.get(window_id)
+        if not pend:
+            return None
+        return pend[next(reversed(pend))]
+
+    def _hook_askuq(self, window_id: str) -> HookGate | None:
+        """The window's pending ``AskUserQuestion`` from the event log, if any.
+
+        Only an ``AskUserQuestion``: a pending ``ExitPlanMode`` (the other interactive
+        tool) is not what an AskUserQuestion pane is showing, and a **subagent's** hook
+        events carry its *parent's* ``session_id`` — so they resolve to the parent's
+        window, and matching the tool name is what keeps a subagent's ordinary tool call
+        from being dressed up as the gate on the parent's screen. A lookup failure is
+        never fatal: the pane render is right there.
+        """
+        if self._pending_gate is None:
+            return None
+        try:
+            gate = self._pending_gate(window_id)
+        except Exception:
+            log.exception("hook gate lookup failed for %s", window_id)
+            return None
+        if gate is None or gate.tool != "AskUserQuestion" or not gate.questions:
+            return None
+        return gate
+
+    def _held_gate(self, tool_use_id: str) -> "OpenGate | None":
+        """The blocked hook waiting on this gate, if there is one. Never fatal.
+
+        An expired hold reads as None (:func:`chela.gateanswer.open_gate` enforces the
+        deadline on read), so a gate whose hook has already given up loses its answer
+        buttons and the card falls back to saying "answer it in the terminal" — which is
+        the truth at that point. A button that would be refused is worse than no button.
+        """
+        if self._held is None:
+            return None
+        try:
+            return self._held(tool_use_id)
+        except Exception:
+            log.exception("held-gate lookup failed for %s", tool_use_id)
+            return None
+
+    @staticmethod
+    def _answerable(gate: HookGate, uq: "AskUQ | None") -> bool:
+        """Can a tap's ordinal mapping be PROVEN for this gate? If not: no buttons.
+
+        This is the FALLBACK path — a gate no hook is holding open (a pre-plugin agent).
+        Answering it goes through keystroke injection, and that path can
+        only land on the right row when the scraper can see the ``❯`` cursor and the rows
+        it counted are the options we numbered. That holds for exactly one shape: a
+        **single question**, **single select**, whose pane scrape parsed the same number
+        of options the payload declares.
+
+        Everything else — a multi-question selector (the TUI walks the questions, so
+        option *i* means a different thing depending which one is on screen), a
+        ``multiSelect`` question (an answer is a *set*), or a preview-bearing layout the
+        scraper cannot read a cursor out of — gets the nav row and a card that says so.
+        Synthesising a selector whose mapping we cannot prove is CMX-32 (tap 3 → answer
+        2): a button that silently picks the wrong option is worse than no button.
+        """
+        if len(gate.questions) != 1:
+            return False
+        q = gate.questions[0]
+        return (
+            not q.multi_select
+            and uq is not None
+            and not uq.multi
+            and uq.cursor >= 0
+            and len(uq.options) == len(q.options) > 0
+        )
+
+    def _sync(self, window_id, kind, detected, sig_fn, cards_fn, *,
+              force: bool = False) -> None:
+        """Post / edit / poof the tracked message(s) for one prompt kind.
+
+        The single relay path every prompt shares. ``detected is None`` means the prompt
+        is no longer on the pane (answered / dismissed) → resolve it. Otherwise: an
+        unchanged render is a no-op (edge-triggered — a still-open prompt is never
+        re-posted, and this is the de-dup that keeps a repainting mirror off the wire), a
+        changed one edits the tracked message(s) in place (so a mid-render partial and the
+        settled prompt are ONE message), and a first render posts them. An edit that fails
+        (the message was deleted) falls back to a fresh post.
+
+        A prompt renders to a *list* of cards — one per question for a payload-rendered
+        AskUserQuestion, one for every other prompt. A render whose card COUNT changed
+        cannot be edited into the old messages, so those are poofed and the new set
+        posted.
+
+        A kind with an edit floor (:data:`_MIN_EDIT_INTERVAL` — the mirror) SKIPS an edit
+        that lands inside it, leaving the signature stale so the next poll re-renders the
+        newest pane; nothing is dropped, only deferred. ``force`` (a D-pad tap) bypasses
+        the floor.
+
+        A post Telegram would not take is NOT recorded (that is how a gate went missing
+        in silence) — it is re-posted, on a backoff (:data:`_REPOST_BACKOFF_BASE`), until
+        it lands or the gate leaves the pane.
+        """
+        if detected is None:
+            self._resolve(window_id, kind)
+            return
+
+        signature = sig_fn(detected)
+        tracked = self._prompts.get(window_id, {}).get(kind)
+        if tracked is not None and tracked.signature == signature:
+            return
+
+        now = self._now()
+        interval = _MIN_EDIT_INTERVAL.get(kind, 0.0)
+        if (
+            tracked is not None
+            and not force
+            and interval
+            and now - tracked.last_edit < interval
+        ):
+            return  # throttled — the signature stays stale, so the next poll re-renders
+
+        # A prompt whose last post Telegram refused waits out its backoff before asking
+        # again. A tap (``force``) does not wait: a human with a thumb on the screen is a
+        # better reason to spend a request than any backoff is to save one.
+        key = (window_id, kind)
+        failed = self._undelivered.get(key)
+        if failed is not None and not force and now < failed.next_at:
+            return
+
+        thread = self._registry.thread_for_window(window_id)
+        if thread is None:
+            log.debug("%s prompt on %s but no bound topic; skipping", kind, window_id)
+            return
+
+        cards = cards_fn(detected)
+
+        if (
+            tracked is not None
+            and tracked.message_ids
+            and self._edit is not None
+            and len(tracked.message_ids) == len(cards)
+        ):
+            if all(self._edit_card(mid, card)
+                   for mid, card in zip(tracked.message_ids, cards)):
+                tracked.signature = signature
+                tracked.last_edit = now
+                self._undelivered.pop(key, None)
+                return
+        replaced: list[int] = []
+        if tracked is not None:
+            # Either the card count changed, or a message is gone from Telegram (deleted,
+            # too old, or refused right now). Post a fresh set — a half-updated prompt on
+            # a phone is a prompt that lies about what it is asking — and poof the old
+            # messages, but only AFTER the new ones are up (below). Poofing first would,
+            # on a post Telegram then refuses, take a live gate off the human's phone to
+            # replace it with nothing.
+            if kind == _MIRROR:
+                self._expanded.discard(window_id)
+            gone = self._prompts.get(window_id, {}).pop(kind, None)
+            replaced = list(gone.message_ids) if gone is not None else []
+
+        message_ids: list[int] = []
+        delivered = True
+        for card in cards:
+            if self._post is not None:
+                message_id = self._post_card(card, thread)
+                if isinstance(message_id, int):
+                    message_ids.append(message_id)
+                else:
+                    delivered = False
+            else:
+                # No id-returning poster (plain-sender tests) — post via the sender;
+                # without an id we can neither edit nor poof the message.
+                self._sender(card.text, card.parse_mode, thread, reply_markup=card.markup)
+        if not delivered:
+            # Telegram delivered NOTHING (flood control, or a payload it refused).
+            # Recording the signature anyway is how a gate goes missing in silence: this
+            # tracker is EDGE-triggered, so a marker written for a message that does not
+            # exist means the next tick sees "already relayed" and returns — forever,
+            # because a *pending* gate's pane holds still by definition (it is waiting for
+            # a human). Reconstructed from the 07-14 artifacts (CMX-74): two
+            # AskUserQuestion gates raised inside a 429 storm, both on the pane, neither
+            # ever on the phone. So: poof whatever half of the set did land, leave the
+            # window unmarked, and post it again — but on a BACKOFF, because the failure
+            # mode we are retrying into is *a rate limit*, and a gate can be pending on a
+            # human for hours. Every-tick-forever would be this daemon DDoSing itself with
+            # the very traffic that hid the gate.
+            attempts = (failed.attempts if failed is not None else 0) + 1
+            wait = (
+                0.0 if attempts == 1
+                else min(_REPOST_BACKOFF_BASE * 2 ** (attempts - 2), _REPOST_BACKOFF_MAX)
+            )
+            self._undelivered[key] = _Undelivered(attempts, now + wait)
+            log.warning(
+                "telegram took none of the %s prompt on %s (attempt %d) — "
+                "re-posting in %.0fs", kind, window_id, attempts, wait)
+            self._poof(message_ids)
+            if replaced:
+                # The old messages are still on the phone and still the best thing there
+                # — keep owning them (a stale signature, so the next tick re-renders
+                # them; and their ids, so they can still be poofed when the gate is
+                # answered). An untracked live keyboard is one nobody can ever take away.
+                self._prompts.setdefault(window_id, {})[kind] = _Tracked(
+                    "", replaced, tracked.last_edit if tracked is not None else 0.0)
+            return
+        self._undelivered.pop(key, None)
+        self._poof(replaced)
+        # A delivered gate says so, with the ids Telegram gave back. The 07-14 incident was
+        # invisible in the log — a gate on the pane, nothing on the phone, and not one line
+        # either way — so the delivery of a thing a human is *blocked on* is worth a line.
+        if message_ids:
+            log.info("relayed %s prompt on %s to topic %s as %s",
+                     kind, window_id, thread, message_ids)
+        self._prompts.setdefault(window_id, {})[kind] = _Tracked(
+            signature, message_ids, now)
+
+    def _post_card(self, card: Card, thread) -> int | None:
+        """Post one card, falling back to plain text if Telegram rejects the markup.
+
+        A ``<pre>``-bearing body is the only formatted thing this watcher sends, and a
+        formatting rejection must never cost the human the *content*: a gate that arrives
+        with its options missing is the exact silent degrade this change exists to end.
+        """
+        message_id = self._post(card.text, card.parse_mode, thread, card.markup)
+        if message_id is None and card.plain and card.parse_mode:
+            log.warning("gate card rejected with parse_mode=%s — re-posting it plain",
+                        card.parse_mode)
+            message_id = self._post(card.plain, None, thread, card.markup)
+        return message_id
+
+    def _edit_card(self, message_id: int, card: Card) -> bool:
+        """Edit one tracked message to this card, plain-text fallback and all."""
+        if self._edit(message_id, card.text, card.parse_mode, card.markup):
+            return True
+        if card.plain and card.parse_mode:
+            return bool(self._edit(message_id, card.plain, None, card.markup))
+        return False
+
+    def _resolve(self, window_id: str, kind: str) -> None:
+        """The prompt is answered — drop its marker and poof its message(s).
+
+        Deleting is the point: the buttons on an answered prompt are not just
+        stale, they are *live* — a later tap would fire Enter/Escape at whatever
+        the agent is doing by then. The transcript's ``tool_result`` (relayed
+        separately) is the record of what was chosen.
+
+        The mirror's 📖 state dies with its message: view state outliving the view it
+        belonged to is how the *next* gate would arrive mysteriously expanded.
+        """
+        if kind == _MIRROR:
+            self._expanded.discard(window_id)
+        self._undelivered.pop((window_id, kind), None)
+        tracked = self._prompts.get(window_id, {}).pop(kind, None)
+        if tracked is not None:
+            self._poof(tracked.message_ids)
+
+    def _poof(self, message_ids) -> None:
+        """QUEUE these messages for deletion. No network, no blocking — safe under the lock.
+
+        Every caller of this is inside the reconcile lock, and a delete is a Bot API call
+        that Telegram can make wait (flood control). So this one does not make it: it
+        hands the ids to :meth:`_drain_poofs`, which runs after the lock is dropped.
+        """
+        if self._delete is None:
+            return
+        for message_id in message_ids:
+            self._poofq.append((message_id, 0))
+
+    def _drain_poofs(self) -> None:
+        """Delete the queued messages. Call OUTSIDE the lock. Never raises.
+
+        Deleting is the point of poofing: the buttons on an answered prompt are not just
+        stale, they are *live* — a later tap would fire Enter/Escape at whatever the agent
+        is doing by then. So a delete Telegram refuses goes back on the queue for the next
+        drain rather than being dropped on the floor (:data:`_MAX_POOF_TRIES`), and every
+        entry point drains — the pane tick, the transcript relay's :meth:`observe`, a
+        D-pad tap — so in practice a poof still goes out within milliseconds of the
+        resolve that queued it. What it may NOT do is go out while holding the lock the
+        pane poll needs.
+
+        Only one pass over what is queued *now*: a re-queued id is left for the next
+        drain, so a permanently-refused delete can never spin this loop.
+        """
+        if self._delete is None:
+            return
+        for _ in range(len(self._poofq)):
+            try:
+                message_id, tries = self._poofq.popleft()
+            except IndexError:  # another thread drained it first
+                return
+            try:
+                # ``False`` is BotSender reporting a refusal; a poster that returns
+                # nothing (the plain-callable tests) is taken at its word.
+                refused = self._delete(message_id) is False
+            except Exception:
+                log.exception("failed to delete relayed prompt message %s", message_id)
+                refused = True
+            if not refused:
+                continue
+            if tries + 1 < _MAX_POOF_TRIES:
+                self._poofq.append((message_id, tries + 1))
+            else:
+                log.error(
+                    "gave up deleting prompt message %s after %d tries — its buttons are "
+                    "still live", message_id, _MAX_POOF_TRIES)

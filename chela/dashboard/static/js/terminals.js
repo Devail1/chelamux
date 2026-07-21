@@ -1,3 +1,9 @@
+// --- Stage 0: ES-module imports ---
+import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util.js';
+import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
+import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
+import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
+
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
 // ---------------------------------------------------------------------------
@@ -138,7 +144,7 @@ function _showReadyRetry(wid) {
     const ph = stage.querySelector('.term-pending[data-pending="' + _cssEsc(wid) + '"]');
     if (!ph) return;
     ph.innerHTML = `<div class="term-pending-inner">still starting —
-      <a href="#" class="term-retry" onclick="retryReady('${_jsStr(wid)}');return false;">click to retry</a></div>`;
+      <a href="#" class="term-retry" onclick="chela.retryReady('${_jsStr(wid)}');return false;">click to retry</a></div>`;
 }
 
 function retryReady(wid) {
@@ -182,7 +188,7 @@ async function spawnShell(btn) {
             alert('Spawn failed: ' + ((res && res.error) || 'unknown error'));
             return;
         }
-        _agentsCache = [];   // force /api/agents refetch so the new window shows
+        setAgentsCache([]);   // force /api/agents refetch so the new window shows
         _termSig = '';       // invalidate render cache so the stage rebuilds
         await renderTerminals();
     } catch (e) {
@@ -257,66 +263,111 @@ function _isManaged(wid) {
     return false;
 }
 
-// ---- Per-pane custom titles (display-only; the wid stays the routing key).
-// Persisted in localStorage keyed by wid; empty = reset.
-function _paneTitles() {
-    try { return JSON.parse(localStorage.getItem('pc_pane_titles') || '{}'); } catch (e) { return {}; }
+// ---- Display labels. THE TMUX WINDOW NAME IS THE SOURCE OF TRUTH: a rename goes
+// to the server (renamePane -> POST /api/agents/<wid>/rename -> tmux rename-window)
+// and comes back to every client through /api/agents. There is deliberately NO
+// local label store. The old one (localStorage `pc_pane_titles`) was per-browser:
+// a rename on the laptop was invisible on the phone, never reached tmux or the
+// bound Telegram topic, and died with the browser's data. Drop any leftovers so
+// the two layers can't disagree.
+try { localStorage.removeItem('pc_pane_titles'); } catch (e) { /* private mode */ }
+
+// Names tmux auto-assigns and never a human — a numbered shell, or a bare
+// command tmux follows (`claude`, `bash`, …). Mirrors the server's
+// is_generic_name() so both layers agree on what counts as a fillable blank.
+const _GENERIC_NAMES = new Set(['bash', 'zsh', 'sh', 'fish', 'claude', 'node', 'python', 'python3']);
+function _isGenericName(name) {
+    const n = (name || '').trim();
+    if (!n) return true;
+    return /^shell(-\d+)?$/i.test(n) || _GENERIC_NAMES.has(n.toLowerCase());
 }
-// Friendly display label for a window, shared by agent cards + terminal panes
-// so the two stay aligned. Precedence: an explicit user rename wins; else a
-// generic "shell-N" is relabelled to its repo (cwd basename from
-// `claude agents --json`) so cards read as the project, not shell-1/shell-2;
-// multiple shells in the same repo get a trailing index; else the raw name.
+
+// Friendly display label for a window, shared by agent cards + terminal panes so
+// the two stay aligned. This is a FORMATTER over the real name, not a second name.
+// A name a human chose is intent and is shown verbatim (same rule the server's
+// is_generic_name() applies). A generic name (`shell-2`, or a bare `claude`) is a
+// blank we fill with the most meaningful thing we know, in order: the Claude
+// session name, then the repo (cwd basename — so cards read as the project, not
+// shell-1/claude, and generic siblings in one repo get a trailing index), then
+// the raw name; a literal placeholder only if even that is empty.
+//
+// NB: this only changes what a label RESOLVES to. It must never leak into the
+// wall's `_termSig`, which is keyed on window ids alone — else buildWall reloads
+// every live iframe on a relabel (CMX-67/71).
 function _displayLabel(wid) {
-    const custom = _paneTitles()[wid];
-    if (typeof custom === 'string' && custom) return custom;
     const cache = _agentsCache || [];
     const a = cache.find(x => x.window_id === wid);
     const name = a ? a.name : wid;
-    if (!/^shell(-\d+)?$/i.test(name)) return name;
+    if (!_isGenericName(name)) return name;
+    if (a && a.session_name) return a.session_name;
     const baseOf = x => (x && x.cwd) ? (x.cwd.replace(/\/+$/, '').split('/').pop() || '') : '';
     const base = baseOf(a);
-    if (!base) return name;
-    const siblings = cache.filter(x => /^shell(-\d+)?$/i.test(x.name) && baseOf(x) === base);
-    if (siblings.length > 1) {
-        siblings.sort((x, y) => x.name.localeCompare(y.name));
-        return `${base} ${siblings.findIndex(x => x.window_id === wid) + 1}`;
+    if (base) {
+        // Only siblings that also fall through to their repo (no chosen name, no
+        // session name) share the numbering, so the indices stay contiguous.
+        const siblings = cache.filter(x => _isGenericName(x.name) && !x.session_name && baseOf(x) === base);
+        if (siblings.length > 1) {
+            siblings.sort((x, y) => x.name.localeCompare(y.name));
+            return `${base} ${siblings.findIndex(x => x.window_id === wid) + 1}`;
+        }
+        return base;
     }
-    return base;
+    return name || 'claude window';
 }
 
 function _paneTitle(wid) {
     return _displayLabel(wid);
 }
-function _setPaneTitle(wid, title) {
-    const all = _paneTitles();
-    const name = _nameOfWid(wid);
-    if (title && title !== name) all[wid] = title; else delete all[wid];
-    localStorage.setItem('pc_pane_titles', JSON.stringify(all));
+
+// Rename the WINDOW (not a local label): POST the new name, which renames the tmux
+// window, so it shows up on every client, in tmux, and on the bound Telegram topic.
+// Refetches /api/agents so the wall, cards and nav all relabel from the real name.
+async function _commitRename(wid, name) {
+    const res = await api(`/api/agents/${encodeURIComponent(wid)}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+    });
+    if (!res || !res.ok) throw new Error((res && res.error) || 'rename failed');
+    const agents = await api('/api/agents');
+    setAgentsCache(agents);
+    _refreshPaneLabels();
 }
 
-// Swap a pane title span for an inline input. Enter saves, Esc cancels, empty
-// resets to the real name. Only the displayed label changes — never the gs-id.
+// Swap a pane title span for an inline input. Enter saves, Esc cancels. The name is
+// the window's real name, so an unchanged (or empty) value is simply not submitted.
 function renamePane(ev, span, wid) {
     ev.stopPropagation();
     const input = document.createElement('input');
     input.className = 'pane-title-edit';
-    input.value = _paneTitle(wid);
-    input.title = 'Enter to save · Esc to cancel · empty to reset';
+    input.value = _nameOfWid(wid);   // edit the REAL name, not the prettified label
+    input.title = 'Enter to save · Esc to cancel';
     span.replaceWith(input);
     input.focus();
     input.select();
     let done = false;
-    const commit = (save) => {
-        if (done) return;
-        done = true;
-        if (save) _setPaneTitle(wid, input.value.trim());
+    const restore = () => {
         const fresh = document.createElement('span');
         fresh.className = 'pane-title';
         fresh.title = 'double-click to rename';
         fresh.textContent = _paneTitle(wid);
         fresh.addEventListener('dblclick', e2 => renamePane(e2, fresh, wid));
         input.replaceWith(fresh);
+        return fresh;
+    };
+    const commit = async (save) => {
+        if (done) return;
+        done = true;
+        const name = input.value.trim();
+        const unchanged = !name || name === _nameOfWid(wid);
+        restore();
+        if (!save || unchanged) return;
+        try {
+            await _commitRename(wid, name);
+        } catch (e) {
+            console.error('renamePane', e);
+            alert('Rename failed: ' + e.message);
+        }
     };
     input.addEventListener('keydown', e2 => {
         e2.stopPropagation();
@@ -354,7 +405,7 @@ function _ownerPresence() {
     return _ownerPresenceP;
 }
 // Wire the router immediately so a shared pane's shim 'ready' is caught on load.
-_ownerPresence();
+if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) _ownerPresence();
 
 // On load, reflect any already-active shares in the global safety indicator —
 // covers landing straight on a non-terminals tab with a forgotten live share.
@@ -635,44 +686,170 @@ function _updateShareBtns(wid) {
 
 function _shareBtnHTML(wid) {
     const on = _sharedWids.has(wid);
-    return `<button class="gs-share-btn${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
-      onclick="shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
-      title="Share this session">${lucideIcon('share-2', 15)}<span class="gs-share-count" hidden></span></button>`;
+    return `<button class="gs-share-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
+      onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
+      title="Share this session"><span class="ov-ic">${lucideIcon('share-2', 14)}</span><span>Share current session</span><span class="gs-share-count" hidden></span></button>`;
+}
+
+// The pane-title toggle: "⊙ Orchestrator" — one click registers THIS pane's
+// session as the decisions-inbox recipient (an atomic take-over of the single
+// slot, chela/inbox.py::register via /api/orchestrator/subscribe), one click
+// releases it (falls back to the decisions panel — chela/dashboard/static/js/
+// decisions.js). `.on` reflects the LIVE owner, kept current across every pane
+// via onOrchestratorChange (fired on our own clicks, other panes' clicks, and
+// the SSE `orchestrator` delta — sse.js).
+function _orchBtnHTML(wid) {
+    const on = orchestratorState().wid === wid;
+    const title = on
+        ? 'This pane receives the decisions inbox — click to release'
+        : 'Click to receive the decisions inbox in this pane';
+    return `<button class="gs-orch-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
+      onclick="chela.orchestratorBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
+      title="${attrEsc(title)}"><span class="ov-ic">${lucideIcon('circle-dot', 14)}</span><span>Orchestrator</span></button>`;
+}
+
+function _updateOrchBtns() {
+    const owner = orchestratorState().wid;
+    document.querySelectorAll('.gs-orch-btn').forEach(btn => {
+        const wid = btn.getAttribute('data-wid');
+        const on = owner === wid;
+        btn.classList.toggle('on', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        btn.title = on
+            ? 'This pane receives the decisions inbox — click to release'
+            : 'Click to receive the decisions inbox in this pane';
+    });
+    // CMX-119: the pane's status dot (paneHead) carries a non-hue ring while
+    // it owns the decisions inbox — driven off this SAME signal as the menu
+    // row above, so the ring and the row's `.on` state can never disagree.
+    document.querySelectorAll('.gs-dot[data-wid]').forEach(dot => {
+        dot.classList.toggle('gs-dot-orch', dot.getAttribute('data-wid') === owner);
+    });
+}
+
+// Fires on our own clicks, every other pane's clicks (subscribe is a global
+// take-over) and the SSE `orchestrator` delta — one state, every button in sync.
+onOrchestratorChange(_updateOrchBtns);
+
+async function orchestratorBtnClick(btn, wid) {
+    const on = orchestratorState().wid === wid;
+    btn.disabled = true;
+    try {
+        const result = on ? await orchestratorRelease(wid) : await orchestratorSubscribe(wid);
+        if (!result || !result.ok) {
+            console.error('orchestrator toggle failed', result && result.error);
+        }
+    } finally {
+        btn.disabled = false;
+    }
 }
 
 function paneHead(wid, draggable) {
     const j = _jsStr(wid);
-    const title = `<span class="pane-title" title="double-click to rename" ondblclick="renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
+    const title = `<span class="pane-title" title="double-click to rename" ondblclick="chela.renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
+    // The NAME is the drag handle (CMX-117 drops the old "☰" glyph) — `.gs-grip`
+    // stays the class GridStack's `handle`/`draggable.handle` option targets
+    // (buildWall), so dragging still works; only the glyph is gone.
     const label = draggable
-        ? `<span class="gs-grip" title="drag to move">&#9776; ${title}</span>`
+        ? `<span class="gs-grip" title="drag to move">${title}</span>`
         : `<span class="gs-label">${title}</span>`;
     // × kill: rendered ONLY for non-managed agents (spawned shells / ad-hoc
     // sessions). Managed personas (anything in agents.yaml) get no × so they
     // can't be torn down from the wall by accident; the backend also refuses.
     const kill = _isManaged(wid) ? '' :
-        `<button class="gs-kill-btn" onclick="termKillClick(this,'${j}')" title="Kill this session">&#10005;</button>`;
+        `<button class="gs-kill-btn" onclick="chela.termKillClick(this,'${j}')" title="Kill this session">&#10005;</button>`;
     // Minimize-to-dock is a wall-only concept (single view shows one pane, with
     // nothing to dock it beside) — only render it for draggable wall tiles.
     const min = draggable
-        ? `<button class="gs-min-btn" onclick="termMinFor(this)" title="Minimize to dock">&#128469;</button>` : '';
+        ? `<button class="gs-min-btn" onclick="chela.termMinFor(this)" title="Minimize to dock">&#128469;</button>` : '';
+    // Pin is also wall-only: it exempts this tile from applyGridLayout's
+    // auto-reflow (grid presets), so single mode (no reflow to opt out of) gets
+    // no button either.
+    const pin = draggable ? _pinBtnHTML(wid) : '';
     // No PgUp/PgDn/scroll/Esc/^C here: with focus in the pane those keys reach the
     // terminal natively (wheel/keys scroll, Esc and Ctrl-C pass through), so the
     // header carries only the window controls (minimize / maximize / kill).
+    // The wire's port + the room badge are WALL chrome: single-pane mode has a
+    // header but no gs-id (nothing to wire to, nothing to resolve a drop against),
+    // so it simply gets neither — degrade, don't crash.
+    const port = draggable
+        ? `<button class="gs-port popover-item ov-item" onmousedown="chela.wireDragStart(event, this, '${j}')"
+             title="Wire this agent to another — drag onto a peer"
+             aria-label="Wire this agent to another"><span class="ov-ic">${lucideIcon('link-2', 14)}</span><span>Wire to…</span></button>` : '';
+    const roomBadge = draggable
+        ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden></button>` : '';
+    // CMX-119: pane header v2 — split the CMX-117 combined badge back apart
+    // now that every pane has a bottom bar to hold its numbers. `.gs-dot` is a
+    // plain status-by-SHAPE indicator (filled = working, hollow = idle, filled
+    // + glow ring = waiting/wants-human — Liav is red-weak, so shape carries
+    // the signal, not hue alone) — `_colorTermDots` (this file) targets
+    // `.term-status-dot`, which this dot also wears, so the same
+    // working/waiting/idle classes paint it same as everywhere else (see the
+    // .gs-dot rules in style.css). The orchestrator ring (_updateOrchBtns,
+    // below) is a SEPARATE non-hue outline on this same dot. The "⋯" trigger
+    // (lucide `more-vertical`) opens the same Wire/Share/Orchestrator/Pin menu
+    // the old combined badge used to — same togglePaneOverflow, same `menu =
+    // btn.nextElementSibling` contract, so the menu's rows and all their live
+    // state wiring (_updateShareBtns/_updateOrchBtns/the pin toggle) are
+    // untouched, just anchored at a plain button instead of the pill. The
+    // pane № (Alt+N jump target) moved OUT of the header entirely, down to
+    // the bottom bar — see _ctxBarHTML.
+    const dot = `<span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span>`;
+    const menu = `<span class="gs-menu-wrap">
+        <button class="gs-menu-btn" onclick="chela.togglePaneOverflow(event, this)"
+                aria-haspopup="true" aria-expanded="false" title="Session actions">${lucideIcon('more-vertical', 14)}</button>
+        <div class="popover pane-overflow-menu overflow-menu" hidden>
+          ${port}
+          ${_shareBtnHTML(wid)}
+          ${_orchBtnHTML(wid)}
+          ${pin}
+        </div>
+      </span>`;
     return `<div class="gs-head">
-      ${_statusDot(wid)}
+      ${dot}
+      ${menu}
       ${label}
-      <span class="gs-branch" hidden></span>
-      <span class="gs-ctx" hidden></span>
+      ${roomBadge}
       <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
       <span class="gs-keys">
         <span class="gs-win-ctl">
-          ${_shareBtnHTML(wid)}
           ${min}
-          <button class="gs-max-btn" onclick="termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
+          <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
           ${kill}
         </span>
       </span>
     </div>`;
+}
+
+// Toggle this pane's "⋯" overflow menu (Wire/Share/Orchestrator/Pin). Only one
+// open at a time — opening a second closes the first — and light-dismisses on
+// the next outside click, same pattern as nav.js's openPrimaryMenu/openNewMenu.
+function togglePaneOverflow(ev, btn) {
+    if (ev) ev.stopPropagation();
+    const menu = btn.nextElementSibling;
+    if (!menu) return;
+    const opening = menu.hidden;
+    _closeAllPaneOverflows();
+    if (!opening) return;
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    const r = btn.getBoundingClientRect();
+    menu.style.top = (r.bottom + 6) + 'px';
+    // CMX-119: LEFT-anchored to the trigger (not right-anchored off it) — the
+    // trigger sits near the pane's left edge, between the dot and the name, so
+    // anchoring the menu's right edge to the trigger's right edge (the old
+    // math) could park it far from the pane on a wide wall. Opening rightward
+    // from the trigger's own left edge keeps it over the pane it belongs to.
+    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+    setTimeout(() => document.addEventListener('click', _closeAllPaneOverflows, { once: true }), 0);
+}
+
+function _closeAllPaneOverflows() {
+    document.querySelectorAll('.pane-overflow-menu:not([hidden])').forEach(m => {
+        m.hidden = true;
+        const btn = m.previousElementSibling;
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+    });
 }
 
 // Inline kill-confirm — same plain-DOM affordance as the kanban delete button
@@ -687,8 +864,8 @@ function termKillClick(btn, wid) {
     confirmEl.dataset.agent = wid;
     confirmEl.innerHTML = `
         <span class="kanban-confirm-msg">Kill ${escHtml(_paneTitle(wid))}?</span>
-        <button class="btn-confirm" type="button" onclick="termKillConfirm(this, true)">Kill</button>
-        <button type="button" onclick="termKillConfirm(this, false)">Cancel</button>`;
+        <button class="btn-confirm" type="button" onclick="chela.termKillConfirm(this, true)">Kill</button>
+        <button type="button" onclick="chela.termKillConfirm(this, false)">Cancel</button>`;
     pane.appendChild(confirmEl);
     btn.style.visibility = 'hidden';
 }
@@ -729,7 +906,7 @@ async function termKillConfirm(actionBtn, ok) {
 function _termKillShowError(confirmEl, killBtn, msg) {
     confirmEl.innerHTML = `
         <span class="kanban-confirm-msg" style="color:var(--red);">${escHtml(msg)}</span>
-        <button type="button" onclick="termKillConfirm(this, false)">Close</button>`;
+        <button type="button" onclick="chela.termKillConfirm(this, false)">Close</button>`;
     if (killBtn) killBtn.style.visibility = '';
 }
 
@@ -770,6 +947,44 @@ function _saveMinimized() {
     localStorage.setItem('pc_wall_minimized', JSON.stringify([..._minimized]));
 }
 
+// ---- Per-pane layout pin ----------------------------------------------------
+// A pinned pane sits out of applyGridLayout's auto-reflow (grid presets): its
+// x/y/w/h are left exactly as the user placed them while every other pane
+// rearranges around it. Persisted by wid so a pin survives a wall rebuild.
+let _pinned = _loadPinned();
+
+function _loadPinned() {
+    try { return new Set(JSON.parse(localStorage.getItem('pc_wall_pinned') || '[]')); }
+    catch (e) { return new Set(); }
+}
+function _savePinned() {
+    localStorage.setItem('pc_wall_pinned', JSON.stringify([..._pinned]));
+}
+
+function _pinBtnHTML(wid) {
+    const on = _pinned.has(wid);
+    const title = on
+        ? "Pinned — this pane keeps its spot when a grid layout is applied. Click to unpin"
+        : "Pin — keep this pane's position when a grid layout is applied";
+    return `<button class="gs-pin-btn popover-item ov-item${on ? ' on' : ''}" onclick="chela.termPinToggle(this,'${_jsStr(wid)}')"
+      aria-pressed="${on ? 'true' : 'false'}" title="${attrEsc(title)}"><span class="ov-ic">${lucideIcon('pin', 14)}</span><span>Pin</span></button>`;
+}
+
+// Toggle a pane's pin state. applyGridLayout reads _pinned directly (no
+// rebuild needed here) — this only flips the button + tile visuals and persists.
+function termPinToggle(btn, wid) {
+    if (_pinned.has(wid)) _pinned.delete(wid); else _pinned.add(wid);
+    _savePinned();
+    const on = _pinned.has(wid);
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.title = on
+        ? "Pinned — this pane keeps its spot when a grid layout is applied. Click to unpin"
+        : "Pin — keep this pane's position when a grid layout is applied";
+    const item = btn.closest('.grid-stack-item');
+    if (item) item.classList.toggle('pane-pinned', on);
+}
+
 // Hide a tile element + pull it out of the grid engine. Idempotent.
 function _minimizeItem(item) {
     if (!item || item.dataset.minimized === '1') return;
@@ -802,6 +1017,96 @@ function termMinFor(btn) {
 function toggleDockChip(wid) {
     if (_minimized.has(wid)) restoreFromDock(wid);
     else minimizePane(wid);
+}
+
+// ---- Lazy tiles: a DISPATCHED worker opens MINIMIZED, and POPS OUT when it blocks --
+//
+// ⛔ THE RULE, and it is one rule across two surfaces: a dispatched worker must not
+// occupy human attention surface — a Telegram topic (CMX-73) OR a Wall tile (this) —
+// until it needs a human. The wall is where you WATCH the fleet; five workers grinding
+// through a backlog tile it edge to edge and crowd out the one session you are in, and
+// none of them wanted watching. So a worker the dispatcher owns opens as a chip in the
+// dock (its ttyd iframe live and scrollable the whole time — minimize never detaches
+// it) and takes a tile the moment it BLOCKS on you. The wall stops being a wall of
+// noise and becomes what the topic list already is: the agents that want a human.
+//
+// The two facts come from /api/agents, both server-derived (see app.py):
+//   `dispatched`  — the RUN ROW owns the window id (never a guess from the name);
+//   `needs_human` — blocked on a human NOW: claude's own `waiting`, OR the hook log,
+//                   OR the pane (a Bash/Edit PERMISSION gate lives only as pixels).
+//
+// Per-wid state is a persisted 3-value machine — absent → 'docked' → 'popped' — and
+// the reason it exists rather than "just re-read the flags each tick" is that this must
+// NEVER FIGHT THE HUMAN. Re-deriving would re-minimize a pane the moment you pulled it
+// out of the dock, forever. So each decision is taken exactly ONCE per window:
+//   * absent  — never decided. Working → dock it ('docked'). Already blocked → leave it
+//               on the wall ('popped'): it was born wanting you.
+//   * 'docked'— we hid it, and we are the only one who may un-hide it: when it blocks,
+//               pop it out. Then 'popped', permanently.
+//   * 'popped'— hands off. Minimize it, restore it, ignore it — the wall never touches
+//               that window again, whatever it does next.
+// It is keyed by wid and persisted for the same reason `pc_wall_minimized` is: a reload
+// must not re-litigate a decision (which, mid-gate, would re-dock the very pane you were
+// answering). It is pruned in dropTerminalPane when the window dies, and disowned below
+// the moment a wid stops being dispatched — tmux recycles `@N` after a server restart,
+// and a stale 'docked' must never leave a HUMAN's window hidden.
+let _autoDock = _loadAutoDock();
+
+function _loadAutoDock() {
+    try { return JSON.parse(localStorage.getItem('pc_wall_autodock') || '{}') || {}; }
+    catch (e) { return {}; }
+}
+function _saveAutoDock() {
+    localStorage.setItem('pc_wall_autodock', JSON.stringify(_autoDock));
+}
+function _forgetAutoDock(wid) {
+    if (!(wid in _autoDock)) return;
+    delete _autoDock[wid];
+    _saveAutoDock();
+}
+
+// Run the machine over one poll's worth of agents. Called from _applyTermStatus, which
+// runs AFTER the tiles exist on both paths in (renderTerminals → buildWall, and
+// termTick → _absorbFreshTerminals) — a tile we cannot see yet is simply decided on the
+// next tick (4s), never dropped.
+function _lazyDock(agents) {
+    if (WALL_TILE_DISPATCHED) return;              // opt-out: tile every worker like a human's
+    if (!Array.isArray(agents)) return;
+    if (_termMode !== 'wall' || !_grid) return;    // the dock is a wall affordance
+    let dirty = false;
+    for (const a of agents) {
+        const wid = a && a.window_id;
+        if (!wid) continue;
+        const state = _autoDock[wid];
+
+        // Not (or no longer) the dispatcher's. A tile we docked on a worker's behalf
+        // must not stay hidden once that wid is someone else's — tmux hands `@N` out
+        // afresh after a server restart, and hiding a human's terminal is the one
+        // failure this feature is not allowed to have.
+        if (!a.dispatched) {
+            if (state === 'docked' && _minimized.has(wid)) restoreFromDock(wid);
+            if (state) { delete _autoDock[wid]; dirty = true; }
+            continue;
+        }
+
+        if (!state) {
+            if (wantsHuman(a)) {
+                _autoDock[wid] = 'popped';         // born blocked — it keeps its tile
+            } else if (_renderedWids.includes(wid)) {
+                minimizePane(wid);                 // working quietly — off the attention surface
+                _autoDock[wid] = 'docked';
+            } else {
+                continue;                          // no tile yet — decide on the next tick
+            }
+            dirty = true;
+        } else if (state === 'docked' && wantsHuman(a)) {
+            // 🗜️ THE POP-OUT. It wants a human, so it has earned the wall.
+            if (_minimized.has(wid)) restoreFromDock(wid);
+            _autoDock[wid] = 'popped';             // one pop, ever — from here it is yours
+            dirty = true;
+        }
+    }
+    if (dirty) _saveAutoDock();
 }
 
 // ---- Taskbar drag-reorder (order drives the wall layout) -------------------
@@ -862,6 +1167,10 @@ const _STATUS_CLASS = { busy: 'working', waiting: 'waiting', idle: 'idle' };
 const _STATUS_TITLE = { busy: 'Working', waiting: 'Waiting for input', idle: 'Idle' };
 
 // Colour the live status dots (pane headers + taskbar chips) from /api/agents.
+// "Waiting" is the shared wantsHuman() predicate, NOT session_status alone: a
+// dispatched worker stopped at a Bash PERMISSION gate is `busy` to `claude agents
+// --json` and blocked in fact, and it is the pane probe (needs_human) that says so.
+// Amber it — it is the same agent the wall is about to pop out of the dock.
 function _colorTermDots(agents) {
     if (!agents) return;
     const by = {};
@@ -869,13 +1178,15 @@ function _colorTermDots(agents) {
     document.querySelectorAll('#panel-terminals .term-status-dot').forEach(dot => {
         const a = by[dot.dataset.statusFor];
         const st = a ? a.session_status : null;
+        const wants = wantsHuman(a);
         dot.classList.remove('working', 'waiting', 'idle');
-        dot.classList.add(_STATUS_CLASS[st] || 'idle');
-        dot.title = _STATUS_TITLE[st] || (a && a.claude_running ? 'Idle' : 'No Claude session');
+        dot.classList.add(wants ? 'waiting' : (_STATUS_CLASS[st] || 'idle'));
+        dot.title = wants ? _STATUS_TITLE.waiting
+            : (_STATUS_TITLE[st] || (a && a.claude_running ? 'Idle' : 'No Claude session'));
         // Flag the host surface (live pane OR taskbar chip) so a "waiting for
         // input" pane gets a yellow border even when minimized to the dock.
         const host = dot.closest('.grid-stack-item-content, .term-pane, .min-chip');
-        if (host) host.classList.toggle('term-waiting', st === 'waiting');
+        if (host) host.classList.toggle('term-waiting', wants);
     });
 }
 
@@ -892,6 +1203,7 @@ function _applyTermStatus(agents) {
         if (st === 'busy' && _paneStatus[a.window_id] !== 'busy') _paneActivity[a.window_id] = now;  // rising edge
         _paneStatus[a.window_id] = st;
     });
+    _lazyDock(agents);   // dock the dispatcher's quiet workers; pop out the ones that block
     _colorTermDots(agents);
     // Wall tick is the fast path (4s) — refresh the tab signal here too so the
     // title/favicon update promptly on the flagship view, not just on the 30s
@@ -915,9 +1227,12 @@ function _applyTermContext(ctx) {
         const c = by[bar.dataset.ctxFor];
         const fill = bar.querySelector('.term-ctx-fill');
         if (!fill) return;
+        // CMX-117: branch + context chips moved OUT of the top .gs-head into this
+        // same subtle bottom bar (_ctxBarHTML) — read/write them from `bar` itself
+        // now, not the header.
         const head = bar.parentElement && bar.parentElement.querySelector('.gs-head');
-        const ctxChip = head && head.querySelector('.gs-ctx');
-        const branchChip = head && head.querySelector('.gs-branch');
+        const ctxChip = bar.querySelector('.gs-ctx');
+        const branchChip = bar.querySelector('.gs-branch');
         if (!c || c.used_pct == null) {
             fill.style.width = '0';
             fill.className = 'term-ctx-fill';
@@ -1014,7 +1329,7 @@ function renderMinDock() {
             const cls = min ? 'min-chip min-chip-minimized' : 'min-chip min-chip-active';
             const icon = min ? '&#128471;' : '&#128469;';   // restore vs minimize glyph
             return `<button class="${cls}" data-wid="${attrEsc(wid)}"
-              onclick="toggleDockChip('${j}')" title="Click to ${min ? 'restore' : 'minimize'} ${attrEsc(_paneTitle(wid))}">
+              onclick="chela.toggleDockChip('${j}')" title="Click to ${min ? 'restore' : 'minimize'} ${attrEsc(_paneTitle(wid))}">
               ${_statusDot(wid)}
               <span class="min-chip-title">${escHtml(_paneTitle(wid))}</span>
               <span class="min-chip-icon" aria-hidden="true">${icon}</span>
@@ -1045,7 +1360,7 @@ function kbToggle() {
 async function renderTerminals() {
     if (!TERMINALS_ON) return;   // terminals disabled — DOM (#term-stage etc.) absent
     let agents = _agentsCache;
-    if (!agents || !agents.length) { agents = await api('/api/agents'); _agentsCache = agents; }
+    if (!agents || !agents.length) { agents = await api('/api/agents'); setAgentsCache(agents); }
     const wids = (agents || []).filter(a => a.online !== false && a.window_id).map(a => a.window_id);
 
     // Wall mode tiles 5+ terminals across a 12-col grid — useless at 375px.
@@ -1115,7 +1430,7 @@ async function renderTerminals() {
         destroyGrid();
         stage.className = 'term-single';
         const sw = sel.value || wids[0];
-        stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}${_ctxBarHTML(sw)}</div>`;
+        stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}${_ctxBarHTML(sw, false)}</div>`;
         _renderedWids = [sw];
     }
     // Seed readiness pollers for whatever placeholders we just rendered.
@@ -1131,6 +1446,7 @@ async function renderTerminals() {
 
     renderMobileSwitcher();   // phone single-mode agent pills (no-op on desktop)
     _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
+    _refreshRooms();          // paint room accents on the first render, not 4s later
 }
 
 // ---- Reactive pane lifecycle ----------------------------------------------
@@ -1196,7 +1512,24 @@ function focusPaneByWid(wid) {
         if (!item) return;
         item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         const ifr = item.querySelector('iframe.term-frame');
-        if (ifr) { try { ifr.contentWindow.focus(); } catch (e) { /* cross-doc guard */ } ifr.focus(); }
+        if (ifr) {
+            try { ifr.contentWindow.focus(); } catch (e) { /* cross-doc guard */ }
+            // CMX-114 (live-broken in the real browser, cmx-112's jsdom guard was
+            // green while the feature was dead): contentWindow.focus() alone does
+            // NOT reliably move the browser's actual keyboard focus into this frame
+            // when switching FROM another focused pane — the border moves but
+            // typing doesn't follow. Focus the iframe ELEMENT itself too, and route
+            // focus into the terminal's own textarea (exposed as `term` by ttyd's
+            // page, same global _paneTermDims already reaches for) so typing lands
+            // in the pane, not just highlights it. Both are called unconditionally
+            // (not one-as-fallback-for-the-other) — that's what actually moves live
+            // browser focus.
+            try { ifr.focus(); } catch (e) { /* cross-doc guard */ }
+            try {
+                const t = ifr.contentWindow.term;
+                if (t && typeof t.focus === 'function') t.focus();
+            } catch (e) { /* cross-doc guard */ }
+        }
         const content = item.querySelector('.grid-stack-item-content') || item;
         content.classList.add('pane-flash');
         setTimeout(() => content.classList.remove('pane-flash'), 1100);
@@ -1291,7 +1624,7 @@ async function termTick() {
     if (_termSuspended) return;   // tab hidden: don't add/reconnect iframes we just released
     let agents;
     try { agents = await api('/api/agents'); } catch (e) { return; }   // transient — try again next tick
-    _agentsCache = agents;
+    setAgentsCache(agents);
     const live = (agents || []).filter(a => a.online !== false && a.window_id).map(a => a.window_id);
     const liveSet = new Set(live);
 
@@ -1312,6 +1645,7 @@ async function termTick() {
     // in case a rename changed a pane's friendly name.
     _applyTermStatus(agents);
     _refreshPaneLabels();
+    _refreshRooms();   // rooms can also be made from the CLI/hooks — the wall follows
     try {
         const ctx = await api('/api/agents/context');
         _applyTermContext(ctx);
@@ -1352,6 +1686,117 @@ function _refreshPaneLabels() {
     }
     renderMobileSwitcher();   // reflect renames / added / dropped agents in the pills
 }
+
+// ---- Keyboard-fast pane switcher (Alt+1..9) + palette-first (Ctrl/⌘+K) -----
+// The first 9 panes in stable wall order get a jump key. Shared by the badge
+// painter and the shortcut handler so "what a tile shows" and "what Alt+N
+// jumps to" can never drift apart. CMX-116: the palette is the primary,
+// discoverable pane switcher — Alt+N stays as the power-user fallback.
+function _switcherOrder() {
+    return _orderedWids(_renderedWids).slice(0, 9);
+}
+
+// Paint (or hide) each tile's index badge. Cheap — only touches tiles whose
+// number actually changed — call freely after anything that can reorder the
+// wall (a build, a surgical append, a pane drop).
+function _refreshPaneIdx() {
+    if (!TERMINALS_ON || _termMode !== 'wall') return;
+    const order = _switcherOrder();
+    $('#term-stage').querySelectorAll('.grid-stack-item .gs-idx').forEach(el => {
+        if (!el.hidden) { el.hidden = true; el.textContent = ''; }
+    });
+    order.forEach((wid, i) => {
+        const el = _gridItemEl(wid);
+        const idx = el && el.querySelector('.gs-idx');
+        if (!idx) return;
+        idx.textContent = String(i + 1);
+        idx.hidden = false;
+    });
+}
+
+// Alt+1..9: jump straight to that pane, tmux-prefix style — no menu, no
+// typing. Ignored while the user is typing anywhere (an input) or while the
+// palette is open, so it never steals a keystroke. Shared with the
+// iframe-side wiring below so "what counts as a switch key" can't drift.
+function _altSwitchWid(e) {
+    if (!TERMINALS_ON || _termMode !== 'wall' || !e.altKey || e.ctrlKey || e.metaKey) return null;
+    if (!/^[1-9]$/.test(e.key)) return null;
+    return _switcherOrder()[Number(e.key) - 1] || null;
+}
+
+// Ctrl/⌘+K — the same combo the parent chrome's palette shortcut uses
+// (nav.js). Matched the same way here so a pane's own keydown can trigger it.
+function _isPaletteKey(e) {
+    return (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K');
+}
+
+// Capture phase for consistency with the iframe-side listener below (which is
+// the load-bearing one — see its comment): harmless here since the parent
+// document IS the dispatch target for these keydowns either way.
+document.addEventListener('keydown', e => {
+    const target = e.target;
+    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+    const wid = _altSwitchWid(e);
+    if (!wid) return;
+    e.preventDefault();
+    focusPaneByWid(wid);
+}, true);
+
+// Once Alt+N focuses a pane, keystrokes land in that ttyd iframe's OWN
+// document — a same-origin iframe's keydown never bubbles to the parent, so
+// the listener above goes deaf to the next Alt+N (or Ctrl/⌘+K) until focus
+// manually returns to the parent. Wire the same shortcuts inside each pane's
+// document too, as soon as it (re)loads. Unlike the parent, no INPUT/TEXTAREA
+// guard is needed: ttyd's DOM holds nothing but the terminal, and its own
+// input IS a textarea (the xterm helper) — excluding it would defeat the
+// whole point.
+//
+// CMX-114 (live-broken in the real browser, cmx-112's jsdom guard was green
+// while the feature was dead): a real keydown targets xterm's helper textarea
+// and xterm handles/consumes it FIRST, so it never reliably reaches a
+// bubble-phase listener on `doc` — only a synthetic `dispatchEvent` does,
+// which is exactly why the old jsdom guard passed on a dead feature. Register
+// in the CAPTURE phase with `stopImmediatePropagation` so this fires BEFORE
+// xterm's own handler, both switching panes/opening the palette AND stopping
+// the stray Alt-digit or Ctrl+K from reaching the shell (xterm otherwise
+// treats Ctrl+K as readline's kill-to-end-of-line).
+//
+// CMX-116: a SET of shortcuts, not a second bespoke injector — Ctrl/⌘+K is
+// the primary, discoverable pane switcher (the palette floats open panes to
+// the top, see nav.js `_openPaneItems`); Alt+1..9 stays as the direct-jump
+// power-user fallback. Was `_wireIframeAltSwitch`, generalized in place so
+// "what shortcuts reach a focused pane" can't drift between the two.
+function _wireIframeShortcuts(ifr) {
+    let doc;
+    try { doc = ifr.contentDocument; } catch (e) { return; }   // cross-doc guard
+    if (!doc) return;
+    doc.addEventListener('keydown', e => {
+        const wid = _altSwitchWid(e);
+        if (wid) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            focusPaneByWid(wid);
+            return;
+        }
+        if (_isPaletteKey(e)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (typeof openPalette === 'function') openPalette();
+        }
+    }, true);
+}
+
+// 'load' doesn't bubble, but it still traverses ancestors during the CAPTURE
+// phase, so a single capturing listener on `document` catches every
+// `.term-frame` iframe's load — including future ones — with no per-tile
+// wiring needed at creation time. Re-running on every load (not just the
+// first) is required: each navigation swaps in a brand-new Document, which
+// discards whatever listener was attached to the one before it.
+document.addEventListener('load', e => {
+    const ifr = e.target;
+    if (!ifr || ifr.tagName !== 'IFRAME' || !ifr.classList.contains('term-frame')) return;
+    _wireIframeShortcuts(ifr);
+}, true);
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
 // the current selection. Options carry the wid as value + the friendly label as
@@ -1402,8 +1847,10 @@ function dropTerminalPane(wid) {
     }
     _renderedWids = _renderedWids.filter(w => w !== wid);
     if (_minimized.has(wid)) { _minimized.delete(wid); _saveMinimized(); }
+    _forgetAutoDock(wid);   // the window is gone: its lazy-dock decision dies with it
     renderMinDock();        // taskbar lists every pane → refresh whenever one drops
     _refitWallForDock();    // taskbar may have shrunk a row → re-fit the wall above it
+    _refreshPaneIdx();      // Alt+N badges (keyboard-fast pane switcher)
     _syncTermSig();
 }
 
@@ -1421,19 +1868,37 @@ function _wallTileHTML(wid, x, y, w, h) {
     const body = _termReady.has(wid)
         ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termSrc(wid)}" title="${escHtml(_paneTitle(wid))}"></iframe>`
         : _termPlaceholder(wid);
-    return `<div class="grid-stack-item" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
+    const pinnedCls = _pinned.has(wid) ? ' pane-pinned' : '';
+    return `<div class="grid-stack-item${pinnedCls}" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
     ${paneHead(wid, true)}
     ${body}
-    ${_ctxBarHTML(wid)}
+    ${_ctxBarHTML(wid, true)}
   </div>
 </div>`;
 }
 
-// Per-tile context-window bar pinned to the tile bottom edge. Filled/coloured by
-// _applyTermContext from /api/agents/context, keyed by window_id.
-function _ctxBarHTML(wid) {
-    return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —"><i class="term-ctx-fill"></i></div>`;
+// Per-tile context-window bar pinned to the tile bottom edge (CMX-117: now the
+// subtle home for branch + context, folded together with the ambient fill strip
+// — previously two top-header chips PLUS this bar). Filled/coloured by
+// _applyTermContext from /api/agents/context, keyed by window_id. CMX-119
+// moved the pane № (Alt+N jump target) chip here, far-right after context;
+// CMX-124 pinned it to the FAR-LEFT instead (№ → branch → context). CMX-127
+// (Liav changed his mind: № reads better far-right) supersedes that — back to
+// branch → context → №, with branch+context LEFT-grouped and № pinned to the
+// bar's far-right edge via its own auto left-margin (see the CSS comment
+// above .gs-idx) — filled in and shown/hidden by _refreshPaneIdx, same as
+// before, just a different resting place; `draggable` gates it exactly like
+// paneHead's own wall-only controls (single mode has no Alt+N switcher to
+// target).
+function _ctxBarHTML(wid, draggable) {
+    const idxNum = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
+    return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
+      <span class="gs-branch" hidden></span>
+      <span class="gs-ctx" hidden></span>
+      ${idxNum}
+      <i class="term-ctx-fill"></i>
+    </div>`;
 }
 
 function buildWall(wids) {
@@ -1513,6 +1978,8 @@ function buildWall(wids) {
     });
     _applyWallLock();   // restore the locked (swap-on-drag) feel across reloads
     renderMinDock();
+    _replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
+    _refreshPaneIdx();      // Alt+N badges (keyboard-fast pane switcher)
 }
 
 // Surgically append new tiles to an existing wall WITHOUT touching the live
@@ -1555,6 +2022,8 @@ async function addWallTiles(wids) {
     _applyWallLock();           // a tile added while locked must inherit no-resize
     renderMinDock();            // taskbar lists every pane → add the new chip(s)
     _refitWallForDock();        // taskbar may have grown a row → re-fit the wall above it
+    _replayRoomAccents();       // a fresh tile already in a room wears its accent at once
+    _refreshPaneIdx();          // Alt+N badges (keyboard-fast pane switcher)
     _syncTermSig();
     return true;
 }
@@ -1657,7 +2126,7 @@ function _buildGridPicker() {
     if (!host.dataset.built) {
         host.innerHTML = WALL_PRESETS.map((p, i) =>
             `<button class="gl-btn" data-preset="${i}" title="${escHtml(p.label)}" aria-label="${escHtml(p.label)}"
-                     onclick="applyGridLayout(${p.cols}, ${p.rows}, this)">${_gridGlyph(p.cols, p.rows)}</button>`
+                     onclick="chela.applyGridLayout(${p.cols}, ${p.rows}, this)">${_gridGlyph(p.cols, p.rows)}</button>`
         ).join('');
         host.dataset.built = '1';
     }
@@ -1788,6 +2257,183 @@ function _doSwap(el) {
     }
 }
 
+// ---- THE WIRE: drag a line between two tiles to put their agents in a room ---
+//
+// The relationship is chela/rooms.py's (typed ledger, active dispatch, loop
+// guards); this is the gesture that CREATES one, and nothing more.
+//
+// Three things make it work on a wall of live iframes:
+//
+//   1. THE IFRAMES MUST NOT EAT THE MOUSE. Same idiom the tile drag already uses:
+//      `.gs-dragging` on the grid → CSS drops `pointer-events` on every
+//      `.term-frame`, so mousemove/elementFromPoint see the TILES. (NOT
+//      `.term-dragging`, which HIDES the terminals — watching them is the point.)
+//   2. THE PORT MUST STEAL THE MOUSEDOWN, or gridstack starts a tile drag under
+//      us (`renamePane` does exactly this).
+//   3. EVERY OTHER TILE SPROUTS A SOCKET while a wire is in flight (`.wire-live`
+//      on the stage). Without that nobody discovers the gesture exists.
+//
+// Room state NEVER reaches `_termSig` — the accent is patched per tile
+// (applyRoomAccents), so wiring two agents together reloads no terminal.
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+let _wire = null;         // in-flight drag: {fromWid, svg, path, stage, gsEl, hoverWid, x1, y1}
+let _roomsCache = null;   // last /api/rooms payload, replayed onto freshly built tiles
+
+function _wireCleanup() {
+    if (!_wire) return;
+    const { svg, stage, gsEl, hoverWid } = _wire;
+    document.removeEventListener('mousemove', _wireMove);
+    document.removeEventListener('mouseup', _wireDrop);
+    document.removeEventListener('keydown', _wireKey);
+    document.removeEventListener('pointercancel', _wireCleanup);
+    window.removeEventListener('blur', _wireCleanup);
+    if (svg) svg.remove();
+    if (stage) stage.classList.remove('wire-live');
+    if (gsEl) gsEl.classList.remove('gs-dragging');
+    if (hoverWid) { const el = _gridItemEl(hoverWid); if (el) el.classList.remove('wire-target'); }
+    const src = _gridItemEl(_wire.fromWid);
+    if (src) src.classList.remove('wire-source');
+    _wire = null;
+}
+
+// Where the pointer is, in #term-stage coordinates (the SVG overlay's box).
+function _wirePoint(e) {
+    const r = _wire.stage.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+function wireDragStart(e, btn, wid) {
+    e.preventDefault();
+    e.stopPropagation();          // or gridstack takes the gesture as a tile drag
+    if (!TERMINALS_ON || _termMode !== 'wall') return;
+    const stage = $('#term-stage');
+    const gsEl = stage && stage.querySelector('.grid-stack');
+    if (!stage || !gsEl) return;
+    _wireCleanup();               // never two wires at once
+    // CMX-117: Wire now lives inside the badge-anchored popover — close it the
+    // instant the drag starts so a `position:fixed` menu never sits open (and
+    // floating on top of the wall) for the whole gesture; it would otherwise
+    // outlive the drag until the next document click.
+    _closeAllPaneOverflows();
+
+    gsEl.classList.add('gs-dragging');   // iframes stop swallowing the mouse
+    stage.classList.add('wire-live');    // every tile sprouts a drop socket
+    const src = _gridItemEl(wid);
+    if (src) src.classList.add('wire-source');
+
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'wire-overlay');
+    const path = document.createElementNS(SVG_NS, 'path');
+    svg.appendChild(path);
+    stage.appendChild(svg);
+
+    // CMX-123: origin from the SOURCE PANE's top-center, not `btn` — `btn` is the
+    // "Wire to…" row inside the badge/⋮ overflow menu, a `position:fixed` portal, so
+    // anchoring there made the wire visibly start from the floating menu instead of
+    // the pane it's wiring from.
+    const b = (src || btn).getBoundingClientRect(), s = stage.getBoundingClientRect();
+    _wire = {
+        fromWid: wid, svg, path, stage, gsEl, hoverWid: null,
+        x1: b.left + b.width / 2 - s.left, y1: b.top - s.top,
+    };
+    _wireMove(e);
+    document.addEventListener('mousemove', _wireMove);
+    document.addEventListener('mouseup', _wireDrop);
+    document.addEventListener('keydown', _wireKey);
+    // A HELD gesture can end where `document` cannot see it: release the button over
+    // devtools, a second monitor, or the OS desktop and the mouseup never arrives —
+    // `.gs-dragging` would then outlive the drag, and it is what puts
+    // `pointer-events: none` on EVERY .term-frame (style.css). The wall would go dead
+    // to clicks for the whole fleet, with nothing to heal it (buildWall runs only when
+    // the fleet changes). So every way out is wired to the same cleanup.
+    document.addEventListener('pointercancel', _wireCleanup);   // touch stolen, devtools
+    window.addEventListener('blur', _wireCleanup);               // dragged off the window
+}
+
+// The wid of the tile under the pointer (or null — empty stage, or a tile with
+// no gs-id, both of which are a CANCEL, not a room).
+function _wireHit(e) {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const item = el && el.closest && el.closest('#term-stage .grid-stack-item');
+    return (item && item.getAttribute('gs-id')) || null;
+}
+
+function _wireMove(e) {
+    if (!_wire) return;
+    // The primary button is no longer down, and we never saw it come up: it was
+    // released off-window (blur can lag, or never fire if the window kept focus while
+    // the cursor left it). The gesture is OVER — and it ended on nothing we saw, so it
+    // is a CANCEL, not a drop: a room the user did not aim at is worse than no room.
+    if (e.buttons !== undefined && !(e.buttons & 1)) return _wireCleanup();
+    const p = _wirePoint(e);
+    _wire.path.setAttribute('d', bezierPath(_wire.x1, _wire.y1, p.x, p.y));
+    const hit = _wireHit(e);
+    const next = resolveDrop(_wire.fromWid, hit).ok ? hit : null;
+    if (next === _wire.hoverWid) return;
+    if (_wire.hoverWid) { const prev = _gridItemEl(_wire.hoverWid); if (prev) prev.classList.remove('wire-target'); }
+    _wire.hoverWid = next;
+    if (next) { const el = _gridItemEl(next); if (el) el.classList.add('wire-target'); }
+}
+
+function _wireKey(e) { if (e.key === 'Escape') _wireCleanup(); }
+
+async function _wireDrop(e) {
+    if (!_wire) return;
+    const fromWid = _wire.fromWid;
+    const drop = resolveDrop(fromWid, _wireHit(e));
+    const anchor = _gridItemEl(fromWid);
+    _wireCleanup();
+    if (!drop.ok) return;         // self / empty stage / no wid → nothing created
+    const head = anchor && anchor.querySelector('.gs-head');
+    try {
+        const res = await api('/api/rooms/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ wids: drop.wids }),
+        });
+        if (!res || res.error) { _termShareToast(head, res && res.error ? res.error : 'wire failed'); return; }
+        _termShareToast(head, `🔌 ${_displayLabel(_nameOfWid(drop.wids[1]))} joined ${res.room}`);
+    } catch (err) {
+        _termShareToast(head, 'wire failed — could not reach the dashboard');
+        return;
+    }
+    await _refreshRooms();
+}
+
+// Click a tile's room badge → leave that room. (The only room *un*-wiring in the
+// UI; the ledger itself is untouched — leaving is a membership edit, not a purge.)
+async function wireRoomClick(btn, wid) {
+    const room = btn && btn.getAttribute('data-room');
+    if (!room) return;
+    try {
+        await api('/api/rooms/leave', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ wid, room }),
+        });
+    } catch (e) { /* transient — the next poll re-reads the truth */ }
+    await _refreshRooms();
+}
+
+// Read the rooms (the SAME dict `chela room status` prints) and PATCH the tiles.
+// Never re-renders the wall: `_termSig` is not consulted and not touched, so no
+// iframe is recreated when membership changes.
+async function _refreshRooms() {
+    if (!TERMINALS_ON || _termMode !== 'wall') return;
+    let status;
+    try { status = await api('/api/rooms'); } catch (e) { return; }   // transient — next tick
+    _roomsCache = status;
+    applyRoomAccents($('#term-stage'), status);
+}
+
+// Repaint accents from cache onto tiles that were just (re)built — a full
+// buildWall or a surgical addWallTiles produces bare tiles, and the room state is
+// already known, so there's no reason to make them wait for the next poll.
+function _replayRoomAccents() {
+    if (_roomsCache) applyRoomAccents($('#term-stage'), _roomsCache);
+}
+
 // Apply a layout to the current wall panes, sized to fill the viewport height
 // with NO bottom gap.
 //
@@ -1813,8 +2459,12 @@ function applyGridLayout(cols, rows, btn) {
     const { rows: total, cellPx } = _wallFill();
     _grid.cellHeight(cellPx);                  // exact divisor so `total` rows fill the height
     // Lay panes out in the taskbar order (pc_pane_order); fall back to current
-    // column-order so an un-reordered wall keeps its existing positions.
+    // column-order so an un-reordered wall keeps its existing positions. Pinned
+    // panes are excluded entirely — a preset reflows every OTHER pane around
+    // them, leaving a pinned tile's x/y/w/h exactly where the user put it
+    // (per-pane layout pin, CMX-108).
     const nodes = _grid.engine.nodes.slice()
+        .filter(n => !_pinned.has(n.id))
         .sort((a, b) => (_orderIndex(a.id) - _orderIndex(b.id)) || (a.x - b.x) || (a.y - b.y));
     const N = nodes.length;
     if (!N) return;
@@ -1891,7 +2541,7 @@ function renderMobileSwitcher() {
     // session" → shareCurrentAgent), so the row no longer carries its own 🔗 button.
     host.innerHTML = wids.map(w => {
         const cls = 'term-pill' + (w === active ? ' active' : '');
-        return `<button class="${cls}" data-wid="${attrEsc(w)}" onclick="switchAgentMobile('${_jsStr(w)}')">
+        return `<button class="${cls}" data-wid="${attrEsc(w)}" onclick="chela.switchAgentMobile('${_jsStr(w)}')">
           ${_statusDot(w)}<span class="term-pill-label">${escHtml(_paneTitle(w))}</span>
         </button>`;
     }).join('');
@@ -2015,3 +2665,10 @@ if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', _kbPin);
     window.visualViewport.addEventListener('scroll', _kbPin);
 }
+
+// --- Stage 0: ES-module exports ---
+export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, renderTerminals, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleWallLock, wireDragStart, wireRoomClick });

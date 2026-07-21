@@ -1,6 +1,6 @@
 [project]
 name = "chelamux"
-version = "0.1.0"
+version = "0.2.0"
 description = "A tiny control plane for a fleet of Claude Code agents on tmux — schedule long-lived ones, dispatch ephemeral ones into git worktrees that open PRs."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,9 +21,20 @@ dashboard = [
     "flask-sock>=0.7",   # same-origin /term/<wid> ttyd reverse proxy (WebSocket)
     "cryptography>=42",  # E2E terminal-share crypto (HKDF-SHA256 + AES-256-GCM); interops with browser WebCrypto
 ]
+
+# The Telegram bridge is an OPTIONAL extra. The core installs and runs without
+# it. Install with `pip install chelamux[telegram]` (or `uv sync --extra
+# telegram`) to enable the Telegram Forum ↔ Claude Code session bridge.
+# Adapted from six-ddc/ccbot (MIT) — see the top-level NOTICE file.
+telegram = [
+    "python-telegram-bot>=21.0",       # Telegram Bot API client for the bridge
+    "Pillow>=10.0",                    # /screenshot: render a tmux pane -> PNG (ANSI colour)
+    "telegramify-markdown>=0.5,<1.0",  # render Claude's Markdown body as real MarkdownV2 entities
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "telegramify-markdown>=0.5,<1.0",  # so format tests exercise real rendering (CI omits [telegram])
 ]
 
 [project.scripts]
