@@ -15,7 +15,7 @@ Each item is a four-field brief the judge can enforce mechanically:
 
 ## Open — CI drives the loop
 
-- [ ] **📱✕ MOBILE TITLE BAR — restore the ✕ close (kill) button (Liav, 2026-07-21).** CMX-130 restored the pane title bar on phones but hid ALL window controls with `.gs-keys { display: none }` in the `@media (max-width: 768px)` block — which also dropped the **✕ close/kill** button. Bring just the ✕ back.
+- [x] **📱✕ MOBILE TITLE BAR — restore the ✕ close (kill) button (Liav, 2026-07-21).** CMX-130 restored the pane title bar on phones but hid ALL window controls with `.gs-keys { display: none }` in the `@media (max-width: 768px)` block — which also dropped the **✕ close/kill** button. Bring just the ✕ back.
 
   **OBJECTIVE.** In the `@media (max-width: 768px)` block of `style.css`: instead of `.gs-keys { display: none }`, **show `.gs-keys`** (its default `display: flex`) and hide only the wall-only **maximize** button (`.gs-max-btn { display: none }`) — maximize doesn't apply to the forced single pane. The **✕ kill button `.gs-kill-btn` stays visible** → the mobile title bar becomes `● · ⋮ · name · … · ✕`. (The minimize button `.gs-min-btn` is only rendered for *draggable wall tiles* — `terminals.js` ~764 gates it on `draggable` — so it's already absent on the mobile single pane; no rule needed for it.) The ✕ still only renders for **non-managed** sessions (existing behavior, `terminals.js` ~759 — managed personas keep no ✕), and its tap→confirm→kill flow (`termKillClick`/`termKillConfirm`) works as-is. If the ✕ looks oversized in the compact 27px mobile bar (`.gs-kill-btn` is `font-size: 12px; padding: 4px 7px`), tighten it slightly on mobile so it fits — small, judgment call.
 
