@@ -1052,27 +1052,49 @@ test('CMX-130: mobile keeps the pane header (shorter) instead of hiding it, and 
         'forced single pane');
 });
 
-test('CMX-130: --term-keybar-h reserves the fixed mobile keybar\'s footprint, and .term-single .term-pane subtracts it', () => {
-    const varDecl = CSS.match(/:root\s*\{\s*--term-keybar-h:\s*([0-9.]+)px/);
-    assert.ok(varDecl, '--term-keybar-h must be declared as a px length on :root — declaring it on a ' +
-        'selector nothing matches leaves the text intact but silently falls back var(--term-keybar-h, 0px) to 0');
-    assert.ok(parseFloat(varDecl[1]) > 0,
-        '--term-keybar-h must not be zeroed — a zeroed var silently disables the reservation, letting the ' +
-        'fixed keybar paint back over the terminal\'s own bottom row');
+test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in .term-single .term-pane\'s height calc, which also subtracts the safe-area inset', () => {
+    // Parse rule blocks (same approach as the .gs-head guard above) so we match on the
+    // ACTUAL variable name, not a text prefix. Prior rounds fell to boundary tricks:
+    // unbinding the declaration from :root (var falls back to 0px), then renaming only
+    // the CONSUMER to `var(--term-keybar-height)` — a longer name a prefix regex
+    // `var(--term-keybar-h` still matches, but which references an UNDECLARED var (→ 0px
+    // fallback) and silently reverts the keybar-overlap fix. Both sides are pinned here
+    // to the exact name `--term-keybar-h`, terminated by a real boundary.
+    const cssNoComments = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+    const ruleBlocks = [];
+    const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+    let m;
+    while ((m = ruleRe.exec(cssNoComments))) ruleBlocks.push({ selector: m[1].trim(), body: m[2] });
+    const hasSelector = (b, sel) => b.selector.split(',').map((s) => s.trim()).includes(sel);
 
-    assert.match(CSS, /\.term-single \.term-pane\s*\{\s*height:\s*calc\(70vh - var\(--term-keybar-h/,
-        '.term-single .term-pane on mobile must shrink its height by var(--term-keybar-h), not a bare 70vh — ' +
-        'a bare 70vh is exactly what let the fixed keybar overlap the pane\'s bottom rows');
+    // --- DECLARATION: --term-keybar-h on :root, px > 0. The `:` terminates the name,
+    //     so `--term-keybar-height:` cannot satisfy `--term-keybar-h\s*:`. ---
+    let declPx = null;
+    for (const b of ruleBlocks.filter((b) => hasSelector(b, ':root'))) {
+        const d = b.body.match(/--term-keybar-h\s*:\s*([0-9.]+)px/);
+        if (d) { declPx = parseFloat(d[1]); break; }
+    }
+    assert.ok(declPx !== null, '--term-keybar-h must be declared on :root as a px length (so the pane inherits it)');
+    assert.ok(declPx > 0, '--term-keybar-h must be > 0 — a zeroed reservation lets the fixed keybar paint over the pane bottom');
 
-    // CMX-130 (safe-area): --term-keybar-h is only the FIXED 47px footprint; the keybar's
-    // own bottom padding is `calc(6px + env(safe-area-inset-bottom))`, so on a
-    // home-indicator phone the bar is 47px + inset tall. The pane's calc must therefore
-    // ALSO subtract env(safe-area-inset-bottom), or the inset's worth of the bottom row
-    // (input box + "auto mode on") stays painted under the bar. Dropping the inset term
-    // silently re-introduces exactly that partial overlap → RED.
-    assert.match(CSS,
-        /\.term-single \.term-pane\s*\{\s*height:\s*calc\(70vh - var\(--term-keybar-h[^)]*\)\s*-\s*env\(safe-area-inset-bottom\)/,
-        '.term-single .term-pane must subtract env(safe-area-inset-bottom) IN ADDITION to var(--term-keybar-h) ' +
-        '— the keybar\'s footprint is 47px PLUS the home-indicator inset, and subtracting only the 47px leaves ' +
-        'the inset\'s worth of the pane\'s bottom row under the fixed bar');
+    // --- CONSUMER: the mobile .term-single .term-pane rule whose height is a calc() ---
+    const paneCalc = ruleBlocks
+        .filter((b) => hasSelector(b, '.term-single .term-pane'))
+        .map((b) => b.body)
+        .find((body) => /height:\s*calc\(/.test(body));
+    assert.ok(paneCalc, '.term-single .term-pane must set height: calc(...) on mobile, not a bare 70vh');
+
+    // Extract every var() by its FULL name (--[\w-]+ is greedy and terminated by `,` or
+    // `)`), then require the exact `--term-keybar-h` — a renamed/longer consumer captures
+    // a different name and fails this, closing the prefix-match hole.
+    const consumedVars = [...paneCalc.matchAll(/var\(\s*(--[\w-]+)\s*(?:,[^)]*)?\)/g)].map((x) => x[1]);
+    assert.ok(consumedVars.includes('--term-keybar-h'),
+        `.term-single .term-pane height must consume var(--term-keybar-h) by exact name — captured: ` +
+        `${consumedVars.join(', ') || '(none)'}. A longer/renamed name references an undeclared var ` +
+        '(→ 0px fallback) and silently reverts the keybar-overlap fix.');
+
+    // --- and it must ALSO subtract the safe-area inset (keybar is 47px PLUS the inset) ---
+    assert.match(paneCalc, /env\(\s*safe-area-inset-bottom\s*\)/,
+        '.term-single .term-pane must ALSO subtract env(safe-area-inset-bottom) — subtracting only the ' +
+        '47px --term-keybar-h leaves the home-indicator inset\'s worth of the bottom row under the fixed bar');
 });
