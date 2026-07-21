@@ -177,6 +177,66 @@ def test_send_key_returns_false_on_tmux_error():
         assert messenger.send_key("@2", "Up") is False
 
 
+# --- resend_enter — retry a dropped Enter WITHOUT re-pasting the seed ----------
+#
+# A late startup redraw (an MCP-auth notice, `gh auth login`, any splash that redraws
+# after the paste) can eat the separately-sent Enter, stranding the prompt text on the
+# ❯ line unsubmitted. Retrying with a full send_tmux would type that prompt a SECOND
+# time on top of itself; resend_enter fires Enter alone.
+
+_PANE_PROMPT = (
+    "╭───────────────────────────────────╮\n"
+    "│ ❯ seed prompt text                │\n"
+    "╰───────────────────────────────────╯\n"
+)
+_PANE_BASH = (
+    "╭───────────────────────────────────╮\n"
+    "│ ! rm -rf /                        │\n"
+    "╰───────────────────────────────────╯\n"
+)
+
+
+def test_resend_enter_sends_only_enter_into_a_prose_prompt():
+    def fake_run(cmd, *a, **kw):
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            return _FakeResult(stdout=_PANE_PROMPT)
+        return _FakeResult()
+
+    with patch.object(messenger.subprocess, "run", side_effect=fake_run) as m, \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.resend_enter("@1") is True
+    assert _cmds(m.call_args_list) == [
+        ["tmux", "capture-pane", "-p", "-t", "chela:@1"],   # the input-mode guard
+        ["tmux", "send-keys", "-t", "chela:@1", "Enter"],
+    ]
+
+
+def test_resend_enter_refuses_an_unsafe_input_mode_and_sends_nothing():
+    def fake_run(cmd, *a, **kw):
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            return _FakeResult(stdout=_PANE_BASH)
+        return _FakeResult()
+
+    with patch.object(messenger.subprocess, "run", side_effect=fake_run) as m, \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.resend_enter("@1") is False
+    # Only the mode-check read happened — no Enter was sent into a bash-input pane.
+    assert _cmds(m.call_args_list) == [["tmux", "capture-pane", "-p", "-t", "chela:@1"]]
+
+
+def test_resend_enter_returns_false_on_tmux_error():
+    import subprocess
+
+    def fake_run(cmd, *a, **kw):
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            return _FakeResult(stdout=_PANE_PROMPT)
+        raise subprocess.CalledProcessError(1, cmd, stderr=b"no server")
+
+    with patch.object(messenger.subprocess, "run", side_effect=fake_run), \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.resend_enter("@1") is False
+
+
 def test_send_escape_sends_escape_without_enter():
     with patch.object(messenger.subprocess, "run", return_value=_FakeResult()) as m, \
             patch.object(messenger.config, "current_session", return_value="chela"):

@@ -18,7 +18,7 @@ from chela.config import (
     judge_max_unknown_retries,
     max_reworks,
 )
-from chela.messenger import send_tmux
+from chela.messenger import resend_enter, send_tmux
 from chela.sources import Task, get_source
 from chela.transcripts import agent_transcript_summary
 from chela.tui_text import sanitize as tui_sanitize
@@ -92,10 +92,13 @@ GIT_TIMEOUT_SECONDS = 30
 GIT_NET_TIMEOUT_SECONDS = 60
 
 # Seed-delivery verification (see _seed_landed / _send_seed). After pasting the
-# prompt we confirm the agent actually picked it up — a late splash redraw can
-# swallow the paste, leaving the agent idle with no task. The agent flips
+# prompt we confirm the agent actually picked it up — a late splash redraw (an
+# MCP-auth notice, `gh auth login`, generically any startup redraw) can land after
+# the paste and swallow its separately-sent Enter, stranding the prompt on the ❯
+# line unsubmitted rather than dropping the paste itself. The agent flips
 # "idle" → "busy" the moment it accepts a prompt, so poll that status for a
-# short window; if it never flips, re-send (capped) instead of hoping.
+# short window; if it never flips, RE-SEND ENTER (capped) — never re-paste, since
+# the text is already sitting there and a second paste would type it twice.
 SEED_CONFIRM_TIMEOUT_SECONDS = 8.0
 SEED_CONFIRM_POLL_INTERVAL = 1.0
 SEED_MAX_SENDS = 3
@@ -1032,12 +1035,21 @@ def _seed_landed(
 def _send_seed(window_id: str, prompt: str, task_id: str) -> bool:
     """Send the seed prompt and confirm it landed, re-sending if it didn't.
 
-    Returns False only when the send itself fails. An unconfirmed seed after
+    Only the FIRST send is a full :func:`send_tmux` (paste + Enter). If the agent
+    is still idle afterwards, the paste itself landed — what got swallowed is the
+    separately-sent Enter, eaten by a late startup redraw (an MCP-auth notice,
+    `gh auth login`, or any other splash that redraws after the paste). Retrying
+    with another full send_tmux would type the prompt a SECOND time on top of the
+    still-unsubmitted text, so every retry after the first re-sends Enter ONLY
+    (:func:`chela.messenger.resend_enter`).
+
+    Returns False only when a send itself fails. An unconfirmed seed after
     SEED_MAX_SENDS is logged and left to the reconcile watchdog rather than
     retried forever — a genuinely broken agent must fail cleanly.
     """
     for send in range(1, SEED_MAX_SENDS + 1):
-        if not send_tmux(window_id, prompt):
+        ok = send_tmux(window_id, prompt) if send == 1 else resend_enter(window_id)
+        if not ok:
             return False
         landed = _seed_landed(window_id)
         if landed is None:
@@ -1052,8 +1064,8 @@ def _send_seed(window_id: str, prompt: str, task_id: str) -> bool:
             return True
         if send < SEED_MAX_SENDS:
             log.warning(
-                "Task %s: agent on %s still idle %.0fs after the seed (paste dropped); "
-                "re-sending (%d/%d)",
+                "Task %s: agent on %s still idle %.0fs after the seed (Enter dropped); "
+                "re-sending Enter (%d/%d)",
                 task_id, window_id, SEED_CONFIRM_TIMEOUT_SECONDS, send + 1, SEED_MAX_SENDS,
             )
             time.sleep(SEED_RESEND_SETTLE_SECONDS)
