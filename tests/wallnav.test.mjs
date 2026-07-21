@@ -992,8 +992,10 @@ test('starting a wire from the badge menu closes the menu immediately, and Escap
 // rules. (a) A prior pass hid `.gs-head` outright on phones reasoning the agent name/
 // status already live in the switcher pills — but that also hid the header's own dot/
 // menu (Share/Orchestrator/Pin), the only place those live on mobile. It's back, just
-// shorter (tighter padding/font) than the desktop bar; the window-control keys (drag/
-// min/max/kill) genuinely don't apply to the forced single pane, so those stay hidden.
+// shorter (tighter padding/font) than the desktop bar; the drag/min/max window-control
+// keys genuinely don't apply to the forced single pane, so those stay hidden — but ×
+// kill is the only way to tear a session down on phones (no wall, no overflow-menu
+// equivalent), so CMX-133 keeps it visible instead of blanket-hiding `.gs-keys`.
 // (b) The persistent v2 keybar is `position: fixed` — it paints OVER whatever flow
 // content sits at the bottom of the viewport rather than pushing it up. `.term-single
 // .term-pane`'s mobile height (70vh) was tuned against the OLD collapsible #term-bar
@@ -1002,7 +1004,7 @@ test('starting a wire from the badge menu closes the menu immediately, and Escap
 // is the fixed bar's measured footprint; the pane must subtract it. Static
 // source-text facts, same honest-scoping as the ctx-bar-h guards above — jsdom can't
 // resolve the rendered overlap itself.
-test('CMX-130: mobile keeps the pane header (shorter) instead of hiding it, and hides only the inapplicable window-control keys', () => {
+test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and hides only the inapplicable window-control keys (not the × kill button)', () => {
     // Parse non-nested rule blocks (selector list + body) out of the raw CSS text.
     // A plain /\.gs-head\s*\{\s*display:\s*none;?\s*\}/ doesNotMatch only catches
     // `.gs-head` as a SOLE selector — folding it into a neighbouring grouped
@@ -1047,9 +1049,23 @@ test('CMX-130: mobile keeps the pane header (shorter) instead of hiding it, and 
     assert.ok(mobile.fs < desktop.fs,
         `the mobile .gs-head font-size (${mobile.fs}px) must be smaller than desktop's (${desktop.fs}px)`);
 
-    assert.match(CSS, /\.gs-keys\s*\{\s*display:\s*none;?\s*\}/,
-        '.gs-keys (drag/min/max/kill) must stay hidden on mobile — those controls do not apply to the ' +
-        'forced single pane');
+    // CMX-133: `.gs-keys` itself must NOT be blanket-hidden any more — that also
+    // swallowed the × kill button, the only way to tear a session down on phones.
+    const hidesGsKeys = ruleBlocks.some((b) =>
+        selectorsIn(b).includes('.gs-keys') && /display:\s*none/.test(b.body));
+    assert.equal(hidesGsKeys, false,
+        '.gs-keys must not be display:none on mobile any more — that hides the × kill button along ' +
+        'with the inapplicable drag/min/max controls');
+
+    // The individual window-control buttons that genuinely don't apply to a forced
+    // single pane (drag has nothing to drag onto, minimize has no dock, maximize is
+    // already full-screen) must still be hidden — but NOT gs-kill-btn.
+    const hidesSelector = (sel) => ruleBlocks.some((b) =>
+        selectorsIn(b).includes(sel) && /display:\s*none/.test(b.body));
+    assert.ok(hidesSelector('.gs-min-btn'), '.gs-min-btn must stay hidden on mobile — no dock to minimize to');
+    assert.ok(hidesSelector('.gs-max-btn'), '.gs-max-btn must stay hidden on mobile — already full-screen');
+    assert.equal(hidesSelector('.gs-kill-btn'), false,
+        '.gs-kill-btn must NOT be hidden on mobile — it is the only way to close/kill a session there');
 });
 
 test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in .term-single .term-pane\'s height calc, which also subtracts the safe-area inset', () => {
