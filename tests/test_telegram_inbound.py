@@ -533,12 +533,13 @@ class _FakeCallbackQuery:
         self.data = data
         self.message = msg
         self.answers: list[str | None] = []
+        self.edits: list[dict] = []
 
     async def answer(self, text=None, **_kw):
         self.answers.append(text)
 
-    async def edit_message_media(self, **_kw):  # pragma: no cover - must not run
-        raise AssertionError("a refresh tap must reply fresh, not edit in place")
+    async def edit_message_media(self, **kw):
+        self.edits.append(kw)
 
 
 class _FakeCallbackUpdate:
@@ -565,7 +566,7 @@ def _key_handler(*, capture, send_key):
     return cbs[-1].callback  # the pattern-less catch-all: _on_key
 
 
-def test_refresh_tap_recaptures_the_pane_and_sends_no_key():
+def test_refresh_tap_edits_the_screenshot_in_place_and_sends_no_key():
     import asyncio
 
     sent: list[str] = []
@@ -580,8 +581,9 @@ def test_refresh_tap_recaptures_the_pane_and_sends_no_key():
     assert sent == [], "🔄 must not type anything into the session"
     query = update.callback_query
     assert query.answers == ["🔄"]
-    # A snapshot came back — a PNG, or the text block when Pillow is absent.
-    assert query.message.photos or query.message.texts
+    # The SAME message's photo is edited in place — no fresh message posted.
+    assert len(query.edits) == 1
+    assert query.message.photos == [] and query.message.texts == []
 
 
 # ── CMX-50: a gate answered from Telegram sends NOTHING to the pane ──────────

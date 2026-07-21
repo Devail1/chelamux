@@ -625,6 +625,32 @@ def build_application(
             log.exception("screenshot render failed for %s; sending text", window_id)
             await _reply_text_snapshot(reply_to, pane)
 
+    async def _edit_screenshot(query, window_id: str, *, delay: float = 0.0) -> None:
+        """Capture ``window_id`` and edit the tapped message's photo in place.
+
+        Shared by both 🔄 refresh buttons (control keyboard + AskUserQuestion)
+        and the keypress-refresh below: edits the SAME message instead of
+        posting a fresh one, so repeated taps don't clutter the topic. Any
+        failure (unchanged pane, stale message, no Pillow) is swallowed — a
+        refresh that can't show something new just no-ops rather than
+        falling back to a duplicate post.
+        """
+        try:
+            from chela.telegram.screenshot import text_to_image
+
+            if delay:
+                await asyncio.sleep(delay)  # let the pane repaint after a keystroke
+            pane = capture(window_id, ansi=True)
+            if not pane.strip():
+                return
+            png = await asyncio.to_thread(text_to_image, pane)
+            await query.edit_message_media(
+                media=InputMediaPhoto(io.BytesIO(png)),
+                reply_markup=_screenshot_keyboard(),
+            )
+        except Exception:  # unchanged pane, stale message, or no Pillow — ignore
+            log.debug("screenshot edit failed for %s", window_id, exc_info=True)
+
     async def _on_screenshot(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
         msg = update.message
         if msg is None:
@@ -795,9 +821,9 @@ def build_application(
         always answered — even when gated out or unknown — so Telegram stops the
         button's spinner. On a successful key press the snapshot is refreshed in
         place (best-effort) so the terminal's reaction is visible. The 🔄 button
-        sends no key: it replies with a FRESH snapshot (like the AskUserQuestion
-        refresh), because an in-place edit of an unchanged pane is rejected by
-        Telegram — a refresh tap must always show something.
+        sends no key: it edits that SAME message's photo in place too (like the
+        AskUserQuestion refresh), so repeated taps don't clutter the topic with
+        fresh screenshots.
         """
         query = update.callback_query
         if query is None:
@@ -817,8 +843,7 @@ def build_application(
             return
         if key_id == _REFRESH_KEY_ID:
             await query.answer("🔄")
-            if msg is not None:
-                await _reply_screenshot(msg, window_id)
+            await _edit_screenshot(query, window_id)
             return
         if action is None:  # bad payload
             await query.answer()
@@ -830,20 +855,7 @@ def build_application(
             return
         # Best-effort refresh so the keypress's effect shows without re-running
         # /screenshot — the whole point of driving the terminal from a phone.
-        try:
-            from chela.telegram.screenshot import text_to_image
-
-            await asyncio.sleep(0.4)  # let the pane repaint after the keystroke
-            pane = capture(window_id, ansi=True)
-            if not pane.strip():
-                return
-            png = await asyncio.to_thread(text_to_image, pane)
-            await query.edit_message_media(
-                media=InputMediaPhoto(io.BytesIO(png)),
-                reply_markup=_screenshot_keyboard(),
-            )
-        except Exception:  # unchanged pane, stale message, or no Pillow — ignore
-            log.debug("snapshot refresh after keypress failed", exc_info=True)
+        await _edit_screenshot(query, window_id, delay=0.4)
 
     def _select_keys_for(window_id: str, target: int) -> "list[str]":
         """Cursor-relative keystrokes to pick option ``target``, re-reading the pane.
@@ -980,7 +992,8 @@ def build_application(
         The keystroke paths remain for an agent whose gate no hook announced (one launched
         before the plugin): a ``qa:<i>`` tap re-reads the live ``❯`` cursor and injects the
         cursor-relative Down/Up presses + Enter (:func:`_select_keys_for`); a
-        ``qa:nav:<key>`` tap sends one key; ``qa:nav:ref`` re-screenshots. Every tap is
+        ``qa:nav:<key>`` tap sends one key; ``qa:nav:ref`` edits the message's photo
+        in place with a fresh capture. Every tap is
         answered so Telegram stops the button's spinner, even when gated out or unrecognised.
         """
         query = update.callback_query
@@ -1012,8 +1025,7 @@ def build_application(
             return
         if kind == "refresh":
             await query.answer("🔄")
-            if msg is not None:
-                await _reply_screenshot(msg, window_id)
+            await _edit_screenshot(query, window_id)
             return
         if kind == "key":
             tmux_key, label = payload
