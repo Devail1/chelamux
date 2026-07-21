@@ -121,15 +121,35 @@ def test_send_seed_caps_retries_on_a_dead_agent():
     assert enter.call_count == dispatcher.SEED_MAX_SENDS - 1
 
 
-def test_send_seed_fails_open_when_status_is_unreadable():
-    """Unverifiable status must not trigger a blind duplicate paste."""
+def test_send_seed_does_not_fail_open_on_unreadable_status():
+    """`_seed_landed` → None (status UNREADABLE — exactly what a window mid-redraw
+    returns, the moment a startup notice ate the Enter) must NOT be treated as
+    landed. The old code failed open here ("assuming the seed landed") and stranded
+    the seed unsubmitted — the residual that bit CMX-133. It must re-send Enter and
+    only succeed once the agent actually goes busy. Restore the fail-open → RED."""
+    landed = iter([None, True])
     with patch.object(dispatcher, "send_tmux", return_value=True) as send, \
-         patch.object(dispatcher, "resend_enter") as enter, \
+         patch.object(dispatcher, "resend_enter", return_value=True) as enter, \
+         patch.object(dispatcher, "_seed_landed", side_effect=lambda _w: next(landed)), \
+         patch.object(dispatcher.time, "sleep"):
+        assert dispatcher._send_seed("@1", "prompt", "abc") is True
+    assert send.call_count == 1              # pasted exactly once
+    enter.assert_called_once_with("@1")      # the None triggered an Enter resend, not a fail-open return
+
+
+def test_send_seed_resends_enter_not_paste_on_persistently_unreadable_status():
+    """Persistently unverifiable status (None every poll — a window stuck mid-redraw)
+    must NOT fail open (the old bug that stranded CMX-133) and must NOT blindly
+    re-PASTE (which would duplicate the prompt). It re-sends ENTER only, capped, then
+    leaves a still-dead window to the reconcile watchdog. Restore the fail-open → RED
+    (enter would then never be called)."""
+    with patch.object(dispatcher, "send_tmux", return_value=True) as send, \
+         patch.object(dispatcher, "resend_enter", return_value=True) as enter, \
          patch.object(dispatcher, "_seed_landed", return_value=None), \
          patch.object(dispatcher.time, "sleep"):
         assert dispatcher._send_seed("@1", "prompt", "abc") is True
-    assert send.call_count == 1
-    enter.assert_not_called()
+    assert send.call_count == 1                               # never re-pastes
+    assert enter.call_count == dispatcher.SEED_MAX_SENDS - 1  # re-sends Enter, capped
 
 
 def test_send_seed_reports_a_failed_send():

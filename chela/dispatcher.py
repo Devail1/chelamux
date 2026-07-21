@@ -1052,12 +1052,17 @@ def _send_seed(window_id: str, prompt: str, task_id: str) -> bool:
         if not ok:
             return False
         landed = _seed_landed(window_id)
+        # `landed is None` means the status was UNREADABLE — which is exactly what a
+        # window mid-redraw returns, the very moment a startup notice (MCP auth, gh
+        # auth, any splash) ate the Enter. The old code FAILED OPEN here ("assuming
+        # the seed landed") and stranded the seed unsubmitted. Treat None like an idle
+        # (False) result instead: fall through and re-send Enter. SEED_MAX_SENDS still
+        # bounds it — a genuinely dead window drops to the reconcile watchdog below.
         if landed is None:
             log.debug(
-                "Task %s: agent status unreadable on %s; assuming the seed landed",
+                "Task %s: agent status unreadable on %s; treating as not-yet-landed, re-sending Enter",
                 task_id, window_id,
             )
-            return True
         if landed:
             if send > 1:
                 log.info("Task %s: seed landed on %s after %d sends", task_id, window_id, send)
