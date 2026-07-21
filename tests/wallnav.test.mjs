@@ -1093,8 +1093,13 @@ test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in 
         `${consumedVars.join(', ') || '(none)'}. A longer/renamed name references an undeclared var ` +
         '(→ 0px fallback) and silently reverts the keybar-overlap fix.');
 
-    // --- and it must ALSO subtract the safe-area inset (keybar is 47px PLUS the inset) ---
-    assert.match(paneCalc, /env\(\s*safe-area-inset-bottom\s*\)/,
-        '.term-single .term-pane must ALSO subtract env(safe-area-inset-bottom) — subtracting only the ' +
-        '47px --term-keybar-h leaves the home-indicator inset\'s worth of the bottom row under the fixed bar');
+    // --- OPERATORS + STRUCTURE: both terms must be SUBTRACTED from a 70vh base, exact names.
+    //     "contains var(--term-keybar-h)" and "contains env(safe-area-inset-bottom)" both stay
+    //     true if you flip a `-` to `+` (adds the footprint → TALLER pane, WORSE overlap) or
+    //     change the 70vh base. Pin the whole shape so the sign and base can't drift. ---
+    assert.match(paneCalc,
+        /height:\s*calc\(\s*70vh\s*-\s*var\(\s*--term-keybar-h\s*(?:,[^)]*)?\)\s*-\s*env\(\s*safe-area-inset-bottom\s*\)\s*\)/,
+        '.term-single .term-pane height must be exactly `calc(70vh - var(--term-keybar-h[, fallback]) - ' +
+        'env(safe-area-inset-bottom))` — base 70vh, BOTH terms SUBTRACTED (a flipped + grows the pane and ' +
+        'worsens the overlap), exact var name. Any of those silently reverts the keybar-overlap fix.');
 });
