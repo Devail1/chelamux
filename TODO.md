@@ -15,6 +15,20 @@ Each item is a four-field brief the judge can enforce mechanically:
 
 ## Open — CI drives the loop
 
+- [ ] **📸🔄 TELEGRAM — the /screenshot 🔄 button must EDIT the screenshot in place, not post a new one (Liav, 2026-07-21).** After `/screenshot`, tapping 🔄 currently posts a *fresh* screenshot message instead of updating the existing one. The user wants the current screenshot updated in place (no new-message clutter).
+
+  **ROOT CAUSE.** In `chela/telegram/inbound.py`, `_on_key`'s `_REFRESH_KEY_ID` branch calls `_reply_screenshot(msg, window_id)` → `reply_photo` = a NEW message. The key-press path directly below it already edits in place with `query.edit_message_media(media=InputMediaPhoto(png), reply_markup=_screenshot_keyboard())`. The 🔄 sends new *deliberately* — the old docstring says "a refresh must always show something [and] an in-place edit of an unchanged pane is rejected by Telegram" — but that's the behavior to change: an unchanged screenshot staying put beats a duplicate.
+
+  **OBJECTIVE.** Make the 🔄 branch **edit the callback message's media in place** (mirror the key-press path: `capture(window_id, ansi=True)` → `text_to_image` → `query.edit_message_media(...)` with `_screenshot_keyboard()`), NOT `_reply_screenshot`. On an **unchanged pane** Telegram raises "message not modified" — **catch it and ignore** (also stale-message / no-Pillow), since `query.answer("🔄")` already stopped the spinner and no update is the correct outcome. Update the branch's docstring to match.
+
+  **BOUNDARIES.** `chela/telegram/inbound.py` — only the `_REFRESH_KEY_ID` branch in `_on_key` (+ docstring). Do NOT change `_reply_screenshot` itself (the `/screenshot` COMMAND still posts the initial photo through it), the key-press edit-in-place path, `_screenshot_keyboard`, or the separate AskUserQuestion (`^qa:`) refresh handler (a parallel candidate, but OUT OF SCOPE — mention it in the PR if you like). PR → `dev`.
+
+  **GUARDS (pytest; corrupt→RED; mock the callback `query`, `capture`, `text_to_image`).**
+    - Tapping 🔄 calls `query.edit_message_media` (in-place) and does NOT call `reply_photo` / `_reply_screenshot` (no new message). Revert to `_reply_screenshot` → RED.
+    - When `edit_message_media` raises Telegram's "message not modified" `BadRequest` (unchanged pane), the handler **swallows it** — no exception propagates and no new message is sent. Make the handler re-raise or fall back to sending a new photo → RED.
+
+  **VERIFY.** In a Telegram topic: `/screenshot`, then tap 🔄 — the SAME message's image updates in place (or stays put if the pane is unchanged); **no second screenshot message appears**.
+
 - [ ] **📩 TELEGRAM BRIDGE — add `/compact` to the "/" menu as a passthrough command (Liav, 2026-07-21).** `/compact` is a **Claude Code** slash command (compacts the session's context), so the bridge should surface it in Telegram's "/" autocomplete and **forward** it to the bridged session — NOT intercept it. Mirrors the existing `/clear`.
 
   **OBJECTIVE.** In `chela/telegram/inbound.py`, add `("compact", "Compact the agent's context (forwarded to Claude Code)")` to **`PASSTHROUGH_COMMANDS`** (the list of Claude-Code commands surfaced in the "/" menu but forwarded via the catch-all send_tmux path — right next to the existing `("clear", …)`). Because it's a passthrough, do NOT register a `CommandHandler` for it and do NOT add it to `BRIDGE_COMMANDS` (that would make the bridge intercept it instead of forwarding to Claude Code). `MENU_COMMANDS` auto-includes it (it's `BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS`), and the existing `resolve_command_for_window` already strips the `@botname` suffix Telegram appends in groups, so `/compact@chelamuxbot` forwards as `/compact`.
