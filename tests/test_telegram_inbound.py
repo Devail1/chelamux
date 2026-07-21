@@ -182,6 +182,13 @@ def test_unknown_own_username_strips_rather_than_drops():
     assert resolve_command_for_window("/clear@chelamuxbot", None) == "/clear"
 
 
+def test_compact_menu_tap_in_a_group_strips_our_bot_suffix():
+    # /compact is a second passthrough command (CMX-134) — the group @botname
+    # suffix must be stripped the same way /clear's is, or Claude Code never
+    # recognises its own command and /compact silently degrades to a no-op prompt.
+    assert resolve_command_for_window("/compact@chelamuxbot", OUR_BOT) == "/compact"
+
+
 def test_clear_is_published_to_menu_but_not_bridge_intercepted():
     # /clear autocompletes (it's in the published MENU_COMMANDS) yet is a
     # passthrough — never a bridge command, so no CommandHandler owns it and it
@@ -192,6 +199,19 @@ def test_clear_is_published_to_menu_but_not_bridge_intercepted():
     assert "clear" not in bridge_names
     assert MENU_COMMANDS == BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS
     assert ("clear", PASSTHROUGH_COMMANDS[0][1]) in MENU_COMMANDS
+
+
+def test_compact_is_published_to_menu_but_not_bridge_intercepted():
+    # /compact mirrors /clear: a Claude Code slash command, so it autocompletes
+    # via the published menu but is never owned by a bridge CommandHandler — it
+    # falls through to Claude Code like any other passthrough command.
+    names = {name for name, _desc in PASSTHROUGH_COMMANDS}
+    assert "compact" in names
+    bridge_names = {name for name, _desc in BRIDGE_COMMANDS}
+    assert "compact" not in bridge_names
+    assert MENU_COMMANDS == BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS
+    compact_desc = next(desc for name, desc in PASSTHROUGH_COMMANDS if name == "compact")
+    assert ("compact", compact_desc) in MENU_COMMANDS
 
 
 # --------------------------------------------------------------------------
