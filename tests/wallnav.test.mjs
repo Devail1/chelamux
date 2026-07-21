@@ -987,3 +987,40 @@ test('starting a wire from the badge menu closes the menu immediately, and Escap
     assert.equal(stage.classList.contains('wire-live'), false, 'Escape must fully clean up the drop-socket state');
     assert.equal(stage.querySelector('.wire-overlay'), null, 'Escape must remove the SVG overlay');
 });
+
+// 18 — CMX-130: MOBILE PANE CHROME. Two bundled fixes in the `@media (max-width: 768px)`
+// rules. (a) A prior pass hid `.gs-head` outright on phones reasoning the agent name/
+// status already live in the switcher pills — but that also hid the header's own dot/
+// menu (Share/Orchestrator/Pin), the only place those live on mobile. It's back, just
+// shorter (tighter padding/font) than the desktop bar; the window-control keys (drag/
+// min/max/kill) genuinely don't apply to the forced single pane, so those stay hidden.
+// (b) The persistent v2 keybar is `position: fixed` — it paints OVER whatever flow
+// content sits at the bottom of the viewport rather than pushing it up. `.term-single
+// .term-pane`'s mobile height (70vh) was tuned against the OLD collapsible #term-bar
+// and never updated for the new fixed bar, so it painted over the pane's own bottom
+// row (the input box + the TUI's own "auto mode on" status line). `--term-keybar-h`
+// is the fixed bar's measured footprint; the pane must subtract it. Static
+// source-text facts, same honest-scoping as the ctx-bar-h guards above — jsdom can't
+// resolve the rendered overlap itself.
+test('CMX-130: mobile keeps the pane header (shorter) instead of hiding it, and hides only the inapplicable window-control keys', () => {
+    assert.doesNotMatch(CSS, /\.gs-head\s*\{\s*display:\s*none;?\s*\}/,
+        '.gs-head must not be flatly hidden on mobile — the header\'s dot/menu (Share/Orchestrator/Pin) ' +
+        'must stay reachable on phones');
+    assert.match(CSS, /\.gs-head\s*\{\s*padding:\s*[0-9.]+px\s+[0-9.]+px;\s*font-size:\s*[0-9.]+px;\s*\}/,
+        'the mobile .gs-head override must shrink its padding/font-size to a shorter bar than desktop');
+    assert.match(CSS, /\.gs-keys\s*\{\s*display:\s*none;?\s*\}/,
+        '.gs-keys (drag/min/max/kill) must stay hidden on mobile — those controls do not apply to the ' +
+        'forced single pane');
+});
+
+test('CMX-130: --term-keybar-h reserves the fixed mobile keybar\'s footprint, and .term-single .term-pane subtracts it', () => {
+    const varDecl = CSS.match(/--term-keybar-h:\s*([0-9.]+)px/);
+    assert.ok(varDecl, '--term-keybar-h must be declared as a px length');
+    assert.ok(parseFloat(varDecl[1]) > 0,
+        '--term-keybar-h must not be zeroed — a zeroed var silently disables the reservation, letting the ' +
+        'fixed keybar paint back over the terminal\'s own bottom row');
+
+    assert.match(CSS, /\.term-single \.term-pane\s*\{\s*height:\s*calc\(70vh - var\(--term-keybar-h/,
+        '.term-single .term-pane on mobile must shrink its height by var(--term-keybar-h), not a bare 70vh — ' +
+        'a bare 70vh is exactly what let the fixed keybar overlap the pane\'s bottom rows');
+});
