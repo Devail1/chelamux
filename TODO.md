@@ -15,6 +15,19 @@ Each item is a four-field brief the judge can enforce mechanically:
 
 ## Open — CI drives the loop
 
+- [ ] **📱✕ MOBILE TITLE BAR — restore the ✕ close (kill) button (Liav, 2026-07-21).** CMX-130 restored the pane title bar on phones but hid ALL window controls with `.gs-keys { display: none }` in the `@media (max-width: 768px)` block — which also dropped the **✕ close/kill** button. Bring just the ✕ back.
+
+  **OBJECTIVE.** In the `@media (max-width: 768px)` block of `style.css`: instead of `.gs-keys { display: none }`, **show `.gs-keys`** (its default `display: flex`) and hide only the wall-only **maximize** button (`.gs-max-btn { display: none }`) — maximize doesn't apply to the forced single pane. The **✕ kill button `.gs-kill-btn` stays visible** → the mobile title bar becomes `● · ⋮ · name · … · ✕`. (The minimize button `.gs-min-btn` is only rendered for *draggable wall tiles* — `terminals.js` ~764 gates it on `draggable` — so it's already absent on the mobile single pane; no rule needed for it.) The ✕ still only renders for **non-managed** sessions (existing behavior, `terminals.js` ~759 — managed personas keep no ✕), and its tap→confirm→kill flow (`termKillClick`/`termKillConfirm`) works as-is. If the ✕ looks oversized in the compact 27px mobile bar (`.gs-kill-btn` is `font-size: 12px; padding: 4px 7px`), tighten it slightly on mobile so it fits — small, judgment call.
+
+  **BOUNDARIES.** `style.css` `@media (max-width: 768px)` block only. Do NOT change the **desktop** `.gs-keys`/`.gs-win-ctl` (min/max/kill stay on desktop), the kill/min/max JS (`terminals.js`), the CMX-130 title-bar height (`.gs-head` padding/font) or the pane-height cutoff fix (`.term-single .term-pane` calc), or the bottom bar. PR → `dev`.
+
+  **GUARDS (`wallnav.test.mjs`; corrupt→RED — SOURCE-STRUCTURE parse of the `max-width: 768px` media block).**
+    - Within that media block, `.gs-keys` is **NOT** `display: none` (the control container is shown). Re-add `.gs-keys { display: none }` → RED.
+    - Within that block, `.gs-max-btn` **IS** `display: none` (maximize hidden on the single pane). Remove it → RED.
+    - Within that block, **no rule hides `.gs-kill-btn`** (the ✕ must stay). Add `.gs-kill-btn { display: none }` → RED.
+
+  **VERIFY (live, mobile viewport).** The pane title bar shows the **✕ close button** at the right — with **no** maximize/minimize — and tapping it opens the kill-confirm. (Doubles as a live check that the submit-hardening holds: this agent should self-submit with no manual nudge.)
+
 - [x] **🐛⌨️ HARDEN THE SEED SUBMIT — re-send Enter (not re-paste) so any startup redraw can't strand the prompt (Liav, 2026-07-21; residual after CMX-131).** CMX-131's MCP isolation removed the "MCP servers need authentication" notice, but dispatched windows STILL hang: a SECOND late startup notice (`gh auth login for PR status`) — and generically ANY startup redraw — lands after `send_tmux` (`messenger.py`) pastes the prompt and **eats its separately-sent Enter**, stranding the seed on the `❯` line unsubmitted. Confirmed live: judge launched with `--strict-mcp-config` (no MCP notice) yet still sat idle with the prompt typed.
 
   **ROOT CAUSE.** `_send_seed` (`dispatcher.py` ~1031) mis-recovers: on "agent still idle after the seed" it re-sends the **whole prompt** via `send_tmux` again — but the paste almost always DID land, so re-pasting **doubles the prompt** in the input box; and when `_seed_landed` reads the session status as `None` (unreadable — which is exactly what a mid-redraw window returns) it **fails open** ("assuming the seed landed"), so the Enter is never re-sent. The real failure is "paste landed, Enter eaten," but the code treats it as "paste dropped."
