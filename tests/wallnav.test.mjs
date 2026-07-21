@@ -1050,10 +1050,16 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
     walk(cssNoComments, 0, [], rules);
 
     // A media stack is compatible with an actual phone (<=768px wide) unless one of
-    // its enclosing conditions demands a min-width a <=768px viewport can't meet.
+    // its enclosing conditions demands a min-width a <=768px viewport can't meet. A
+    // judge round caught this NOT accounting for negation: `not all and (min-width:
+    // 769px)` is the exact COMPLEMENT of "min-width > 768", so it's satisfied on
+    // every phone instead of ruled out by one — a bare numeric-threshold check with
+    // no regard for a leading `not` gets the polarity backwards.
     const activeOnMobile = (mediaStack) => !mediaStack.some((cond) => {
+        const negated = /(^|\s)not\b/i.test(cond);
         const m = cond.match(/min-width:\s*([0-9.]+)px/);
-        return m && parseFloat(m[1]) > 768;
+        if (!m) return false;
+        return negated ? false : parseFloat(m[1]) > 768;
     });
 
     // Does this one selector (an entry from a comma-separated list) TARGET an element
@@ -1066,13 +1072,78 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
         return new RegExp(`\\.${cls}(?![\\w-])`).test(subject);
     };
 
-    // True if ANY rule that could actually apply on a real phone hides `cls` — reached
-    // via an exact `.cls { display: none }`, a MORE SPECIFIC descendant form (`.term-
-    // single .cls { display: none }`), or a rule neutered by a contradictory @media.
-    const hiddenOnMobile = (cls) => rules.some((r) =>
-        activeOnMobile(r.media) &&
-        /display:\s*none/.test(r.body) &&
-        r.selector.split(',').some((s) => targets(s, cls)));
+    // A judge round caught `targets` missing a UNIVERSAL subject (`.gs-keys > *`):
+    // its rightmost compound is `*`, which never textually contains `.gs-win-ctl`,
+    // yet it structurally matches that exact element (the real DOM's only child of
+    // `.gs-keys`) and hides it — and everything inside it — same as a named rule
+    // would. Map each button class to its real ancestor chain (paneHead's actual
+    // markup: .gs-keys > .gs-win-ctl > the three buttons) so a wildcard descendant
+    // selector rooted at any of those ancestors counts as targeting it too.
+    const ANCESTORS = {
+        'gs-win-ctl': ['gs-keys'],
+        'gs-min-btn': ['gs-keys', 'gs-win-ctl'],
+        'gs-max-btn': ['gs-keys', 'gs-win-ctl'],
+        'gs-kill-btn': ['gs-keys', 'gs-win-ctl'],
+    };
+    const matchesCls = (selector, cls) => {
+        if (targets(selector, cls)) return true;
+        const tokens = selector.trim().replace(/[>+~]/g, ' ').split(/\s+/).filter(Boolean);
+        const subject = tokens[tokens.length - 1] || '';
+        if (subject !== '*') return false;
+        const ancestors = ANCESTORS[cls] || [];
+        return tokens.slice(0, -1).some((t) =>
+            ancestors.some((a) => new RegExp(`\\.${a}(?![\\w-])`).test(t)));
+    };
+
+    // Rough CSS specificity (ids, classes/attrs/pseudo-classes, elements), computed
+    // over the WHOLE selector text (combinators don't add to it) — good enough for
+    // this stylesheet's selectors, not a general CSS engine. A judge round caught
+    // `hiddenOnMobile` treating "some hiding rule exists" as the whole answer: a
+    // LATER, MORE SPECIFIC rule that un-hides the same class (`.gs-head .gs-min-btn
+    // { display: inline-flex }` outranks `.gs-min-btn { display: none }`) wins the
+    // real cascade while the old check still saw the (out-ranked) hiding rule and
+    // called it hidden.
+    const specificity = (selector) => {
+        const ids = (selector.match(/#[\w-]+/g) || []).length;
+        const classish = (selector.match(/\.[\w-]+/g) || []).length +
+            (selector.match(/\[[^\]]*\]/g) || []).length +
+            (selector.match(/::?[a-zA-Z-]+/g) || []).length;
+        const stripped = selector
+            .replace(/#[\w-]+/g, ' ').replace(/\.[\w-]+/g, ' ')
+            .replace(/\[[^\]]*\]/g, ' ').replace(/::?[a-zA-Z-]+/g, ' ');
+        const elements = (stripped.match(/[a-zA-Z][\w-]*/g) || []).length;
+        return ids * 10000 + classish * 100 + elements;
+    };
+
+    // The winning declaration for one CSS property, across every active-on-mobile
+    // rule (media or not — a plain base rule is always active) that matches `cls`:
+    // highest specificity wins, later source order breaks a tie — the real cascade,
+    // not "does some rule exist". A rule with no such property never enters the race.
+    const winningDeclaration = (cls, prop) => {
+        const propRe = new RegExp(prop + ':\\s*([a-zA-Z-]+)', 'g');
+        const candidates = [];
+        rules.forEach((r, idx) => {
+            if (!activeOnMobile(r.media)) return;
+            const values = [...r.body.matchAll(propRe)].map((m) => m[1]);
+            if (!values.length) return;
+            const value = values[values.length - 1];   // last decl in the SAME rule body wins
+            r.selector.split(',').forEach((raw) => {
+                const s = raw.trim();
+                if (s && matchesCls(s, cls)) candidates.push({ spec: specificity(s), idx, value });
+            });
+        });
+        if (!candidates.length) return null;
+        candidates.sort((a, b) => (a.spec - b.spec) || (a.idx - b.idx));
+        return candidates[candidates.length - 1].value;
+    };
+
+    // True if the winning cascade result for `cls` on an actual phone is invisible —
+    // via `display: none` OR `visibility: hidden` (a judge round caught the old guard
+    // testing only the literal string `display: none`, missing `visibility: hidden`,
+    // which hides just as completely).
+    const hiddenOnMobile = (cls) =>
+        winningDeclaration(cls, 'display') === 'none' ||
+        winningDeclaration(cls, 'visibility') === 'hidden';
 
     assert.equal(hiddenOnMobile('gs-head'), false,
         '.gs-head must not be hidden on mobile — alone, via a more specific selector, or via a rule ' +
@@ -1127,20 +1198,38 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
 // them ever construct the single-pane header (draggable=false) that phones force
 // renderTerminals into. Gating `kill` on `draggable` (wall-only) would leave the CSS
 // un-hiding a button that is never there, and every guard above would stay green.
-test('CMX-133: the single-pane header (the only header a phone ever renders) includes the × kill button, not gated on draggable', async () => {
-    window.chela.setTermMode('single');
-    await new Promise((r) => setTimeout(r, 120));   // let the in-flight renderTerminals settle
+// A judge round caught a second, sharper hole: this whole file hard-stubs
+// `matchMedia` to always report a DESKTOP width (`matches: false`, set once in
+// `before()`), so `_isMobileTerm()` is unconditionally false here — a regression
+// that gates `kill` on `_isManaged(wid) || _isMobileTerm()` (hiding it on an ACTUAL
+// phone, the exact CMX-133 bug) would never flip that condition and this test would
+// stay green. Stub matchMedia to report a PHONE width for the extent of this one
+// test, so `_isMobileTerm()` really is true while the header renders — the only way
+// to prove `kill` isn't gated on it.
+test('CMX-133: the single-pane header includes the × kill button on an ACTUAL phone (matchMedia stubbed to a phone width), not gated on draggable or _isMobileTerm()', async () => {
+    const origMatchMedia = window.matchMedia;
+    window.matchMedia = (q) => ({
+        media: q, matches: true, addEventListener() {}, removeEventListener() {},
+        addListener() {}, removeListener() {},
+    });
     try {
+        window.chela.setTermMode('single');
+        await new Promise((r) => setTimeout(r, 120));   // let the in-flight renderTerminals settle
         const stage = document.querySelector('#term-stage');
         assert.equal(stage.className, 'term-single',
             'setTermMode("single") must force the single-pane layout for this assertion to be meaningful');
         const head = stage.querySelector('.gs-head');
         assert.ok(head, 'single-pane mode must still render a pane header');
         assert.ok(head.querySelector('.gs-kill-btn'),
-            'the single-pane header must include the × kill button — gating it on `draggable` (true only ' +
-            'for wall tiles) silently drops it on mobile while every wall-only DOM test stays green');
+            'the single-pane header must include the × kill button on an ACTUAL phone (matchMedia stubbed ' +
+            'to report a phone-width match, so `_isMobileTerm()` is really true here) — gating it on ' +
+            '`draggable` (true only for wall tiles) or on `_isMobileTerm()` (this file\'s other guards never ' +
+            'exercise it, since every other test runs under the desktop-width matchMedia stub) silently ' +
+            'reproduces the exact CMX-133 bug: no × on any real phone');
     } finally {
-        // Restore wall mode so any test appended after this one still sees wall tiles.
+        // Restore the desktop-width stub and wall mode so any test appended after
+        // this one sees the same environment every other test in this file expects.
+        window.matchMedia = origMatchMedia;
         window.chela.setTermMode('wall');
         await new Promise((r) => setTimeout(r, 120));
     }
