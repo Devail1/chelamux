@@ -29,7 +29,7 @@ Each item is a four-field brief the judge can enforce mechanically:
 
   **VERIFY.** In a Telegram topic: `/screenshot`, then tap 🔄 — the SAME message's image updates in place (or stays put if the pane is unchanged); **no second screenshot message appears**.
 
-- [ ] **📩 TELEGRAM BRIDGE — add `/compact` to the "/" menu as a passthrough command (Liav, 2026-07-21).** `/compact` is a **Claude Code** slash command (compacts the session's context), so the bridge should surface it in Telegram's "/" autocomplete and **forward** it to the bridged session — NOT intercept it. Mirrors the existing `/clear`.
+- [x] **📩 TELEGRAM BRIDGE — add `/compact` to the "/" menu as a passthrough command (Liav, 2026-07-21).** `/compact` is a **Claude Code** slash command (compacts the session's context), so the bridge should surface it in Telegram's "/" autocomplete and **forward** it to the bridged session — NOT intercept it. Mirrors the existing `/clear`.
 
   **OBJECTIVE.** In `chela/telegram/inbound.py`, add `("compact", "Compact the agent's context (forwarded to Claude Code)")` to **`PASSTHROUGH_COMMANDS`** (the list of Claude-Code commands surfaced in the "/" menu but forwarded via the catch-all send_tmux path — right next to the existing `("clear", …)`). Because it's a passthrough, do NOT register a `CommandHandler` for it and do NOT add it to `BRIDGE_COMMANDS` (that would make the bridge intercept it instead of forwarding to Claude Code). `MENU_COMMANDS` auto-includes it (it's `BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS`), and the existing `resolve_command_for_window` already strips the `@botname` suffix Telegram appends in groups, so `/compact@chelamuxbot` forwards as `/compact`.
 
