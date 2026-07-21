@@ -15,7 +15,7 @@ Each item is a four-field brief the judge can enforce mechanically:
 
 ## Open — CI drives the loop
 
-- [ ] **📸🔄 TELEGRAM — the /screenshot 🔄 button must EDIT the screenshot in place, not post a new one (Liav, 2026-07-21).** After `/screenshot`, tapping 🔄 currently posts a *fresh* screenshot message instead of updating the existing one. The user wants the current screenshot updated in place (no new-message clutter).
+- [x] **📸🔄 TELEGRAM — the /screenshot 🔄 button must EDIT the screenshot in place, not post a new one (Liav, 2026-07-21).** After `/screenshot`, tapping 🔄 currently posts a *fresh* screenshot message instead of updating the existing one. The user wants the current screenshot updated in place (no new-message clutter).
 
   **ROOT CAUSE.** In `chela/telegram/inbound.py`, `_on_key`'s `_REFRESH_KEY_ID` branch calls `_reply_screenshot(msg, window_id)` → `reply_photo` = a NEW message. The key-press path directly below it already edits in place with `query.edit_message_media(media=InputMediaPhoto(png), reply_markup=_screenshot_keyboard())`. The 🔄 sends new *deliberately* — the old docstring says "a refresh must always show something [and] an in-place edit of an unchanged pane is rejected by Telegram" — but that's the behavior to change: an unchanged screenshot staying put beats a duplicate.
 
