@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import importlib
 import json
+import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from chela.sources import Task
 from chela.workflow import WorkflowDef
 
 
@@ -75,13 +78,13 @@ def test_settings_mode_used_when_workflow_has_no_cmd(mods):
     _, userconfig, dispatcher = mods
     userconfig.set_(dispatcher.PERMISSION_MODE_KEY, "plan")
     assert dispatcher.resolve_agent_cmd(_wf()) == (
-        "claude --permission-mode plan --model sonnet", "settings")
+        "claude --strict-mcp-config --permission-mode plan --model sonnet", "settings")
 
 
 def test_built_in_default_when_nothing_set(mods):
     _, _, dispatcher = mods
     assert dispatcher.resolve_agent_cmd(_wf()) == (
-        "claude --permission-mode auto --model sonnet", "default")
+        "claude --strict-mcp-config --permission-mode auto --model sonnet", "default")
 
 
 def test_blank_workflow_cmd_falls_through_to_settings(mods):
@@ -89,6 +92,107 @@ def test_blank_workflow_cmd_falls_through_to_settings(mods):
     _, userconfig, dispatcher = mods
     userconfig.set_(dispatcher.PERMISSION_MODE_KEY, "plan")
     assert dispatcher.resolve_agent_cmd(_wf(cmd="   "))[1] == "settings"
+
+
+# --- CMX-131: dispatched windows never inherit the operator's MCP servers ----
+#
+# `--strict-mcp-config` with no `--mcp-config` given means the launched CLI loads NO
+# MCP servers at all. Without it, a dispatched window inherits the OPERATOR's own
+# `~/.claude.json` `mcpServers` (browser automation, docs search, ...), and each
+# server's connect handshake races the TUI's own readiness glyph: a late redraw can
+# swallow the pasted seed prompt's Enter, leaving the agent idle forever with the
+# prompt typed but unsubmitted.
+
+def test_settings_and_default_commands_carry_strict_mcp_config(mods):
+    """⚖️ Both the Settings-sourced and the built-in-default command isolate MCP.
+    Corrupt (drop `--strict-mcp-config` from AGENT_BASE_CMD) → this goes RED."""
+    _, userconfig, dispatcher = mods
+    assert "--strict-mcp-config" in dispatcher.resolve_agent_cmd(_wf())[0]
+    userconfig.set_(dispatcher.PERMISSION_MODE_KEY, "plan")
+    assert "--strict-mcp-config" in dispatcher.resolve_agent_cmd(_wf())[0]
+
+
+def test_judge_command_also_carries_strict_mcp_config(mods):
+    """⚖️ The judge shares the exact same built-in command, so it isolates MCP too.
+    Corrupt (make role="judge" skip the flag) → RED."""
+    _, _, dispatcher = mods
+    cmd, _ = dispatcher.resolve_agent_cmd(_wf(), "judge")
+    assert "--strict-mcp-config" in cmd
+
+
+def test_workflow_cmd_is_not_forced_to_isolate_mcp(mods):
+    """An explicit `agent.cmd` override stays authoritative — no flag is injected
+    over it, matching the existing precedence rule (test_workflow_cmd_wins)."""
+    _, _, dispatcher = mods
+    cmd, src = dispatcher.resolve_agent_cmd(_wf(cmd="claude --permission-mode acceptEdits"))
+    assert "--strict-mcp-config" not in cmd
+    assert src == "workflow"
+
+
+# --- the WIRING: the actual spawn commands carry the isolation flag ---------
+#
+# The pure resolver above proves the LOGIC; this proves the WIRING — that the string
+# `_launch_agent` actually sends to tmux via send-keys (for both a first dispatch and
+# the judge) is the isolated one, not just what the resolver would return in theory.
+
+def _conn(dispatcher) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    return dispatcher.ensure_schema(conn)
+
+
+def _sent_claude_cmd(run_mock) -> str | None:
+    for c in run_mock.call_args_list:
+        argv = c.args[0] if c.args else c.kwargs.get("args")
+        if isinstance(argv, list) and "send-keys" in argv:
+            for a in argv:
+                if isinstance(a, str) and a.startswith("claude"):
+                    return a
+    return None
+
+
+def test_spawn_sends_a_strict_mcp_config_command_to_tmux(mods, tmp_path):
+    """🔧 End to end through `_spawn`: the command tmux actually receives isolates MCP.
+    Corrupt (revert AGENT_BASE_CMD to plain "claude") → RED."""
+    _, _, dispatcher = mods
+    wf = _wf()
+    task = Task(id="abc123", title="do a thing", file=str(tmp_path / "TODO.md"),
+                line_number=7, raw="- [ ] do a thing")
+    conn = _conn(dispatcher)
+    with patch.object(dispatcher, "ensure_worktree", return_value=(tmp_path / "wt", False)), \
+         patch.object(dispatcher.subprocess, "run") as run, \
+         patch.object(dispatcher, "_kill_windows_named"), \
+         patch.object(dispatcher, "_new_window", return_value="@9"), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_send_seed", return_value=True):
+        assert dispatcher._spawn(wf, task, attempt=1, conn=conn) is True
+    sent = _sent_claude_cmd(run)
+    assert sent is not None and "--strict-mcp-config" in sent
+
+
+def test_spawn_judge_sends_a_strict_mcp_config_command_to_tmux(mods, tmp_path):
+    """🔴 End to end through `_spawn_judge`: same isolation, the judge's own launch.
+    Corrupt (revert AGENT_BASE_CMD to plain "claude") → RED."""
+    _, _, dispatcher = mods
+    wf = _wf()
+    conn = _conn(dispatcher)
+    conn.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status, branch_name, "
+        "task_number, pr_url) VALUES (?, ?, ?, 'awaiting_review', ?, ?, ?)",
+        ("abc123", str(wf.path), "do a thing", "cmx-1", 1, "https://x/pull/1"),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM runs WHERE task_id=?", ("abc123",)).fetchone()
+    wt = tmp_path / "judge-abc123"
+    with patch.object(dispatcher, "detached_worktree", return_value=(wt, True)), \
+         patch.object(dispatcher.subprocess, "run") as run, \
+         patch.object(dispatcher, "_kill_windows_named"), \
+         patch.object(dispatcher, "_new_window", return_value="@9"), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_send_seed", return_value=True):
+        assert dispatcher._spawn_judge(wf, row, "deadbeef", conn) is True
+    sent = _sent_claude_cmd(run)
+    assert sent is not None and "--strict-mcp-config" in sent
 
 
 # --- fail closed ------------------------------------------------------------
@@ -110,7 +214,7 @@ def test_bad_stored_mode_fails_closed_to_default(mods, bad):
     userconfig._save({dispatcher.PERMISSION_MODE_KEY: bad})
     assert dispatcher.settings_permission_mode() is None
     assert dispatcher.resolve_agent_cmd(_wf()) == (
-        "claude --permission-mode auto --model sonnet", "default")
+        "claude --strict-mcp-config --permission-mode auto --model sonnet", "default")
 
 
 def test_corrupt_config_file_does_not_crash_the_daemon(mods):
@@ -133,7 +237,7 @@ def test_mode_persists_across_a_daemon_restart(mods):
     importlib.reload(dispatcher)
     assert dispatcher.settings_permission_mode() == "acceptEdits"
     assert dispatcher.resolve_agent_cmd(_wf())[0] == \
-        "claude --permission-mode acceptEdits --model sonnet"
+        "claude --strict-mcp-config --permission-mode acceptEdits --model sonnet"
 
 
 # --- the write path (POST /api/config) --------------------------------------

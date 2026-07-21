@@ -212,7 +212,17 @@ DEFAULT_PERMISSION_MODE = "auto"
 # The dashboard-writable key in ~/.chela/config.json (see chela.userconfig).
 PERMISSION_MODE_KEY = "agent_permission_mode"
 
-AGENT_BASE_CMD = "claude"
+# CMX-131: `--strict-mcp-config` with no `--mcp-config` given means the launched CLI
+# loads ZERO MCP servers — never the OPERATOR's own (`~/.claude.json` `mcpServers`,
+# meant for an interactive human session: browser automation, docs search, ...). A
+# dispatched window inherits that global config by default, and each server's connect
+# handshake races the TUI's own startup: a late connect (or failed-connect) redraw can
+# land AFTER the readiness glyph flips, swallowing the pasted seed prompt's Enter. The
+# agent then sits idle forever with the prompt typed but never submitted — the
+# "unattended dispatch hangs" bug this isolates. Applies to every dispatched window
+# (coding agent, rework, judge) via this one constant; an explicit `agent.cmd` in
+# WORKFLOW.md still bypasses it entirely (see resolve_agent_cmd's precedence).
+AGENT_BASE_CMD = "claude --strict-mcp-config"
 
 # --- coding-agent model (CMX-91) --------------------------------------------
 #
