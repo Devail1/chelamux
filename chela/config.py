@@ -338,6 +338,29 @@ ORCHESTRATOR_ENABLED = os.environ.get("CHELA_ORCHESTRATOR", "false").strip().low
 ACTOR_ENV = "CHELA_ACTOR"
 AUTO_ORCHESTRATOR_ACTOR = "auto-orchestrator"
 
+# 🔀⚠️ AUTO-MERGE (see chela.automerge) — the FULLY-UNATTENDED merge sweep (CMX-138). Today
+# every autonomous merge path — a human's own `chela merge`, and the auto-launched orchestrator
+# (which needs a human's attended-lease, see ACTOR_ENV above) — has a human either doing it or
+# watching it. This is the one path that does not: on every daemon tick it hands each
+# judge-`clean` `awaiting_review` run straight to `contract.merge`, the SAME gate (base/CI/judge/
+# mergeable, still no `--force`, still no NEVER-line override) a human or the lease-gated
+# orchestrator would use — it just does not wait for either to be watching.
+#
+# ⛔ Defaults OFF, hard: a fresh/external install must never autonomously merge anything with
+# nobody attending. This is a deliberate, narrow loosening of "no fully-unattended auto-merge"
+# (docs/ESCALATION_CONTRACT.md) that only an operator who has explicitly read the risk and set
+# this env var opts into — never a default, never inferred, never widened by any other flag.
+AUTO_MERGE_ENABLED = os.environ.get("CHELA_AUTO_MERGE", "false").strip().lower() in (
+    "true", "1", "yes", "on",
+)
+# The actor stamp `chela.automerge` passes to `contract.merge` — deliberately NOT
+# AUTO_ORCHESTRATOR_ACTOR. That actor string is what makes `contract.merge` require a live
+# attended-lease (its clause 2); auto-merge is meant to run with nobody attending at all, so it
+# needs its own name — one that never accidentally satisfies (or is satisfied by) the
+# orchestrator's lease gate, and that the event log can tell apart from a human or the
+# orchestrator when someone later asks "why did this merge itself."
+AUTO_MERGE_ACTOR = "auto-merge"
+
 _dispatch_raw = os.environ.get("CHELA_DISPATCH_WORKFLOWS", "")
 DISPATCH_WORKFLOWS = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()

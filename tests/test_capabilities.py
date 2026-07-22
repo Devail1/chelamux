@@ -112,6 +112,36 @@ def test_no_state_file_means_unknown_not_off(chela_dir):
     assert capabilities.live_capability("dispatch") is None
 
 
+def test_auto_merge_is_off_by_default_and_silent(monkeypatch, caplog):
+    """OFF must not warn about auto-merge specifically — even though a *different* capability
+    (the empty-workflows dispatcher, exercised elsewhere in this file) legitimately does."""
+    caps = list(_caps(monkeypatch, []).values())
+    auto_merge = next(c for c in caps if c.key == "auto_merge")
+    assert auto_merge.on is False
+    with caplog.at_level(logging.INFO):
+        capabilities.announce(caps, logging.getLogger("chela.test.automerge-off"))
+    assert not [r for r in caplog.records
+                if r.levelno >= logging.WARNING and auto_merge.label in r.getMessage()]
+
+
+def test_auto_merge_on_is_a_LOUD_warning_not_a_quiet_info(monkeypatch, caplog):
+    """🔴 The whole point of `warn_when_on`: a risky capability staying ON must announce itself
+    as loudly as a needed one going silently OFF. Corrupt `announce()` to fall through to the
+    plain `log.info` branch for an ON+warn_when_on capability and this goes red."""
+    monkeypatch.setattr(config, "AUTO_MERGE_ENABLED", True)
+    caps = list(_caps(monkeypatch, []).values())
+    auto_merge = next(c for c in caps if c.key == "auto_merge")
+    assert auto_merge.on is True
+    assert auto_merge.warn_when_on is True
+
+    log = logging.getLogger("chela.test.automerge-on")
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        capabilities.announce(caps, log)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(auto_merge.label in r.getMessage() for r in warnings)
+    assert any("UNATTENDED" in r.getMessage() for r in warnings)
+
+
 def test_a_daemon_that_boots_into_a_held_queue_announces_the_hold(chela_dir, monkeypatch, caplog):
     """A dispatcher that is ON and claiming nothing is a disabled subsystem wearing a
     green badge. Booting into a held queue and logging only "ON" is the nine-hour silence
