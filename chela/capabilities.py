@@ -47,12 +47,14 @@ class Capability:
     detail: str                     # what is (or is not) happening, in a sentence
     fix: str = ""                   # how to turn it on — only meaningful when off
     warn_when_off: bool = False     # OFF is a foot-gun, not a preference: log WARNING
+    warn_when_on: bool = False      # ON is the risk (e.g. auto-merge) — log WARNING, not INFO
     extra: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {"key": self.key, "label": self.label, "on": self.on,
                 "detail": self.detail, "fix": self.fix,
-                "warn_when_off": self.warn_when_off, **self.extra}
+                "warn_when_off": self.warn_when_off, "warn_when_on": self.warn_when_on,
+                **self.extra}
 
 
 def effective() -> list[Capability]:
@@ -141,6 +143,23 @@ def effective() -> list[Capability]:
                     else "CHELA_TERMINALS_ENABLED=false — the dashboard serves no terminals"),
             fix="unset CHELA_TERMINALS_ENABLED=false",
         ),
+        # 🔀⚠️ CMX-138. The one fully-UNATTENDED merge path in the whole system — see
+        # chela.automerge. OFF is the safe, expected state for every install but an operator's
+        # own; ON gets its own WARNING line every boot (never just an INFO), because "silence
+        # never means off" cuts both ways — a risky capability staying quietly ON is the same
+        # blind spot as a needed one silently OFF.
+        Capability(
+            key="auto_merge", label="🔀⚠️ Auto-merge", on=config.AUTO_MERGE_ENABLED,
+            detail=("UNATTENDED — every judge-clean `awaiting_review` PR is squash-merged on "
+                    "this daemon's own tick, with NO human attending and NO attended-lease "
+                    "required (contract.merge's base/CI/mergeable gate still applies in full; "
+                    "only the human-attendance requirement is gone). Trust your judge."
+                    if config.AUTO_MERGE_ENABLED else
+                    "off — merging stays a human or attended-orchestrator act (the safe default)"),
+            fix="unset CHELA_AUTO_MERGE — OFF is the recommended default for every install "
+                "but an operator's own",
+            warn_when_on=True,
+        ),
     ]
 
 
@@ -163,6 +182,8 @@ def announce(caps: list[Capability], log: logging.Logger) -> None:
                 "released (`chela dispatch --resume`); reconciliation continues.",
                 cap.label, held.get("summary", "held"),
             )
+        elif cap.on and cap.warn_when_on:
+            log.warning("%s: ON — %s", cap.label, cap.detail)
         elif cap.on:
             log.info("%s: ON — %s", cap.label, cap.detail)
         elif cap.warn_when_off:

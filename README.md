@@ -402,6 +402,7 @@ the dashboard *publishes* the port it bound.
 | `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick interval in the daemon (s) |
 | `CHELA_MAX_REWORKS` | `2` | How many times a PR that fails review is sent back to its agent before the run stops at `needs_human`. `0` = no rework at all |
 | `CHELA_JUDGE` | `true` | The **judge** — the adversarial pass on a green PR (corrupt each guard, re-run the suite, block only on one that survives). One extra agent per PR head, so this is the fleet-wide off switch; a workflow turns it off for itself with `judge: {enabled: false}`, and it is off anyway without a `judge.test_cmd` |
+| `CHELA_AUTO_MERGE` | `false` | ⚠️ **Fully-UNATTENDED auto-merge — opt-in risk.** On every daemon tick, squash-merges every judge-`clean` `awaiting_review` PR through the same `chela merge` gate (base branch, CI green, MERGEABLE — still no override) with **no human attending and no attended-lease required**. Off by default on every install, including yours, until you turn it on: this trusts your judge configuration completely, unattended. See [docs/ESCALATION_CONTRACT.md](docs/ESCALATION_CONTRACT.md) (v0.5) before enabling |
 | `CHELA_AGENT_CMD` | `claude` | Launch command for the dashboard Start button |
 | `CHELA_PROJECTS_DIR` | `~/projects` | Folder scanned for git repos to suggest in the Launch sidebar (also settable in dashboard **Settings → Projects folder**, which wins) |
 | `CHELA_NOTIFY_URL` | — | Needs-input notification target (ntfy / Telegram / webhook) |
