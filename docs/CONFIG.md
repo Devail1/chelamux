@@ -203,3 +203,17 @@ umask 077 && printf 'TELEGRAM_BOT_TOKEN=…\nTELEGRAM_CHAT_ID=…\n' > ~/.chela/
 ```
 
 Neither file is ever committed. Both live under `$CHELA_DIR`, which is not the repo.
+
+### Don't clone someone else's `chela.env`
+
+`chela.env` carries no secrets, but it does carry **per-install** values — start from
+`examples/chela.env` and set your own rather than copying another machine's verbatim:
+
+- **`CHELA_NOTIFY_URL`** is *yours*. An `ntfy.sh` topic is **unauthenticated** — anyone who
+  knows the topic name can both read and publish to it — so it is effectively a shared
+  secret. Inherit someone else's and your update / needs-input pings land on *their* phone
+  (and they can read yours). Pick your own topic (`ntfy.sh/chela-<you>-<random>`).
+- **Paths** (`CHELA_DISPATCH_WORKFLOWS`, …) are absolute and machine-specific — another
+  install's point at directories you don't have.
+- `CHELA_COLLAB_RELAY` is the one value that is *meant* to be shared: two installs that want
+  to share terminal sessions point at the **same** relay on purpose.
