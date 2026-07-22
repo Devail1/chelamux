@@ -1906,6 +1906,34 @@ def set_judge_state(task_id: str, state: str, detail: str = "") -> None:
         conn.commit()
 
 
+def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
+    """Free a finished run's worktree the moment its row goes `done` — not later.
+
+    `done` is terminal and NOT_CLAIMABLE: nothing ever reworks a `done` row, so nothing
+    ever needs its worktree again once this fires. Previously nothing removed it at all
+    — the worktree.py:35 comment on `ensure_worktree`'s collision handling made it sound
+    like `_prune_done_rows` was the thing freeing this disk, but that function only ever
+    dropped the DB row; a run's checkout + `.venv`/`node_modules` sat on disk until
+    someone noticed and hand-pruned it (51 orphaned worktrees / 2.6 GB, 2026-07-22).
+    Removing it here, right as the row commits to `done`, closes that gap.
+
+    Only the worktree DIRECTORY goes — the branch is left alone on purpose:
+    `_max_existing_task_number` scans branches (local + remote) to avoid handing out a
+    task_number that's still spoken for, and a live branch with no worktree is exactly
+    the state it already expects to see for a finished run.
+
+    Best-effort and silent on an already-gone worktree (hand-cleaned, or this task never
+    got past `claimed`): `remove_worktree` itself only warns on failure, it never raises.
+    """
+    worktree_path = row["worktree_path"]
+    if not worktree_path:
+        return
+    wt_path = Path(worktree_path)
+    if not wt_path.is_dir():
+        return
+    remove_worktree(repo_path, wt_path)
+
+
 def _prune_done_rows(
     conn: sqlite3.Connection,
     workflow_path: str,
@@ -2194,6 +2222,8 @@ def tick(workflow_path: str | Path) -> dict:
                 conn.execute(
                     "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
                 )
+                conn.commit()
+                _cleanup_worktree_on_done(wf.path.parent, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (PR merged)", row["task_id"])
@@ -2219,6 +2249,8 @@ def tick(workflow_path: str | Path) -> dict:
                     "UPDATE runs SET status='done', pr_url=COALESCE(?, pr_url) WHERE task_id=?",
                     (pr_url, row["task_id"]),
                 )
+                conn.commit()
+                _cleanup_worktree_on_done(wf.path.parent, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (removed from source, window killed)", row["task_id"])
@@ -2248,6 +2280,8 @@ def tick(workflow_path: str | Path) -> dict:
                         "pr_state=COALESCE(?, pr_state) WHERE task_id=?",
                         (_now(), pr_url, pr_state, row["task_id"]),
                     )
+                    conn.commit()
+                    _cleanup_worktree_on_done(wf.path.parent, row)
                     summary["reconciled_done"] += 1
                     log.info("Task %s done (removed from source, merged PR found)", row["task_id"])
                     continue
