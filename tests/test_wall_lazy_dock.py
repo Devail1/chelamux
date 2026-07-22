@@ -24,11 +24,14 @@ answer is load-bearing), not one per window in the fleet.
 """
 from __future__ import annotations
 
+import json
+import time
 from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
 
+from chela import event_log, sessions, transcripts
 from chela.dashboard import app as dash
 
 # A fleet: one human session, two dispatcher-spawned workers.
@@ -135,6 +138,50 @@ def test_ai_title_surfaces_on_the_agent_row(client):
         agents = _by_wid(client)
     assert agents["@9"]["ai_title"] == "Fix the flaky wall test"
     assert agents["@9"]["recap"] == "recap text"   # the two ride together, neither replaces the other
+
+
+def test_ai_title_does_not_collide_for_two_windows_sharing_one_cwd(client, tmp_path, monkeypatch):
+    """CMX-153, through the real HTTP route (no `agent_transcript_summary` mock this
+    time): two windows launched in the SAME directory (Anthony's ``anthony_work`` twice)
+    must not read back the SAME title. `/api/agents` has `window_id` sitting right next
+    to this lookup (~app.py:205-206) — this pins that it is actually USED, not just
+    threaded through unused plumbing."""
+    cwd = "/home/x/anthony_work"
+    root = tmp_path / "projects"
+    root.mkdir()
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", root)
+
+    sid_a = "11111111-1111-1111-1111-111111111111"
+    sid_b = "22222222-2222-2222-2222-222222222222"
+    proj = root / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True)
+    for sid, title in ((sid_a, "Refactor the risk engine"), (sid_b, "Write the onboarding docs")):
+        (proj / f"{sid}.jsonl").write_text(json.dumps({"type": "ai-title", "aiTitle": title}) + "\n")
+
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {
+        "@1": sessions.Pane(wid="@1", path=cwd, command="claude", claude_pid=1,
+                             launched_in=cwd, started=time.time() - 60),
+        "@2": sessions.Pane(wid="@2", path=cwd, command="claude", claude_pid=2,
+                             launched_in=cwd, started=time.time() - 60),
+    })
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=sid_a)
+    event_log.append("hook.pre_tool_use", "b", wid="@2", session_id=sid_b)
+
+    with (
+        patch("chela.discovery.get_all_windows",
+              return_value={"anthony_work": "@1", "anthony_work (2)": "@2"}),
+        patch("chela.dispatcher.list_runs", return_value=[]),
+        patch("chela.agent_manager.session_status_map",
+              return_value={"by_pid": {}, "cwd_by_pid": {}}),
+        patch("chela.agent_manager.claude_pid", return_value=None),
+        patch("chela.agent_manager.window_type", return_value="claude"),
+        patch("chela.scheduler.list_tasks", return_value=[]),
+        patch("chela.messenger.capture_pane", return_value=""),
+    ):
+        agents = _by_wid(client)
+
+    assert agents["@1"]["ai_title"] == "Refactor the risk engine"
+    assert agents["@2"]["ai_title"] == "Write the onboarding docs"
 
 
 def test_claudes_own_waiting_needs_no_pane_capture(client):

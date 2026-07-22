@@ -51,7 +51,7 @@ def test_agent_doc_description_is_recap_and_surfaces_pr(monkeypatch):
     """An agent concept should read as *what it's doing* (recap) with its project +
     latest PR as frontmatter, so a glance card is insight, not boilerplate."""
     monkeypatch.setattr(discovery, "get_window_cwd", lambda name: "/home/x/nautilus")
-    monkeypatch.setattr(okf.transcripts, "_resolve_agent_transcript", lambda name: "/t.jsonl")
+    monkeypatch.setattr(okf.transcripts, "_resolve_agent_transcript", lambda name, window_id=None: "/t.jsonl")
     monkeypatch.setattr(okf.transcripts, "latest_recap",
                         lambda p: "# heading\n\nRefactored the risk engine and opened a PR.\nmore detail")
     monkeypatch.setattr(okf.transcripts, "latest_pr",
@@ -64,9 +64,26 @@ def test_agent_doc_description_is_recap_and_surfaces_pr(monkeypatch):
     assert cwd == "/home/x/nautilus"
 
 
+def test_agent_doc_passes_its_window_id_to_transcript_resolution(monkeypatch):
+    """`_agent_doc` already receives `wid` as an argument — it must hand it to
+    `_resolve_agent_transcript` rather than letting that call fall back to the
+    name/cwd guess, or two same-cwd agent concepts collide on one transcript
+    (CMX-153, same fix as the dashboard route)."""
+    monkeypatch.setattr(discovery, "get_window_cwd", lambda name: "/home/x/nautilus")
+    seen = {}
+
+    def fake_resolve(name, window_id=None):
+        seen["window_id"] = window_id
+        return None
+
+    monkeypatch.setattr(okf.transcripts, "_resolve_agent_transcript", fake_resolve)
+    okf._agent_doc("nautilus", "@11", {})
+    assert seen["window_id"] == "@11"
+
+
 def test_agent_doc_description_falls_back_without_recap(monkeypatch):
     monkeypatch.setattr(discovery, "get_window_cwd", lambda name: "/home/x/proj")
-    monkeypatch.setattr(okf.transcripts, "_resolve_agent_transcript", lambda name: None)
+    monkeypatch.setattr(okf.transcripts, "_resolve_agent_transcript", lambda name, window_id=None: None)
     md, _ = okf._agent_doc("shell-1", "@2", {})
     m = _meta(md)
     assert m["description"] == "agent window shell-1 @ proj"
@@ -105,7 +122,7 @@ def test_export_bundle_is_conformant(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler, "list_tasks", lambda: [task])
     monkeypatch.setattr(discovery, "get_all_windows", lambda: {"agent-1": "@1"})
     monkeypatch.setattr(discovery, "get_window_cwd", lambda name: "/home/x/proj")
-    monkeypatch.setattr(okf.transcripts, "_resolve_agent_transcript", lambda name: None)
+    monkeypatch.setattr(okf.transcripts, "_resolve_agent_transcript", lambda name, window_id=None: None)
 
     out = tmp_path / "knowledge"
     summary = okf.export_bundle(out_dir=out)
