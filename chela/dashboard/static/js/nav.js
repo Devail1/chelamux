@@ -239,6 +239,14 @@ function _agentRowHtml(a) {
     const stCls = _SIDEBAR_DOT_CLASS[dot] || 'idle';
     const label = _agentLabel(a);
 
+    // Open-on-wall cue: a click on this row RESTORES a hidden pane vs merely
+    // FOCUSES one already visible — worth knowing before you click. True only when
+    // the pane is both rendered (on the wall, not just known to /api/agents) and not
+    // minimized to the dock.
+    const onWall = TERMINALS_ON && !!a.window_id
+        && _renderedWids.includes(a.window_id) && !_minimized.has(a.window_id);
+    const wallCls = onWall ? ' on-wall' : '';
+
     const c = a.window_id ? _ctxByWid[a.window_id] : null;
     let ctxChip = '';
     if (c && c.used_pct != null) {
@@ -265,7 +273,9 @@ function _agentRowHtml(a) {
 
     const type = _agentType(a);
 
-    return `<div class="agent-row rich${active}" data-agent="${attrEsc(a.name)}" onclick="chela.selectAgent(this.dataset.agent)">
+    const wallTitle = onWall ? ' title="Open on the wall"' : '';
+    return `<div class="agent-row rich${active}${wallCls}" data-agent="${attrEsc(a.name)}"${wallTitle}
+        onclick="chela.selectAgent(this.dataset.agent)">
         <span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>
         <span class="ar-type ${attrEsc(type)}" title="${attrEsc(type)} window">${escHtml(_typeGlyph(type))}</span>
         <div class="ar-main">
