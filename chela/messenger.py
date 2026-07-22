@@ -186,6 +186,35 @@ def send_tmux(window_id: str, text: str) -> bool:
         return False
 
 
+def resend_enter(window_id: str) -> bool:
+    """Re-send Enter ONLY — for a seed whose paste landed but whose separately-sent
+    Enter was swallowed by a late TUI redraw (a startup notice, an MCP handshake,
+    generically any splash that redraws after the paste). Returns True on success.
+
+    Deliberately not a re-:func:`send_tmux`: the prompt text is already sitting,
+    unsubmitted, on the ``❯`` input line, so re-running the full send would type it
+    a SECOND time on top of itself rather than just submitting what is already
+    there. Guarded by the same :func:`refuses_paste` check as ``send_tmux`` — the
+    pane may have flipped to bash-input mode since the original paste, and an
+    Enter sent into that mode would execute whatever now sits on that line.
+    """
+    target = f"{config.current_session()}:{window_id}"
+    unsafe = refuses_paste(window_id)
+    if unsafe:
+        log.warning("refusing to send Enter into %s: its prompt is in %s-input mode",
+                    window_id, unsafe)
+        return False
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "Enter"],
+            check=True, capture_output=True,
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        log.error("tmux send-keys Enter failed for %s: %s", window_id, e.stderr.decode())
+        return False
+
+
 def capture_pane(window_id: str, *, ansi: bool = False) -> str:
     """Return the visible text of ``window_id``'s tmux pane (empty on error).
 

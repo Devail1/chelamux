@@ -182,6 +182,13 @@ def test_unknown_own_username_strips_rather_than_drops():
     assert resolve_command_for_window("/clear@chelamuxbot", None) == "/clear"
 
 
+def test_compact_menu_tap_in_a_group_strips_our_bot_suffix():
+    # /compact is a second passthrough command (CMX-134) — the group @botname
+    # suffix must be stripped the same way /clear's is, or Claude Code never
+    # recognises its own command and /compact silently degrades to a no-op prompt.
+    assert resolve_command_for_window("/compact@chelamuxbot", OUR_BOT) == "/compact"
+
+
 def test_clear_is_published_to_menu_but_not_bridge_intercepted():
     # /clear autocompletes (it's in the published MENU_COMMANDS) yet is a
     # passthrough — never a bridge command, so no CommandHandler owns it and it
@@ -192,6 +199,19 @@ def test_clear_is_published_to_menu_but_not_bridge_intercepted():
     assert "clear" not in bridge_names
     assert MENU_COMMANDS == BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS
     assert ("clear", PASSTHROUGH_COMMANDS[0][1]) in MENU_COMMANDS
+
+
+def test_compact_is_published_to_menu_but_not_bridge_intercepted():
+    # /compact mirrors /clear: a Claude Code slash command, so it autocompletes
+    # via the published menu but is never owned by a bridge CommandHandler — it
+    # falls through to Claude Code like any other passthrough command.
+    names = {name for name, _desc in PASSTHROUGH_COMMANDS}
+    assert "compact" in names
+    bridge_names = {name for name, _desc in BRIDGE_COMMANDS}
+    assert "compact" not in bridge_names
+    assert MENU_COMMANDS == BRIDGE_COMMANDS + PASSTHROUGH_COMMANDS
+    compact_desc = next(desc for name, desc in PASSTHROUGH_COMMANDS if name == "compact")
+    assert ("compact", compact_desc) in MENU_COMMANDS
 
 
 # --------------------------------------------------------------------------
@@ -533,12 +553,13 @@ class _FakeCallbackQuery:
         self.data = data
         self.message = msg
         self.answers: list[str | None] = []
+        self.edits: list[dict] = []
 
     async def answer(self, text=None, **_kw):
         self.answers.append(text)
 
-    async def edit_message_media(self, **_kw):  # pragma: no cover - must not run
-        raise AssertionError("a refresh tap must reply fresh, not edit in place")
+    async def edit_message_media(self, **kw):
+        self.edits.append(kw)
 
 
 class _FakeCallbackUpdate:
@@ -565,7 +586,7 @@ def _key_handler(*, capture, send_key):
     return cbs[-1].callback  # the pattern-less catch-all: _on_key
 
 
-def test_refresh_tap_recaptures_the_pane_and_sends_no_key():
+def test_refresh_tap_edits_the_screenshot_in_place_and_sends_no_key():
     import asyncio
 
     sent: list[str] = []
@@ -580,8 +601,9 @@ def test_refresh_tap_recaptures_the_pane_and_sends_no_key():
     assert sent == [], "🔄 must not type anything into the session"
     query = update.callback_query
     assert query.answers == ["🔄"]
-    # A snapshot came back — a PNG, or the text block when Pillow is absent.
-    assert query.message.photos or query.message.texts
+    # The SAME message's photo is edited in place — no fresh message posted.
+    assert len(query.edits) == 1
+    assert query.message.photos == [] and query.message.texts == []
 
 
 # ── CMX-50: a gate answered from Telegram sends NOTHING to the pane ──────────

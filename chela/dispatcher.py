@@ -18,7 +18,7 @@ from chela.config import (
     judge_max_unknown_retries,
     max_reworks,
 )
-from chela.messenger import send_tmux
+from chela.messenger import resend_enter, send_tmux
 from chela.sources import Task, get_source
 from chela.transcripts import agent_transcript_summary
 from chela.tui_text import sanitize as tui_sanitize
@@ -92,13 +92,19 @@ GIT_TIMEOUT_SECONDS = 30
 GIT_NET_TIMEOUT_SECONDS = 60
 
 # Seed-delivery verification (see _seed_landed / _send_seed). After pasting the
-# prompt we confirm the agent actually picked it up — a late splash redraw can
-# swallow the paste, leaving the agent idle with no task. The agent flips
+# prompt we confirm the agent actually picked it up — a late splash redraw (an
+# MCP-auth notice, `gh auth login`, generically any startup redraw) can land after
+# the paste and swallow its separately-sent Enter, stranding the prompt on the ❯
+# line unsubmitted rather than dropping the paste itself. The agent flips
 # "idle" → "busy" the moment it accepts a prompt, so poll that status for a
-# short window; if it never flips, re-send (capped) instead of hoping.
+# short window; if it never flips, RE-SEND ENTER (capped) — never re-paste, since
+# the text is already sitting there and a second paste would type it twice.
 SEED_CONFIRM_TIMEOUT_SECONDS = 8.0
 SEED_CONFIRM_POLL_INTERVAL = 1.0
-SEED_MAX_SENDS = 3
+# 5 sends × ~8s each ≈ 40s of resend coverage — enough to outlast a slow startup
+# notice (MCP-auth, `gh auth login`) whose redraw window can run 20-30s before the
+# pane accepts keystrokes again. (Was 3 ≈ 24s, which gave up too early — CMX-133.)
+SEED_MAX_SENDS = 5
 SEED_RESEND_SETTLE_SECONDS = 1.0
 
 # Claude Code TUI ready indicators, matched against `tmux capture-pane -p`.
@@ -212,7 +218,17 @@ DEFAULT_PERMISSION_MODE = "auto"
 # The dashboard-writable key in ~/.chela/config.json (see chela.userconfig).
 PERMISSION_MODE_KEY = "agent_permission_mode"
 
-AGENT_BASE_CMD = "claude"
+# CMX-131: `--strict-mcp-config` with no `--mcp-config` given means the launched CLI
+# loads ZERO MCP servers — never the OPERATOR's own (`~/.claude.json` `mcpServers`,
+# meant for an interactive human session: browser automation, docs search, ...). A
+# dispatched window inherits that global config by default, and each server's connect
+# handshake races the TUI's own startup: a late connect (or failed-connect) redraw can
+# land AFTER the readiness glyph flips, swallowing the pasted seed prompt's Enter. The
+# agent then sits idle forever with the prompt typed but never submitted — the
+# "unattended dispatch hangs" bug this isolates. Applies to every dispatched window
+# (coding agent, rework, judge) via this one constant; an explicit `agent.cmd` in
+# WORKFLOW.md still bypasses it entirely (see resolve_agent_cmd's precedence).
+AGENT_BASE_CMD = "claude --strict-mcp-config"
 
 # --- coding-agent model (CMX-91) --------------------------------------------
 #
@@ -994,25 +1010,31 @@ def _seed_landed(
     window_id: str,
     timeout: float = SEED_CONFIRM_TIMEOUT_SECONDS,
     poll: float = SEED_CONFIRM_POLL_INTERVAL,
-) -> bool | None:
+) -> bool:
     """Did the seed prompt actually reach the agent?
 
-    True once the agent flips to "busy" (it only does that with a prompt in
-    hand), False if it is still "idle" when the window closes (the paste was
-    swallowed — a splash redraw landing after the ready glyph does exactly
-    that), and None when the status is unreadable, in which case delivery is
-    unverifiable and the caller should fail open rather than re-send blindly.
+    True once the agent flips to "busy" (it only does that with a prompt in hand);
+    False if it never goes busy within `timeout` — the paste's Enter was swallowed
+    (a splash redraw landing after the ready glyph does exactly that) and needs a
+    resend. Transient unreadable reads (None from `_agent_status`, a window
+    mid-redraw) are treated as "not yet" and polled through, NOT reported as a
+    verdict — bailing on the first one burned the resend budget before the notice
+    cleared (the CMX-133 hang).
 
     A freshly-booted agent reads "idle" until the seed makes it busy, so this
-    watches for the idle → busy transition, not for "is it idle right now".
+    watches for the → busy transition, not for "is it idle right now".
     """
     deadline = time.monotonic() + timeout
     while True:
-        status = _agent_status(window_id)
-        if status is None:
-            return None
-        if status == "busy":
+        if _agent_status(window_id) == "busy":
             return True
+        # Anything other than "busy" — "idle", "waiting", or None (status UNREADABLE,
+        # exactly what a window mid-redraw returns while a startup notice eats
+        # keystrokes) — means "not landed yet, keep waiting". Bailing on the first None
+        # (the old behaviour) made the caller's resend loop burn its whole budget in ~2s,
+        # before the notice cleared — the CMX-133 hang. Poll the full window for the
+        # → busy transition instead; a genuinely unaddressable window is caught by the
+        # send itself failing (send_tmux/resend_enter return False), not here.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
@@ -1022,28 +1044,42 @@ def _seed_landed(
 def _send_seed(window_id: str, prompt: str, task_id: str) -> bool:
     """Send the seed prompt and confirm it landed, re-sending if it didn't.
 
-    Returns False only when the send itself fails. An unconfirmed seed after
+    Only the FIRST send is a full :func:`send_tmux` (paste + Enter). If the agent
+    is still idle afterwards, the paste itself landed — what got swallowed is the
+    separately-sent Enter, eaten by a late startup redraw (an MCP-auth notice,
+    `gh auth login`, or any other splash that redraws after the paste). Retrying
+    with another full send_tmux would type the prompt a SECOND time on top of the
+    still-unsubmitted text, so every retry after the first re-sends Enter ONLY
+    (:func:`chela.messenger.resend_enter`).
+
+    Returns False only when a send itself fails. An unconfirmed seed after
     SEED_MAX_SENDS is logged and left to the reconcile watchdog rather than
     retried forever — a genuinely broken agent must fail cleanly.
     """
     for send in range(1, SEED_MAX_SENDS + 1):
-        if not send_tmux(window_id, prompt):
+        ok = send_tmux(window_id, prompt) if send == 1 else resend_enter(window_id)
+        if not ok:
             return False
         landed = _seed_landed(window_id)
+        # `landed is None` means the status was UNREADABLE — which is exactly what a
+        # window mid-redraw returns, the very moment a startup notice (MCP auth, gh
+        # auth, any splash) ate the Enter. The old code FAILED OPEN here ("assuming
+        # the seed landed") and stranded the seed unsubmitted. Treat None like an idle
+        # (False) result instead: fall through and re-send Enter. SEED_MAX_SENDS still
+        # bounds it — a genuinely dead window drops to the reconcile watchdog below.
         if landed is None:
             log.debug(
-                "Task %s: agent status unreadable on %s; assuming the seed landed",
+                "Task %s: agent status unreadable on %s; treating as not-yet-landed, re-sending Enter",
                 task_id, window_id,
             )
-            return True
         if landed:
             if send > 1:
                 log.info("Task %s: seed landed on %s after %d sends", task_id, window_id, send)
             return True
         if send < SEED_MAX_SENDS:
             log.warning(
-                "Task %s: agent on %s still idle %.0fs after the seed (paste dropped); "
-                "re-sending (%d/%d)",
+                "Task %s: agent on %s still idle %.0fs after the seed (Enter dropped); "
+                "re-sending Enter (%d/%d)",
                 task_id, window_id, SEED_CONFIRM_TIMEOUT_SECONDS, send + 1, SEED_MAX_SENDS,
             )
             time.sleep(SEED_RESEND_SETTLE_SECONDS)
