@@ -99,6 +99,7 @@ def test_share_does_not_resize_owner_window(monkeypatch, _isolate):
     real source size via the bridge's T_META resend-on-resize instead."""
     monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
     monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    monkeypatch.setattr(dash.config, "COLLAB_RELAY", "wss://relay.example/")
     touched = []
     monkeypatch.setattr(dash, "_pin_grid", lambda *a: touched.append(("pin",) + a))
     monkeypatch.setattr(dash, "_unpin_grid", lambda *a: touched.append(("unpin",) + a))
@@ -184,6 +185,27 @@ def test_stop_broadcasts_ended_frame(monkeypatch):
     monkeypatch.setattr(b, "_seal_send", lambda typ, pt: sent.append((typ, pt)))
     b.stop()
     assert any(t == cs.e2e.T_CTL and b'"ended"' in pt for t, pt in sent)
+
+
+def test_share_on_without_relay_errors_instead_of_faking_it(monkeypatch, _isolate):
+    """No CHELA_COLLAB_RELAY configured (the out-of-the-box default): turning
+    sharing on must fail loudly (ok:false + error) instead of returning
+    ok:true with an empty info dict — that emptiness used to slip past the
+    client's `!resp.ok` error-toast check and render a blank popover."""
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    monkeypatch.setattr(dash.config, "COLLAB_RELAY", "")
+    started = []
+    monkeypatch.setattr(dash.collab_stream, "start_bridge", lambda wid, on_revoke=None: started.append(wid) or "CODE")
+
+    resp = dash.app.test_client().post("/api/term/@9/share", json={"on": True})
+
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["ok"] is False
+    assert "CHELA_COLLAB_RELAY" in body["error"]
+    assert "@9" not in dash._SHARED             # never seeded a phantom share
+    assert started == []                        # never even tried to start a bridge
 
 
 def test_grant_endpoint_is_gone(monkeypatch, _isolate):
