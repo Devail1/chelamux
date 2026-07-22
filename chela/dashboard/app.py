@@ -242,6 +242,7 @@ def api_agents():
             "recap": transcript["recap"],
             "recap_ts": transcript["recap_ts"],
             "pr": transcript["pr"],
+            "ai_title": transcript.get("ai_title"),
         })
 
     # Belt-and-braces share revocation on session end (see _reap_shares).

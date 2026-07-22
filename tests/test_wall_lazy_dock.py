@@ -79,7 +79,7 @@ def _fleet(*, panes: dict[str, str], status: dict[str, str]):
         patch("chela.agent_manager.window_type", return_value="claude"),
         patch("chela.scheduler.list_tasks", return_value=[]),
         patch("chela.transcripts.agent_transcript_summary",
-              return_value={"recap": None, "recap_ts": None, "pr": None}),
+              return_value={"recap": None, "recap_ts": None, "pr": None, "ai_title": None}),
         patch("chela.messenger.capture_pane", side_effect=lambda wid: panes.get(wid, "")) as cap,
     ):
         yield cap
@@ -114,6 +114,27 @@ def test_a_permission_gate_is_needs_human_even_though_claude_says_busy(client):
     assert agents["@9"]["needs_human"] is True
     # The worker actually working is NOT dragged onto the wall.
     assert agents["@10"]["needs_human"] is False
+
+
+def test_ai_title_surfaces_on_the_agent_row(client):
+    """CMX-146: Claude Code's own auto-generated session title rides `/api/agents`
+    alongside (not instead of) the recap — the title bar and sidebar both need it."""
+    with (
+        patch("chela.discovery.get_all_windows", return_value=dict(LIVE)),
+        patch("chela.dispatcher.list_runs", return_value=list(RUNS)),
+        patch("chela.agent_manager.session_status_map",
+              return_value={"by_pid": {}, "cwd_by_pid": {}}),
+        patch("chela.agent_manager.claude_pid", return_value=None),
+        patch("chela.agent_manager.window_type", return_value="claude"),
+        patch("chela.scheduler.list_tasks", return_value=[]),
+        patch("chela.transcripts.agent_transcript_summary",
+              return_value={"recap": "recap text", "recap_ts": None, "pr": None,
+                             "ai_title": "Fix the flaky wall test"}),
+        patch("chela.messenger.capture_pane", return_value=""),
+    ):
+        agents = _by_wid(client)
+    assert agents["@9"]["ai_title"] == "Fix the flaky wall test"
+    assert agents["@9"]["recap"] == "recap text"   # the two ride together, neither replaces the other
 
 
 def test_claudes_own_waiting_needs_no_pane_capture(client):

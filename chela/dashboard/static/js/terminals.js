@@ -329,6 +329,15 @@ function _paneTitle(wid) {
     return _displayLabel(wid);
 }
 
+// Claude Code's own auto-generated session title (CMX-146) — a distinct record
+// from the pane's name (tmux window name / rename), so it rides ALONGSIDE it
+// as a dim subtitle rather than replacing it. '' (not shown) until Claude has
+// written a first `ai-title` record for the session.
+function _paneAiTitle(wid) {
+    const a = _agentByWid(wid);
+    return (a && a.ai_title) || '';
+}
+
 // Rename the WINDOW (not a local label): POST the new name, which renames the tmux
 // window, so it shows up on every client, in tmux, and on the bound Telegram topic.
 // Refetches /api/agents so the wall, cards and nav all relabel from the real name.
@@ -795,12 +804,16 @@ async function orchestratorBtnClick(btn, wid) {
 function paneHead(wid, draggable) {
     const j = _jsStr(wid);
     const title = `<span class="pane-title" title="double-click to rename" ondblclick="chela.renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
+    // CMX-146: Claude's own auto-generated session title, dim under the name —
+    // hidden entirely until a first `ai-title` record exists for the session.
+    const aiTitle = _paneAiTitle(wid);
+    const subtitle = aiTitle ? `<span class="pane-subtitle" title="${attrEsc(aiTitle)}">${escHtml(aiTitle)}</span>` : '';
     // The NAME is the drag handle (CMX-117 drops the old "☰" glyph) — `.gs-grip`
     // stays the class GridStack's `handle`/`draggable.handle` option targets
     // (buildWall), so dragging still works; only the glyph is gone.
     const label = draggable
-        ? `<span class="gs-grip" title="drag to move">${title}</span>`
-        : `<span class="gs-label">${title}</span>`;
+        ? `<span class="gs-grip" title="drag to move">${title}${subtitle}</span>`
+        : `<span class="gs-label">${title}${subtitle}</span>`;
     // × kill: rendered ONLY for non-managed agents (spawned shells / ad-hoc
     // sessions). Managed personas (anything in agents.yaml) get no × so they
     // can't be torn down from the wall by accident; the backend also refuses.
@@ -1706,27 +1719,47 @@ async function termTick() {
     renderSidebarAgents(agents);
 }
 
-// Update the visible label of every on-screen pane + chip from current state,
-// WITHOUT touching the iframe. A window rename only changes display text, so
-// this keeps the header/chip/dropdown in sync with zero reload. (During an
-// inline rename the `.pane-title` span is swapped for an input of a different
-// class, so the query below never clobbers an in-progress edit.)
-function _setSpanLabel(span, wid) {
-    if (!span || !wid) return;
-    const lbl = _paneTitle(wid);
-    if (span.textContent !== lbl) span.textContent = lbl;
+// Update the visible label + ai-title subtitle of every on-screen pane + chip
+// from current state, WITHOUT touching the iframe. A window rename only
+// changes display text, so this keeps the header/chip/dropdown in sync with
+// zero reload. `wrap` is the `.gs-grip`/`.gs-label` header cell (name +
+// subtitle together, not just the name span) so both can be refreshed as one.
+// During an inline rename the `.pane-title` span is swapped for an input of a
+// different class, so the title-text query below never clobbers an
+// in-progress edit; the subtitle (a sibling, untouched by rename) still
+// refreshes normally.
+function _setSpanLabel(wrap, wid) {
+    if (!wrap || !wid) return;
+    const titleSpan = wrap.querySelector('.pane-title');
+    if (titleSpan) {
+        const lbl = _paneTitle(wid);
+        if (titleSpan.textContent !== lbl) titleSpan.textContent = lbl;
+    }
+    const aiTitle = _paneAiTitle(wid);
+    let subSpan = wrap.querySelector('.pane-subtitle');
+    if (aiTitle) {
+        if (!subSpan) {
+            subSpan = document.createElement('span');
+            subSpan.className = 'pane-subtitle';
+            wrap.appendChild(subSpan);
+        }
+        if (subSpan.textContent !== aiTitle) subSpan.textContent = aiTitle;
+        if (subSpan.title !== aiTitle) subSpan.title = aiTitle;
+    } else if (subSpan) {
+        subSpan.remove();
+    }
 }
 function _refreshPaneLabels() {
     if (!TERMINALS_ON) return;
     if (_termMode === 'wall') {
         $('#term-stage').querySelectorAll('.grid-stack-item').forEach(item => {
-            _setSpanLabel(item.querySelector('.pane-title'), item.getAttribute('gs-id'));
+            _setSpanLabel(item.querySelector('.gs-grip, .gs-label'), item.getAttribute('gs-id'));
         });
         renderMinDock();   // chips carry labels too
     } else {
         const sel = $('#term-agent');
         const pane = $('#term-stage') && $('#term-stage').querySelector('.term-pane');
-        if (sel && pane) _setSpanLabel(pane.querySelector('.pane-title'), sel.value);
+        if (sel && pane) _setSpanLabel(pane.querySelector('.gs-grip, .gs-label'), sel.value);
         if (sel) Array.from(sel.options).forEach(o => {
             const lbl = _paneTitle(o.value);
             if (o.textContent !== lbl) o.textContent = lbl;

@@ -276,6 +276,12 @@ function _agentRowHtml(a) {
     if (a.recap_ts) age = ageStr((Date.now() - new Date(a.recap_ts)) / 1000).replace(' ago', '');
     const recap = a.recap ? `<span class="ar-recap" title="${attrEsc(a.recap)}">${escHtml(a.recap)}</span>` : '';
 
+    // CMX-146: Claude's own auto-generated session title — a different record
+    // than the recap above (which is an occasional away_summary, often absent).
+    // Shown as its own dim line so it never gets read as the recap.
+    const aiTitle = a.ai_title
+        ? `<div class="ar-title" title="${attrEsc(a.ai_title)}">${escHtml(a.ai_title)}</div>` : '';
+
     const sub = `<span class="ar-state ${stCls}">${stWord}</span>`
         + (age ? `<span class="ar-age">· ${age}</span>` : '')
         + (recap ? ` ${recap}` : '');
@@ -300,6 +306,7 @@ function _agentRowHtml(a) {
                 <span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span>
                 ${ctxChip}
             </div>
+            ${aiTitle}
             <div class="ar-sub">${sub}</div>
         </div>
         ${pin}
@@ -444,6 +451,7 @@ function renderAgentDetail() {
     ];
     if (a.schedule_next_run) rows.push(['Next run', shortTime(a.schedule_next_run)]);
     if (a.schedule_last_run) rows.push(['Last run', shortTime(a.schedule_last_run)]);
+    if (a.ai_title) rows.push(['Title', escHtml(a.ai_title)]);
 
     let pr = '';
     if (a.pr && a.pr.url) {

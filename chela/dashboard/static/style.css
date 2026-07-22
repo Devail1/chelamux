@@ -202,10 +202,19 @@ body {
     border-bottom: 1px solid var(--border);
 }
 .gs-grip, .gs-label {
-    flex: 1 1 auto; user-select: none;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1 1 auto; min-width: 0; user-select: none;
+    display: flex; flex-direction: column; justify-content: center; overflow: hidden;
 }
 .gs-grip { cursor: move; }
+.pane-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* CMX-146: Claude's own auto-generated session title, dim and small under the
+   pane name — a distinct record from the name itself (which is the tmux window
+   name / rename), so it rides alongside it rather than replacing it. */
+.pane-subtitle {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10px; line-height: 1.3; font-weight: 400;
+    color: var(--text-dim); opacity: 0.75;
+}
 
 /* --- CMX-119: pane header v2 — split the CMX-117 combined badge back apart
    now that every pane has a bottom bar to hold its numbers (see .term-ctx-bar
@@ -2482,6 +2491,12 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .ar-ctx.warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
 .ar-ctx.danger { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
+/* CMX-146: Claude's own auto-generated session title — its own dim line, distinct
+   from `.ar-recap` below (an occasional away_summary blurb, often absent). */
+.ar-title {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10px; color: var(--text-dim); opacity: 0.75;
+}
 .ar-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; font-size: 10px; color: var(--text-dim); }
 .ar-state { flex: 0 0 auto; font-weight: 600; text-transform: capitalize; }
 .ar-state.working { color: var(--green); }
@@ -2980,6 +2995,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
        desktop bar. See CMX-133 below for what happens to the window-control
        keys (drag/min/max/kill) themselves. */
     .gs-head { padding: 2px 8px; font-size: 11px; }
+    /* CMX-146: single mobile pane is already tight on vertical space — drop the
+       dim ai-title subtitle here, keep it for wall/desktop panes. */
+    .pane-subtitle { display: none; }
     /* CMX-133: drag/minimize/maximize genuinely don't apply to the forced
        single pane, but × kill is the only way to tear a session down on
        phones (no wall, no overflow-menu equivalent) — keep just that button. */
