@@ -151,6 +151,34 @@ def test_auto_merge_on_is_a_LOUD_warning_not_a_quiet_info(monkeypatch, caplog):
     assert any("UNATTENDED" in r.getMessage() for r in warnings)
 
 
+def test_auto_update_is_off_by_default_and_silent(monkeypatch, caplog):
+    """Same contract as auto_merge above, for the other fully-unattended act (CMX-148)."""
+    caps = list(_caps(monkeypatch, []).values())
+    auto_update = next(c for c in caps if c.key == "auto_update")
+    assert auto_update.on is False
+    with caplog.at_level(logging.INFO):
+        capabilities.announce(caps, logging.getLogger("chela.test.autoupdate-off"))
+    assert not [r for r in caplog.records
+                if r.levelno >= logging.WARNING and auto_update.label in r.getMessage()]
+
+
+def test_auto_update_on_is_a_LOUD_warning_not_a_quiet_info(monkeypatch, caplog):
+    """🔴 Corrupt `announce()` to fall through to the plain `log.info` branch for an
+    ON+warn_when_on capability and this goes red."""
+    monkeypatch.setattr(config, "AUTO_UPDATE_ENABLED", True)
+    caps = list(_caps(monkeypatch, []).values())
+    auto_update = next(c for c in caps if c.key == "auto_update")
+    assert auto_update.on is True
+    assert auto_update.warn_when_on is True
+
+    log = logging.getLogger("chela.test.autoupdate-on")
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        capabilities.announce(caps, log)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(auto_update.label in r.getMessage() for r in warnings)
+    assert any("UNATTENDED" in r.getMessage() for r in warnings)
+
+
 def test_a_daemon_that_boots_into_a_held_queue_announces_the_hold(chela_dir, monkeypatch, caplog):
     """A dispatcher that is ON and claiming nothing is a disabled subsystem wearing a
     green badge. Booting into a held queue and logging only "ON" is the nine-hour silence

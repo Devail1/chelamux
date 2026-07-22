@@ -266,3 +266,18 @@ act; judgment or security or irreversible → ask.** That is the whole contract.
   human's say-so. The capability announces itself LOUDLY (a WARNING, not an INFO, every boot it
   is on — `capabilities.py`'s `warn_when_on`) for the same reason a disabled subsystem must never
   be silent: a risky capability staying quietly ON is the same blind spot, mirrored.
+- **v0.6 (CMX-148) — `CHELA_AUTO_UPDATE`, the same opt-in shape as `CHELA_AUTO_MERGE`, applied
+  to self-update instead of merging.** CMX-142 part 1 gave `chela update` a safety-railed
+  `apply()` (refuses on a dirty or diverged tree; otherwise pulls, `uv sync`s, restarts running
+  `chela-*` services) plus a behind-notifier that only ever informs — nothing in part 1 pulls
+  code on its own. `chela.update.auto_apply_sweep` is part 2: on the daemon's own hourly tick it
+  calls that *exact same* `apply()` — no separate, unaudited pull path, no loosened refusal —
+  with nobody attending. Off by default, for the same reason `CHELA_AUTO_MERGE` is: a fresh or
+  external install must never autonomously rewrite its own code and restart its own services
+  (chela-daemon included) unattended; only an operator who trusts CI on their upstream branch
+  turns it on for themselves. The two flags are independent — trusting a judge to merge PRs is
+  not the same trust as letting every merged dependency auto-deploy onto your own machine, and
+  `CHELA_AUTO_MERGE` being on never implies or requires `CHELA_AUTO_UPDATE`, or vice versa. Same
+  loud-ON contract as auto-merge (`capabilities.py`'s `warn_when_on` — a WARNING every boot it is
+  on, never a quiet INFO) — a risky capability staying quietly ON is the blind spot this whole
+  module exists to close, mirrored a second time.

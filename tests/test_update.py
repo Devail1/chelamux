@@ -1,4 +1,5 @@
-"""``chela update`` (CMX-142 part 1) — the human-run half of self-update.
+"""``chela update`` — self-update, in two halves: CMX-142 part 1 (human-run `chela update`
++ the behind-notifier) and CMX-148 part 2 (`CHELA_AUTO_UPDATE`'s unattended sweep).
 
 Everything here runs against REAL local git repos (a real `upstream` + a real clone
 tracking it), not mocked git — the safety rail this module exists for (never clobber a
@@ -13,10 +14,11 @@ import argparse
 import logging
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from chela import main, update
+from chela import config, main, update
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -279,6 +281,194 @@ def test_notifier_stays_quiet_when_nothing_is_behind(checkout, monkeypatch):
 
     assert behind == 0
     assert stub.sent == []
+
+
+# --- auto_apply_sweep (CMX-148 part 2): the fully-UNATTENDED half, opt-in ------------
+
+def test_auto_apply_disabled_by_default():
+    assert config.AUTO_UPDATE_ENABLED is False
+    assert update.auto_apply_enabled() is False
+
+
+def test_auto_apply_enabled_follows_the_flag(monkeypatch):
+    monkeypatch.setattr(config, "AUTO_UPDATE_ENABLED", True)
+    assert update.auto_apply_enabled() is True
+
+
+def _pm2_stub(restart_calls):
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout="[]")
+        if args[:2] == ["uv", "sync"]:
+            return _FakeCP()
+        if args[0] == "pm2" and args[1] == "restart":
+            restart_calls.append(args)
+            return _FakeCP()
+        raise AssertionError(f"unexpected _sh call: {args}")
+    return fake_sh
+
+
+def test_auto_apply_sweep_stays_silent_when_nothing_is_behind(checkout, monkeypatch, caplog):
+    """🔴 The quiet path: with nothing behind, this must neither log nor notify — a drumbeat
+    of "nothing to do" every hour is exactly the log-blindness this module warns against."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        result = update.auto_apply_sweep()
+
+    assert result.ok is True
+    assert result.behind_before == 0
+    assert stub.sent == []
+    assert caplog.records == []
+
+
+def test_auto_apply_sweep_pulls_and_restarts_when_behind(checkout, upstream, monkeypatch, caplog):
+    """🔴 THE LOAD-BEARING GUARD. This is the one thing part 1 refused to do: actually pull
+    and restart with nobody watching. If this stops calling `apply()`, or `apply()`'s pull
+    step is bypassed, this goes red without HEAD ever advancing."""
+    _commit(upstream, "new.txt", "new\n")
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    restart_calls = []
+    monkeypatch.setattr(update, "_sh", _pm2_stub(restart_calls))
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    before_head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        result = update.auto_apply_sweep()
+
+    after_head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    assert result.ok is True
+    assert result.behind_before == 1
+    assert after_head != before_head, "auto_apply_sweep must actually advance HEAD, unattended"
+    assert len(stub.sent) == 1
+    assert "applied" in stub.sent[0][0]
+    assert any("UNATTENDED" in r.getMessage() for r in caplog.records)
+
+
+def test_auto_apply_sweep_logs_and_notifies_loudly_on_refusal_without_raising(
+    checkout, upstream, monkeypatch, caplog,
+):
+    """A dirty tree (or any other apply() refusal) must be reported loudly, not swallowed —
+    unlike an auto-merge candidate, a stuck refusal here needs a human to clear it."""
+    _commit(upstream, "new.txt", "new\n")
+    (checkout / "README.md").write_text("dirty, uncommitted edit\n")
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.ERROR, logger=update.log.name):
+        result = update.auto_apply_sweep()
+
+    assert result.ok is False
+    assert result.step == "dirty-check"
+    assert len(stub.sent) == 1
+    assert "FAILED" in stub.sent[0][1]
+    assert any("dirty-check" in r.getMessage() for r in caplog.records)
+
+
+def test_auto_apply_sweep_never_calls_apply_with_a_bespoke_repo_arg(checkout, upstream, monkeypatch):
+    """Sanity: `auto_apply_sweep()` must drive the SAME `apply()` a human's `chela update`
+    calls (via `repo_root()`), not some separate, unaudited code path."""
+    _commit(upstream, "new.txt", "new\n")
+    called = []
+    real_apply = update.apply
+
+    def spy(repo=None):
+        called.append(repo)
+        return real_apply(repo)
+
+    monkeypatch.setattr(update, "apply", spy)
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "_sh", _pm2_stub([]))
+
+    update.auto_apply_sweep()
+
+    assert called == [None]  # apply() itself resolves repo_root() when not given one
+
+
+# --- production call-site: the daemon loop actually switches on CHELA_AUTO_UPDATE -----
+
+def _run_one_daemon_tick(monkeypatch) -> None:
+    """Drive exactly ONE iteration of `cmd_run`'s `while not stop.stopping` loop with every
+    other subsystem kept inert, so the tick reaches the update-check call-site and stops.
+
+    Mirrors `tests/test_context.py::_run_one_daemon_tick` — the same shape of test that
+    catches a call-site being unwired even though every unit test of the extracted seam
+    (`auto_apply_sweep`, `check_and_notify`) stays green, because none of them exercise
+    `cmd_run` itself. `last_update_check` starts at 0.0 in `cmd_run`, so the real epoch
+    makes the update-check branch due on this very first pass — no need to fake time.
+    """
+    monkeypatch.setattr(main.GracefulShutdown, "install", lambda self: self)
+
+    def stop_after_one(self, _seconds):
+        self._event.set()
+        return True
+
+    monkeypatch.setattr(main.GracefulShutdown, "wait", stop_after_one)
+    monkeypatch.setattr(main.scheduler, "init", lambda: None)
+    monkeypatch.setattr(main.scheduler, "tick", lambda: 0)
+    monkeypatch.setattr(main.agent_manager, "reconcile_window_names", lambda: [])
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: False)
+    monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+    monkeypatch.setattr(main.inbox, "enabled", lambda: False)
+    monkeypatch.setattr(main.capabilities, "effective", lambda: [])
+    monkeypatch.setattr(main.capabilities, "announce", lambda caps, log: None)
+    monkeypatch.setattr(main.capabilities, "publish", lambda caps, boot_id: None)
+
+
+def test_the_daemon_loop_calls_auto_apply_sweep_when_enabled(monkeypatch):
+    """🔴 WIRING (production call-site) — every test above exercises `auto_apply_sweep` in
+    isolation, so they ALL stay green even if `cmd_run` never reaches it (e.g. the
+    `if update.auto_apply_enabled():` guard reverted to always calling `check_and_notify`).
+    Drives one real tick of the daemon loop and proves the wire is connected."""
+    _run_one_daemon_tick(monkeypatch)
+    monkeypatch.setattr(main.update, "auto_apply_enabled", lambda: True)
+    calls = []
+    monkeypatch.setattr(main.update, "auto_apply_sweep", lambda: calls.append(1))
+    monkeypatch.setattr(
+        main.update, "check_and_notify",
+        lambda behind: pytest.fail("must not call check_and_notify while auto-update is ON"),
+    )
+
+    main.cmd_run(SimpleNamespace())
+
+    assert calls == [1], (
+        "cmd_run did NOT call update.auto_apply_sweep on the loop pass even though "
+        "auto_apply_enabled() is True — CHELA_AUTO_UPDATE is unwired and can be reverted "
+        "with the suite green"
+    )
+
+
+def test_the_daemon_loop_still_only_informs_when_auto_update_is_off(monkeypatch):
+    """The flip side of the wiring test above: with the flag off (the default), the loop
+    must keep calling the informer, never the unattended sweep."""
+    _run_one_daemon_tick(monkeypatch)
+    monkeypatch.setattr(main.update, "auto_apply_enabled", lambda: False)
+    monkeypatch.setattr(
+        main.update, "auto_apply_sweep",
+        lambda: pytest.fail("must not call auto_apply_sweep while CHELA_AUTO_UPDATE is off"),
+    )
+    calls = []
+    monkeypatch.setattr(main.update, "check_and_notify", lambda behind: calls.append(behind) or behind)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert calls == [0], (
+        "cmd_run did NOT call update.check_and_notify on the loop pass with auto-update "
+        "off — the default informer path is unwired"
+    )
 
 
 # --- repo_root ------------------------------------------------------------------------
