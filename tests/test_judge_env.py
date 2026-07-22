@@ -106,17 +106,33 @@ def test_every_npm_package_a_js_suite_imports_is_declared():
         )
 
 
+def _hook_text_including_scripts(before_run: str) -> str:
+    """``before_run`` plus the text of any repo script it delegates to (CMX-151: the actual
+    ``npm ci`` moved out of the inline hook and into ``scripts/npm-shared-install.sh``, so a
+    literal search of the hook string alone would go blind to it). One level of indirection
+    only — enough to follow the hook to the script that does the installing, not a general
+    shell interpreter."""
+    text = before_run
+    for tok in re.findall(r"\S*scripts/\S+\.sh", before_run):
+        script = ROOT / tok.lstrip("./")
+        if script.is_file():
+            text += "\n" + script.read_text()
+    return text
+
+
 def test_the_hook_that_builds_a_worktree_installs_what_the_suites_need():
     """⛔ THE LOAD-BEARING ONE. ``before_run`` is the JUDGE's environment too."""
     declared = _declared()
     if not declared:
         pytest.skip("package.json declares no npm dependencies — nothing to install")
     before_run = _wf().get("hooks", "before_run") or ""
-    assert any(tok in before_run for tok in _INSTALLS), (
+    haystack = _hook_text_including_scripts(before_run)
+    assert any(tok in haystack for tok in _INSTALLS), (
         f"package.json declares {sorted(declared)}, but WORKFLOW.md's `hooks.before_run` "
-        f"({before_run!r}) never installs it. That hook builds every dispatched worktree AND "
-        f"every judge worktree, so the judge runs `judge.test_cmd` against a worktree missing "
-        f"a dependency its own suites import: baseline red, CANNOT VERIFY, forever (CMX-80)."
+        f"({before_run!r}), including any script it delegates to, never installs it. That "
+        f"hook builds every dispatched worktree AND every judge worktree, so the judge runs "
+        f"`judge.test_cmd` against a worktree missing a dependency its own suites import: "
+        f"baseline red, CANNOT VERIFY, forever (CMX-80)."
     )
 
 
