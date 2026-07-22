@@ -951,6 +951,13 @@ def api_term_share(wid):
     if not on:
         _revoke_share(wid)
         return jsonify({"ok": True, "shared": False})
+    if not config.COLLAB_RELAY:
+        # No relay configured — collab_stream.start_bridge would just return None
+        # and leave us with a "shared" flag pointing at a bridge that never started.
+        # Fail loudly here instead: the client's error-toast path only fires on
+        # `!resp.ok`, so silently returning ok:true with an empty info dict is what
+        # produced the blank popover this guards against.
+        return jsonify({"ok": False, "error": "Sharing is off — set CHELA_COLLAB_RELAY to enable."}), 400
     # Single grid authority for the E2E path: the LIVE tmux window size — the exact
     # dims the bridge streams (collab_stream._window_dims). Seed _SHARED with THAT,
     # not the posted pane dims or the 120x30 default, so the advertised grid matches
