@@ -129,3 +129,49 @@ def test_last_assistant_activity_sees_a_reply_written_after_the_watch(tmp_path):
 
     last = transcripts.last_assistant_activity(cwd, base=tmp_path)
     assert last is not None and last > (now - timedelta(minutes=1)).timestamp()
+
+
+# --- latest_ai_title: the session's auto-generated title (CMX-146) --------------
+#
+# Distinct from the recap (`away_summary`, an occasional "what happened while you
+# were away" blurb): `ai-title` records are Claude Code's own short name for the
+# conversation, revised as it evolves. The LATEST one is current.
+
+def test_latest_ai_title_picks_the_newest_of_several(tmp_path):
+    # The trailing record is deliberately NOT an ai-title (a later user turn, as a
+    # real session would append) — this pins the `type == "ai-title"` filter itself,
+    # not just recency: a predicate loosened to "any record" would match this last
+    # line first, see no `aiTitle` field, and wrongly return None.
+    f = tmp_path / "t.jsonl"
+    _write(f, [
+        {"type": "ai-title", "aiTitle": "Fix login bug", "sessionId": "s1"},
+        {"type": "ai-title", "aiTitle": "Fix login bug and add tests", "sessionId": "s1"},
+        {"type": "user", "message": {"role": "user", "content": "keep going"}},
+    ])
+    assert transcripts.latest_ai_title(f) == "Fix login bug and add tests"
+
+
+def test_latest_ai_title_none_when_absent_or_blank(tmp_path):
+    f = tmp_path / "t.jsonl"
+    _write(f, [{"type": "user", "message": {"role": "user", "content": "hi"}}])
+    assert transcripts.latest_ai_title(f) is None
+
+    blank = tmp_path / "blank.jsonl"
+    _write(blank, [{"type": "ai-title", "aiTitle": "   "}])
+    assert transcripts.latest_ai_title(blank) is None
+
+
+def test_summary_for_path_includes_ai_title_distinct_from_recap(tmp_path):
+    f = tmp_path / "t.jsonl"
+    _write(f, [
+        {"type": "system", "subtype": "away_summary", "content": "recap text",
+         "timestamp": "2026-07-11T10:00:00Z"},
+        {"type": "ai-title", "aiTitle": "Investigate flaky CI"},
+    ])
+    summary = transcripts.summary_for_path(f)
+    assert summary["recap"] == "recap text"
+    assert summary["ai_title"] == "Investigate flaky CI"
+
+    assert transcripts.summary_for_path(None) == {
+        "recap": None, "recap_ts": None, "pr": None, "ai_title": None,
+    }

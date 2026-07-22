@@ -1,12 +1,15 @@
-"""Read recap + PR-link records from Claude Code session JSONL transcripts.
+"""Read recap + PR-link + title records from Claude Code session JSONL transcripts.
 
 Each Claude Code session writes a JSONL transcript at
     ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
 where <encoded-cwd> replaces every `/` and `.` in the cwd with `-`.
 
-We want two things per agent:
+We want three things per agent:
   - the latest `{"type": "system", "subtype": "away_summary"}.content` (recap)
   - the latest `{"type": "pr-link", ...}` record (last PR opened in-session)
+  - the latest `{"type": "ai-title", "aiTitle": ...}` record (Claude's own
+    auto-generated session title — distinct from the recap: it names the
+    session, the recap summarizes what happened while you were away)
 
 Transcripts grow without bound, so we scan from the tail of the file
 backwards block-by-block and stop at the first match (or once we have
@@ -173,6 +176,23 @@ def latest_pr(path: Path) -> PRLink | None:
     )
 
 
+def latest_ai_title(path: Path) -> str | None:
+    """Return the latest `{"type": "ai-title"}.aiTitle`, or None.
+
+    Claude Code appends one of these each time it revises the session's
+    auto-generated title as the conversation evolves — the LATEST record is
+    the current title. Unlike the recap (`latest_recap`, an occasional
+    "what happened" summary), this is a short *name* for the session and is
+    written far more often, so plain empty-string content is skipped rather
+    than treated as "no title yet".
+    """
+    rec = latest_record(path, lambda o: o.get("type") == "ai-title")
+    if not rec:
+        return None
+    title = rec.get("aiTitle")
+    return title.strip() if isinstance(title, str) and title.strip() else None
+
+
 # ---------------------------------------------------------------------------
 # Dashboard-facing helpers
 # ---------------------------------------------------------------------------
@@ -273,15 +293,16 @@ def _resolve_agent_transcript(agent_name: str) -> Path | None:
 
 
 def summary_for_path(path: Path | None) -> dict:
-    """`{"recap", "recap_ts", "pr"}` for a resolved transcript path (or all None)."""
+    """`{"recap", "recap_ts", "pr", "ai_title"}` for a transcript path (or all None)."""
     if path is None:
-        return {"recap": None, "recap_ts": None, "pr": None}
+        return {"recap": None, "recap_ts": None, "pr": None, "ai_title": None}
     rec = _latest_recap_record(path)
     pr = latest_pr(path)
     return {
         "recap": rec.get("content") if rec else None,
         "recap_ts": rec.get("timestamp") if rec else None,
         "pr": pr.to_dict() if pr else None,
+        "ai_title": latest_ai_title(path),
     }
 
 
@@ -373,11 +394,13 @@ def agent_context_from_transcript(agent_name: str) -> dict | None:
 
 
 def agent_transcript_summary(agent_name: str) -> dict:
-    """Return `{"recap": str|None, "recap_ts": str|None, "pr": dict|None}`.
+    """Return `{"recap": str|None, "recap_ts": str|None, "pr": dict|None, "ai_title": str|None}`.
 
     `recap_ts` is the ISO timestamp of the away_summary record so the
     dashboard can show how old a recap is (Claude Code emits these only
     occasionally, so a displayed recap can legitimately lag by hours).
-    All fields are None if the transcript can't be found.
+    `ai_title` is Claude's own auto-generated title for the session — a
+    different record than the recap (see `latest_ai_title`). All fields are
+    None if the transcript can't be found.
     """
     return summary_for_path(_resolve_agent_transcript(agent_name))
