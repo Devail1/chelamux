@@ -198,6 +198,22 @@ def effective() -> list[Capability]:
                 "but an operator's own",
             warn_when_on=True,
         ),
+        # ⬆️⚠️ CMX-148, part 2 of CMX-142. Same "silence never means off, and a risky ON
+        # never means quiet" contract as auto_merge above, for the other fully-UNATTENDED
+        # act this daemon can take on its own — see chela.update.auto_apply_sweep.
+        Capability(
+            key="auto_update", label="⬆️⚠️ Auto-update", on=config.AUTO_UPDATE_ENABLED,
+            detail=("UNATTENDED — whenever this checkout falls behind its upstream, this "
+                    "daemon pulls, `uv sync`s, and restarts its own `chela-*` services "
+                    "(including itself) on its own hourly tick, with NO human attending "
+                    "(`update.apply()`'s dirty-tree/diverged-branch refusal still applies "
+                    "in full; only the human-attendance requirement is gone)."
+                    if config.AUTO_UPDATE_ENABLED else
+                    "off — updating stays a human act via `chela update` (the safe default)"),
+            fix="unset CHELA_AUTO_UPDATE — OFF is the recommended default for every install "
+                "but an operator's own",
+            warn_when_on=True,
+        ),
     ]
 
 

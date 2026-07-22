@@ -1,21 +1,28 @@
-"""``chela update`` — the human-run half of self-update. Part 1 of 2.
+"""``chela update`` — self-update, in two halves.
 
 Adopters otherwise have to know the manual dance: ``git pull`` the checkout, ``uv sync``
 its deps, ``pm2 restart`` the services onto the new code. This module gives that dance a
 name and a safety rail, plus a heads-up (:func:`check_and_notify`, wired into the daemon
 loop in ``cmd_run``) when the checkout has fallen behind its upstream.
 
-⛔ **This is deliberately NOT automatic.** :func:`apply` only ever runs when a human (or a
-script a human runs) calls ``chela update``. There is no flag here that pulls code on its
-own — that is part 2 (an off-by-default ``CHELA_AUTO_UPDATE`` sweep), a separate, larger
-trust decision this module does not make for you.
+**Part 1 — human-run, always on.** :func:`apply` (what ``chela update`` calls) and
+:func:`check_and_notify` (the behind-notifier) only ever run when a human, or a script a
+human runs, asks — the notifier only ever INFORMS, never pulls.
 
-The safety rail that makes ``apply()`` a command you can run without reading its diff
-first: it refuses outright on a dirty working tree (never clobbers local edits) and on a
-diverged branch (never forces a merge past commits only the local checkout has) — both
-checked BEFORE anything touches disk. Only then does it pull, re-sync dependencies with
-every extra installed (never ``--frozen``, which prunes extras nobody asked to remove),
-and restart whatever ``chela-*`` PM2 services are actually running.
+**Part 2 — :func:`auto_apply_sweep`, opt-in, off by default (``CHELA_AUTO_UPDATE`` /
+:data:`chela.config.AUTO_UPDATE_ENABLED`).** Mirrors ``chela.automerge``'s contract: the
+*same* :func:`apply` a human's own ``chela update`` runs — same dirty-tree / diverged-branch
+refusal, nothing loosened — just invoked on the daemon's own hourly tick instead of a
+human's say-so. An operator opts in only after reading that trade-off; it is never a
+default and never inferred from any other flag.
+
+The safety rail that makes ``apply()`` a command you can run (by hand OR unattended)
+without reading its diff first: it refuses outright on a dirty working tree (never
+clobbers local edits) and on a diverged branch (never forces a merge past commits only the
+local checkout has) — both checked BEFORE anything touches disk. Only then does it pull,
+re-sync dependencies with every extra installed (never ``--frozen``, which prunes extras
+nobody asked to remove), and restart whatever ``chela-*`` PM2 services are actually
+running.
 """
 from __future__ import annotations
 
@@ -25,7 +32,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import notify
+from chela import config, notify
 from chela.dispatcher import GIT_TIMEOUT_SECONDS, _git, _git_ok, _git_out
 
 log = logging.getLogger(__name__)
@@ -216,3 +223,45 @@ def check_and_notify(previously_behind: int) -> int:
             notify.send(f"{status.behind} commit(s) behind — run `chela update`",
                          title="chela: update available")
     return status.behind
+
+
+def auto_apply_enabled() -> bool:
+    """Read live, never latched — an operator flips ``CHELA_AUTO_UPDATE`` on a running
+    daemon the same way ``chela.automerge.enabled()`` reads ``CHELA_AUTO_MERGE``."""
+    return config.AUTO_UPDATE_ENABLED
+
+
+def auto_apply_sweep() -> ApplyResult:
+    """The unattended half of self-update (CMX-148). Called from the daemon loop in place
+    of :func:`check_and_notify` whenever :func:`auto_apply_enabled` is true, on the same
+    hourly cadence (``main.UPDATE_CHECK_INTERVAL_SECONDS``).
+
+    Runs the *exact same* :func:`apply` a human's own ``chela update`` runs — nothing here
+    re-implements or loosens its dirty-tree / diverged-branch refusal. Stays silent only
+    when there was truly nothing to do (``behind_before == 0`` and ``ok``); every real
+    attempt — a successful pull-and-restart, or a refusal — is logged loudly and (if
+    configured) pushed to :mod:`chela.notify`, because a stuck refusal (e.g. a dirty tree
+    from a manual edit on the host) needs a human's attention to clear, and unlike an
+    auto-merge candidate it will not resolve itself by waiting for the next tick.
+    """
+    result = apply()
+    if result.ok and result.behind_before == 0:
+        return result  # nothing was behind — the common case, kept quiet on purpose
+
+    if result.ok:
+        restarted = ", ".join(result.restarted) or "no services"
+        log.warning(
+            "⬆️⚠️ auto-update: applied %d commit(s) UNATTENDED (CHELA_AUTO_UPDATE) — "
+            "restarted %s", result.behind_before, restarted,
+        )
+        if notify.enabled():
+            notify.send(
+                f"applied {result.behind_before} commit(s), restarted {restarted}",
+                title="chela: auto-update applied",
+            )
+    else:
+        log.error("auto-update: refused at step %r — %s", result.step, result.error)
+        if notify.enabled():
+            notify.send(f"refused at step {result.step!r}: {result.error}",
+                         title="chela: auto-update FAILED")
+    return result

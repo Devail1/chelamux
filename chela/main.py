@@ -314,11 +314,17 @@ def cmd_run(args) -> None:
                     log.exception("Needs-input check failed")
                 last_notify_check = now
 
-            # Self-update heads-up (CMX-142 part 1): informs, never pulls — `chela update`
-            # is a human-run act. Edge-triggered by `update.check_and_notify` itself.
+            # Self-update: informs by default (CMX-142 part 1) — `chela update` is a
+            # human-run act, and `update.check_and_notify` never pulls. `CHELA_AUTO_UPDATE`
+            # (CMX-148 part 2, off by default — see capabilities.py's loud ON-warning at
+            # boot) swaps that for `update.auto_apply_sweep`, which actually pulls, syncs,
+            # and restarts on this same hourly tick, unattended.
             if now - last_update_check >= UPDATE_CHECK_INTERVAL_SECONDS:
                 try:
-                    update_behind_seen = update.check_and_notify(update_behind_seen)
+                    if update.auto_apply_enabled():
+                        update.auto_apply_sweep()
+                    else:
+                        update_behind_seen = update.check_and_notify(update_behind_seen)
                 except Exception:
                     log.exception("Update-availability check failed")
                 last_update_check = now
