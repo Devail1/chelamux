@@ -491,23 +491,26 @@ body {
 .term-share-pop .tsp-lock { font-weight: 600; color: var(--green, #3fb950); }
 .term-share-pop .tsp-ro { margin-left: auto; font-size: 10.5px; color: var(--muted, #7d8590);
     border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
-.term-share-pop .tsp-lbl { display: block; margin: 8px 0 4px; font-size: 10.5px; color: var(--muted, #7d8590); }
-.term-share-pop .tsp-hint { opacity: 0.8; }
-.term-share-pop .tsp-row { display: flex; gap: 6px; }
-.term-share-pop .tsp-in {
+/* tsp-lbl/tsp-row/tsp-in/tsp-copy/tsp-warn are the join-link/pairing-code row
+   markup (_shareInfoRowsHTML) — shared between the pane popover and the "Active
+   shares" sheet (.ss-row-body), so these rules apply under both ancestors. */
+.term-share-pop .tsp-lbl, .shares-sheet .tsp-lbl { display: block; margin: 8px 0 4px; font-size: 10.5px; color: var(--muted, #7d8590); }
+.term-share-pop .tsp-hint, .shares-sheet .tsp-hint { opacity: 0.8; }
+.term-share-pop .tsp-row, .shares-sheet .tsp-row { display: flex; gap: 6px; }
+.term-share-pop .tsp-in, .shares-sheet .tsp-in {
     flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px;
     background: var(--bg, #0a0c11); color: var(--text); border: 1px solid var(--border);
     font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace;
 }
 .term-share-pop .tsp-code { letter-spacing: 0.06em; }
-.term-share-pop .tsp-copy, .term-share-pop .tsp-stop {
+.term-share-pop .tsp-copy, .term-share-pop .tsp-stop, .shares-sheet .tsp-copy {
     cursor: pointer; border-radius: 6px; border: 1px solid var(--border);
     background: var(--surface); color: var(--text); font-size: 11.5px; padding: 6px 10px;
 }
-.term-share-pop .tsp-copy:hover { border-color: var(--accent); }
+.term-share-pop .tsp-copy:hover, .shares-sheet .tsp-copy:hover { border-color: var(--accent); }
 .term-share-pop .tsp-stop { width: 100%; margin-top: 12px; color: var(--red, #f85149); border-color: rgba(248, 81, 73, 0.4); }
 .term-share-pop .tsp-stop:hover { background: rgba(248, 81, 73, 0.12); }
-.term-share-pop .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
+.term-share-pop .tsp-warn, .shares-sheet .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
 /* Mobile: the share popover becomes a bottom-sheet — full-width, pinned to the
    bottom edge with safe-area padding and 44px+ tap targets. The pane header 🔗 is
@@ -565,9 +568,11 @@ body {
 .shares-sheet .ss-sub { color: var(--muted, #7d8590); font-size: 11.5px; margin-bottom: 11px; }
 .shares-sheet .ss-list { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
 .shares-sheet .ss-row {
-    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    display: flex; flex-direction: column; padding: 8px 10px;
     background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
 }
+.shares-sheet .ss-row-hd { display: flex; align-items: center; gap: 10px; }
+.shares-sheet .ss-row-body { margin-top: 2px; }
 .shares-sheet .ss-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
 .shares-sheet .ss-wid { color: var(--muted, #7d8590); font-size: 10.5px; }
 .shares-sheet .ss-stop {
@@ -592,6 +597,8 @@ body {
     .shares-sheet .ss-list { max-height: 60vh; }
     .shares-sheet .ss-stop { padding: 11px 16px; min-height: 44px; }
     .shares-sheet .ss-stopall { min-height: 48px; }
+    .shares-sheet .tsp-in { padding: 11px 12px; font-size: 14px; }
+    .shares-sheet .tsp-copy { min-height: 44px; padding: 0 16px; }
     /* Keep the amber pill readable but compact next to the other topbar icons. */
     .shares-indicator { height: 38px; padding: 0 11px; }
 }

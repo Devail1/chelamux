@@ -470,26 +470,43 @@ async function openSharesSheet() {
 }
 
 function closeSharesSheet() {
+    _sharesSheetGen++;   // invalidate any in-flight _buildSharesSheet fetch (see below)
     const bd = document.getElementById('shares-sheet-backdrop');
     if (bd) bd.remove();
     document.removeEventListener('keydown', _sharesSheetKey, true);
 }
 function _sharesSheetKey(e) { if (e.key === 'Escape') closeSharesSheet(); }
 
-function _buildSharesSheet() {
+// Bumped on every (re)build + on close: /api/term/shared deliberately omits join
+// links/pairing codes (owner-only secrets — see api_term_shared), so each row needs
+// its own /share-info round trip before we can render it. That await opens a race —
+// two overlapping rebuilds (e.g. a Stop mid-fetch plus the SSE-driven resync in
+// _renderSharesIndicator) would otherwise both finish and each insert its own
+// backdrop. A stale call bails instead of touching the DOM once a newer call (or a
+// close) has superseded it.
+let _sharesSheetGen = 0;
+
+async function _buildSharesSheet() {
+    const gen = ++_sharesSheetGen;
+    const wids = [..._sharedWids];
+    const infos = await Promise.all(wids.map(wid =>
+        api('/api/term/' + encodeURIComponent(wid) + '/share-info').catch(() => ({}))));
+    if (gen !== _sharesSheetGen) return;   // superseded — a newer build or a close won
     const existing = document.getElementById('shares-sheet-backdrop');
     if (existing) existing.remove();
-    const wids = [..._sharedWids];
     const backdrop = document.createElement('div');
     backdrop.id = 'shares-sheet-backdrop';
     backdrop.className = 'shares-backdrop';
     backdrop.onclick = (e) => { if (e.target === backdrop) closeSharesSheet(); };
     const sheet = document.createElement('div');
     sheet.className = 'shares-sheet';
-    const rows = wids.map(wid => `
+    const rows = wids.map((wid, i) => `
         <div class="ss-row" data-wid="${attrEsc(wid)}">
-          <span class="ss-label">${escHtml(_paneTitle(wid))} <span class="ss-wid">${escHtml(wid)}</span></span>
-          <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
+          <div class="ss-row-hd">
+            <span class="ss-label">${escHtml(_paneTitle(wid))} <span class="ss-wid">${escHtml(wid)}</span></span>
+            <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
+          </div>
+          <div class="ss-row-body">${_shareInfoRowsHTML(infos[i], 'Link unavailable — reopen this sheet to retry.')}</div>
         </div>`).join('');
     sheet.innerHTML =
         `<div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Active shares
@@ -499,6 +516,7 @@ function _buildSharesSheet() {
          ${wids.length ? `<button class="ss-stopall" type="button">Stop all sharing (${wids.length})</button>` : ''}`;
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);
+    _wireShareCopyButtons(sheet);
     sheet.querySelector('.ss-close').onclick = closeSharesSheet;
     sheet.querySelectorAll('.ss-stop').forEach(b => b.onclick = async () => {
         b.disabled = true; b.textContent = 'Stopping…';
@@ -546,6 +564,14 @@ function _paneTermDims(wid) {
 // then show the popover; if already shared, just (re)open the popover — never
 // silently stop on a stray click (Stop lives inside the popover).
 async function shareBtnClick(btn, wid) {
+    // Freeze the anchor rect NOW, before any await: this click is inside the pane's
+    // "⋯" overflow menu, and it bubbles past our own onclick up to the document-level
+    // {once:true} listener togglePaneOverflow armed on open (_closeAllPaneOverflows) —
+    // which hides the menu, and this button with it, before the awaits below resolve.
+    // A getBoundingClientRect() read after that point comes back zeroed (the button
+    // is display:none), so the popover used to land pinned to the top-left corner
+    // instead of under the button. Read it synchronously and thread it through.
+    const rect = (btn && !_isMobileTerm()) ? btn.getBoundingClientRect() : null;
     // ADOPT-FIRST: the share lives on the SERVER and survives page refreshes, so
     // always ask the server before minting. If a share already exists, reopen its
     // popover (same code) — never re-mint. This makes _sharedWids a mere hint: even
@@ -556,7 +582,7 @@ async function shareBtnClick(btn, wid) {
     if (info && info.pairing_code) {
         _sharedWids.add(wid); _updateShareBtns(wid); _renderSharesIndicator();
         _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code));
-        _sharePopover(btn, wid, info);
+        _sharePopover(rect, wid, info);
         return;
     }
     const body = { on: true };
@@ -575,7 +601,7 @@ async function shareBtnClick(btn, wid) {
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
     _renderSharesIndicator();
-    _sharePopover(btn, wid, resp);   // resp carries join_url + pairing_code
+    _sharePopover(rect, wid, resp);   // resp carries join_url + pairing_code
 }
 
 async function _stopShare(wid) {
@@ -599,45 +625,57 @@ function _sharePopOutside(e) {
     if (p && !p.contains(e.target) && !e.target.closest('.gs-share-btn')) _closeSharePopover();
 }
 
-// Popover anchored under the share button: join URL + pairing code (each with a
-// copy button) + a full-access badge + Stop sharing. The pairing code is what the
-// joiner pastes to derive the E2E keys — the relay never sees plaintext. A paired
-// joiner has full access (type + scroll); there is no separate grant.
-function _sharePopover(btn, wid, info) {
-    _closeSharePopover();
+// Join URL + pairing code, each as a labeled readonly input with a Copy button —
+// shared markup between the per-pane popover and the "Active shares" sheet (both
+// need the same view of a share's secrets, sourced from /api/term/<wid>/share-info
+// since /api/term/shared deliberately omits them — see api_term_shared).
+function _shareInfoRowsHTML(info, emptyMsg) {
     const url = info && info.join_url ? info.join_url : '';
     const code = info && info.pairing_code ? info.pairing_code : '';
     const row = (label, val, extra) => `
       <label class="tsp-lbl">${label}${extra || ''}</label>
       <div class="tsp-row"><input class="tsp-in" readonly value="${attrEsc(val)}">
         <button class="tsp-copy" data-copy="${attrEsc(val)}">Copy</button></div>`;
+    return (url ? row('Join link', url) : '') +
+        (code ? row('Pairing code', code, ' <span class="tsp-hint">— needed to decrypt</span>') : '') +
+        (!url && !code ? `<div class="tsp-warn">${emptyMsg}</div>` : '');
+}
+function _wireShareCopyButtons(root) {
+    root.querySelectorAll('.tsp-copy').forEach(b => b.onclick = () => {
+        navigator.clipboard.writeText(b.dataset.copy)
+            .then(() => { b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1500); })
+            .catch(() => {});
+    });
+}
+
+// Popover anchored under the share button: join URL + pairing code (each with a
+// copy button) + a full-access badge + Stop sharing. The pairing code is what the
+// joiner pastes to derive the E2E keys — the relay never sees plaintext. A paired
+// joiner has full access (type + scroll); there is no separate grant.
+// `rect` is the anchor button's getBoundingClientRect(), captured by the caller
+// BEFORE its await chain — see the comment in shareBtnClick for why it can't be
+// read fresh here.
+function _sharePopover(rect, wid, info) {
+    _closeSharePopover();
     const pop = document.createElement('div');
     pop.className = 'term-share-pop';
     pop.innerHTML =
         `<div class="tsp-hd"><span class="tsp-lock">&#128274; end-to-end</span>` +
         `<span class="tsp-ro">read + write</span></div>` +
-        (url ? row('Join link', url) : '') +
-        (code ? row('Pairing code', code, ' <span class="tsp-hint">— needed to decrypt</span>') : '') +
-        (!url && !code
-            ? `<div class="tsp-warn">Relay not configured — set <code>CHELA_COLLAB_RELAY</code> to stream.</div>` : '') +
+        _shareInfoRowsHTML(info, 'Relay not configured — set <code>CHELA_COLLAB_RELAY</code> to stream.') +
         `<button class="tsp-stop">Stop sharing</button>`;
     document.body.appendChild(pop);
     if (_isMobileTerm()) {
         // Mobile: CSS pins it as a bottom-sheet (safe-area padding, 44px targets);
         // skip the desktop top/right anchor so the inline styles don't fight it.
-    } else if (btn) {
-        const r = btn.getBoundingClientRect();
-        pop.style.top = (r.bottom + 6) + 'px';
-        pop.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+    } else if (rect) {
+        pop.style.top = (rect.bottom + 6) + 'px';
+        pop.style.right = Math.max(8, window.innerWidth - rect.right) + 'px';
     } else {                       // palette-invoked (no anchor button) → top-right
         pop.style.top = '52px';
         pop.style.right = '16px';
     }
-    pop.querySelectorAll('.tsp-copy').forEach(b => b.onclick = () => {
-        navigator.clipboard.writeText(b.dataset.copy)
-            .then(() => { b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1500); })
-            .catch(() => {});
-    });
+    _wireShareCopyButtons(pop);
     pop.querySelector('.tsp-stop').onclick = () => _stopShare(wid);
     setTimeout(() => document.addEventListener('mousedown', _sharePopOutside, true), 0);
 }
