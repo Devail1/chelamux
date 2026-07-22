@@ -822,7 +822,7 @@ function paneHead(wid, draggable) {
     // Minimize-to-dock is a wall-only concept (single view shows one pane, with
     // nothing to dock it beside) — only render it for draggable wall tiles.
     const min = draggable
-        ? `<button class="gs-min-btn" onclick="chela.termMinFor(this)" title="Minimize to dock">&#128469;</button>` : '';
+        ? `<button class="gs-min-btn" onclick="chela.termMinFor(this)" title="Minimize to dock">${lucideIcon('minus', 14)}</button>` : '';
     // Pin is also wall-only: it exempts this tile from applyGridLayout's
     // auto-reflow (grid presets), so single mode (no reflow to opt out of) gets
     // no button either.
@@ -875,7 +875,7 @@ function paneHead(wid, draggable) {
       <span class="gs-keys">
         <span class="gs-win-ctl">
           ${min}
-          <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">&#128470;</button>
+          <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">${lucideIcon('maximize-2', 14)}</button>
           ${kill}
         </span>
       </span>
@@ -978,14 +978,15 @@ function _termKillShowError(confirmEl, killBtn, msg) {
 // inverse — the tile snaps back to its exact prior x/y/w/h with no recompute.
 // There is no separate banner or ESC binding (ESC is the agent's interrupt key):
 // the way out is the same button, which goes accent-filled while maximized so
-// it reads as the obvious exit. Icon flips between 🗖 and 🗗 to match state.
+// it reads as the obvious exit. Icon flips between maximize-2 and minimize-2
+// (CMX-154: SVG, not emoji — the old 🗖/🗗 glyphs were tofu on macOS) to match state.
 function termMaxFor(btn) {
     if (!btn) return;
     const pane = btn.closest('.term-pane, .grid-stack-item-content');
     if (!pane) return;
     const isMax = pane.classList.toggle('pane-maximized');
     document.body.classList.toggle('pane-is-maximized', isMax);
-    btn.innerHTML = isMax ? '&#128471;' : '&#128470;';
+    btn.innerHTML = isMax ? lucideIcon('minimize-2', 14) : lucideIcon('maximize-2', 14);
     btn.title = isMax ? 'Restore pane' : 'Maximize pane';
     btn.setAttribute('aria-pressed', isMax ? 'true' : 'false');
 }
@@ -1388,7 +1389,8 @@ function renderMinDock() {
             const j = _jsStr(wid);
             const min = _minimized.has(wid);
             const cls = min ? 'min-chip min-chip-minimized' : 'min-chip min-chip-active';
-            const icon = min ? '&#128471;' : '&#128469;';   // restore vs minimize glyph
+            // CMX-154: SVG, not emoji — the old 🗗/🗕 glyphs were tofu on macOS.
+            const icon = min ? lucideIcon('maximize-2', 12) : lucideIcon('minus', 12);
             return `<button class="${cls}" data-wid="${attrEsc(wid)}"
               onclick="chela.toggleDockChip('${j}')" title="Click to ${min ? 'restore' : 'minimize'} ${attrEsc(_paneTitle(wid))}">
               ${_statusDot(wid)}

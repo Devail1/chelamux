@@ -389,6 +389,11 @@ body {
     min-width: 0; color: var(--text); background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
 }
+/* Minimize/maximize are SVG (lucideIcon), not text — undo the inline SVG's
+   baseline gap. NOT `display:flex` here: that would out-specificity the
+   `.gs-min-btn, .gs-max-btn { display: none }` mobile rule below (same trap
+   the pane-header-v2 comment above already flags for this pair of classes). */
+.gs-min-btn svg, .gs-max-btn svg { vertical-align: middle; }
 .gs-keys button:hover { border-color: var(--accent); }
 .gs-keys button.btn-accent { background: var(--accent); color: #0d1117; border-color: var(--accent); }
 /* × kill — only rendered for non-managed sessions. Red hover signals it's
@@ -750,7 +755,8 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 }
 .min-chip:hover { border-color: var(--accent); color: var(--accent); }
 .min-chip-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.min-chip-icon { flex: 0 0 auto; opacity: 0.7; }
+.min-chip-icon { flex: 0 0 auto; display: inline-flex; align-items: center; opacity: 0.7; }
+.min-chip-icon svg { display: block; }
 /* Visible (active) panes: accent left-border so they read as "on the wall".
    Minimized panes: dimmed/muted. */
 .min-chip-active { border-left: 3px solid var(--accent); }
