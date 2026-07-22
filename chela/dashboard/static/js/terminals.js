@@ -171,6 +171,16 @@ function setTermMode(m) {
     renderTerminals();
 }
 
+// "The wall is the visible screen": the terminals tab is active AND it's in
+// wall (not single-terminal) mode. Sidebar-row clicks (nav.js selectAgent,
+// CMX-139) use this to decide whether clicking an already-open pane should
+// hide it (wall visible) or summon it (wall not visible, or another tab
+// entirely) — the same click means something different depending on what's
+// actually on screen.
+function isWallVisible() {
+    return currentTab === 'terminals' && _termMode === 'wall';
+}
+
 // Spawn a fresh plain-shell tmux window, then re-render the wall so its pane
 // appears. The /term/<wid>/ iframe 404s until the ttyd supervisor's next poll
 // (~12s); renderTerminals renders a pending placeholder + readiness poll for
@@ -2667,7 +2677,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, renderTerminals, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
