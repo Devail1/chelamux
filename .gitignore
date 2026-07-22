@@ -40,8 +40,10 @@ secrets.*
 # without this line one `git add -A` would publish it). See CLAUDE.md.
 docs/AUTH_PLANE_SCOPE.md
 
-# Node — dev-only (jsdom, for the dashboard DOM test suites). See package.json.
-node_modules/
+# Node — dev-only (jsdom, for the dashboard DOM test suites). See package.json. No trailing
+# slash: CMX-151 makes this a SYMLINK (into a shared install outside any worktree), and a
+# `dir/`-style pattern does not match a symlink named `node_modules`.
+node_modules
 
 # The dispatch queue is per-install working state, not shipped content
 # (see TODO.example.md). The dispatcher reads it from disk.
