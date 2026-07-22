@@ -83,9 +83,13 @@ hooks:
   # `uv sync --all-extras`: dashboard/telegram tests false-fail on a default-only sync (a
   # `uv run` in a fresh worktree auto-syncs WITHOUT extras — the CMX-21 trap), and
   # `--extra X` DROPS the other extras, so it must be `--all-extras`.
-  # `npm ci`: jsdom, the repo's one npm dep (dev-only, nothing is bundled or shipped) —
-  # what CI installs, in the same breath, for the same reason.
-  before_run: uv sync --all-extras --quiet && npm ci --no-audit --no-fund --silent
+  # `scripts/npm-shared-install.sh`: installs jsdom, the repo's one npm dep (dev-only,
+  # nothing is bundled or shipped) — what CI installs, in the same breath, for the same
+  # reason, but via ONE shared node_modules symlinked into every worktree rather than a
+  # fresh `npm ci` copying 27M into each (CMX-151: unlike `uv sync`, which hardlinks from
+  # its own cache, `npm ci` always unpacks real files, and N concurrent worktrees were
+  # paying for N identical copies of the same dep).
+  before_run: uv sync --all-extras --quiet && scripts/npm-shared-install.sh
 ---
 
 # Autonomous coding agent — chelamux
