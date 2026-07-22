@@ -881,7 +881,7 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("judge_cannot_verify_tries",
          "ALTER TABLE runs ADD COLUMN judge_cannot_verify_tries INTEGER"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
-        # `record_window=False` (the run's `window_id` must stay the RUN's window, not a
+        # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
         # means it is otherwise invisible to `dispatched_window_ids` — the SAME "is this a
         # dispatched worker?" read the forum-topic bridge (CMX-73) and the Wall tile (CMX-76)
@@ -2851,7 +2851,7 @@ def _launch_agent(
     *,
     hook_vars: dict,
     fresh_worktree: bool,
-    record_window: bool = True,
+    judge_window: bool = False,
     role: str = "coding",
 ) -> str:
     """PREPARE the worktree, then put an agent in it. THE spawn path — the only one.
@@ -2896,10 +2896,15 @@ def _launch_agent(
     ``hook_vars`` is the same ``{{...}}`` map the prompt is rendered from, so a hook can
     target the worktree it is preparing (``{{workspace_path}}``).
 
-    ``record_window=False`` for an agent that is working ON a run rather than AS it (the
-    judge): ``runs.window_id`` is the run's OWN window — the Feed keys its lane on it and the
-    inbox addresses ``run_review`` to it — so stamping a short-lived judge's id there would
-    misattribute both.
+    ``judge_window=True`` for an agent that is working ON a run rather than AS it (the
+    judge): stamps ``judge_window_id``/``judge_window_epoch`` instead of ``runs.window_id`` —
+    the run's OWN window column, which the Feed keys its lane on and ``run_review`` addresses,
+    and must stay the RUN's window, never a short-lived judge's. ⛔ It is stamped at the SAME
+    lossless moment as the run's own id (right after ``_new_window()``, below) — CMX-136:
+    stamping a judge's id only after this whole function returns (past the ready-wait and
+    ``_send_seed``, several seconds later) left its tmux window live but invisible to
+    ``dispatched_window_ids`` for that whole gap, so the Wall drew it full-size like a human's
+    window instead of docking it minimized from the first poll.
 
     ``role`` (``"coding"`` | ``"judge"``) picks the MODEL the launch command runs on (see
     :func:`resolve_agent_cmd`). ⛔ The judge passes ``role="judge"`` so its command stays on
@@ -2928,10 +2933,18 @@ def _launch_agent(
     # Only a real @id is stored — _new_window degrades to the bare name when the id can't
     # be parsed, and a name in this column would be a lie the Feed keys a lane on. The id is
     # stamped with the tmux epoch that ISSUED it (CMX-77): this is the same lossless moment,
-    # and the id is worthless to a later reader without it.
-    if record_window and re.fullmatch(r"@\d+", target_id):
-        conn.execute("UPDATE runs SET window_id=?, window_epoch=? WHERE task_id=?",
-                     (target_id, epoch.current(), task_id))
+    # and the id is worthless to a later reader without it. CMX-136: the judge gets that SAME
+    # lossless moment into ITS OWN columns — stamping it any later (e.g. after the ready-wait
+    # and _send_seed below) reopens the stamp race this branch exists to close.
+    if re.fullmatch(r"@\d+", target_id):
+        if judge_window:
+            conn.execute(
+                "UPDATE runs SET judge_window_id=?, judge_window_epoch=? WHERE task_id=?",
+                (target_id, epoch.current(), task_id))
+        else:
+            conn.execute(
+                "UPDATE runs SET window_id=?, window_epoch=? WHERE task_id=?",
+                (target_id, epoch.current(), task_id))
         conn.commit()
 
     # WORKFLOW.md's agent.cmd → the Settings permission mode → the built-in default (see
@@ -3365,14 +3378,21 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
         _judge_vars(wf, row, worktree, sha),
     )
     try:
-        judge_target_id = _launch_agent(
+        _launch_agent(
             wf, task_id, judge.judge_window_name(branch), worktree, prompt, conn,
             hook_vars=_judge_vars(wf, row, worktree, sha),
             fresh_worktree=created,
-            # ⛔ The judge is NOT this run's agent. `window_id` is the run's own window (the
-            # Feed keys its lane on it, the inbox addresses run_review to it) and pointing it
-            # at a judge that will be gone in twenty minutes would misattribute both.
-            record_window=False,
+            # 🤫 CMX-97 (race closed CMX-136). The judge is NOT this run's agent — `window_id`
+            # is the run's own window (the Feed keys its lane on it, the inbox addresses
+            # run_review to it) and pointing it at a judge that will be gone in twenty minutes
+            # would misattribute both. `judge_window=True` stamps `judge_window_id`/
+            # `judge_window_epoch` instead, INSIDE `_launch_agent` at the same lossless moment
+            # as the run's own id — right after the tmux window is created, before the
+            # ready-wait/`_send_seed` that can run for several seconds. Stamping it out HERE,
+            # after this call returns, left the judge's window live-but-unstamped for that
+            # whole gap: invisible to `dispatched_window_ids`, so the Wall drew it full-size
+            # like a human's window instead of docking it minimized from the first poll.
+            judge_window=True,
             # ⛔ The judge runs on the fixed capable model, NEVER the coding-agent Settings
             # model — a `sonnet` default set for the fleet must not downgrade the safety net.
             role="judge",
@@ -3381,18 +3401,6 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
         log.exception("judge: %s: the judge agent failed to launch", task_id)
         set_judge_state(task_id, judge.J_CANNOT_VERIFY, f"the judge agent failed to launch: {e}")
         return False
-    # 🤫 CMX-97. `record_window=False` (above) keeps the RUN's `window_id` untouched on
-    # purpose — but that also left the judge invisible to `dispatched_window_ids`, so it
-    # looked like a human window: a Telegram topic nobody should message, popped full-size
-    # on the Wall instead of docking minimized. Stamp the judge's OWN id/epoch pair here so
-    # that same classifier can tell "the dispatcher owns this too" without touching the
-    # run's window_id.
-    if judge_target_id and re.fullmatch(r"@\d+", judge_target_id):
-        conn.execute(
-            "UPDATE runs SET judge_window_id=?, judge_window_epoch=? WHERE task_id=?",
-            (judge_target_id, epoch.current(), task_id),
-        )
-        conn.commit()
     log.info("judge: %s: judging %s on %s in %s", task_id, row["pr_url"] or "?", sha[:12], worktree)
     return True
 
