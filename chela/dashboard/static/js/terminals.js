@@ -1799,10 +1799,14 @@ function _refreshPaneIdx() {
 // typing. Ignored while the user is typing anywhere (an input) or while the
 // palette is open, so it never steals a keystroke. Shared with the
 // iframe-side wiring below so "what counts as a switch key" can't drift.
+// Keyed on e.code (physical key, e.g. "Digit1"), not e.key: on macOS, Option
+// is a dead-key/compose modifier, so Option+1 reports e.key as "¡" (never a
+// bare digit) even though the physical key pressed is the same "1".
 function _altSwitchWid(e) {
     if (!TERMINALS_ON || _termMode !== 'wall' || !e.altKey || e.ctrlKey || e.metaKey) return null;
-    if (!/^[1-9]$/.test(e.key)) return null;
-    return _switcherOrder()[Number(e.key) - 1] || null;
+    const m = /^Digit([1-9])$/.exec(e.code);
+    if (!m) return null;
+    return _switcherOrder()[Number(m[1]) - 1] || null;
 }
 
 // Ctrl/⌘+K — the same combo the parent chrome's palette shortcut uses
