@@ -117,6 +117,25 @@ def test_share_does_not_resize_owner_window(monkeypatch, _isolate):
     assert touched == []                                     # ...and untouched on revoke
 
 
+def test_share_off_when_no_relay_configured(monkeypatch, _isolate):
+    """No relay configured -> collab_stream.start_bridge returns None. The endpoint
+    must fail loudly (ok:False, 400) instead of pretending to share with an empty
+    info dict — _SHARED/_share_info must stay unseeded so the client never marks
+    the button 'on' or opens a popover with no join URL / pairing code."""
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    monkeypatch.setattr(dash.collab_stream, "start_bridge", lambda wid, on_revoke=None: None)
+
+    resp = dash.app.test_client().post("/api/term/@9/share", json={"on": True})
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["ok"] is False
+    assert body["shared"] is False
+    assert body.get("error")                    # non-empty message for the client toast
+    assert "@9" not in dash._SHARED
+    assert "@9" not in dash._share_info
+
+
 def test_bridge_resend_meta_on_source_resize(monkeypatch):
     """The bridge watches the source window size and resends T_META ONLY when it
     changes — the sole grid-lockstep mechanism (no window pin). The visual repaint

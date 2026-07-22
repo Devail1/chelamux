@@ -951,6 +951,19 @@ def api_term_share(wid):
     if not on:
         _revoke_share(wid)
         return jsonify({"ok": True, "shared": False})
+    # Start the E2E stream bridge; on_revoke fires if it fails closed on session
+    # death, so a share can never outlive its terminal (see collab_stream). With no
+    # relay configured (the default — no phone-home to anyone's personal infra
+    # unless you point CHELA_COLLAB_RELAY at one you own) this returns None: fail
+    # loudly here instead of seeding _SHARED/_share_info for a share that never
+    # actually started, which used to leave the client thinking it had shared.
+    code = collab_stream.start_bridge(wid, on_revoke=_revoke_share)
+    if not code:
+        return jsonify({
+            "ok": False,
+            "shared": False,
+            "error": "Sharing is off: no relay configured — set CHELA_COLLAB_RELAY to enable it.",
+        }), 400
     # Single grid authority for the E2E path: the LIVE tmux window size — the exact
     # dims the bridge streams (collab_stream._window_dims). Seed _SHARED with THAT,
     # not the posted pane dims or the 120x30 default, so the advertised grid matches
@@ -959,11 +972,8 @@ def api_term_share(wid):
     # the owner's window — a live workflow must stream undisturbed.
     cols, rows = collab_stream._window_dims(wid)
     _SHARED[wid] = {"cols": cols, "rows": rows}
-    # Start the E2E stream bridge; on_revoke fires if it fails closed on session
-    # death, so a share can never outlive its terminal (see collab_stream).
-    code = collab_stream.start_bridge(wid, on_revoke=_revoke_share)
     # Full access: a paired joiner (they hold the code) can type + scroll — no grant.
-    info = {"pairing_code": code, "join_url": collab_stream.join_url(wid)} if code else {}
+    info = {"pairing_code": code, "join_url": collab_stream.join_url(wid)}
     _share_info[wid] = info
     return jsonify({"ok": True, "shared": True, **info})
 
