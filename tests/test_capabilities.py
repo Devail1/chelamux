@@ -112,6 +112,15 @@ def test_no_state_file_means_unknown_not_off(chela_dir):
     assert capabilities.live_capability("dispatch") is None
 
 
+def test_update_available_row_never_crashes_effective(monkeypatch):
+    """CMX-142 part 1: whatever state the real checkout is in (no upstream, offline,
+    not even a git repo), `effective()` must still return a well-formed row — never raise."""
+    caps = _caps(monkeypatch, [])
+    assert "update_available" in caps
+    assert isinstance(caps["update_available"].on, bool)
+    assert caps["update_available"].detail
+
+
 def test_auto_merge_is_off_by_default_and_silent(monkeypatch, caplog):
     """OFF must not warn about auto-merge specifically — even though a *different* capability
     (the empty-workflows dispatcher, exercised elsewhere in this file) legitimately does."""

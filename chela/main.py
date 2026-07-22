@@ -44,6 +44,7 @@ from chela import (
     orchestrator,
     rooms,
     scheduler,
+    update,
     workflow,
 )
 from chela.personas import autolaunch, lease
@@ -61,6 +62,11 @@ from chela.config import (
 # Cost history (CMX-94): how often the daemon prunes context_snapshots — coarser
 # than CAPTURE_INTERVAL_SECONDS on purpose, since retention is measured in days.
 PRUNE_INTERVAL_SECONDS = 86400
+
+# Self-update notifier (CMX-142 part 1): how often the daemon fetches upstream to check
+# whether the checkout has fallen behind. Hourly — a `git fetch` on every tick would be
+# both wasteful and, on a slow/offline network, a stall the whole loop would inherit.
+UPDATE_CHECK_INTERVAL_SECONDS = 3600
 
 logging.basicConfig(
     level=logging.INFO,
@@ -196,6 +202,8 @@ def cmd_run(args) -> None:
     dispatch_held = False
     last_notify_check = 0.0
     waiting_seen: set[str] = set()
+    last_update_check = 0.0
+    update_behind_seen = 0
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
     # silently on its first tick instead of announcing every already-idle agent. (A
@@ -305,6 +313,15 @@ def cmd_run(args) -> None:
                 except Exception:
                     log.exception("Needs-input check failed")
                 last_notify_check = now
+
+            # Self-update heads-up (CMX-142 part 1): informs, never pulls — `chela update`
+            # is a human-run act. Edge-triggered by `update.check_and_notify` itself.
+            if now - last_update_check >= UPDATE_CHECK_INTERVAL_SECONDS:
+                try:
+                    update_behind_seen = update.check_and_notify(update_behind_seen)
+                except Exception:
+                    log.exception("Update-availability check failed")
+                last_update_check = now
 
             # Decisions inbox: tell the orchestrator when work it delegated finishes,
             # blocks, or fails — pushed into its session only while it is idle.
@@ -1745,6 +1762,46 @@ def cmd_judge(args) -> None:
               "the judge never merges.")
 
 
+def cmd_update(args) -> None:
+    """``chela update`` — pull the checkout, re-sync deps, restart services. ``--check``
+    only reports how far behind it is; it changes nothing.
+
+    Refuses outright (see ``chela.update.apply``) on a dirty working tree or a branch
+    that has diverged from its upstream — never clobbers local edits, never forces a
+    merge. There is no auto-pull here; that is a separate, later, opt-in decision.
+    """
+    try:
+        repo = update.repo_root()
+    except update.NotAGitCheckout as e:
+        print(f"update: {e}")
+        sys.exit(1)
+
+    if getattr(args, "check", False):
+        status = update.commits_behind(repo)
+        if not status.ok:
+            print(f"update --check: {status.error}")
+            sys.exit(1)
+        if status.behind:
+            print(f"{status.behind} commit(s) behind {status.branch or 'upstream'} — run `chela update`")
+        else:
+            print("up to date")
+        return
+
+    result = update.apply(repo)
+    if not result.ok:
+        print(f"update: refused at {result.step} — {result.error}")
+        sys.exit(1)
+    if result.behind_before == 0:
+        print("up to date — nothing to do")
+        return
+    if result.restarted:
+        print(f"✅ pulled {result.behind_before} commit(s), re-synced deps, restarted: "
+              f"{', '.join(result.restarted)}")
+    else:
+        print(f"✅ pulled {result.behind_before} commit(s), re-synced deps "
+              "(no running chela-* PM2 services to restart)")
+
+
 def cmd_merge(args) -> None:
     """⚙️⚖️ AUTONOMOUSLY merge a dispatched PR — the escalation contract, enforced in code.
 
@@ -2182,6 +2239,15 @@ def main() -> None:
                         help="One-off override of $CHELA_DASHBOARD_PORT (the env file is "
                              "the source of truth; default 5001)")
 
+    # update — the human-run half of self-update (CMX-142 part 1: no auto-pull)
+    p_update = sub.add_parser(
+        "update",
+        help="Pull the checkout, re-sync deps, restart chela-* services (refuses on a "
+             "dirty or diverged tree)",
+    )
+    p_update.add_argument("--check", action="store_true",
+                          help="Report how many commits behind upstream, without changing anything")
+
     # doctor — is what the fleet is RUNNING with still what the env file says?
     sub.add_parser(
         "doctor",
@@ -2280,6 +2346,8 @@ def main() -> None:
         cmd_reopen(args)
     elif args.command == "escalate":
         cmd_escalate(args)
+    elif args.command == "update":
+        cmd_update(args)
     else:
         parser.print_help()
 

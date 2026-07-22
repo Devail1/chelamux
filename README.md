@@ -354,6 +354,7 @@ measured numbers, and why a per-job cap does *not* protect the machine:
 | `chela events rotate [--yes]` | Retire the log to a `.bak` and start a fresh `boot_id` (an operator step — never silent) |
 | `chela plugin [--dir PATH] [--port N]` | Render the [Claude Code hooks plugin](docs/HOOKS.md) that feeds the event log |
 | `chela doctor` | Check the running config against `~/.chela/chela.env` — [drift is silent otherwise](docs/CONFIG.md) |
+| `chela update [--check]` | Pull the checkout, `uv sync --all-extras`, restart running `chela-*` services — refuses on a dirty or diverged tree, never auto-run. `--check` just reports how far behind |
 
 **Agent-facing** — an agent runs these *about its siblings*, from inside its own
 window (it knows itself via `$CHELA_WID`, injected at spawn):
