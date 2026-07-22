@@ -23,10 +23,20 @@ from chela.personas import lease
 
 @pytest.fixture(autouse=True)
 def _clean_runs():
-    with dispatcher._db() as conn:
-        conn.execute("DELETE FROM runs")
-        conn.commit()
+    # Wipe on BOTH sides of the test: `runs` lives in the module-global
+    # `dispatcher.DB_PATH` (not the per-test `chela_dir`), so a seeded
+    # `awaiting_review` row left behind here leaks into any LATER test that reads
+    # that DB — e.g. `test_config_env.py::test_doctor_is_quiet_when_everything_agrees`,
+    # whose `pr.checks` doctor fact then tries to verify our fake PR and reports
+    # CANNOT VERIFY. Teardown cleanup keeps the pollution from crossing files.
+    def _wipe() -> None:
+        with dispatcher._db() as conn:
+            conn.execute("DELETE FROM runs")
+            conn.commit()
+
+    _wipe()
     yield
+    _wipe()
 
 
 @pytest.fixture
