@@ -203,7 +203,7 @@ def api_agents():
 
     agents = []
     for name, window_id in windows.items():
-        transcript = transcripts.agent_transcript_summary(name)
+        transcript = transcripts.agent_transcript_summary(name, window_id=window_id)
 
         # Map window -> child claude pid -> session status + cwd. No claude pid
         # means a plain shell (or a dead session): not running, never "thinking".

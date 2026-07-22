@@ -287,8 +287,23 @@ def last_assistant_activity(cwd: str | None, base: Path | None = None) -> float 
         return None
 
 
-def _resolve_agent_transcript(agent_name: str) -> Path | None:
-    """Resolve agent_name → transcript path via its window's live cwd."""
+def _resolve_agent_transcript(agent_name: str, window_id: str | None = None) -> Path | None:
+    """Resolve an agent → its transcript path, by WINDOW when a window id is given.
+
+    Two windows can share one cwd (the same directory launched twice), and a cwd
+    guess cannot tell them apart — it hands both of them whichever transcript won
+    the "newest record" race, so one window's title/recap/PR bleed into the
+    other's (CMX-153; same root cause as CMX-147's Telegram topic collision).
+    :mod:`chela.sessions` is the authority for "which transcript is THIS window
+    writing" (session id via the event log or ``--resume``, cwd only as a last
+    resort, and it REFUSES the cwd guess outright when it can't disambiguate) —
+    so a caller that has a window id must hand it over rather than falling back
+    to the name→cwd guess here. Only a caller with no window id at all (none
+    live, or none looked up) gets the cwd fallback.
+    """
+    if window_id:
+        from chela import sessions
+        return sessions.transcript_for_window(window_id)
     return transcript_for_cwd(discovery.get_window_cwd(agent_name))
 
 
@@ -385,15 +400,18 @@ def latest_context_usage(path: Path) -> dict | None:
     return {"used_tokens": used, "model": rec["message"].get("model")}
 
 
-def agent_context_from_transcript(agent_name: str) -> dict | None:
-    """`latest_context_usage` for an agent, resolving its active transcript."""
-    path = _resolve_agent_transcript(agent_name)
+def agent_context_from_transcript(agent_name: str, window_id: str | None = None) -> dict | None:
+    """`latest_context_usage` for an agent, resolving its active transcript.
+
+    Pass `window_id` when the caller has one — see `_resolve_agent_transcript`.
+    """
+    path = _resolve_agent_transcript(agent_name, window_id)
     if path is None:
         return None
     return latest_context_usage(path)
 
 
-def agent_transcript_summary(agent_name: str) -> dict:
+def agent_transcript_summary(agent_name: str, window_id: str | None = None) -> dict:
     """Return `{"recap": str|None, "recap_ts": str|None, "pr": dict|None, "ai_title": str|None}`.
 
     `recap_ts` is the ISO timestamp of the away_summary record so the
@@ -401,6 +419,7 @@ def agent_transcript_summary(agent_name: str) -> dict:
     occasionally, so a displayed recap can legitimately lag by hours).
     `ai_title` is Claude's own auto-generated title for the session — a
     different record than the recap (see `latest_ai_title`). All fields are
-    None if the transcript can't be found.
+    None if the transcript can't be found. Pass `window_id` when the caller
+    has one — see `_resolve_agent_transcript`.
     """
-    return summary_for_path(_resolve_agent_transcript(agent_name))
+    return summary_for_path(_resolve_agent_transcript(agent_name, window_id))

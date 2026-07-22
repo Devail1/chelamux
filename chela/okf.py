@@ -219,7 +219,7 @@ def _agent_doc(name: str, wid: str, runs_by_window: dict[str, list[dict]]) -> tu
     cwd = discovery.get_window_cwd(name)
     recap = None
     pr = None
-    tpath = transcripts._resolve_agent_transcript(name)
+    tpath = transcripts._resolve_agent_transcript(name, window_id=wid)
     if tpath:
         try:
             recap = transcripts.latest_recap(tpath)
