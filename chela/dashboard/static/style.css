@@ -2455,6 +2455,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
 /* ---- Richer agent rows: name + ctx% on the top line, live state · age · recap
    beneath, so you read what a session is doing without opening it. */
 .agent-row.rich { align-items: flex-start; gap: 8px; }
+/* CMX-137's on-wall ring + CMX-146's ai-title line made SESSION rows denser — give
+   them more vertical breathing room than the tight 1px .side-list default (nav rows
+   are left untouched). Scoped to the sessions list + its per-project groups. */
+#sidebar-agents { gap: 5px; }
+#sidebar-agents .group-rows { gap: 5px; }
 /* 10px status dot — matches the collapsed rail (body.sidebar-collapsed .agent-row.rich
    .term-status-dot) so folding doesn't resize it. Scoped to the rich row, so the 8px
    base still holds for the wall pane dots and term pills. */
