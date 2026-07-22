@@ -361,6 +361,25 @@ AUTO_MERGE_ENABLED = os.environ.get("CHELA_AUTO_MERGE", "false").strip().lower()
 # orchestrator when someone later asks "why did this merge itself."
 AUTO_MERGE_ACTOR = "auto-merge"
 
+# ⬆️⚠️ AUTO-UPDATE (see chela.update.auto_apply_sweep) — the FULLY-UNATTENDED half of
+# self-update (CMX-148, part 2 of CMX-142). Part 1 (`chela update`, `update.check_and_notify`)
+# only ever INFORMS a human that the checkout fell behind — nothing there pulls code on its
+# own. This is the opt-in sweep that lets the daemon actually pull, `uv sync`, and restart its
+# own `chela-*` services (including itself) on its own hourly tick, mirroring
+# CHELA_AUTO_MERGE's contract exactly: the exact same safety rail underneath
+# (`update.apply()`'s dirty-tree / diverged-branch refusal, unchanged and unloosened by this
+# flag) — the only thing this removes is a human watching it happen.
+#
+# ⛔ Defaults OFF, hard: a fresh/external install must never autonomously rewrite its own
+# code and restart its own services with nobody attending. This is a deliberate, narrow
+# opt-in an operator makes for themselves — never a default, never inferred, and never
+# widened by any other flag (CHELA_AUTO_MERGE included — the two are independent knobs; an
+# operator can trust their judge to merge PRs without trusting every dependency in `dev` to
+# auto-deploy onto their own machine, and vice versa).
+AUTO_UPDATE_ENABLED = os.environ.get("CHELA_AUTO_UPDATE", "false").strip().lower() in (
+    "true", "1", "yes", "on",
+)
+
 _dispatch_raw = os.environ.get("CHELA_DISPATCH_WORKFLOWS", "")
 DISPATCH_WORKFLOWS = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()

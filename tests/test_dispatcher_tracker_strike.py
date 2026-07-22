@@ -9,6 +9,7 @@ mangling the base branch.
 """
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -371,3 +372,88 @@ def test_tick_retries_a_strike_that_could_not_land(ticking, monkeypatch):
     subprocess.run(["git", "-C", str(repo), "commit", "-am", "human"], check=True, capture_output=True)
     assert dispatcher.tick(wf_path)["tracker_struck"] == 1
     assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [ ] beta\n- [ ] human edit\n"
+
+
+# --- the out-of-band-merge guard (CMX-140) ----------------------------------
+#
+# A run's PR merged OUTSIDE `chela merge` (a hand `gh pr merge`) while the row still
+# reads `failed` with retries left — the exact leak observed with CMX-138. A `failed`
+# row was never part of the reconcile scan, so it never saw the merge and the claim
+# loop happily re-dispatched attempt N+1 for work that had already shipped.
+
+def _seed_failed_run(wf_path: Path, task_id: str, pr_state: str, attempt: int = 1) -> None:
+    """A fresh-dispatch attempt that failed, whose PR may have merged anyway."""
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, "
+            "started_at, attempt, pr_url, pr_state) "
+            "VALUES (?,?,?,'failed',?,?,?,?)",
+            (task_id, str(wf_path), "t", dispatcher._now(), attempt,
+             "https://github.com/o/r/pull/1", pr_state),
+        )
+        conn.commit()
+
+
+def test_tick_reconciles_a_failed_run_whose_PR_merged_out_of_band(ticking):
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+    _seed_failed_run(wf_path, alpha, pr_state="merged")
+
+    # Out-of-band merge: the PR landed by a hand `gh pr merge`, so nothing ever struck
+    # the tracker line — it is still open going into this tick.
+    assert "- [ ] alpha" in (repo / "TODO.md").read_text()
+
+    summary = dispatcher.tick(wf_path)
+
+    assert _status(alpha) == "done"
+    assert summary["tracker_struck"] == 1
+    assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [ ] beta\n"
+
+
+def test_a_failed_run_with_no_merge_still_retries(ticking, monkeypatch):
+    """Regression: the widened reconcile must not freeze a genuine failure's retry."""
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+    _seed_failed_run(wf_path, alpha, pr_state="open")
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("open", "MERGEABLE"))
+    claimed: list[tuple[str, int]] = []
+
+    def _spawn(wf, task, attempt, conn):
+        claimed.append((task.id, attempt))
+        return True
+
+    monkeypatch.setattr(dispatcher, "_spawn", _spawn)
+
+    summary = dispatcher.tick(wf_path)
+
+    assert _status(alpha) != "done"
+    assert claimed == [(alpha, 2)]
+    assert summary["dispatched"] == 1
+
+
+def test_prune_never_drops_a_done_row_still_unstruck_in_the_tracker():
+    """CMX-140 leak #2: `_prune_done_rows` used to drop `done` rows purely by
+    retention count, with no regard for whether the tracker strike had actually
+    landed. If a `done`+merged row's task_id is STILL open (`- [ ]`) in the
+    tracker, pruning it leaves nothing for the claim loop to find — the next
+    claim sees `existing is None` and re-dispatches a task that already shipped."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    dispatcher.ensure_schema(conn)
+    wf_path = "wf.md"
+    for task_id in ("unstruck", "struck"):
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, started_at, "
+            "attempt, pr_state) VALUES (?, ?, 't', 'done', ?, 1, 'merged')",
+            (task_id, wf_path, dispatcher._now()),
+        )
+    conn.commit()
+
+    # keep=0 would normally prune every done row for this workflow.
+    removed = dispatcher._prune_done_rows(conn, wf_path, open_ids={"unstruck"}, keep=0)
+
+    assert removed == 1
+    remaining = {r["task_id"] for r in conn.execute("SELECT task_id FROM runs").fetchall()}
+    assert remaining == {"unstruck"}

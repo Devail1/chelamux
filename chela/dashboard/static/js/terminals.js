@@ -171,6 +171,16 @@ function setTermMode(m) {
     renderTerminals();
 }
 
+// "The wall is the visible screen": the terminals tab is active AND it's in
+// wall (not single-terminal) mode. Sidebar-row clicks (nav.js selectAgent,
+// CMX-139) use this to decide whether clicking an already-open pane should
+// hide it (wall visible) or summon it (wall not visible, or another tab
+// entirely) — the same click means something different depending on what's
+// actually on screen.
+function isWallVisible() {
+    return currentTab === 'terminals' && _termMode === 'wall';
+}
+
 // Spawn a fresh plain-shell tmux window, then re-render the wall so its pane
 // appears. The /term/<wid>/ iframe 404s until the ttyd supervisor's next poll
 // (~12s); renderTerminals renders a pending placeholder + readiness poll for
@@ -319,6 +329,15 @@ function _paneTitle(wid) {
     return _displayLabel(wid);
 }
 
+// Claude Code's own auto-generated session title (CMX-146) — a distinct record
+// from the pane's name (tmux window name / rename), so it rides ALONGSIDE it
+// as a dim subtitle rather than replacing it. '' (not shown) until Claude has
+// written a first `ai-title` record for the session.
+function _paneAiTitle(wid) {
+    const a = _agentByWid(wid);
+    return (a && a.ai_title) || '';
+}
+
 // Rename the WINDOW (not a local label): POST the new name, which renames the tmux
 // window, so it shows up on every client, in tmux, and on the bound Telegram topic.
 // Refetches /api/agents so the wall, cards and nav all relabel from the real name.
@@ -460,26 +479,43 @@ async function openSharesSheet() {
 }
 
 function closeSharesSheet() {
+    _sharesSheetGen++;   // invalidate any in-flight _buildSharesSheet fetch (see below)
     const bd = document.getElementById('shares-sheet-backdrop');
     if (bd) bd.remove();
     document.removeEventListener('keydown', _sharesSheetKey, true);
 }
 function _sharesSheetKey(e) { if (e.key === 'Escape') closeSharesSheet(); }
 
-function _buildSharesSheet() {
+// Bumped on every (re)build + on close: /api/term/shared deliberately omits join
+// links/pairing codes (owner-only secrets — see api_term_shared), so each row needs
+// its own /share-info round trip before we can render it. That await opens a race —
+// two overlapping rebuilds (e.g. a Stop mid-fetch plus the SSE-driven resync in
+// _renderSharesIndicator) would otherwise both finish and each insert its own
+// backdrop. A stale call bails instead of touching the DOM once a newer call (or a
+// close) has superseded it.
+let _sharesSheetGen = 0;
+
+async function _buildSharesSheet() {
+    const gen = ++_sharesSheetGen;
+    const wids = [..._sharedWids];
+    const infos = await Promise.all(wids.map(wid =>
+        api('/api/term/' + encodeURIComponent(wid) + '/share-info').catch(() => ({}))));
+    if (gen !== _sharesSheetGen) return;   // superseded — a newer build or a close won
     const existing = document.getElementById('shares-sheet-backdrop');
     if (existing) existing.remove();
-    const wids = [..._sharedWids];
     const backdrop = document.createElement('div');
     backdrop.id = 'shares-sheet-backdrop';
     backdrop.className = 'shares-backdrop';
     backdrop.onclick = (e) => { if (e.target === backdrop) closeSharesSheet(); };
     const sheet = document.createElement('div');
     sheet.className = 'shares-sheet';
-    const rows = wids.map(wid => `
+    const rows = wids.map((wid, i) => `
         <div class="ss-row" data-wid="${attrEsc(wid)}">
-          <span class="ss-label">${escHtml(_paneTitle(wid))} <span class="ss-wid">${escHtml(wid)}</span></span>
-          <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
+          <div class="ss-row-hd">
+            <span class="ss-label">${escHtml(_paneTitle(wid))} <span class="ss-wid">${escHtml(wid)}</span></span>
+            <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
+          </div>
+          <div class="ss-row-body">${_shareInfoRowsHTML(infos[i], 'Link unavailable — reopen this sheet to retry.')}</div>
         </div>`).join('');
     sheet.innerHTML =
         `<div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Active shares
@@ -489,6 +525,7 @@ function _buildSharesSheet() {
          ${wids.length ? `<button class="ss-stopall" type="button">Stop all sharing (${wids.length})</button>` : ''}`;
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);
+    _wireShareCopyButtons(sheet);
     sheet.querySelector('.ss-close').onclick = closeSharesSheet;
     sheet.querySelectorAll('.ss-stop').forEach(b => b.onclick = async () => {
         b.disabled = true; b.textContent = 'Stopping…';
@@ -536,6 +573,14 @@ function _paneTermDims(wid) {
 // then show the popover; if already shared, just (re)open the popover — never
 // silently stop on a stray click (Stop lives inside the popover).
 async function shareBtnClick(btn, wid) {
+    // Freeze the anchor rect NOW, before any await: this click is inside the pane's
+    // "⋯" overflow menu, and it bubbles past our own onclick up to the document-level
+    // {once:true} listener togglePaneOverflow armed on open (_closeAllPaneOverflows) —
+    // which hides the menu, and this button with it, before the awaits below resolve.
+    // A getBoundingClientRect() read after that point comes back zeroed (the button
+    // is display:none), so the popover used to land pinned to the top-left corner
+    // instead of under the button. Read it synchronously and thread it through.
+    const rect = (btn && !_isMobileTerm()) ? btn.getBoundingClientRect() : null;
     // ADOPT-FIRST: the share lives on the SERVER and survives page refreshes, so
     // always ask the server before minting. If a share already exists, reopen its
     // popover (same code) — never re-mint. This makes _sharedWids a mere hint: even
@@ -546,7 +591,7 @@ async function shareBtnClick(btn, wid) {
     if (info && info.pairing_code) {
         _sharedWids.add(wid); _updateShareBtns(wid); _renderSharesIndicator();
         _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code));
-        _sharePopover(btn, wid, info);
+        _sharePopover(rect, wid, info);
         return;
     }
     const body = { on: true };
@@ -565,7 +610,7 @@ async function shareBtnClick(btn, wid) {
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
     _renderSharesIndicator();
-    _sharePopover(btn, wid, resp);   // resp carries join_url + pairing_code
+    _sharePopover(rect, wid, resp);   // resp carries join_url + pairing_code
 }
 
 async function _stopShare(wid) {
@@ -589,45 +634,57 @@ function _sharePopOutside(e) {
     if (p && !p.contains(e.target) && !e.target.closest('.gs-share-btn')) _closeSharePopover();
 }
 
-// Popover anchored under the share button: join URL + pairing code (each with a
-// copy button) + a full-access badge + Stop sharing. The pairing code is what the
-// joiner pastes to derive the E2E keys — the relay never sees plaintext. A paired
-// joiner has full access (type + scroll); there is no separate grant.
-function _sharePopover(btn, wid, info) {
-    _closeSharePopover();
+// Join URL + pairing code, each as a labeled readonly input with a Copy button —
+// shared markup between the per-pane popover and the "Active shares" sheet (both
+// need the same view of a share's secrets, sourced from /api/term/<wid>/share-info
+// since /api/term/shared deliberately omits them — see api_term_shared).
+function _shareInfoRowsHTML(info, emptyMsg) {
     const url = info && info.join_url ? info.join_url : '';
     const code = info && info.pairing_code ? info.pairing_code : '';
     const row = (label, val, extra) => `
       <label class="tsp-lbl">${label}${extra || ''}</label>
       <div class="tsp-row"><input class="tsp-in" readonly value="${attrEsc(val)}">
         <button class="tsp-copy" data-copy="${attrEsc(val)}">Copy</button></div>`;
+    return (url ? row('Join link', url) : '') +
+        (code ? row('Pairing code', code, ' <span class="tsp-hint">— needed to decrypt</span>') : '') +
+        (!url && !code ? `<div class="tsp-warn">${emptyMsg}</div>` : '');
+}
+function _wireShareCopyButtons(root) {
+    root.querySelectorAll('.tsp-copy').forEach(b => b.onclick = () => {
+        navigator.clipboard.writeText(b.dataset.copy)
+            .then(() => { b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1500); })
+            .catch(() => {});
+    });
+}
+
+// Popover anchored under the share button: join URL + pairing code (each with a
+// copy button) + a full-access badge + Stop sharing. The pairing code is what the
+// joiner pastes to derive the E2E keys — the relay never sees plaintext. A paired
+// joiner has full access (type + scroll); there is no separate grant.
+// `rect` is the anchor button's getBoundingClientRect(), captured by the caller
+// BEFORE its await chain — see the comment in shareBtnClick for why it can't be
+// read fresh here.
+function _sharePopover(rect, wid, info) {
+    _closeSharePopover();
     const pop = document.createElement('div');
     pop.className = 'term-share-pop';
     pop.innerHTML =
         `<div class="tsp-hd"><span class="tsp-lock">&#128274; end-to-end</span>` +
         `<span class="tsp-ro">read + write</span></div>` +
-        (url ? row('Join link', url) : '') +
-        (code ? row('Pairing code', code, ' <span class="tsp-hint">— needed to decrypt</span>') : '') +
-        (!url && !code
-            ? `<div class="tsp-warn">Relay not configured — set <code>CHELA_COLLAB_RELAY</code> to stream.</div>` : '') +
+        _shareInfoRowsHTML(info, 'Relay not configured — set <code>CHELA_COLLAB_RELAY</code> to stream.') +
         `<button class="tsp-stop">Stop sharing</button>`;
     document.body.appendChild(pop);
     if (_isMobileTerm()) {
         // Mobile: CSS pins it as a bottom-sheet (safe-area padding, 44px targets);
         // skip the desktop top/right anchor so the inline styles don't fight it.
-    } else if (btn) {
-        const r = btn.getBoundingClientRect();
-        pop.style.top = (r.bottom + 6) + 'px';
-        pop.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+    } else if (rect) {
+        pop.style.top = (rect.bottom + 6) + 'px';
+        pop.style.right = Math.max(8, window.innerWidth - rect.right) + 'px';
     } else {                       // palette-invoked (no anchor button) → top-right
         pop.style.top = '52px';
         pop.style.right = '16px';
     }
-    pop.querySelectorAll('.tsp-copy').forEach(b => b.onclick = () => {
-        navigator.clipboard.writeText(b.dataset.copy)
-            .then(() => { b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1500); })
-            .catch(() => {});
-    });
+    _wireShareCopyButtons(pop);
     pop.querySelector('.tsp-stop').onclick = () => _stopShare(wid);
     setTimeout(() => document.addEventListener('mousedown', _sharePopOutside, true), 0);
 }
@@ -747,12 +804,16 @@ async function orchestratorBtnClick(btn, wid) {
 function paneHead(wid, draggable) {
     const j = _jsStr(wid);
     const title = `<span class="pane-title" title="double-click to rename" ondblclick="chela.renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
+    // CMX-146: Claude's own auto-generated session title, dim under the name —
+    // hidden entirely until a first `ai-title` record exists for the session.
+    const aiTitle = _paneAiTitle(wid);
+    const subtitle = aiTitle ? `<span class="pane-subtitle" title="${attrEsc(aiTitle)}">${escHtml(aiTitle)}</span>` : '';
     // The NAME is the drag handle (CMX-117 drops the old "☰" glyph) — `.gs-grip`
     // stays the class GridStack's `handle`/`draggable.handle` option targets
     // (buildWall), so dragging still works; only the glyph is gone.
     const label = draggable
-        ? `<span class="gs-grip" title="drag to move">${title}</span>`
-        : `<span class="gs-label">${title}</span>`;
+        ? `<span class="gs-grip" title="drag to move">${title}${subtitle}</span>`
+        : `<span class="gs-label">${title}${subtitle}</span>`;
     // × kill: rendered ONLY for non-managed agents (spawned shells / ad-hoc
     // sessions). Managed personas (anything in agents.yaml) get no × so they
     // can't be torn down from the wall by accident; the backend also refuses.
@@ -1658,27 +1719,47 @@ async function termTick() {
     renderSidebarAgents(agents);
 }
 
-// Update the visible label of every on-screen pane + chip from current state,
-// WITHOUT touching the iframe. A window rename only changes display text, so
-// this keeps the header/chip/dropdown in sync with zero reload. (During an
-// inline rename the `.pane-title` span is swapped for an input of a different
-// class, so the query below never clobbers an in-progress edit.)
-function _setSpanLabel(span, wid) {
-    if (!span || !wid) return;
-    const lbl = _paneTitle(wid);
-    if (span.textContent !== lbl) span.textContent = lbl;
+// Update the visible label + ai-title subtitle of every on-screen pane + chip
+// from current state, WITHOUT touching the iframe. A window rename only
+// changes display text, so this keeps the header/chip/dropdown in sync with
+// zero reload. `wrap` is the `.gs-grip`/`.gs-label` header cell (name +
+// subtitle together, not just the name span) so both can be refreshed as one.
+// During an inline rename the `.pane-title` span is swapped for an input of a
+// different class, so the title-text query below never clobbers an
+// in-progress edit; the subtitle (a sibling, untouched by rename) still
+// refreshes normally.
+function _setSpanLabel(wrap, wid) {
+    if (!wrap || !wid) return;
+    const titleSpan = wrap.querySelector('.pane-title');
+    if (titleSpan) {
+        const lbl = _paneTitle(wid);
+        if (titleSpan.textContent !== lbl) titleSpan.textContent = lbl;
+    }
+    const aiTitle = _paneAiTitle(wid);
+    let subSpan = wrap.querySelector('.pane-subtitle');
+    if (aiTitle) {
+        if (!subSpan) {
+            subSpan = document.createElement('span');
+            subSpan.className = 'pane-subtitle';
+            wrap.appendChild(subSpan);
+        }
+        if (subSpan.textContent !== aiTitle) subSpan.textContent = aiTitle;
+        if (subSpan.title !== aiTitle) subSpan.title = aiTitle;
+    } else if (subSpan) {
+        subSpan.remove();
+    }
 }
 function _refreshPaneLabels() {
     if (!TERMINALS_ON) return;
     if (_termMode === 'wall') {
         $('#term-stage').querySelectorAll('.grid-stack-item').forEach(item => {
-            _setSpanLabel(item.querySelector('.pane-title'), item.getAttribute('gs-id'));
+            _setSpanLabel(item.querySelector('.gs-grip, .gs-label'), item.getAttribute('gs-id'));
         });
         renderMinDock();   // chips carry labels too
     } else {
         const sel = $('#term-agent');
         const pane = $('#term-stage') && $('#term-stage').querySelector('.term-pane');
-        if (sel && pane) _setSpanLabel(pane.querySelector('.pane-title'), sel.value);
+        if (sel && pane) _setSpanLabel(pane.querySelector('.gs-grip, .gs-label'), sel.value);
         if (sel) Array.from(sel.options).forEach(o => {
             const lbl = _paneTitle(o.value);
             if (o.textContent !== lbl) o.textContent = lbl;
@@ -2667,7 +2748,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, renderTerminals, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

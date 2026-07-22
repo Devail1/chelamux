@@ -37,6 +37,7 @@ from chela.telegram.reconcile import (
     TopicClosedHandler,
     TopicManager,
     blocked_on_human,
+    disambiguate_topic_names,
     dispatched_window_ids,
     reconcile_bindings,
     topic_name_for,
@@ -381,6 +382,66 @@ def test_reconcile_without_cwd_for_uses_window_name():
 
 
 # --------------------------------------------------------------------------
+# disambiguate_topic_names — same-cwd generic-name windows must not collide
+# (CMX-147: two windows in one cwd both fell back to the same project
+# basename, so their topics were indistinguishable in the Telegram topic list)
+# --------------------------------------------------------------------------
+
+def test_disambiguate_leaves_unique_names_untouched():
+    assert disambiguate_topic_names({"@3": "chelamux", "@4": "nautilus"}) == {
+        "@3": "chelamux", "@4": "nautilus",
+    }
+
+
+def test_disambiguate_suffixes_every_colliding_window_with_its_id():
+    # BOTH windows get the suffix — neither reads as the "plain", canonical one.
+    got = disambiguate_topic_names({"@3": "chelamux", "@7": "chelamux"})
+    assert got == {"@3": "chelamux (@3)", "@7": "chelamux (@7)"}
+
+
+def test_disambiguate_only_touches_the_names_that_actually_collide():
+    got = disambiguate_topic_names(
+        {"@3": "chelamux", "@7": "chelamux", "@9": "nautilus"}
+    )
+    assert got == {
+        "@3": "chelamux (@3)", "@7": "chelamux (@7)", "@9": "nautilus",
+    }
+
+
+def test_reconcile_disambiguates_two_windows_sharing_a_cwd_and_generic_name():
+    # Two windows in the SAME project, both with tmux's command-follow name
+    # ("claude") — topic_name_for falls both back to "chelamux" alone.
+    reg = BindingRegistry("777")
+    api = _StubTopicApi(threads=["42", "43"])
+    cwds = {"@3": "/home/liav/projects/chelamux", "@7": "/home/liav/projects/chelamux"}
+    changed = reconcile_bindings(
+        reg, {"@3": "claude", "@7": "claude"}, ["@3", "@7"], api, cwd_for=cwds.get
+    )
+    assert changed is True
+    assert sorted(api.created) == ["chelamux (@3)", "chelamux (@7)"]
+    assert reg.topic_name("@3") == "chelamux (@3)"
+    assert reg.topic_name("@7") == "chelamux (@7)"
+
+
+def test_reconcile_disambiguates_retroactively_when_a_sibling_appears():
+    # @3 is already bound with the plain name from a tick where it was alone.
+    # Once @7 shows up in the same cwd, @3's topic must be RENAMED to add the
+    # suffix too — it must not keep looking like the sole/canonical one.
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    reg.set_topic_name("@3", "chelamux")
+    api = _StubTopicApi(threads=["43"])
+    cwds = {"@3": "/home/liav/projects/chelamux", "@7": "/home/liav/projects/chelamux"}
+    changed = reconcile_bindings(
+        reg, {"@3": "claude", "@7": "claude"}, ["@3", "@7"], api, cwd_for=cwds.get
+    )
+    assert changed is True
+    assert api.created == ["chelamux (@7)"]
+    assert api.renamed == [("42", "chelamux (@3)")]
+    assert reg.topic_name("@3") == "chelamux (@3)"
+
+
+# --------------------------------------------------------------------------
 # Dispatcher-spawned agents (CMX-73) — no topic while working, one when BLOCKED
 # --------------------------------------------------------------------------
 
@@ -666,7 +727,7 @@ def test_a_settled_run_whose_id_tmux_recycled_is_NOT_dispatched():
 
 
 # --------------------------------------------------------------------------
-# The judge's OWN window (CMX-97) — `_spawn_judge` launches with `record_window=False`,
+# The judge's OWN window (CMX-97) — `_spawn_judge` launches with `judge_window=True`,
 # so it must be found through `judge_window_id`, never `window_id`.
 # --------------------------------------------------------------------------
 

@@ -112,6 +112,15 @@ def test_no_state_file_means_unknown_not_off(chela_dir):
     assert capabilities.live_capability("dispatch") is None
 
 
+def test_update_available_row_never_crashes_effective(monkeypatch):
+    """CMX-142 part 1: whatever state the real checkout is in (no upstream, offline,
+    not even a git repo), `effective()` must still return a well-formed row — never raise."""
+    caps = _caps(monkeypatch, [])
+    assert "update_available" in caps
+    assert isinstance(caps["update_available"].on, bool)
+    assert caps["update_available"].detail
+
+
 def test_auto_merge_is_off_by_default_and_silent(monkeypatch, caplog):
     """OFF must not warn about auto-merge specifically — even though a *different* capability
     (the empty-workflows dispatcher, exercised elsewhere in this file) legitimately does."""
@@ -139,6 +148,34 @@ def test_auto_merge_on_is_a_LOUD_warning_not_a_quiet_info(monkeypatch, caplog):
         capabilities.announce(caps, log)
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any(auto_merge.label in r.getMessage() for r in warnings)
+    assert any("UNATTENDED" in r.getMessage() for r in warnings)
+
+
+def test_auto_update_is_off_by_default_and_silent(monkeypatch, caplog):
+    """Same contract as auto_merge above, for the other fully-unattended act (CMX-148)."""
+    caps = list(_caps(monkeypatch, []).values())
+    auto_update = next(c for c in caps if c.key == "auto_update")
+    assert auto_update.on is False
+    with caplog.at_level(logging.INFO):
+        capabilities.announce(caps, logging.getLogger("chela.test.autoupdate-off"))
+    assert not [r for r in caplog.records
+                if r.levelno >= logging.WARNING and auto_update.label in r.getMessage()]
+
+
+def test_auto_update_on_is_a_LOUD_warning_not_a_quiet_info(monkeypatch, caplog):
+    """🔴 Corrupt `announce()` to fall through to the plain `log.info` branch for an
+    ON+warn_when_on capability and this goes red."""
+    monkeypatch.setattr(config, "AUTO_UPDATE_ENABLED", True)
+    caps = list(_caps(monkeypatch, []).values())
+    auto_update = next(c for c in caps if c.key == "auto_update")
+    assert auto_update.on is True
+    assert auto_update.warn_when_on is True
+
+    log = logging.getLogger("chela.test.autoupdate-on")
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        capabilities.announce(caps, log)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(auto_update.label in r.getMessage() for r in warnings)
     assert any("UNATTENDED" in r.getMessage() for r in warnings)
 
 

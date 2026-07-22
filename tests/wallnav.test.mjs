@@ -1286,3 +1286,80 @@ test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in 
         'env(safe-area-inset-bottom))` — base 70vh, BOTH terms SUBTRACTED (a flipped + grows the pane and ' +
         'worsens the overlap), exact var name. Any of those silently reverts the keybar-overlap fix.');
 });
+
+// CMX-146 — Claude's own auto-generated session title rides as a dim `.pane-subtitle`
+// under the pane name, distinct from the name itself. It must (a) render on first paint
+// when `/api/agents` carries `ai_title`, (b) stay ABSENT for a pane with none, and (c)
+// track live updates through `_refreshPaneLabels` (the poll path) without a full rebuild
+// — added, updated, and removed again as the agent's `ai_title` comes and goes.
+test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and only when present', () => {
+    const withTitle = AGENTS.map(a => a.window_id === '@1' ? { ...a, ai_title: 'Fix the flaky wall test' } : a);
+    util.setAgentsCache(withTitle);
+    try {
+        terminals._refreshPaneLabels();
+        const sub1 = tile('@1').querySelector('.gs-grip .pane-subtitle');
+        assert.ok(sub1, '@1 carries an ai_title — its pane header must show a .pane-subtitle');
+        assert.equal(sub1.textContent, 'Fix the flaky wall test');
+        assert.equal(sub1.getAttribute('title'), 'Fix the flaky wall test', 'full text on hover via the title attr');
+        // @2 has no ai_title in this fixture — its header must carry no subtitle at all,
+        // not an empty one (an always-present-but-blank span would still pass a truthiness
+        // check on a corrupted "hide when falsy" guard).
+        assert.equal(tile('@2').querySelector('.gs-grip .pane-subtitle'), null,
+            'a pane with no ai_title must render NO .pane-subtitle element');
+    } finally {
+        util.setAgentsCache(AGENTS);
+        terminals._refreshPaneLabels();
+    }
+});
+
+// A brand-new wid forces buildWall to construct its tile FRESH through paneHead
+// itself (the wall's `_termSig` is keyed on the wid set — see the comment on
+// `_displayLabel` above — so a new window always rebuilds, unlike an ai_title
+// change on an EXISTING wid, which only ever reaches the DOM through
+// `_refreshPaneLabels`, covered separately above). This is the only test in the
+// file that exercises paneHead's initial markup for the subtitle, not the
+// refresh path — the two are genuinely different code paths in terminals.js.
+test('CMX-146: a NEW pane (never refreshed) still shows its ai_title from paneHead\'s own initial markup', async () => {
+    const withNewAgent = [...AGENTS, { name: 'delta', window_id: '@4', online: true, ai_title: 'Ship the delta feature' }];
+    try {
+        util.setAgentsCache(withNewAgent);
+        await terminals.renderTerminals();
+        const sub = tile('@4').querySelector('.gs-grip .pane-subtitle');
+        assert.ok(sub, 'a freshly-built tile (via paneHead, not _refreshPaneLabels) must carry the ai_title subtitle');
+        assert.equal(sub.textContent, 'Ship the delta feature');
+    } finally {
+        util.setAgentsCache(AGENTS);
+        await terminals.renderTerminals();
+        assert.equal(tile('@4'), null, 'the injected 4th pane must not leak into later tests');
+    }
+});
+
+test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and removed again', () => {
+    try {
+        // starts absent (restored AGENTS fixture carries no ai_title)
+        assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null);
+
+        util.setAgentsCache(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate flaky CI' } : a));
+        terminals._refreshPaneLabels();
+        let sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
+        assert.ok(sub, 'a fresh ai_title must appear on the next refresh, no full rebuild required');
+        assert.equal(sub.textContent, 'Investigate flaky CI');
+
+        // a revised title (Claude re-titles as the conversation evolves) must replace it in place
+        util.setAgentsCache(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate and fix flaky CI' } : a));
+        terminals._refreshPaneLabels();
+        sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
+        assert.ok(sub, 'the subtitle element must still be there after a revision');
+        assert.equal(sub.textContent, 'Investigate and fix flaky CI');
+
+        // and it must be removed again once the field goes back to empty/absent — not left
+        // stale, which would read as a title Claude never actually confirmed.
+        util.setAgentsCache(AGENTS);
+        terminals._refreshPaneLabels();
+        assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null,
+            'the subtitle must be REMOVED once ai_title is gone, not left stale from the prior refresh');
+    } finally {
+        util.setAgentsCache(AGENTS);
+        terminals._refreshPaneLabels();
+    }
+});

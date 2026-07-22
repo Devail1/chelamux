@@ -202,10 +202,19 @@ body {
     border-bottom: 1px solid var(--border);
 }
 .gs-grip, .gs-label {
-    flex: 1 1 auto; user-select: none;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1 1 auto; min-width: 0; user-select: none;
+    display: flex; flex-direction: column; justify-content: center; overflow: hidden;
 }
 .gs-grip { cursor: move; }
+.pane-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* CMX-146: Claude's own auto-generated session title, dim and small under the
+   pane name — a distinct record from the name itself (which is the tmux window
+   name / rename), so it rides alongside it rather than replacing it. */
+.pane-subtitle {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10px; line-height: 1.3; font-weight: 400;
+    color: var(--text-dim); opacity: 0.75;
+}
 
 /* --- CMX-119: pane header v2 — split the CMX-117 combined badge back apart
    now that every pane has a bottom bar to hold its numbers (see .term-ctx-bar
@@ -491,23 +500,26 @@ body {
 .term-share-pop .tsp-lock { font-weight: 600; color: var(--green, #3fb950); }
 .term-share-pop .tsp-ro { margin-left: auto; font-size: 10.5px; color: var(--muted, #7d8590);
     border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
-.term-share-pop .tsp-lbl { display: block; margin: 8px 0 4px; font-size: 10.5px; color: var(--muted, #7d8590); }
-.term-share-pop .tsp-hint { opacity: 0.8; }
-.term-share-pop .tsp-row { display: flex; gap: 6px; }
-.term-share-pop .tsp-in {
+/* tsp-lbl/tsp-row/tsp-in/tsp-copy/tsp-warn are the join-link/pairing-code row
+   markup (_shareInfoRowsHTML) — shared between the pane popover and the "Active
+   shares" sheet (.ss-row-body), so these rules apply under both ancestors. */
+.term-share-pop .tsp-lbl, .shares-sheet .tsp-lbl { display: block; margin: 8px 0 4px; font-size: 10.5px; color: var(--muted, #7d8590); }
+.term-share-pop .tsp-hint, .shares-sheet .tsp-hint { opacity: 0.8; }
+.term-share-pop .tsp-row, .shares-sheet .tsp-row { display: flex; gap: 6px; }
+.term-share-pop .tsp-in, .shares-sheet .tsp-in {
     flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px;
     background: var(--bg, #0a0c11); color: var(--text); border: 1px solid var(--border);
     font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace;
 }
 .term-share-pop .tsp-code { letter-spacing: 0.06em; }
-.term-share-pop .tsp-copy, .term-share-pop .tsp-stop {
+.term-share-pop .tsp-copy, .term-share-pop .tsp-stop, .shares-sheet .tsp-copy {
     cursor: pointer; border-radius: 6px; border: 1px solid var(--border);
     background: var(--surface); color: var(--text); font-size: 11.5px; padding: 6px 10px;
 }
-.term-share-pop .tsp-copy:hover { border-color: var(--accent); }
+.term-share-pop .tsp-copy:hover, .shares-sheet .tsp-copy:hover { border-color: var(--accent); }
 .term-share-pop .tsp-stop { width: 100%; margin-top: 12px; color: var(--red, #f85149); border-color: rgba(248, 81, 73, 0.4); }
 .term-share-pop .tsp-stop:hover { background: rgba(248, 81, 73, 0.12); }
-.term-share-pop .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
+.term-share-pop .tsp-warn, .shares-sheet .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
 /* Mobile: the share popover becomes a bottom-sheet — full-width, pinned to the
    bottom edge with safe-area padding and 44px+ tap targets. The pane header 🔗 is
@@ -565,9 +577,11 @@ body {
 .shares-sheet .ss-sub { color: var(--muted, #7d8590); font-size: 11.5px; margin-bottom: 11px; }
 .shares-sheet .ss-list { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
 .shares-sheet .ss-row {
-    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    display: flex; flex-direction: column; padding: 8px 10px;
     background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
 }
+.shares-sheet .ss-row-hd { display: flex; align-items: center; gap: 10px; }
+.shares-sheet .ss-row-body { margin-top: 2px; }
 .shares-sheet .ss-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
 .shares-sheet .ss-wid { color: var(--muted, #7d8590); font-size: 10.5px; }
 .shares-sheet .ss-stop {
@@ -592,6 +606,8 @@ body {
     .shares-sheet .ss-list { max-height: 60vh; }
     .shares-sheet .ss-stop { padding: 11px 16px; min-height: 44px; }
     .shares-sheet .ss-stopall { min-height: 48px; }
+    .shares-sheet .tsp-in { padding: 11px 12px; font-size: 14px; }
+    .shares-sheet .tsp-copy { min-height: 44px; padding: 0 16px; }
     /* Keep the amber pill readable but compact next to the other topbar icons. */
     .shares-indicator { height: 38px; padding: 0 11px; }
 }
@@ -2439,6 +2455,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
 /* ---- Richer agent rows: name + ctx% on the top line, live state · age · recap
    beneath, so you read what a session is doing without opening it. */
 .agent-row.rich { align-items: flex-start; gap: 8px; }
+/* CMX-137's on-wall ring + CMX-146's ai-title line made SESSION rows denser — give
+   them more vertical breathing room than the tight 1px .side-list default (nav rows
+   are left untouched). Scoped to the sessions list + its per-project groups. */
+#sidebar-agents { gap: 5px; }
+#sidebar-agents .group-rows { gap: 5px; }
 /* 10px status dot — matches the collapsed rail (body.sidebar-collapsed .agent-row.rich
    .term-status-dot) so folding doesn't resize it. Scoped to the rich row, so the 8px
    base still holds for the wall pane dots and term pills. */
@@ -2475,6 +2496,12 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .ar-ctx.warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
 .ar-ctx.danger { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
+/* CMX-146: Claude's own auto-generated session title — its own dim line, distinct
+   from `.ar-recap` below (an occasional away_summary blurb, often absent). */
+.ar-title {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10px; color: var(--text-dim); opacity: 0.75;
+}
 .ar-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; font-size: 10px; color: var(--text-dim); }
 .ar-state { flex: 0 0 auto; font-weight: 600; text-transform: capitalize; }
 .ar-state.working { color: var(--green); }
@@ -2973,6 +3000,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
        desktop bar. See CMX-133 below for what happens to the window-control
        keys (drag/min/max/kill) themselves. */
     .gs-head { padding: 2px 8px; font-size: 11px; }
+    /* CMX-146: single mobile pane is already tight on vertical space — drop the
+       dim ai-title subtitle here, keep it for wall/desktop panes. */
+    .pane-subtitle { display: none; }
     /* CMX-133: drag/minimize/maximize genuinely don't apply to the forced
        single pane, but × kill is the only way to tear a session down on
        phones (no wall, no overflow-menu equivalent) — keep just that button. */

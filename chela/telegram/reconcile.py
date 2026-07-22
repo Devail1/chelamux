@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from typing import Callable
 
 from chela import epoch
@@ -105,6 +106,31 @@ def topic_name_for(cwd: str | None, window_name: str) -> str:
     if normalized == home or normalized == os.sep:
         return window_name
     return os.path.basename(normalized) or window_name
+
+
+def disambiguate_topic_names(names: dict[str, str]) -> dict[str, str]:
+    """Break ties when two windows resolve to the identical topic name.
+
+    :func:`topic_name_for` is deliberately per-window pure — it has no idea a
+    sibling window exists. Two agents parked in the SAME cwd with generic names
+    (tmux's command-follow ``claude``, or a bare ``shell-N``) both fall back to
+    the identical project basename, so two windows in ``~/projects/chelamux``
+    would each get a topic titled "chelamux" — same title, no way to tell which
+    is which from the Telegram topic list (CMX-147).
+
+    Every name shared by more than one window gets its window id appended —
+    ``"chelamux (@3)"`` / ``"chelamux (@7)"`` — so the fallback still reads as
+    the project but each topic is tell-apart-able. ALL of the colliding windows
+    get the suffix, not just the second one seen, so there is no "plain" one
+    that reads as more canonical than its sibling — and the result never
+    depends on dict iteration order, since collisions are decided by counting
+    first.
+    """
+    counts = Counter(names.values())
+    return {
+        wid: f"{name} ({wid})" if counts[name] > 1 else name
+        for wid, name in names.items()
+    }
 
 
 class TopicManager:
@@ -211,6 +237,9 @@ def reconcile_bindings(
       :func:`chela.discovery.get_window_cwd_by_id`); injected so this stays pure.
       When given, a provisioned topic is named after the agent's *project* (its cwd
       basename) via :func:`topic_name_for` instead of the raw tmux window name.
+      Two windows sharing a cwd and both carrying generic names collide on that
+      same basename; :func:`disambiguate_topic_names` appends each one's window id
+      before anything is created or renamed, so they read as distinct topics.
     * ``dispatched``  — the window ids the DISPATCHER owns, read off the ``runs``
       table (:func:`dispatched_window_ids`), not guessed from a window name.
     * ``gate_for``    — ``window_id -> blocked-on-a-human evidence | None`` probe (in
@@ -306,6 +335,18 @@ def reconcile_bindings(
         log.info("auto-topics: window %s %s — closed topic %s, unbound", wid, why, thread)
         changed = True
 
+    # Names first, for EVERY current agent window (bound or not) — so a collision
+    # between two windows sharing a cwd + generic name (CMX-147) is visible before
+    # anything is created or renamed, and so a topic bound in an earlier, still-
+    # unambiguous tick gets the disambiguating suffix retroactively once a sibling
+    # shows up (the rename loop below picks that up like any other name change).
+    raw_names = {
+        wid: topic_name_for(cwd_for(wid) if cwd_for is not None else None,
+                             live_windows.get(wid, wid))
+        for wid in agent_ids
+    }
+    desired_names = disambiguate_topic_names(raw_names)
+
     # Provision: an agent window with no binding gets a fresh topic. Idempotent —
     # a window that already has a binding (by id) is skipped, so no double-create.
     for wid in agent_ids:
@@ -313,9 +354,7 @@ def reconcile_bindings(
             continue
         if not _wants_topic(wid):
             continue  # dispatcher-owned and working away quietly — not the forum's problem
-        window_name = live_windows.get(wid, wid)
-        cwd = cwd_for(wid) if cwd_for is not None else None
-        name = topic_name_for(cwd, window_name)
+        name = desired_names[wid]
         thread = topic_api.create_topic(name)
         if thread is None:
             continue  # create failed (perms?); leave unbound and retry next tick
@@ -334,8 +373,7 @@ def reconcile_bindings(
         thread = registry.thread_for_window(wid)
         if thread is None:
             continue
-        cwd = cwd_for(wid) if cwd_for is not None else None
-        desired = topic_name_for(cwd, live_windows.get(wid, wid))
+        desired = desired_names[wid]
         if registry.topic_name(wid) == desired:
             continue
         if not topic_api.rename_topic(thread, desired):

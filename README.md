@@ -354,6 +354,7 @@ measured numbers, and why a per-job cap does *not* protect the machine:
 | `chela events rotate [--yes]` | Retire the log to a `.bak` and start a fresh `boot_id` (an operator step — never silent) |
 | `chela plugin [--dir PATH] [--port N]` | Render the [Claude Code hooks plugin](docs/HOOKS.md) that feeds the event log |
 | `chela doctor` | Check the running config against `~/.chela/chela.env` — [drift is silent otherwise](docs/CONFIG.md) |
+| `chela update [--check]` | Pull the checkout, `uv sync --all-extras`, restart running `chela-*` services — refuses on a dirty or diverged tree, never auto-run. `--check` just reports how far behind |
 
 **Agent-facing** — an agent runs these *about its siblings*, from inside its own
 window (it knows itself via `$CHELA_WID`, injected at spawn):
@@ -403,6 +404,7 @@ the dashboard *publishes* the port it bound.
 | `CHELA_MAX_REWORKS` | `2` | How many times a PR that fails review is sent back to its agent before the run stops at `needs_human`. `0` = no rework at all |
 | `CHELA_JUDGE` | `true` | The **judge** — the adversarial pass on a green PR (corrupt each guard, re-run the suite, block only on one that survives). One extra agent per PR head, so this is the fleet-wide off switch; a workflow turns it off for itself with `judge: {enabled: false}`, and it is off anyway without a `judge.test_cmd` |
 | `CHELA_AUTO_MERGE` | `false` | ⚠️ **Fully-UNATTENDED auto-merge — opt-in risk.** On every daemon tick, squash-merges every judge-`clean` `awaiting_review` PR through the same `chela merge` gate (base branch, CI green, MERGEABLE — still no override) with **no human attending and no attended-lease required**. Off by default on every install, including yours, until you turn it on: this trusts your judge configuration completely, unattended. See [docs/ESCALATION_CONTRACT.md](docs/ESCALATION_CONTRACT.md) (v0.5) before enabling |
+| `CHELA_AUTO_UPDATE` | `false` | ⚠️ **Fully-UNATTENDED self-update — opt-in risk.** Whenever the checkout falls behind its upstream, the daemon runs the exact same `chela update` a human would (refuses on a dirty or diverged tree, `git pull --ff-only`, `uv sync --all-extras`, restart `chela-*` services — including itself) on its own hourly tick, with **no human attending**. Off by default on every install, including yours: this trusts CI and the upstream branch completely, unattended. See [docs/ESCALATION_CONTRACT.md](docs/ESCALATION_CONTRACT.md) (v0.6) before enabling |
 | `CHELA_AGENT_CMD` | `claude` | Launch command for the dashboard Start button |
 | `CHELA_PROJECTS_DIR` | `~/projects` | Folder scanned for git repos to suggest in the Launch sidebar (also settable in dashboard **Settings → Projects folder**, which wins) |
 | `CHELA_NOTIFY_URL` | — | Needs-input notification target (ntfy / Telegram / webhook) |

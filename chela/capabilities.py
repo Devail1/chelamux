@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, hold, inbox, notify
+from chela import config, hold, inbox, notify, update
 
 # The state file is written once at startup and deleted on a clean exit. A crash leaves
 # it behind; the pid check in live() is what makes a stale file harmless — same contract
@@ -55,6 +55,43 @@ class Capability:
                 "detail": self.detail, "fix": self.fix,
                 "warn_when_off": self.warn_when_off, "warn_when_on": self.warn_when_on,
                 **self.extra}
+
+
+def _update_available_capability() -> Capability:
+    """CMX-142 part 1: is the checkout behind its upstream?
+
+    ``fetch=False`` — this reads only the LOCAL remote-tracking ref, deliberately never a
+    network call. ``effective()`` runs on every `chela doctor` invocation and every daemon
+    boot; a `git fetch` in there would make both as slow (and as flaky) as the network,
+    which is the same trap ``notify``/``dispatch`` avoid by reading local state only. The
+    daemon's own periodic ``update.check_and_notify`` (see `cmd_run`) is what actually
+    fetches, on its own hourly cadence — this row is only ever as fresh as that last fetch.
+    """
+    try:
+        status = update.commits_behind(fetch=False)
+    except update.NotAGitCheckout as e:
+        return Capability(
+            key="update_available", label="Update available", on=False,
+            detail=f"not a git checkout — {e}", fix="pip install --upgrade chelamux",
+        )
+    if not status.ok:
+        return Capability(
+            key="update_available", label="Update available", on=False,
+            detail=f"couldn't tell ({status.error})", fix="chela update --check",
+        )
+    if status.error:
+        # ok=True but carrying a note (no upstream configured) — "up to date" would be a
+        # guess dressed as an answer; say what's actually true instead.
+        return Capability(
+            key="update_available", label="Update available", on=False,
+            detail=status.error, fix="",
+        )
+    return Capability(
+        key="update_available", label="Update available", on=bool(status.behind),
+        detail=(f"{status.behind} commit(s) behind — run `chela update`" if status.behind
+                else "up to date (as of the last fetch)"),
+        fix="chela update",
+    )
 
 
 def effective() -> list[Capability]:
@@ -143,6 +180,7 @@ def effective() -> list[Capability]:
                     else "CHELA_TERMINALS_ENABLED=false — the dashboard serves no terminals"),
             fix="unset CHELA_TERMINALS_ENABLED=false",
         ),
+        _update_available_capability(),
         # 🔀⚠️ CMX-138. The one fully-UNATTENDED merge path in the whole system — see
         # chela.automerge. OFF is the safe, expected state for every install but an operator's
         # own; ON gets its own WARNING line every boot (never just an INFO), because "silence
@@ -157,6 +195,22 @@ def effective() -> list[Capability]:
                     if config.AUTO_MERGE_ENABLED else
                     "off — merging stays a human or attended-orchestrator act (the safe default)"),
             fix="unset CHELA_AUTO_MERGE — OFF is the recommended default for every install "
+                "but an operator's own",
+            warn_when_on=True,
+        ),
+        # ⬆️⚠️ CMX-148, part 2 of CMX-142. Same "silence never means off, and a risky ON
+        # never means quiet" contract as auto_merge above, for the other fully-UNATTENDED
+        # act this daemon can take on its own — see chela.update.auto_apply_sweep.
+        Capability(
+            key="auto_update", label="⬆️⚠️ Auto-update", on=config.AUTO_UPDATE_ENABLED,
+            detail=("UNATTENDED — whenever this checkout falls behind its upstream, this "
+                    "daemon pulls, `uv sync`s, and restarts its own `chela-*` services "
+                    "(including itself) on its own hourly tick, with NO human attending "
+                    "(`update.apply()`'s dirty-tree/diverged-branch refusal still applies "
+                    "in full; only the human-attendance requirement is gone)."
+                    if config.AUTO_UPDATE_ENABLED else
+                    "off — updating stays a human act via `chela update` (the safe default)"),
+            fix="unset CHELA_AUTO_UPDATE — OFF is the recommended default for every install "
                 "but an operator's own",
             warn_when_on=True,
         ),

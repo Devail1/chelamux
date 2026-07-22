@@ -3,7 +3,7 @@ import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
-import { _displayLabel, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, shareBtnClick } from './terminals.js';
+import { _displayLabel, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals.js';
 import { _isFav, _launcherData, launchProject, refreshLauncher } from './launcher.js';
 import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
@@ -135,14 +135,31 @@ function selectView(view) {
     refresh();
 }
 
-// Clicking an agent (sidebar row or command palette) lands you ON its live
-// pane — switch to the wall, restore/scroll/flash it (focusPaneByWid). The
-// metadata "detail" card is the fallback only when there's no wall to land on
-// (terminals off) or the window isn't resolved yet.
+// Clicking an agent (sidebar row or command palette) acts relative to the
+// wall (CMX-139), three cases:
+//   1. wall already visible AND this pane is open on it (rendered, not
+//      minimized) -> minimize it. A click on an already-summoned pane hides
+//      it, mirroring the on-wall ring cue (CMX-137, _agentRowHtml).
+//   2. not on the wall at all (another tab, or single-terminal mode) ->
+//      switch to wall mode and focus/restore the pane there.
+//   3. wall visible but the pane is minimized -> restore + focus (the old
+//      always-focus behavior).
+// The metadata "detail" card is the fallback only when there's no wall to
+// land on (terminals off) or the window isn't resolved yet.
 function selectAgent(name) {
     if (TERMINALS_ON && typeof focusPaneByWid === 'function') {
         const a = (_agentsCache || []).find(x => x.name === name);
-        if (a && a.window_id) { focusPaneByWid(a.window_id); return; }
+        if (a && a.window_id) {
+            const wid = a.window_id;
+            const openOnWall = _renderedWids.includes(wid) && !_minimized.has(wid);
+            if (isWallVisible() && openOnWall) {
+                minimizePane(wid);
+            } else {
+                if (!isWallVisible()) setTermMode('wall');   // leaving single-terminal mode / another tab
+                focusPaneByWid(wid);
+            }
+            return;
+        }
     }
     showAgentDetail(name);
 }
@@ -259,6 +276,12 @@ function _agentRowHtml(a) {
     if (a.recap_ts) age = ageStr((Date.now() - new Date(a.recap_ts)) / 1000).replace(' ago', '');
     const recap = a.recap ? `<span class="ar-recap" title="${attrEsc(a.recap)}">${escHtml(a.recap)}</span>` : '';
 
+    // CMX-146: Claude's own auto-generated session title — a different record
+    // than the recap above (which is an occasional away_summary, often absent).
+    // Shown as its own dim line so it never gets read as the recap.
+    const aiTitle = a.ai_title
+        ? `<div class="ar-title" title="${attrEsc(a.ai_title)}">${escHtml(a.ai_title)}</div>` : '';
+
     const sub = `<span class="ar-state ${stCls}">${stWord}</span>`
         + (age ? `<span class="ar-age">· ${age}</span>` : '')
         + (recap ? ` ${recap}` : '');
@@ -283,6 +306,7 @@ function _agentRowHtml(a) {
                 <span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span>
                 ${ctxChip}
             </div>
+            ${aiTitle}
             <div class="ar-sub">${sub}</div>
         </div>
         ${pin}
@@ -427,6 +451,7 @@ function renderAgentDetail() {
     ];
     if (a.schedule_next_run) rows.push(['Next run', shortTime(a.schedule_next_run)]);
     if (a.schedule_last_run) rows.push(['Last run', shortTime(a.schedule_last_run)]);
+    if (a.ai_title) rows.push(['Title', escHtml(a.ai_title)]);
 
     let pr = '';
     if (a.pr && a.pr.url) {

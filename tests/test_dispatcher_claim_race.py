@@ -267,6 +267,32 @@ def test_a_hold_survives_a_restart_of_the_process_that_honours_it(repo, spawns):
     assert spawns.titles == []
 
 
+# --- the out-of-band-merge guard: a merged task is never re-claimed (CMX-140) ---
+
+
+def test_a_merged_task_is_never_claimed_even_if_reconcile_missed_it(repo, spawns, monkeypatch):
+    """Belt-and-suspenders claim guard. The reconcile pass (1.) already flips a
+    `failed`+merged row to `done` before the claim loop runs, so to prove THIS
+    guard (not that one) is what stops the re-claim, neuter the reconcile
+    widening for this test only and confirm the claim loop still refuses a
+    `pr_state='merged'` row on its own."""
+    first = _id(repo, "first item")
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, attempt, "
+            "started_at, pr_url, pr_state) VALUES (?, ?, ?, 'failed', 1, ?, ?, 'merged')",
+            (first, str((repo / "WORKFLOW.md").resolve()), "first item", dispatcher._now(),
+             "https://example.invalid/pull/1"),
+        )
+    monkeypatch.setattr(dispatcher, "RECONCILE_MERGE_STATUSES", dispatcher.REVIEW_STATUSES)
+
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert "first item" not in spawns.titles
+    assert summary["dispatched"] == 1
+    assert spawns.titles == ["second item"]
+
+
 # --- the landmine: a reorder must not re-key an in-flight run ---------------
 
 
