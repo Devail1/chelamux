@@ -570,28 +570,20 @@ function _paneTermDims(wid) {
 }
 
 // Share button: turn sharing ON (mint the E2E bridge, get join URL + pairing code)
-// then show the popover; if already shared, just (re)open the popover — never
-// silently stop on a stray click (Stop lives inside the popover).
+// then open the "Active shares" sheet — the single place a share's link + code +
+// Copy + Stop live (CMX-152). If already shared, the sheet just reopens showing it.
 async function shareBtnClick(btn, wid) {
-    // Freeze the anchor rect NOW, before any await: this click is inside the pane's
-    // "⋯" overflow menu, and it bubbles past our own onclick up to the document-level
-    // {once:true} listener togglePaneOverflow armed on open (_closeAllPaneOverflows) —
-    // which hides the menu, and this button with it, before the awaits below resolve.
-    // A getBoundingClientRect() read after that point comes back zeroed (the button
-    // is display:none), so the popover used to land pinned to the top-left corner
-    // instead of under the button. Read it synchronously and thread it through.
-    const rect = (btn && !_isMobileTerm()) ? btn.getBoundingClientRect() : null;
     // ADOPT-FIRST: the share lives on the SERVER and survives page refreshes, so
-    // always ask the server before minting. If a share already exists, reopen its
-    // popover (same code) — never re-mint. This makes _sharedWids a mere hint: even
-    // if it is stale (e.g. right after a reload, before /api/agents has seeded it),
-    // a click can't rotate the code or orphan the running bridge.
+    // always ask the server before minting — never re-mint an existing share. This
+    // makes _sharedWids a mere hint: even if it is stale (e.g. right after a
+    // reload, before /api/agents has seeded it), a click can't rotate the code or
+    // orphan the running bridge.
     let info = {};
     try { info = (await api('/api/term/' + encodeURIComponent(wid) + '/share-info')) || {}; } catch (_) {}
     if (info && info.pairing_code) {
         _sharedWids.add(wid); _updateShareBtns(wid); _renderSharesIndicator();
         _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code));
-        _sharePopover(rect, wid, info);
+        openSharesSheet();
         return;
     }
     const body = { on: true };
@@ -610,7 +602,7 @@ async function shareBtnClick(btn, wid) {
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
     _renderSharesIndicator();
-    _sharePopover(rect, wid, resp);   // resp carries join_url + pairing_code
+    openSharesSheet();
 }
 
 async function _stopShare(wid) {
@@ -622,22 +614,13 @@ async function _stopShare(wid) {
     } catch (_) {}
     _sharedWids.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
     _ownerPresence().then(m => m && m.stopOwnerPresence(wid));
-    _reloadPaneFrame(wid); _updateShareBtns(wid); _renderSharesIndicator(); _closeSharePopover();
-}
-
-function _closeSharePopover() {
-    document.querySelectorAll('.term-share-pop').forEach(p => p.remove());
-    document.removeEventListener('mousedown', _sharePopOutside, true);
-}
-function _sharePopOutside(e) {
-    const p = document.querySelector('.term-share-pop');
-    if (p && !p.contains(e.target) && !e.target.closest('.gs-share-btn')) _closeSharePopover();
+    _reloadPaneFrame(wid); _updateShareBtns(wid); _renderSharesIndicator();
 }
 
 // Join URL + pairing code, each as a labeled readonly input with a Copy button —
-// shared markup between the per-pane popover and the "Active shares" sheet (both
-// need the same view of a share's secrets, sourced from /api/term/<wid>/share-info
-// since /api/term/shared deliberately omits them — see api_term_shared).
+// the markup for one share's info inside the "Active shares" sheet (.ss-row-body),
+// sourced from /api/term/<wid>/share-info since /api/term/shared deliberately
+// omits them — see api_term_shared.
 function _shareInfoRowsHTML(info, emptyMsg) {
     const url = info && info.join_url ? info.join_url : '';
     const code = info && info.pairing_code ? info.pairing_code : '';
@@ -655,38 +638,6 @@ function _wireShareCopyButtons(root) {
             .then(() => { b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1500); })
             .catch(() => {});
     });
-}
-
-// Popover anchored under the share button: join URL + pairing code (each with a
-// copy button) + a full-access badge + Stop sharing. The pairing code is what the
-// joiner pastes to derive the E2E keys — the relay never sees plaintext. A paired
-// joiner has full access (type + scroll); there is no separate grant.
-// `rect` is the anchor button's getBoundingClientRect(), captured by the caller
-// BEFORE its await chain — see the comment in shareBtnClick for why it can't be
-// read fresh here.
-function _sharePopover(rect, wid, info) {
-    _closeSharePopover();
-    const pop = document.createElement('div');
-    pop.className = 'term-share-pop';
-    pop.innerHTML =
-        `<div class="tsp-hd"><span class="tsp-lock">&#128274; end-to-end</span>` +
-        `<span class="tsp-ro">read + write</span></div>` +
-        _shareInfoRowsHTML(info, 'Relay not configured — set <code>CHELA_COLLAB_RELAY</code> to stream.') +
-        `<button class="tsp-stop">Stop sharing</button>`;
-    document.body.appendChild(pop);
-    if (_isMobileTerm()) {
-        // Mobile: CSS pins it as a bottom-sheet (safe-area padding, 44px targets);
-        // skip the desktop top/right anchor so the inline styles don't fight it.
-    } else if (rect) {
-        pop.style.top = (rect.bottom + 6) + 'px';
-        pop.style.right = Math.max(8, window.innerWidth - rect.right) + 'px';
-    } else {                       // palette-invoked (no anchor button) → top-right
-        pop.style.top = '52px';
-        pop.style.right = '16px';
-    }
-    _wireShareCopyButtons(pop);
-    pop.querySelector('.tsp-stop').onclick = () => _stopShare(wid);
-    setTimeout(() => document.addEventListener('mousedown', _sharePopOutside, true), 0);
 }
 
 // Throwaway toast bubble anchored to the pane header — same plain-DOM affordance
