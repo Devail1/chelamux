@@ -2444,6 +2444,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
    base still holds for the wall pane dots and term pills. */
 .agent-row.rich .term-status-dot { margin-top: 4px; flex: 0 0 auto; width: 10px; height: 10px; }
 .agent-row.rich.active::before { height: 22px; }
+/* Open-on-wall cue: a faint ring on rows whose pane is live on the wall (not docked
+   to the min-dock) — so a click reads as "focus" vs "restore" before you make it.
+   Deliberately quieter than .active (a fill + rail): a 1px inset ring only. */
+.agent-row.on-wall { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 32%, var(--border)); }
+.agent-row.on-wall:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, var(--border)); }
 /* Window-type cue: a GLYPH (C / $ / ⚙), never colour alone. The letter carries the
    type; the tint only reinforces it, and it comes from the Okabe-Ito colourblind-
    safe palette (sky blue / bluish green / orange) rather than a red-green pairing.
