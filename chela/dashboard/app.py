@@ -593,51 +593,91 @@ _TERM_SCROLLBAR_CSS = (
 #       dashboard, so a `storage` event fires here whenever the settings panel
 #       changes it — live switching, no reload. `window.chelaApplyTermPrefs` is
 #       also exposed so the parent frame can poke it directly for instant feedback.
-#   (2) Fix the FOUT/atlas bug: xterm rasterises glyphs into a texture atlas ONCE
-#       at first paint, using whatever font was ready then. Our @font-faces load
-#       async (font-display:swap), so the first atlas uses the fallback and never
-#       rebuilds — the real font only appeared on cells xterm re-drew (a text
-#       selection/scroll), i.e. the font "changed" on select. apply() awaits the
-#       chosen faces via the CSS Font Loading API, then clears the atlas
-#       (clearTextureAtlas) so the next render rebuilds it correctly.
+#   (2) Fix the FOUT/atlas bug: xterm rasterises glyphs into a texture atlas keyed
+#       by the render config (family/size/…) — see xterm's
+#       browser/renderer/shared/CharAtlasCache.ts `acquireTextureAtlas`. At first
+#       paint (before our @font-faces finish loading — font-display:swap) that
+#       atlas gets built from the fallback font and CACHED under this exact
+#       config. Re-applying the SAME fontFamily/fontSize once the webfont is
+#       ready is a cache HIT on that same stale entry — a no-op — so on a build
+#       whose `clearTextureAtlas()` is absent or a no-op (CMX-155: reported on
+#       macOS with fonts confirmed loaded), the tofu glyphs never go away.
+#       apply() awaits the chosen faces via the CSS Font Loading API, then (a)
+#       calls clearTextureAtlas() when present, and (b), regardless of (a): walks
+#       fontSize to a neighboring value and back across two real animation
+#       frames. Per acquireTextureAtlas, a terminal only sheds a cache entry it
+#       owns when a REAL render runs against a genuinely different config — the
+#       walk forces exactly that (evicting the poisoned entry), then returns to
+#       the original size so the next render rebuilds fresh, now with the
+#       webfont loaded. A same-tick set-and-revert would NOT work here: xterm
+#       coalesces same-tick option changes into one render at the final value,
+#       so the intermediate config (and thus the eviction) never actually renders.
 # Reconciles on a bounded interval (not a one-shot) because ttyd re-applies its
 # launch client-options — including fontSize — when the WebSocket connects, which
-# can land AFTER a single apply() and revert a pane to the default size. apply()
-# early-returns once the terminal already matches, so the interval is a cheap
-# no-op after it converges; it also re-applies on tab refocus and on storage
-# changes. The interval also covers `window.term` not existing yet at first tick.
+# can land AFTER a single apply() and revert a pane to the default size. The
+# atlas fix above only needs to run once per page (an `atlasFixed` flag gates
+# it) — but that flag is deliberately SEPARATE from the "does fontFamily/
+# fontSize already match" check: matching already (the common case — no custom
+# prefs) must not skip the one-time atlas walk, or it never runs at all. Once
+# fixed, later ticks are a cheap no-op; it also re-applies (and re-arms the
+# walk) on tab refocus and on storage changes, and covers `window.term` not
+# existing yet at first tick.
 _TERM_FONT_PREF_SHIM = (
     "<script>(function(){"
-    "var LAT={jetbrains:\"JetBrains Mono\",firacode:\"Fira Code\","
-    "plex:\"IBM Plex Mono\",source:\"Source Code Pro\",cascadia:\"Cascadia Code\"};"
-    "var HEB={miriam:\"Miriam Mono CLM\",noto:\"Noto Sans Hebrew\",heebo:\"Heebo\","
-    "assistant:\"Assistant\",rubik:\"Rubik\",frankruhl:\"Frank Ruhl Libre\","
-    "david:\"David Libre\"};"
+    "var LAT={jetbrains:'JetBrains Mono',firacode:'Fira Code',"
+    "plex:'IBM Plex Mono',source:'Source Code Pro',cascadia:'Cascadia Code'};"
+    "var HEB={miriam:'Miriam Mono CLM',noto:'Noto Sans Hebrew',heebo:'Heebo',"
+    "assistant:'Assistant',rubik:'Rubik',frankruhl:'Frank Ruhl Libre',"
+    "david:'David Libre'};"
+    "var atlasFixed=false;"
+    "function raf(){return new Promise(function(res){"
+    "if(window.requestAnimationFrame)requestAnimationFrame(res);else setTimeout(res,16);});}"
     "function apply(){var t=window.term;if(!t)return;"
     "var lat=LAT[localStorage.getItem('chela_term_latin')]||LAT.jetbrains;"
     "var heb=HEB[localStorage.getItem('chela_term_font')]||HEB.miriam;"
     "var s=window.__CHELA_GRID_FONT__||(parseInt(localStorage.getItem('chela_term_fontsize'),10)||14);"
     "var fam=\"'\"+lat+\"','Symbols Nerd Font','\"+heb+\"',monospace\";"
-    "if(t.options&&t.options.fontSize===s&&t.options.fontFamily===fam)return;"
+    "function getSize(){return t.options?t.options.fontSize:"
+    "(t.getOption?t.getOption('fontSize'):undefined);}"
+    "function getFam(){return t.options?t.options.fontFamily:"
+    "(t.getOption?t.getOption('fontFamily'):undefined);}"
+    "function setSize(v){if(t.options)t.options.fontSize=v;"
+    "else if(t.setOption)t.setOption('fontSize',v);}"
+    "function setFam(f){if(t.options)t.options.fontFamily=f;"
+    "else if(t.setOption)t.setOption('fontFamily',f);}"
+    "if(atlasFixed&&getSize()===s&&getFam()===fam)return;"
     "var L=[s+\"px '\"+lat+\"'\",\"bold \"+s+\"px '\"+lat+\"'\",s+\"px '\"+heb+\"'\","
     "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\"];"
     "var P=(document.fonts&&document.fonts.load)?"
     "Promise.all(L.map(function(f){return document.fonts.load(f).catch(function(){});}))"
     ":Promise.resolve();"
-    "P.then(function(){try{"
-    "if(t.options){t.options.fontFamily=fam;t.options.fontSize=s;}"
-    "else if(t.setOption){t.setOption('fontFamily',fam);t.setOption('fontSize',s);}"
-    "if(t.clearTextureAtlas)t.clearTextureAtlas();"
+    "P.then(function(){"
+    "try{setFam(fam);setSize(s);"
     "if(t.fit&&!window.__CHELA_GRID_FONT__)t.fit();"
     "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
-    "}catch(e){}});}"
+    "}catch(e){}"
+    "if(atlasFixed)return;"
+    "try{if(t.clearTextureAtlas)t.clearTextureAtlas();}catch(e){}"
+    "try{"
+    "var decoy=s>1?s-1:s+1;"
+    "setSize(decoy);"
+    "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
+    "raf().then(raf).then(function(){"
+    "try{setSize(s);"
+    "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
+    "if(t.fit&&!window.__CHELA_GRID_FONT__)t.fit();"
+    "}catch(e){}"
+    "atlasFixed=true;"
+    "});"
+    "}catch(e){atlasFixed=true;}"
+    "});}"
     "window.chelaApplyTermPrefs=apply;"
     "var n=0,iv=setInterval(function(){apply();if(++n>60)clearInterval(iv);},500);"
     "document.addEventListener('visibilitychange',function(){"
-    "if(!document.hidden)apply();});"
+    "if(!document.hidden){atlasFixed=false;apply();}});"
     "window.addEventListener('storage',function(e){if(!e.key||"
     "e.key==='chela_term_font'||e.key==='chela_term_latin'"
-    "||e.key==='chela_term_fontsize')apply();});"
+    "||e.key==='chela_term_fontsize'){atlasFixed=false;apply();}});"
     "})();</script>"
 )
 
