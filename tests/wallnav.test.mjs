@@ -424,12 +424,12 @@ test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alon
 
     const flashed = wid => tile(wid).querySelector('.grid-stack-item-content').classList.contains('pane-flash');
 
-    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '3', altKey: true, bubbles: true }));
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '3', code: 'Digit3', altKey: true, bubbles: true }));
     await new Promise(r => setTimeout(r, 120));   // focusPaneByWid defers by 60ms before flashing
     assert.ok(flashed('@3'), 'Alt+3 must flash the pane the badge labelled 3');
     assert.ok(!flashed('@1'), 'Alt+3 must not touch an unrelated pane');
 
-    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '1', bubbles: true }));   // no altKey
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '1', code: 'Digit1', bubbles: true }));   // no altKey
     await new Promise(r => setTimeout(r, 120));
     assert.ok(!flashed('@1'), 'a bare digit (no Alt) must be ignored — it is normal terminal input');
 });
@@ -451,7 +451,7 @@ test('Alt+N focuses BOTH the pane\'s own iframe element and its xterm terminal',
     let ifrFocusCalled = false;
     ifr.focus = () => { ifrFocusCalled = true; };
 
-    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '2', altKey: true, bubbles: true }));
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '2', code: 'Digit2', altKey: true, bubbles: true }));
     await new Promise(r => setTimeout(r, 120));   // focusPaneByWid defers by 60ms
 
     assert.ok(termFocused, 'Alt+2 must call the xterm Terminal\'s own .focus() so keystrokes are routed into it');
@@ -476,10 +476,25 @@ test('Alt+N still switches panes once focus has moved into a pane\'s own iframe 
 
     // Fired on the IFRAME'S OWN document, not the parent — what a keypress looks
     // like once xterm's helper textarea has focus inside that pane.
-    from.contentDocument.dispatchEvent(new window.KeyboardEvent('keydown', { key: '2', altKey: true, bubbles: true }));
+    from.contentDocument.dispatchEvent(new window.KeyboardEvent('keydown', { key: '2', code: 'Digit2', altKey: true, bubbles: true }));
     await new Promise(r => setTimeout(r, 120));
 
     assert.ok(flashed('@2'), 'Alt+2 fired inside the focused pane\'s own iframe must still switch panes');
+});
+
+// 6b — macOS: OPTION IS A DEAD-KEY/COMPOSE MODIFIER (CMX-149). Option+1 reports
+// e.key as a composed character ("¡"), never a bare digit — the switcher must key
+// off e.code (the physical key, layout- and modifier-independent), not e.key, or
+// the shortcut is permanently dead on macOS.
+test('Alt+N still switches panes when e.key is a macOS-composed character, keyed off e.code', async () => {
+    const flashed = wid => tile(wid).querySelector('.grid-stack-item-content').classList.contains('pane-flash');
+
+    // What a real macOS browser reports for Option+1: e.key is the composed
+    // character, not '1' — only e.code carries the physical key pressed.
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '¡', code: 'Digit1', altKey: true, bubbles: true }));
+    await new Promise(r => setTimeout(r, 120));
+
+    assert.ok(flashed('@1'), 'Option+1 on macOS (e.key="¡", e.code="Digit1") must still flash pane 1');
 });
 
 // 8 — THE IFRAME LISTENER IS CAPTURE-PHASE AND PREEMPTS XTERM (CMX-114). jsdom has no
@@ -511,7 +526,7 @@ test('the iframe alt-switch listener is registered in the CAPTURE phase and stop
 
     let prevented = false;
     let stoppedImmediate = false;
-    const evt = new window.KeyboardEvent('keydown', { key: '1', altKey: true });
+    const evt = new window.KeyboardEvent('keydown', { key: '1', code: 'Digit1', altKey: true });
     Object.defineProperty(evt, 'preventDefault', { value: () => { prevented = true; }, configurable: true });
     Object.defineProperty(evt, 'stopImmediatePropagation', { value: () => { stoppedImmediate = true; }, configurable: true });
     handler(evt);
