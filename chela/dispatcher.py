@@ -75,6 +75,15 @@ REVIEW_STATUSES = ("awaiting_review", "changes_requested", "needs_human")
 # States a fresh claim must skip: already in flight, parked in review, or shipped.
 NOT_CLAIMABLE = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "done")
 
+# Statuses whose PR can still merge OUT OF BAND (a hand `gh pr merge`, never through
+# `chela merge`) with no chance for chela to have already seen it settle: the review
+# states (a PR is open, waiting on a human or CI) AND `failed` — a fresh-dispatch retry
+# gets its own PR per attempt, and a HUMAN merging attempt N's PR by hand while the row
+# still reads `failed` (retries left) must stop the claim loop from spawning attempt
+# N+1 for work that already shipped. `claimed`/`running` are excluded: neither has
+# opened a PR yet, so `pr_state` cannot be `merged` for them.
+RECONCILE_MERGE_STATUSES = (*REVIEW_STATUSES, "failed")
+
 # Readiness poll (see _wait_for_ready) — how long to wait for the agent TUI to
 # accept input before sending the prompt, and how often to re-check.
 READY_TIMEOUT_SECONDS = 60
@@ -1900,24 +1909,40 @@ def set_judge_state(task_id: str, state: str, detail: str = "") -> None:
 def _prune_done_rows(
     conn: sqlite3.Connection,
     workflow_path: str,
+    open_ids: frozenset[str] = frozenset(),
     keep: int = DONE_HISTORY_PER_WORKFLOW,
 ) -> int:
     """Keep at most `keep` most-recent done rows for a workflow, drop the older ones.
 
     Ordering uses ended_at (falling back to started_at) so rows without timestamps
     sort last and get pruned first.
+
+    A `done` row whose `task_id` is still in `open_ids` — its tracker line has not
+    been struck yet (an offline strike, a diverged base, or simply a strike still
+    pending this same tick) — is NEVER pruned, retention window or not. It is the
+    only thing left standing between the claim loop and a duplicate dispatch of a
+    task whose PR already merged (the out-of-band-merge guard): prune it and the
+    next claim finds `existing is None` and spawns fresh, with no surviving row to
+    stop it.
     """
+    guard_clause = ""
+    params: list = [workflow_path]
+    if open_ids:
+        guard_clause = f"AND task_id NOT IN ({','.join('?' * len(open_ids))})"
+        params.extend(open_ids)
+    params.extend([workflow_path, keep])
     cursor = conn.execute(
-        """DELETE FROM runs
+        f"""DELETE FROM runs
            WHERE status='done'
              AND workflow_path=?
+             {guard_clause}
              AND task_id NOT IN (
                SELECT task_id FROM runs
                WHERE status='done' AND workflow_path=?
                ORDER BY COALESCE(ended_at, started_at, '') DESC
                LIMIT ?
              )""",
-        (workflow_path, workflow_path, keep),
+        params,
     )
     return cursor.rowcount
 
@@ -2147,14 +2172,19 @@ def tick(workflow_path: str | Path) -> dict:
         # task_id missing from open_ids, and mark them `done` ("removed from
         # source, window killed") — killing a live sibling workflow's run within
         # one tick of dispatch.
+        #
+        # `failed` is included alongside the review states (RECONCILE_MERGE_STATUSES)
+        # so a run whose PR merged OUT OF BAND while it still reads `failed` (retries
+        # left) reconciles to `done` here too — otherwise the claim loop below would
+        # re-dispatch a task whose work already shipped (the out-of-band-merge guard).
         rows = conn.execute(
             "SELECT * FROM runs WHERE workflow_path=? AND status IN ({})".format(
-                ",".join("?" * len(ACTIVE_STATUSES + REVIEW_STATUSES))
+                ",".join("?" * len(ACTIVE_STATUSES + RECONCILE_MERGE_STATUSES))
             ),
-            (str(wf.path), *ACTIVE_STATUSES, *REVIEW_STATUSES),
+            (str(wf.path), *ACTIVE_STATUSES, *RECONCILE_MERGE_STATUSES),
         ).fetchall()
         for row in rows:
-            if row["status"] in REVIEW_STATUSES and row["pr_state"] == "merged":
+            if row["status"] in RECONCILE_MERGE_STATUSES and row["pr_state"] == "merged":
                 # pr_state was refreshed in phase 0 above, so we see the merge on
                 # the very tick it lands. The tracker strike happens in 1b, after
                 # this transition is durable — if it fails, this row stays `done`
@@ -2470,7 +2500,9 @@ def tick(workflow_path: str | Path) -> dict:
         summary["trial_ledger"] = _write_trial_ledger(wf, conn)
 
         # 2. Keep done rows for the "recent runs" view; just cap history per workflow.
-        _prune_done_rows(conn, str(wf.path))
+        # `open_ids` guards a done-but-unstruck row from being pruned out from under
+        # the claim-time out-of-band-merge check below (3c).
+        _prune_done_rows(conn, str(wf.path), open_ids)
         conn.commit()
 
         # 2b. Fire after_done hook (post-commit so the row state is durable in
@@ -2620,7 +2652,7 @@ def tick(workflow_path: str | Path) -> dict:
             if active >= max_concurrent:
                 break
             existing = conn.execute(
-                "SELECT status, attempt FROM runs WHERE task_id=?", (task.id,)
+                "SELECT status, attempt, pr_state FROM runs WHERE task_id=?", (task.id,)
             ).fetchone()
             if existing:
                 # Fresh tasks only: anything already in flight (claimed/running), parked in
@@ -2630,6 +2662,13 @@ def tick(workflow_path: str | Path) -> dict:
                 # fork a NEW worktree off the base branch and abandon the PR under review.
                 # Only `failed` rows are eligible for a retry, and only until MAX_ATTEMPTS.
                 if existing["status"] in NOT_CLAIMABLE:
+                    continue
+                # Belt-and-suspenders out-of-band-merge guard: whatever status this row
+                # reads THIS tick, a `pr_state='merged'` row is never re-dispatched — the
+                # reconcile pass above (1.) should already have flipped it to `done` before
+                # we ever got here, but a surviving stale status (a race, a schema this
+                # tick's reconcile didn't cover) must not fall through to a duplicate spawn.
+                if existing["pr_state"] == "merged":
                     continue
                 if existing["status"] == "failed" and existing["attempt"] >= MAX_ATTEMPTS:
                     continue
