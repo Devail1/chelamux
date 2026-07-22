@@ -666,7 +666,7 @@ def test_a_settled_run_whose_id_tmux_recycled_is_NOT_dispatched():
 
 
 # --------------------------------------------------------------------------
-# The judge's OWN window (CMX-97) — `_spawn_judge` launches with `record_window=False`,
+# The judge's OWN window (CMX-97) — `_spawn_judge` launches with `judge_window=True`,
 # so it must be found through `judge_window_id`, never `window_id`.
 # --------------------------------------------------------------------------
 

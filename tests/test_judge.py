@@ -701,23 +701,42 @@ def test_spawn_judge_resets_the_unknown_count_on_a_new_sha_and_bumps_it_on_a_ret
     assert _state() == ("f00dbabe", judge.J_RUNNING, 0)
 
 
-def test_spawn_judge_stamps_its_OWN_window_id_never_the_runs(tmp_path):
-    """🤫 CMX-97. `_spawn_judge` calls `_launch_agent(..., record_window=False)` so the
+def _fake_tmux_new_window(target_id: str):
+    """Fake `subprocess.run` good enough to drive `_launch_agent`'s real tmux half:
+    `tmux new-window` reports `target_id`, everything else (send-keys, …) is a no-op."""
+    from types import SimpleNamespace
+
+    def fake_run(argv, *a, **k):
+        if argv[:2] == ["tmux", "new-window"]:
+            return SimpleNamespace(stdout=f"{target_id}\n", returncode=0)
+        return SimpleNamespace(stdout="", returncode=0)
+
+    return fake_run
+
+
+def test_spawn_judge_stamps_its_OWN_window_id_never_the_runs(tmp_path, monkeypatch):
+    """🤫 CMX-97. `_spawn_judge` calls `_launch_agent(..., judge_window=True)` so the
     RUN's `window_id` must stay untouched — but the judge still needs to be found by
     `dispatched_window_ids` (CMX-73's forum-topic gate, CMX-76's Wall tile), so it gets
-    its OWN `judge_window_id`/`judge_window_epoch` pair instead."""
+    its OWN `judge_window_id`/`judge_window_epoch` pair instead. ⛔ Runs `_launch_agent` for
+    REAL (only the tmux subprocess calls are faked) — CMX-136 moved the stamp INSIDE that
+    function, so mocking `_launch_agent` itself would no longer exercise the stamp at all."""
     wf = _wf(tmp_path)
     with dispatcher._db() as conn:
         _run_row(conn, tmp_path, workflow_path=str(wf.path), window_id="@1",
                  window_epoch="epoch-orig")
 
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda *_a, **_k: None)
+    monkeypatch.setattr(dispatcher, "_wait_for_ready", lambda *a, **k: True)
+    monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **k: True)
+    monkeypatch.setattr(dispatcher.subprocess, "run", _fake_tmux_new_window("@42"))
+    monkeypatch.setattr(dispatcher.epoch, "current", lambda: "epoch-now")
+
     with dispatcher._db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
         with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
              patch.object(dispatcher, "render_prompt", return_value="x"), \
-             patch.object(dispatcher, "_judge_vars", return_value={}), \
-             patch.object(dispatcher, "_launch_agent", return_value="@42"), \
-             patch.object(dispatcher.epoch, "current", return_value="epoch-now"):
+             patch.object(dispatcher, "_judge_vars", return_value={}):
             assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
 
     run = dispatcher.resolve_run("abc123")
@@ -728,7 +747,7 @@ def test_spawn_judge_stamps_its_OWN_window_id_never_the_runs(tmp_path):
     assert run["window_epoch"] == "epoch-orig"
 
 
-def test_spawn_judge_stamps_nothing_when_the_launch_returns_no_real_id(tmp_path):
+def test_spawn_judge_stamps_nothing_when_the_launch_returns_no_real_id(tmp_path, monkeypatch):
     """`_new_window` degrades to a bare name when the `@id` can't be parsed (see
     `_launch_agent`) — a name in `judge_window_id` would be a lie `dispatched_window_ids`
     keys a decision on, so it must stay NULL rather than record a lie."""
@@ -736,17 +755,55 @@ def test_spawn_judge_stamps_nothing_when_the_launch_returns_no_real_id(tmp_path)
     with dispatcher._db() as conn:
         _run_row(conn, tmp_path, workflow_path=str(wf.path))
 
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda *_a, **_k: None)
+    monkeypatch.setattr(dispatcher, "_wait_for_ready", lambda *a, **k: True)
+    monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **k: True)
+    monkeypatch.setattr(dispatcher.subprocess, "run", _fake_tmux_new_window("judge-test-1"))
+
     with dispatcher._db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
         with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
              patch.object(dispatcher, "render_prompt", return_value="x"), \
-             patch.object(dispatcher, "_judge_vars", return_value={}), \
-             patch.object(dispatcher, "_launch_agent", return_value="judge-test-1"):
+             patch.object(dispatcher, "_judge_vars", return_value={}):
             assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
 
     run = dispatcher.resolve_run("abc123")
     assert run["judge_window_id"] is None
     assert run["judge_window_epoch"] is None
+
+
+def test_spawn_judge_stamps_the_window_id_before_the_ready_wait_not_after(tmp_path, monkeypatch):
+    """⏱️ CMX-136. The whole point of moving the stamp inside `_launch_agent` is to close
+    the race where the judge's tmux window existed (so `/api/agents` reported it live) but
+    `judge_window_id` was still NULL (so `dispatched_window_ids` could not see it yet) — the
+    Wall drew it full-size like a human window for the entire ready-wait + `_send_seed` gap.
+    So the stamp must land BEFORE `_wait_for_ready` is even called, not after. A regression
+    that put the stamp back after the full launch (e.g. keying off the return value again)
+    would still pass the two tests above — only checking ordering catches it."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    seen_at_ready_wait = {}
+
+    def _wait_for_ready(*a, **k):
+        run = dispatcher.resolve_run("abc123")
+        seen_at_ready_wait["judge_window_id"] = run["judge_window_id"]
+        return True
+
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda *_a, **_k: None)
+    monkeypatch.setattr(dispatcher, "_wait_for_ready", _wait_for_ready)
+    monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **k: True)
+    monkeypatch.setattr(dispatcher.subprocess, "run", _fake_tmux_new_window("@42"))
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+             patch.object(dispatcher, "render_prompt", return_value="x"), \
+             patch.object(dispatcher, "_judge_vars", return_value={}):
+            assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
+
+    assert seen_at_ready_wait["judge_window_id"] == "@42"
 
 
 def test_a_red_pr_is_not_judged_it_is_already_going_back(tmp_path):
