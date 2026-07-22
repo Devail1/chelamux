@@ -24,6 +24,7 @@ from pathlib import Path
 
 from chela import (
     agent_manager,
+    automerge,
     capabilities,
     config,
     context,
@@ -287,6 +288,16 @@ def cmd_run(args) -> None:
                         log.info("Dispatch %s: %s", wf_path.name, summary)
                 except Exception:
                     log.exception("Dispatch tick failed for %s", wf_path)
+
+            # 🔀⚠️ Auto-merge (CMX-138): off by default (see chela.automerge / capabilities.py's
+            # loud ON-warning at boot). Runs across every dispatched workflow's runs in one pass
+            # (dispatcher.list_runs() is global, not per-workflow), fully independent of the
+            # attended-lease the orchestrator's own merges require — this IS the unattended path.
+            if automerge.enabled():
+                try:
+                    automerge.sweep()
+                except Exception:
+                    log.exception("Auto-merge sweep failed")
 
             if notify.enabled() and now - last_notify_check >= NOTIFY_INTERVAL:
                 try:

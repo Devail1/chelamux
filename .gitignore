@@ -42,3 +42,7 @@ docs/AUTH_PLANE_SCOPE.md
 
 # Node — dev-only (jsdom, for the dashboard DOM test suites). See package.json.
 node_modules/
+
+# The dispatch queue is per-install working state, not shipped content
+# (see TODO.example.md). The dispatcher reads it from disk.
+TODO.md

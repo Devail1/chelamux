@@ -244,3 +244,25 @@ act; judgment or security or irreversible → ask.** That is the whole contract.
 - **Next**: encode nothing new into the taxonomy (CMX-90 changed *when* a supervised orchestrator
   is woken, not *what* it may decide); treat **isolation** as the explicit blocker on ever flipping
   the orchestrator from lease-attended to fully unattended.
+- **v0.5 (CMX-138) — `CHELA_AUTO_MERGE`, a strictly opt-in, off-by-default UNATTENDED merge
+  sweep.** Everything above — a human's own `chela merge`, the auto-launched orchestrator's
+  lease-gated one — has someone either doing the merge or watching it happen. `chela.automerge`
+  adds the one path that does not: on every daemon tick it hands each judge-`clean`
+  `awaiting_review` run straight to the *same* `contract.merge` gate (base branch / judge `clean`
+  / CI green / MERGEABLE — no `--force`, no NEVER-line override, nothing loosened), stamped with
+  its own actor (`config.AUTO_MERGE_ACTOR`) so it is never confused with a human or the
+  orchestrator in the event log, and deliberately **not** gated by the attended-lease — an
+  unattended sweep gated on attendance would not be unattended.
+
+  ⚠️ **This is a real loosening and it is meant to be felt as one**, not a clever way around the
+  isolation prerequisite above: `docs/ESCALATION_CONTRACT.md`'s "no fully-unattended auto-merge"
+  line existed because nobody had asked for the opposite yet. `CHELA_AUTO_MERGE` is that ask,
+  made explicit, narrow, and **off by default** — a fresh or external install never merges
+  anything with nobody attending; only an operator who read this section and trusts their own
+  judge configuration turns it on. It is narrower than "the orchestrator unattended" in the sense
+  that matters for isolation: it never reasons, never runs an LLM-chosen shell command, and never
+  acts outside what `contract.merge` already scopes to — it performs exactly the one mechanical
+  action (`gh pr merge --squash`) a human's own `chela merge` performs, on a timer instead of a
+  human's say-so. The capability announces itself LOUDLY (a WARNING, not an INFO, every boot it
+  is on — `capabilities.py`'s `warn_when_on`) for the same reason a disabled subsystem must never
+  be silent: a risky capability staying quietly ON is the same blind spot, mirrored.
