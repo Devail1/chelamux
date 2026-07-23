@@ -124,6 +124,19 @@ SEED_RESEND_SETTLE_SECONDS = 1.0
 _READY_FOOTER = "bypass permissions"
 _PROMPT_CHAR = "❯"  # ❯
 
+# Active-work signature (see _pane_shows_activity). The Claude Code TUI draws its
+# working spinner (a cycling star glyph) + a live "(<elapsed> · ↓ <n> tokens)" /
+# "for <n>m <n>s" status line ABOVE the input box — and the input box below it is
+# an EMPTY `❯` while it generates. So `_pane_idle_empty_prompt` returns True for an
+# agent that is very much working; without this veto the watchdog false-fails it
+# (cmx-158/159/160 were all marked `failed` mid-work, 2026-07-23). The spinner
+# frames are version-dependent, so we also key off the token/elapsed counter, which
+# only ever appears while Claude is actively generating.
+_SPINNER_GLYPHS = "✢✳∗✻✽✶✦✷✸✹✺⋆✻●◐◓◑◒"
+_WORK_LINE_RE = re.compile(
+    r"↑|↓|\btokens\b|esc to interrupt|(?<!\w)for \d+m|(?<!\w)for \d+s|\(\d+m\b|\(\d+s\b"
+)
+
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:[/?#]|$)")
 
 # --- CI: the one signal that needs no judgment -------------------------------
@@ -995,6 +1008,43 @@ def _pane_idle_empty_prompt(pane: str) -> bool:
             after = line.split(_PROMPT_CHAR, 1)[1].strip().strip("│").strip()
             return after == ""
     return False
+
+
+def _pane_shows_activity(pane: str) -> bool:
+    """True when the pane shows Claude Code actively generating/running a tool.
+
+    The TUI paints its working spinner + a live "(<elapsed> · ↓ <n> tokens)" status
+    ABOVE the input box while the box below stays an empty `❯` — so a working agent
+    trips :func:`_pane_idle_empty_prompt`. This is the veto that keeps the watchdog
+    from nudging or failing an agent that is plainly still working: a spinner-star
+    line OR a token/elapsed counter is positive evidence of work. Erring toward "is
+    working" is deliberate — a false veto merely declines to fail a run (safe), while
+    a false idle-verdict kills a working agent's PR (the bug this fixes).
+    """
+    for line in pane.splitlines():
+        s = line.strip()
+        if s and s[0] in _SPINNER_GLYPHS:
+            return True
+        if _WORK_LINE_RE.search(s):
+            return True
+    return False
+
+
+def _dismiss_input_block(window_id: str) -> None:
+    """Send Escape to a window whose agent is blocked on an input dialog.
+
+    A dispatched agent has no human to answer an ``AskUserQuestion`` (or a gated
+    permission prompt); left alone it hangs until MAX_ATTEMPTS. Escape cancels the
+    dialog so the model falls back to its own default and keeps working. Best-effort
+    and never raises — a failed send is caught by the next watchdog tick.
+    """
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{window_id}", "Escape"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("Task dialog-dismiss on %s failed: %s", window_id, e)
 
 
 def _agent_status(window_id: str) -> str | None:
@@ -2079,6 +2129,7 @@ def tick(workflow_path: str | Path) -> dict:
         "dispatched": 0,
         "pr_state_refreshed": 0,
         "watchdog_renudged": 0,
+        "watchdog_unblocked": 0,
         "tracker_struck": 0,
         "reworked": 0,
         "escalated": 0,
@@ -2303,11 +2354,11 @@ def tick(workflow_path: str | Path) -> dict:
                 log.warning("Task %s failed (window gone, attempt %d)", row["task_id"], attempt)
                 continue
 
-            # Watchdog: a running row whose window is alive but stuck at an
-            # idle, empty Claude prompt means the startup race dropped the
-            # prompt (the startup-race strand). Re-send the prompt once; if it
-            # stays idle for another WATCHDOG_IDLE_MINUTES, fail it so the
-            # attempt-capped re-dispatch path takes over.
+            # Watchdog: a running row whose window is alive but stuck — either the
+            # startup race dropped its prompt (it sits at an idle, empty `❯`) or it
+            # blocked on an input dialog no dispatched agent has a human to answer.
+            # Re-send / unblock once, then fail into the attempt-capped re-dispatch
+            # path only on affirmative evidence it is not working.
             if (
                 row["status"] == "running"
                 and row["window_name"]
@@ -2319,23 +2370,76 @@ def tick(workflow_path: str | Path) -> dict:
                     and (datetime.now(timezone.utc) - started).total_seconds()
                     >= WATCHDOG_IDLE_MINUTES * 60
                 )
-                # Cross-check the pane signature against the native busy status
-                # (the same authority the seed-delivery check uses) so an agent
-                # that is actually working never gets nudged; an unreadable
-                # status falls back to the pane alone.
-                stuck = (
-                    idle_age_ok
-                    and _pane_idle_empty_prompt(_capture_pane(row["window_name"]))
-                    and _agent_status(row["window_name"]) != "busy"
-                )
-                if stuck:
-                    nudged = _parse_ts(row["idle_nudged_at"])
+                if idle_age_ok:
+                    window = row["window_name"]
+                    pane = _capture_pane(window)
+                    status = _agent_status(window)
                     task = tasks_by_id.get(row["task_id"])
+                    nudged = _parse_ts(row["idle_nudged_at"])
+                    nudge_expired = (
+                        nudged is not None
+                        and (datetime.now(timezone.utc) - nudged).total_seconds()
+                        >= WATCHDOG_IDLE_MINUTES * 60
+                    )
+
+                    # (a) Blocked on an input dialog — `AskUserQuestion` or a gated
+                    # permission prompt: the native status is "waiting" and the pane
+                    # shows a picker, not a bare `❯`, so the idle-empty check below
+                    # never fires and a dispatched agent (no human) hangs to
+                    # MAX_ATTEMPTS. Escape it so the model falls back to its own
+                    # default — but only after a full grace, so a human answering via
+                    # Telegram still wins. If it is STILL waiting a grace after the
+                    # Escape, it is not recovering: fail it into re-dispatch.
+                    if status == "waiting":
+                        if nudged is not None and nudge_expired:
+                            if _is_rework(row):
+                                _rework_failed(
+                                    conn, row,
+                                    "rework agent blocked on an input dialog with no human",
+                                )
+                                continue
+                            conn.execute(
+                                "UPDATE runs SET status='failed', ended_at=?, last_error=? WHERE task_id=?",
+                                (_now(), "agent blocked on an input dialog with no human", row["task_id"]),
+                            )
+                            summary["reconciled_failed"] += 1
+                            log.warning("Task %s failed (input-dialog block, no human to answer)", row["task_id"])
+                        elif nudged is None:
+                            _dismiss_input_block(window)
+                            conn.execute(
+                                "UPDATE runs SET idle_nudged_at=? WHERE task_id=?",
+                                (_now(), row["task_id"]),
+                            )
+                            summary["watchdog_unblocked"] += 1
+                            log.warning(
+                                "Task %s blocked on an input dialog (AskUserQuestion?); "
+                                "sent Escape to %s (no human present)",
+                                row["task_id"], window,
+                            )
+                        continue
+
+                    # (b) Idle-empty-prompt stall (the dropped-prompt strand) — but
+                    # NEVER while the pane shows active work. The TUI paints its
+                    # spinner + a live token/elapsed counter ABOVE an EMPTY input box,
+                    # so a working agent trips `_pane_idle_empty_prompt`; the activity
+                    # veto is what stops the watchdog nudging/failing it mid-work
+                    # (cmx-158/159/160 were false-failed this way, 2026-07-23).
+                    stuck = (
+                        _pane_idle_empty_prompt(pane)
+                        and not _pane_shows_activity(pane)
+                        and status != "busy"
+                    )
+                    if not stuck:
+                        continue
                     if nudged is not None:
-                        # Already nudged. Give the nudge a full window to take
-                        # effect before declaring it dead, to avoid failing an
-                        # agent that's merely between steps.
-                        if (datetime.now(timezone.utc) - nudged).total_seconds() >= WATCHDOG_IDLE_MINUTES * 60:
+                        if not nudge_expired:
+                            continue          # nudged recently; give it the full window
+                        # A terminal FAIL needs AFFIRMATIVE idleness ("idle"), never a
+                        # merely-not-busy read: an UNREADABLE status (None) is not
+                        # evidence of idleness, and failing on it is exactly what killed
+                        # working agents. On an unreadable status, re-nudge instead — a
+                        # genuinely stuck agent reads "idle" and fails correctly.
+                        if status == "idle":
                             if _is_rework(row):
                                 _rework_failed(
                                     conn, row,
@@ -2348,25 +2452,28 @@ def tick(workflow_path: str | Path) -> dict:
                             )
                             summary["reconciled_failed"] += 1
                             log.warning("Task %s failed (idle at empty prompt after re-nudge)", row["task_id"])
-                    else:
-                        # ⛔ A stuck REWORK is re-nudged with its REWORK prompt, not the
-                        # first-dispatch one: the two say opposite things ("branch and open a
-                        # PR" vs "you are already on your branch, your PR is open, here is
-                        # the verdict"). Re-seeding the wrong one is the same lost verdict as
-                        # a `failed` rework, just delivered by hand.
-                        prompt = _renudge_prompt(wf, row, task)
-                        if prompt is None:
-                            continue          # task gone from the tracker; nothing to re-send
-                        _send_seed(row["window_name"], prompt, row["task_id"])
-                        conn.execute(
-                            "UPDATE runs SET idle_nudged_at=? WHERE task_id=?",
-                            (_now(), row["task_id"]),
-                        )
-                        summary["watchdog_renudged"] += 1
-                        log.warning(
-                            "Task %s idle at empty prompt; re-sent prompt to %s",
-                            row["task_id"], row["window_name"],
-                        )
+                            continue
+                        # status unreadable → fall through and re-nudge (no false fail).
+                    # First nudge (nudged is None), or a re-nudge after an unreadable
+                    # status at the fail step.
+                    # ⛔ A stuck REWORK is re-nudged with its REWORK prompt, not the
+                    # first-dispatch one: the two say opposite things ("branch and open a
+                    # PR" vs "you are already on your branch, your PR is open, here is
+                    # the verdict"). Re-seeding the wrong one is the same lost verdict as
+                    # a `failed` rework, just delivered by hand.
+                    prompt = _renudge_prompt(wf, row, task)
+                    if prompt is None:
+                        continue          # task gone from the tracker; nothing to re-send
+                    _send_seed(window, prompt, row["task_id"])
+                    conn.execute(
+                        "UPDATE runs SET idle_nudged_at=? WHERE task_id=?",
+                        (_now(), row["task_id"]),
+                    )
+                    summary["watchdog_renudged"] += 1
+                    log.warning(
+                        "Task %s idle at empty prompt; re-sent prompt to %s",
+                        row["task_id"], window,
+                    )
 
         # 1b. Strike the merged tasks in the tracker — we are its only writer.
         # Commit the reconcile first so the `done` rows are durable: if the
