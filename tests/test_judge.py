@@ -493,6 +493,59 @@ def test_a_cannot_verify_run_is_left_alone_AND_says_so(tmp_path):
     assert "NOT an approval" in posted[0]
 
 
+# --- (h) THE REAP (CMX-164): the throwaway worktree is gone whatever happened -----------
+
+def _judge_worktree_path(tmp_path: Path, task_id: str) -> Path:
+    return tmp_path / ".chela" / "wts" / f"judge-{task_id}"
+
+
+def test_a_judge_run_that_FINISHES_reaps_its_own_worktree(tmp_path, monkeypatch):
+    """Before CMX-164, NOTHING removed the judge's throwaway worktree — the directory
+    persisted after every judged PR (3 found, ~100-143 MB each, live audit 2026-07-23).
+    `cleanup=True` — the judge agent's real, final call — must remove it on the ordinary
+    clean-verdict path."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    assert wt_path.is_dir()
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert result["state"] == judge.J_CLEAN
+    assert not wt_path.exists()
+
+
+def test_a_judge_run_that_RAISES_still_reaps_its_worktree(tmp_path, monkeypatch):
+    """⛔ Drop the `finally` (make cleanup a happy-path-only call again) and this goes RED:
+    an exception mid-judgment must not leak the directory forever — the worktree is reaped
+    whether `judge_run` finishes OR blows up."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    assert wt_path.is_dir()
+
+    def _boom(*a, **kw):
+        raise RuntimeError("the suite subprocess blew up")
+
+    monkeypatch.setattr(judge, "run_experiments", _boom)
+
+    with pytest.raises(RuntimeError, match="blew up"):
+        judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert not wt_path.exists()
+
+
 def test_the_judge_never_shells_out_to_a_merge(tmp_path):
     """A belt-and-braces guard on the one thing the judge must never do."""
     calls: list[list] = []

@@ -21,6 +21,16 @@ set -euo pipefail
 # shellcheck source=scripts/chela-env.sh
 . "$(dirname "$0")/chela-env.sh"
 
+# Cap glibc's per-thread malloc arenas (CMX-163). Every service here runs several
+# threads (pane polling, transcript relay, dashboard workers, ...), and glibc's default
+# is to grow a fresh arena per thread on contention — each one keeps its own free-list,
+# so RSS climbs with thread count and plateaus high instead of low. This is what a load
+# audit measured as the dashboard's steady-state "growth": not a leak, just an
+# uncapped arena count. `:=` only sets it when chela.env / the environment hasn't
+# already picked a value — the "environment wins" rule from chela-env.sh above.
+: "${MALLOC_ARENA_MAX:=2}"
+export MALLOC_ARENA_MAX
+
 # ⚠️ LOAD-BEARING. config.current_session() resolves $CHELA_TMUX_SESSION → else the
 # session that owns $TMUX_PANE → else "chela". That middle step is right for an agent
 # living in a pane and WRONG for a service: a TMUX/TMUX_PANE inherited from the shell

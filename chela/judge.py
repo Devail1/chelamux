@@ -844,57 +844,63 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     repo_dir = str(wf.path.parent)
     pr_url = run.get("pr_url")
 
-    raw, err = load_experiments(experiments_path)
-    if err:
-        report = Report(cannot_verify=err)
-    elif not test_cmd:
-        report = Report(cannot_verify="this workflow sets no `judge.test_cmd` — there is no "
-                                      "suite to run a mutation against")
-    elif not worktree.is_dir():
-        report = Report(cannot_verify=f"the judge worktree {worktree} is gone")
-    else:
-        report = run_experiments(
-            worktree, test_cmd, raw, timeout=judge_suite_timeout(wf),
-        )
-
-    blocking = report.blocking
-    result = {"ok": True, "task_id": task_id, "state": report.state,
-              "blocking": len(blocking), "outcomes": [o.as_dict() for o in report.outcomes],
-              "cannot_verify": report.cannot_verify, "notes": len(report.notes)}
-
-    if blocking:
-        body = block_body(report, pr_url, test_cmd or "?")
-        verdict = dispatcher.request_changes(task_id, body)
-        if not verdict.get("ok"):
-            # The CAS refused it: the row moved under us (a human merged it, or the CI gate
-            # got there first). Nothing was written, and nothing should be.
-            log.info("judge: %s found %d blocking finding(s), but the verdict was not "
-                     "written: %s", task_id, len(blocking), verdict.get("error"))
-            dispatcher.set_judge_state(
-                task_id, J_CANNOT_VERIFY,
-                f"the run moved while the judge was running: {verdict.get('error')}",
-            )
-            result.update(ok=False, state=J_CANNOT_VERIFY, error=verdict.get("error"))
+    # ⛔ CMX-164: the judge worktree already exists on disk by this point (`_spawn_judge`
+    # created it before this ever ran), and MUST be reaped whether this call finishes or
+    # blows up — a `run_experiments`/`request_changes`/`set_judge_state` exception must not
+    # leak the directory forever. `finally`, not a happy-path call at the bottom.
+    try:
+        raw, err = load_experiments(experiments_path)
+        if err:
+            report = Report(cannot_verify=err)
+        elif not test_cmd:
+            report = Report(cannot_verify="this workflow sets no `judge.test_cmd` — there is no "
+                                          "suite to run a mutation against")
+        elif not worktree.is_dir():
+            report = Report(cannot_verify=f"the judge worktree {worktree} is gone")
         else:
-            dispatcher.set_judge_state(
-                task_id, J_BLOCKED,
-                "; ".join(f"{o.experiment.guard}: SURVIVED" for o in blocking)[:500],
+            report = run_experiments(
+                worktree, test_cmd, raw, timeout=judge_suite_timeout(wf),
             )
-            log.warning("judge: %s SENT BACK — %d guard(s) survived corruption",
-                        task_id, len(blocking))
-            result["round"] = verdict.get("round")
-    else:
-        body = comment_body(report, pr_url, test_cmd or "?")
-        dispatcher._post_pr_comment(pr_url, repo_dir, body)
-        dispatcher.set_judge_state(
-            task_id, report.state, report.cannot_verify or "every guard held",
-        )
-        log.info("judge: %s → %s (%d experiment(s))", task_id, report.state,
-                 len(report.outcomes))
 
-    if cleanup:
-        _cleanup(wf, task_id, run.get("branch_name") or "")
-    return result
+        blocking = report.blocking
+        result = {"ok": True, "task_id": task_id, "state": report.state,
+                  "blocking": len(blocking), "outcomes": [o.as_dict() for o in report.outcomes],
+                  "cannot_verify": report.cannot_verify, "notes": len(report.notes)}
+
+        if blocking:
+            body = block_body(report, pr_url, test_cmd or "?")
+            verdict = dispatcher.request_changes(task_id, body)
+            if not verdict.get("ok"):
+                # The CAS refused it: the row moved under us (a human merged it, or the CI gate
+                # got there first). Nothing was written, and nothing should be.
+                log.info("judge: %s found %d blocking finding(s), but the verdict was not "
+                         "written: %s", task_id, len(blocking), verdict.get("error"))
+                dispatcher.set_judge_state(
+                    task_id, J_CANNOT_VERIFY,
+                    f"the run moved while the judge was running: {verdict.get('error')}",
+                )
+                result.update(ok=False, state=J_CANNOT_VERIFY, error=verdict.get("error"))
+            else:
+                dispatcher.set_judge_state(
+                    task_id, J_BLOCKED,
+                    "; ".join(f"{o.experiment.guard}: SURVIVED" for o in blocking)[:500],
+                )
+                log.warning("judge: %s SENT BACK — %d guard(s) survived corruption",
+                            task_id, len(blocking))
+                result["round"] = verdict.get("round")
+        else:
+            body = comment_body(report, pr_url, test_cmd or "?")
+            dispatcher._post_pr_comment(pr_url, repo_dir, body)
+            dispatcher.set_judge_state(
+                task_id, report.state, report.cannot_verify or "every guard held",
+            )
+            log.info("judge: %s → %s (%d experiment(s))", task_id, report.state,
+                     len(report.outcomes))
+
+        return result
+    finally:
+        if cleanup:
+            _cleanup(wf, task_id, run.get("branch_name") or "")
 
 
 def _cleanup(wf, task_id: str, branch: str) -> None:

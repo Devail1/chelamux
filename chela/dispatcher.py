@@ -16,8 +16,10 @@ from chela.config import (
     CHELA_DIR,
     DISPATCH_TICK_INTERVAL,
     TMUX_SESSION,
+    human_size,
     judge_max_unknown_retries,
     max_reworks,
+    worktree_disk_budget_bytes,
 )
 from chela.messenger import resend_enter, send_tmux
 from chela.sources import Task, get_source
@@ -36,6 +38,7 @@ from chela.worktree import (
     BranchGone,
     attach_worktree,
     detached_worktree,
+    disk_usage_bytes,
     ensure_worktree,
     remove_worktree,
 )
@@ -2065,7 +2068,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "judged": 0, "judge_lost": 0,
-        "trial_ledger": 0,
+        "trial_ledger": 0, "disk_budget_exceeded": False,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
     }
@@ -2142,6 +2145,7 @@ def tick(workflow_path: str | Path) -> dict:
         "judged": 0,
         "judge_lost": 0,
         "trial_ledger": 0,
+        "disk_budget_exceeded": False,
         "blocked": blocked,
         "error": status.error,
         "held": False,
@@ -2787,12 +2791,37 @@ def tick(workflow_path: str | Path) -> dict:
                 log.exception("Rework re-spawn failed for task %s", row["task_id"])
                 _rework_failed(conn, row, f"rework re-spawn failed: {e}")
 
+        # 3b′. 🧹💽 THE DISK-BUDGET RAIL (CMX-164) — the `memcap` analog for disk. A fresh
+        # claim forks a BRAND-NEW worktree (`ensure_worktree`), and `~/.chela/worktrees/` is
+        # the largest per-agent resource chela consumes — the one that scales with agent
+        # count. An adopter with a heavier repo (a Rust `target/`, an ML venv, a Node
+        # monorepo: 1-10 GB *per worktree*) can otherwise run the box out of disk, which is
+        # worse than an OOM: it takes git, sqlite, tmux and the daemon down together, and
+        # there is no rail for it today. Only measured when a slot is actually free —
+        # walking the tree to learn there is nothing to claim anyway would be the same
+        # wasted work the fetch skip below avoids. Rework/judge worktrees are NOT gated
+        # here: both attach to or reuse a worktree already on disk, never fork a fresh one.
+        over_budget = False
+        budget = worktree_disk_budget_bytes()
+        if budget and active < max_concurrent:
+            used = disk_usage_bytes(resolve_workspace_root(wf))
+            if used > budget:
+                over_budget = True
+                summary["disk_budget_exceeded"] = True
+                log.warning(
+                    "Dispatch REFUSED for %s — the worktree root is %s, over the %s "
+                    "CHELA_WORKTREE_DISK_BUDGET. No new task will be claimed until disk is "
+                    "freed (a stuck/orphaned worktree, or space made elsewhere).",
+                    wf.path, human_size(used), human_size(budget),
+                )
+
         # 3c. FETCH-THEN-CLAIM: re-read the queue from origin/<base_branch> right now,
         # rather than trusting the parse made at the top of this tick (before the PR
         # polling and the tracker strike, both of which touch the network). Necessary,
-        # NOT sufficient — see _claim_order. Skipped entirely when every slot is busy:
-        # there is nothing to claim, and a network fetch to learn that is a waste.
-        queue = _claim_order(wf, source, open_tasks) if active < max_concurrent else []
+        # NOT sufficient — see _claim_order. Skipped entirely when every slot is busy, OR
+        # when the disk budget above refused the claim: there is nothing to claim, and a
+        # network fetch to learn that is a waste either way.
+        queue = _claim_order(wf, source, open_tasks) if (active < max_concurrent and not over_budget) else []
 
         for task in queue:
             if active >= max_concurrent:

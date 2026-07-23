@@ -167,6 +167,14 @@ Typing = Callable[..., bool]
 # the full command is one /screenshot away).
 _MAX_DETAIL = 300
 
+# Cap on unpaired tool_use entries tracked per window (CMX-163). A tool_use whose
+# tool_result never arrives — Esc-interrupt, an API-errored turn, a /clear rotation, the
+# monitor's EOF-skip on a fresh transcript — is never popped by :meth:`observe`, so
+# without a ceiling the backlog grows for the lifetime of the window. Only the most
+# recent entry is ever read (:meth:`PermissionGateWatcher._latest_pending`), so evicting
+# the oldest once this many pile up costs nothing functionally.
+_MAX_PENDING_PER_WINDOW = 32
+
 # Longest plan body inlined before truncating (the full plan is one /screenshot
 # away; a shorter cap keeps the approval message readable on a phone).
 _MAX_PLAN = 2000
@@ -242,10 +250,18 @@ _MAX_STATUS = 200
 
 @dataclass
 class _PendingTool:
-    """An unpaired ``tool_use`` awaiting its ``tool_result``."""
+    """An unpaired ``tool_use`` awaiting its ``tool_result``.
+
+    Holds the pre-extracted, already-clipped :func:`_tool_detail` string rather than
+    the raw ``tool_input`` payload (CMX-163) — a ``Write`` or ``Task`` call's input can
+    run tens of KB, and this entry may sit until :data:`_MAX_PENDING_PER_WINDOW`
+    evicts it or the window closes, not just until the next tick. Computing the detail
+    once at insert time, instead of keeping the payload alive to compute it lazily,
+    bounds what one entry costs to a small constant.
+    """
 
     tool_name: str | None
-    tool_input: dict | None
+    detail: str | None
 
 
 @dataclass(frozen=True)
@@ -344,7 +360,7 @@ def format_gate_message(info: _PendingTool | None, gate: Gate) -> str:
     tool = gate.tool or tx_tool
     detail = _clip(gate.detail) if gate.detail else None
     if detail is None and tool == tx_tool and info is not None:
-        detail = _tool_detail(tx_tool, info.tool_input)
+        detail = info.detail
     if tool and detail:
         return f"❓ Permission — {tool}: {detail}"
     if tool:
@@ -1512,10 +1528,17 @@ class PermissionGateWatcher:
         with self._lock:
             if ct == "tool_use":
                 if uid:
-                    self._pending.setdefault(window_id, {})[uid] = _PendingTool(
-                        tool_name=getattr(msg, "tool_name", None),
-                        tool_input=getattr(msg, "tool_input", None),
+                    tool_name = getattr(msg, "tool_name", None)
+                    pend = self._pending.setdefault(window_id, {})
+                    pend[uid] = _PendingTool(
+                        tool_name=tool_name,
+                        detail=_tool_detail(tool_name, getattr(msg, "tool_input", None)),
                     )
+                    # Evict the oldest unpaired entries once the backlog exceeds the
+                    # cap — see _MAX_PENDING_PER_WINDOW. A dict is insertion-ordered,
+                    # so the first key is always the least-recently-added one.
+                    while len(pend) > _MAX_PENDING_PER_WINDOW:
+                        pend.pop(next(iter(pend)))
             elif ct == "tool_result":
                 pend = self._pending.get(window_id)
                 if pend and uid:

@@ -181,6 +181,21 @@ def effective() -> list[Capability]:
             fix="unset CHELA_TERMINALS_ENABLED=false",
         ),
         _update_available_capability(),
+        # 🧹💽 CMX-164: the `memcap` analog for disk. Off is the safe, unopinionated default
+        # for a fresh install — a small repo never needs it — but a heavier one (a Rust
+        # `target/`, an ML venv, a Node monorepo) can fill the disk with nothing to stop it,
+        # so an operator who knows their repo's footprint gets a rail to turn on.
+        Capability(
+            key="worktree_disk_budget", label="🧹💽 Worktree disk budget",
+            on=bool(config.worktree_disk_budget_bytes()),
+            detail=(f"refusing a fresh claim once a workflow's worktree root exceeds "
+                    f"{config.human_size(config.worktree_disk_budget_bytes())}"
+                    if config.worktree_disk_budget_bytes() else
+                    "off — CHELA_WORKTREE_DISK_BUDGET is unset/0, so no rail stops a heavy "
+                    "repo from filling the disk"),
+            fix="set CHELA_WORKTREE_DISK_BUDGET=20G (or any K/M/G/T byte size) in "
+                f"{config.env_file_path() or '$CHELA_DIR/chela.env'} and restart the daemon",
+        ),
         # 🔀⚠️ CMX-138. The one fully-UNATTENDED merge path in the whole system — see
         # chela.automerge. OFF is the safe, expected state for every install but an operator's
         # own; ON gets its own WARNING line every boot (never just an INFO), because "silence
