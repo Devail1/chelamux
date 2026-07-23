@@ -70,6 +70,16 @@ class BindingRegistry:
         # reconcile tick tell "still bound" from "reissued to a stranger". Kept as data,
         # never as a live tmux call: this class stays pure (the epoch is passed in).
         self._epochs: dict[str, str] = {}
+        # window_id -> the title text currently pinned in that window's topic. A CACHE
+        # of what we last told Telegram (same shape as ``_topic_names``), so the
+        # pinned-title sync only calls the Bot API when Claude's own session title
+        # (``chela.transcripts.latest_ai_title``) actually changed.
+        self._pinned_titles: dict[str, str] = {}
+        # window_id -> the message_id of the pinned anchor message in that window's
+        # topic. Kept so a title revision EDITS that same message in place
+        # (``editMessageText``) instead of pinning a new one each time, which would
+        # flap Telegram's "pinned a message" notice on every retitle.
+        self._pinned_message_ids: dict[str, str] = {}
 
     @property
     def chat_id(self) -> str | None:
@@ -100,11 +110,15 @@ class BindingRegistry:
             self._window_to_thread.pop(old_window, None)
             self._topic_names.pop(old_window, None)
             self._epochs.pop(old_window, None)
-        # A fresh binding means a different topic, so whatever name we cached for
+            self._pinned_titles.pop(old_window, None)
+            self._pinned_message_ids.pop(old_window, None)
+        # A fresh binding means a different topic, so whatever name/pin we cached for
         # this window describes someone else's topic now. Drop it: unknown reads as
-        # "resync once", which is always safe; a stale name reads as "in sync" and
-        # would leave the topic misnamed forever.
+        # "resync once", which is always safe; a stale value reads as "in sync" and
+        # would leave the topic misnamed / mistitled forever.
         self._topic_names.pop(w, None)
+        self._pinned_titles.pop(w, None)
+        self._pinned_message_ids.pop(w, None)
         self._window_to_thread[w] = t
         self._thread_to_window[t] = w
         self._epochs.pop(w, None)
@@ -122,6 +136,8 @@ class BindingRegistry:
         self._thread_to_window.pop(thread, None)
         self._topic_names.pop(w, None)
         self._epochs.pop(w, None)
+        self._pinned_titles.pop(w, None)
+        self._pinned_message_ids.pop(w, None)
         return True
 
     def stamp(self, window_id: str, epoch: str) -> bool:
@@ -162,6 +178,32 @@ class BindingRegistry:
             return None
         return self._topic_names.get(w)
 
+    def set_pinned_title(self, window_id: str, title: str) -> None:
+        """Record the title text currently pinned in ``window_id``'s topic."""
+        w = _norm(window_id)
+        if w is not None:
+            self._pinned_titles[w] = title
+
+    def pinned_title(self, window_id: str | int | None) -> str | None:
+        """The title we last pinned for this window (None → never pinned)."""
+        w = _norm(window_id)
+        if w is None:
+            return None
+        return self._pinned_titles.get(w)
+
+    def set_pinned_message_id(self, window_id: str, message_id: str | int) -> None:
+        """Record the message_id of ``window_id``'s pinned anchor message."""
+        w = _norm(window_id)
+        if w is not None:
+            self._pinned_message_ids[w] = str(message_id)
+
+    def pinned_message_id(self, window_id: str | int | None) -> str | None:
+        """The message_id of the pinned anchor message (None → not yet pinned)."""
+        w = _norm(window_id)
+        if w is None:
+            return None
+        return self._pinned_message_ids.get(w)
+
     def window_for_thread(self, thread_id: str | int | None) -> str | None:
         """The window bound to ``thread_id`` (None → unbound / General topic)."""
         t = _norm(thread_id)
@@ -186,12 +228,14 @@ class BindingRegistry:
     # -- persistence -------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise to ``{chat_id, bindings, topic_names, epochs}``."""
+        """Serialise to ``{chat_id, bindings, topic_names, epochs, pinned_titles, pinned_message_ids}``."""
         return {
             "chat_id": self._chat_id,
             "bindings": dict(self._window_to_thread),
             "topic_names": dict(self._topic_names),
             "epochs": dict(self._epochs),
+            "pinned_titles": dict(self._pinned_titles),
+            "pinned_message_ids": dict(self._pinned_message_ids),
         }
 
     @classmethod
@@ -214,6 +258,14 @@ class BindingRegistry:
         for window, name in (data.get("topic_names") or {}).items():
             if reg.thread_for_window(window) is not None:
                 reg.set_topic_name(window, name)
+        # Absent in files written before pinned titles existed: those windows just
+        # look un-pinned, so the next reconcile tick pins one fresh and records it.
+        for window, message_id in (data.get("pinned_message_ids") or {}).items():
+            if reg.thread_for_window(window) is not None:
+                reg.set_pinned_message_id(window, message_id)
+        for window, title in (data.get("pinned_titles") or {}).items():
+            if reg.thread_for_window(window) is not None:
+                reg.set_pinned_title(window, title)
         return reg
 
     def save(self, path: str | Path | None = None) -> None:

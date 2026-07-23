@@ -58,7 +58,7 @@ from typing import Callable
 
 from chela import epoch
 from chela.agent_manager import is_generic_name
-from chela.telegram.relay import Transport, _urllib_transport
+from chela.telegram.relay import Transport, _truncate_utf16, _urllib_transport
 
 log = logging.getLogger(__name__)
 
@@ -210,6 +210,79 @@ class TopicManager:
             log.warning("closeForumTopic(%s) failed: %s", thread_id, resp.get("description", resp))
             return False
         return True
+
+    def pin_title(
+        self, thread_id: str | int, title: str, existing_message_id: str | int | None = None,
+    ) -> str | None:
+        """Ensure ``title`` is showing in the PINNED anchor message of ``thread_id``.
+
+        The pinned-title counterpart to :meth:`rename_topic` — same edge-triggered
+        contract (the caller only calls this when the title actually changed) — but
+        pinning names the *session* (Claude's own auto-generated title), where
+        renaming names the *topic* (the tmux window). Kept separate on purpose: see
+        :func:`sync_pinned_titles`.
+
+        With ``existing_message_id`` given, this EDITS that message in place
+        (``editMessageText``) — the cheap path, and the one that keeps a single
+        pinned message across every title revision instead of flapping Telegram's
+        "pinned a message" service notice on each one. Only when there is no prior
+        message, or the edit fails (deleted, too old, a stale id from a topic that
+        no longer exists), does it post a fresh message and pin it.
+
+        Returns the message_id now holding ``title`` (pin it yourself is unnecessary
+        — this call does it), or ``None`` if even the fallback send failed. A send
+        that succeeds but whose ``pinChatMessage`` is rejected (e.g. the bot lacks
+        *Pin Messages*) still returns the message_id: the next tick then edits that
+        same message rather than spamming a fresh one every tick over a permission
+        it cannot fix itself.
+        """
+        text = _truncate_utf16(title)
+        if existing_message_id is not None and self._edit_message(existing_message_id, text):
+            return str(existing_message_id)
+        mid = self._send_message(thread_id, text)
+        if mid is None:
+            return None
+        self._pin_message(thread_id, mid)
+        return mid
+
+    def _send_message(self, thread_id: str | int, text: str) -> str | None:
+        resp = self._transport(
+            "sendMessage",
+            {
+                "chat_id": self._chat_id,
+                "message_thread_id": thread_id,
+                "text": text,
+                "disable_notification": True,
+            },
+        )
+        if not resp.get("ok"):
+            log.warning("sendMessage(%s) failed: %s", thread_id, resp.get("description", resp))
+            return None
+        mid = (resp.get("result") or {}).get("message_id")
+        return str(mid) if mid is not None else None
+
+    def _edit_message(self, message_id: str | int, text: str) -> bool:
+        resp = self._transport(
+            "editMessageText",
+            {"chat_id": self._chat_id, "message_id": message_id, "text": text},
+        )
+        if resp.get("ok"):
+            return True
+        desc = str(resp.get("description") or "")
+        if "not modified" in desc.lower():
+            return True
+        log.debug("editMessageText(%s) failed, falling back to a fresh pin: %s", message_id, desc or resp)
+        return False
+
+    def _pin_message(self, thread_id: str | int, message_id: str | int) -> bool:
+        resp = self._transport(
+            "pinChatMessage",
+            {"chat_id": self._chat_id, "message_id": message_id, "disable_notification": True},
+        )
+        if resp.get("ok"):
+            return True
+        log.warning("pinChatMessage(%s) failed: %s", message_id, resp.get("description", resp))
+        return False
 
 
 def reconcile_bindings(
@@ -383,6 +456,84 @@ def reconcile_bindings(
         changed = True
 
     return changed
+
+
+def sync_pinned_titles(
+    registry,
+    topic_api,
+    agent_ids,
+    ai_title_for: Callable[[str], str | None],
+) -> bool:
+    """Keep each bound topic's PINNED message showing Claude's current session title.
+
+    A Telegram topic only shows its static NAME (:func:`topic_name_for` — the
+    project/window name, capped to Telegram's topic-name length and rate-limited
+    like any rename), which is a different thing from Claude Code's own
+    auto-generated **session** title (``chela.transcripts.latest_ai_title`` — the
+    ``{"type": "ai-title"}`` transcript record the dashboard already surfaces via
+    ``latest_ai_title``). Anthony wanted that semantic title visible in Telegram
+    too, and a pinned message — not the topic name — is where it goes: names churn
+    into rate limits and lose the ``@wid`` disambiguation
+    (:func:`disambiguate_topic_names`) a title has no business overwriting.
+
+    Same edge-triggered contract as the rename loop just above: pure (no live
+    Telegram/transcript reads of its own — ``ai_title_for`` is injected, in
+    production :func:`ai_title_for_window`), and diffed against
+    :meth:`~chela.telegram.bindings.BindingRegistry.pinned_title` (the cache of
+    what we last pinned) so a steady-state tick — the title hasn't changed —
+    makes zero API calls. Only a **bound** window (one with a topic already) is a
+    candidate; an unbound agent has nowhere to pin into yet and is skipped until
+    the next tick provisions one. A window whose transcript carries no title yet
+    (``ai_title_for`` returns ``None``/empty) is left alone rather than pinning a
+    blank placeholder.
+
+    :meth:`TopicManager.pin_title` does the edit-in-place-or-fresh-pin dance and
+    returns the message_id now holding the title (or ``None`` on a hard failure,
+    e.g. the bot lacks *Pin Messages* — logged and retried next tick, same as a
+    failed rename). Returns ``True`` if any topic's pin changed, so the caller
+    knows to ``registry.save()``.
+    """
+    changed = False
+    for wid in agent_ids:
+        thread = registry.thread_for_window(wid)
+        if thread is None:
+            continue
+        try:
+            title = ai_title_for(wid)
+        except Exception:  # noqa: BLE001 — a transcript hiccup must not wedge the loop
+            log.debug("pinned-title: ai_title probe failed for %s", wid, exc_info=True)
+            continue
+        if not title:
+            continue
+        if registry.pinned_title(wid) == title:
+            continue
+        mid = topic_api.pin_title(thread, title, existing_message_id=registry.pinned_message_id(wid))
+        if mid is None:
+            continue  # perms/deleted topic; leave it unsynced and retry next tick
+        registry.set_pinned_title(wid, title)
+        registry.set_pinned_message_id(wid, mid)
+        log.info("pinned-title: updated topic %s for %s -> %s", thread, wid, title)
+        changed = True
+    return changed
+
+
+def ai_title_for_window(window_id: str) -> str | None:
+    """Claude's current auto-generated session title for ``window_id``, or None.
+
+    The production ``ai_title_for`` fed to :func:`sync_pinned_titles`. Resolves the
+    live transcript via :func:`chela.sessions.transcript_for_window` — BY SESSION
+    ID, the same authority :mod:`~chela.telegram.monitor` insists on and cwd-guessing
+    gets wrong (two windows sharing a cwd, a ``--resume`` from elsewhere; see that
+    module's docstring) — never by cwd. ``None`` when the window has no resolvable
+    transcript yet, or the transcript carries no ``ai-title`` record yet.
+    """
+    from chela import sessions
+    from chela.transcripts import latest_ai_title
+
+    path = sessions.transcript_for_window(window_id)
+    if path is None:
+        return None
+    return latest_ai_title(path)
 
 
 def blocked_on_human(wid: str, *, gate=None, capture=None, detect=None):

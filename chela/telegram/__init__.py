@@ -62,11 +62,13 @@ from chela.telegram.parser import Message, parse_entries, parse_line
 from chela.telegram.reconcile import (
     TopicClosedHandler,
     TopicManager,
+    ai_title_for_window,
     blocked_on_human,
     disambiguate_topic_names,
     dispatched_window_ids,
     live_agent_windows,
     reconcile_bindings,
+    sync_pinned_titles,
     topic_name_for,
 )
 from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay
@@ -104,6 +106,8 @@ __all__ = [
     "TopicManager",
     "TopicClosedHandler",
     "reconcile_bindings",
+    "sync_pinned_titles",
+    "ai_title_for_window",
     "blocked_on_human",
     "dispatched_window_ids",
     "live_agent_windows",
