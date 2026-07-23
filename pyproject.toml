@@ -34,7 +34,7 @@ telegram = [
 ]
 dev = [
     "pytest>=8.0",
-    "pytest-xdist>=3.6",               # parallel test runner (`-n auto`) — see addopts below
+    "pytest-xdist>=3.6",               # parallel test runner — see addopts below for the worker count
     "ruff>=0.6",
     "telegramify-markdown>=0.5,<1.0",  # so format tests exercise real rendering (CI omits [telegram])
 ]
@@ -63,7 +63,14 @@ testpaths = ["tests"]
 # own scratch CHELA_DIR, so state files never collide either.
 #
 # To debug a single test serially (real -s output, pdb), pass `-n0` on the command line.
-addopts = "-n auto --dist loadfile"
+#
+# `-n 4`, NOT `-n auto`: capped on purpose. CI runs on a 4-core runner, so 4 is already
+# `auto` there — but the JUDGE runs this same suite on the dev box DURING a dispatch, next
+# to live agents, and `auto` there is ~20 workers each spawning git/node. On a box where an
+# OOM takes down the whole tmux fleet, a 20-worker spike next to the agents is not worth the
+# ~1min-vs-2min it buys; 4 keeps the judge fast without the memory surge. Raise it per-run
+# with `-n auto`/`-n <N>` on the command line when you know the box is idle.
+addopts = "-n 4 --dist loadfile"
 
 [tool.ruff]
 line-length = 100
