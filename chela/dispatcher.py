@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+import os
 import re
 import sqlite3
 import subprocess
@@ -108,13 +109,17 @@ GIT_NET_TIMEOUT_SECONDS = 60
 # "idle" → "busy" the moment it accepts a prompt, so poll that status for a
 # short window; if it never flips, RE-SEND ENTER (capped) — never re-paste, since
 # the text is already sitting there and a second paste would type it twice.
-SEED_CONFIRM_TIMEOUT_SECONDS = 8.0
-SEED_CONFIRM_POLL_INTERVAL = 1.0
+# These three are env-overridable so a real deploy can tune them for a slow box, and so
+# the test suite can collapse them to ~0: no test has a real Claude TUI to flip "busy", so
+# the confirm loop would otherwise burn its full real-time budget (5×8s ≈ 44s PER dispatch)
+# doing nothing — which was ~80% of the suite's wall-clock. Defaults are unchanged for prod.
+SEED_CONFIRM_TIMEOUT_SECONDS = float(os.environ.get("CHELA_SEED_CONFIRM_TIMEOUT_SECONDS") or 8.0)
+SEED_CONFIRM_POLL_INTERVAL = float(os.environ.get("CHELA_SEED_CONFIRM_POLL_INTERVAL") or 1.0)
 # 5 sends × ~8s each ≈ 40s of resend coverage — enough to outlast a slow startup
 # notice (MCP-auth, `gh auth login`) whose redraw window can run 20-30s before the
 # pane accepts keystrokes again. (Was 3 ≈ 24s, which gave up too early — CMX-133.)
 SEED_MAX_SENDS = 5
-SEED_RESEND_SETTLE_SECONDS = 1.0
+SEED_RESEND_SETTLE_SECONDS = float(os.environ.get("CHELA_SEED_RESEND_SETTLE_SECONDS") or 1.0)
 
 # Claude Code TUI ready indicators, matched against `tmux capture-pane -p`.
 # The prompt glyph marks the (empty) input box and is present in every
