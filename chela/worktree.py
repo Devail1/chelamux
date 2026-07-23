@@ -1,5 +1,7 @@
 from __future__ import annotations
+import errno
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -181,18 +183,81 @@ def detached_worktree(repo_path: Path, ref: str, wt_path: Path) -> tuple[Path, b
 
 
 def remove_worktree(repo_path: Path, wt_path: Path) -> bool:
-    """Drop a worktree and its directory. Best-effort — a leftover directory is not fatal."""
+    """Drop a worktree and its directory — survives every way it can go stale.
+
+    Tries ``git worktree remove --force`` first — the normal case, a live worktree git
+    knows about. When that fails and the directory is STILL there, two things can be true:
+
+    * git has no administrative record of this path at all (an unregistered leftover — a
+      crash mid-create, a hand-copied directory, ``git worktree list`` never heard of it).
+      There is nothing for git to remove, so fall back to a direct recursive delete.
+    * the delete itself fails with EPERM/EACCES — root-owned remnants a Docker build left
+      behind (chela runs as the user, not root, so it can never touch them). This is NOT
+      swallowed silently: it is logged loudly, naming the path and the owning uid, and the
+      directory is left in place rather than half-deleted.
+
+    Always ``git worktree prune``s afterward, so a directory that WAS removed doesn't
+    linger as a dangling administrative record blocking the next ``worktree add``.
+    """
     out = subprocess.run(
         ["git", "-C", str(repo_path), "worktree", "remove", "--force", str(wt_path)],
         capture_output=True, text=True,
     )
+    removed = out.returncode == 0
+
+    if not removed and wt_path.exists():
+        try:
+            shutil.rmtree(wt_path)
+            removed = True
+        except OSError as e:
+            if e.errno in (errno.EACCES, errno.EPERM):
+                try:
+                    owner = wt_path.stat().st_uid
+                except OSError:
+                    owner = "?"
+                log.warning(
+                    "could not remove worktree %s: owned by uid %s, not this process's — "
+                    "a container build likely wrote root-owned files here; rerun its build "
+                    "step with `--user $(id -u):$(id -g)`. Left in place.",
+                    wt_path, owner,
+                )
+            else:
+                log.warning("could not remove worktree %s: %s", wt_path, e)
+
     subprocess.run(
         ["git", "-C", str(repo_path), "worktree", "prune"], check=False, capture_output=True,
     )
-    if out.returncode != 0:
-        log.warning("could not remove worktree %s: %s", wt_path, (out.stderr or "").strip())
-        return False
-    return True
+    return removed or not wt_path.exists()
+
+
+def disk_usage_bytes(root: Path) -> int:
+    """Best-effort recursive byte size of everything under ``root`` — the disk-budget
+    rail's measurement (see ``config.worktree_disk_budget_bytes``). A plain ``os.walk``
+    rather than shelling out to ``du``: it needs no coreutils flag that BSD/GNU disagree
+    on, and it degrades entry-by-entry rather than all-or-nothing — a single unreadable
+    subdirectory (a root-owned remnant from mode 4) is skipped, not fatal to the whole
+    measurement. Symlinks are never followed, so a link back into the repo it was cloned
+    from can't double-count or loop.
+    """
+    total = 0
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                else:
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return total
 
 
 def _ref_exists(repo_path: Path, ref: str) -> bool:
