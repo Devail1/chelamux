@@ -36,10 +36,12 @@ from chela.telegram.hookgate import pending_gate
 from chela.telegram.reconcile import (
     TopicClosedHandler,
     TopicManager,
+    ai_title_for_window,
     blocked_on_human,
     disambiguate_topic_names,
     dispatched_window_ids,
     reconcile_bindings,
+    sync_pinned_titles,
     topic_name_for,
 )
 
@@ -322,6 +324,204 @@ def test_topic_manager_close_reports_success_and_failure():
         return {"ok": False, "description": "TOPIC_ID_INVALID"}
 
     assert TopicManager("tok", "777", transport=failing).close_topic(42) is False
+
+
+# --------------------------------------------------------------------------
+# pin_title (TopicManager) — edit-in-place, fresh-pin fallback
+# --------------------------------------------------------------------------
+
+def test_pin_title_with_no_prior_message_sends_then_pins():
+    calls: list[tuple[str, dict]] = []
+
+    def transport(method, fields):
+        calls.append((method, fields))
+        if method == "sendMessage":
+            return {"ok": True, "result": {"message_id": 5001}}
+        return {"ok": True, "result": True}
+
+    mgr = TopicManager("tok", "777", transport=transport)
+    assert mgr.pin_title(42, "Fix the flaky login test") == "5001"
+    assert [m for m, _ in calls] == ["sendMessage", "pinChatMessage"]
+    send_fields = calls[0][1]
+    assert send_fields["message_thread_id"] == 42
+    assert send_fields["text"] == "Fix the flaky login test"
+    assert calls[1][1]["message_id"] == "5001"
+
+
+def test_pin_title_with_existing_message_edits_in_place_no_send_no_pin():
+    calls: list[tuple[str, dict]] = []
+
+    def transport(method, fields):
+        calls.append((method, fields))
+        return {"ok": True, "result": True}
+
+    mgr = TopicManager("tok", "777", transport=transport)
+    assert mgr.pin_title(42, "Now fixing auth", existing_message_id="5001") == "5001"
+    assert calls == [
+        ("editMessageText", {"chat_id": "777", "message_id": "5001", "text": "Now fixing auth"}),
+    ]
+
+
+def test_pin_title_falls_back_to_fresh_pin_when_edit_fails():
+    # The tracked message was deleted (or the topic itself is gone) — editMessageText
+    # fails, so pin_title must not just give up: it posts a fresh anchor and pins it.
+    calls: list[tuple[str, dict]] = []
+
+    def transport(method, fields):
+        calls.append((method, fields))
+        if method == "editMessageText":
+            return {"ok": False, "description": "Bad Request: message to edit not found"}
+        if method == "sendMessage":
+            return {"ok": True, "result": {"message_id": 5002}}
+        return {"ok": True, "result": True}
+
+    mgr = TopicManager("tok", "777", transport=transport)
+    assert mgr.pin_title(42, "Still fixing auth", existing_message_id="stale") == "5002"
+    assert [m for m, _ in calls] == ["editMessageText", "sendMessage", "pinChatMessage"]
+
+
+def test_pin_title_treats_not_modified_edit_as_success():
+    def transport(method, fields):
+        assert method == "editMessageText"
+        return {"ok": False, "description": "Bad Request: message is not modified"}
+
+    mgr = TopicManager("tok", "777", transport=transport)
+    assert mgr.pin_title(42, "same text", existing_message_id="5001") == "5001"
+
+
+def test_pin_title_returns_none_when_the_fresh_send_itself_fails():
+    def transport(method, fields):
+        if method == "sendMessage":
+            return {"ok": False, "description": "chat not found"}
+        raise AssertionError("pinChatMessage must not be called without a message to pin")
+
+    mgr = TopicManager("tok", "777", transport=transport)
+    assert mgr.pin_title(42, "title") is None
+
+
+def test_pin_title_still_returns_the_id_when_pin_permission_is_missing():
+    # A send that succeeds but whose pin the bot lacks rights for still leaves an
+    # editable anchor message — degrading to "unpinned but current" beats re-posting
+    # a brand-new message (and re-failing to pin it) every single tick forever.
+    calls: list[tuple[str, dict]] = []
+
+    def transport(method, fields):
+        calls.append((method, fields))
+        if method == "sendMessage":
+            return {"ok": True, "result": {"message_id": 5003}}
+        if method == "pinChatMessage":
+            return {"ok": False, "description": "not enough rights to pin a message"}
+        return {"ok": True, "result": True}
+
+    mgr = TopicManager("tok", "777", transport=transport)
+    assert mgr.pin_title(42, "title") == "5003"
+
+
+# --------------------------------------------------------------------------
+# sync_pinned_titles — the edge-triggered per-tick pass over bound topics
+# --------------------------------------------------------------------------
+
+class _StubTopicApiWithPins(_StubTopicApi):
+    """Adds pin_title recording on top of the create/close/rename stub above."""
+
+    def __init__(self, *args, pin_ok=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pin_ok = pin_ok
+        self.pinned: list[tuple[str, str, str | None]] = []  # (thread, title, existing_id)
+
+    def pin_title(self, thread_id, title, existing_message_id=None):
+        self.pinned.append((str(thread_id), title, existing_message_id))
+        return None if not self._pin_ok else "9999"
+
+
+def test_sync_pinned_titles_skips_an_unbound_window():
+    reg = BindingRegistry("777")  # @3 never bound — no topic to pin into
+    api = _StubTopicApiWithPins()
+    assert sync_pinned_titles(reg, api, {"@3"}, lambda wid: "some title") is False
+    assert api.pinned == []
+
+
+def test_sync_pinned_titles_skips_a_window_with_no_title_yet():
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    api = _StubTopicApiWithPins()
+    assert sync_pinned_titles(reg, api, {"@3"}, lambda wid: None) is False
+    assert api.pinned == []
+
+
+def test_sync_pinned_titles_pins_a_fresh_title_and_caches_it():
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    api = _StubTopicApiWithPins()
+    changed = sync_pinned_titles(reg, api, {"@3"}, lambda wid: "Fix the flaky login test")
+    assert changed is True
+    assert api.pinned == [("42", "Fix the flaky login test", None)]
+    assert reg.pinned_title("@3") == "Fix the flaky login test"
+    assert reg.pinned_message_id("@3") == "9999"
+
+
+def test_sync_pinned_titles_is_silent_once_the_title_is_current():
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    api = _StubTopicApiWithPins()
+    assert sync_pinned_titles(reg, api, {"@3"}, lambda wid: "same title") is True
+    assert sync_pinned_titles(reg, api, {"@3"}, lambda wid: "same title") is False
+    assert len(api.pinned) == 1                 # the second tick made zero API calls
+
+
+def test_sync_pinned_titles_edits_the_cached_message_on_a_revision():
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    reg.set_pinned_title("@3", "old title")
+    reg.set_pinned_message_id("@3", "1234")
+    api = _StubTopicApiWithPins()
+    changed = sync_pinned_titles(reg, api, {"@3"}, lambda wid: "new title")
+    assert changed is True
+    assert api.pinned == [("42", "new title", "1234")]  # passed the prior id through
+    assert reg.pinned_title("@3") == "new title"
+
+
+def test_sync_pinned_titles_leaves_the_cache_untouched_on_a_hard_pin_failure():
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    api = _StubTopicApiWithPins(pin_ok=False)
+    changed = sync_pinned_titles(reg, api, {"@3"}, lambda wid: "a title")
+    assert changed is False
+    assert reg.pinned_title("@3") is None        # retried next tick, not marked done
+
+
+def test_sync_pinned_titles_survives_a_probe_that_raises_for_one_window():
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    reg.bind("@5", "43")
+    api = _StubTopicApiWithPins()
+
+    def flaky(wid):
+        if wid == "@3":
+            raise RuntimeError("transcript read failed")
+        return "fine"
+
+    changed = sync_pinned_titles(reg, api, {"@3", "@5"}, flaky)
+    assert changed is True
+    assert api.pinned == [("43", "fine", None)]   # @3 skipped, @5 still got pinned
+
+
+def test_ai_title_for_window_resolves_via_session_id_not_cwd(monkeypatch):
+    from pathlib import Path
+
+    from chela import sessions
+    from chela import transcripts as transcripts_mod
+
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid, base=None: Path("/fake/t.jsonl"))
+    monkeypatch.setattr(transcripts_mod, "latest_ai_title", lambda path: "Fix the flaky login test")
+    assert ai_title_for_window("@3") == "Fix the flaky login test"
+
+
+def test_ai_title_for_window_is_none_with_no_resolvable_transcript(monkeypatch):
+    from chela import sessions
+
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid, base=None: None)
+    assert ai_title_for_window("@3") is None
 
 
 # --------------------------------------------------------------------------
@@ -817,7 +1017,7 @@ class _OneTick:
         self.waited.append(interval)
 
 
-def _run_one_tick(monkeypatch, *, live=None, dispatched=None):
+def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=False):
     """Run ONE tick of the real ``chela.main._reconcile_loop``; return its kwargs."""
     from chela import discovery, main
     from chela import telegram as tg
@@ -828,16 +1028,24 @@ def _run_one_tick(monkeypatch, *, live=None, dispatched=None):
     def _fake_reconcile(registry, live_windows, agent_ids, topic_api, **kwargs):
         seen["args"] = (registry, live_windows, agent_ids, topic_api)
         seen["kwargs"] = kwargs
-        return False
+        return reconcile_returns
 
     def _fake_dispatched(runs=None, live_windows=None, now_epoch=None):
         seen["dispatched_call"] = {"runs": runs, "live_windows": live_windows,
                                    "now_epoch": now_epoch}
         return {"@9"} if dispatched is None else dispatched
 
+    def _fake_sync_pinned_titles(registry, topic_api, agent_ids, ai_title_for):
+        seen["pinned_call"] = {
+            "registry": registry, "topic_api": topic_api,
+            "agent_ids": agent_ids, "ai_title_for": ai_title_for,
+        }
+        return False
+
     monkeypatch.setattr(tg, "live_agent_windows", lambda: (live, set(live)))
     monkeypatch.setattr(tg, "dispatched_window_ids", _fake_dispatched)
     monkeypatch.setattr(tg, "reconcile_bindings", _fake_reconcile)
+    monkeypatch.setattr(tg, "sync_pinned_titles", _fake_sync_pinned_titles)
     monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: None)
 
     stop = _OneTick()
@@ -903,3 +1111,22 @@ def test_bind_dispatched_env_var_turns_it_on(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_the_reconcile_loop_actually_wires_pinned_titles(monkeypatch):
+    # Revert the wiring in main.py (delete the sync_pinned_titles call) and this goes RED.
+    from chela import telegram as tg
+
+    seen = _run_one_tick(monkeypatch)
+    call = seen["pinned_call"]
+    assert call["agent_ids"] == {"@9", "@6"}
+    assert call["ai_title_for"] is tg.ai_title_for_window
+    assert call["topic_api"] is not None
+
+
+def test_the_reconcile_loop_still_syncs_pinned_titles_when_bindings_also_changed(monkeypatch):
+    # THE guard this whole wiring exists to catch: `a or b` short-circuits, so chaining
+    # sync_pinned_titles onto reconcile_bindings with `or` would skip it on any tick that
+    # also provisioned/reaped/renamed a topic. Both must run on EVERY tick.
+    seen = _run_one_tick(monkeypatch, reconcile_returns=True)
+    assert "pinned_call" in seen

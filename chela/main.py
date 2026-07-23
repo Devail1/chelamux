@@ -1284,6 +1284,14 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
     on a human** (:func:`~chela.telegram.reconcile.blocked_on_human` — the hook log **or**
     the pane, because a *permission* gate exists only on the pane), so a fleet of
     short-lived workers can't turn the forum into a changelog.
+
+    Each tick also re-syncs every bound topic's PINNED message to Claude's current
+    auto-generated session title (:func:`~chela.telegram.reconcile.sync_pinned_titles`)
+    — a different surface than the topic *name* above (that one tracks the tmux
+    window; this one tracks the session's own semantic title, edited in place as it
+    evolves). Piggybacked on this same loop rather than a separate one: it is the
+    existing per-tick, edge-triggered, save-only-on-change pass over every bound
+    window, and a title update is no more urgent than a rename.
     """
     from chela.discovery import get_window_cwd_by_id
     from chela import telegram as tg
@@ -1298,14 +1306,19 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
             now_epoch = epoch.current()
             dispatched = set() if BIND_DISPATCHED else tg.dispatched_window_ids(
                 live_windows=live, now_epoch=now_epoch)
-            if tg.reconcile_bindings(
+            bindings_changed = tg.reconcile_bindings(
                 registry, live, agents, topic_api,
                 cwd_for=get_window_cwd_by_id,
                 dispatched=dispatched,
                 gate_for=tg.blocked_on_human,
                 bind_dispatched=BIND_DISPATCHED,
                 now_epoch=now_epoch,
-            ):
+            )
+            # A separate call, not `or`-chained onto reconcile_bindings above — a Python
+            # `or` short-circuits, and reconcile_bindings returning True (a provision/reap
+            # happened) would then skip the pin sync entirely for that tick.
+            titles_changed = tg.sync_pinned_titles(registry, topic_api, agents, tg.ai_title_for_window)
+            if bindings_changed or titles_changed:
                 registry.save()
                 log.info("auto-topics: now bridging %s", ", ".join(registry.windows()) or "(none)")
         except Exception:
