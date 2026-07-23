@@ -99,6 +99,17 @@ SESSION_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{7,63}$")
 # collapsed before they were ever tried and every same-cwd window resolved to None.
 PROC = Path("/proc")
 
+# Does THIS host have a real /proc? Decided once, from the real filesystem — deliberately
+# NOT from ``PROC``, which tests point at a fixture tree.
+#
+# The distinction is the whole safety property. On a /proc host, a read that fails is a real
+# ABSENCE — a dead pid, a fixture that omits the process — and must stay one. If a failed
+# read fell through to `pgrep` there instead, a test that points PROC at a fixture to say
+# "no claude process to find" would quietly scan the machine's live process table and
+# answer from whatever happened to be running: host-dependent, and flaky exactly where it
+# is hardest to debug. So only a host with NO /proc at all — macOS — ever falls back.
+_PROC_HOST = Path("/proc").is_dir()
+
 # The fallback queries are single, read-only process lookups. Bounded because this runs on
 # the hook path, with an agent BLOCKED on it.
 _SHIM_TIMEOUT = 2.0
@@ -152,10 +163,17 @@ class Pane:
 def _sh(argv: list[str]) -> str | None:
     """Run one small read-only process query; stdout, or None on any failure.
 
+    Returns None immediately on a /proc host: there, a failed read means the fact is
+    genuinely absent, and asking the process table instead would answer a fixture's
+    question with the machine's live state (see :data:`_PROC_HOST`). This is the single
+    gate every fallback below inherits.
+
     Never raises: a missing tool (``lsof`` is not installed everywhere), a non-zero exit
     (the pid died between listing and asking) and a timeout are all the same answer here —
     "this fact is unavailable" — which every caller already handles.
     """
+    if _PROC_HOST:
+        return None
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=_SHIM_TIMEOUT)
     except (OSError, subprocess.SubprocessError):

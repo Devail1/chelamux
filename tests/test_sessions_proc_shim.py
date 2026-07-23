@@ -38,8 +38,25 @@ _ARGV_TAIL = ["claude", "--resume", SID]
 
 @pytest.fixture
 def no_proc(monkeypatch, tmp_path):
-    """A host with no ``/proc`` — the macOS case, forced on whatever runs this."""
+    """A host with no ``/proc`` — the macOS case, forced on whatever runs this.
+
+    BOTH knobs are required, and the second is the point: ``_PROC_HOST`` is what decides
+    whether a failed read may fall back at all. Pointing ``PROC`` alone at an empty tree is
+    how the existing suite says "this fixture has no such process" ON a /proc host, and
+    that must keep degrading rather than reaching for the live process table.
+    """
     monkeypatch.setattr(sessions, "PROC", tmp_path / "nonexistent-proc")
+    monkeypatch.setattr(sessions, "_PROC_HOST", False)
+
+
+def _children_unguarded() -> list[int]:
+    """``_sh_children`` with the /proc-host gate forced open, for fixture setup only."""
+    saved = sessions._PROC_HOST
+    sessions._PROC_HOST = False
+    try:
+        return sessions._sh_children(os.getpid())
+    finally:
+        sessions._PROC_HOST = saved
 
 
 @pytest.fixture
@@ -52,8 +69,11 @@ def child(tmp_path):
         cwd=str(cwd),
     )
     # Popen returns before the kernel has necessarily published the process to `ps`/`pgrep`.
+    # Probed with the gate forced open, since the fixture that opens it may not be active.
     deadline = time.time() + 5
-    while time.time() < deadline and not sessions._sh_children(os.getpid()):
+    while time.time() < deadline:
+        if proc.pid in _children_unguarded():
+            break
         time.sleep(0.05)
     try:
         yield proc, str(cwd)
