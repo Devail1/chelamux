@@ -12,6 +12,7 @@ A LIVE worktree must still win the idempotent-reuse path untouched.
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -117,3 +118,62 @@ def test_survives_a_dead_worktree_administrative_record(repo: Path, tmp_path: Pa
     assert created is True
     assert new_wt == wt_path
     assert new_wt.is_dir()
+
+
+# --- remove_worktree: all four ways a worktree can go stale (CMX-164) -------------------
+
+def test_remove_worktree_removes_a_live_worktree(repo: Path, tmp_path: Path):
+    wt_path, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, tmp_path / "worktrees")
+
+    assert worktree.remove_worktree(repo, wt_path) is True
+    assert not wt_path.exists()
+
+
+def test_remove_worktree_falls_back_to_a_direct_delete_for_an_unregistered_directory(
+    repo: Path, tmp_path: Path,
+):
+    """git has no administrative record of this path at all — `git worktree remove`
+    refuses it ("not a working tree"). Make it give up instead of falling back → RED."""
+    wt_path = tmp_path / "orphan"
+    wt_path.mkdir()
+    (wt_path / "junk.txt").write_text("leftover from a crashed create\n")
+
+    removed = worktree.remove_worktree(repo, wt_path)
+
+    assert removed is True
+    assert not wt_path.exists()
+
+
+def test_remove_worktree_on_EPERM_logs_loudly_and_leaves_the_directory(
+    repo: Path, tmp_path: Path, monkeypatch, caplog,
+):
+    """Root-owned remnants a Docker build left behind (chela runs as the user, not root).
+    Swallow the PermissionError silently (no log, or pretend it succeeded) → RED."""
+    wt_path = tmp_path / "root_owned"
+    wt_path.mkdir()
+    (wt_path / "cant_touch_this").write_text("root:root\n")
+
+    def _boom(path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(worktree.shutil, "rmtree", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        removed = worktree.remove_worktree(repo, wt_path)
+
+    assert removed is False
+    assert wt_path.is_dir()                  # left in place, not half-deleted
+    assert str(wt_path) in caplog.text        # named loudly, not a silent no-op
+
+
+def test_disk_usage_bytes_sums_file_sizes_recursively(tmp_path: Path):
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.txt").write_bytes(b"x" * 100)
+    (root / "sub" / "b.txt").write_bytes(b"y" * 250)
+
+    assert worktree.disk_usage_bytes(root) == 350
+
+
+def test_disk_usage_bytes_on_a_missing_root_is_zero_not_a_crash(tmp_path: Path):
+    assert worktree.disk_usage_bytes(tmp_path / "does-not-exist") == 0

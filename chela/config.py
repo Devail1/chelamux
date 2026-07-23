@@ -500,6 +500,58 @@ TERM_COLS = int(os.environ.get("CHELA_TERM_COLS", "120"))
 TERM_ROWS = int(os.environ.get("CHELA_TERM_ROWS", "30"))
 
 
+_SIZE_SUFFIXES = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+
+
+def _parse_size_bytes(raw: str) -> int | None:
+    """``"20G"`` → bytes. A bare integer is bytes; a trailing K/M/G/T (case-insensitive,
+    1024-based) is a size suffix. ``None`` for anything that doesn't parse — the caller
+    treats that as budget-off rather than crashing a tick on a typo."""
+    raw = raw.strip().upper()
+    if not raw:
+        return None
+    suffix = raw[-1]
+    number, mult = (raw[:-1], _SIZE_SUFFIXES[suffix]) if suffix in _SIZE_SUFFIXES and suffix else (raw, 1)
+    try:
+        return int(float(number) * mult)
+    except ValueError:
+        return None
+
+
+def worktree_disk_budget_bytes() -> int:
+    """The disk ceiling for a workflow's worktree root — the ``memcap`` analog for disk
+    (CMX-164). A dispatch tick that finds the root's measured size over this refuses to
+    claim a fresh task rather than let an adopter's heavier repo (a Rust ``target/``, an
+    ML venv, a Node monorepo — 1-10 GB *per worktree*) run the box out of disk, which is
+    worse than an OOM: it can take git, sqlite, tmux and the daemon down together.
+
+    ``CHELA_WORKTREE_DISK_BUDGET`` accepts a bare byte count or a K/M/G/T-suffixed size
+    (``"20G"``, ``"500M"``, ...). ``0``, unset, or anything that fails to parse means OFF
+    — no adopter is forced to opt into a rail they haven't sized for their own repo, and a
+    garbage value degrades to the safe default rather than crashing the tick.
+
+    Read per call, never latched at import: a policy knob an operator turns on a daemon
+    that is already running.
+    """
+    raw = os.environ.get("CHELA_WORKTREE_DISK_BUDGET", "").strip()
+    if not raw:
+        return 0
+    parsed = _parse_size_bytes(raw)
+    return parsed if parsed and parsed > 0 else 0
+
+
+def human_size(n: int) -> str:
+    """``21474836480`` → ``"20.0G"``. Only ever fed a non-negative byte count — the
+    disk-budget rail's shared formatter, for the log line and the capability detail to
+    agree on the same units."""
+    size = float(n)
+    for unit in ("B", "K", "M", "G", "T"):
+        if size < 1024 or unit == "T":
+            return f"{int(size)}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}T"
+
+
 def is_loopback_host(host: str) -> bool:
     """True when the dashboard bind host is the local loopback (the safe case
     for serving the writable terminal wall)."""

@@ -111,6 +111,23 @@ def test_tick_removes_the_worktree_when_a_PR_merges(ticking, monkeypatch):
     assert "cmx-1" in _branches(repo)  # branch left alone (task_number collision guard)
 
 
+def test_tick_leaves_an_awaiting_review_worktree_alone(ticking, monkeypatch):
+    """⛔ A run still `awaiting_review` is NOT terminal — a rework may re-spawn INTO this
+    same worktree. Remove it unconditionally here and this goes RED."""
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+    worktrees_root = repo.parent / ".chela" / "worktrees"
+    wt_path = _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root)
+    assert wt_path.is_dir()
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("open", "MERGEABLE"))
+
+    summary = dispatcher.tick(wf_path)
+
+    assert summary["reconciled_done"] == 0
+    assert wt_path.is_dir()          # still needed — a rework may re-spawn into it
+
+
 def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticking):
     """`row["task_id"] not in open_ids and status in REVIEW_STATUSES` → done: the other
     `tick()` path that reaches `done` without a fresh `pr_state` read this tick."""
