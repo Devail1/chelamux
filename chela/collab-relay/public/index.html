@@ -6,6 +6,16 @@
 <title>chela · shared terminal</title>
 <link rel="stylesheet" href="/vendor/xterm.css">
 <style>
+  /* Glyph-fallback tier — see fonts/README.md. The primary face (JetBrains Mono /
+     Menlo / Consolas) is whatever the viewer's OS already has; these two are
+     bundled so TUI glyphs the primary face lacks (tool-marker ⏺, ❌/✅, thinking
+     spinners, Nerd Font PUA icons) don't fall through to tofu (▢) on a browser
+     with neither installed. font-display:block avoids a flash of tofu while the
+     face downloads (same choice as the dashboard's terminal font bundle). */
+  @font-face { font-family:'Symbola'; src:url('/fonts/Symbola-Subset.ttf') format('truetype'); font-display:block; }
+  @font-face { font-family:'Symbols Nerd Font'; src:url('/fonts/SymbolsNerdFontMono-Regular.ttf') format('truetype'); font-display:block; }
+</style>
+<style>
   :root { --bg:#0a0c11; --panel:#0d1117; --border:#1f2632; --fg:#c9d1d9; --dim:#7d8590; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
   * { box-sizing:border-box; }
   html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
@@ -180,7 +190,7 @@
 
     const term = new Terminal({
       cursorBlink: false, convertEol: false,
-      fontFamily: 'JetBrains Mono, Menlo, Consolas, monospace', fontSize: 14,
+      fontFamily: "JetBrains Mono, Menlo, Consolas, 'Symbola', 'Symbols Nerd Font', monospace", fontSize: 14,
       theme: { background:'#0d1117', foreground:'#c9d1d9', cursor:'#58a6ff', cursorAccent:'#0d1117',
         selectionBackground:'#264f78', black:'#484f58', red:'#ff7b72', green:'#3fb950', yellow:'#d29922',
         blue:'#58a6ff', magenta:'#bc8cff', cyan:'#39c5cf', white:'#b1bac4', brightBlack:'#6e7681',
@@ -188,6 +198,24 @@
         brightMagenta:'#d2a8ff', brightCyan:'#56d4dd', brightWhite:'#f0f6fc' },
     });
     term.open(document.getElementById('term'));
+
+    // xterm rasterises glyphs into a texture atlas keyed by (fontFamily, fontSize)
+    // — see xterm's CharAtlasCache.acquireTextureAtlas. The gate (pairing code
+    // entry) usually buys enough time for the @font-face fetches above to finish
+    // before the first real frame writes anything, but a fast reconnect (stored
+    // pairing code, instant auto-join) can race ahead of the fonts and paint the
+    // first frame's tofu into that atlas — a cache HIT thereafter, so the glyphs
+    // never self-correct even once the fonts land (same underlying quirk fixed
+    // for the dashboard's viewer in CMX-155). Wait for the fallback faces via the
+    // CSS Font Loading API, then evict the atlas and force a real repaint.
+    if (window.document && document.fonts && document.fonts.load) {
+      const px = (term.options && term.options.fontSize) || 14;
+      Promise.all([`${px}px Symbola`, `${px}px "Symbols Nerd Font"`].map((f) => document.fonts.load(f).catch(() => {})))
+        .then(() => {
+          try { if (term.clearTextureAtlas) term.clearTextureAtlas(); } catch (_) {}
+          try { if (term.rows) term.refresh(0, term.rows - 1); } catch (_) {}
+        });
+    }
 
     // Letterbox the FIXED master grid by scaling fontSize (never CSS transform).
     // KEEP one shared master grid — TUIs can't reflow client-side and writable

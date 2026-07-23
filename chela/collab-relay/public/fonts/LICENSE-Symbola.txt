@@ -1,0 +1,19 @@
+Symbola (subset) — license
+===========================
+
+Upstream font: Symbola by George Douros (http://users.teilar.gr/~g1951d/)
+Copyright (C) 2007-2015 George Douros
+
+License (verbatim, from the Debian fonts-symbola package copyright file,
+itself sourced from the upstream distribution):
+
+    Fonts are free for any use; they may be opened, edited,
+    modified, regenerated, packaged and redistributed.
+
+`Symbola-Subset.ttf` in this directory is a subset of the upstream Symbola
+font (Unicode ranges U+2300-23FF "Miscellaneous Technical" and U+2600-27BF
+"Miscellaneous Symbols" + "Dingbats" only), produced with fontTools'
+`pyftsubset` to keep the binary small. It is used exclusively as a
+symbol-glyph fallback tier by `chela/telegram/screenshot.py`'s `/screenshot`
+PNG renderer — it is not served to the browser and is not part of the web
+terminal's font picker.
