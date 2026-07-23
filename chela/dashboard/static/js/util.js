@@ -35,6 +35,16 @@ const _LUCIDE = {
     // `keyboard` — the command palette's "Keyboard shortcuts" row (nav.js
     // _paletteItems), opening the shortcuts cheatsheet overlay (CMX-121).
     'keyboard': '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>',
+    // `maximize-2` / `minimize-2` — the pane header's maximize/restore toggle
+    // (terminals.js termMaxFor) and the min-dock chip's restore icon, replacing
+    // the 🗖/🗗 window-chrome emoji (U+1F5D6/U+1F5D7): a rare Unicode block most
+    // fonts, including macOS defaults, don't cover — they rendered as tofu (CMX-154).
+    'maximize-2': '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/>',
+    'minimize-2': '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/>',
+    // `minus` — the pane header's "minimize to dock" button and the min-dock
+    // chip's minimize icon, replacing the 🗕 window-chrome emoji (U+1F5D5) for
+    // the same tofu reason as maximize-2/minimize-2 above (CMX-154).
+    'minus': '<path d="M5 12h14"/>',
 };
 function lucideIcon(name, size = 16) {
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" `

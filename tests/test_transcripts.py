@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
-from chela import transcripts
+from chela import discovery, event_log, sessions, transcripts
 
 CWD = "/home/x/proj"
 
@@ -175,3 +176,74 @@ def test_summary_for_path_includes_ai_title_distinct_from_recap(tmp_path):
     assert transcripts.summary_for_path(None) == {
         "recap": None, "recap_ts": None, "pr": None, "ai_title": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# CMX-153: two same-cwd windows must resolve to THEIR OWN transcript, by
+# window id — not whichever file wins the cwd "newest record" race.
+# ---------------------------------------------------------------------------
+
+SID_A = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"
+SID_B = "cf19ca61-ffbb-4dbf-a8c7-66b74294fa69"
+
+
+def _session_transcript(base, cwd, session_id, ai_title):
+    proj = base / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True, exist_ok=True)
+    path = proj / f"{session_id}.jsonl"
+    path.write_text(json.dumps({"type": "ai-title", "aiTitle": ai_title}) + "\n")
+    return path
+
+
+def test_resolve_agent_transcript_prefers_window_id_over_the_cwd_guess(monkeypatch):
+    """A caller that hands over a window id must get `sessions.transcript_for_window`'s
+    answer, not the name/cwd guess — even when the cwd guess would return something
+    else entirely. This is the actual wiring bug: the dashboard had a window id sitting
+    right next to the transcript lookup and never used it (CMX-153)."""
+    monkeypatch.setattr(sessions, "transcript_for_window",
+                        lambda wid, base=None: f"/by-window/{wid}.jsonl")
+    monkeypatch.setattr(transcripts, "transcript_for_cwd", lambda cwd, base=None: "/by-cwd/wrong.jsonl")
+    monkeypatch.setattr(discovery, "get_window_cwd", lambda name: CWD)
+
+    assert transcripts._resolve_agent_transcript("agent", window_id="@7") == "/by-window/@7.jsonl"
+
+
+def test_resolve_agent_transcript_falls_back_to_cwd_with_no_window_id(monkeypatch):
+    """A caller with no window id at all (none live, none looked up) keeps the old,
+    best-effort cwd guess — it is still strictly better than nothing."""
+    monkeypatch.setattr(transcripts, "transcript_for_cwd", lambda cwd, base=None: "/by-cwd/only.jsonl")
+    monkeypatch.setattr(discovery, "get_window_cwd", lambda name: CWD)
+
+    assert transcripts._resolve_agent_transcript("agent") == "/by-cwd/only.jsonl"
+
+
+def test_agent_transcript_summary_disambiguates_two_windows_sharing_one_cwd(
+        tmp_path, monkeypatch):
+    """The actual bug, end to end: two windows launched in the SAME directory each get
+    THEIR OWN ai_title back, because they are resolved by window (session id) rather
+    than by the directory they happen to share."""
+    root = tmp_path / "projects"
+    root.mkdir()
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", root)
+    monkeypatch.setattr(discovery, "get_window_cwd", lambda name: CWD)
+
+    _session_transcript(root, CWD, SID_A, "Refactor the risk engine")
+    _session_transcript(root, CWD, SID_B, "Write the onboarding docs")
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {
+        "@1": sessions.Pane(wid="@1", path=CWD, command="claude", claude_pid=1,
+                             launched_in=CWD, started=time.time() - 60),
+        "@2": sessions.Pane(wid="@2", path=CWD, command="claude", claude_pid=2,
+                             launched_in=CWD, started=time.time() - 60),
+    })
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID_A)
+    event_log.append("hook.pre_tool_use", "b", wid="@2", session_id=SID_B)
+
+    summary_a = transcripts.agent_transcript_summary("anthony_work", window_id="@1")
+    summary_b = transcripts.agent_transcript_summary("anthony_work", window_id="@2")
+    assert summary_a["ai_title"] == "Refactor the risk engine"
+    assert summary_b["ai_title"] == "Write the onboarding docs"
+
+    # what resolving by cwd/name alone could only ever do: hand BOTH of them the same
+    # (arbitrary "newest") transcript — the bug this guards against.
+    by_name_only = transcripts.agent_transcript_summary("anthony_work")
+    assert by_name_only["ai_title"] in ("Refactor the risk engine", "Write the onboarding docs")
