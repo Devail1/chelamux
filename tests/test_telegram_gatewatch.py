@@ -191,10 +191,14 @@ def test_unbound_window_is_not_relayed():
 
 
 def test_format_uses_bash_command_collapsing_whitespace():
-    from chela.telegram.gatewatch import _PendingTool
+    # detail is precomputed by _tool_detail at observe()-time (CMX-163), so exercise
+    # it the same way the watcher does rather than handing format_gate_message an
+    # already-collapsed string.
+    from chela.telegram.gatewatch import _PendingTool, _tool_detail
 
     gate = Gate(text="Do you want to proceed?", kind="PermissionPrompt")
-    msg = format_gate_message(_PendingTool("Bash", {"command": "make  test\n"}), gate)
+    detail = _tool_detail("Bash", {"command": "make  test\n"})
+    msg = format_gate_message(_PendingTool("Bash", detail), gate)
     assert msg == "❓ Permission — Bash: make test"
 
 
@@ -202,7 +206,7 @@ def test_format_uses_edit_file_path():
     from chela.telegram.gatewatch import _PendingTool
 
     gate = Gate(text="…", kind="PermissionPrompt")
-    msg = format_gate_message(_PendingTool("Edit", {"file_path": "/x/y.py"}), gate)
+    msg = format_gate_message(_PendingTool("Edit", "/x/y.py"), gate)
     assert msg == "❓ Permission — Edit: /x/y.py"
 
 
@@ -210,7 +214,7 @@ def test_format_unknown_tool_without_detail_names_the_tool():
     from chela.telegram.gatewatch import _PendingTool
 
     gate = Gate(text="Do you want to proceed?", kind="PermissionPrompt")
-    msg = format_gate_message(_PendingTool("SomeTool", {"foo": "bar"}), gate)
+    msg = format_gate_message(_PendingTool("SomeTool", None), gate)
     assert msg == "❓ Permission — SomeTool"
 
 
@@ -240,6 +244,21 @@ def test_scraped_pane_identity_wins_over_a_stale_unpaired_tool_use():
     w.observe("@1", _tool_use("Read", "u1", {"file_path": "/somewhere/else.py"}))
     w.poll(["@1"])
     assert sender.calls[0][0] == "❓ Permission — Bash: rm -rf build/"
+
+
+def test_unpaired_tool_use_backlog_is_capped_per_window():
+    # CMX-163: an unpaired tool_use whose tool_result never arrives (Esc-interrupt,
+    # an API-errored turn, /clear) must not accumulate forever — the map is capped,
+    # oldest evicted first, and the most-recent entry (the fallback identity that
+    # actually matters) survives.
+    from chela.telegram.gatewatch import _MAX_PENDING_PER_WINDOW
+
+    sender = _Sender()
+    w = _watcher(sender, _Registry({"@1": "100"}), {"@1": ""})
+    for i in range(_MAX_PENDING_PER_WINDOW * 3):
+        w.observe("@1", _tool_use("Bash", f"u{i}", {"command": f"cmd{i}"}))
+    assert len(w._pending["@1"]) <= _MAX_PENDING_PER_WINDOW
+    assert w._latest_pending("@1").detail == f"cmd{_MAX_PENDING_PER_WINDOW * 3 - 1}"
 
 
 # ── AskUserQuestion (pane-triggered, no transcript gate) ────────────────────
