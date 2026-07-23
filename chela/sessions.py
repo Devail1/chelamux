@@ -61,6 +61,17 @@ fact in :mod:`chela.runtime_truth`) — the silence is the bug.
 refresh: no ``pgrep``, no ``capture-pane``, no ``claude agents --json``. That budget is
 not decorative — :mod:`chela.hooks` resolves through here while a live agent is BLOCKED on
 the hook (CMX-41 rejected the pgrep path precisely because it takes seconds).
+
+**macOS has no ``/proc`` at all** (CMX-157), which used to mean every fact above — a
+pane's ``claude_pid``, ``launched_in``, ``resumed``, ``started`` — came back ``None``, on
+every platform, silently. A window alone in its cwd still resolved (the cwd fallback needs
+none of these), but two windows sharing a cwd could not: with no ``started`` there is no
+floor, so (1) is correctly refused, and the ``--resume`` cmdline in (2) was simply never
+read — leaving only the cwd, which refuses to pick between them (see above). One root
+cause, symptoms on three surfaces: window titles, session recaps/PRs, and the Telegram
+same-cwd relay. :data:`_IS_MACOS` swaps the process-fact functions onto ``ps``/``lsof``
+(both ship with the OS) instead of ``/proc`` — same evidence, same cost shape, a bulk
+``ps`` snapshot standing in for the ``/proc`` children walk.
 """
 from __future__ import annotations
 
@@ -68,6 +79,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -88,6 +100,18 @@ SESSION_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{7,63}$")
 # lookup at a fixture tree, and so a kernel without /proc simply degrades (the cmdline
 # signal disappears; the event log and the cwd fallback still answer).
 PROC = Path("/proc")
+
+# macOS has no /proc at all — every process fact below was silently returning None there
+# (CMX-157: same-cwd windows resolved to nothing, on every surface `resolve_window` feeds —
+# titles, recaps, the Telegram relay — because `started`/`resumed` never got a value to
+# refuse or accept). `_IS_MACOS` is a module-level bool, not an inline `sys.platform` check,
+# so a test can flip it without actually running on a Mac. True branches every process-fact
+# function below onto `ps`/`lsof` instead of `/proc`; both ship with the OS, so no new
+# dependency. Cost stays bounded the same way the /proc path is bounded: one `ps -Ao
+# pid=,ppid=,comm=` snapshot, TTL-cached alongside the pane map, answers every `_children`/
+# `_comm` call in a refresh, and `lsof`/`ps -p <pid>` run only for the one claude pid a pane
+# already found — never a system-wide `lsof` scan.
+_IS_MACOS = sys.platform == "darwin"
 
 # The claude process is normally the pane shell's direct child, but a wrapper (a `sg`, an
 # `env`, a launcher script) can sit in between. Walk a couple of generations, not the
@@ -142,6 +166,8 @@ def _boot_time() -> float:
 
 
 def _comm(pid: int) -> str:
+    if _IS_MACOS:
+        return _ps_snapshot().get(pid, (0, ""))[1]
     try:
         return (PROC / str(pid) / "comm").read_text().strip()
     except OSError:
@@ -149,7 +175,11 @@ def _comm(pid: int) -> str:
 
 
 def _children(pid: int) -> list[int]:
-    """Direct children of ``pid``, straight from /proc — no pgrep, no process table scan."""
+    """Direct children of ``pid``. /proc on Linux; a cached ``ps`` snapshot on macOS
+    (:func:`_ps_snapshot`) — neither is a pgrep-per-pid, so this stays cheap on a refresh."""
+    if _IS_MACOS:
+        table = _ps_snapshot()
+        return sorted(p for p, (ppid, _) in table.items() if ppid == pid)[:_MAX_CHILDREN]
     try:
         raw = (PROC / str(pid) / "task" / str(pid) / "children").read_text()
     except OSError:
@@ -180,19 +210,16 @@ def _claude_pid(pane_pid: int) -> int | None:
 
 
 def _proc_cwd(pid: int) -> str | None:
+    if _IS_MACOS:
+        return _proc_cwd_macos(pid)
     try:
         return os.readlink(str(PROC / str(pid) / "cwd")) or None
     except OSError:
         return None
 
 
-def _resumed_session(pid: int) -> str | None:
-    """``--resume <sid>`` / ``--resume=<sid>`` off a process's command line, validated."""
-    try:
-        raw = (PROC / str(pid) / "cmdline").read_bytes()
-    except OSError:
-        return None
-    argv = [a for a in raw.decode("utf-8", "replace").split("\0") if a]
+def _resume_from_argv(argv: list[str]) -> str | None:
+    """``--resume <sid>`` / ``--resume=<sid>`` out of an already-split argv, validated."""
     for i, arg in enumerate(argv):
         candidate = None
         if arg in ("--resume", "-r") and i + 1 < len(argv):
@@ -204,8 +231,22 @@ def _resumed_session(pid: int) -> str | None:
     return None
 
 
+def _resumed_session(pid: int) -> str | None:
+    """``--resume <sid>`` / ``--resume=<sid>`` off a process's command line, validated."""
+    if _IS_MACOS:
+        return _resume_from_argv(_cmdline_macos(pid))
+    try:
+        raw = (PROC / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return None
+    argv = [a for a in raw.decode("utf-8", "replace").split("\0") if a]
+    return _resume_from_argv(argv)
+
+
 def _proc_started(pid: int) -> float | None:
     """Epoch seconds the process started — the floor under a stale ``wid`` mapping."""
+    if _IS_MACOS:
+        return _proc_started_macos(pid)
     try:
         stat = (PROC / str(pid) / "stat").read_text()
     except OSError:
@@ -220,6 +261,106 @@ def _proc_started(pid: int) -> float | None:
     if not boot or not _CLK_TCK:
         return None
     return boot + ticks / _CLK_TCK
+
+
+# --- process facts, the macOS backend ------------------------------------------------
+#
+# No /proc on macOS, so every fact above comes from `ps`/`lsof` instead — both ship with
+# the OS. `_children`/`_comm` share ONE cached snapshot (`_ps_snapshot`, TTL alongside the
+# pane map) rather than a call per pid; `_proc_cwd`/`_resumed_session`/`_proc_started` run
+# one bounded `lsof`/`ps -p <pid>` each, only for the single claude pid a pane already
+# found — the same "handful of reads per refresh" budget the /proc path promises.
+
+_ps_table_cache: dict = {"ts": 0.0, "table": {}}
+_ps_table_lock = threading.Lock()
+
+
+def _ps_snapshot() -> dict[int, tuple[int, str]]:
+    """``{pid: (ppid, comm)}`` for every process, TTL-cached — the macOS stand-in for
+    walking ``/proc/<pid>/task/<pid>/children``."""
+    now = time.time()
+    if now - _ps_table_cache["ts"] < _TTL:
+        return _ps_table_cache["table"]
+    with _ps_table_lock:
+        if time.time() - _ps_table_cache["ts"] < _TTL:
+            return _ps_table_cache["table"]
+        table: dict[int, tuple[int, str]] = {}
+        try:
+            result = subprocess.run(
+                ["ps", "-Ao", "pid=,ppid=,comm="],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            result = None
+        if result is not None and result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = line.split(None, 2)
+                if len(parts) < 3:
+                    continue
+                try:
+                    pid, ppid = int(parts[0]), int(parts[1])
+                except ValueError:
+                    continue
+                table[pid] = (ppid, os.path.basename(parts[2].strip()))
+        _ps_table_cache["table"] = table
+        _ps_table_cache["ts"] = time.time()
+        return table
+
+
+def _proc_cwd_macos(pid: int) -> str | None:
+    """A process's cwd via ``lsof -a -d cwd -p <pid> -Fn`` — ``-F n`` emits one
+    ``n<path>``-prefixed line per matching fd, so this needs no column parsing."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-d", "cwd", "-p", str(pid), "-Fn"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n") and len(line) > 1:
+            return line[1:]
+    return None
+
+
+def _cmdline_macos(pid: int) -> list[str]:
+    """A process's argv, space-split off ``ps -ww -o command=`` (``-ww`` disables the
+    terminal-width truncation macOS ``ps`` otherwise applies even when piped)."""
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    line = result.stdout.strip("\n").strip()
+    return line.split() if line else []
+
+
+def _proc_started_macos(pid: int) -> float | None:
+    """Epoch seconds a process started, off ``ps -o lstart=`` — a calendar timestamp
+    (local time, same as ``ps`` prints it), not an elapsed-time computation, so it carries
+    no now-vs-call jitter the way ``etime`` would."""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    try:
+        return time.mktime(time.strptime(raw, "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        return None
 
 
 # --- the pane map -------------------------------------------------------------------

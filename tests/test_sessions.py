@@ -447,3 +447,172 @@ def test_a_pane_with_no_claude_process_degrades_to_the_pane_path(tmp_path, monke
     pane = sessions._load_panes()["@5"]
     assert pane.claude_pid is None and pane.resumed is None
     assert pane.origin == "/home/u"                # the pane path, as a last resort
+
+
+# --- the process facts, macOS backend (CMX-157) ---------------------------------------
+#
+# macOS has no /proc, so every fact above came back None there — silently. A window alone
+# in its cwd still resolved (the cwd fallback needs none of these facts), but two windows
+# sharing a cwd resolved to NOTHING: no `started` floor meant the event log was refused,
+# and the `--resume` cmdline was never read at all. These pin the `ps`/`lsof` stand-in.
+
+class _Result:
+    def __init__(self, stdout: str = "", returncode: int = 0):
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def _mock_ps_lsof(monkeypatch, *, tmux_stdout: str, ps_table: str = "",
+                  lstart_by_pid: dict[str, str] | None = None,
+                  command_by_pid: dict[str, str] | None = None,
+                  cwd_by_pid: dict[str, str] | None = None, missing: set[str] = frozenset()):
+    """Routes `subprocess.run` the way macOS's process-fact backend actually calls it:
+    one `tmux list-windows`, one bulk `ps -Ao pid=,ppid=,comm=` snapshot, and per-pid
+    `ps -p <pid> -o lstart=` / `ps -ww -p <pid> -o command=` / `lsof -a -d cwd -p <pid>
+    -Fn`. `missing` names a command (e.g. "lsof") that should raise FileNotFoundError,
+    the way a kernel with no such binary would."""
+    monkeypatch.setattr(sessions, "_IS_MACOS", True)
+    lstart_by_pid = lstart_by_pid or {}
+    command_by_pid = command_by_pid or {}
+    cwd_by_pid = cwd_by_pid or {}
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[0] in missing:
+            raise FileNotFoundError(argv[0])
+        if argv[:2] == ["tmux", "list-windows"]:
+            return _Result(tmux_stdout)
+        if argv[:2] == ["ps", "-Ao"]:
+            return _Result(ps_table)
+        if argv[0] == "ps" and argv[-1] == "lstart=":
+            pid = argv[argv.index("-p") + 1]
+            return _Result(lstart_by_pid.get(pid, ""), 0 if pid in lstart_by_pid else 1)
+        if argv[0] == "ps" and "-ww" in argv:
+            pid = argv[argv.index("-p") + 1]
+            return _Result(command_by_pid.get(pid, ""), 0 if pid in command_by_pid else 1)
+        if argv[0] == "lsof":
+            pid = argv[argv.index("-p") + 1]
+            return _Result(cwd_by_pid.get(pid, ""), 0 if pid in cwd_by_pid else 1)
+        return _Result("", 1)
+
+    monkeypatch.setattr(sessions.subprocess, "run", fake_run)
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def _reset_ps_cache(monkeypatch):
+    """The `ps` snapshot is TTL-cached like the pane map — a fresh dict per test so one
+    test's mock doesn't leak into the next."""
+    monkeypatch.setattr(sessions, "_ps_table_cache", {"ts": 0.0, "table": {}})
+
+
+def test_the_pane_map_on_macos_reads_process_facts_via_ps_and_lsof(monkeypatch):
+    """The regression, verbatim: on a kernel with no /proc, every fact used to come back
+    None. Same claude_pid/resumed/launched_in/started a Linux /proc read would produce."""
+    _mock_ps_lsof(
+        monkeypatch,
+        tmux_stdout="@2\tclaude\t/somewhere/else\t15499\n",
+        ps_table="15499 1 bash\n16154 15499 claude\n",
+        lstart_by_pid={"16154": "Mon Jul 21 10:15:23 2026"},
+        command_by_pid={"16154": f"claude --resume {SID}"},
+        cwd_by_pid={"16154": "n/home/u/project\n"},
+    )
+
+    pane = sessions._load_panes()["@2"]
+    assert pane.claude_pid == 16154
+    assert pane.resumed == SID
+    assert pane.launched_in == "/home/u/project"    # via lsof, not the pane path
+    assert pane.path == "/somewhere/else"
+    assert pane.started == pytest.approx(
+        time.mktime(time.strptime("Mon Jul 21 10:15:23 2026", "%a %b %d %H:%M:%S %Y")))
+
+
+def test_a_macos_pane_with_no_claude_process_degrades_to_the_pane_path(monkeypatch):
+    """A shell window: the ps snapshot has no `claude` comm under it anywhere."""
+    _mock_ps_lsof(
+        monkeypatch,
+        tmux_stdout="@5\tbash\t/home/u\t123\n",
+        ps_table="123 1 bash\n",
+    )
+    pane = sessions._load_panes()["@5"]
+    assert pane.claude_pid is None and pane.resumed is None and pane.started is None
+    assert pane.origin == "/home/u"
+
+
+def test_macos_process_facts_degrade_when_ps_is_entirely_missing(monkeypatch):
+    """No `ps` on PATH at all: even the claude-pid walk (which is `ps`-backed on macOS,
+    same as `/proc`-backed on Linux) comes back empty — never an exception, same shape as
+    a Linux box whose `/proc` is missing."""
+    _mock_ps_lsof(
+        monkeypatch,
+        tmux_stdout="@2\tclaude\t/somewhere\t15499\n",
+        ps_table="15499 1 bash\n16154 15499 claude\n",
+        missing={"ps"},
+    )
+    pane = sessions._load_panes()["@2"]
+    assert pane.claude_pid is None
+    assert pane.launched_in is None and pane.resumed is None and pane.started is None
+
+
+def test_macos_cwd_degrades_when_only_lsof_is_missing(monkeypatch):
+    """`ps` is fine (the claude pid, `--resume`, and start time all resolve) but `lsof`
+    is not installed: only the cwd signal disappears, same as one `/proc` read failing
+    while the others succeed."""
+    _mock_ps_lsof(
+        monkeypatch,
+        tmux_stdout="@2\tclaude\t/somewhere\t15499\n",
+        ps_table="15499 1 bash\n16154 15499 claude\n",
+        lstart_by_pid={"16154": "Mon Jul 21 10:15:23 2026"},
+        command_by_pid={"16154": f"claude --resume {SID}"},
+        missing={"lsof"},
+    )
+    pane = sessions._load_panes()["@2"]
+    assert pane.claude_pid == 16154
+    assert pane.resumed == SID and pane.started is not None
+    assert pane.launched_in is None                # the one fact lsof would have supplied
+
+
+def test_two_macos_windows_sharing_a_cwd_now_resolve_by_session_not_NOTHING(
+        projects, monkeypatch):
+    """THE symptom, reproduced end to end: two windows launched in one directory used to
+    both resolve to None on macOS, because `started` was always None there — no floor
+    means the event log is refused (`resolve_window`'s `pane.started is None` branch), and
+    `resumed` was never read either. With ps/lsof standing in for /proc, both facts are
+    populated again and the event log resolves each window to ITS OWN transcript — the
+    exact case the cwd fallback can never split."""
+    a = _transcript(projects, "/home/u/repo", SID)
+    b = _transcript(projects, "/home/u/repo", OTHER)
+    _mock_ps_lsof(
+        monkeypatch,
+        tmux_stdout="@1\tclaude\t/home/u/repo\t100\n@2\tclaude\t/home/u/repo\t200\n",
+        ps_table="100 1 bash\n101 100 claude\n200 1 bash\n201 200 claude\n",
+        lstart_by_pid={"101": "Mon Jul 21 10:00:00 2026", "201": "Mon Jul 21 10:00:00 2026"},
+        command_by_pid={"101": "claude", "201": "claude"},
+        cwd_by_pid={"101": "n/home/u/repo\n", "201": "n/home/u/repo\n"},
+    )
+    pane_map = sessions._load_panes()
+    assert pane_map["@1"].started is not None and pane_map["@2"].started is not None
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+    event_log.append("hook.pre_tool_use", "b", wid="@2", session_id=OTHER)
+
+    res1 = sessions.resolve_window("@1", pane_map=pane_map)
+    res2 = sessions.resolve_window("@2", pane_map=pane_map)
+    assert res1.path == a and res1.source == "event_log"
+    assert res2.path == b and res2.source == "event_log"
+
+
+def test_ps_snapshot_and_started_parse_the_expected_ps_output_shapes(monkeypatch):
+    """The parsing pinned in isolation: a comm column that carries a full path is reduced
+    to a basename (matching what /proc's `comm` file would report), and `lstart=`'s
+    calendar string round-trips through `time.strptime`/`time.mktime` exactly."""
+    _mock_ps_lsof(
+        monkeypatch, tmux_stdout="",
+        ps_table="1 0 /sbin/launchd\n42 1 /Applications/Claude.app/Contents/MacOS/claude\n",
+    )
+    table = sessions._ps_snapshot()
+    assert table[1] == (0, "launchd")
+    assert table[42] == (1, "claude")
+
+    started = sessions._proc_started_macos(str(42))
+    assert started is None    # no lstart mock configured for pid "42" above → returncode 1
