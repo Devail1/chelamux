@@ -535,6 +535,13 @@ _TERM_SCROLL_SHIM = (
 _TERM_FONTS = [
     # Icons — font-display:block avoids a box-flash before the icon font loads.
     ("Symbols Nerd Font", "SymbolsNerdFontMono-Regular.ttf", None, None),
+    # Coverage-only fallback (not in the picker — see _TERM_FONT_PREF_SHIM's
+    # `fam` chain): CMX-159. Same Symbola subset CMX-156 bundled for the
+    # /screenshot PNG renderer (U+2300-23FF, U+2600-27BF) — the TUI glyphs
+    # (`⏺` `❌` `✅` `✦` `✷` `✨` `⚙`) that neither JetBrains Mono nor Symbols
+    # Nerd Font contain, and that CMX-155's atlas fix couldn't help because a
+    # texture-atlas rebuild can't rasterize a glyph no stacked font contains.
+    ("Symbola Fallback", "Symbola-Subset.ttf", None, None),
     # English / Latin monospace (picker: English face)
     ("JetBrains Mono",  "JetBrainsMono.ttf",       True,  None),
     ("Fira Code",       "FiraCode.ttf",            True,  None),
@@ -636,7 +643,7 @@ _TERM_FONT_PREF_SHIM = (
     "var lat=LAT[localStorage.getItem('chela_term_latin')]||LAT.jetbrains;"
     "var heb=HEB[localStorage.getItem('chela_term_font')]||HEB.miriam;"
     "var s=window.__CHELA_GRID_FONT__||(parseInt(localStorage.getItem('chela_term_fontsize'),10)||14);"
-    "var fam=\"'\"+lat+\"','Symbols Nerd Font','\"+heb+\"',monospace\";"
+    "var fam=\"'\"+lat+\"','Symbols Nerd Font','Symbola Fallback','\"+heb+\"',monospace\";"
     "function getSize(){return t.options?t.options.fontSize:"
     "(t.getOption?t.getOption('fontSize'):undefined);}"
     "function getFam(){return t.options?t.options.fontFamily:"
@@ -647,7 +654,8 @@ _TERM_FONT_PREF_SHIM = (
     "else if(t.setOption)t.setOption('fontFamily',f);}"
     "if(atlasFixed&&getSize()===s&&getFam()===fam)return;"
     "var L=[s+\"px '\"+lat+\"'\",\"bold \"+s+\"px '\"+lat+\"'\",s+\"px '\"+heb+\"'\","
-    "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\"];"
+    "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\","
+    "s+\"px 'Symbola Fallback'\"];"
     "var P=(document.fonts&&document.fonts.load)?"
     "Promise.all(L.map(function(f){return document.fonts.load(f).catch(function(){});}))"
     ":Promise.resolve();"

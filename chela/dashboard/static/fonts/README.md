@@ -18,18 +18,20 @@ font — see its note below.
 |------|-------|---------|--------------------|
 | Symbols Nerd Font | `SymbolsNerdFontMono-Regular.ttf` | MIT | Nerd Fonts — https://github.com/ryanoasis/nerd-fonts |
 
-## Server-side only (not in the web terminal font picker)
+## Coverage fallback (not in the web terminal font picker)
 
-Not served via `@font-face` / not selectable in Settings — used only as a
-glyph-coverage fallback by `chela/telegram/screenshot.py`'s `/screenshot` PNG
-renderer, which draws each character with the first font in its chain
-(JetBrains Mono → Symbola subset → Symbols Nerd Font) that actually contains
-that glyph, instead of drawing everything in one font and letting missing
-glyphs come out as tofu (`▢`).
+Served via `@font-face` (so xterm.js's per-glyph fallback can reach it) but not
+a selectable Settings option — it exists purely to fill the gap neither the
+picker's Latin nor Hebrew faces nor Symbols Nerd Font cover. CMX-159: without
+it, the web terminal's TUI glyphs (`⏺` `❌` `✅` `✦` `✷` `✨` `⚙`) fell through
+the whole family stack to the browser's system `monospace` and came out as
+tofu (`▢`) — an xterm texture-atlas rebuild (CMX-155) can't rasterize a glyph
+no stacked font actually contains. Same subset `chela/telegram/screenshot.py`'s
+`/screenshot` PNG renderer uses as a glyph-coverage fallback (CMX-156).
 
 | Font | Files | License | Copyright / source |
 |------|-------|---------|--------------------|
-| Symbola (subset) | `Symbola-Subset.ttf` | Freeware (`LICENSE-Symbola.txt`) | © George Douros — subset to U+2300-23FF, U+2600-27BF (the TUI spinner/tool-marker glyphs JetBrains Mono lacks: `⏺` `✦` `✷` `✨` `⚙`) |
+| Symbola (subset) | `Symbola-Subset.ttf` | Freeware (`LICENSE-Symbola.txt`) | © George Douros — subset to U+2300-23FF, U+2600-27BF (the TUI spinner/tool-marker glyphs JetBrains Mono and Symbols Nerd Font both lack: `⏺` `❌` `✅` `✦` `✷` `✨` `⚙`) |
 
 ## English / monospace (Latin)
 
