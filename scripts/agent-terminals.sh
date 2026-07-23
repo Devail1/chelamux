@@ -149,6 +149,21 @@ free_port() {
 spawn() {
     local wid="$1" port="$2" grp
     grp="${WEBTERM_PREFIX}$(sanitize "$wid")"
+    # `tmux -u` is NOT cosmetic. This tmux client is spawned by ttyd, which PM2 starts
+    # with a bare environment — no LANG, no LC_ALL, no LC_CTYPE — so tmux's own locale
+    # check marks the client non-UTF-8 (`#{client_utf8}` = 0) and it then substitutes an
+    # ASCII `_` for EVERY non-ASCII character before sending it to the browser. Claude
+    # Code's TUI markers (`✻` `⏺` `✅` `❌`) arrive at xterm as literal 0x5F underscores:
+    # the pane itself is fine (tmux's own `capture-pane` shows the real glyph), and the
+    # web terminal shows `_ Baked for 10s`.
+    #
+    # ⛔ This is NOT a font problem, and no font can fix it — the character is replaced
+    # two layers upstream of the browser, so the web terminal's bundled faces (Symbols
+    # Nerd Font, the Symbola coverage fallback — CMX-155/159) never get to see it. Those
+    # fixed real tofu on the `/screenshot` and collab-viewer paths, which look identical
+    # and are a different bug. `-u` forces UTF-8 output regardless of the environment
+    # check, which is exactly the documented case for it.
+    #
     # --base-path /term/<wid>: ttyd serves its page, assets, and /ws under that
     # prefix so the same-origin dashboard proxy (app.py term_http / term_ws) can
     # forward /term/<wid>/* verbatim with no path rewriting. The iframe src in
@@ -161,7 +176,7 @@ spawn() {
         --client-option "theme=${TERM_THEME}" \
         --client-option disableLeaveAlert=true \
         --client-option disableResizeOverlay=true \
-        tmux new-session -A -s "${grp}" -t "${TMUX_SESSION}" ';' \
+        tmux -u new-session -A -s "${grp}" -t "${TMUX_SESSION}" ';' \
                  set-option destroy-unattached off ';' \
                  set-option status off ';' \
                  set-option -g window-size largest ';' \
