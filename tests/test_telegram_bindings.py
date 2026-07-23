@@ -109,7 +109,9 @@ def test_save_load_round_trip(tmp_path):
     assert data == {"chat_id": "777",
                     "bindings": {"@3": "42", "@7": "88"},
                     "topic_names": {},
-                    "epochs": {}}
+                    "epochs": {},
+                    "pinned_titles": {},
+                    "pinned_message_ids": {}}
 
     loaded = BindingRegistry.load(path)
     assert loaded.chat_id == "777"
@@ -146,6 +148,77 @@ def test_load_corrupt_file_yields_empty_registry(tmp_path):
 def test_default_bindings_path_honours_env(monkeypatch, tmp_path):
     monkeypatch.setenv("CHELA_TELEGRAM_BINDINGS", str(tmp_path / "custom.json"))
     assert default_bindings_path() == tmp_path / "custom.json"
+
+
+def test_pinned_title_and_message_id_round_trip_through_the_registry():
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    assert reg.pinned_title("@3") is None            # never pinned yet
+    assert reg.pinned_message_id("@3") is None
+    reg.set_pinned_title("@3", "Fix the flaky login test")
+    reg.set_pinned_message_id("@3", 5001)             # wire ids arrive as int
+    assert reg.pinned_title("@3") == "Fix the flaky login test"
+    assert reg.pinned_message_id("@3") == "5001"      # normalised to str, like topic ids
+
+
+def test_rebinding_a_window_drops_its_stale_pinned_title():
+    # A fresh binding means a DIFFERENT topic — whatever we pinned in the old one
+    # describes someone else's topic now. Unknown reads as "pin fresh"; a stale
+    # cache would read as "in sync" and never re-pin into the new topic.
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    reg.set_pinned_title("@3", "old title")
+    reg.set_pinned_message_id("@3", "5001")
+    reg.bind("@3", "99")                              # rebind @3 to a new topic
+    assert reg.pinned_title("@3") is None
+    assert reg.pinned_message_id("@3") is None
+
+
+def test_rebinding_a_thread_to_a_different_window_drops_the_old_windows_pin_cache():
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    reg.set_pinned_title("@3", "old title")
+    reg.set_pinned_message_id("@3", "5001")
+    reg.bind("@7", "42")                              # thread 42 now belongs to @7
+    assert reg.thread_for_window("@3") is None
+    assert reg.pinned_title("@3") is None
+    assert reg.pinned_message_id("@3") is None
+
+
+def test_unbind_drops_the_pinned_title_cache():
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    reg.set_pinned_title("@3", "old title")
+    reg.set_pinned_message_id("@3", "5001")
+    reg.unbind("@3")
+    assert reg.pinned_title("@3") is None
+    assert reg.pinned_message_id("@3") is None
+
+
+def test_pinned_title_save_load_round_trip(tmp_path):
+    reg = BindingRegistry("777")
+    reg.bind("@3", "42")
+    reg.set_pinned_title("@3", "Fix the flaky login test")
+    reg.set_pinned_message_id("@3", "5001")
+    path = tmp_path / "bindings.json"
+    reg.save(path)
+
+    loaded = BindingRegistry.load(path)
+    assert loaded.pinned_title("@3") == "Fix the flaky login test"
+    assert loaded.pinned_message_id("@3") == "5001"
+
+
+def test_load_tolerates_a_file_written_before_pinned_titles_existed(tmp_path):
+    # Back-compat: bindings files predating this feature have no such keys. Those
+    # windows just read as "never pinned", so the next reconcile tick pins one
+    # fresh — no migration step, no crash.
+    path = tmp_path / "bindings.json"
+    path.write_text(json.dumps({"chat_id": "777", "bindings": {"@3": "42"}}))
+
+    loaded = BindingRegistry.load(path)
+    assert loaded.thread_for_window("@3") == "42"
+    assert loaded.pinned_title("@3") is None
+    assert loaded.pinned_message_id("@3") is None
 
 
 def test_load_tolerates_a_file_written_before_topic_names_existed(tmp_path):
