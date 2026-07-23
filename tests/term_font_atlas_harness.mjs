@@ -91,7 +91,7 @@ if (mode === 'with-clear') {
 }
 
 // --- simulate ttyd's initial synchronous paint, BEFORE the webfont is ready ---
-const DEFAULT_FAM = "'JetBrains Mono','Symbols Nerd Font','Miriam Mono CLM',monospace";
+const DEFAULT_FAM = "'JetBrains Mono','Symbols Nerd Font','Symbola Fallback','Miriam Mono CLM',monospace";
 const DEFAULT_SIZE = 14;
 term.options.fontFamily = DEFAULT_FAM;
 term.options.fontSize = DEFAULT_SIZE;

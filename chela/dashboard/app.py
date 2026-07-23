@@ -535,6 +535,13 @@ _TERM_SCROLL_SHIM = (
 _TERM_FONTS = [
     # Icons — font-display:block avoids a box-flash before the icon font loads.
     ("Symbols Nerd Font", "SymbolsNerdFontMono-Regular.ttf", None, None),
+    # Coverage-only fallback (not in the picker — see _TERM_FONT_PREF_SHIM's
+    # `fam` chain): CMX-159. Same Symbola subset CMX-156 bundled for the
+    # /screenshot PNG renderer (U+2300-23FF, U+2600-27BF) — the TUI glyphs
+    # (`⏺` `❌` `✅` `✦` `✷` `✨` `⚙`) that neither JetBrains Mono nor Symbols
+    # Nerd Font contain, and that CMX-155's atlas fix couldn't help because a
+    # texture-atlas rebuild can't rasterize a glyph no stacked font contains.
+    ("Symbola Fallback", "Symbola-Subset.ttf", None, None),
     # English / Latin monospace (picker: English face)
     ("JetBrains Mono",  "JetBrainsMono.ttf",       True,  None),
     ("Fira Code",       "FiraCode.ttf",            True,  None),
@@ -636,7 +643,7 @@ _TERM_FONT_PREF_SHIM = (
     "var lat=LAT[localStorage.getItem('chela_term_latin')]||LAT.jetbrains;"
     "var heb=HEB[localStorage.getItem('chela_term_font')]||HEB.miriam;"
     "var s=window.__CHELA_GRID_FONT__||(parseInt(localStorage.getItem('chela_term_fontsize'),10)||14);"
-    "var fam=\"'\"+lat+\"','Symbols Nerd Font','\"+heb+\"',monospace\";"
+    "var fam=\"'\"+lat+\"','Symbols Nerd Font','Symbola Fallback','\"+heb+\"',monospace\";"
     "function getSize(){return t.options?t.options.fontSize:"
     "(t.getOption?t.getOption('fontSize'):undefined);}"
     "function getFam(){return t.options?t.options.fontFamily:"
@@ -647,7 +654,8 @@ _TERM_FONT_PREF_SHIM = (
     "else if(t.setOption)t.setOption('fontFamily',f);}"
     "if(atlasFixed&&getSize()===s&&getFam()===fam)return;"
     "var L=[s+\"px '\"+lat+\"'\",\"bold \"+s+\"px '\"+lat+\"'\",s+\"px '\"+heb+\"'\","
-    "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\"];"
+    "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\","
+    "s+\"px 'Symbola Fallback'\"];"
     "var P=(document.fonts&&document.fonts.load)?"
     "Promise.all(L.map(function(f){return document.fonts.load(f).catch(function(){});}))"
     ":Promise.resolve();"
@@ -1825,7 +1833,7 @@ def api_agents_kill():
 # Hooks — Claude Code hooks -> the event log, and (for a question) back again.
 # ---------------------------------------------------------------------------
 
-def _session_start_recap(body: dict):
+def _session_start_recap(body: dict, explicit_wid: str | None = None):
     """Hand a starting session the shared context its rooms hold — or NOTHING.
 
     A restarted agent has forgotten every handoff, question and blocker its room ever
@@ -1835,9 +1843,11 @@ def _session_start_recap(body: dict):
 
     The window is resolved the CMX-48 way — off the session's ORIGIN, never its ``cwd``
     (:func:`chela.hooks.wid_for_session`) — and an unresolvable one gets nothing rather
-    than someone else's rooms. An agent in **no** room gets an EMPTY BODY: the hook is a
-    ``command`` hook whose stdout IS the injected context, so a byte here is a byte in
-    every fresh context in the fleet, and most agents are in no room.
+    than someone else's rooms. ``explicit_wid`` (the ``X-Chela-Wid`` header this hook alone
+    can carry — CMX-160) short-circuits that inference when the agent said which window it
+    is. An agent in **no** room gets an EMPTY BODY: the hook is a ``command`` hook whose
+    stdout IS the injected context, so a byte here is a byte in every fresh context in the
+    fleet, and most agents are in no room.
 
     Fails open, always. A raise here would be a hook that prints its stack trace into an
     agent's context window.
@@ -1848,6 +1858,7 @@ def _session_start_recap(body: dict):
         wid = hooks.wid_for_session(
             body.get("session_id") if isinstance(body.get("session_id"), str) else None,
             transcript if isinstance(transcript, str) else None,
+            explicit_wid=explicit_wid,
         )
         text = rooms.recap(wid) if wid else ""
     except Exception:  # noqa: BLE001 — a bug in OUR code must not wedge a starting agent
@@ -1896,9 +1907,12 @@ def api_hooks(event):
         log.warning("hooks: %s body over %d bytes — not read", event, hooks.MAX_BODY)
         return jsonify({})
     body = request.get_json(force=True, silent=True)
-    hooks.ingest(event, body)
+    # Only the SessionStart `command` hook can send this (CMX-160) — every other event
+    # rides `http`, which carries Claude Code's payload and none of the agent's own env.
+    explicit_wid = request.headers.get("X-Chela-Wid") or None
+    hooks.ingest(event, body, explicit_wid=explicit_wid)
     if event == "SessionStart" and isinstance(body, dict):
-        return _session_start_recap(body)
+        return _session_start_recap(body, explicit_wid)
     if event == "PostToolUse" and isinstance(body, dict):
         # The gate is over — whoever answered it. A ⏎ driven into the mirrored pane answers
         # the TUI directly, so a hook we are holding for that same call would otherwise wait
