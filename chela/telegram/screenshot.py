@@ -7,31 +7,49 @@ Telegram instead of reflowed plain text.
 
 The ANSI parser (16-colour, 256-colour cube + grayscale, and 24-bit RGB) is
 ported from six-ddc/ccbot's ``src/ccbot/screenshot.py`` (MIT); see the top-level
-NOTICE file for upstream attribution. We keep only a single font tier: chela
-already bundles **JetBrains Mono** (SIL OFL 1.1) for the dashboard/web-terminal,
-so the renderer reuses that one file and falls back to Pillow's built-in bitmap
-font if it can't be loaded — ccbot's extra CJK/symbol tiers (Noto CJK, Symbola)
-are intentionally dropped to avoid shipping more font binaries.
+NOTICE file for upstream attribution.
+
+Pillow does no per-glyph font fallback: a character missing from the font
+you hand it renders as ``.notdef`` tofu (``▢``). Claude Code's TUI draws its
+tool-use bullet (``⏺``), thinking spinners (``✦``/``✷``/``✨``) and status
+markers (``⚙``) from Unicode blocks that JetBrains Mono — chela's bundled
+dashboard/web-terminal font — doesn't cover. So each character is rendered
+with the first font in a small chain that actually contains its glyph:
+JetBrains Mono (primary) → a small Symbola subset (Misc Technical + Misc
+Symbols/Dingbats — the blocks those glyphs live in) → Symbols Nerd Font
+(already bundled for the web terminal's icon glyphs) → Pillow's built-in
+bitmap font as a last resort. See ``chela/dashboard/static/fonts/README.md``
+for the font licenses.
 
 Pillow is an optional dependency (the ``[telegram]`` extra installs it); importing
 this module without Pillow raises ImportError, and the ``/screenshot`` handler
-degrades to a text snapshot in that case.
+degrades to a text snapshot in that case. fontTools (also a ``[telegram]``
+extra dependency) is used only to read each fallback font's cmap once at
+import time — no shaping/layout work happens through it.
 """
 from __future__ import annotations
 
 import io
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
+from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
 
-# Reuse the JetBrains Mono already bundled for the dashboard (SIL OFL 1.1 —
-# license at chela/dashboard/static/fonts/OFL-JetBrainsMono.txt) rather than
-# duplicating a font binary inside this package.
-_FONT_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "dashboard" / "static" / "fonts" / "JetBrainsMono.ttf"
+_FONTS_DIR = Path(__file__).resolve().parent.parent / "dashboard" / "static" / "fonts"
+
+# Ordered glyph-fallback chain: the first font whose cmap contains a given
+# character wins. JetBrains Mono (SIL OFL 1.1) is the primary monospaced
+# face; Symbola (subset, freeware — see LICENSE-Symbola.txt) and Symbols
+# Nerd Font (MIT) are reused/subsetted purely to cover glyphs JetBrains Mono
+# lacks, rather than switching the whole render to a different font.
+_FONT_PATH = _FONTS_DIR / "JetBrainsMono.ttf"
+_FALLBACK_FONT_PATHS = (
+    _FONT_PATH,
+    _FONTS_DIR / "Symbola-Subset.ttf",
+    _FONTS_DIR / "SymbolsNerdFontMono-Regular.ttf",
 )
 
 # Basic 16-colour ANSI palette (indices 0-15), tuned to a dark terminal theme.
@@ -63,12 +81,68 @@ class _Segment:
     style: _Style
 
 
-def _load_font(size: int):
-    """The bundled JetBrains Mono at ``size``, or Pillow's default on failure."""
+@lru_cache(maxsize=None)
+def _font_cmap(path: Path) -> frozenset[int]:
+    """The set of Unicode code points ``path`` has glyphs for (empty on failure)."""
     try:
-        return ImageFont.truetype(str(_FONT_PATH), size)
-    except OSError:
-        return ImageFont.load_default()
+        font = TTFont(str(path), lazy=True, fontNumber=0)
+        try:
+            return frozenset(font.getBestCmap())
+        finally:
+            font.close()
+    except Exception:
+        return frozenset()
+
+
+@lru_cache(maxsize=None)
+def _load_fallback_chain(size: int) -> tuple[tuple[ImageFont.FreeTypeFont, frozenset[int]], ...]:
+    """Loaded ``(face, cmap)`` pairs for :data:`_FALLBACK_FONT_PATHS`, in order."""
+    chain = []
+    for path in _FALLBACK_FONT_PATHS:
+        try:
+            face = ImageFont.truetype(str(path), size)
+        except OSError:
+            continue
+        chain.append((face, _font_cmap(path)))
+    return tuple(chain)
+
+
+def _load_font(size: int):
+    """The primary face at ``size`` (JetBrains Mono), or Pillow's default on failure."""
+    chain = _load_fallback_chain(size)
+    return chain[0][0] if chain else ImageFont.load_default()
+
+
+def _face_for_char(chain, default, ch: str):
+    """The first fallback-chain face that has a glyph for ``ch`` (else ``default``)."""
+    cp = ord(ch)
+    for face, cmap in chain:
+        if cp in cmap:
+            return face
+    return default
+
+
+def _split_by_face(text: str, chain, default) -> list[tuple[str, object]]:
+    """Group consecutive characters of ``text`` that resolve to the same face.
+
+    Keeps runs whole when possible so measuring/drawing stays cheap for the
+    common case (a whole segment in the primary font).
+    """
+    if not text:
+        return []
+    runs: list[tuple[str, object]] = []
+    current_face = _face_for_char(chain, default, text[0])
+    current_chars = [text[0]]
+    for ch in text[1:]:
+        face = _face_for_char(chain, default, ch)
+        if face is current_face:
+            current_chars.append(ch)
+        else:
+            runs.append(("".join(current_chars), current_face))
+            current_face = face
+            current_chars = [ch]
+    runs.append(("".join(current_chars), current_face))
+    return runs
 
 
 def _approximate_256_color(idx: int) -> tuple[int, int, int]:
@@ -149,8 +223,16 @@ def text_to_image(text: str, *, font_size: int = 24, with_ansi: bool = True) -> 
     returns non-empty PNG bytes for any input, including the empty string.
     """
     font = _load_font(font_size)
+    chain = _load_fallback_chain(font_size)
     lines = text.split("\n")
     line_segments = [_parse_line(line, with_ansi) for line in lines]
+    # Split each segment into (run_text, face) runs once, up front, so a
+    # segment that mixes e.g. plain text and a spinner glyph draws each run
+    # with whichever font in the fallback chain actually has that glyph.
+    line_runs = [
+        [(seg.style, _split_by_face(seg.text, chain, font)) for seg in segments]
+        for segments in line_segments
+    ]
 
     padding = 16
     line_height = int(font_size * 1.4)
@@ -158,11 +240,12 @@ def text_to_image(text: str, *, font_size: int = 24, with_ansi: bool = True) -> 
     # Measure against a throwaway canvas before sizing the real one.
     probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     max_width = 0
-    for segments in line_segments:
+    for seg_runs in line_runs:
         w = 0
-        for seg in segments:
-            bbox = probe.textbbox((0, 0), seg.text, font=font)
-            w += bbox[2] - bbox[0]
+        for _style, runs in seg_runs:
+            for run_text, face in runs:
+                bbox = probe.textbbox((0, 0), run_text, font=face)
+                w += bbox[2] - bbox[0]
         max_width = max(max_width, w)
 
     img_width = max(1, int(max_width)) + padding * 2
@@ -172,15 +255,21 @@ def text_to_image(text: str, *, font_size: int = 24, with_ansi: bool = True) -> 
     draw = ImageDraw.Draw(img)
 
     y = padding
-    for segments in line_segments:
+    for seg_runs in line_runs:
         x = padding
-        for seg in segments:
-            if seg.style.bg:
-                bbox = draw.textbbox((x, y), seg.text, font=font)
-                draw.rectangle([bbox[0], y, bbox[2], y + line_height], fill=seg.style.bg)
-            draw.text((x, y), seg.text, fill=seg.style.fg, font=font)
-            bbox = draw.textbbox((0, 0), seg.text, font=font)
-            x += bbox[2] - bbox[0]
+        for style, runs in seg_runs:
+            if style.bg and runs:
+                cursor, left, right = x, None, None
+                for run_text, face in runs:
+                    bbox = draw.textbbox((cursor, y), run_text, font=face)
+                    left = bbox[0] if left is None else left
+                    right = bbox[2]
+                    cursor += bbox[2] - bbox[0]
+                draw.rectangle([left, y, right, y + line_height], fill=style.bg)
+            for run_text, face in runs:
+                draw.text((x, y), run_text, fill=style.fg, font=face)
+                bbox = draw.textbbox((0, 0), run_text, font=face)
+                x += bbox[2] - bbox[0]
         y += line_height
 
     buf = io.BytesIO()
