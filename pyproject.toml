@@ -34,6 +34,7 @@ telegram = [
 ]
 dev = [
     "pytest>=8.0",
+    "pytest-xdist>=3.6",               # parallel test runner (`-n auto`) — see addopts below
     "ruff>=0.6",
     "telegramify-markdown>=0.5,<1.0",  # so format tests exercise real rendering (CI omits [telegram])
 ]
@@ -50,6 +51,19 @@ packages = ["chela"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Run in parallel by default. The suite is ~28 min serial (100% of CI's wall-clock is this
+# run — every other step totals ~14s), and it is longer than the judge's 900s test-command
+# timeout, so parallelism rescues BOTH surfaces at once: CI and the in-worktree judge.
+#
+# `--dist loadfile`: distribute by FILE, never split one file across workers. This keeps
+# each test file's tests together and on ONE worker, which is what makes it safe — the two
+# "live" suites (test_epoch_live, test_terminals_selfheal) drive a real tmux server on an
+# isolated `-L chelatest-…` scratch socket, and never having their tests race on separate
+# workers is why we don't need per-test socket names. conftest already gives every test its
+# own scratch CHELA_DIR, so state files never collide either.
+#
+# To debug a single test serially (real -s output, pdb), pass `-n0` on the command line.
+addopts = "-n auto --dist loadfile"
 
 [tool.ruff]
 line-length = 100

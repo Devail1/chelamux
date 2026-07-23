@@ -106,6 +106,18 @@ os.environ["CHELA_DISPATCH_WORKFLOWS"] = ""
 # table hands the code one (see tests/test_runtime_truth.py).
 os.environ["CHELA_TMUX_SESSION"] = "chela-tests-no-such-session"
 
+# Collapse the dispatcher's seed-delivery confirm loop to ~instant. In production it polls a
+# freshly-spawned Claude window for up to 5×8s ≈ 44s, waiting for it to flip "busy" (see
+# dispatcher.SEED_CONFIRM_TIMEOUT_SECONDS). No test has a real TUI to flip, so every test
+# that triggers a dispatch would otherwise pay that full real-time budget doing nothing — it
+# was ~80% of the suite's wall-clock (test_dispatcher_ci/_rework/_spawn_retry/_critic all sat
+# at exactly 44s/88s). Set BEFORE dispatcher import so its module-level constants pick these
+# up (the timeout is a default arg, bound at import — a fixture would be too late). Tests that
+# exercise the retry LOGIC itself mock _agent_status/time.sleep and are unaffected.
+os.environ.setdefault("CHELA_SEED_CONFIRM_TIMEOUT_SECONDS", "0.05")
+os.environ.setdefault("CHELA_SEED_CONFIRM_POLL_INTERVAL", "0.01")
+os.environ.setdefault("CHELA_SEED_RESEND_SETTLE_SECONDS", "0")
+
 
 class LiveStateEscape(BaseException):
     """A test reached the developer's real ``~/.chela`` / ``~/.claude``.
