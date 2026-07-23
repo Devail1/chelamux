@@ -394,6 +394,62 @@ def test_the_slug_is_resolved_once_and_cached(monkeypatch):
     assert len(globs) == 1
 
 
+# --- $CHELA_WID: the agent SAYING which window it is (CMX-160) -----------------------
+#
+# Every hook but SessionStart rides `http` — Claude Code's own client, carrying only the
+# payload, none of the agent's env. SessionStart is a `command` hook and so inherits the
+# process env, letting the agent short-circuit inference entirely via an `X-Chela-Wid`
+# header. Still not trusted blind: malformed, empty, or naming a window that is not live
+# right now must fall through to the SAME inference as if no header had ever been sent.
+
+def test_explicit_wid_short_circuits_correlation_that_would_otherwise_fail(monkeypatch):
+    """The header is checked FIRST — it wins even where the origin-based inference below
+    it has nothing at all to go on (no panes stubbed)."""
+    monkeypatch.setattr(hooks, "_panes", _panes({"/repo": [("@3", "claude")]}))
+    assert hooks.wid_for_session("s1", None, explicit_wid="@3") == "@3"
+
+
+def test_explicit_wid_naming_a_dead_window_falls_through_to_inference(monkeypatch):
+    """A stale/wrong header must never be WORSE than no header — it falls through to the
+    same origin-based resolution any other hook uses, not to a hard failure."""
+    monkeypatch.setattr(hooks, "_panes", _panes({"/repo": [("@3", "claude")]}))
+    assert hooks.wid_for_session(
+        "s1", "/p/projects/-repo/s1.jsonl", explicit_wid="@999") == "@3"
+
+
+@pytest.mark.parametrize("hint", ["", None, "not-a-wid", "@", "@abc", "@3;rm -rf /", "3"])
+def test_a_malformed_or_empty_header_is_treated_as_no_header(monkeypatch, hint):
+    """Empty is the ordinary case (a session chela did not launch has no ``$CHELA_WID``),
+    and the rest is attacker-adjacent input off an HTTP header — shape-checked before it is
+    ever trusted, the same discipline a session id gets before it is pasted into a glob."""
+    monkeypatch.setattr(hooks, "_panes", _panes({"/repo": [("@3", "claude")]}))
+    assert hooks._explicit_wid(hint) is None
+    assert hooks.wid_for_session(
+        "s1", "/p/projects/-repo/s1.jsonl", explicit_wid=hint) == "@3"
+
+
+def test_ingest_carries_the_explicit_wid_through_to_the_record(monkeypatch):
+    monkeypatch.setattr(hooks, "_panes", lambda force=False: {})   # inference: nothing
+    monkeypatch.setattr(hooks, "_slug_from_disk", lambda session_id: None)
+    record = hooks.ingest("PreToolUse", _body(), explicit_wid="@3")
+    assert record["wid"] is None    # @3 isn't a live pane — the header names a dead window
+
+
+def test_ingest_files_the_event_under_the_explicit_wid_when_it_is_live(monkeypatch):
+    monkeypatch.setattr(hooks, "_panes", _panes({"/repo": [("@3", "claude")]}))
+    record = hooks.ingest("PreToolUse", _body(cwd="/elsewhere"), explicit_wid="@3")
+    assert record["wid"] == "@3"
+
+
+def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
+    """Baked in as ``${CHELA_WID:-}`` — expanded by the agent's OWN shell at hook time, not
+    by chela (this string is one manifest shared by the whole fleet, so it cannot bake in
+    any one agent's id)."""
+    command = hooks.recap_command(port=5001)
+    assert 'X-Chela-Wid: ${CHELA_WID:-}' in command
+    assert "$CHELA_WID" not in command.replace("${CHELA_WID:-}", "")
+
+
 # --- the endpoint ----------------------------------------------------------------
 
 def test_endpoint_appends_and_answers_nothing_that_nobody_answered(client):
@@ -578,3 +634,33 @@ def test_the_session_start_hook_still_lands_in_the_log(client, wired):
     """It is a curl into the same endpoint, so SessionStart finally ingests too."""
     _session_start(client, "/a")
     assert [e["type"] for e in event_log.read()["events"]][-1] == "hook.session_start"
+
+
+# --- SessionStart: the X-Chela-Wid header (CMX-160) -----------------------------------
+
+def test_the_header_hands_back_a_recap_when_ordinary_correlation_has_nothing(
+        client, wired):
+    """End to end: the payload correlates to nothing at all (no pane sits in its cwd, no
+    transcript on disk) — the header alone still resolves it to @3's room."""
+    with patch.object(hooks, "_panes",
+                      _panes({"/somewhere-unrelated": [("@3", "claude")]})):
+        resp = client.post("/hooks/SessionStart", json=_body(
+            hook_event_name="SessionStart", source="startup",
+            session_id="unrelated-session-id", transcript_path=None, cwd="/nowhere",
+        ), headers={"X-Chela-Wid": "@3"})
+    assert resp.status_code == 200
+    out = resp.get_json()["hookSpecificOutput"]
+    assert "does the parser own the retry?" in out["additionalContext"]
+
+
+def test_a_header_naming_a_dead_window_falls_back_to_ordinary_correlation(
+        client, wired):
+    """A stale header (the window it names is no longer live) must not be worse than no
+    header at all — it falls through to the same origin-based resolution."""
+    resp = _session_start(client, "/a")   # unheadered control: @3, via cwd correlation
+    with patch.object(hooks, "_panes", _panes({"/a": [("@3", "claude")]})):
+        with_header = client.post("/hooks/SessionStart", json=_body(
+            hook_event_name="SessionStart", source="startup",
+            transcript_path=f"/h/.claude/projects/{transcripts.encode_cwd('/a')}/s.jsonl",
+        ), headers={"X-Chela-Wid": "@404"})
+    assert resp.get_json() == with_header.get_json()

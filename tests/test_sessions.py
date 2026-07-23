@@ -447,3 +447,53 @@ def test_a_pane_with_no_claude_process_degrades_to_the_pane_path(tmp_path, monke
     pane = sessions._load_panes()["@5"]
     assert pane.claude_pid is None and pane.resumed is None
     assert pane.origin == "/home/u"                # the pane path, as a last resort
+
+
+# --- _looks_like_claude: the tolerant match (CMX-160) --------------------------------
+
+def test_a_claude_reporting_as_something_else_is_still_found(tmp_path, monkeypatch):
+    """``/proc``'s ``comm`` is a truncated BASENAME, not the invocation — a claude launched
+    through a version manager or wrapper can report as ``node`` rather than bare
+    ``claude``. An exact ``comm == "claude"`` match then finds nothing (no ``claude_pid``,
+    so no ``started``/``resumed``/``launched_in``, and :func:`resolve_window`'s two
+    strongest signals collapse before they are ever tried) — this is the macOS case CMX-160
+    exists for. The substring fallback over the full cmdline (the same thing
+    ``pgrep -P <pid> -f claude`` matches, which :func:`chela.agent_manager.claude_pid`
+    already does) still finds it."""
+    _fake_proc(tmp_path, monkeypatch, 16200, comm="node",
+              cmdline=["node", "/usr/local/lib/claude-versions/1.2.3/cli.js",
+                       "--resume", SID],
+              cwd="/home/u", parent=15500)
+    assert sessions._claude_pid(15500) == 16200
+
+
+def test_a_bare_node_process_with_no_claude_in_its_cmdline_is_not_matched(
+        tmp_path, monkeypatch):
+    """The tolerant match is a substring scan of the cmdline, not "anything not exactly
+    claude" — a plain ``node`` child (a linter, a dev server) must not be mistaken for the
+    agent."""
+    _fake_proc(tmp_path, monkeypatch, 16201, comm="node",
+              cmdline=["node", "server.js"], cwd="/home/u", parent=15501)
+    assert sessions._claude_pid(15501) is None
+
+
+def test_the_pane_map_resolves_a_wrapped_claude_end_to_end(tmp_path, monkeypatch):
+    """The failure mode as it actually shows up: :func:`_load_panes` must produce a
+    ``claude_pid`` (and therefore ``started``/``resumed``/``launched_in``) for a claude
+    process whose ``comm`` is not the bare string ``claude`` — otherwise every downstream
+    signal in :func:`resolve_window` collapses silently."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _fake_proc(tmp_path, monkeypatch, 16154, comm="node14",
+              cmdline=["node", "/opt/claude/cli.js", "--resume", SID],
+              cwd=str(home), parent=15499)
+
+    class Result:
+        returncode = 0
+        stdout = "@2\tnode14\t/somewhere/else\t15499\n"
+
+    monkeypatch.setattr(sessions.subprocess, "run", lambda *a, **k: Result())
+    pane = sessions._load_panes()["@2"]
+    assert pane.claude_pid == 16154
+    assert pane.resumed == SID
+    assert pane.launched_in == str(home)

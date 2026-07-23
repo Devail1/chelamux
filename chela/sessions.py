@@ -163,6 +163,29 @@ def _children(pid: int) -> list[int]:
     return out
 
 
+def _looks_like_claude(pid: int) -> bool:
+    """Tolerant "is this process claude" test — the same substring match
+    :func:`chela.agent_manager.claude_pid` makes via ``pgrep -P <pane_pid> -f claude``, so
+    the two window-attribution paths agree instead of one silently failing where the other
+    succeeds (CMX-160).
+
+    ``/proc``'s ``comm`` is the executable's BASENAME (and truncated to 15 bytes), not the
+    full invocation — a claude launched through a version manager or a wrapper can report
+    as ``node`` or a versioned binary rather than bare ``claude``, and an exact-equals
+    check against ``comm`` alone then returns None: no ``claude_pid``, so no ``started``/
+    ``resumed``/``launched_in``, and :func:`resolve_window`'s two strongest signals
+    collapse before they are ever tried. So this falls back to a substring scan of the
+    full command line — the same thing ``pgrep -f`` matches against — before giving up.
+    """
+    if _comm(pid) == "claude":
+        return True
+    try:
+        raw = (PROC / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return False
+    return b"claude" in raw
+
+
 def _claude_pid(pane_pid: int) -> int | None:
     """The claude process running in a pane (breadth-first, a couple of generations)."""
     frontier = [pane_pid]
@@ -170,7 +193,7 @@ def _claude_pid(pane_pid: int) -> int | None:
         nxt: list[int] = []
         for pid in frontier:
             for child in _children(pid):
-                if _comm(child) == "claude":
+                if _looks_like_claude(child):
                     return child
                 nxt.append(child)
         if not nxt:
