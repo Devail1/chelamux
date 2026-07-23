@@ -29,6 +29,7 @@ dashboard = [
 telegram = [
     "python-telegram-bot>=21.0",       # Telegram Bot API client for the bridge
     "Pillow>=10.0",                    # /screenshot: render a tmux pane -> PNG (ANSI colour)
+    "fonttools>=4.0",                  # /screenshot: per-glyph font-fallback coverage (cmap lookup)
     "telegramify-markdown>=0.5,<1.0",  # render Claude's Markdown body as real MarkdownV2 entities
 ]
 dev = [
