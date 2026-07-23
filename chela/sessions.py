@@ -85,9 +85,23 @@ log = logging.getLogger(__name__)
 SESSION_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{7,63}$")
 
 # Where the process facts come from. A module-level Path so a test can point the whole
-# lookup at a fixture tree, and so a kernel without /proc simply degrades (the cmdline
-# signal disappears; the event log and the cwd fallback still answer).
+# lookup at a fixture tree.
+#
+# ``/proc`` is the FAST PATH, not the only path: every fact below is one file read there,
+# no subprocess at all, and Linux never leaves it. A host without ``/proc`` — macOS, where
+# it does not exist at ALL — falls back to the POSIX tools that report the same facts
+# (``pgrep``/``ps``/``lsof``, see ``_sh_*`` below). That fallback is reached only when the
+# ``/proc`` read itself FAILS, so the Linux budget is unchanged and the "one tmux call and
+# nothing else" guarantee still holds there.
+#
+# Before this shim, a /proc-less host lost `claude_pid` — and with it `started`,
+# `resumed` and `launched_in` — so :func:`resolve_window`'s two strongest signals
+# collapsed before they were ever tried and every same-cwd window resolved to None.
 PROC = Path("/proc")
+
+# The fallback queries are single, read-only process lookups. Bounded because this runs on
+# the hook path, with an agent BLOCKED on it.
+_SHIM_TIMEOUT = 2.0
 
 # The claude process is normally the pane shell's direct child, but a wrapper (a `sg`, an
 # `env`, a launcher script) can sit in between. Walk a couple of generations, not the
@@ -129,6 +143,33 @@ class Pane:
 
 
 # --- process facts ------------------------------------------------------------------
+#
+# Each fact is one function with the /proc read first and the POSIX query second. Keeping
+# the pair INSIDE the function is deliberate: every call site (and every test that points
+# PROC at a fixture tree) keeps working untouched, and there is no "which backend am I on"
+# flag that can drift out of step with what the machine can actually answer.
+
+def _sh(argv: list[str]) -> str | None:
+    """Run one small read-only process query; stdout, or None on any failure.
+
+    Never raises: a missing tool (``lsof`` is not installed everywhere), a non-zero exit
+    (the pid died between listing and asking) and a timeout are all the same answer here —
+    "this fact is unavailable" — which every caller already handles.
+    """
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=_SHIM_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _first_line(out: str | None) -> str:
+    """The first non-empty line of a command's output, stripped."""
+    for line in (out or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
 
 def _boot_time() -> float:
     """Epoch seconds the machine booted — the base for a process's start time."""
@@ -145,15 +186,18 @@ def _comm(pid: int) -> str:
     try:
         return (PROC / str(pid) / "comm").read_text().strip()
     except OSError:
-        return ""
+        pass
+    # `ps -o comm=` prints an absolute path on macOS and a bare name on Linux; /proc's
+    # `comm` is always the basename, so normalise to that and keep one comparison.
+    return os.path.basename(_first_line(_sh(["ps", "-o", "comm=", "-p", str(pid)])))
 
 
 def _children(pid: int) -> list[int]:
-    """Direct children of ``pid``, straight from /proc — no pgrep, no process table scan."""
+    """Direct children of ``pid`` — straight from /proc, else ``pgrep -P``."""
     try:
         raw = (PROC / str(pid) / "task" / str(pid) / "children").read_text()
     except OSError:
-        return []
+        return _sh_children(pid)
     out = []
     for token in raw.split()[:_MAX_CHILDREN]:
         try:
@@ -161,6 +205,38 @@ def _children(pid: int) -> list[int]:
         except ValueError:
             continue
     return out
+
+
+def _sh_children(pid: int) -> list[int]:
+    """``pgrep -P <pid>`` — one pid per line.
+
+    Each line must be ENTIRELY digits to count. `pgrep` emits nothing else, so this only
+    ever rejects output that did not come from `pgrep` at all — which is exactly what a
+    test that stubs `subprocess.run` wholesale hands back, and inheriting a pid from it
+    would be a fact invented out of another command's stdout.
+    """
+    out = _sh(["pgrep", "-P", str(pid)])
+    kids: list[int] = []
+    for line in (out or "").splitlines()[:_MAX_CHILDREN]:
+        token = line.strip()
+        if token.isdigit():
+            kids.append(int(token))
+    return kids
+
+
+def _cmdline_argv(pid: int) -> list[str]:
+    """A process's argv — NUL-split from /proc, else whitespace-split from ``ps -o args=``.
+
+    ``ps`` flattens argv into one space-joined string, so an argument containing a space
+    splits in two here. Both readers of this only look for ``--resume <sid>`` and the
+    substring ``claude``, and a session id can hold neither a space nor a quote, so the
+    flattening cannot change either answer.
+    """
+    try:
+        raw = (PROC / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return (_sh(["ps", "-o", "args=", "-p", str(pid)]) or "").split()
+    return [a for a in raw.decode("utf-8", "replace").split("\0") if a]
 
 
 def _looks_like_claude(pid: int) -> bool:
@@ -176,14 +252,15 @@ def _looks_like_claude(pid: int) -> bool:
     ``resumed``/``launched_in``, and :func:`resolve_window`'s two strongest signals
     collapse before they are ever tried. So this falls back to a substring scan of the
     full command line — the same thing ``pgrep -f`` matches against — before giving up.
+
+    Both reads go through the /proc-or-POSIX pair above, so the tolerance CMX-160 added is
+    real on a host with no /proc rather than a branch that can never be reached: there,
+    ``comm`` and ``cmdline`` were BOTH unreadable, so this returned False for a process
+    ``ps`` plainly reports as ``claude`` (CMX-1xx).
     """
     if _comm(pid) == "claude":
         return True
-    try:
-        raw = (PROC / str(pid) / "cmdline").read_bytes()
-    except OSError:
-        return False
-    return b"claude" in raw
+    return any("claude" in arg for arg in _cmdline_argv(pid))
 
 
 def _claude_pid(pane_pid: int) -> int | None:
@@ -206,16 +283,18 @@ def _proc_cwd(pid: int) -> str | None:
     try:
         return os.readlink(str(PROC / str(pid) / "cwd")) or None
     except OSError:
-        return None
+        pass
+    # `lsof -Fn` is field output: one field per line, the value after a 1-char tag. `-d cwd`
+    # narrows it to the one descriptor we want, so the first `n` line IS the cwd.
+    for line in (_sh(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"]) or "").splitlines():
+        if line.startswith("n"):
+            return line[1:].strip() or None
+    return None
 
 
 def _resumed_session(pid: int) -> str | None:
     """``--resume <sid>`` / ``--resume=<sid>`` off a process's command line, validated."""
-    try:
-        raw = (PROC / str(pid) / "cmdline").read_bytes()
-    except OSError:
-        return None
-    argv = [a for a in raw.decode("utf-8", "replace").split("\0") if a]
+    argv = _cmdline_argv(pid)
     for i, arg in enumerate(argv):
         candidate = None
         if arg in ("--resume", "-r") and i + 1 < len(argv):
@@ -232,7 +311,7 @@ def _proc_started(pid: int) -> float | None:
     try:
         stat = (PROC / str(pid) / "stat").read_text()
     except OSError:
-        return None
+        return _sh_started(pid)
     # The comm field can contain spaces and parens; everything after the last ')' is safe.
     try:
         fields = stat[stat.rindex(")") + 1:].split()
@@ -243,6 +322,23 @@ def _proc_started(pid: int) -> float | None:
     if not boot or not _CLK_TCK:
         return None
     return boot + ticks / _CLK_TCK
+
+
+def _sh_started(pid: int) -> float | None:
+    """``ps -o lstart=`` → epoch seconds.
+
+    ``lstart`` is an ABSOLUTE local timestamp ("Thu Jul 23 14:03:35 2026"), so unlike
+    /proc's jiffies-since-boot it needs no boot time to interpret — which is why the
+    fallback does not have to reproduce :func:`_boot_time` at all. The only consumer
+    compares it against event-log timestamps, and both are epoch seconds.
+    """
+    text = _first_line(_sh(["ps", "-o", "lstart=", "-p", str(pid)]))
+    if not text:
+        return None
+    try:
+        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        return None
 
 
 # --- the pane map -------------------------------------------------------------------
