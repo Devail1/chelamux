@@ -347,9 +347,19 @@ The hook is a `curl` into the same endpoint every other hook POSTs to:
 
 ```json
 {"type": "command",
- "command": "curl -s --fail --max-time 3 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/SessionStart 2>/dev/null || true",
+ "command": "curl -s --fail --max-time 3 -X POST -H 'Content-Type: application/json' -H \"X-Chela-Wid: ${CHELA_WID:-}\" --data-binary @- http://127.0.0.1:5001/hooks/SessionStart 2>/dev/null || true",
  "timeout": 5}
 ```
+
+Being a `command` hook buys a second thing (CMX-160): it runs as a child of the agent's own
+`claude` process, so it inherits that process's environment — `$CHELA_WID`, exported into
+the pane's shell ahead of every chela-managed launch. Every other hook rides `http` (Claude
+Code's own client, which sends only the payload), so this is the one hook that can just
+*say* which window it is rather than have chela infer it from `/proc` and tmux panes — which
+also makes it the one hook whose window resolution needs no `/proc` at all, macOS included.
+The header is validated (shape, and that it names a currently live window) before it is
+trusted; anything else falls through to the same origin-based inference every other hook
+uses.
 
 Not a `chela` spawn: `chela` is not on an agent's PATH (it is a `uv run` inside the repo),
 so `chela room recap` would be `command not found` in most fleets — and it would fail
@@ -384,9 +394,9 @@ Four rules, and each one is load-bearing:
   line goes back through `rooms.sanitize()`, and the recap opens with the `[chela room]`
   header, which makes it unpostable: `rooms.is_relay_text()` refuses a body that starts
   with one (the echo guard, for free).
-* **The window is resolved off the session's ORIGIN, never `cwd`** (the CMX-48 rule, same
-  as every other hook). A session that cannot be correlated gets nothing rather than
-  somebody else's rooms.
+* **The window is resolved off `$CHELA_WID` when the header validates, else off the
+  session's ORIGIN, never `cwd`** (the CMX-48 rule, same as every other hook). A session
+  that cannot be correlated either way gets nothing rather than somebody else's rooms.
 
 `chela room recap [--wid @N]` prints exactly what the hook would inject — including
 printing nothing at all.

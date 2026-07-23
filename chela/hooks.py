@@ -107,6 +107,15 @@ GATE_TIMEOUT = 120
 # `SessionStart` — Claude Code 2.1.209 collects `additionalContexts` from its SessionStart
 # hooks), or with an EMPTY body when the session's window is in no room: no bytes out, no
 # boilerplate in the context of every agent in the fleet.
+#
+# Being a `command` hook buys a second thing (CMX-160): it runs as a child of the claude
+# process itself, so it inherits that process's environment — `$CHELA_WID`, exported into
+# the pane's shell ahead of every chela-managed launch (`agent_manager.wid_env_prefix`,
+# `spawn.py`). Every OTHER hook rides `http` (Claude Code's own client, which sends the
+# payload and nothing of the agent's env), so this is the one place the agent can just SAY
+# which window it is rather than have chela infer it from `/proc` and tmux panes — and the
+# one place cross-platform, since inference needs `/proc` and this does not. See
+# `recap_command` and `_explicit_wid`.
 RECAP_TIMEOUT = 5
 
 
@@ -120,9 +129,17 @@ def hook_timeout(event: str) -> int:
 
 
 def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
-    """The ``SessionStart`` command hook: POST the payload, print the recap, fail open."""
+    """The ``SessionStart`` command hook: POST the payload, print the recap, fail open.
+
+    Carries ``$CHELA_WID`` as a header — expanded by the agent's own shell at hook time,
+    not baked in here (this string is one manifest shared by the whole fleet). Empty for a
+    session chela did not launch (no such env var); the receiver treats an empty or
+    unrecognised header exactly like a missing one (:func:`_explicit_wid`).
+    """
     return ("curl -s --fail --max-time 3 -X POST "
-            "-H 'Content-Type: application/json' --data-binary @- "
+            "-H 'Content-Type: application/json' "
+            "-H \"X-Chela-Wid: ${CHELA_WID:-}\" "
+            "--data-binary @- "
             f"{hook_url('SessionStart', port, host)} 2>/dev/null || true")
 
 # Event types are namespaced: `hook.pre_tool_use` says *an agent told us this*, as
@@ -535,8 +552,35 @@ def session_slug(session_id: str | None, transcript_path: str | None = None) -> 
     return slug
 
 
+# A window id, straight from the shape chela hands out (`@N`) — validated before it is
+# ever trusted, the same discipline `SESSION_RE` applies to a session id pasted into a
+# glob (`chela/sessions.py`): a header is attacker-adjacent input (it rode an HTTP
+# request), so its shape is checked and its claim is checked against a LIVE window before
+# either ever reaches an event record.
+_WID_RE = re.compile(r"^@\d+$")
+
+
+def _explicit_wid(hint: str | None,
+                  panes: dict[str, sessions.Pane] | None = None) -> str | None:
+    """A window id the AGENT ITSELF supplied, via ``$CHELA_WID`` on the one hook that runs
+    as a shell command and so inherits its process's env (:func:`recap_command`) — ground
+    truth, not inference: no pane walk, no ``/proc``, nothing that a missing kernel
+    interface can take out from under it on macOS.
+
+    Still not trusted blind. Malformed, empty (no such env var — a session chela did not
+    launch) or naming a window that is not live right now all fall through to ``None``
+    exactly as if the header had never been sent, and the caller re-derives it the old way
+    — a bad header must never be WORSE than no header.
+    """
+    if not hint or not _WID_RE.match(hint):
+        return None
+    live = _panes() if panes is None else panes
+    return hint if hint in live else None
+
+
 def wid_for_session(session_id: str | None,
-                    transcript_path: str | None = None) -> str | None:
+                    transcript_path: str | None = None,
+                    explicit_wid: str | None = None) -> str | None:
     """The chela window a session runs in, or None if it cannot be said for certain.
 
     Ambiguity resolves to **None**, never to a guess: two agents launched in one directory
@@ -545,10 +589,17 @@ def wid_for_session(session_id: str | None,
     ``session_id``, ``cwd`` and ``transcript_path`` are in the payload either way, so
     nothing is lost but the shortcut.
 
+    ``explicit_wid`` — the ``X-Chela-Wid`` header the ``SessionStart`` command hook sends
+    (CMX-160) — is checked FIRST and, once validated, short-circuits the inference below
+    entirely: the agent said which window it is, so there is nothing left to guess.
+
     A **subagent**'s hooks carry its parent's ``session_id``, so they resolve to the
     parent's window. That is the right answer, not a near-miss: the subagent runs inside
     that agent, in that window, and there is no window of its own to file it against.
     """
+    wid = _explicit_wid(explicit_wid)
+    if wid:
+        return wid
     wid = _wid_in(session_id, transcript_path, _panes())
     if wid:
         return wid
@@ -693,7 +744,7 @@ def summarize(event: str, body: dict) -> str:
 
 # --- ingest -----------------------------------------------------------------------
 
-def ingest(event: str, body) -> dict | None:
+def ingest(event: str, body, explicit_wid: str | None = None) -> dict | None:
     """One hook POST → one log record. Returns the record, or None if it was dropped.
 
     NEVER raises. The caller is a Flask route serving an agent that is blocked on this
@@ -701,7 +752,9 @@ def ingest(event: str, body) -> dict | None:
     parsing, not grounds for breaking someone's session.
 
     ``event`` comes from the URL, not from the body: the URL is what the plugin we ship
-    controls, so it cannot be spoofed by a payload.
+    controls, so it cannot be spoofed by a payload. ``explicit_wid`` is the ``X-Chela-Wid``
+    header — set only on ``SessionStart`` (see :func:`recap_command`) — and is validated
+    inside :func:`wid_for_session`, not here.
     """
     try:
         if event not in HOOK_EVENTS:
@@ -721,6 +774,7 @@ def ingest(event: str, body) -> dict | None:
             wid=wid_for_session(
                 session_id,
                 transcript_path if isinstance(transcript_path, str) else None,
+                explicit_wid=explicit_wid,
             ),
             session_id=session_id,
         )

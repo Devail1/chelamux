@@ -1833,7 +1833,7 @@ def api_agents_kill():
 # Hooks — Claude Code hooks -> the event log, and (for a question) back again.
 # ---------------------------------------------------------------------------
 
-def _session_start_recap(body: dict):
+def _session_start_recap(body: dict, explicit_wid: str | None = None):
     """Hand a starting session the shared context its rooms hold — or NOTHING.
 
     A restarted agent has forgotten every handoff, question and blocker its room ever
@@ -1843,9 +1843,11 @@ def _session_start_recap(body: dict):
 
     The window is resolved the CMX-48 way — off the session's ORIGIN, never its ``cwd``
     (:func:`chela.hooks.wid_for_session`) — and an unresolvable one gets nothing rather
-    than someone else's rooms. An agent in **no** room gets an EMPTY BODY: the hook is a
-    ``command`` hook whose stdout IS the injected context, so a byte here is a byte in
-    every fresh context in the fleet, and most agents are in no room.
+    than someone else's rooms. ``explicit_wid`` (the ``X-Chela-Wid`` header this hook alone
+    can carry — CMX-160) short-circuits that inference when the agent said which window it
+    is. An agent in **no** room gets an EMPTY BODY: the hook is a ``command`` hook whose
+    stdout IS the injected context, so a byte here is a byte in every fresh context in the
+    fleet, and most agents are in no room.
 
     Fails open, always. A raise here would be a hook that prints its stack trace into an
     agent's context window.
@@ -1856,6 +1858,7 @@ def _session_start_recap(body: dict):
         wid = hooks.wid_for_session(
             body.get("session_id") if isinstance(body.get("session_id"), str) else None,
             transcript if isinstance(transcript, str) else None,
+            explicit_wid=explicit_wid,
         )
         text = rooms.recap(wid) if wid else ""
     except Exception:  # noqa: BLE001 — a bug in OUR code must not wedge a starting agent
@@ -1904,9 +1907,12 @@ def api_hooks(event):
         log.warning("hooks: %s body over %d bytes — not read", event, hooks.MAX_BODY)
         return jsonify({})
     body = request.get_json(force=True, silent=True)
-    hooks.ingest(event, body)
+    # Only the SessionStart `command` hook can send this (CMX-160) — every other event
+    # rides `http`, which carries Claude Code's payload and none of the agent's own env.
+    explicit_wid = request.headers.get("X-Chela-Wid") or None
+    hooks.ingest(event, body, explicit_wid=explicit_wid)
     if event == "SessionStart" and isinstance(body, dict):
-        return _session_start_recap(body)
+        return _session_start_recap(body, explicit_wid)
     if event == "PostToolUse" and isinstance(body, dict):
         # The gate is over — whoever answered it. A ⏎ driven into the mirrored pane answers
         # the TUI directly, so a hook we are holding for that same call would otherwise wait
