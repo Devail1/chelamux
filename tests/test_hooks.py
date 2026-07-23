@@ -365,6 +365,10 @@ def test_correlation_reads_tmux_once_not_the_pane(monkeypatch, tmp_path):
     monkeypatch.setenv("CHELA_TMUX_SESSION", "chela")      # as PM2 pins it
     monkeypatch.setattr(hooks, "_panes", _REAL_PANES)      # undo the autouse stub
     monkeypatch.setattr(sessions, "PROC", tmp_path)        # no claude process to find
+    # This budget is the /proc host's: one tmux call and NOTHING else. A host without /proc
+    # pays for the same facts with `pgrep`/`ps` instead (chela.sessions._sh), so pin the
+    # platform rather than let the assertion below depend on where the suite happens to run.
+    monkeypatch.setattr(sessions, "_PROC_HOST", True)
     monkeypatch.setattr(sessions.subprocess, "run", fake_run)
     monkeypatch.setattr(sessions, "_panes_cache", {"ts": 0.0, "panes": {}})
 
