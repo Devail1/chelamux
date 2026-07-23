@@ -109,6 +109,15 @@ Task ID `{{task_id}}`.
 A fresh git worktree at `{{workspace_path}}` on branch `{{branch_name}}` (forked from
 `{{base_branch}}`). Make your changes here, not in the main checkout.
 
+## You are unattended — decide, don't ask
+
+No human is watching this session. **⛔ Do NOT call `AskUserQuestion`** — there is no one
+to answer it and the dispatcher will find you hung. When you hit a genuine choice, pick the
+most reasonable default, note the assumption in your PR body, and proceed. Run tests and
+commands **synchronously** and wait for them — never park work on a prompt for a human. The
+only sanctioned stop is a real blocker (see "If you get stuck" below), stated in your final
+message.
+
 ## Done criteria — follow in order
 
 1. **Implement the task.** Read the relevant code in the worktree first. For skills,
