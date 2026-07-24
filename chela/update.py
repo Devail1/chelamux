@@ -62,10 +62,14 @@ class ApplyResult:
     """What :func:`apply` did, or the step it refused / failed at."""
 
     ok: bool
-    step: str = ""              # "dirty-check" | "fetch" | "ff-check" | "pull" | "uv-sync" | "pm2-restart" | "done"
+    # "dirty-check" | "fetch" | "ff-check" | "rewrite-backup" | "rewrite-reset" | "pull"
+    # | "uv-sync" | "pm2-restart" | "done"
+    step: str = ""
     error: str = ""
     behind_before: int = 0
     restarted: list[str] = field(default_factory=list)
+    rewrite_recovered: bool = False   # True if `apply()` recovered from a history rewrite
+    backup_ref: str = ""              # where the pre-rewrite HEAD was preserved, if so
 
 
 def repo_root() -> Path:
@@ -159,9 +163,55 @@ def _running_pm2_services(repo: Path) -> list[str]:
     )
 
 
+def _is_history_rewrite(repo: Path) -> bool:
+    """Whether HEAD and ``@{u}`` share NO common ancestor at all — the fingerprint of a
+    full-history rewrite (``git filter-repo`` + force-push), as opposed to an ordinary
+    side-by-side divergence (both sides added commits on top of a shared history), which
+    always retains one. ``git merge-base`` exits exactly 1 for "no common ancestor"; any
+    other nonzero exit (bad revision, repo trouble) is a different failure, NOT this case
+    — so it falls through to the ordinary diverged-branch refusal rather than triggering a
+    reset on a guess.
+    """
+    cp = _git(repo, "merge-base", "HEAD", "@{u}")
+    return cp is not None and cp.returncode == 1
+
+
+def _recover_from_history_rewrite(repo: Path, branch: str) -> ApplyResult:
+    """Recover from an upstream history rewrite WITHOUT ever destroying local commits:
+    preserve the current (pre-rewrite) HEAD under a dedicated backup ref, THEN hard-reset
+    the branch onto the rewritten upstream. Even if some of those commits were never
+    published (real local work, not just now-invalid copies of what upstream rewrote),
+    they stay fully reachable at the backup ref — nothing is deleted, only relocated off
+    the branch tip. Returns an :class:`ApplyResult` with ``ok=True`` and ``backup_ref``
+    set on success, or ``ok=False``/``step``/``error`` on failure — :func:`apply` returns
+    this verbatim on failure and reads ``backup_ref`` off it on success.
+    """
+    head_sha = _git_out(_git(repo, "rev-parse", "HEAD"))
+    backup_ref = f"refs/chela-backup/{branch}-{head_sha[:12]}"
+
+    backup_cp = _git(repo, "update-ref", backup_ref, "HEAD")
+    if not _git_ok(backup_cp):
+        err = backup_cp.stderr.strip() if backup_cp is not None else "git update-ref failed to run"
+        return ApplyResult(ok=False, step="rewrite-backup", error=err)
+
+    reset_cp = _git(repo, "reset", "--hard", "@{u}")
+    if not _git_ok(reset_cp):
+        err = reset_cp.stderr.strip() if reset_cp is not None else "git reset failed to run"
+        return ApplyResult(ok=False, step="rewrite-reset", error=err, backup_ref=backup_ref)
+
+    log.warning(
+        "⛑️ upstream history was rewritten (e.g. `git filter-repo` + force-push) — backed "
+        "up the pre-rewrite HEAD to %s and reset %r onto the new history", backup_ref, branch,
+    )
+    return ApplyResult(ok=True, backup_ref=backup_ref)
+
+
 def apply(repo: Path | None = None) -> ApplyResult:
-    """The safe update sequence. Refuses before touching anything on a dirty or
-    diverged tree; otherwise pulls, re-syncs, and restarts — in that order, every time.
+    """The safe update sequence. Refuses before touching anything on a dirty tree;
+    on a diverged branch, recovers safely if the divergence is actually an upstream
+    history rewrite (see :func:`_is_history_rewrite`), otherwise still refuses. Then
+    pulls (or, after a rewrite recovery, is already up to date), re-syncs, and restarts
+    — in that order, every time.
     """
     repo = repo or repo_root()
 
@@ -174,25 +224,36 @@ def apply(repo: Path | None = None) -> ApplyResult:
     if not status.ok:
         return ApplyResult(ok=False, step="fetch", error=status.error)
 
+    rewrite_recovered = False
+    backup_ref = ""
     if status.ahead > 0:
-        return ApplyResult(
-            ok=False, step="ff-check", behind_before=status.behind,
-            error=f"local branch is {status.ahead} commit(s) ahead of its upstream — "
-                  "diverged, not fast-forwardable; resolve by hand",
-        )
+        if not _is_history_rewrite(repo):
+            return ApplyResult(
+                ok=False, step="ff-check", behind_before=status.behind,
+                error=f"local branch is {status.ahead} commit(s) ahead of its upstream — "
+                      "diverged, not fast-forwardable; resolve by hand",
+            )
+        recovery = _recover_from_history_rewrite(repo, status.branch)
+        if not recovery.ok:
+            return ApplyResult(ok=False, step=recovery.step, error=recovery.error,
+                                behind_before=status.behind, backup_ref=recovery.backup_ref)
+        rewrite_recovered = True
+        backup_ref = recovery.backup_ref
 
-    if status.behind == 0:
+    if status.behind == 0 and not rewrite_recovered:
         return ApplyResult(ok=True, step="done", behind_before=0)
 
-    pull_cp = _git(repo, "pull", "--ff-only")
-    if not _git_ok(pull_cp):
-        err = pull_cp.stderr.strip() if pull_cp is not None else "git pull failed to run"
-        return ApplyResult(ok=False, step="pull", behind_before=status.behind, error=err)
+    if not rewrite_recovered:
+        pull_cp = _git(repo, "pull", "--ff-only")
+        if not _git_ok(pull_cp):
+            err = pull_cp.stderr.strip() if pull_cp is not None else "git pull failed to run"
+            return ApplyResult(ok=False, step="pull", behind_before=status.behind, error=err)
 
     sync_cp = _sh(["uv", "sync", "--all-extras"], cwd=repo)
     if sync_cp is None or sync_cp.returncode != 0:
         err = sync_cp.stderr.strip() if sync_cp is not None else "uv sync failed to run"
-        return ApplyResult(ok=False, step="uv-sync", behind_before=status.behind, error=err)
+        return ApplyResult(ok=False, step="uv-sync", behind_before=status.behind, error=err,
+                            rewrite_recovered=rewrite_recovered, backup_ref=backup_ref)
 
     services = _running_pm2_services(repo)
     if services:
@@ -200,9 +261,11 @@ def apply(repo: Path | None = None) -> ApplyResult:
         if restart_cp is None or restart_cp.returncode != 0:
             err = restart_cp.stderr.strip() if restart_cp is not None else "pm2 restart failed to run"
             return ApplyResult(ok=False, step="pm2-restart", behind_before=status.behind,
-                                error=err, restarted=[])
+                                error=err, restarted=[], rewrite_recovered=rewrite_recovered,
+                                backup_ref=backup_ref)
 
-    return ApplyResult(ok=True, step="done", behind_before=status.behind, restarted=services)
+    return ApplyResult(ok=True, step="done", behind_before=status.behind, restarted=services,
+                        rewrite_recovered=rewrite_recovered, backup_ref=backup_ref)
 
 
 def check_and_notify(previously_behind: int) -> int:

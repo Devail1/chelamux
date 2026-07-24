@@ -110,6 +110,96 @@ def test_diverged_branch_refuses_and_never_pulls(checkout, upstream, git_calls):
     assert not any(args and args[0] == "pull" for args in git_calls)
 
 
+# --- history rewrite (force-push scrub) ⇒ recover safely, never refuse -----------------
+
+def _force_rewrite_history(upstream: Path) -> None:
+    """Simulate exactly what `git filter-repo` + a force-push does: replace `main` with a
+    brand-new, unrelated commit history (same eventual content, different commit objects
+    all the way down to a new root). A real orphan branch, not a mock -- the whole point
+    of this module's safety rail is that it must survive real git's actual behaviour.
+    """
+    _git(upstream, "checkout", "-q", "--orphan", "scrubbed")
+    (upstream / "README.md").write_text("scrubbed\n")
+    _git(upstream, "add", "README.md")
+    _configure(upstream)
+    _git(upstream, "commit", "-q", "-m", "scrubbed history")
+    _git(upstream, "branch", "-M", "scrubbed", "main")
+
+
+def test_history_rewrite_is_recovered_safely_not_refused(checkout, upstream, monkeypatch):
+    """🔴 THE LOAD-BEARING GUARD for CMX-168. A force-pushed history rewrite must NOT hit
+    the old "diverged, not fast-forwardable; resolve by hand" dead end -- it must recover:
+    back up the pre-rewrite HEAD, then land exactly on the new upstream tip."""
+    before_head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    _force_rewrite_history(upstream)
+    monkeypatch.setattr(update, "_sh", _pm2_stub([]))
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.rewrite_recovered is True
+    assert result.step != "ff-check"
+    assert result.backup_ref.startswith("refs/chela-backup/")
+
+    new_head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    upstream_head = subprocess.run(
+        ["git", "-C", str(upstream), "rev-parse", "main"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert new_head == upstream_head, "must land exactly on the rewritten upstream tip"
+
+    backed_up = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", result.backup_ref],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert backed_up == before_head, "the pre-rewrite HEAD must be preserved, not lost"
+
+
+def test_history_rewrite_recovery_still_refuses_a_dirty_tree(checkout, upstream):
+    """The dirty-check must still run BEFORE any rewrite recovery -- a rewrite is never
+    an excuse to reset over uncommitted local edits."""
+    _force_rewrite_history(upstream)
+    (checkout / "README.md").write_text("dirty, uncommitted edit\n")
+
+    result = update.apply(checkout)
+
+    assert result.ok is False
+    assert result.step == "dirty-check"
+
+
+def test_ordinary_divergence_with_shared_history_still_refuses(checkout, upstream, git_calls):
+    """Regression guard: a normal side-by-side divergence (both sides commit on top of the
+    SAME history, not a rewrite) must keep refusing exactly as before -- only a genuine
+    unrelated-history rewrite should ever trigger the reset path."""
+    _commit(upstream, "new.txt", "new\n")
+    _commit(checkout, "local.txt", "local\n")
+
+    result = update.apply(checkout)
+
+    assert result.ok is False
+    assert result.step == "ff-check"
+    assert result.rewrite_recovered is False
+    assert not any(args and args[0] == "reset" for args in git_calls)
+
+
+def test_is_history_rewrite_false_for_ordinary_divergence(checkout, upstream):
+    _commit(upstream, "new.txt", "new\n")
+    _commit(checkout, "local.txt", "local\n")
+    assert update._is_history_rewrite(checkout) is False
+
+
+def test_is_history_rewrite_true_after_a_force_pushed_rewrite(checkout, upstream):
+    _force_rewrite_history(upstream)
+    _git(checkout, "fetch")
+    assert update._is_history_rewrite(checkout) is True
+
+
 # --- happy path order --------------------------------------------------------------
 
 def test_happy_path_fetches_then_pulls_ff_only_then_syncs_then_restarts(

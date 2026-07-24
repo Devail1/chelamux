@@ -1809,15 +1809,19 @@ def cmd_update(args) -> None:
     result = update.apply(repo)
     if not result.ok:
         print(f"update: refused at {result.step} — {result.error}")
+        if result.backup_ref:
+            print(f"(pre-rewrite HEAD is safe at {result.backup_ref})")
         sys.exit(1)
     if result.behind_before == 0:
         print("up to date — nothing to do")
         return
+    action = (f"⛑️ recovered from an upstream history rewrite (old HEAD backed up at "
+              f"{result.backup_ref}), reset onto" if result.rewrite_recovered else "pulled")
     if result.restarted:
-        print(f"✅ pulled {result.behind_before} commit(s), re-synced deps, restarted: "
+        print(f"✅ {action} {result.behind_before} commit(s), re-synced deps, restarted: "
               f"{', '.join(result.restarted)}")
     else:
-        print(f"✅ pulled {result.behind_before} commit(s), re-synced deps "
+        print(f"✅ {action} {result.behind_before} commit(s), re-synced deps "
               "(no running chela-* PM2 services to restart)")
 
 
