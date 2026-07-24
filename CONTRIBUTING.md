@@ -60,6 +60,9 @@ its own corruption. Write guards that would catch you.
   `## [Unreleased]` (Added / Changed / Fixed), with the PR number.
 - **Update docs** when you change a `CHELA_*` knob, a command, or a hook — the README
   config table and `docs/` are adopter-facing and drift is user-visible.
+- **Any change to the rendered hooks (`hooks_spec`) MUST bump `plugin/.claude-plugin/plugin.json`
+  version** — Claude Code keys plugin updates on the version, so a hook change without a
+  bump ships stale hooks to every adopter.
 
 ## How the dispatcher builds tasks (optional context)
 

@@ -373,6 +373,32 @@ def test_cli_without_check_does_call_apply(checkout, monkeypatch):
     assert called == [checkout]
 
 
+def test_update_reminds_when_the_installed_plugin_is_stale(checkout, monkeypatch, capsys):
+    """CMX-170: Claude Code keys a plugin update on its version alone — a `chela update`
+    that changed the rendered hooks does not itself push them into the plugin cache every
+    agent already loaded from. Detect that (reusing `plugin.installed`'s own comparison,
+    :func:`chela.doctor.installed_hooks_stale`) and say so."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=0))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: True)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    assert "/plugin update" in capsys.readouterr().out
+
+
+def test_update_stays_quiet_when_the_installed_plugin_is_current(checkout, monkeypatch, capsys):
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=0))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    assert "/plugin update" not in capsys.readouterr().out
+
+
 # --- notifier is edge-triggered + never pulls -----------------------------------------
 
 class _StubNotify:
