@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in chela doesn't work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A quick `chela doctor` (below) resolves most environment issues faster than anything else.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: I ran `chela dispatch ...` and ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`chela doctor` output"
+      description: Paste the output of `uv run chela doctor` — it reconciles what's declared against what's actually running.
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: chela version / commit
+      description: "`git rev-parse --short HEAD` (or the release)."
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS + Python + tmux
+      placeholder: "macOS 14 · Python 3.12 · tmux 3.4"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Daemon output, tracebacks, or the Feed — whatever's relevant.
+      render: text
+    validations:
+      required: false

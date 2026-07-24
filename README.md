@@ -92,6 +92,10 @@ already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
 
 ## Install
 
+> **New here?** [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) is a
+> ~10-minute clone-to-first-dispatched-agent walkthrough. The sections below are
+> the reference.
+
 chela uses [`uv`](https://docs.astral.sh/uv/). The core has two small deps
 (`croniter`, `pyyaml`); the **dashboard + live terminal wall** ships as a
 **separate install** (adds Flask) — same feature, kept out of the core so a

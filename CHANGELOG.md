@@ -10,7 +10,10 @@ history lives in `git log`.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`docs/GETTING_STARTED.md`** — a clone-to-first-dispatched-agent quickstart.
+- **`CODE_OF_CONDUCT.md`** (Contributor Covenant 2.1) and GitHub issue/PR templates.
 
 ## [0.2.0] — 2026-07-23
 
