@@ -40,6 +40,7 @@ from chela import (
     runtime_truth,
     sessions,
     transcripts,
+    update,
 )
 from chela.telegram import bindings
 
@@ -132,6 +133,11 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_truth, "_agent_cmd_which", lambda binary: f"/usr/bin/{binary}")
     monkeypatch.setattr(runtime_truth, "_gh_auth_status", lambda: True)
     monkeypatch.setattr(runtime_truth, "_ref_exists", lambda repo, branch: True)
+
+    # repo.upstream_synced: this checkout tracks its upstream cleanly — no local
+    # divergence for `chela update` to have to recover from.
+    monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
+                        lambda: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
 
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
@@ -382,6 +388,16 @@ def _break_relay_transcripts(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_upstream_synced(tmp_path, monkeypatch):
+    """The branch is diverged from its upstream — the fingerprint an upstream history
+    rewrite (`git filter-repo` + force-push) leaves behind (CMX-168), same shape as
+    genuine unpushed local commits. Either way `chela update` is what tells them apart
+    and, if it is a rewrite, self-heals — doctor only has to say something is wrong."""
+    monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
+                        lambda: update.UpdateStatus(ok=True, behind=0, ahead=3, branch="dev"))
+    return doctor.ERROR
+
+
 CORRUPTIONS = {
     "relay.transcripts": _break_relay_transcripts,
     "env.file": _break_env_file,
@@ -404,6 +420,7 @@ CORRUPTIONS = {
     "plugin.hooks_flowing": _break_hooks_flowing,
     "windows.resolvable": _break_windows_resolvable,
     "fonts.glyph_coverage": _break_fonts_glyph_coverage,
+    "repo.upstream_synced": _break_upstream_synced,
 }
 
 
@@ -654,3 +671,79 @@ def test_a_run_parked_on_a_HUMAN_is_never_reported_as_stalled(monkeypatch):
 
     assert runtime_truth._stalled_report(
         _claim(status="needs_human", waiting=99999.0)) == []
+
+
+# --- repo.upstream_synced: CMX-168's self-heal, surfaced read-only in doctor -----------
+#
+# `chela update` recovers from an upstream history rewrite (backup-ref + `reset --hard`),
+# but only when a human (or the auto-update sweep) actually runs it. This fact asks the
+# same question doctor-side and points at the fix — it must NEVER perform the fetch-and-
+# reset itself; that action lives only in `chela.update.apply`.
+
+def test_diverged_upstream_points_at_chela_update(fleet, monkeypatch):
+    """A diverged branch — the shape a real rewrite leaves behind — is reported with the
+    fix named, not just flagged red."""
+    _break_upstream_synced(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "repo.upstream_synced"]
+    assert findings and findings[0].level == doctor.ERROR
+    assert "3 commit(s) AHEAD" in findings[0].title
+    assert "chela update" in findings[0].detail
+
+
+def test_upstream_synced_report_never_calls_reset_or_fetch(fleet, monkeypatch):
+    """The fact's whole contract: it may READ git state, but the production call that
+    fetches and hard-resets (`chela.update.apply` / `_recover_from_history_rewrite`) must
+    never be reachable from doctor's read path."""
+    calls = []
+    monkeypatch.setattr(update, "apply", lambda *a, **k: calls.append("apply"))
+    monkeypatch.setattr(
+        update, "_recover_from_history_rewrite",
+        lambda *a, **k: calls.append("_recover_from_history_rewrite"))
+    _break_upstream_synced(fleet, monkeypatch)
+
+    doctor.check()
+
+    assert calls == [], f"doctor's read path reached a mutating update.* call: {calls}"
+
+
+def test_upstream_synced_status_never_fetches(monkeypatch):
+    """`fetch=False` is the entire read-only guarantee: the real seam behind this fact
+    must never itself trigger a network `git fetch`, only ever read as fresh as the last
+    real one (`chela update --check`, the daemon's periodic notifier)."""
+    calls = []
+
+    def fake_commits_behind(repo=None, *, fetch=True):
+        calls.append(fetch)
+        return update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev")
+
+    monkeypatch.setattr(update, "commits_behind", fake_commits_behind)
+    runtime_truth._upstream_synced_status()
+    assert calls == [False]
+
+
+def test_upstream_synced_is_silent_when_no_upstream_is_configured(fleet, monkeypatch):
+    """A branch with nothing to compare against (never pushed) is not a bug — just
+    nothing to report, same as `commits_behind`'s own `ok=True, error=...` contract."""
+    monkeypatch.setattr(
+        runtime_truth, "_upstream_synced_status",
+        lambda: update.UpdateStatus(ok=True, branch="cmx-169",
+                                    error="no upstream configured for this branch"))
+    assert [f for f in doctor.check() if f.fact == "repo.upstream_synced"] == []
+
+
+def test_upstream_synced_cannot_verify_when_git_cannot_answer(fleet, monkeypatch):
+    """`git rev-list` failing is the owner not answering — CANNOT VERIFY, never green."""
+    monkeypatch.setattr(
+        runtime_truth, "_upstream_synced_status",
+        lambda: update.UpdateStatus(ok=False, error="git rev-list failed"))
+    findings = [f for f in doctor.check() if f.fact == "repo.upstream_synced"]
+    assert findings and all(f.level == doctor.ERROR for f in findings)
+    assert "CANNOT VERIFY repo.upstream_synced" in findings[0].title
+
+
+def test_repo_upstream_synced_does_not_apply_to_a_pip_install(monkeypatch):
+    """A pip install has no `.git` — there is no upstream to have diverged from."""
+    monkeypatch.setattr(
+        update, "repo_root",
+        lambda: (_ for _ in ()).throw(update.NotAGitCheckout("not a git checkout")))
+    assert not runtime_truth.fact("repo.upstream_synced").applies()
