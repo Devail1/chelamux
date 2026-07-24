@@ -570,6 +570,36 @@ def test_render_plugin_bakes_in_a_nondefault_port(tmp_path):
     assert market["plugins"][0]["source"] == "./"
 
 
+# --- the version<->hooks coupling: a hook change without a version bump ships every
+# adopter stale hooks forever, because Claude Code keys `/plugin install`/update on the
+# version alone (CMX-170) ----------------------------------------------------------------
+
+def test_hooks_fingerprint_matches_the_recorded_version():
+    """The recorded fingerprint MOVES when `hooks_spec` changes, only via a version bump.
+
+    Corrupt this by editing `hooks_spec` (add/remove a header) without touching
+    `EXPECTED_HOOKS_FINGERPRINT`, or by bumping `plugin.json`'s version without adding a
+    fingerprint entry for it — either one must go RED, naming the adopter-stale-hooks trap.
+    """
+    version = hooks.plugin_manifest()["version"]
+    assert version in hooks.EXPECTED_HOOKS_FINGERPRINT, (
+        f"plugin.json version {version!r} has no recorded hooks fingerprint — a version "
+        "bump must ALSO record hooks.hooks_fingerprint() in EXPECTED_HOOKS_FINGERPRINT."
+    )
+    assert hooks.hooks_fingerprint() == hooks.EXPECTED_HOOKS_FINGERPRINT[version], (
+        "hooks_spec() changed shape without a plugin.json version bump — Claude Code keys "
+        "plugin updates on the version alone, so every existing adopter would silently "
+        "keep the STALE hooks forever. Bump plugin/.claude-plugin/plugin.json's version "
+        "AND record the new hooks.hooks_fingerprint() in EXPECTED_HOOKS_FINGERPRINT."
+    )
+
+
+def test_hooks_fingerprint_is_port_independent():
+    """A different dashboard port renders a byte-different manifest but the SAME hooks —
+    only a structural change (a header, a timeout, an event) may trip the guard above."""
+    assert hooks.hooks_fingerprint(5001) == hooks.hooks_fingerprint(5099)
+
+
 # --- SessionStart: the room recap, handed to a session that cannot remember it -------
 #
 # A hook is read at agent STARTUP and an agent's context does not survive its process, so

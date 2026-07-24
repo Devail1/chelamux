@@ -800,6 +800,24 @@ def effective_port() -> int:
     return config.live_dashboard_port()
 
 
+def installed_hooks_stale() -> bool:
+    """True when at least one INSTALLED copy of the plugin disagrees with what
+    ``hooks.hooks_spec()`` renders right now — the exact same comparison
+    ``plugin.installed`` uses above (:func:`hooks.installed_plugins`,
+    :func:`hooks.manifest_drift`), reused rather than reimplemented so `chela update`'s
+    post-update reminder can never drift from what `chela doctor` checks.
+
+    ``False`` when nothing is installed at all — that is a DIFFERENT problem
+    (``plugin.installed`` already reports it loudly) and not what this reminder is for: an
+    update has nothing to remind about a plugin the operator never installed.
+    """
+    expected = hooks.hooks_spec(effective_port())
+    return any(
+        copy.hooks is not None and hooks.manifest_drift(copy.hooks, expected)
+        for copy in hooks.installed_plugins()
+    )
+
+
 def _plugin_applies() -> bool:
     """A machine with nothing rendered is not running hooks; an INSTALLED copy still has
     to be checked though — a plugin installed from a checkout renders nothing here."""

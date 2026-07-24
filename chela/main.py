@@ -1814,15 +1814,23 @@ def cmd_update(args) -> None:
         sys.exit(1)
     if result.behind_before == 0:
         print("up to date — nothing to do")
-        return
-    action = (f"⛑️ recovered from an upstream history rewrite (old HEAD backed up at "
-              f"{result.backup_ref}), reset onto" if result.rewrite_recovered else "pulled")
-    if result.restarted:
-        print(f"✅ {action} {result.behind_before} commit(s), re-synced deps, restarted: "
-              f"{', '.join(result.restarted)}")
     else:
-        print(f"✅ {action} {result.behind_before} commit(s), re-synced deps "
-              "(no running chela-* PM2 services to restart)")
+        action = (f"⛑️ recovered from an upstream history rewrite (old HEAD backed up at "
+                  f"{result.backup_ref}), reset onto" if result.rewrite_recovered else "pulled")
+        if result.restarted:
+            print(f"✅ {action} {result.behind_before} commit(s), re-synced deps, restarted: "
+                  f"{', '.join(result.restarted)}")
+        else:
+            print(f"✅ {action} {result.behind_before} commit(s), re-synced deps "
+                  "(no running chela-* PM2 services to restart)")
+    if doctor.installed_hooks_stale():
+        # Claude Code keys a plugin update on `plugin.json`'s version alone — a `chela
+        # update` that changed the rendered hooks does NOT push them into the plugin
+        # cache every agent already loaded from. That copy stays stale until a human
+        # re-triggers the client-side install; chela cannot drive `/plugin` itself.
+        print("⚠️  chela's hooks changed — in Claude Code run `/plugin update` (or "
+              "`/plugin uninstall chela@chela` + `/plugin install chela@chela`), then "
+              "restart your agent windows.")
 
 
 def cmd_merge(args) -> None:

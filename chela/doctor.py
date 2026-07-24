@@ -43,6 +43,7 @@ from chela.runtime_truth import (  # noqa: F401 — doctor's public surface, re-
     audit_all,
     fact,
     facts,
+    installed_hooks_stale,
 )
 
 
