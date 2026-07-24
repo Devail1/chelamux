@@ -117,10 +117,14 @@ test('the topbar has ONE primary button, not the old three', () => {
 // staying correctly-outside in this file's fixture. These two run against the real
 // source text instead.
 
+// CMX-171 added #btn-decisions (the Decisions inbox popover, moved out of the
+// sidebar) as a fourth, deliberate topbar button — a distinct standalone action,
+// not a leftover from the #btn-palette/#btn-new/#btn-overflow fold this test
+// guards against regressing. The set is now fixed at exactly these three.
 test('.topbar-actions in the REAL index.html has exactly one primary button', () => {
     const topbar = HTML.match(/<div class="topbar-actions">[\s\S]*?<\/div>\s*<\/header>/)[0];
     const buttonIds = [...topbar.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
-    assert.deepEqual(buttonIds, ['btn-shares', 'btn-primary-menu'],
+    assert.deepEqual(buttonIds, ['btn-shares', 'btn-decisions', 'btn-primary-menu'],
         `.topbar-actions has unexpected buttons: ${buttonIds.join(', ')}`);
 });
 

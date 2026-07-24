@@ -510,6 +510,34 @@ body {
 .shares-sheet .tsp-copy:hover { border-color: var(--accent); }
 .shares-sheet .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
+/* Host resources strip (#resources-strip, CMX-172) — three compact CPU/RAM/Disk
+   readouts sampled by the dashboard itself (chela/dashboard/resources.py). The
+   % number is always the primary signal; a threshold tint (ok/warn/bad, from
+   resourcesmodel.js's level()) is secondary decoration only — never the sole
+   cue, since the primary user is red-weak. Each readout hides independently
+   when its value is null (unreadable host), and the whole strip stays hidden
+   until the first sample lands. */
+.res-strip { display: inline-flex; align-items: center; gap: 10px; padding: 0 4px; }
+.res-strip[hidden] { display: none; }
+.res-item {
+    display: inline-flex; align-items: baseline; gap: 4px;
+    font-size: 12px; font-weight: 600; color: var(--text-dim); white-space: nowrap;
+}
+.res-item[hidden] { display: none; }
+.res-item .res-label { font-size: 10.5px; font-weight: 600; color: var(--muted, #7d8590); letter-spacing: 0.02em; }
+.res-item .res-value { color: var(--text); font-variant-numeric: tabular-nums; }
+.res-item.res-ok .res-value { color: var(--ok-green); }
+.res-item.res-warn .res-value { color: var(--ok-orange); }
+.res-item.res-bad .res-value { color: var(--ok-vermillion); }
+
+@media (max-width: 768px) {
+    /* Keep the numbers, drop the CPU/RAM/Disk labels — the strip must never
+       push the topbar's icon buttons off-screen on a phone. */
+    .res-strip { gap: 6px; }
+    .res-item .res-label { display: none; }
+    .res-item .res-value { font-size: 11px; }
+}
+
 /* Global active-shares indicator (safety kill-switch) — a persistent topbar pill
    shown whenever ANY session is shared, on every tab + mobile (where the pane
    header 🔗 is hidden). AMBER, not red: the primary user is red-weak and red is
@@ -535,6 +563,32 @@ body {
 }
 @keyframes sharesPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .shares-indicator .si-dot { animation: none; } }
+
+/* Decisions inbox topbar button — the header's #btn-decisions (icon-btn) plus
+   its state dot, colour-only decoration on top of a title tooltip (never the
+   sole signal — Liav is red-weak, same rule as .decisions-chip below). */
+#btn-decisions { position: relative; }
+.decisions-dot {
+    position: absolute; top: 6px; right: 6px; width: 8px; height: 8px;
+    border-radius: 50%; border: 1.5px solid var(--surface);
+}
+.decisions-dot.dot-ok { background: var(--ok-green); }
+.decisions-dot.dot-none { background: var(--text-dim); }
+.decisions-dot.dot-bad { background: var(--ok-vermillion); }
+.decisions-dot.dot-warn { background: var(--ok-orange); }
+
+/* The unread-count badge (decisionsmodel.js) — a SEPARATE signal from the dot
+   above (state vs. "how many you haven't looked at"), so it sits at the
+   opposite corner and reads as a number, never colour-only (same red-weak
+   rule as the dot/chip: the digits carry the fact, urgency colour is on top). */
+.decisions-unread {
+    position: absolute; bottom: -4px; right: -4px; min-width: 16px; height: 16px;
+    padding: 0 3px; border-radius: 8px; background: var(--text-dim); color: var(--surface);
+    font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+    border: 1.5px solid var(--surface);
+}
+.decisions-unread.decisions-unread-warn { background: var(--ok-orange); }
+.decisions-unread.decisions-unread-bad { background: var(--ok-vermillion); }
 
 /* Shares sheet — ONE component: an anchored panel on desktop, a bottom-sheet on
    mobile. Lists every active share with a prominent Stop each + a Stop-All. */
@@ -3216,14 +3270,20 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .persona-doc { font-size: 10.5px; color: var(--text-dim); background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
 
-/* Decisions — the durable, owner-independent log (decisions.js), an always-visible
-   THIRD sidebar section (index.html #side-decisions, below Navigate + Sessions;
-   cmx-106 first shipped this inside the Personas panel, cmx-107 relocated it).
-   Rows reuse the Feed's .feed-row/.feed-cls-*/.feed-glyph classes verbatim
-   (feed.js), so a decision reads identically whether you meet it here or in the
-   Feed — but the sidebar column (264px, .app) is far narrower than the Feed's
-   canvas, so the row grid is overridden below into a stacked, wrapping layout. */
-#side-decisions { padding: 0 10px 4px; }
+/* Decisions — the durable, owner-independent log (decisions.js), now a topbar
+   popover (index.html #decisions-menu, anchored off #btn-decisions; cmx-106
+   first shipped this inside the Personas panel, cmx-107 relocated it into an
+   always-visible sidebar section, CMX-171 moved it again into this popover so
+   the sidebar stops permanently spending a section on it — and structurally
+   fixes a bug where the sidebar's collapsed-rail hide-list never listed these
+   elements, so they used to spill into the 60px icon rail). Rows reuse the
+   Feed's .feed-row/.feed-cls-*/.feed-glyph classes verbatim (feed.js), so a
+   decision reads identically whether you meet it here or in the Feed — but the
+   popover is far narrower than the Feed's canvas, so the row grid is overridden
+   below into a stacked, wrapping layout. */
+.decisions-menu { min-width: 320px; max-width: 92vw; padding: 8px; }
+.decisions-menu .popover-head { padding: 4px 8px 6px; }
+.decisions-menu .popover-title { font-weight: 700; font-size: 12.5px; color: var(--text); }
 .decisions-chip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border);
     background: var(--surface); font-size: 11.5px; margin-bottom: 10px; }

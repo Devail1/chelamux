@@ -90,8 +90,9 @@ export const VIEWS = [
         // orchestrator). Read-only: it renders the registry, it never launches a persona.
         lucide: 'drama',
         // The decisions log used to ride alongside the persona cards (cmx-106); it now
-        // lives in the always-visible sidebar section (main.js seeds + ticks it,
-        // decisions.js), so this view is persona cards only.
+        // lives in the topbar's Decisions popover (main.js seeds + ticks it,
+        // decisions.js — CMX-171 moved it out of the sidebar), so this view is
+        // persona cards only.
         enter: () => refreshPersonas(),
         tick: () => refreshPersonas(),
     },
