@@ -926,6 +926,23 @@ body.term-dragging { overflow: hidden; }
     box-shadow: 0 0 0 2px var(--accent); outline: none;
 }
 
+/* --- Wall redesign: Focus layout (one pane large, the rest a strip) --------
+   `.wall-focus-main` / `.wall-focus-strip` are set/cleared by _applyWallFocus
+   / _clearFocusClasses (terminals.js) in lockstep with the toggle — never a
+   CSS-only guess at which pane is which. The strip panes get a pointer
+   cursor + hover tint on their HEADER ONLY (the promote affordance —
+   terminals.js's _bindFocusPromote reads clicks there, never the iframe) so
+   "click here to bring this pane forward" is discoverable without a label. */
+.grid-stack-item.wall-focus-main > .grid-stack-item-content {
+    box-shadow: 0 0 0 1px var(--accent);
+}
+.grid-stack-item.wall-focus-strip > .grid-stack-item-content .gs-head {
+    cursor: pointer;
+}
+.grid-stack-item.wall-focus-strip > .grid-stack-item-content .gs-head:hover {
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
 /* --- THE WIRE: drag from a tile's port onto a peer to put them in a room -----
    The gesture reuses `.gs-dragging` (above) to neutralise the iframes' pointer
    events — it must NOT hide the terminals (`.term-dragging`): watching them while

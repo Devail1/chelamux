@@ -3,7 +3,7 @@ import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, at
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
-import { actionBarKind, costView, ctxLevel, prChip, rankOrder, recapView, tileState } from './wallmodel.js';
+import { actionBarKind, costView, ctxLevel, focusLayout, prChip, rankOrder, recapView, tileState } from './wallmodel.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -36,6 +36,20 @@ let _wallAuto = localStorage.getItem('pc_wall_auto') === '1';
 // Reset to '' to force the next _applyAutoArrange to (re)apply unconditionally
 // (toggle-on, preset change while auto, or a fresh buildWall).
 let _autoOrderSig = '';
+// Focus layout toggle (default OFF): one pane large, the rest a right-side
+// strip (wallmodel.js's focusLayout). Mutually exclusive with auto-arrange —
+// both toggles OWN the layout, so turning one on turns the other off (see
+// toggleWallFocus / toggleWallAuto). Manual layout (pc_wall_layout) is just
+// as sacred here as it is for auto: this mode never writes it, and toggling
+// off restores it verbatim via the SAME _restoreManualLayout auto-arrange uses.
+let _wallFocus = localStorage.getItem('pc_wall_focus') === '1';
+// Which pane is currently the large "focus" pane. Chosen when Focus turns on
+// (_pickFocusWid) and updated by clicking a strip pane's header (promote).
+let _focusWid = null;
+// Sig of "focus wid | strip order" last applied, mirroring _autoOrderSig —
+// the 4s poll only touches GridStack when the focus target or the tiled pane
+// set actually changed, never on every tick.
+let _focusOrderSig = '';
 let _paneActivity = {};           // wid -> epoch ms a pane last STARTED being busy; drives the taskbar MRU sort
 let _paneStatus = {};             // wid -> last seen session_status, for rising-edge (idle→busy) detection
 
@@ -1262,6 +1276,7 @@ function _applyTermStatus(agents) {
     _colorTermDots(agents);
     _applyWallTileFrame(agents);   // wall redesign slice 1: state pill / recap / PR chip / action bar
     _applyAutoArrange(agents);     // wall redesign slice 2: re-rank the wall — no-op unless auto is on and the order changed
+    _applyWallFocus(agents);       // wall redesign (Focus toggle): re-fit the one-large + strip layout — no-op unless focus is on and the target/pane-set changed
     // Wall tick is the fast path (4s) — refresh the tab signal here too so the
     // title/favicon update promptly on the flagship view, not just on the 30s
     // sidebar refresh. updateTabSignal is idempotent, so the two callers agree.
@@ -1525,6 +1540,7 @@ async function renderTerminals() {
 
     renderMobileSwitcher();   // phone single-mode agent pills (no-op on desktop)
     _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
+    _bindFocusPromote();      // click a strip pane's header to promote it while Focus is on (idempotent)
     _refreshRooms();          // paint room accents on the first render, not 4s later
 }
 
@@ -2197,8 +2213,9 @@ function buildWall(wids) {
         const item = gsEl.querySelector(`.grid-stack-item[gs-id="${_cssEsc(wid)}"]`);
         if (item) _minimizeItem(item);
     });
-    _autoOrderSig = '';   // fresh tile set: force the next auto-arrange apply, don't trust a stale sig
-    _applyWallInteractivity();   // restore the locked (swap-on-drag) / auto-arrange feel across reloads
+    _autoOrderSig = '';    // fresh tile set: force the next auto-arrange apply, don't trust a stale sig
+    _focusOrderSig = '';   // same, for Focus: force the next _applyWallFocus apply on a fresh tile set
+    _applyWallInteractivity();   // restore the locked (swap-on-drag) / auto-arrange / focus feel across reloads
     renderMinDock();
     _replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
     _refreshPaneIdx();      // Alt+N badges (keyboard-fast pane switcher)
@@ -2351,6 +2368,19 @@ function _autoGlyph() {
         <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>`;
 }
 
+// Focus layout glyph: a big rect (the focus pane) beside two stacked small
+// rects (the strip) — deliberately a DIFFERENT shape from lock/auto/preset
+// icons (echoes _gridGlyph's rounded-rect idiom, sized to match) so Focus
+// reads as its own control, not a preset variant. Static, same reasoning as
+// _autoGlyph — .gl-btn.active carries the on/off signal.
+function _focusGlyph() {
+    return `<svg viewBox="0 0 18 14" width="18" height="14" fill="currentColor" aria-hidden="true">
+        <rect x="1" y="1" width="10" height="12" rx="1"/>
+        <rect x="13" y="1" width="4" height="5" rx="1"/>
+        <rect x="13" y="8" width="4" height="5" rx="1"/>
+    </svg>`;
+}
+
 // Populate the toolbar's glyph picker once. Idempotent (dataset guard) so the
 // per-render renderTerminals() call is cheap.
 function _buildGridPicker() {
@@ -2370,6 +2400,7 @@ function _buildGridPicker() {
     });
     _reflectLockBtn();
     _reflectAutoBtn();
+    _reflectFocusBtn();
 }
 
 // ---- Layout lock (swap-on-drop) --------------------------------------------
@@ -2407,18 +2438,33 @@ function _reflectAutoBtn() {
         : 'Auto-arrange — rank panes by attention (needs you → working → idle → done)';
 }
 
-// Push the current lock + auto-arrange state onto the live grid. Safe to call
-// any time _grid exists (e.g. right after buildWall, so a reload restores the
-// locked/auto feel). Auto-arrange wins over lock: while it's on, the layout is
-// COMPUTED (rankOrder), so both move and resize are disabled outright — a
-// manual drag/resize while auto is on would just get overwritten by the next
-// poll's re-apply, so disabling is the honest UI rather than a confusing revert.
+// Focus layout: reflect the toggle's on/off state on its toolbar button —
+// same pattern as _reflectAutoBtn (static icon; .gl-btn.active carries state).
+function _reflectFocusBtn() {
+    const b = $('#term-focus-btn');
+    if (!b) return;
+    b.classList.toggle('active', _wallFocus);
+    b.innerHTML = _focusGlyph();
+    b.title = _wallFocus
+        ? 'Focus ON — one pane large, the rest a strip. Click a strip pane’s header to promote it. Click to restore your manual layout.'
+        : 'Focus — one pane large, the rest a strip';
+}
+
+// Push the current lock + auto-arrange + focus state onto the live grid. Safe
+// to call any time _grid exists (e.g. right after buildWall, so a reload
+// restores the locked/auto/focus feel). Auto-arrange and Focus both COMPUTE
+// the layout (rankOrder / focusLayout), so either one disables move AND
+// resize outright — a manual drag/resize would just get overwritten by the
+// next poll's re-apply, so disabling is the honest UI rather than a confusing
+// revert. They are mutually exclusive (toggleWallAuto/toggleWallFocus enforce
+// it), so at most one of them is ever true here.
 function _applyWallInteractivity() {
     if (!_grid) return;
-    _grid.enableMove(!_wallAuto);
-    _grid.enableResize(!_wallLocked && !_wallAuto);
+    _grid.enableMove(!_wallAuto && !_wallFocus);
+    _grid.enableResize(!_wallLocked && !_wallAuto && !_wallFocus);
     _reflectLockBtn();
     _reflectAutoBtn();
+    _reflectFocusBtn();
 }
 
 function toggleWallLock(btn) {
@@ -2432,13 +2478,41 @@ function toggleWallLock(btn) {
 // ranks the current fleet and applies it (no waiting for the next 4s poll);
 // turning OFF re-applies the saved pc_wall_layout verbatim — auto mode never
 // wrote to that key, so this is a pure restore, never a reconstruction.
+// Auto-arrange and Focus both own the layout, so turning Auto on turns Focus
+// off first (see toggleWallFocus for the mirror case).
 function toggleWallAuto(btn) {
     _wallAuto = !_wallAuto;
     localStorage.setItem('pc_wall_auto', _wallAuto ? '1' : '0');
+    if (_wallAuto && _wallFocus) { _wallFocus = false; localStorage.setItem('pc_wall_focus', '0'); _focusWid = null; _focusOrderSig = ''; _clearFocusClasses(); }
     _autoOrderSig = '';   // stale from a previous auto session — force a fresh apply either way
     _applyWallInteractivity();
     if (_wallAuto) _applyAutoArrange(_agentsCache);
     else _restoreManualLayout();
+    if (btn) btn.blur();
+}
+
+// Focus layout toggle: one pane large (_focusWid), the rest a right-side
+// strip (wallmodel.js's focusLayout). Turning ON picks a focus pane
+// (_pickFocusWid: the user's click-focused pane, else the first wantsHuman
+// pane, else the first tiled pane) and applies immediately, same "don't wait
+// for the next poll" contract as auto-arrange. Turning OFF restores
+// pc_wall_layout verbatim via the SAME _restoreManualLayout auto-arrange
+// uses — Focus never wrote that key either. Mutually exclusive with
+// auto-arrange: turning Focus on turns Auto off first.
+function toggleWallFocus(btn) {
+    _wallFocus = !_wallFocus;
+    localStorage.setItem('pc_wall_focus', _wallFocus ? '1' : '0');
+    if (_wallFocus && _wallAuto) { _wallAuto = false; localStorage.setItem('pc_wall_auto', '0'); _autoOrderSig = ''; }
+    _focusOrderSig = '';   // stale from a previous focus session — force a fresh apply either way
+    _applyWallInteractivity();
+    if (_wallFocus) {
+        _pickFocusWid();
+        _applyWallFocus(_agentsCache);
+    } else {
+        _focusWid = null;
+        _clearFocusClasses();
+        _restoreManualLayout();
+    }
     if (btn) btn.blur();
 }
 
@@ -2789,6 +2863,15 @@ function applyGridLayout(cols, rows, btn) {
     _wallPreset = { cols, rows };
     localStorage.setItem('pc_wall_preset', JSON.stringify(_wallPreset));   // persist for reloads + resize re-fit
     if (!_grid) return;
+    // Focus owns the layout while it's on (fixed 8/4 split, not a column
+    // count) — a preset click or a viewport resize (this fn's other caller)
+    // just refits the SAME focus layout to the new viewport, it never falls
+    // through to the column/row fill below.
+    if (_wallFocus) {
+        _focusOrderSig = '';
+        _applyWallFocus(_agentsCache);
+        return;
+    }
     if (_wallAuto) {
         _autoOrderSig = '';   // force a re-apply at the new column/row count
         _applyAutoArrange(_agentsCache);
@@ -2856,6 +2939,95 @@ function _restoreManualLayout() {
     } finally {
         _grid.batchUpdate(false);
     }
+}
+
+// ---- Focus layout (one pane large, the rest a strip) -----------------------
+//
+// Choose which pane becomes the large focus pane the moment Focus turns on
+// (or its current target falls off the wall — killed, minimized out, pinned):
+// the user's own click-focused pane (._focusedPane — the SAME signal that
+// paints the .term-focused ring, docs/wall-redesign.md's focus tracking)
+// first, else the first pane that wantsHuman (the attention signal the whole
+// redesign is built on), else the first tiled pane. Pinned panes are never
+// eligible — they sit out of every fill, same as auto-arrange/presets.
+function _pickFocusWid() {
+    _focusWid = null;
+    if (!_grid) return;
+    const tiled = _grid.engine.nodes
+        .map(n => n.id)
+        .filter(id => id != null && !_pinned.has(id));
+    if (!tiled.length) return;
+    const tiledSet = new Set(tiled);
+    if (_focusedPane) {
+        const item = _focusedPane.closest('.grid-stack-item');
+        const wid = item && item.getAttribute('gs-id');
+        if (wid && tiledSet.has(wid)) { _focusWid = wid; return; }
+    }
+    const wanter = (_agentsCache || []).find(a => a && a.window_id && tiledSet.has(a.window_id) && wantsHuman(a));
+    if (wanter) { _focusWid = wanter.window_id; return; }
+    _focusWid = tiled[0];
+}
+
+// Strip the promote/large-pane CSS hooks from every tile — called on
+// toggle-off (and implicitly superseded by a fresh _applyWallFocus pass on
+// toggle-on) so a leftover class never survives into manual/auto mode.
+function _clearFocusClasses() {
+    if (!_grid) return;
+    _grid.engine.nodes.forEach(n => { if (n.el) n.el.classList.remove('wall-focus-main', 'wall-focus-strip'); });
+    const gsEl = $('#term-stage') && $('#term-stage').querySelector('.grid-stack');
+    if (gsEl) gsEl.classList.remove('wall-focus-on');
+}
+
+// Apply the Focus layout — no-op unless Focus is on. Mirrors _applyAutoArrange's
+// shape (agents in, sig-guarded, never writes pc_wall_layout) but writes
+// GridStack directly instead of going through _fillNodesByOrder: that shared
+// engine only expresses "flow N panes in an order across a fixed cols×rows
+// grid," not focusLayout's fixed 8-vs-4-column split with one pane pinned
+// large — so this computes the {wid:{x,y,w,h}} map itself (wallmodel.js's
+// focusLayout, PURE) and applies it in one batch, same GridStack idiom every
+// other fill here uses.
+function _applyWallFocus(agents) {
+    if (!_wallFocus || _termMode !== 'wall' || !_grid) return;
+    const tiled = _grid.engine.nodes
+        .map(n => n.id)
+        .filter(id => id != null && !_pinned.has(id));
+    if (!tiled.length) return;
+    const tiledSet = new Set(tiled);
+    // The current target fell off the wall (killed/minimized/pinned since it
+    // was chosen) — pick a fresh one before laying out.
+    if (!_focusWid || !tiledSet.has(_focusWid)) _pickFocusWid();
+    if (!_focusWid) return;
+    const relevant = (agents || []).filter(a => a && a.window_id && tiledSet.has(a.window_id));
+    const wantsByWid = {};
+    relevant.forEach(a => { wantsByWid[a.window_id] = wantsHuman(a); });
+    // Strip order = needs-you-first (rankOrder, same ranking auto-arrange
+    // uses), minus the focus pane itself — it's already large, not in the strip.
+    const order = rankOrder(relevant, wantsByWid).filter(wid => wid !== _focusWid);
+    // A tile GridStack knows about but missing from the fresh agents poll (a
+    // transient gap, not yet dropped) still needs a strip slot — append it at
+    // the end, the same fallback _applyAutoArrange gives an unranked tile.
+    tiled.forEach(wid => { if (wid !== _focusWid && !order.includes(wid)) order.push(wid); });
+    const sig = _focusWid + '|' + order.join(',');
+    if (sig === _focusOrderSig) return;   // target + strip order unchanged since the last apply — skip
+    _focusOrderSig = sig;
+    const { rows: total, cellPx } = _wallFill();
+    _grid.cellHeight(cellPx);   // exact divisor so `total` rows fill the height, same as _fillNodesByOrder
+    const layout = focusLayout([_focusWid, ...order], _focusWid, total);
+    _grid.batchUpdate();
+    try {
+        _grid.engine.nodes.forEach(n => {
+            const rect = layout[n.id];
+            if (rect) _grid.update(n.el, rect);
+            if (n.el) {
+                n.el.classList.toggle('wall-focus-main', n.id === _focusWid);
+                n.el.classList.toggle('wall-focus-strip', !!rect && n.id !== _focusWid);
+            }
+        });
+    } finally {
+        _grid.batchUpdate(false);
+    }
+    const gsEl = $('#term-stage') && $('#term-stage').querySelector('.grid-stack');
+    if (gsEl) gsEl.classList.add('wall-focus-on');
 }
 
 // ---- Mobile agent switcher -------------------------------------------------
@@ -2954,6 +3126,34 @@ function _bindHeaderSwipe() {
     _termSwipeBound = true;
 }
 
+// Promote a STRIP pane to the large focus slot by clicking its HEADER — same
+// delegated-off-#term-stage idiom as _bindHeaderSwipe (survives buildWall's
+// innerHTML rebuilds, bound once). Only the header promotes: the iframe stays
+// fully interactive (click-to-focus-and-type is untouched), and only while
+// Focus mode is actually on. Buttons/links inside the header (kill/min/max/
+// menu/pin/wire) keep doing their own thing rather than ALSO promoting — the
+// menu button already stopPropagation()s its click (togglePaneOverflow), and
+// this skips any other button/link/popover explicitly.
+let _focusPromoteBound = false;
+function _bindFocusPromote() {
+    if (_focusPromoteBound) return;
+    const stage = document.getElementById('term-stage');
+    if (!stage) return;
+    stage.addEventListener('click', e => {
+        if (!_wallFocus || _termMode !== 'wall') return;
+        if (e.target.closest('button, a, .popover')) return;   // let their own handlers act alone
+        const head = e.target.closest('.gs-head');
+        if (!head) return;
+        const item = head.closest('.grid-stack-item');
+        const wid = item && item.getAttribute('gs-id');
+        if (!wid || wid === _focusWid || _pinned.has(wid)) return;
+        _focusWid = wid;
+        _focusOrderSig = '';   // target changed — force a re-apply
+        _applyWallFocus(_agentsCache);
+    });
+    _focusPromoteBound = true;
+}
+
 // Keep the strip in sync when the viewport crosses the mobile breakpoint.
 window.addEventListener('resize', () => {
     if (TERMINALS_ON && currentTab === 'terminals') renderMobileSwitcher();
@@ -3018,4 +3218,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _ord
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });

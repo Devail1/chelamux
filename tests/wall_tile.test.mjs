@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    actionBarKind, actionVerb, costView, ctxLevel, isFinished, prChip, rankOrder, recapView, tileState,
+    actionBarKind, actionVerb, costView, ctxLevel, focusLayout, isFinished, prChip, rankOrder, recapView, tileState,
 } from '../chela/dashboard/static/js/wallmodel.js';
 
 const agent = (over = {}) => ({
@@ -229,4 +229,64 @@ test('rankOrder: all-same-rank input (idle tier) comes back in the exact input o
 test('rankOrder: empty input -> []', () => {
     assert.deepEqual(rankOrder([], {}), []);
     assert.deepEqual(rankOrder(null, {}), []);
+});
+
+// --- focusLayout (Wall redesign: Focus layout toggle) ------------------------
+
+test('focusLayout: the focus pane gets {x:0,y:0,w:8} and the full height', () => {
+    const layout = focusLayout(['@a', '@b', '@c'], '@a', 12);
+    // 🔴 GUARD: widening the focus pane to w:12 (or any value but 8) while a
+    // strip exists breaks this — the strip needs the right 4 columns.
+    assert.deepEqual(layout['@a'], { x: 0, y: 0, w: 8, h: 12 });
+});
+
+test('focusLayout: strip panes sit at x:8,w:4, stacked top-to-bottom in the given order', () => {
+    const layout = focusLayout(['@a', '@b', '@c'], '@a', 12);
+    // 🔴 GUARD: moving the strip's x off 8 (e.g. back to 0) would overlap the
+    // focus pane instead of sitting beside it.
+    assert.equal(layout['@b'].x, 8);
+    assert.equal(layout['@b'].w, 4);
+    assert.equal(layout['@c'].x, 8);
+    assert.equal(layout['@c'].w, 4);
+    // Two strip panes, 12 rows total -> 6/6, y increasing, non-overlapping.
+    assert.deepEqual(layout['@b'], { x: 8, y: 0, w: 4, h: 6 });
+    assert.deepEqual(layout['@c'], { x: 8, y: 6, w: 4, h: 6 });
+});
+
+test('focusLayout: strip stacking is non-overlapping and heights sum to the total, last pane eats the remainder', () => {
+    // 13 rows / 3 strip panes doesn't divide evenly — pins the exact split
+    // _fillNodesByOrder's own math would produce (floor, floor, remainder).
+    const layout = focusLayout(['@f', '@1', '@2', '@3'], '@f', 13);
+    // 🔴 GUARD: breaking the y-accumulation (e.g. always starting each strip
+    // pane at y:0, or using a fixed height instead of accumulating) would
+    // make these ranges overlap instead of stacking.
+    assert.deepEqual(layout['@1'], { x: 8, y: 0, w: 4, h: 4 });
+    assert.deepEqual(layout['@2'], { x: 8, y: 4, w: 4, h: 4 });
+    assert.deepEqual(layout['@3'], { x: 8, y: 8, w: 4, h: 5 });   // last eats the remainder
+    const total = layout['@1'].h + layout['@2'].h + layout['@3'].h;
+    assert.equal(total, 13, 'strip heights must sum to the total row count');
+    // Non-overlapping: each pane's y range ends exactly where the next begins.
+    assert.equal(layout['@1'].y + layout['@1'].h, layout['@2'].y);
+    assert.equal(layout['@2'].y + layout['@2'].h, layout['@3'].y);
+});
+
+test('focusLayout: a single pane (focus only, no strip) fills all 12 columns', () => {
+    const layout = focusLayout(['@only'], '@only', 10);
+    // 🔴 GUARD: leaving w at 8 here (the strip-present width) would waste the
+    // right 4 columns when there is nothing to put in a strip.
+    assert.deepEqual(layout, { '@only': { x: 0, y: 0, w: 12, h: 10 } });
+});
+
+test('focusLayout: focusWid absent from orderedWids falls back to the first wid as focus', () => {
+    const layout = focusLayout(['@x', '@y'], '@nonexistent', 10);
+    // 🔴 GUARD: dropping the fallback (or falling back to some other wid than
+    // the first) would either throw on a stale focus target or focus the
+    // wrong pane.
+    assert.deepEqual(layout['@x'], { x: 0, y: 0, w: 8, h: 10 });
+    assert.deepEqual(layout['@y'], { x: 8, y: 0, w: 4, h: 10 });
+});
+
+test('focusLayout: empty orderedWids -> {}', () => {
+    assert.deepEqual(focusLayout([], '@a', 10), {});
+    assert.deepEqual(focusLayout(null, '@a', 10), {});
 });

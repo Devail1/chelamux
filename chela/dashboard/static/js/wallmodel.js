@@ -169,3 +169,46 @@ export function rankOrder(agents, wantsByWid) {
         .sort((a, b) => (a.rank - b.rank) || (a.i - b.i))
         .map(x => x.wid);
 }
+
+// ---- Focus layout (Wall redesign — Focus layout toggle) --------------------
+//
+// One pane large (the "focus" pane), the rest a compact right-side vertical
+// strip — a 12-column grid, PURE function of its inputs (no DOM/GridStack):
+// given `orderedWids` (who's on the wall, in the order the strip should stack
+// — the caller reuses rankOrder() for this, needs-you first, same ordering
+// contract auto-arrange already established) and `focusWid` (who's large),
+// return `{wid: {x,y,w,h}}` in integer grid cells. `totalRows` is the caller's
+// already-computed viewport row count (same total _wallFill()/_fillNodesByOrder
+// thinks in) — this function never measures anything itself.
+//
+// Geometry (fixed, not preset-driven — Focus is its own layout, not a column
+// count):
+//   - The focus pane: x:0, y:0, w:8, h:totalRows (full height).
+//   - Every OTHER wid (in the given order): a right-side strip, x:8, w:4,
+//     stacked top-to-bottom — y increases by each pane's share of the height,
+//     which splits evenly with the LAST strip pane eating the rounding
+//     remainder (mirrors _fillNodesByOrder's column-fill math exactly, so the
+//     strip always reaches the bottom with no gap).
+//   - No strip at all (the focus pane is the only wid) → it fills all 12
+//     columns, not just 8 — there's nothing to reserve the right rail for.
+//   - `focusWid` absent from `orderedWids` → the first wid becomes focus
+//     (never throws, never returns an empty layout for a non-empty wall).
+export function focusLayout(orderedWids, focusWid, totalRows) {
+    const wids = (orderedWids || []).filter(w => w != null);
+    const layout = {};
+    if (!wids.length) return layout;
+    const rows = Math.max(1, Math.floor(totalRows) || 1);
+    const focus = wids.includes(focusWid) ? focusWid : wids[0];
+    const strip = wids.filter(w => w !== focus);
+    layout[focus] = { x: 0, y: 0, w: strip.length ? 8 : 12, h: rows };
+    if (!strip.length) return layout;
+    const n = strip.length;
+    const hEach = Math.max(1, Math.floor(rows / n));
+    let y = 0;
+    strip.forEach((wid, i) => {
+        const h = (i === n - 1) ? Math.max(1, rows - y) : hEach;   // last eats the remainder
+        layout[wid] = { x: 8, y, w: 4, h };
+        y += h;
+    });
+    return layout;
+}
