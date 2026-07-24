@@ -216,6 +216,32 @@ body {
     color: var(--text-dim); opacity: 0.75;
 }
 
+/* --- Wall redesign slice 1: the recap line — Claude's own "what happened
+   while you were away" (a.recap), surfaced on the Wall for the first time.
+   Dim, one line, ellipsised; recap_ts rides in the tooltip. Sits between the
+   header and the iframe in normal flow (wall tiles only — _wallTileHTML is
+   never used by single mode), so it simply shrinks the iframe's own flex
+   box rather than needing any bottom-bar margin math. Hidden (not rendered
+   collapsed) when there is no recap — "degrade quietly", never an empty bar. */
+.pane-recap {
+    position: relative; flex: 0 0 auto; padding: 3px 22px 3px 9px;
+    font-size: 10.5px; line-height: 1.3; color: var(--text-dim); opacity: 0.85;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.pane-recap:hover { opacity: 1; }
+/* click-to-expand chevron — a pseudo-element so the 4s repaint's
+   textContent= never wipes it; rotates when the recap is pinned open. */
+.pane-recap::after {
+    content: '\25be'; position: absolute; right: 8px; top: 3px;
+    font-size: 9px; opacity: 0.55; transition: transform .12s ease;
+}
+.pane-recap.recap-open {
+    white-space: normal; overflow-y: auto; max-height: 8.5em; text-overflow: clip;
+}
+.pane-recap.recap-open::after { transform: rotate(180deg); }
+.pane-recap[hidden] { display: none; }
+
 /* --- CMX-119: pane header v2 — split the CMX-117 combined badge back apart
    now that every pane has a bottom bar to hold its numbers (see .term-ctx-bar
    / .gs-idx below). `.gs-dot` is back to a plain circle carrying LIVE STATUS
@@ -244,6 +270,23 @@ body {
    so it never collides with the waiting-state glow above) — updated in lockstep
    with the menu's Orchestrator row by _updateOrchBtns (terminals.js). */
 .gs-dot.gs-dot-orch { outline: 2px solid var(--ok-blue); outline-offset: 1px; }
+
+/* --- Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
+   Wall-only (paneHead's `draggable` gate — single mode renders none of this,
+   so mobile's forced single mode at <768px is untouched). GLYPH + WORD always
+   carry the state (Liav is red-weak); the Okabe-Ito colour below is
+   decoration on top, never the sole signal. `tileState` (wallmodel.js) is the
+   one source of the glyph/word/class triple; this file only paints it. */
+.gs-state {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px;
+    padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor;
+    font-size: 10px; font-weight: 700; line-height: 1.5; white-space: nowrap;
+}
+.gs-state-glyph { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.gs-state-working { color: var(--ok-green); }
+.gs-state-needs-you { color: var(--ok-orange); }
+.gs-state-done { color: var(--ok-sky); }
+.gs-state-idle { color: var(--text-dim); opacity: 0.85; }
 
 .gs-menu-wrap { position: relative; flex: 0 0 auto; }
 .gs-menu-btn {
@@ -311,6 +354,22 @@ body {
 .gs-branch { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .gs-ctx.ctx-warn { color: var(--yellow); }
 .gs-ctx.ctx-danger { color: var(--red); }
+
+/* --- Wall redesign slice 1: the meta row's model + PR + cost chips, folded
+   into this SAME bottom bar rather than a separate strip (enrich, don't
+   duplicate — .gs-branch/.gs-ctx above already live here). Wall-only
+   (_ctxBarHTML's draggable gate), left-grouped in normal flow same as
+   .gs-branch/.gs-ctx; `.gs-idx` (below) keeps its own auto-left-margin so it
+   stays pinned far-right no matter how many of these chips are hidden. */
+.gs-model, .gs-cost {
+    flex: 0 0 auto; font-weight: 500; line-height: 1;
+    white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.gs-pr {
+    flex: 0 0 auto; font-weight: 700; line-height: 1; white-space: nowrap;
+    color: var(--ok-sky); text-decoration: none; pointer-events: auto;
+}
+.gs-pr:hover { text-decoration: underline; }
 
 /* Pane № (Alt+N jump target) — CMX-119 originally tucked it at the far right
    of the bottom bar, after the context numbers; CMX-124 moved it to the FAR
@@ -795,6 +854,53 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
        the .term-single .term-pane .term-frame rule above for why margin. */
     margin-bottom: var(--term-ctx-bar-h);
 }
+/* Wall redesign slice 1: when the action bar (below) is showing, it stacks
+   ABOVE the ctx bar (same absolutely-positioned-footer technique as that bar
+   uses against the iframe) — so the iframe needs to reserve that much MORE
+   margin. `.has-term-action` is toggled by _applyWallTileFrame the instant
+   the bar's kind changes, in lockstep with the bar's own [hidden]. */
+.grid-stack-item-content.has-term-action .term-frame {
+    margin-bottom: calc(var(--term-ctx-bar-h) + var(--term-action-bar-h));
+}
+/* --- Wall redesign slice 1: the action bar. Amber (Approve/Answer, a
+   wantsHuman pane) or blue (Review, a finished pane with a PR) — GLYPH + WORD
+   still carry the state here too (◆/✓, matching the header pill), colour is
+   decoration. Sends its action via the EXISTING /api/term/key path
+   (chela.termActionClick -> termKeyFor), no new endpoint. Always rendered,
+   hidden by default — _applyWallTileFrame fills content and un-hides it, the
+   same pattern the ctx bar's chips already use. */
+:root { --term-action-bar-h: 26px; }
+.term-action-bar {
+    position: absolute; left: 0; right: 0; bottom: var(--term-ctx-bar-h); z-index: 5;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    height: var(--term-action-bar-h); padding: 0 9px;
+    font-size: 11px; font-weight: 600;
+    border-top: 1px solid var(--border);
+}
+.term-action-bar[hidden] { display: none; }
+.term-action-label {
+    display: inline-flex; align-items: center; gap: 5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.term-action-bar.action-approve, .term-action-bar.action-answer {
+    background: color-mix(in srgb, var(--ok-orange) 18%, var(--term-bg));
+    color: var(--ok-orange);
+}
+.term-action-bar.action-review {
+    background: color-mix(in srgb, var(--ok-sky) 18%, var(--term-bg));
+    color: var(--ok-sky);
+}
+.term-action-btn {
+    flex: 0 0 auto; display: inline-block; font: inherit; font-size: 10.5px; font-weight: 700;
+    padding: 2px 8px; border-radius: 4px; border: 1px solid currentColor;
+    background: transparent; color: inherit; cursor: pointer; text-decoration: none;
+    transition: background .12s ease, border-color .12s ease;
+}
+/* Soft tint on hover — keep the accent text legible, don't flip to a solid
+   block (the bar is already an accent-tinted surface; a full invert fought it). */
+.term-action-btn:hover { background: color-mix(in srgb, currentColor 15%, transparent); }
+.term-action-btn:active { background: color-mix(in srgb, currentColor 24%, transparent); }
+.term-action-btn:disabled { opacity: 0.6; cursor: default; }
 /* iframes eat the mouse mid-drag; neutralise them while dragging/resizing */
 .grid-stack.gs-dragging .term-frame { pointer-events: none; }
 /* Pin the page during a drag: gridstack transiently grows the grid into a lower
@@ -818,6 +924,23 @@ body.term-dragging { overflow: hidden; }
 /* The pane a locked drag is hovering — the swap target. */
 .grid-stack-item.swap-target > .grid-stack-item-content {
     box-shadow: 0 0 0 2px var(--accent); outline: none;
+}
+
+/* --- Wall redesign: Focus layout (one pane large, the rest a strip) --------
+   `.wall-focus-main` / `.wall-focus-strip` are set/cleared by _applyWallFocus
+   / _clearFocusClasses (terminals.js) in lockstep with the toggle — never a
+   CSS-only guess at which pane is which. The strip panes get a pointer
+   cursor + hover tint on their HEADER ONLY (the promote affordance —
+   terminals.js's _bindFocusPromote reads clicks there, never the iframe) so
+   "click here to bring this pane forward" is discoverable without a label. */
+.grid-stack-item.wall-focus-main > .grid-stack-item-content {
+    box-shadow: 0 0 0 1px var(--accent);
+}
+.grid-stack-item.wall-focus-strip > .grid-stack-item-content .gs-head {
+    cursor: pointer;
+}
+.grid-stack-item.wall-focus-strip > .grid-stack-item-content .gs-head:hover {
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
 
 /* --- THE WIRE: drag from a tile's port onto a peer to put them in a room -----
