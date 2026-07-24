@@ -82,7 +82,8 @@ already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
   messages it), and a human ends up being the message bus.
 - **Telegram bridge** — one forum topic per agent window: drive or supervise any
   agent from your phone, two-way (`chela telegram`; see
-  [`skills/telegram-setup`](skills/telegram-setup/SKILL.md)).
+  [`skills/telegram-setup`](skills/telegram-setup/SKILL.md)). Best paired with the
+  [hooks plugin](#recommended-the-hooks-plugin) — full-fidelity, tap-to-answer gates.
 - **tmux-native discovery** — windows are agents; `tmux list-windows` is the
   single source of truth. No external registry, no heartbeat daemon.
 - **Lean core, optional dashboard** — a two-dependency headless core; the Flask
@@ -457,6 +458,38 @@ push-to-pocket "your agent needs you" alert.
 
 ---
 
+## Recommended: the hooks plugin
+
+chela runs without any Claude Code hooks — it falls back to scraping each tmux
+pane. But two hooks are **strongly recommended**: several features are only fully
+reliable with them. Both fail *open* — if the daemon is down the hook logs a
+warning and your agent carries on, so a hook never wedges a session.
+
+**The event-log plugin** (`chela plugin`) POSTs every tool call, prompt,
+permission request and session end to the daemon, so a *pending* gate is known the
+instant it happens instead of scraped off the terminal after the fact. Install it
+for:
+
+- **Lossless blocked-agent gates on Telegram.** A pane scrape of an
+  `AskUserQuestion` is lossy — a multi-question or preview-bearing selector parses
+  as unparseable and reaches your phone with **no options at all** (this happened
+  live). The hook carries every question, option label, description and preview.
+- **Answering a question from Telegram with zero keystrokes.** The plugin returns
+  a human's tapped answer directly, instead of chela typing arrow-keys at the
+  terminal — a substrate that has *silently mis-answered* a picker and can't
+  express a multi-select answer at all.
+- **The live event Feed** on the dashboard.
+
+```bash
+chela plugin --dir ~/.chela/plugin        # render it (bakes in your dashboard port)
+claude --plugin-dir ~/.chela/plugin       # or: /plugin marketplace add ~/.chela/plugin
+```
+
+See **[docs/HOOKS.md](docs/HOOKS.md)** for the full contract. Pair it with the
+**statusLine hook** (below) for exact context + rate-limit numbers.
+
+---
+
 ## Context & rate-limit tracking
 
 The dashboard shows each agent's **context-window usage** and the account-wide
@@ -469,9 +502,10 @@ chela install-statusline           # prints the snippet to add to settings.json
 chela install-statusline --write   # writes it for you (won't clobber an existing one)
 ```
 
-It's optional. Without it, the context bar falls back to a coarser estimate
-derived from the agent's transcript (no rate-limit pills, and the window size is
-a guess — see `CHELA_DEFAULT_CONTEXT_WINDOW`). Install the hook for exact numbers.
+**Recommended** — install it for exact usage numbers. Without it, the context bar
+falls back to a coarser estimate derived from the agent's transcript (no
+rate-limit pills, and the window size is a guess — see
+`CHELA_DEFAULT_CONTEXT_WINDOW`).
 
 ---
 

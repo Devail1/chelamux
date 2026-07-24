@@ -15,6 +15,13 @@ history lives in `git log`.
 - **`docs/GETTING_STARTED.md`** — a clone-to-first-dispatched-agent quickstart.
 - **`CODE_OF_CONDUCT.md`** (Contributor Covenant 2.1) and GitHub issue/PR templates.
 
+### Changed
+
+- **Docs now recommend the hooks plugin.** README and the landing docs make clear
+  the event-log plugin (`chela plugin`) is strongly recommended — it unlocks
+  lossless blocked-agent gates on Telegram, zero-keystroke answers, and the live
+  Feed — and the statusLine hook is reframed as recommended for exact usage numbers.
+
 ## [0.2.0] — 2026-07-23
 
 The first tracked release: chelamux went public (MIT) and hardened through a
