@@ -33,6 +33,19 @@
         <span class="si-dot" aria-hidden="true"></span>
         <span class="si-text">0 sharing</span>
       </button>
+      <!-- Decisions inbox — the durable, owner-independent record of every dispatch
+           outcome chela/inbox.py has ever queued (CMX-171: moved out of the sidebar,
+           see #decisions-menu below for why). The dot reflects the same live/nobody/
+           dangling/unverified state the chip used to show inline; the numeric badge
+           (decisionsmodel.js) is the unread count — the two are independent signals,
+           not a substitute for each other; click to open the full log (which also
+           clears the badge). -->
+      <button class="icon-btn" id="btn-decisions" title="Decisions" aria-label="Decisions inbox"
+              aria-haspopup="true" onclick="chela.openDecisionsMenu(event)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+        <span class="decisions-dot" id="decisions-dot" hidden></span>
+        <span class="decisions-unread" id="decisions-unread" hidden></span>
+      </button>
       <!-- The three former primaries (Jump to… #btn-palette, New… #btn-new, overflow
            #btn-overflow) fold into this ONE button (CMX-109 / CMX-108 Part A
            re-filed) — #primary-menu below. ⌘K still opens the palette directly
@@ -69,22 +82,6 @@
       <div class="side-list" id="sidebar-agents">
         <div class="side-empty">No agents</div>
       </div>
-    </section>
-
-    <!-- Decisions — the durable, owner-independent record of every dispatch outcome
-         chela/inbox.py has ever queued, plus who (if anyone) currently receives it
-         live. Always visible (not gated behind the Personas tab, unlike cmx-106):
-         with no live owner, the chip below says so and the log keeps recording —
-         nothing is ever silently orphaned. Seeded once on page load (main.js) and
-         kept live off the SSE `log`/`orchestrator` deltas continuously, the same
-         way Sessions above stays live — see chela/dashboard/static/js/decisions.js. -->
-    <section class="side-section" id="side-decisions">
-      <div class="side-head">
-        <span class="side-title"
-              title="Every dispatch outcome, ever — recorded here whether or not a live session is receiving it. Click a pane's ⊙ toggle on the Wall to have it delivered straight into that session instead of landing only here.">Decisions</span>
-      </div>
-      <div id="decisions-chip"></div>
-      <div class="decisions-list" id="decisions-list"></div>
     </section>
 
   </aside>
@@ -538,6 +535,28 @@
   <div class="ov-stat">
     <span class="ov-lbl">Updated</span><span class="value ts" id="hdr-updated">-</span>
   </div>
+</div>
+
+<!-- Decisions inbox popover — the durable, owner-independent record of every
+     dispatch outcome chela/inbox.py has ever queued, plus who (if anyone)
+     currently receives it live. CMX-171: moved here from a permanent THIRD
+     sidebar section (`#side-decisions`, cmx-106/cmx-107) into a topbar popover
+     anchored off #btn-decisions, same open/close pattern as #new-menu /
+     #primary-menu above. This also fixes a real bug structurally: the sidebar's
+     collapsed 60px icon-rail hide-list (style.css) never listed the old
+     `#decisions-chip`/`.decisions-list`, so they used to spill into the rail —
+     moving the section out of the sidebar entirely means there is nothing left
+     to spill. #decisions-chip/#decisions-list keep their ids unchanged, so
+     chela/dashboard/static/js/decisions.js paints into this popover exactly as
+     it painted into the old sidebar section — nothing about its state/seeding/
+     SSE wiring changed, only where the DOM lives. -->
+<div class="popover decisions-menu" id="decisions-menu" style="display:none;">
+  <div class="popover-head">
+    <span class="popover-title"
+          title="Every dispatch outcome, ever — recorded here whether or not a live session is receiving it. Click a pane's ⊙ toggle on the Wall to have it delivered straight into that session instead of landing only here.">Decisions</span>
+  </div>
+  <div id="decisions-chip"></div>
+  <div class="decisions-list" id="decisions-list"></div>
 </div>
 
 <!-- Launcher: "add a project to Favorites" picker (filled from /api/launcher/suggest) -->
