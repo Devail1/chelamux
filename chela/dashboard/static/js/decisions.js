@@ -1,24 +1,28 @@
 // ---------------------------------------------------------------------------
 // DECISIONS LOG — the durable, owner-independent home for what the decisions
-// inbox has ever said. Lives in its own always-visible sidebar section
-// (index.html `#side-decisions`), not gated behind any nav tab (cmx-106 first
-// shipped it inside the Personas panel — cmx-107 moved it here so it is
-// genuinely always on screen, like the sidebar's Sessions list).
+// inbox has ever said. Lives in a topbar popover (index.html `#decisions-menu`,
+// anchored off `#btn-decisions`), not gated behind any nav tab (cmx-106 first
+// shipped it inside the Personas panel — cmx-107 moved it into an always-visible
+// sidebar section — CMX-171 moved it again, out of the sidebar into this popover,
+// so the sidebar stops permanently spending a third section on it. It is still
+// seeded/ticked exactly the same as before; only the DOM it paints into moved).
 //
 // This is deliberately NOT a second store. chela/inbox.py::tick() appends every
 // event to event_log (chela/event_log.py) whether or not a live session is
 // registered as the orchestrator — "the log is owner-independent" is already
 // true of the write path (see inbox.tick's unconditional `event_log.from_inbox`
-// loop). So this section is a FILTERED READ of the same /api/log the Feed reads
+// loop). So this popover is a FILTERED READ of the same /api/log the Feed reads
 // (feed.js), narrowed to the kinds chela/inbox.py actually queues/logs, plus an
 // owner chip (orchestrator.js) — a decision is never lost here even when the
-// chip reads "nobody": that IS this section being the fallback home.
+// chip reads "nobody": that IS this panel being the fallback home.
 //
-// Wiring (cmx-107): main.js seeds it ONCE on page load (`enterDecisions()`,
-// unconditional — no tab-open needed) and keeps it live off the SSE
-// `log`/`orchestrator` deltas (sse.js) continuously, plus a `tickDecisions()`
-// fallback poll each refresh() tick — the same pattern refreshSidebar() uses
-// for Sessions. Nothing here is gated on `currentTab` any more.
+// Wiring (cmx-107, unchanged by CMX-171): main.js seeds it ONCE on page load
+// (`enterDecisions()`, unconditional — no tab-open/popover-open needed) and
+// keeps it live off the SSE `log`/`orchestrator` deltas (sse.js) continuously,
+// plus a `tickDecisions()` fallback poll each refresh() tick — the same pattern
+// refreshSidebar() uses for Sessions. Nothing here is gated on `currentTab`.
+// The header dot (`#decisions-dot`) mirrors the same state, so the state is
+// legible without opening the popover.
 //
 // The cursor/drain contract is identical to the Feed's (feedmodel.js:
 // drainLog) — resume from `next_seq`, never `last_seq`; a rotted cursor comes
@@ -144,7 +148,20 @@ function _gapHtml() {
     return `<div class="feed-gap">⚠ ${escHtml(_gap.reason || 'a gap in the decisions log')}</div>`;
 }
 
+// The header button's dot (#decisions-dot) — the same live/nobody/dangling/
+// unverified state the chip conveys, surfaced without opening the popover.
+function _renderDot() {
+    const dot = $('#decisions-dot');
+    if (!dot) return;
+    const s = orchestratorState();
+    const meta = CHIP_META[s.state] || CHIP_META.unregistered;
+    dot.hidden = false;
+    dot.className = 'decisions-dot dot-' + meta.cls;
+    dot.title = meta.word;
+}
+
 function _render() {
+    _renderDot();
     const chip = $('#decisions-chip');
     if (chip) chip.innerHTML = _chipHtml();
     const host = $('#decisions-list');
@@ -157,5 +174,31 @@ function _render() {
     host.innerHTML = _gapHtml() + rows.map(_rowHtml).join('');
 }
 
+// --- Header popover: anchored + light-dismiss, same pattern as nav.js's
+// openPrimaryMenu/openNewMenu (#primary-menu/#new-menu). Opening ticks the log
+// so the popover is never showing a stale read the moment it appears.
+function openDecisionsMenu(ev) {
+    if (ev) ev.stopPropagation();
+    const m = $('#decisions-menu');
+    if (!m) return;
+    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-decisions');
+    // Show it BEFORE measuring: a display:none element has no offsetWidth.
+    m.style.display = 'block';
+    const r = anchor.getBoundingClientRect();
+    m.style.top = (r.bottom + 6) + 'px';
+    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
+    tickDecisions();
+    setTimeout(() => document.addEventListener('click', hideDecisionsMenu, { once: true }), 0);
+}
+
+function hideDecisionsMenu() {
+    const m = $('#decisions-menu');
+    if (m) m.style.display = 'none';
+}
+
 // --- Stage 0: ES-module exports ---
-export { DECISION_TYPES, enterDecisions, onDecisionsLogDelta, tickDecisions };
+export { DECISION_TYPES, enterDecisions, hideDecisionsMenu, onDecisionsLogDelta, openDecisionsMenu, tickDecisions };
+
+// --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
+window.chela = window.chela || {};
+Object.assign(window.chela, { hideDecisionsMenu, openDecisionsMenu });
