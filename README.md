@@ -114,6 +114,10 @@ uv sync --extra dashboard
 Requirements: Python ≥ 3.11, `tmux`, `git`, the `claude` CLI on `PATH`
 (plus `gh` for the dispatcher's PR flow).
 
+**Recommended:** install the [hooks plugin](#recommended-the-hooks-plugin) too — one
+line inside Claude Code (`/plugin marketplace add Devail1/chelamux`). It's what makes
+blocked-agent handling, phone answering, and the live Feed work well.
+
 **Authenticate Claude once.** chela doesn't manage credentials — it drives the
 `claude` CLI inside your tmux windows. Log in once on the machine (`claude`, then
 `/login` — or `claude setup-token` for a headless/long-lived token); every agent
