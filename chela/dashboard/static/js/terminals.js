@@ -2835,13 +2835,23 @@ function _restoreManualLayout() {
     if (!_grid) return;
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('pc_wall_layout') || '{}'); } catch (e) { /* noop */ }
+    const valid = s => s && Number.isInteger(s.x) && Number.isInteger(s.y) && s.w > 0 && s.h > 0;
+    const nodes = _grid.engine.nodes.filter(n => !_pinned.has(n.id) && valid(saved[n.id]));
+    if (!nodes.length) return;
     _grid.batchUpdate();
     try {
-        _grid.engine.nodes.forEach(n => {
+        // TWO-PASS park-then-place. A restore often SWAPS columns (auto-arrange
+        // put a working pane where an idle one is saved, and vice-versa); moving
+        // one straight into a spot the other still occupies makes GridStack shove
+        // the occupant away, and the swap never settles (both tiles cascade into
+        // one column). So first park every node in its own empty row far below
+        // the grid, clearing the real area, THEN drop each onto its saved cell —
+        // now nothing collides. Both passes are inside one batch, so the parked
+        // positions are transient and never paint.
+        nodes.forEach((n, i) => _grid.update(n.el, { x: 0, y: 10000 + i * 2, w: 1, h: 1 }));
+        nodes.forEach(n => {
             const s = saved[n.id];
-            if (s && Number.isInteger(s.x) && Number.isInteger(s.y) && s.w > 0 && s.h > 0) {
-                _grid.update(n.el, { x: s.x, y: s.y, w: s.w, h: s.h });
-            }
+            _grid.update(n.el, { x: s.x, y: s.y, w: s.w, h: s.h });
         });
     } finally {
         _grid.batchUpdate(false);
