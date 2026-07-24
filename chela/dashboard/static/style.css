@@ -549,6 +549,19 @@ body {
 .decisions-dot.dot-bad { background: var(--ok-vermillion); }
 .decisions-dot.dot-warn { background: var(--ok-orange); }
 
+/* The unread-count badge (decisionsmodel.js) — a SEPARATE signal from the dot
+   above (state vs. "how many you haven't looked at"), so it sits at the
+   opposite corner and reads as a number, never colour-only (same red-weak
+   rule as the dot/chip: the digits carry the fact, urgency colour is on top). */
+.decisions-unread {
+    position: absolute; bottom: -4px; right: -4px; min-width: 16px; height: 16px;
+    padding: 0 3px; border-radius: 8px; background: var(--text-dim); color: var(--surface);
+    font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+    border: 1.5px solid var(--surface);
+}
+.decisions-unread.decisions-unread-warn { background: var(--ok-orange); }
+.decisions-unread.decisions-unread-bad { background: var(--ok-vermillion); }
+
 /* Shares sheet — ONE component: an anchored panel on desktop, a bottom-sheet on
    mobile. Lists every active share with a prominent Stop each + a Stop-All. */
 .shares-backdrop { position: fixed; inset: 0; z-index: 100001; background: rgba(0, 0, 0, 0.45); }
