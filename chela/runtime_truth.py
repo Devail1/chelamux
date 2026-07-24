@@ -66,7 +66,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chela import capabilities, config, discovery, epoch, hold, hooks, sessions
+from chela import capabilities, config, discovery, epoch, event_log, hold, hooks, sessions
 from chela.sources import get_source
 from chela.workflow import load_workflow
 
@@ -806,6 +806,85 @@ def _plugin_applies() -> bool:
     return _rendered_path().exists() or bool(hooks.installed_plugins())
 
 
+# --- fact: the INSTALLED plugin matches, so an agent SHOULD be firing hooks — but does
+# one actually reach the event log? -----------------------------------------------------
+#
+# `plugin.rendered`/`plugin.installed` above compare MANIFESTS — url, timeout, command —
+# and stop there. CMX-41 was exactly a manifest that matched on paper while every hook
+# POSTed into a closed socket, and every hook fails OPEN by design (`curl ... || true`,
+# `SessionStart`'s recap: "fail open"): a broken POST tells the agent NOTHING and tells
+# chela nothing either, anywhere but here. So this fact goes one link further than the
+# manifest and asks the one place a hook's arrival is ever recorded — the event log —
+# whether a hook from a LIVE, already-past-boot agent is actually in it. A window whose
+# claude process has been running long enough that `SessionStart` has certainly fired (it
+# runs at process start, before anything else) and that has produced no `hook.*` event at
+# all is either still POSTing into a dead port, or was launched before the plugin was
+# installed and needs a restart to pick it up — either way, something chela can now say
+# out loud instead of a phone that quietly never rings.
+
+# Long enough after process start that SessionStart has certainly fired and been received
+# (it runs first, before any other hook) — short enough that the bounded event-log ring
+# (CHELA_EVENTS_RING) has not plausibly rolled past it on a busy fleet. Windows outside
+# this band are not asked: too new to judge, or too old for "nothing recent" to mean
+# anything (the ring ages out, not the hook).
+_HOOK_GRACE_SECONDS = 20.0
+_HOOK_STALE_SECONDS = 600.0
+
+
+def _hooks_flowing_declared() -> dict[str, sessions.Pane]:
+    """Live claude-agent windows old enough that ``SessionStart`` should long since have
+    fired and been received."""
+    now = time.time()
+    return {
+        wid: pane for wid, pane in sessions.panes().items()
+        if pane.claude_pid and pane.started
+        and _HOOK_GRACE_SECONDS < now - pane.started < _HOOK_STALE_SECONDS
+    }
+
+
+def _hooks_flowing_read() -> Observation:
+    """The event log's own copy: the newest hook-sourced event seen from each window."""
+    seen: dict[str, float] = {}
+    for rec in event_log.ring():
+        wid = rec.get("wid")
+        rtype = rec.get("type") or ""
+        if wid and rtype.startswith(hooks.TYPE_PREFIX):
+            seen[wid] = max(seen.get(wid, 0.0), rec.get("ts") or 0.0)
+    return observed(seen)
+
+
+def _hooks_flowing_report(declared: dict[str, sessions.Pane],
+                          obs: Observation) -> list[Finding]:
+    if not declared:
+        return []                       # no live agent old enough to judge yet
+    seen: dict[str, float] = obs.value
+    silent = [
+        wid for wid, pane in sorted(declared.items())
+        if seen.get(wid) is None or seen[wid] < pane.started
+    ]
+    if silent:
+        return [Finding(
+            ERROR,
+            f"{len(silent)} live agent window(s) have fired NO hook: {', '.join(silent)}",
+            "Claude Code has the plugin installed (see plugin.installed) and this window's "
+            "claude process has been running well past when `SessionStart` fires — but the "
+            "event log, the ONLY place a hook's arrival is ever recorded, has nothing from "
+            "it. Hooks fail OPEN, so a stale dashboard port (CMX-41), a firewalled "
+            "loopback, or a hook script error reports NOTHING to the agent and NOTHING "
+            "here until this check. The other likely cause is the same fix either way: "
+            "the agent was launched BEFORE the plugin was (re)installed — hooks are read "
+            "at agent startup, so a running agent keeps none until it is restarted. "
+            "Confirm `plugin.installed` and `dashboard.port` agree, then restart the "
+            "agent.",
+        )]
+    return [Finding(
+        OK, f"{len(declared)} live agent window(s): hooks are reaching the event log")]
+
+
+def _hooks_flowing_applies() -> bool:
+    return bool(hooks.installed_plugins())
+
+
 # --- fact: what the RUNNING daemon came up with --------------------------------------
 
 def _daemon_read() -> Observation:
@@ -1449,6 +1528,140 @@ def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
             + (f"; {queued} event(s) queued for its next idle tick" if queued else ""))]
 
 
+# --- fact: on a host with no /proc (macOS), can chela's window-resolution FALLBACK
+# actually run? --------------------------------------------------------------------------
+#
+# `chela.sessions`' `/proc` reads are the FAST PATH, not the only one: a host with no
+# `/proc` at all (macOS) falls back to `ps`/`pgrep` (see `sessions._sh`, `_children`/
+# `_sh_children`, `_comm`). Losing `pgrep` collapses `_claude_pid` to always-None — and
+# with it `started`, `resumed` and `launched_in` — so `resolve_window`'s two STRONGEST
+# signals (the event log, bounded by process start time; `--resume <sid>` off the command
+# line) never fire, for every window on the host, silently: resolution still "succeeds"
+# via the weakest signal alone (tmux's own pane cwd), just wrongly in the one case that
+# signal cannot tell apart — two windows sharing a directory — which is the exact failure
+# class this registry exists to catch (CMX-48, the 2026-07-14 relay outage). Losing `ps`
+# degrades the same fallback pair. Only a fact of a host WITHOUT `/proc`: Linux never
+# leaves the fast path, so there is nothing here to check there.
+
+_WINDOW_SHIM_BINARIES = ("pgrep", "ps")
+
+
+def _window_shim_which(binary: str) -> str | None:
+    """A seam: the real answer is the shell PATH; the suite hands this a fixed one."""
+    return shutil.which(binary)
+
+
+def _windows_resolvable_read() -> Observation:
+    return observed({b: _window_shim_which(b) is not None for b in _WINDOW_SHIM_BINARIES})
+
+
+def _windows_resolvable_report(declared: tuple[str, ...], obs: Observation) -> list[Finding]:
+    found: dict[str, bool] = obs.value
+    missing = [b for b in declared if not found.get(b)]
+    if missing:
+        return [Finding(
+            ERROR,
+            f"no /proc on this host, and {', '.join(missing)} not on PATH — window "
+            "resolution is running BLIND",
+            "chela.sessions falls back to `ps`/`pgrep` when there is no `/proc` (macOS). "
+            f"Without {', '.join(missing)}, `claude_pid` — and with it `started`, "
+            "`resumed`, `launched_in` — is always None, so every window resolves ONLY via "
+            "the weakest signal, tmux's own pane cwd: the same failure class as the "
+            "2026-07-14 relay outage, permanently instead of rarely. Install "
+            f"{' and '.join(missing)} (both ship with macOS by default; a minimal "
+            "container image is the usual way to lose them).",
+        )]
+    return [Finding(
+        OK, f"no /proc on this host — window resolution falls back to "
+            f"{', '.join(declared)}, both on PATH")]
+
+
+def _windows_resolvable_applies() -> bool:
+    return not sessions._PROC_HOST
+
+
+# --- fact: the bundled coverage-fallback font, and whether it REALLY covers the TUI
+# marker glyphs both render surfaces fall back to it for ---------------------------------
+#
+# CMX-156/CMX-159's whole point: JetBrains Mono, Symbols Nerd Font and every font-picker
+# option all lack `⏺ ❌ ✅ ✦ ✷ ✨ ⚙` — the web terminal's tool-marker and spinner glyphs — so
+# both the dashboard (`chela/dashboard/app.py` `_TERM_FONTS`) and the telegram
+# `/screenshot` PNG renderer (`chela/telegram/screenshot.py`) fall back to one bundled
+# Symbola subset for exactly those codepoints. `tests/test_term_symbol_fallback.py`
+# already proves the REPO's copy has them; this fact proves the copy on THIS INSTALL still
+# does — a corrupted download, a packaging miss, or a hand-edit that re-subsets the font
+# would otherwise reintroduce tofu (`▢`) on both surfaces in total silence: a font-fallback
+# failure renders SOMETHING (a box), never an error, on either surface.
+
+_FONTS_DIR = Path(__file__).resolve().parent / "dashboard" / "static" / "fonts"
+_COVERAGE_FONT = "Symbola-Subset.ttf"
+# Mirrors tests/test_term_symbol_fallback.py's _REQUIRED_GLYPHS and the README's
+# documented subset (U+2300-23FF, U+2600-27BF) — the exact glyphs CMX-159 found falling
+# through the whole font stack to tofu.
+_TUI_MARKER_GLYPHS = "⏺❌✅✦✷✨⚙"
+
+
+def _font_coverage_cmap(path: Path):
+    """The font's real cmap, or ``None`` if fontTools is not installed (the ``[telegram]``
+    extra) — a seam so the suite can hand this a fixture without needing the extra."""
+    try:
+        from fontTools.ttLib import TTFont
+    except ImportError:
+        return None
+    try:
+        font = TTFont(str(path), lazy=True, fontNumber=0)
+        try:
+            return font.getBestCmap()
+        finally:
+            font.close()
+    except Exception:
+        return {}
+
+
+def _font_coverage_read() -> Observation:
+    if not _FONTS_DIR.exists():
+        return observed({"exists": False, "cmap": None})
+    path = _FONTS_DIR / _COVERAGE_FONT
+    if not path.exists():
+        return observed({"exists": False, "cmap": None})
+    return observed({"exists": True, "cmap": _font_coverage_cmap(path)})
+
+
+def _font_coverage_report(declared: str, obs: Observation) -> list[Finding]:
+    glyphs = declared
+    val = obs.value
+    if not val["exists"]:
+        return [Finding(
+            ERROR,
+            f"{_COVERAGE_FONT} is MISSING from {_FONTS_DIR}",
+            "The dashboard web terminal and telegram `/screenshot` both fall back to this "
+            f"file for {glyphs!r} — no other bundled font contains them (CMX-156/159). "
+            "Without it both surfaces render tofu (▢) for every tool-marker and spinner "
+            "glyph, with no error anywhere: a missing @font-face 404s silently in the "
+            "browser, and the screenshot renderer's cmap lookup just skips to the next "
+            "(non-covering) font in its chain.",
+        )]
+    cmap = val["cmap"]
+    if cmap is None:
+        return [Finding(
+            OK, f"{_COVERAGE_FONT} present ({_FONTS_DIR})",
+            "fontTools is not installed (the `[telegram]` extra), so chela can only "
+            "confirm the file EXISTS, not that it still contains the glyphs both surfaces "
+            "need. Install `chelamux[telegram]` for a full check.",
+        )]
+    missing = [ch for ch in glyphs if ord(ch) not in cmap]
+    if missing:
+        return [Finding(
+            ERROR,
+            f"{_COVERAGE_FONT} is missing glyph(s): {''.join(missing)!r}",
+            f"The file is there but its cmap no longer covers {missing!r} — a re-subset "
+            "or a corrupted download. The dashboard web terminal and telegram "
+            "`/screenshot` both rely on this exact file for these glyphs; either would "
+            "now render tofu (▢) for the missing ones, silently.",
+        )]
+    return [Finding(OK, f"{_COVERAGE_FONT} covers all {len(glyphs)} TUI marker glyphs")]
+
+
 def _ago(seconds: float) -> str:
     if seconds < 90:
         return f"{int(seconds)}s ago"
@@ -1523,6 +1736,16 @@ def facts() -> list[Fact]:
             read_back=_installed_read,
             report=_installed_report,
             applies=_plugin_applies,
+        ),
+        Fact(
+            name="plugin.hooks_flowing",
+            declared_by="chela.sessions — the live claude-agent windows old enough that "
+                        "SessionStart should long since have fired",
+            owned_by="the event log — the ONLY place a hook's arrival is ever recorded",
+            declare=_hooks_flowing_declared,
+            read_back=_hooks_flowing_read,
+            report=_hooks_flowing_report,
+            applies=_hooks_flowing_applies,
         ),
         Fact(
             name="daemon.capabilities",
@@ -1632,6 +1855,30 @@ def facts() -> list[Fact]:
             read_back=_relay_read,
             report=_relay_report,
             unverifiable_level=WARN,      # same reason as tmux.session
+        ),
+        Fact(
+            name="windows.resolvable",
+            declared_by="chela.sessions — its own POSIX fallback path, exercised only "
+                        "when this host has no /proc",
+            owned_by="the shell PATH — whether pgrep/ps, the fallback's own dependencies, "
+                     "are actually there",
+            declare=lambda: _WINDOW_SHIM_BINARIES,
+            read_back=_windows_resolvable_read,
+            report=_windows_resolvable_report,
+            applies=_windows_resolvable_applies,
+        ),
+        Fact(
+            name="fonts.glyph_coverage",
+            declared_by="the render surfaces that fall back to it for coverage "
+                        "(chela/dashboard/app.py _TERM_FONTS, chela/telegram/"
+                        "screenshot.py) — both need the TUI marker glyphs and neither "
+                        "font they pick before it contains them (CMX-156/159)",
+            owned_by="the font file on disk (chela/dashboard/static/fonts/"
+                     f"{_COVERAGE_FONT}) — its own cmap, the same way the /screenshot "
+                     "renderer picks a face per glyph",
+            declare=lambda: _TUI_MARKER_GLYPHS,
+            read_back=_font_coverage_read,
+            report=_font_coverage_report,
         ),
         Fact(
             name="tests.js_suites",

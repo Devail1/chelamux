@@ -335,6 +335,38 @@ def _unreadable_pr_checks(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_hooks_flowing(tmp_path, monkeypatch):
+    """A window's claude process is live and long past when `SessionStart` should have
+    fired — but the event log has nothing from it. CMX-41, structurally: the manifest
+    matches (plugin.rendered/plugin.installed are both green) and the hook still never
+    arrived."""
+    started = time.time() - 60.0
+    agent_cwd = str(tmp_path / "agent")
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {"@1": sessions.Pane(
+        wid="@1", path=agent_cwd, command="claude", claude_pid=1,
+        launched_in=agent_cwd, started=started)})
+    return doctor.ERROR
+
+
+def _break_windows_resolvable(tmp_path, monkeypatch):
+    """A host with no /proc (macOS) whose PATH is missing `pgrep` — every window's two
+    strongest resolution signals silently collapse to None (chela.sessions' own docstring,
+    verbatim)."""
+    monkeypatch.setattr(sessions, "_PROC_HOST", False)
+    monkeypatch.setattr(
+        runtime_truth, "_window_shim_which",
+        lambda binary: None if binary == "pgrep" else f"/usr/bin/{binary}")
+    return doctor.ERROR
+
+
+def _break_fonts_glyph_coverage(tmp_path, monkeypatch):
+    """The bundled coverage-fallback font is missing on THIS install — a packaging miss
+    or a corrupted download, not a repo defect (tests/test_term_symbol_fallback.py already
+    proves the checked-in copy is fine)."""
+    monkeypatch.setattr(runtime_truth, "_FONTS_DIR", tmp_path / "no-fonts-here")
+    return doctor.ERROR
+
+
 def _break_relay_transcripts(tmp_path, monkeypatch):
     """The bound window's transcript is not where chela looks — the 2026-07-14 outage.
 
@@ -369,6 +401,9 @@ CORRUPTIONS = {
     "runs.parked_branch": _break_runs_parked_branch,
     "pr.checks": _break_pr_checks,
     "tests.js_suites": _break_tests_js_suites,
+    "plugin.hooks_flowing": _break_hooks_flowing,
+    "windows.resolvable": _break_windows_resolvable,
+    "fonts.glyph_coverage": _break_fonts_glyph_coverage,
 }
 
 
