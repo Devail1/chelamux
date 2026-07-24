@@ -28,6 +28,45 @@ before(async () => {
     tm = await import('../chela/dashboard/static/js/taskmodalmodel.js');
 });
 
+// --- briefSource: brief > body > raw, never throws on a sparse item --------
+
+test('briefSource: a run brief wins over body and raw', () => {
+    // 🔴 GUARD: reordering the priority list (e.g. checking `body` first) would
+    // make a claimed run with a stale/short `body` shadow its own richer,
+    // claim-time-persisted `brief` — this pins brief as authoritative once a
+    // run exists.
+    const item = { brief: 'RUN BRIEF', body: 'TASK BODY', raw: '- [ ] raw line' };
+    assert.equal(tm.briefSource(item), 'RUN BRIEF');
+});
+
+test('briefSource: falls back to body when there is no brief (an open task)', () => {
+    const item = { brief: null, body: 'TASK BODY', raw: '- [ ] raw line' };
+    assert.equal(tm.briefSource(item), 'TASK BODY');
+});
+
+test('briefSource: falls back to raw when neither brief nor body exist', () => {
+    // 🔴 GUARD: a bare one-line task (chela.sources.markdown._task_body returns
+    // None for it) or a gh_issues task (no `body` concept at all) must still
+    // render SOMETHING — dropping this fallback step would blank the pane for
+    // every task that predates this feature.
+    const item = { brief: null, body: null, raw: '- [ ] raw line' };
+    assert.equal(tm.briefSource(item), '- [ ] raw line');
+});
+
+test('briefSource: empty strings are treated as absent, not as a match', () => {
+    // 🔴 GUARD: using `??`/`||` naively on an EMPTY STRING `brief` would return
+    // `''` (falsy-but-present) instead of falling through to `body` — dropping
+    // the explicit `v !== ''` check reproduces that.
+    const item = { brief: '', body: '', raw: 'raw wins' };
+    assert.equal(tm.briefSource(item), 'raw wins');
+});
+
+test('briefSource: nothing at all (a backlog item) resolves to null, never throws', () => {
+    assert.equal(tm.briefSource({}), null);
+    assert.equal(tm.briefSource(null), null);
+    assert.equal(tm.briefSource(undefined), null);
+});
+
 // --- briefHtml: pins the knMd CONTRACT the brief pane depends on -----------
 
 test('briefHtml: empty/null/undefined text renders nothing', () => {

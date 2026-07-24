@@ -3,13 +3,18 @@
 The modal needs the task's brief text on BOTH sides of the claim boundary:
 
   * an un-dispatched task only exists as an ``open_tasks`` entry, so
-    ``/api/dispatcher`` must hand back ``Task.raw`` (chela.sources.Task) for it —
-    see ``test_open_tasks_include_raw``.
+    ``/api/dispatcher`` must hand back both ``Task.raw`` (the bare bullet line)
+    AND ``Task.body`` (the FULL multi-line brief — see
+    ``chela.sources.markdown._task_body`` / ``tests/test_markdown_task_body.py``
+    for how that's captured) — see ``test_open_tasks_include_raw`` and
+    ``test_open_tasks_include_body``.
   * once claimed, the task drops out of ``open_tasks`` (it becomes a run), so the
-    brief has to be COPIED onto the run row at claim time (``dispatcher._spawn``)
-    into the new ``runs.brief`` column, or the modal would go blank the instant a
-    task starts running — see ``test_spawn_persists_brief_from_task_raw`` and
-    ``test_spawn_failure_path_also_persists_brief``.
+    brief has to be COPIED onto the run row at claim time (``dispatcher._spawn``,
+    via ``dispatcher._task_brief`` — ``task.body`` first, ``task.raw``/title as
+    fallback) into the new ``runs.brief`` column, or the modal would go blank the
+    instant a task starts running — see ``test_spawn_persists_brief_from_task_raw``,
+    ``test_spawn_prefers_task_body_over_raw_when_both_exist`` and
+    ``test_spawn_falls_back_to_raw_when_task_has_no_body``.
 
 Both additions are additive-only: no status/lifecycle logic changes, and a
 pre-migration row simply reads ``brief IS NULL`` (dispatcher.ensure_schema's
@@ -63,6 +68,35 @@ def test_open_tasks_include_raw(monkeypatch, client, tmp_path):
     tasks = data["workflows"][0]["open_tasks"]
     assert len(tasks) == 1
     assert tasks[0]["raw"] == "- [ ] ship it"
+    # A bare one-line task (no indented continuation) has no `body` — None, not
+    # an empty string (taskmodalmodel.js's briefSource treats '' as "present but
+    # empty" and would stop there instead of falling through to `raw`).
+    assert tasks[0]["body"] is None
+
+
+def test_open_tasks_include_body(monkeypatch, client, tmp_path):
+    """🔴 GUARD: drop the `"body": t.body` line from api_dispatcher's open_tasks
+    comprehension and this goes RED — an un-dispatched task with a real
+    multi-line brief would only ever show its bare bullet line in the modal,
+    exactly the limitation this follow-up exists to fix."""
+    _no_repo_workflow(monkeypatch)
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    (repo / "WORKFLOW.md").write_text(
+        "---\nproject_key: XYZ\ntracker:\n  kind: markdown\n  path: TODO.md\n---\nprompt\n"
+    )
+    (repo / "TODO.md").write_text(
+        "## Open\n\n- [ ] ship it\n\n  **OBJECTIVE.** Ship the thing.\n\n## Backlog\n"
+    )
+    wf_path = (repo / "WORKFLOW.md").resolve()
+    monkeypatch.setattr(dash, "DISPATCH_WORKFLOWS", [wf_path])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
+
+    resp = client.get("/api/dispatcher")
+    tasks = resp.get_json()["workflows"][0]["open_tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["body"] == "ship it\n\n**OBJECTIVE.** Ship the thing."
+    assert "## Backlog" not in tasks[0]["body"]
 
 
 # --- dispatcher._spawn: brief persisted at claim time -----------------------
@@ -137,11 +171,12 @@ def _spawn(wf: WorkflowDef, task: Task, conn: sqlite3.Connection, attempt: int =
 
 
 def test_spawn_persists_brief_from_task_raw(tmp_path):
-    """🔴 GUARD: the claim-path INSERT in dispatcher._spawn must copy
-    `task.raw` into the new `brief` column. Drop the `brief` column/value from
-    that INSERT (or from the ON CONFLICT UPDATE, which a retry exercises) and
-    this goes RED — a claimed run would carry NULL where the modal expects the
-    brief that a moment ago was visible in open_tasks."""
+    """🔴 GUARD: the claim-path INSERT in dispatcher._spawn must copy the task's
+    brief (here, `task.raw` — this task has no `body`) into the new `brief`
+    column. Drop the `brief` column/value from that INSERT (or from the ON
+    CONFLICT UPDATE, which a retry exercises) and this goes RED — a claimed run
+    would carry NULL where the modal expects the brief that a moment ago was
+    visible in open_tasks."""
     repo = _repo(tmp_path)
     root = tmp_path / "worktrees"
     conn = _conn()
@@ -152,6 +187,46 @@ def test_spawn_persists_brief_from_task_raw(tmp_path):
 
     row = conn.execute("SELECT brief FROM runs WHERE task_id='brief-task'").fetchone()
     assert row["brief"] == raw_text
+
+
+def test_spawn_prefers_task_body_over_raw_when_both_exist(tmp_path):
+    """🔴 GUARD: `dispatcher._task_brief` must prefer `task.body` (the FULL
+    multi-line brief) over `task.raw` (the bare bullet line) when both exist —
+    the whole point of this follow-up. Reorder `_task_brief`'s
+    `task.body or task.raw or task.title` (or have `_spawn` pass `task.raw`
+    directly again) and this goes RED: the modal would go back to showing only
+    the one-line bullet even for a task whose full brief WAS captured."""
+    repo = _repo(tmp_path)
+    root = tmp_path / "worktrees"
+    conn = _conn()
+    body_text = "Do the thing\n\n**OBJECTIVE.** Build X.\n\n**BOUNDARIES.** Only file Y."
+    task = Task(
+        id="body-task", title="Do the thing", file="TODO.md", line_number=1,
+        raw="- [ ] Do the thing", body=body_text,
+    )
+
+    assert _spawn(_wf(repo, root), task, conn) is True
+
+    row = conn.execute("SELECT brief FROM runs WHERE task_id='body-task'").fetchone()
+    assert row["brief"] == body_text
+
+
+def test_spawn_falls_back_to_raw_when_task_has_no_body(tmp_path):
+    """The other half of the same guard: a bare one-line task (no continuation
+    — `task.body is None`, exactly what chela.sources.markdown._task_body
+    returns for one) still gets SOME brief, not NULL."""
+    repo = _repo(tmp_path)
+    root = tmp_path / "worktrees"
+    conn = _conn()
+    task = Task(
+        id="bare-task", title="Bare task", file="TODO.md", line_number=1,
+        raw="- [ ] Bare task", body=None,
+    )
+
+    assert _spawn(_wf(repo, root), task, conn) is True
+
+    row = conn.execute("SELECT brief FROM runs WHERE task_id='bare-task'").fetchone()
+    assert row["brief"] == "- [ ] Bare task"
 
 
 def test_spawn_retry_refreshes_brief_via_on_conflict(tmp_path):

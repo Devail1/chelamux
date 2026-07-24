@@ -931,10 +931,11 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # in both, which is exactly "the critic never ran".
         ("critic_notes", "ALTER TABLE runs ADD COLUMN critic_notes TEXT"),
         ("critic_reviewed_at", "ALTER TABLE runs ADD COLUMN critic_reviewed_at TEXT"),
-        # 📋 Task-detail modal (Work-view redesign). `brief` is the task's `Task.raw` —
-        # the tracker's own text for this task (the original line for a markdown
-        # tracker; the issue URL for gh_issues) — copied onto the run row at CLAIM
-        # time (`_spawn`, below) so the modal still has the brief to show once the
+        # 📋 Task-detail modal (Work-view redesign). `brief` is the task's full
+        # multi-line brief (`Task.body` — the markdown source's title + its dedented
+        # OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation, when it captured one;
+        # else `Task.raw`/title — see `_task_brief`, below) copied onto the run row
+        # at CLAIM time (`_spawn`) so the modal still has the brief to show once the
         # task has left `open_tasks` (which only lists UNCLAIMED tasks). Additive and
         # read-only downstream: nothing in the dispatch/rework/judge path reads this
         # column back. A pre-migration row simply reads NULL — the modal degrades to
@@ -2870,7 +2871,7 @@ def tick(workflow_path: str | Path) -> dict:
                        ON CONFLICT(task_id) DO UPDATE SET
                          status='failed', attempt=excluded.attempt, last_error=excluded.last_error,
                          brief=excluded.brief""",
-                    (task.id, str(wf.path), task.title, attempt, str(e), _now(), task.raw),
+                    (task.id, str(wf.path), task.title, attempt, str(e), _now(), _task_brief(task)),
                 )
                 conn.commit()
                 continue
@@ -2915,6 +2916,17 @@ def _max_existing_task_number(repo_path: Path, project_key: str) -> int:
         if suffix.isdigit():
             best = max(best, int(suffix))
     return best
+
+
+def _task_brief(task: Task) -> str | None:
+    """What to persist onto `runs.brief` at claim time — the task-detail modal's
+    left pane. `task.body` (the markdown source's full title + dedented
+    OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation) wins when the source
+    captured one; a bare one-line task, or a source with no notion of a
+    continuation (gh_issues), falls back to `task.raw` (the bullet line / issue
+    URL), and — belt-and-suspenders, should raw itself ever be empty — `task.title`.
+    """
+    return task.body or task.raw or task.title
 
 
 def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) -> bool:
@@ -2968,7 +2980,7 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
              window_epoch=NULL, brief=excluded.brief""",
-        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number, task.raw),
+        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number, _task_brief(task)),
     )
     conn.commit()
 

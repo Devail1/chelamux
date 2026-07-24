@@ -495,10 +495,14 @@ function _kanbanFlatten(data) {
                 title: t.title,
                 file: t.file,
                 line_number: t.line_number,
-                // The tracker's own text for this task (chela.sources.Task.raw) —
-                // an un-dispatched task's only brief; the task-detail modal falls
-                // back to it when there's no run (and so no `brief` column) yet.
+                // The tracker's own text for this task — `body` (chela.sources.
+                // Task.body: the FULL title + dedented OBJECTIVE/BOUNDARIES/
+                // GUARDS/VERIFY continuation, when the markdown source captured
+                // one) is an un-dispatched task's richest brief; `raw` (the bare
+                // bullet line / issue URL) is the fallback. The task-detail modal
+                // reads both — there's no run (and so no `brief` column) yet.
                 raw: t.raw,
+                body: t.body,
                 workflow_path: wf.path,
                 project_key: wf.project_key || null,
             });

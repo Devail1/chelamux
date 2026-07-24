@@ -2,7 +2,7 @@
 import { $, escHtml, closeModal, shortTime, showModal } from './util.js';
 import { _runDisplayId, _runPrCell } from './dispatcher.js';
 import { runStatusBadgeClass } from './runstate.js';
-import { briefHtml, timelineSteps } from './taskmodalmodel.js';
+import { briefHtml, briefSource, timelineSteps } from './taskmodalmodel.js';
 
 // ---------------------------------------------------------------------------
 // The task-detail modal — a Jira-like "issue" view a kanban card click opens
@@ -16,8 +16,8 @@ import { briefHtml, timelineSteps } from './taskmodalmodel.js';
 // never re-fetches. `item` is one of:
 //   - a run dict (dict(r) from chela.dispatcher.list_runs(), full column set —
 //     carries `brief`, `review_history`, `judge_state`, `pr_url`, ...), or
-//   - an open-task dict (`{id, title, file, line_number, raw, ...}` — no run
-//     yet, so no PR/judge/timeline fields), or
+//   - an open-task dict (`{id, title, file, line_number, raw, body, ...}` — no
+//     run yet, so no PR/judge/timeline fields), or
 //   - a backlog item (`{title, section, file, ...}` — no id at all).
 // Every field access below is defensive for exactly that reason.
 // ---------------------------------------------------------------------------
@@ -103,12 +103,11 @@ function _timelineHtml(item) {
 }
 
 function _briefPane(item) {
-    // A run's own `brief` (populated at claim time from the task's raw text —
-    // see dispatcher._spawn) wins; an open (never-claimed) task only ever has
-    // `raw`. Neither existing (a backlog item, or a legacy pre-migration run
-    // row) degrades to a plain note, never a blank pane.
-    const src = (item.brief != null && item.brief !== '') ? item.brief
-        : (item.raw != null && item.raw !== '') ? item.raw : null;
+    // briefSource() picks brief > body > raw (see its own doc comment in
+    // taskmodalmodel.js). None of the three existing (a backlog item, a
+    // legacy pre-migration run row, or a bare one-line task with no
+    // continuation) degrades to a plain note, never a blank pane.
+    const src = briefSource(item);
     if (!src) return '<div class="task-modal-empty">No brief recorded for this task.</div>';
     return briefHtml(src);
 }
