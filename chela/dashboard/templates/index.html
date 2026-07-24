@@ -24,6 +24,20 @@
     <div class="brand"><img src="static/img/claw-mark.svg" class="brand-mark" alt=""><span>chela</span></div>
 
     <div class="topbar-actions">
+      <!-- Host resources strip — live CPU/RAM/Disk, sampled on-request by the
+           dashboard process itself (chela/dashboard/resources.py via
+           GET /api/resources — never the daemon, never a shared state file,
+           CMX-172). Three compact readouts; resources.js (pure math lives in
+           resourcesmodel.js) tints each past its 75%/90% threshold via
+           --ok-green/--ok-orange/--ok-vermillion, but the % NUMBER is always
+           the signal — colour is decoration on top, never the sole cue (Liav
+           is red-weak). A metric whose value comes back null (unreadable
+           host) hides itself rather than show a stale/fake number. -->
+      <div class="res-strip" id="resources-strip" hidden>
+        <span class="res-item" id="res-cpu" hidden><span class="res-label">CPU</span><span class="res-value">--%</span></span>
+        <span class="res-item" id="res-mem" hidden><span class="res-label">RAM</span><span class="res-value">--%</span></span>
+        <span class="res-item" id="res-disk" hidden><span class="res-label">Disk</span><span class="res-value">--%</span></span>
+      </div>
       <!-- Global active-shares indicator (safety kill-switch): shown on EVERY tab +
            mobile whenever any session is shared, so a forgotten live share (= an
            exposed terminal via a public link) is always one tap from Stop. NOT in

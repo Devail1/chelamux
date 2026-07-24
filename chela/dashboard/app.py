@@ -27,6 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
 from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, rooms, scheduler, spawn, starter, transcripts, userconfig
+from chela.dashboard import resources
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
@@ -2038,6 +2039,14 @@ def api_cost():
         start = now - timedelta(days=30)
 
     return jsonify(context.windowed_cost(start, now))
+
+
+@app.route("/api/resources")
+@require_auth
+def api_resources():
+    """Host CPU/RAM/Disk for the header strip — a light on-request sample, never
+    a 500: resources.sample() degrades every unreadable field to null."""
+    return jsonify(resources.sample())
 
 
 # ---------------------------------------------------------------------------

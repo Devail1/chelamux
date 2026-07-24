@@ -10,6 +10,7 @@ import { findView } from './viewreg.js';
 import { initSSE } from './sse.js';
 import { refreshOrchestratorStatus } from './orchestrator.js';
 import { enterDecisions, tickDecisions } from './decisions.js';
+import { enterResources, tickResources } from './resources.js';
 
 // ---------------------------------------------------------------------------
 // Refresh loop
@@ -30,6 +31,9 @@ async function refresh() {
         // `orchestrator` deltas (sse.js — no longer tab-gated, see decisions.js).
         await refreshSidebar();
         await tickDecisions();
+        // Header resources strip — plain poll, no SSE delta (there is nothing
+        // event-driven to push here, unlike Decisions).
+        await tickResources();
         if (typeof refreshLauncher === 'function') refreshLauncher();
         const view = findView(VIEWS, currentTab);
         if (view && view.tick) await view.tick();
@@ -63,6 +67,9 @@ refreshOrchestratorStatus();
 // the ONLY thing that paints it before the first SSE `log`/`orchestrator` delta
 // or the next refresh() tick.
 enterDecisions();
+// Seeds the header resources strip (CPU/RAM/Disk) on load, same reasoning as
+// enterDecisions() above — otherwise it stays blank until the first refresh().
+enterResources();
 
 // --- Stage 0: ES-module exports ---
 export { refresh };

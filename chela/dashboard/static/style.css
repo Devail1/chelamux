@@ -510,6 +510,34 @@ body {
 .shares-sheet .tsp-copy:hover { border-color: var(--accent); }
 .shares-sheet .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
+/* Host resources strip (#resources-strip, CMX-172) — three compact CPU/RAM/Disk
+   readouts sampled by the dashboard itself (chela/dashboard/resources.py). The
+   % number is always the primary signal; a threshold tint (ok/warn/bad, from
+   resourcesmodel.js's level()) is secondary decoration only — never the sole
+   cue, since the primary user is red-weak. Each readout hides independently
+   when its value is null (unreadable host), and the whole strip stays hidden
+   until the first sample lands. */
+.res-strip { display: inline-flex; align-items: center; gap: 10px; padding: 0 4px; }
+.res-strip[hidden] { display: none; }
+.res-item {
+    display: inline-flex; align-items: baseline; gap: 4px;
+    font-size: 12px; font-weight: 600; color: var(--text-dim); white-space: nowrap;
+}
+.res-item[hidden] { display: none; }
+.res-item .res-label { font-size: 10.5px; font-weight: 600; color: var(--muted, #7d8590); letter-spacing: 0.02em; }
+.res-item .res-value { color: var(--text); font-variant-numeric: tabular-nums; }
+.res-item.res-ok .res-value { color: var(--ok-green); }
+.res-item.res-warn .res-value { color: var(--ok-orange); }
+.res-item.res-bad .res-value { color: var(--ok-vermillion); }
+
+@media (max-width: 768px) {
+    /* Keep the numbers, drop the CPU/RAM/Disk labels — the strip must never
+       push the topbar's icon buttons off-screen on a phone. */
+    .res-strip { gap: 6px; }
+    .res-item .res-label { display: none; }
+    .res-item .res-value { font-size: 11px; }
+}
+
 /* Global active-shares indicator (safety kill-switch) — a persistent topbar pill
    shown whenever ANY session is shared, on every tab + mobile (where the pane
    header 🔗 is hidden). AMBER, not red: the primary user is red-weak and red is
