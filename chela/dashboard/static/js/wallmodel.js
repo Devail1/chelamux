@@ -124,3 +124,48 @@ export function costView(costUsd) {
     if (costUsd == null) return null;
     return '$' + Number(costUsd).toFixed(2);
 }
+
+// ---- attention rank (slice 2: auto-arrange) --------------------------------
+//
+// Which numeric TIER a pane belongs to for auto-arrange ordering — needs-you
+// (0) -> busy/working (1) -> idle (2) -> done (3). Deliberately mirrors
+// tileState's precedence exactly (same header comment applies: wants
+// OUTRANKS session_status, so a dispatched pane sitting at a permission gate
+// while claude still reports "busy" ranks with needs-you, not working;
+// isFinished only applies once busy/blocked are both ruled out) rather than
+// inventing a second ordering — the tile's pill and the wall's sort must
+// always agree on what a pane "is".
+function _rankTier(agent, wants) {
+    if (wants) return 0;
+    if (agent && agent.session_status === 'busy') return 1;
+    if (isFinished(agent, wants)) return 3;
+    return 2;
+}
+
+// Order a fleet's window_ids by attention: needs-you first, then working,
+// then idle, then done — STABLE within a rank (two same-tier panes keep
+// their relative order from `agents`, they are never re-sorted by wid or any
+// other secondary key). This is the auto-arrange toggle's entire ordering
+// contract (docs/wall-redesign.md slice 2): manual layout is sacred, so the
+// caller (terminals.js) only ever READS this order to compute a GridStack
+// fill — it must never feed back into `pc_wall_layout`.
+//
+// `wantsByWid` is the caller's precomputed {wid: boolean} map (wantsHuman(a)
+// per agent) for the same DOM-free reason as every other function here (see
+// the file header) — this function never calls wantsHuman itself.
+export function rankOrder(agents, wantsByWid) {
+    const list = agents || [];
+    return list
+        .map((a, i) => ({
+            wid: a && a.window_id,
+            rank: _rankTier(a, !!(wantsByWid && a && wantsByWid[a.window_id])),
+            i,
+        }))
+        .filter(x => x.wid != null)
+        // Primary key is the rank tier; the `i` tiebreak is what makes ties
+        // STABLE explicitly (rather than relying on the host engine's sort
+        // stability) — this is the exact line a "swap tiers" or
+        // "non-stable sort" corruption would break.
+        .sort((a, b) => (a.rank - b.rank) || (a.i - b.i))
+        .map(x => x.wid);
+}

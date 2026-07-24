@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    actionBarKind, actionVerb, costView, ctxLevel, isFinished, prChip, recapView, tileState,
+    actionBarKind, actionVerb, costView, ctxLevel, isFinished, prChip, rankOrder, recapView, tileState,
 } from '../chela/dashboard/static/js/wallmodel.js';
 
 const agent = (over = {}) => ({
@@ -172,4 +172,61 @@ test('costView: a real cost of exactly $0.00 must NOT hide — 0 is a value, not
 test('costView: formats to two decimals like cost.js\'s _fmtCost', () => {
     assert.equal(costView(1.5), '$1.50');
     assert.equal(costView(0.004), '$0.00');
+});
+
+// --- rankOrder (Wall redesign slice 2: auto-arrange) -------------------------
+
+test('rankOrder: needs-you (0) -> busy/working (1) -> idle (2) -> done (3), across all four tiers', () => {
+    // Deliberately shuffled input (done, idle, busy, needs-you) — the assert
+    // pins the CANONICAL order, so it only passes if every tier is read in the
+    // right place.
+    const done = agent({ window_id: '@done', session_status: 'idle', pr: { url: 'https://x/1' } });
+    const idle = agent({ window_id: '@idle', session_status: 'idle' });
+    const busy = agent({ window_id: '@busy', session_status: 'busy' });
+    const needsYou = agent({ window_id: '@needs', needs_human: true });
+    const list = [done, idle, busy, needsYou];
+    const wantsByWid = { '@done': false, '@idle': false, '@busy': false, '@needs': true };
+    // 🔴 GUARD: swapping any two rank tiers (e.g. idle sorting before busy, or
+    // done sorting before idle) flips this exact order.
+    assert.deepEqual(rankOrder(list, wantsByWid), ['@needs', '@busy', '@idle', '@done']);
+});
+
+test('rankOrder: wantsHuman OUTRANKS busy — a gated-but-busy pane ranks with needs-you, not working', () => {
+    // Mirrors tileState's load-bearing precedence (wallmodel.js's header
+    // comment): a dispatched pane sitting at a permission gate still reports
+    // session_status 'busy'. Checking 'busy' before `wants` would misrank a
+    // blocked pane as merely "working" and bury it behind calmer panes.
+    const gated = agent({ window_id: '@gated', session_status: 'busy', needs_human: true });
+    const busy = agent({ window_id: '@busy', session_status: 'busy' });
+    const list = [busy, gated];
+    const wantsByWid = { '@busy': false, '@gated': true };
+    // 🔴 GUARD: checking session_status === 'busy' before `wants` puts @busy
+    // first instead of @gated.
+    assert.deepEqual(rankOrder(list, wantsByWid), ['@gated', '@busy']);
+});
+
+test('rankOrder: stable within a rank — same-rank panes keep their input order, never re-sorted by wid', () => {
+    const b1 = agent({ window_id: '@b1', session_status: 'busy' });
+    const b2 = agent({ window_id: '@b2', session_status: 'busy' });
+    const b3 = agent({ window_id: '@b3', session_status: 'busy' });
+    const list = [b3, b1, b2];   // deliberately not alphabetical
+    const wantsByWid = { '@b1': false, '@b2': false, '@b3': false };
+    // 🔴 GUARD: a non-stable sort (e.g. re-sorting ties by wid, or dropping the
+    // `i` tiebreak in favour of relying on engine sort stability) would reorder
+    // this to ['@b1','@b2','@b3'] instead of preserving the input sequence.
+    assert.deepEqual(rankOrder(list, wantsByWid), ['@b3', '@b1', '@b2']);
+});
+
+test('rankOrder: all-same-rank input (idle tier) comes back in the exact input order', () => {
+    const a1 = agent({ window_id: '@a1', session_status: 'idle' });
+    const a2 = agent({ window_id: '@a2', session_status: 'idle' });
+    const a3 = agent({ window_id: '@a3', session_status: 'idle' });
+    const list = [a2, a3, a1];
+    const wantsByWid = { '@a1': false, '@a2': false, '@a3': false };
+    assert.deepEqual(rankOrder(list, wantsByWid), ['@a2', '@a3', '@a1']);
+});
+
+test('rankOrder: empty input -> []', () => {
+    assert.deepEqual(rankOrder([], {}), []);
+    assert.deepEqual(rankOrder(null, {}), []);
 });

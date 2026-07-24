@@ -3,7 +3,7 @@ import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, at
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
-import { actionBarKind, costView, ctxLevel, prChip, recapView, tileState } from './wallmodel.js';
+import { actionBarKind, costView, ctxLevel, prChip, rankOrder, recapView, tileState } from './wallmodel.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -26,6 +26,16 @@ let _renderedWids = [];           // pane wids currently in the DOM (live render
 let _termTimer = null;            // fast reactive poll while the terminals tab is open
 let _wallPreset = _loadWallPreset();   // active {cols, rows} fill preset; default 2 columns
 let _wallLocked = localStorage.getItem('pc_wall_locked') === '1';   // lock = swap-on-drag, no resize
+// Wall redesign slice 2: auto-arrange toggle (default OFF). Manual layout
+// (pc_wall_layout) stays SACRED — auto mode only ever computes a live grid
+// fill from rankOrder() and applies it via GridStack; it never writes
+// pc_wall_layout, so toggling off always restores exactly what the user left.
+let _wallAuto = localStorage.getItem('pc_wall_auto') === '1';
+// Comma-joined wid sequence last applied by auto-arrange, so the 4s poll only
+// touches GridStack when the ranked order actually changed (no per-tick thrash).
+// Reset to '' to force the next _applyAutoArrange to (re)apply unconditionally
+// (toggle-on, preset change while auto, or a fresh buildWall).
+let _autoOrderSig = '';
 let _paneActivity = {};           // wid -> epoch ms a pane last STARTED being busy; drives the taskbar MRU sort
 let _paneStatus = {};             // wid -> last seen session_status, for rising-edge (idle→busy) detection
 
@@ -1251,6 +1261,7 @@ function _applyTermStatus(agents) {
     _lazyDock(agents);   // dock the dispatcher's quiet workers; pop out the ones that block
     _colorTermDots(agents);
     _applyWallTileFrame(agents);   // wall redesign slice 1: state pill / recap / PR chip / action bar
+    _applyAutoArrange(agents);     // wall redesign slice 2: re-rank the wall — no-op unless auto is on and the order changed
     // Wall tick is the fast path (4s) — refresh the tab signal here too so the
     // title/favicon update promptly on the flagship view, not just on the 30s
     // sidebar refresh. updateTabSignal is idempotent, so the two callers agree.
@@ -2186,7 +2197,8 @@ function buildWall(wids) {
         const item = gsEl.querySelector(`.grid-stack-item[gs-id="${_cssEsc(wid)}"]`);
         if (item) _minimizeItem(item);
     });
-    _applyWallLock();   // restore the locked (swap-on-drag) feel across reloads
+    _autoOrderSig = '';   // fresh tile set: force the next auto-arrange apply, don't trust a stale sig
+    _applyWallInteractivity();   // restore the locked (swap-on-drag) / auto-arrange feel across reloads
     renderMinDock();
     _replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
     _refreshPaneIdx();      // Alt+N badges (keyboard-fast pane switcher)
@@ -2229,7 +2241,7 @@ async function addWallTiles(wids) {
         if (!_renderedWids.includes(wid)) _renderedWids.push(wid);
     });
     _startPlaceholderPolls();   // seed readiness polls for any placeholders we just added
-    _applyWallLock();           // a tile added while locked must inherit no-resize
+    _applyWallInteractivity();  // a tile added while locked/auto must inherit no-resize / no-move
     renderMinDock();            // taskbar lists every pane → add the new chip(s)
     _refitWallForDock();        // taskbar may have grown a row → re-fit the wall above it
     _replayRoomAccents();       // a fresh tile already in a room wears its accent at once
@@ -2328,6 +2340,17 @@ function _lockGlyph(locked) {
         <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="${shackle}"/></svg>`;
 }
 
+// Lucide target (https://lucide.dev/icons/target), 14px to match the lock
+// glyph — deliberately a DIFFERENT shape from the lock/preset icons so the
+// auto-arrange toggle reads as its own control at a glance. Static (unlike
+// the lock glyph it doesn't swap shape on/off — .gl-btn.active carries the
+// on/off signal, same as the preset picker's buttons).
+function _autoGlyph() {
+    return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>`;
+}
+
 // Populate the toolbar's glyph picker once. Idempotent (dataset guard) so the
 // per-render renderTerminals() call is cheap.
 function _buildGridPicker() {
@@ -2346,6 +2369,7 @@ function _buildGridPicker() {
         b.classList.toggle('active', !!(_wallPreset && p.cols === _wallPreset.cols && p.rows === _wallPreset.rows));
     });
     _reflectLockBtn();
+    _reflectAutoBtn();
 }
 
 // ---- Layout lock (swap-on-drop) --------------------------------------------
@@ -2369,18 +2393,52 @@ function _reflectLockBtn() {
         : 'Lock layout — drag swaps panes, resize off';
 }
 
-// Push the current lock state onto the live grid. Safe to call any time _grid
-// exists (e.g. right after buildWall, so a reload restores the locked feel).
-function _applyWallLock() {
+// Wall redesign slice 2: reflect the auto-arrange toggle's on/off state on its
+// toolbar button — same pattern as _reflectLockBtn (static icon here, since
+// unlike lock there's no second shape to swap to; .gl-btn.active carries the
+// state, same as the preset picker's buttons).
+function _reflectAutoBtn() {
+    const b = $('#term-auto-btn');
+    if (!b) return;
+    b.classList.toggle('active', _wallAuto);
+    b.innerHTML = _autoGlyph();
+    b.title = _wallAuto
+        ? 'Auto-arrange ON — panes rank by attention (needs you → working → idle → done). Click to restore your manual layout.'
+        : 'Auto-arrange — rank panes by attention (needs you → working → idle → done)';
+}
+
+// Push the current lock + auto-arrange state onto the live grid. Safe to call
+// any time _grid exists (e.g. right after buildWall, so a reload restores the
+// locked/auto feel). Auto-arrange wins over lock: while it's on, the layout is
+// COMPUTED (rankOrder), so both move and resize are disabled outright — a
+// manual drag/resize while auto is on would just get overwritten by the next
+// poll's re-apply, so disabling is the honest UI rather than a confusing revert.
+function _applyWallInteractivity() {
     if (!_grid) return;
-    _grid.enableResize(!_wallLocked); // no resizing while locked (move stays on → drag-to-swap)
+    _grid.enableMove(!_wallAuto);
+    _grid.enableResize(!_wallLocked && !_wallAuto);
     _reflectLockBtn();
+    _reflectAutoBtn();
 }
 
 function toggleWallLock(btn) {
     _wallLocked = !_wallLocked;
     localStorage.setItem('pc_wall_locked', _wallLocked ? '1' : '0');
-    _applyWallLock();
+    _applyWallInteractivity();
+    if (btn) btn.blur();
+}
+
+// Wall redesign slice 2: flip the auto-arrange toggle. Turning ON immediately
+// ranks the current fleet and applies it (no waiting for the next 4s poll);
+// turning OFF re-applies the saved pc_wall_layout verbatim — auto mode never
+// wrote to that key, so this is a pure restore, never a reconstruction.
+function toggleWallAuto(btn) {
+    _wallAuto = !_wallAuto;
+    localStorage.setItem('pc_wall_auto', _wallAuto ? '1' : '0');
+    _autoOrderSig = '';   // stale from a previous auto session — force a fresh apply either way
+    _applyWallInteractivity();
+    if (_wallAuto) _applyAutoArrange(_agentsCache);
+    else _restoreManualLayout();
     if (btn) btn.blur();
 }
 
@@ -2644,8 +2702,14 @@ function _replayRoomAccents() {
     if (_roomsCache) applyRoomAccents($('#term-stage'), _roomsCache);
 }
 
-// Apply a layout to the current wall panes, sized to fill the viewport height
-// with NO bottom gap.
+// Lay the current (non-pinned) wall tiles out to fill the viewport height with
+// NO bottom gap, ordered by `keyFn(wid)` (ascending; ties broken by current
+// x/y so an un-reordered wall keeps its existing positions). This is the
+// shared fill engine behind BOTH applyGridLayout's taskbar-order presets and
+// _applyAutoArrange's rank-order auto layout — one layout engine, two
+// orderings, per docs/wall-redesign.md ("REUSE the existing preset/fill
+// layout code"). Returns false (no-op) if there's no live grid or no
+// unpinned tiles; callers decide what (if anything) to persist.
 //
 //  - Column presets (rows === 1): distribute every pane across `cols` columns
 //    (balanced — earlier columns take the remainder), and split each column's
@@ -2655,29 +2719,18 @@ function _replayRoomAccents() {
 //    the viewport height, flowed row-major. Panes beyond cols×rows wrap below
 //    and scroll. (Fewer panes than cells leaves the trailing cells empty — the
 //    explicit-grid trade-off.)
-function applyGridLayout(cols, rows, btn) {
-    const host = $('#term-grid-presets');
-    if (btn) {
-        host.querySelectorAll('.gl-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-    }
-    // Remember the active preset so a viewport resize can re-fit it (the fill
-    // is viewport-relative, so a different screen / window size needs a recompute).
-    _wallPreset = { cols, rows };
-    localStorage.setItem('pc_wall_preset', JSON.stringify(_wallPreset));   // persist for reloads + resize re-fit
-    if (!_grid) return;
+function _fillNodesByOrder(keyFn, cols, rows) {
+    if (!_grid) return false;
     const { rows: total, cellPx } = _wallFill();
     _grid.cellHeight(cellPx);                  // exact divisor so `total` rows fill the height
-    // Lay panes out in the taskbar order (pc_pane_order); fall back to current
-    // column-order so an un-reordered wall keeps its existing positions. Pinned
-    // panes are excluded entirely — a preset reflows every OTHER pane around
-    // them, leaving a pinned tile's x/y/w/h exactly where the user put it
-    // (per-pane layout pin, CMX-108).
+    // Pinned panes are excluded entirely — a fill reflows every OTHER pane
+    // around them, leaving a pinned tile's x/y/w/h exactly where the user put
+    // it (per-pane layout pin, CMX-108).
     const nodes = _grid.engine.nodes.slice()
         .filter(n => !_pinned.has(n.id))
-        .sort((a, b) => (_orderIndex(a.id) - _orderIndex(b.id)) || (a.x - b.x) || (a.y - b.y));
+        .sort((a, b) => (keyFn(a.id) - keyFn(b.id)) || (a.x - b.x) || (a.y - b.y));
     const N = nodes.length;
-    if (!N) return;
+    if (!N) return false;
 
     _grid.batchUpdate();
     try {
@@ -2704,8 +2757,8 @@ function applyGridLayout(cols, rows, btn) {
             const lastH = Math.max(3, total - (rows - 1) * hBase);
             const rowY = r => (r < rows) ? r * hBase : (rows - 1) * hBase + lastH + (r - rows) * hBase;
             const rowH = r => (r === rows - 1) ? lastH : hBase;
-            // Row-major in taskbar order so cells fill left-to-right, top-down.
-            nodes.sort((a, b) => (_orderIndex(a.id) - _orderIndex(b.id)) || (a.y - b.y) || (a.x - b.x));
+            // Row-major in `keyFn` order so cells fill left-to-right, top-down.
+            nodes.sort((a, b) => (keyFn(a.id) - keyFn(b.id)) || (a.y - b.y) || (a.x - b.x));
             nodes.forEach((node, i) => {
                 const r = Math.floor(i / cols);
                 _grid.update(node.el, { x: (i % cols) * w, y: rowY(r), w, h: rowH(r) });
@@ -2714,11 +2767,85 @@ function applyGridLayout(cols, rows, btn) {
     } finally {
         _grid.batchUpdate(false);
     }
+    return true;
+}
+
+// Apply a preset layout to the current wall panes (taskbar order, pc_pane_order
+// — see _orderIndex). Persists the result to pc_wall_layout, the SAME manual-
+// layout key a drag/resize writes to, so a preset click is itself a manual
+// arrangement. While auto-arrange is on, positions are computed from
+// rankOrder() instead (never taskbar order) and NEVER persisted here — a
+// preset click while auto is on only changes the column/row count auto fills
+// into, per the auto-arrange contract (manual layout is sacred; auto must
+// never be able to clobber it, including via this button).
+function applyGridLayout(cols, rows, btn) {
+    const host = $('#term-grid-presets');
+    if (btn) {
+        host.querySelectorAll('.gl-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+    }
+    // Remember the active preset so a viewport resize can re-fit it (the fill
+    // is viewport-relative, so a different screen / window size needs a recompute).
+    _wallPreset = { cols, rows };
+    localStorage.setItem('pc_wall_preset', JSON.stringify(_wallPreset));   // persist for reloads + resize re-fit
+    if (!_grid) return;
+    if (_wallAuto) {
+        _autoOrderSig = '';   // force a re-apply at the new column/row count
+        _applyAutoArrange(_agentsCache);
+        return;
+    }
+    if (!_fillNodesByOrder(_orderIndex, cols, rows)) return;
     const out = {};
     _grid.save(false).forEach(nd => {
         if (nd.id != null) out[nd.id] = { x: nd.x, y: nd.y, w: nd.w, h: nd.h };
     });
     localStorage.setItem('pc_wall_layout', JSON.stringify(out));
+}
+
+// Wall redesign slice 2: rank the panes currently ON THE WALL by attention
+// (rankOrder, wallmodel.js) and apply that order via the shared fill engine —
+// no-op unless auto-arrange is on. Compares the new order against the last
+// one actually applied (_autoOrderSig) so a 4s poll with no attention-state
+// change never touches GridStack (no thrash, no wasted reflow). Deliberately
+// NEVER writes pc_wall_layout: that key is the sacred manual arrangement,
+// restored verbatim by _restoreManualLayout on toggle-off.
+function _applyAutoArrange(agents) {
+    if (!_wallAuto || _termMode !== 'wall' || !_grid) return;
+    const tiled = new Set(_grid.engine.nodes.map(n => n.id));
+    const relevant = (agents || []).filter(a => a && a.window_id && tiled.has(a.window_id));
+    const wantsByWid = {};
+    relevant.forEach(a => { wantsByWid[a.window_id] = wantsHuman(a); });
+    const order = rankOrder(relevant, wantsByWid);
+    const sig = order.join(',');
+    if (sig === _autoOrderSig) return;   // ranked order unchanged since the last apply — skip
+    _autoOrderSig = sig;
+    const idx = {};
+    order.forEach((wid, i) => { idx[wid] = i; });
+    // A tile GridStack knows about but that fell out of the fresh agents poll
+    // (a transient gap, not yet dropped) sorts last rather than throwing.
+    _fillNodesByOrder(wid => (wid in idx ? idx[wid] : Number.MAX_SAFE_INTEGER), _wallPreset.cols, _wallPreset.rows);
+}
+
+// Wall redesign slice 2: restore the user's manual arrangement (pc_wall_layout)
+// verbatim when auto-arrange is toggled off. Only touches tiles that actually
+// have a saved position — a tile added while auto was on (never manually
+// placed) simply stays wherever auto last put it, same as any other
+// never-dragged tile today.
+function _restoreManualLayout() {
+    if (!_grid) return;
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('pc_wall_layout') || '{}'); } catch (e) { /* noop */ }
+    _grid.batchUpdate();
+    try {
+        _grid.engine.nodes.forEach(n => {
+            const s = saved[n.id];
+            if (s && Number.isInteger(s.x) && Number.isInteger(s.y) && s.w > 0 && s.h > 0) {
+                _grid.update(n.el, { x: s.x, y: s.y, w: s.w, h: s.h });
+            }
+        });
+    } finally {
+        _grid.batchUpdate(false);
+    }
 }
 
 // ---- Mobile agent switcher -------------------------------------------------
@@ -2881,4 +3008,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _ord
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleRecap, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallLock, wireDragStart, wireRoomClick });
