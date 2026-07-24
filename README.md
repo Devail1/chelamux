@@ -92,6 +92,10 @@ already watch tmux — `tmux attach`, [Mosh](https://mosh.org/), or the
 
 ## Install
 
+> **New here?** [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) is a
+> ~10-minute clone-to-first-dispatched-agent walkthrough. The sections below are
+> the reference.
+
 chela uses [`uv`](https://docs.astral.sh/uv/). The core has two small deps
 (`croniter`, `pyyaml`); the **dashboard + live terminal wall** ships as a
 **separate install** (adds Flask) — same feature, kept out of the core so a
@@ -391,7 +395,9 @@ from a plain shell with neither. Nothing else keeps a copy — a process manager
 block is a second place for config to live, and that is where drift comes from. Start
 services with `scripts/run-chela.sh` (see `examples/ecosystem.config.js`), and read
 **[docs/CONFIG.md](docs/CONFIG.md)** for the precedence rules, the PM2 migration, and why
-the dashboard *publishes* the port it bound.
+the dashboard *publishes* the port it bound. (`run-chela.sh` also exports
+`MALLOC_ARENA_MAX=2` to cap glibc arena bloat — one more reason to launch through it
+rather than invoking `.venv/bin/python` directly.)
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -399,10 +405,15 @@ the dashboard *publishes* the port it bound.
 | `CHELA_DIR` | `~/.chela` | State dir (scheduler.db, worktrees, context) |
 | `CHELA_ENV_FILE` | `$CHELA_DIR/chela.env` | The env file itself. Empty = don't read one |
 | `CHELA_SCHEDULER_POLL_INTERVAL` | `30` | Daemon loop interval (s) |
+| `CHELA_CAPTURE_INTERVAL_SECONDS` | `300` | How often the daemon snapshots each pane's transcript context (s) |
+| `CHELA_CACHE_STALE_SECONDS` | `7200` | Skip transcript files older than this when scanning (s) — the 2 h freshness window |
+| `CHELA_CONTEXT_RETENTION_DAYS` | `30` | How long per-window context snapshots are kept before pruning (days) |
 | `CHELA_DISPATCH_WORKFLOWS` | — | Colon-separated WORKFLOW.md paths the daemon dispatches |
 | `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick interval in the daemon (s) |
 | `CHELA_MAX_REWORKS` | `2` | How many times a PR that fails review is sent back to its agent before the run stops at `needs_human`. `0` = no rework at all |
 | `CHELA_JUDGE` | `true` | The **judge** — the adversarial pass on a green PR (corrupt each guard, re-run the suite, block only on one that survives). One extra agent per PR head, so this is the fleet-wide off switch; a workflow turns it off for itself with `judge: {enabled: false}`, and it is off anyway without a `judge.test_cmd` |
+| `CHELA_JUDGE_MAX_UNKNOWN_RETRIES` | `2` | How many times the judge re-runs when it can't reach a clean verdict (an `unknown`, e.g. a flaky suite) before giving up and escalating to a human |
+| `CHELA_CRITIC` | `true` | The **critic** — the pre-merge review pass that files findings on a PR. The fleet-wide off switch (distinct from the judge's guard-corruption pass) |
 | `CHELA_WORKTREE_DISK_BUDGET` | unset (off) | 🧹💽 The disk ceiling for a workflow's worktree root — the `memcap` analog for disk. A fresh claim forks a brand-new worktree, and `~/.chela/worktrees/` is the largest per-agent resource chela consumes; a heavier repo (a Rust `target/`, an ML venv, a Node monorepo — 1-10 GB *per worktree*) can otherwise fill the disk with nothing to stop it. Accepts a bare byte count or a `K`/`M`/`G`/`T` size (`20G`, `500M`); `0`/unset/unparseable = off, the safe default for a fresh install |
 | `CHELA_AUTO_MERGE` | `false` | ⚠️ **Fully-UNATTENDED auto-merge — opt-in risk.** On every daemon tick, squash-merges every judge-`clean` `awaiting_review` PR through the same `chela merge` gate (base branch, CI green, MERGEABLE — still no override) with **no human attending and no attended-lease required**. Off by default on every install, including yours, until you turn it on: this trusts your judge configuration completely, unattended. See [docs/ESCALATION_CONTRACT.md](docs/ESCALATION_CONTRACT.md) (v0.5) before enabling |
 | `CHELA_AUTO_UPDATE` | `false` | ⚠️ **Fully-UNATTENDED self-update — opt-in risk.** Whenever the checkout falls behind its upstream, the daemon runs the exact same `chela update` a human would (refuses on a dirty or diverged tree, `git pull --ff-only`, `uv sync --all-extras`, restart `chela-*` services — including itself) on its own hourly tick, with **no human attending**. Off by default on every install, including yours: this trusts CI and the upstream branch completely, unattended. See [docs/ESCALATION_CONTRACT.md](docs/ESCALATION_CONTRACT.md) (v0.6) before enabling |
@@ -412,6 +423,8 @@ the dashboard *publishes* the port it bound.
 | `CHELA_NOTIFY_KIND` | auto | Force `ntfy` \| `telegram` \| `webhook` |
 | `CHELA_NOTIFY_CHAT_ID` | — | Telegram chat id (if not in the URL) |
 | `CHELA_NOTIFY_INTERVAL` | `20` | Pane-state scan interval (s) |
+| `CHELA_NOTIFY_TITLE` | `chela: agent needs input` | Title/subject line on the needs-input notification |
+| `CHELA_INBOX_ALARM_GRACE_SECONDS` | `120` | Grace window before the inbox fires an undeliverable-decision phone alarm — long enough that a transient gap doesn't page you |
 | `CHELA_INBOX_ENABLED` | `true` | [Decisions inbox](#the-orchestration-loop). Inert until a session registers as the orchestrator; `false` disables it outright |
 | `CHELA_ORCHESTRATOR_WID` | — | Pin the window the inbox pushes into (`@0`). Otherwise it's whichever session ran `chela watch` |
 | `CHELA_IGNORE_WINDOWS` | — | Comma-separated window names to hide from discovery (placeholder/keep-alive windows) |
@@ -421,6 +434,7 @@ the dashboard *publishes* the port it bound.
 | `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT` | `127.0.0.1` / `5001` | Dashboard bind. The hooks plugin POSTs to this port, so set it **here**, not with `chela dashboard --port` (a per-process override nothing else can see) |
 | `CHELA_TERMINALS_ENABLED` | `true` | Embedded ttyd terminal wall (streams live; loopback-guarded — see below) |
 | `CHELA_TERMINALS_EXPOSE` | `false` | Serve the writable wall on a **non-loopback** bind too (RCE risk — opt-in) |
+| `CHELA_TERM_COLS` / `CHELA_TERM_ROWS` | `120` / `30` | Geometry of the embedded ttyd terminals |
 | `CHELA_WALL_TILE_DISPATCHED` | `false` | The same rule as `CHELA_TELEGRAM_BIND_DISPATCHED`, on the wall: give **dispatcher-spawned** agents a full tile on spawn. Off by default — a worker opens **minimized** (a chip in the dock, terminal live the whole time) and **pops out** the moment it blocks on a human, so five workers grinding through a backlog can't crowd out the session you're actually in |
 | `CHELA_DEFAULT_CONTEXT_WINDOW` | `200000` | Window size assumed by the transcript-based context estimate (fallback only) |
 

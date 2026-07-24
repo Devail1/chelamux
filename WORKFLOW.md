@@ -89,6 +89,18 @@ hooks:
   # fresh `npm ci` copying 27M into each (CMX-151: unlike `uv sync`, which hardlinks from
   # its own cache, `npm ci` always unpacks real files, and N concurrent worktrees were
   # paying for N identical copies of the same dep).
+  #
+  # ⚠️ Docker-based builds: run the container as your own uid or the worktree becomes
+  # UNRECLAIMABLE. A step like `docker run ... build` writes root-owned files into the
+  # worktree; chela runs as your user, so both `git worktree remove` and `rm -rf` then
+  # fail with EPERM and the worktree can never be freed (CMX-164's "mode 4" orphan —
+  # `remove_worktree` will log a loud WARNING and give up rather than half-delete it).
+  # Always pass `--user $(id -u):$(id -g)` (and mount an outside-the-worktree cache).
+  #
+  # Heavy ecosystems: point the build cache at ONE shared location instead of N per-worktree
+  # copies — `CARGO_TARGET_DIR`, a pnpm store, `CCACHE_DIR` — the generalisation of the
+  # shared node_modules above. A per-worktree `target/`/`node_modules` is what fills the
+  # disk (see `CHELA_WORKTREE_DISK_BUDGET`).
   before_run: uv sync --all-extras --quiet && scripts/npm-shared-install.sh
 ---
 

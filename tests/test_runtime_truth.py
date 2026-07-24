@@ -125,6 +125,14 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_truth, "_gh_pr_checks",
                         lambda pr, repo: dispatcher.CIStatus(dispatcher.CI_PASSING, "abc123"))
 
+    # the dispatched workflow's preconditions: the resolved agent command's binary is on
+    # PATH, gh is authenticated, and base_branch exists in git. Real PATH/gh/git lookups
+    # are shelled out for the actual fact (an install with a broken PATH IS the bug it
+    # catches) so the suite stubs the seam instead of depending on the dev box's PATH.
+    monkeypatch.setattr(runtime_truth, "_agent_cmd_which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(runtime_truth, "_gh_auth_status", lambda: True)
+    monkeypatch.setattr(runtime_truth, "_ref_exists", lambda repo, branch: True)
+
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
         runtime_truth, "collected_js_suites",
@@ -239,6 +247,27 @@ def _break_dispatch_hold(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_agent_cmd(tmp_path, monkeypatch):
+    """The resolved `agent.cmd` names a binary the spawning shell's PATH cannot find —
+    tmux would type it into a fresh window and get `command not found` back."""
+    monkeypatch.setattr(runtime_truth, "_agent_cmd_which", lambda binary: None)
+    return doctor.ERROR
+
+
+def _break_gh_auth(tmp_path, monkeypatch):
+    """`gh auth status` says nobody is logged in — every dispatched agent's `gh pr
+    create` fails on the last line of an otherwise-successful run."""
+    monkeypatch.setattr(runtime_truth, "_gh_auth_status", lambda: False)
+    return doctor.ERROR
+
+
+def _break_base_branch(tmp_path, monkeypatch):
+    """`workspace.base_branch` names a ref git does not have — `git worktree add`
+    fails at the FIRST dispatch of this workflow, every time."""
+    monkeypatch.setattr(runtime_truth, "_ref_exists", lambda repo, branch: False)
+    return doctor.ERROR
+
+
 def _break_tmux_windows(tmp_path, monkeypatch):
     """The run row says the agent is working in @1; tmux says @1 does not exist (CMX-62)."""
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@9": "something-else"})
@@ -306,6 +335,38 @@ def _unreadable_pr_checks(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_hooks_flowing(tmp_path, monkeypatch):
+    """A window's claude process is live and long past when `SessionStart` should have
+    fired — but the event log has nothing from it. CMX-41, structurally: the manifest
+    matches (plugin.rendered/plugin.installed are both green) and the hook still never
+    arrived."""
+    started = time.time() - 60.0
+    agent_cwd = str(tmp_path / "agent")
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {"@1": sessions.Pane(
+        wid="@1", path=agent_cwd, command="claude", claude_pid=1,
+        launched_in=agent_cwd, started=started)})
+    return doctor.ERROR
+
+
+def _break_windows_resolvable(tmp_path, monkeypatch):
+    """A host with no /proc (macOS) whose PATH is missing `pgrep` — every window's two
+    strongest resolution signals silently collapse to None (chela.sessions' own docstring,
+    verbatim)."""
+    monkeypatch.setattr(sessions, "_PROC_HOST", False)
+    monkeypatch.setattr(
+        runtime_truth, "_window_shim_which",
+        lambda binary: None if binary == "pgrep" else f"/usr/bin/{binary}")
+    return doctor.ERROR
+
+
+def _break_fonts_glyph_coverage(tmp_path, monkeypatch):
+    """The bundled coverage-fallback font is missing on THIS install — a packaging miss
+    or a corrupted download, not a repo defect (tests/test_term_symbol_fallback.py already
+    proves the checked-in copy is fine)."""
+    monkeypatch.setattr(runtime_truth, "_FONTS_DIR", tmp_path / "no-fonts-here")
+    return doctor.ERROR
+
+
 def _break_relay_transcripts(tmp_path, monkeypatch):
     """The bound window's transcript is not where chela looks — the 2026-07-14 outage.
 
@@ -331,12 +392,18 @@ CORRUPTIONS = {
     "plugin.installed": _break_plugin_installed,
     "daemon.capabilities": _break_daemon_capabilities,
     "dispatch.workflows": _break_dispatch_workflows,
+    "dispatch.agent_cmd": _break_agent_cmd,
+    "dispatch.gh_auth": _break_gh_auth,
+    "dispatch.base_branch": _break_base_branch,
     "dispatch.hold": _break_dispatch_hold,
     "tmux.windows": _break_tmux_windows,
     "inbox.address": _break_inbox_address,
     "runs.parked_branch": _break_runs_parked_branch,
     "pr.checks": _break_pr_checks,
     "tests.js_suites": _break_tests_js_suites,
+    "plugin.hooks_flowing": _break_hooks_flowing,
+    "windows.resolvable": _break_windows_resolvable,
+    "fonts.glyph_coverage": _break_fonts_glyph_coverage,
 }
 
 
@@ -377,6 +444,16 @@ def test_a_check_state_that_cannot_be_read_is_never_a_pass(fleet, monkeypatch):
     assert all(f.level == doctor.ERROR for f in findings)
     assert "CANNOT VERIFY pr.checks" in findings[0].title
     assert "gh is not installed" in findings[0].detail
+
+
+def test_gh_missing_entirely_is_cannot_verify_not_a_pass(fleet, monkeypatch):
+    """`gh` not being on PATH at all is the same failure mode as `pr.checks`'s unread
+    check: an unasked auth state is not fine, it is unknown, and doctor must say so."""
+    monkeypatch.setattr(runtime_truth, "_gh_auth_status", lambda: None)
+    findings = [f for f in doctor.check() if f.fact == "dispatch.gh_auth"]
+    assert findings, "an unaskable gh produced no finding at all"
+    assert all(f.level == doctor.ERROR for f in findings)
+    assert "CANNOT VERIFY dispatch.gh_auth" in findings[0].title
 
 
 def test_a_healthy_fleet_is_green(fleet):

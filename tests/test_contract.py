@@ -26,13 +26,21 @@ from chela.personas import lease
 
 
 @pytest.fixture(autouse=True)
-def _clean_runs():
-    """The runs DB path is import-time latched, so it is shared across tests — start each
-    with an empty table so seeded task ids never collide."""
-    with dispatcher._db() as conn:
-        conn.execute("DELETE FROM runs")
-        conn.commit()
-    yield
+def _own_runs_db(tmp_path, monkeypatch):
+    """A runs DB per test (``dispatcher.DB_PATH`` is latched at import — see conftest).
+
+    This used to just ``DELETE FROM runs`` against the shared, import-time-latched
+    ``dispatcher.DB_PATH`` before each test — which cleaned up for the NEXT test in this
+    file, but left the last seeded row (``awaiting_review``, a fake ``pr_url``) sitting in
+    that shared DB for whatever test ran after this module in the same worker. `chela
+    doctor`'s ``pr.checks`` fact reads every real ``awaiting_review`` row from
+    ``dispatcher.DB_PATH`` and asks GitHub about it — in CI, with no ``gh`` auth, that
+    leftover row came back CANNOT VERIFY and failed an unrelated doctor test
+    (``test_doctor_is_quiet_when_everything_agrees``) that never touched this file. Every
+    other file that seeds runs already isolates with its own ``tmp_path`` DB; this one just
+    hadn't followed suit.
+    """
+    monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
 
 
 @pytest.fixture

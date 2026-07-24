@@ -19,7 +19,7 @@ import sys
 
 import pytest
 
-from chela import config, doctor, hooks
+from chela import config, dispatcher, doctor, hooks
 
 
 @pytest.fixture
@@ -35,6 +35,15 @@ def chela_dir(tmp_path, monkeypatch):
     # scripts/run-chela.sh strips both vars for exactly this reason.
     monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.delenv("TMUX", raising=False)
+    # `dispatcher.DB_PATH` is latched at import time, NOT re-derived from `config.CHELA_DIR`
+    # above — so without this, `doctor.check()`'s `pr.checks` fact reads whatever DB some
+    # OTHER test file (or a leftover from a prior worker run) left at the process-wide
+    # default path, finds a leaked `awaiting_review` row, and shells out to real `gh` to ask
+    # about it. In CI, with no `GH_TOKEN`, that comes back CANNOT-VERIFY (correctly — an
+    # unread check state must never read as green) and this test goes red for a PR it never
+    # touched. Give this fixture its own DB, exactly like `tests/test_contract.py`'s
+    # `_own_runs_db` does for the same reason.
+    monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
     importlib.reload(config)
     importlib.reload(doctor)
     importlib.reload(hooks)
@@ -218,6 +227,20 @@ def test_doctor_is_quiet_when_everything_agrees(chela_dir, monkeypatch):
     hooks.render_plugin(chela_dir / "plugin", port=5005)
     _install_plugin(hooks.hooks_spec(5005))
     assert _levels(doctor.check(), doctor.ERROR) == []
+
+
+def test_chela_dir_isolates_the_dispatcher_db(chela_dir):
+    """`dispatcher.DB_PATH` is latched at import time, NOT re-derived from `config.CHELA_DIR`
+    on reload — so unless this fixture repoints it, `doctor.check()`'s `pr.checks` fact reads
+    whatever DB some OTHER test (or a stale run on this host) left at the frozen default
+    path, finds a leftover `awaiting_review` row, and shells out to real `gh` about it. In
+    CI, with no `GH_TOKEN`, that comes back CANNOT-VERIFY (correctly) and fails this file's
+    `test_doctor_is_quiet_when_everything_agrees` for a PR it never touched. Same fix as
+    `tests/test_contract.py`'s `_own_runs_db`.
+    """
+    assert dispatcher.DB_PATH == chela_dir / "scheduler.db"
+    assert not dispatcher.DB_PATH.exists()
+    assert doctor.audit(doctor.fact("pr.checks")) == []
 
 
 def test_doctor_flags_a_stale_env_var(chela_dir, monkeypatch):

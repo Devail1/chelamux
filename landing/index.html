@@ -234,7 +234,8 @@ uv run chela run</pre>
       <span class="ic">⇶</span>
       <h3>Dispatch TODOs → PRs</h3>
       <p>Point chela at a <code>WORKFLOW.md</code>. Each open <code>- [ ]</code> becomes a git
-      worktree, an agent that implements it, and an opened pull request.</p>
+      worktree, an agent that implements it, and a pull request — which an <strong>adversarial
+      judge</strong> re-reviews before it reaches you.</p>
     </div>
     <div class="card">
       <span class="ic">▦</span>
@@ -349,7 +350,7 @@ uv run chela run</pre>
 <section id="install" class="wrap" style="max-width:680px">
   <div class="pitch" style="margin-bottom:24px">
     <h2>Install</h2>
-    <p>Python ≥ 3.11, <code>tmux</code>, <code>git</code>, and the <code>claude</code> CLI.
+    <p>Linux or macOS, Python ≥ 3.11, <code>tmux</code>, <code>git</code>, and the <code>claude</code> CLI.
     The core is two small deps; the dashboard + live wall ship as a separate install to keep the core lean.</p>
   </div>
   <div class="install" style="margin-top:0">
@@ -360,7 +361,10 @@ uv run chela status
 
 <span class="c"># dashboard + live terminal wall (separate install — keeps the core lean)</span>
 uv sync --extra dashboard
-uv run chela dashboard</pre>
+uv run chela dashboard
+
+<span class="c"># does what's running still match your config?</span>
+uv run chela doctor</pre>
   </div>
   <p style="text-align:center; margin:22px 0 0; color:var(--text-dim); font-size:14px;">
     Full setup, the <code>WORKFLOW.md</code> format, the CLI, and config live in the
