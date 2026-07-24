@@ -3,6 +3,7 @@ import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, at
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
+import { actionBarKind, costView, ctxLevel, prChip, recapView, tileState } from './wallmodel.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -807,6 +808,19 @@ function paneHead(wid, draggable) {
     // pane № (Alt+N jump target) moved OUT of the header entirely, down to
     // the bottom bar — see _ctxBarHTML.
     const dot = `<span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span>`;
+    // Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill —
+    // glyph + word ALWAYS carry the state (Liav is red-weak; colour is
+    // decoration on top, see .gs-state-* in style.css). Wall-only, like the
+    // min/pin buttons above — single mode renders nothing here at all, so
+    // mobile's forced single mode (< 768px) is untouched by construction.
+    // Rendered idle/neutral here (mirrors .gs-dot's own "starts neutral" build
+    // pattern); _applyWallTileFrame (called synchronously right after the
+    // wall is built — see renderTerminals) fills the real state before the
+    // browser ever paints it.
+    const state = draggable
+        ? `<span class="gs-state gs-state-idle" data-state-for="${attrEsc(wid)}" title="idle">
+             <span class="gs-state-glyph" aria-hidden="true">○</span><span class="gs-state-word">idle</span>
+           </span>` : '';
     const menu = `<span class="gs-menu-wrap">
         <button class="gs-menu-btn" onclick="chela.togglePaneOverflow(event, this)"
                 aria-haspopup="true" aria-expanded="false" title="Session actions">${lucideIcon('more-vertical', 14)}</button>
@@ -819,6 +833,7 @@ function paneHead(wid, draggable) {
       </span>`;
     return `<div class="gs-head">
       ${dot}
+      ${state}
       ${menu}
       ${label}
       ${roomBadge}
@@ -1218,6 +1233,7 @@ function _applyTermStatus(agents) {
     });
     _lazyDock(agents);   // dock the dispatcher's quiet workers; pop out the ones that block
     _colorTermDots(agents);
+    _applyWallTileFrame(agents);   // wall redesign slice 1: state pill / recap / PR chip / action bar
     // Wall tick is the fast path (4s) — refresh the tab signal here too so the
     // title/favicon update promptly on the flagship view, not just on the 30s
     // sidebar refresh. updateTabSignal is idempotent, so the two callers agree.
@@ -1246,17 +1262,29 @@ function _applyTermContext(ctx) {
         const head = bar.parentElement && bar.parentElement.querySelector('.gs-head');
         const ctxChip = bar.querySelector('.gs-ctx');
         const branchChip = bar.querySelector('.gs-branch');
+        // Wall redesign slice 1: model + cost chips are wall-only (_ctxBarHTML
+        // only renders them when draggable) — null on single mode's bar, so
+        // every write below is guarded the same way ctxChip/branchChip are.
+        const modelChip = bar.querySelector('.gs-model');
+        const costChip = bar.querySelector('.gs-cost');
         if (!c || c.used_pct == null) {
             fill.style.width = '0';
             fill.className = 'term-ctx-fill';
             bar.title = 'Context: —';
             if (ctxChip) ctxChip.hidden = true;
             if (branchChip) branchChip.hidden = true;
+            if (modelChip) modelChip.hidden = true;
+            if (costChip) costChip.hidden = true;
             return;
         }
         const pct = c.used_pct;
         fill.style.width = Math.min(100, pct) + '%';
-        const sev = pct > 80 ? ' ctx-danger' : pct > 60 ? ' ctx-warn' : '';
+        // Routed through wallmodel.js's ctxLevel — the SAME thresholds this
+        // slice's guard tests pin (tests/wall_tile.test.mjs), so the pure
+        // logic under test is what actually drives the rendered fill/chip,
+        // not a second copy of the 60/80 thresholds living only here.
+        const lvl = ctxLevel(pct);
+        const sev = lvl === 'bad' ? ' ctx-danger' : lvl === 'warn' ? ' ctx-warn' : '';
         fill.className = 'term-ctx-fill' + sev + (c.estimated ? ' est' : '');
         const bits = [`Context: ${c.used}/${c.total} (${pct}%${c.estimated ? '~' : ''})`];
         if (c.model) bits.push(c.model);
@@ -1283,6 +1311,15 @@ function _applyTermContext(ctx) {
             } else {
                 branchChip.hidden = true;
             }
+        }
+        if (modelChip) {
+            if (c.model) { modelChip.textContent = c.model; modelChip.hidden = false; }
+            else modelChip.hidden = true;
+        }
+        if (costChip) {
+            const cost = costView(c.cost_usd);
+            if (cost) { costChip.textContent = cost; costChip.title = 'session cost'; costChip.hidden = false; }
+            else costChip.hidden = true;
         }
     });
 }
@@ -1910,10 +1947,116 @@ function _wallTileHTML(wid, x, y, w, h) {
     return `<div class="grid-stack-item${pinnedCls}" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
     ${paneHead(wid, true)}
+    ${_recapLineHTML(wid)}
     ${body}
     ${_ctxBarHTML(wid, true)}
+    ${_actionBarHTML(wid)}
   </div>
 </div>`;
+}
+
+// Wall redesign slice 1: the away-summary line, Claude's own "what happened
+// while you were away" — never shown on the Wall before this. Dim, one line,
+// recap_ts in the tooltip. Rendered hidden by default (mirrors the ctx bar's
+// chips); _applyWallTileFrame fills it synchronously right after the wall is
+// built (renderTerminals calls _applyTermStatus(_agentsCache) immediately
+// after buildWall), so there is no visible flash of "hidden then shown".
+function _recapLineHTML(wid) {
+    return `<div class="pane-recap" data-recap-for="${attrEsc(wid)}" hidden></div>`;
+}
+
+// Wall redesign slice 1: the amber Approve/Answer bar (wantsHuman) or blue
+// Review bar (finished, PR up) — sends its key via the EXISTING
+// /api/term/key path (termKeyFor -> chela.termActionClick below), no new
+// endpoint. Always rendered (hidden by default) so _applyWallTileFrame can
+// find it by data-action-for on every poll, same pattern as the ctx bar.
+function _actionBarHTML(wid) {
+    return `<div class="term-action-bar" data-action-for="${attrEsc(wid)}" hidden></div>`;
+}
+
+// The action bar's inner markup for a given {kind, label} (wallmodel.js
+// actionBarKind). 'review' links straight to the PR (no key to send);
+// 'answer'/'approve' send Enter via the existing /api/term/key path — Enter
+// accepts Claude's own highlighted default choice at a permission gate and
+// submits a typed reply, which is the one safe, universal action available
+// through the whitelisted key set (app.py::_TERM_KEYS) without a new endpoint.
+function _actionBarContent(wid, kind) {
+    if (kind.kind === 'review') {
+        const chip = prChip((_agentByWid(wid) || {}).pr);
+        const url = chip ? chip.url : '#';
+        return `<span class="term-action-label">✓ PR ready for review</span>
+          <a class="term-action-btn" href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">Review</a>`;
+    }
+    const label = kind.label === 'Answer' ? '◆ Needs an answer' : '◆ Needs approval';
+    return `<span class="term-action-label">${escHtml(label)}</span>
+      <button type="button" class="term-action-btn" onclick="chela.termActionClick(this,'${_jsStr(wid)}')">${escHtml(kind.label)}</button>`;
+}
+
+// Send the action bar's key (Enter) via the existing /api/term/key path.
+async function termActionClick(btn, wid) {
+    if (!btn) return;
+    btn.disabled = true;
+    try {
+        await termKeyFor(wid, 'Enter');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// Wall redesign slice 1: repaint every wall tile's new frame elements (state
+// pill, recap line, PR chip, action bar) from a fresh /api/agents poll — the
+// SAME agents array _applyTermStatus already has, so this runs as one more
+// step of that existing 4s tick rather than a second poll. Model/cost/branch
+// (ctx-poll-driven) are repainted separately by _applyTermContext, which
+// already owns that bar's other chips.
+function _applyWallTileFrame(agents) {
+    if (!agents) return;
+    const by = {};
+    agents.forEach(a => { if (a.window_id) by[a.window_id] = a; });
+
+    document.querySelectorAll('#panel-terminals .gs-state[data-state-for]').forEach(el => {
+        const a = by[el.dataset.stateFor];
+        const s = tileState(a, wantsHuman(a));
+        el.className = 'gs-state gs-state-' + s.cls;
+        el.title = s.word;
+        const g = el.querySelector('.gs-state-glyph');
+        const w = el.querySelector('.gs-state-word');
+        if (g) g.textContent = s.glyph;
+        if (w) w.textContent = s.word;
+    });
+
+    document.querySelectorAll('#panel-terminals .pane-recap[data-recap-for]').forEach(el => {
+        const r = recapView(by[el.dataset.recapFor]);
+        el.hidden = !r;
+        el.textContent = r ? r.text : '';
+        el.title = (r && r.tsTitle) ? ('as of ' + r.tsTitle) : '';
+    });
+
+    document.querySelectorAll('#panel-terminals .gs-pr[data-pr-for]').forEach(el => {
+        const a = by[el.dataset.prFor];
+        const chip = prChip(a && a.pr);
+        if (!chip) { el.hidden = true; el.removeAttribute('href'); el.textContent = ''; return; }
+        el.hidden = false;
+        el.href = chip.url;
+        el.textContent = '⚑ ' + chip.label;
+        el.title = 'Open PR ' + chip.label + (chip.repository ? ' — ' + chip.repository : '');
+    });
+
+    document.querySelectorAll('#panel-terminals .term-action-bar[data-action-for]').forEach(el => {
+        const wid = el.dataset.actionFor;
+        const a = by[wid];
+        const kind = actionBarKind(a, wantsHuman(a));
+        const host = el.closest('.grid-stack-item-content');
+        if (!kind) {
+            if (!el.hidden) { el.hidden = true; el.className = 'term-action-bar'; el.innerHTML = ''; }
+            if (host) host.classList.remove('has-term-action');
+            return;
+        }
+        el.hidden = false;
+        el.className = 'term-action-bar action-' + kind.kind;
+        el.innerHTML = _actionBarContent(wid, kind);
+        if (host) host.classList.add('has-term-action');
+    });
 }
 
 // Per-tile context-window bar pinned to the tile bottom edge (CMX-117: now the
@@ -1931,7 +2074,16 @@ function _wallTileHTML(wid, x, y, w, h) {
 // target).
 function _ctxBarHTML(wid, draggable) {
     const idxNum = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
+    // Wall redesign slice 1: model + PR chip + cost, wall-only (same gate as
+    // idxNum above) — filled/shown by _applyWallTileFrame (PR, agents-driven)
+    // and _applyTermContext (model/cost, context-poll-driven), never both at
+    // once for the same field, so there is exactly one writer per chip.
+    const meta = draggable
+        ? `<span class="gs-model" hidden></span>
+           <a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
+           <span class="gs-cost" hidden></span>` : '';
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
+      ${meta}
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
       ${idxNum}
@@ -2709,4 +2861,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _ord
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleWallLock, wireDragStart, wireRoomClick });

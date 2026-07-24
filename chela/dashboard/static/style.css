@@ -216,6 +216,21 @@ body {
     color: var(--text-dim); opacity: 0.75;
 }
 
+/* --- Wall redesign slice 1: the recap line — Claude's own "what happened
+   while you were away" (a.recap), surfaced on the Wall for the first time.
+   Dim, one line, ellipsised; recap_ts rides in the tooltip. Sits between the
+   header and the iframe in normal flow (wall tiles only — _wallTileHTML is
+   never used by single mode), so it simply shrinks the iframe's own flex
+   box rather than needing any bottom-bar margin math. Hidden (not rendered
+   collapsed) when there is no recap — "degrade quietly", never an empty bar. */
+.pane-recap {
+    flex: 0 0 auto; padding: 3px 9px;
+    font-size: 10.5px; line-height: 1.3; color: var(--text-dim); opacity: 0.85;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+}
+.pane-recap[hidden] { display: none; }
+
 /* --- CMX-119: pane header v2 — split the CMX-117 combined badge back apart
    now that every pane has a bottom bar to hold its numbers (see .term-ctx-bar
    / .gs-idx below). `.gs-dot` is back to a plain circle carrying LIVE STATUS
@@ -244,6 +259,23 @@ body {
    so it never collides with the waiting-state glow above) — updated in lockstep
    with the menu's Orchestrator row by _updateOrchBtns (terminals.js). */
 .gs-dot.gs-dot-orch { outline: 2px solid var(--ok-blue); outline-offset: 1px; }
+
+/* --- Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
+   Wall-only (paneHead's `draggable` gate — single mode renders none of this,
+   so mobile's forced single mode at <768px is untouched). GLYPH + WORD always
+   carry the state (Liav is red-weak); the Okabe-Ito colour below is
+   decoration on top, never the sole signal. `tileState` (wallmodel.js) is the
+   one source of the glyph/word/class triple; this file only paints it. */
+.gs-state {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px;
+    padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor;
+    font-size: 10px; font-weight: 700; line-height: 1.5; white-space: nowrap;
+}
+.gs-state-glyph { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.gs-state-working { color: var(--ok-green); }
+.gs-state-needs-you { color: var(--ok-orange); }
+.gs-state-done { color: var(--ok-sky); }
+.gs-state-idle { color: var(--text-dim); opacity: 0.85; }
 
 .gs-menu-wrap { position: relative; flex: 0 0 auto; }
 .gs-menu-btn {
@@ -311,6 +343,22 @@ body {
 .gs-branch { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .gs-ctx.ctx-warn { color: var(--yellow); }
 .gs-ctx.ctx-danger { color: var(--red); }
+
+/* --- Wall redesign slice 1: the meta row's model + PR + cost chips, folded
+   into this SAME bottom bar rather than a separate strip (enrich, don't
+   duplicate — .gs-branch/.gs-ctx above already live here). Wall-only
+   (_ctxBarHTML's draggable gate), left-grouped in normal flow same as
+   .gs-branch/.gs-ctx; `.gs-idx` (below) keeps its own auto-left-margin so it
+   stays pinned far-right no matter how many of these chips are hidden. */
+.gs-model, .gs-cost {
+    flex: 0 0 auto; font-weight: 500; line-height: 1;
+    white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.gs-pr {
+    flex: 0 0 auto; font-weight: 700; line-height: 1; white-space: nowrap;
+    color: var(--ok-sky); text-decoration: none; pointer-events: auto;
+}
+.gs-pr:hover { text-decoration: underline; }
 
 /* Pane № (Alt+N jump target) — CMX-119 originally tucked it at the far right
    of the bottom bar, after the context numbers; CMX-124 moved it to the FAR
@@ -795,6 +843,49 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
        the .term-single .term-pane .term-frame rule above for why margin. */
     margin-bottom: var(--term-ctx-bar-h);
 }
+/* Wall redesign slice 1: when the action bar (below) is showing, it stacks
+   ABOVE the ctx bar (same absolutely-positioned-footer technique as that bar
+   uses against the iframe) — so the iframe needs to reserve that much MORE
+   margin. `.has-term-action` is toggled by _applyWallTileFrame the instant
+   the bar's kind changes, in lockstep with the bar's own [hidden]. */
+.grid-stack-item-content.has-term-action .term-frame {
+    margin-bottom: calc(var(--term-ctx-bar-h) + var(--term-action-bar-h));
+}
+/* --- Wall redesign slice 1: the action bar. Amber (Approve/Answer, a
+   wantsHuman pane) or blue (Review, a finished pane with a PR) — GLYPH + WORD
+   still carry the state here too (◆/✓, matching the header pill), colour is
+   decoration. Sends its action via the EXISTING /api/term/key path
+   (chela.termActionClick -> termKeyFor), no new endpoint. Always rendered,
+   hidden by default — _applyWallTileFrame fills content and un-hides it, the
+   same pattern the ctx bar's chips already use. */
+:root { --term-action-bar-h: 26px; }
+.term-action-bar {
+    position: absolute; left: 0; right: 0; bottom: var(--term-ctx-bar-h); z-index: 5;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    height: var(--term-action-bar-h); padding: 0 9px;
+    font-size: 11px; font-weight: 600;
+    border-top: 1px solid var(--border);
+}
+.term-action-bar[hidden] { display: none; }
+.term-action-label {
+    display: inline-flex; align-items: center; gap: 5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.term-action-bar.action-approve, .term-action-bar.action-answer {
+    background: color-mix(in srgb, var(--ok-orange) 18%, var(--term-bg));
+    color: var(--ok-orange);
+}
+.term-action-bar.action-review {
+    background: color-mix(in srgb, var(--ok-sky) 18%, var(--term-bg));
+    color: var(--ok-sky);
+}
+.term-action-btn {
+    flex: 0 0 auto; display: inline-block; font: inherit; font-weight: 700;
+    padding: 3px 10px; border-radius: 4px; border: 1px solid currentColor;
+    background: transparent; color: inherit; cursor: pointer; text-decoration: none;
+}
+.term-action-btn:hover { background: currentColor; color: var(--term-bg); }
+.term-action-btn:disabled { opacity: 0.6; cursor: default; }
 /* iframes eat the mouse mid-drag; neutralise them while dragging/resizing */
 .grid-stack.gs-dragging .term-frame { pointer-events: none; }
 /* Pin the page during a drag: gridstack transiently grows the grid into a lower
