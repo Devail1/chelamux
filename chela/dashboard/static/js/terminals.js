@@ -2029,7 +2029,9 @@ function _applyWallTileFrame(agents) {
         const r = recapView(by[el.dataset.recapFor]);
         el.hidden = !r;
         el.textContent = r ? r.text : '';
-        el.title = (r && r.tsTitle) ? ('as of ' + r.tsTitle) : '';
+        // The line clamps to one row; the tooltip reveals the FULL recap (plus
+        // its as-of time), so nothing is lost to truncation on a glance.
+        el.title = r ? (r.text + (r.tsTitle ? '\n\n(as of ' + r.tsTitle + ')' : '')) : '';
     });
 
     document.querySelectorAll('#panel-terminals .gs-pr[data-pr-for]').forEach(el => {
