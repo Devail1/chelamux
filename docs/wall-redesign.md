@@ -1,6 +1,6 @@
 # Wall redesign — design doc
 
-Status: **design approved, pre-implementation** · 2026-07-24 · owner: orchestrator (dispatched slices, Fable-designed, render-verified)
+Status: **shipped on `wall-redesign` (dogfooding), not yet promoted to dev/main** · 2026-07-24 · owner: orchestrator (worktree-built slices, render-verified). Slices 1–3 done (status-dense tile, auto-arrange toggle, Focus layout); slice 5 (drag-to-swap) skipped — already existed in Lock mode. Remaining optional: status-driven *sizing* (panes grow/shrink by state).
 
 ## Context — why
 
@@ -70,7 +70,7 @@ Each slice is one `cmx-N` dispatch: **Fable designs the concrete mockup/spec →
 | **2** ✅ | **Auto-arrange mode toggle** (merges old 2+4) | A default-off *Auto-arrange* toolbar toggle; when ON the wall continuously ranks panes by attention and lays them out in rank order; when OFF the manual layout is restored. **Owner decision: manual layout is sacred — auto never overwrites `pc_wall_layout`; ranking only applies while the toggle is on.** | pure `rankOrder(agents, wantsByWid)` — needs-you → busy → idle → done, stable within a rank. | auto on → needs-you/active to front without reloading iframes; auto off → manual layout restored byte-for-byte; drag/resize disabled while on. **Done — `wall-redesign`.** |
 | **3** ✅ | **Focus layout** (one large pane + strip) | Curated presets (even-grid/focus-one/priority-split) + one-click auto-arrange/reset. | preset → `{wid:{x,y,w,h}}` layout map; auto-arrange is deterministic given a fleet. | each preset applies; reset snaps sane; persists to localStorage. |
 | ~~4~~ | **Smart auto-layout — folded into slice 2** | The status-driven *ranking* shipped in slice 2's auto mode. What remains for a later pass is status-driven *sizing* (needs-you/active panes grow, idle/done shrink) — a refinement of the same toggle, not a separate mode. | — | — |
-| **5** | **True drag-to-swap** | Transparent drag-overlay + manual hit-test + cell swap. **Interactive prototype validated before dispatch.** | swap-cell function (two rects → two new layouts), no-op on self-drop. | drag over the iframe works (overlay beats pointer-events); A↔B exchange; layout persists; no iframe reload. |
+| ~~5~~ | **Drag-to-swap — SKIPPED (already exists)** | Discovered during scoping: **Lock mode already implements drag-to-swap** (`_snapshotForSwap`/`_swapTargetWid`/`_doSwap`, centroid hit-test, live target highlight, swap-*and-resize*) — drag a pane's header onto another. The only net-new would be full-pane drag *over the iframe* via a transparent overlay; owner decided header-drag is sufficient and skipped the overlay (avoids the iframe-pointer-events risk). | — | — |
 
 *(Later, separate workstreams — not this doc: A's collapsible "Needs you" rail; C's focus-mode toggle; cutting the Knowledge view; a Settings surface.)*
 
