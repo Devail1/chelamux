@@ -163,16 +163,29 @@ def _running_pm2_services(repo: Path) -> list[str]:
     )
 
 
-def _is_history_rewrite(repo: Path) -> bool:
-    """Whether HEAD and ``@{u}`` share NO common ancestor at all — the fingerprint of a
-    full-history rewrite (``git filter-repo`` + force-push), as opposed to an ordinary
-    side-by-side divergence (both sides added commits on top of a shared history), which
-    always retains one. ``git merge-base`` exits exactly 1 for "no common ancestor"; any
-    other nonzero exit (bad revision, repo trouble) is a different failure, NOT this case
-    — so it falls through to the ordinary diverged-branch refusal rather than triggering a
-    reset on a guess.
+def _is_history_rewrite(repo: Path, old_upstream: str) -> bool:
+    """Whether the fetch just moved the remote-tracking ref **non-fast-forward** — the
+    fingerprint of a force-push (``git filter-repo`` + push): the tip ``@{u}`` had *before*
+    this fetch (``old_upstream``, captured pre-fetch) is no longer an ancestor of the tip
+    it has *now*.
+
+    This is the reliable signal, NOT "HEAD and ``@{u}`` share no common ancestor": a
+    mid-history ``filter-repo`` keeps every commit before the first change unmodified, so a
+    common ancestor SURVIVES (only a full ``--orphan`` rewrite drops it) — a no-ancestor
+    test would miss the exact scrub this exists for and fall through to the diverged
+    refusal, stranding the adopter. An ordinary upstream that merely advanced keeps its old
+    tip as an ancestor, so this stays False for it.
+
+    ``git merge-base --is-ancestor`` exits 0 when ``old_upstream`` IS an ancestor of the new
+    ``@{u}`` (an ordinary advance) and exactly 1 when it is NOT (a rewrite); any other
+    nonzero exit (bad revision, repo trouble) is a different failure, NOT this case — so it
+    reads as "not a rewrite" and falls through to the ordinary refusal rather than resetting
+    on a guess. An empty ``old_upstream`` (no pre-fetch tip to compare) is likewise not a
+    rewrite.
     """
-    cp = _git(repo, "merge-base", "HEAD", "@{u}")
+    if not old_upstream:
+        return False
+    cp = _git(repo, "merge-base", "--is-ancestor", old_upstream, "@{u}")
     return cp is not None and cp.returncode == 1
 
 
@@ -220,6 +233,11 @@ def apply(repo: Path | None = None) -> ApplyResult:
                             error="working tree has uncommitted changes — refusing to "
                                   "update over local edits")
 
+    # Capture the remote-tracking tip BEFORE the fetch moves it — comparing the old tip
+    # against the new one is how a force-push (history rewrite) is told apart from an
+    # ordinary advance (see _is_history_rewrite). "" if there is no upstream to read.
+    old_upstream = _git_out(_git(repo, "rev-parse", "@{u}"))
+
     status = commits_behind(repo, fetch=True)
     if not status.ok:
         return ApplyResult(ok=False, step="fetch", error=status.error)
@@ -227,7 +245,7 @@ def apply(repo: Path | None = None) -> ApplyResult:
     rewrite_recovered = False
     backup_ref = ""
     if status.ahead > 0:
-        if not _is_history_rewrite(repo):
+        if not _is_history_rewrite(repo, old_upstream):
             return ApplyResult(
                 ok=False, step="ff-check", behind_before=status.behind,
                 error=f"local branch is {status.ahead} commit(s) ahead of its upstream — "

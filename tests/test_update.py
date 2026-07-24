@@ -161,6 +161,59 @@ def test_history_rewrite_is_recovered_safely_not_refused(checkout, upstream, mon
     assert backed_up == before_head, "the pre-rewrite HEAD must be preserved, not lost"
 
 
+def test_partial_rewrite_with_surviving_ancestor_is_recovered(checkout, upstream, monkeypatch):
+    """🔴 THE REALISTIC scrub — the case a `--orphan` test misses. A mid-history
+    `git filter-repo` keeps every commit BEFORE the first change unmodified, so the old and
+    rewritten histories still SHARE a common ancestor (only a full --orphan rewrite drops
+    it). Detection must key on the non-fast-forward move of the remote-tracking ref, NOT on
+    "HEAD and @{u} share no common ancestor" — otherwise this exact case refuses and the
+    self-heal never fires for the rewrite it exists for. Reproduces the shape observed
+    against the real repo (ahead>0, behind>0, common ancestor survives).
+    """
+    # Give upstream a shared base and bring the checkout fully up to date on the OLD tip
+    # (leave its remote-tracking ref STALE — apply() reads it pre-fetch to spot the rewrite).
+    _commit(upstream, "f1.txt", "v1\n", "c1")
+    subprocess.run(["git", "-C", str(checkout), "pull", "-q", "--ff-only"],
+                   check=True, capture_output=True)
+    before_head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    # Force-push a rewrite that orphans that tip but keeps the seed as a shared ancestor:
+    # reset back one commit and re-commit — a mid-history filter-repo in miniature.
+    _git(upstream, "reset", "--hard", "HEAD~1")
+    _commit(upstream, "f1.txt", "v2\n", "c1 rewritten")
+    upstream_new = subprocess.run(
+        ["git", "-C", str(upstream), "rev-parse", "main"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    # PROVE this is the partial case: a common ancestor still exists between the old
+    # checkout HEAD and the rewritten upstream tip (what the "no common ancestor" test missed).
+    assert subprocess.run(
+        ["git", "-C", str(upstream), "merge-base", before_head, upstream_new],
+        capture_output=True,
+    ).returncode == 0, "test must exercise the shared-ancestor (partial-rewrite) case"
+
+    monkeypatch.setattr(update, "_sh", _pm2_stub([]))
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.rewrite_recovered is True
+    assert result.step != "ff-check"
+    new_head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert new_head == upstream_new, "must land exactly on the rewritten upstream tip"
+    backed_up = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", result.backup_ref],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert backed_up == before_head, "the pre-rewrite HEAD must be preserved, not lost"
+
+
 def test_history_rewrite_recovery_still_refuses_a_dirty_tree(checkout, upstream):
     """The dirty-check must still run BEFORE any rewrite recovery -- a rewrite is never
     an excuse to reset over uncommitted local edits."""
@@ -188,16 +241,27 @@ def test_ordinary_divergence_with_shared_history_still_refuses(checkout, upstrea
     assert not any(args and args[0] == "reset" for args in git_calls)
 
 
+def _upstream_tip(checkout: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "@{u}"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
 def test_is_history_rewrite_false_for_ordinary_divergence(checkout, upstream):
-    _commit(upstream, "new.txt", "new\n")
-    _commit(checkout, "local.txt", "local\n")
-    assert update._is_history_rewrite(checkout) is False
+    # The remote-tracking tip BEFORE the fetch — an ordinary advance keeps it as an ancestor.
+    old_upstream = _upstream_tip(checkout)
+    _commit(upstream, "new.txt", "new\n")           # upstream advances (ff on its side)
+    _commit(checkout, "local.txt", "local\n")       # and so does the local checkout
+    _git(checkout, "fetch")
+    assert update._is_history_rewrite(checkout, old_upstream) is False
 
 
 def test_is_history_rewrite_true_after_a_force_pushed_rewrite(checkout, upstream):
+    old_upstream = _upstream_tip(checkout)          # captured pre-fetch, pre-rewrite
     _force_rewrite_history(upstream)
     _git(checkout, "fetch")
-    assert update._is_history_rewrite(checkout) is True
+    assert update._is_history_rewrite(checkout, old_upstream) is True
 
 
 # --- happy path order --------------------------------------------------------------
