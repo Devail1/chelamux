@@ -480,8 +480,19 @@ for:
   express a multi-select answer at all.
 - **The live event Feed** on the dashboard.
 
+Install it straight from this repo, inside Claude Code — this works out of the box
+on the default dashboard port (`5001`):
+
+```
+/plugin marketplace add Devail1/chelamux
+/plugin install chela@chela
+```
+
+On a **non-default** dashboard port? A hook URL is a literal (Claude Code doesn't
+expand env vars in it), so render your own copy with the port baked in:
+
 ```bash
-chela plugin --dir ~/.chela/plugin        # render it (bakes in your dashboard port)
+chela plugin --dir ~/.chela/plugin        # bakes in the port the dashboard actually bound
 claude --plugin-dir ~/.chela/plugin       # or: /plugin marketplace add ~/.chela/plugin
 ```
 

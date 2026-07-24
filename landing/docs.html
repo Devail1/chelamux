@@ -349,7 +349,13 @@ uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span><
     selector otherwise reaches your phone with no options), <strong>answering a question with zero
     keystrokes</strong>, and the live event Feed. It fails open — if the daemon is down the hook logs a
     warning and your agent carries on.</p>
-    <pre>chela plugin --dir ~/.chela/plugin        <span class="c"># render it (bakes in your dashboard port)</span>
+    <p>Install it straight from this repo, inside Claude Code — works out of the box on the default
+    dashboard port (<code>5001</code>):</p>
+    <pre>/plugin marketplace add Devail1/chelamux
+/plugin install chela@chela</pre>
+    <p>On a non-default dashboard port? A hook URL is a literal (Claude Code doesn't expand env vars in
+    it), so render your own copy with the port baked in:</p>
+    <pre>chela plugin --dir ~/.chela/plugin        <span class="c"># bakes in the port the dashboard actually bound</span>
 claude --plugin-dir ~/.chela/plugin       <span class="c"># or: /plugin marketplace add ~/.chela/plugin</span></pre>
 
     <h3>Context &amp; rate-limit pills</h3>
