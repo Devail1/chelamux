@@ -2598,6 +2598,12 @@ def api_dispatcher():
                         "title": t.title,
                         "file": t.file,
                         "line_number": t.line_number,
+                        # The task's full brief text as the tracker source wrote it (the
+                        # original line for a markdown tracker; the issue URL for
+                        # gh_issues — see chela.sources.Task.raw) — additive, so the
+                        # task-detail modal has something to render for an
+                        # un-dispatched task, before a `brief` column exists on any run.
+                        "raw": t.raw,
                     }
                     for t in open_tasks
                     if t.id not in in_flight_ids

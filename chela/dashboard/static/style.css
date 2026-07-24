@@ -1727,6 +1727,162 @@ input[type="text"]:focus, textarea:focus, select:focus {
     margin-top: 14px;
 }
 
+/* ---- Task-detail modal (Work-view redesign) ----
+   A kanban card click opens #modal-task: the brief (markdown) on the left,
+   a details sidebar + review timeline on the right. Wider than the stock
+   .modal (which caps at 90vw with no min), and its own 2-column body that
+   stacks under ~720px — the brief is the primary read, so it goes first in
+   source order and the sidebar follows underneath on narrow viewports. */
+
+.modal-task {
+    position: relative;
+    width: min(860px, 100%);
+    max-width: 92vw;
+    max-height: 86vh;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.task-modal-close {
+    position: absolute;
+    top: 10px; right: 10px;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 5px;
+}
+.task-modal-close:hover { color: var(--text); background: var(--bg); }
+
+.task-modal-head {
+    flex: 0 0 auto;
+    padding-right: 28px;   /* room for the close button */
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+}
+
+.task-modal-headline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+
+.task-modal-title {
+    font-size: 15px;
+    margin: 0;
+    word-break: break-word;
+}
+
+.task-modal-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    gap: 20px;
+    align-items: start;
+}
+
+@media (max-width: 720px) {
+    .task-modal-body { grid-template-columns: 1fr; }
+    .modal-task { max-width: 96vw; max-height: 92vh; }
+}
+
+.task-modal-brief.md { font-size: 13px; line-height: 1.6; min-width: 0; }
+.task-modal-brief.md :is(h1, h2, h3, h4) { font-size: 14px; font-weight: 700; margin: 14px 0 6px; }
+.task-modal-brief.md :is(h1, h2, h3, h4):first-child { margin-top: 0; }
+.task-modal-brief.md p { margin: 6px 0; }
+.task-modal-brief.md .kn-ul { margin: 6px 0; padding-left: 20px; }
+.task-modal-brief.md li { margin: 3px 0; }
+.task-modal-brief.md blockquote {
+    border-left: 3px solid var(--border);
+    margin: 8px 0;
+    padding-left: 10px;
+    color: var(--text-dim);
+}
+.task-modal-brief.md code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 4px; font-size: 12px;
+}
+.task-modal-brief.md .kn-code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; overflow-x: auto;
+}
+.task-modal-brief.md .kn-code code { background: none; border: none; padding: 0; }
+
+.task-modal-side { min-width: 0; font-size: 12px; }
+
+.task-modal-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 14px 0 6px;
+}
+.task-modal-sub:first-child { margin-top: 0; }
+
+.task-modal-row {
+    display: flex;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+    align-items: baseline;
+}
+.task-modal-row-label {
+    flex: 0 0 82px;
+    color: var(--text-dim);
+    font-size: 11px;
+}
+.task-modal-row-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-word;
+}
+
+.task-modal-empty { color: var(--text-dim); font-size: 12px; padding: 4px 0; }
+
+.task-modal-error {
+    color: var(--red);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.task-modal-timeline {
+    list-style: none;
+    margin: 0; padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.task-modal-timeline-step {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    background: var(--bg);
+}
+.task-modal-timeline-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.task-modal-timeline-body {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.kanban-pr-wrap { display: inline-flex; }
+
 /* ---- Timestamp ---- */
 
 .ts { color: var(--text-dim); font-size: 11px; }

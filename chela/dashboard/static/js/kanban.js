@@ -2,6 +2,7 @@
 import { $, BASE_PATH, attrEsc, escHtml } from './util.js';
 import { _runDisplayId, _runPrCell } from './dispatcher.js';
 import { pollWork, postWorkDelete } from './work.js';
+import { openTaskModal } from './taskmodal.js';
 
 // ---------------------------------------------------------------------------
 // Render: the Board segment of WORK (the global cross-workflow kanban)
@@ -59,6 +60,20 @@ const KANBAN_DEFAULT_COLLAPSED = ['backlog', 'failed', 'done'];
 
 let _kanbanFilter = 'all';    // workflow path or 'all'
 
+// Every card object rendered THIS pass, in DOM order — indexed via a card's
+// own `data-kidx`. Rebuilt from scratch at the top of every renderKanban()
+// call (see there), so a click always resolves against the payload that is
+// actually on screen, never a stale one from a previous poll. This is what
+// lets a card click hand openTaskModal() the SAME object the board already
+// has (from the one /api/dispatcher poll) instead of re-fetching.
+let _kanbanCardIndex = [];
+
+function openTaskModalFromCard(el) {
+    const idx = Number(el && el.dataset && el.dataset.kidx);
+    const card = Number.isInteger(idx) ? _kanbanCardIndex[idx] : null;
+    if (card) openTaskModal(card);
+}
+
 // Mobile-only layout: 'swipe' (default, scroll-snap carousel) or 'rows'
 // (collapsible accordion). Persisted so it survives the 30s self-poll and
 // return visits. Desktop ignores it entirely (the 7-col grid is unchanged).
@@ -92,6 +107,10 @@ function _wfName(path) {
 // (Backlog / Open) carry file+text; run-backed cards carry task_id. Empty
 // string when there's no actionable target (defensive — every card we
 // render currently has one).
+// Every onclick below stops propagation FIRST: the card itself now has an
+// onclick (openTaskModalFromCard, added once card rendering carries a
+// data-kidx — see _kCard) — same guard the Wall draws between a tile's own
+// click and its action buttons.
 function _kCardDeleteBtn(card) {
     if (card.status === 'backlog' || card.status === 'open') {
         if (!card.file || !card.title) return '';
@@ -99,18 +118,21 @@ function _kCardDeleteBtn(card) {
                        data-del-kind="source-line"
                        data-file="${attrEsc(card.file)}"
                        data-text="${attrEsc(card.title)}"
-                       onclick="chela.kanbanDeleteClick(this)"
+                       onclick="event.stopPropagation();chela.kanbanDeleteClick(this)"
                        title="Delete this card" aria-label="Delete">&times;</button>`;
     }
     if (!card.task_id) return '';
     return `<button class="kanban-delete-btn" type="button"
                    data-del-kind="run"
                    data-task-id="${attrEsc(card.task_id)}"
-                   onclick="chela.kanbanDeleteClick(this)"
+                   onclick="event.stopPropagation();chela.kanbanDeleteClick(this)"
                    title="Delete this card" aria-label="Delete">&times;</button>`;
 }
 
 function _kCard(card) {
+    // Register this card in render order so a click can resolve it back to the
+    // FULL object (task-detail modal — CMX task-modal) without a second fetch.
+    const kidx = _kanbanCardIndex.push(card) - 1;
     const title = escHtml((card.title || '').slice(0, 200));
     const wf = escHtml(_wfName(card.workflow_path));
     const delBtn = _kCardDeleteBtn(card);
@@ -126,10 +148,10 @@ function _kCard(card) {
             ? `<button class="kanban-promote-btn" type="button"
                        data-wf="${attrEsc(card.workflow_path)}"
                        data-text="${attrEsc(card.title)}"
-                       onclick="chela.kanbanPromoteBacklog(this)">Promote</button>`
+                       onclick="event.stopPropagation();chela.kanbanPromoteBacklog(this)">Promote</button>`
             : '';
         return `
-    <div class="kanban-card kanban-card-backlog">
+    <div class="kanban-card kanban-card-backlog" data-kidx="${kidx}" onclick="chela.openTaskModalFromCard(this)">
         ${delBtn}
         <div class="kanban-card-title">${title}</div>
         <div class="kanban-card-meta">
@@ -157,7 +179,11 @@ function _kCard(card) {
     } else if (card.file) {
         branchOrLine = `<span class="ts">${escHtml(card.file.split('/').pop())}:${card.line_number}</span>`;
     }
-    const pr = _runPrCell(card.pr_url);
+    // Wrapped so a click on the PR link (opens a new tab) doesn't ALSO open the
+    // task modal underneath it — same stopPropagation guard as the action
+    // buttons below, without touching dispatcher.js's shared _runPrCell.
+    const prRaw = _runPrCell(card.pr_url);
+    const pr = prRaw ? `<span class="kanban-pr-wrap" onclick="event.stopPropagation()">${prRaw}</span>` : '';
     // The Awaiting Review column also holds the rework loop's other two states, so a card
     // that is NOT awaiting review says which one it is — in words. (Liav is red-weak: hue
     // is never the only signal, here or anywhere.)
@@ -187,7 +213,7 @@ function _kCard(card) {
             merge = `<button class="kanban-merge-btn" type="button"
                    data-task-id="${tid}"
                    data-pr-url="${attrEsc(card.pr_url)}"
-                   onclick="chela.kanbanMergePR(this)">Merge</button>`;
+                   onclick="event.stopPropagation();chela.kanbanMergePR(this)">Merge</button>`;
         }
         // ⛔ No button at all while CI is red, pending or unread. The server refuses those
         // merges too (it re-reads the checks from GitHub at merge time — this button is a
@@ -196,7 +222,7 @@ function _kCard(card) {
         // The chip beside it says which of the three it is.
     }
     return `
-    <div class="kanban-card kanban-card-${card.status}" data-task-id="${tid}">
+    <div class="kanban-card kanban-card-${card.status}" data-task-id="${tid}" data-kidx="${kidx}" onclick="chela.openTaskModalFromCard(this)">
         ${delBtn}
         <div class="kanban-card-title">${title}</div>
         <div class="kanban-card-meta">
@@ -229,6 +255,10 @@ function kanbanDeleteClick(btn) {
         <span class="kanban-confirm-msg">Delete this?</span>
         <button class="btn-confirm" type="button" onclick="chela.kanbanDeleteConfirm(this, true)">Delete</button>
         <button type="button" onclick="chela.kanbanDeleteConfirm(this, false)">Cancel</button>`;
+    // The card itself now opens the task modal on click (openTaskModalFromCard)
+    // — this whole strip (its text, and both buttons, including the ones the
+    // error path swaps in via _kanbanDeleteShowError) must not also trigger it.
+    confirmEl.addEventListener('click', e => e.stopPropagation());
     card.appendChild(confirmEl);
     btn.style.visibility = 'hidden';
 }
@@ -465,6 +495,10 @@ function _kanbanFlatten(data) {
                 title: t.title,
                 file: t.file,
                 line_number: t.line_number,
+                // The tracker's own text for this task (chela.sources.Task.raw) —
+                // an un-dispatched task's only brief; the task-detail modal falls
+                // back to it when there's no run (and so no `brief` column) yet.
+                raw: t.raw,
                 workflow_path: wf.path,
                 project_key: wf.project_key || null,
             });
@@ -626,6 +660,13 @@ function renderKanban(data) {
     }
     empty.style.display = 'none';
 
+    // Rebuilt every render — see _kanbanCardIndex's own comment. A card clicked
+    // from a previous render's DOM (a poll landed between paint and click) will
+    // resolve against WHATEVER now occupies that index, or nothing; both are
+    // harmless (openTaskModalFromCard no-ops on a miss) and the next 30s poll
+    // repaints the board anyway.
+    _kanbanCardIndex.length = 0;
+
     const { buckets, workflows } = _kanbanFlatten(data);
 
     // Apply the workflow filter to every column (Open included).
@@ -664,4 +705,4 @@ export { renderKanban };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { kanbanDeleteClick, kanbanDeleteConfirm, kanbanMergeAll, kanbanMergePR, kanbanNavTo, kanbanPromoteBacklog, setKanbanFilter, setKanbanLayout, toggleKanbanCol });
+Object.assign(window.chela, { kanbanDeleteClick, kanbanDeleteConfirm, kanbanMergeAll, kanbanMergePR, kanbanNavTo, kanbanPromoteBacklog, openTaskModalFromCard, setKanbanFilter, setKanbanLayout, toggleKanbanCol });

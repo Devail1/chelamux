@@ -931,6 +931,15 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # in both, which is exactly "the critic never ran".
         ("critic_notes", "ALTER TABLE runs ADD COLUMN critic_notes TEXT"),
         ("critic_reviewed_at", "ALTER TABLE runs ADD COLUMN critic_reviewed_at TEXT"),
+        # 📋 Task-detail modal (Work-view redesign). `brief` is the task's `Task.raw` —
+        # the tracker's own text for this task (the original line for a markdown
+        # tracker; the issue URL for gh_issues) — copied onto the run row at CLAIM
+        # time (`_spawn`, below) so the modal still has the brief to show once the
+        # task has left `open_tasks` (which only lists UNCLAIMED tasks). Additive and
+        # read-only downstream: nothing in the dispatch/rework/judge path reads this
+        # column back. A pre-migration row simply reads NULL — the modal degrades to
+        # "no brief recorded", never a crash.
+        ("brief", "ALTER TABLE runs ADD COLUMN brief TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -2856,11 +2865,12 @@ def tick(workflow_path: str | Path) -> dict:
             except Exception as e:
                 log.exception("Dispatch failed for task %s", task.id)
                 conn.execute(
-                    """INSERT INTO runs (task_id, workflow_path, title, status, attempt, last_error, started_at)
-                       VALUES (?, ?, ?, 'failed', ?, ?, ?)
+                    """INSERT INTO runs (task_id, workflow_path, title, status, attempt, last_error, started_at, brief)
+                       VALUES (?, ?, ?, 'failed', ?, ?, ?, ?)
                        ON CONFLICT(task_id) DO UPDATE SET
-                         status='failed', attempt=excluded.attempt, last_error=excluded.last_error""",
-                    (task.id, str(wf.path), task.title, attempt, str(e), _now()),
+                         status='failed', attempt=excluded.attempt, last_error=excluded.last_error,
+                         brief=excluded.brief""",
+                    (task.id, str(wf.path), task.title, attempt, str(e), _now(), task.raw),
                 )
                 conn.commit()
                 continue
@@ -2950,15 +2960,15 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # conflict: leaving attempt 1's id would point the next run_review at a corpse
     # (or, worse, at whatever window tmux later recycled that id onto).
     conn.execute(
-        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number)
-           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?)
+        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief)
+           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(task_id) DO UPDATE SET
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
-             window_epoch=NULL""",
-        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number),
+             window_epoch=NULL, brief=excluded.brief""",
+        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number, task.raw),
     )
     conn.commit()
 

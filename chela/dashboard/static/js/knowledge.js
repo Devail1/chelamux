@@ -559,7 +559,10 @@ function knMd(src, base) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { _kn, knBackToGlance, refreshKnowledge, knGraphModel, knNodeColor, knNodeGlyph, knNodeLabel, knGraphError };
+// knMd/knInline: the dependency-free markdown->HTML renderer, exported for
+// taskmodal.js (the task-detail modal's brief pane) to reuse verbatim rather
+// than pulling in a markdown library for a second dashboard surface.
+export { _kn, knBackToGlance, refreshKnowledge, knGraphModel, knNodeColor, knNodeGlyph, knNodeLabel, knGraphError, knMd, knInline };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
