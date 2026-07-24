@@ -224,11 +224,22 @@ body {
    box rather than needing any bottom-bar margin math. Hidden (not rendered
    collapsed) when there is no recap — "degrade quietly", never an empty bar. */
 .pane-recap {
-    flex: 0 0 auto; padding: 3px 9px;
+    position: relative; flex: 0 0 auto; padding: 3px 22px 3px 9px;
     font-size: 10.5px; line-height: 1.3; color: var(--text-dim); opacity: 0.85;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--border); cursor: pointer;
 }
+.pane-recap:hover { opacity: 1; }
+/* click-to-expand chevron — a pseudo-element so the 4s repaint's
+   textContent= never wipes it; rotates when the recap is pinned open. */
+.pane-recap::after {
+    content: '\25be'; position: absolute; right: 8px; top: 3px;
+    font-size: 9px; opacity: 0.55; transition: transform .12s ease;
+}
+.pane-recap.recap-open {
+    white-space: normal; overflow-y: auto; max-height: 8.5em; text-overflow: clip;
+}
+.pane-recap.recap-open::after { transform: rotate(180deg); }
 .pane-recap[hidden] { display: none; }
 
 /* --- CMX-119: pane header v2 — split the CMX-117 combined badge back apart

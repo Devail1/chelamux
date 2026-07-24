@@ -28,6 +28,23 @@ let _wallPreset = _loadWallPreset();   // active {cols, rows} fill preset; defau
 let _wallLocked = localStorage.getItem('pc_wall_locked') === '1';   // lock = swap-on-drag, no resize
 let _paneActivity = {};           // wid -> epoch ms a pane last STARTED being busy; drives the taskbar MRU sort
 let _paneStatus = {};             // wid -> last seen session_status, for rising-edge (idle→busy) detection
+
+// Wall redesign slice 1: which panes have their recap PINNED OPEN (click the
+// one-line recap to expand it to the full text). Persisted per-wid so the 4s
+// repaint and a reload keep it open, like the layout/minimized state above.
+const RECAP_OPEN_KEY = 'pc_wall_recap_open';
+function _loadRecapOpen() { try { return new Set(JSON.parse(localStorage.getItem(RECAP_OPEN_KEY) || '[]')); } catch (e) { return new Set(); } }
+function _saveRecapOpen() { try { localStorage.setItem(RECAP_OPEN_KEY, JSON.stringify([..._recapOpen])); } catch (e) { /* ignore */ } }
+let _recapOpen = _loadRecapOpen();
+// Toggle from the recap line's inline onclick. Attribute survives the repaint's
+// textContent= (which only replaces child text, never attributes).
+function toggleRecap(el) {
+    const wid = el && el.dataset && el.dataset.recapFor;
+    if (!wid) return;
+    if (_recapOpen.has(wid)) _recapOpen.delete(wid); else _recapOpen.add(wid);
+    _saveRecapOpen();
+    el.classList.toggle('recap-open', _recapOpen.has(wid));
+}
 let _dockOrderSig = '';           // last rendered chip order, so a status poll only rebuilds on a real reorder
 
 // Active wall preset persists across reloads (and drives the resize re-fit).
@@ -1962,7 +1979,7 @@ function _wallTileHTML(wid, x, y, w, h) {
 // built (renderTerminals calls _applyTermStatus(_agentsCache) immediately
 // after buildWall), so there is no visible flash of "hidden then shown".
 function _recapLineHTML(wid) {
-    return `<div class="pane-recap" data-recap-for="${attrEsc(wid)}" hidden></div>`;
+    return `<div class="pane-recap" data-recap-for="${attrEsc(wid)}" hidden onclick="chela.toggleRecap(this)"></div>`;
 }
 
 // Wall redesign slice 1: the amber Approve/Answer bar (wantsHuman) or blue
@@ -2032,6 +2049,7 @@ function _applyWallTileFrame(agents) {
         // The line clamps to one row; the tooltip reveals the FULL recap (plus
         // its as-of time), so nothing is lost to truncation on a glance.
         el.title = r ? (r.text + (r.tsTitle ? '\n\n(as of ' + r.tsTitle + ')' : '')) : '';
+        el.classList.toggle('recap-open', !!r && _recapOpen.has(el.dataset.recapFor));
     });
 
     document.querySelectorAll('#panel-terminals .gs-pr[data-pr-for]').forEach(el => {
@@ -2863,4 +2881,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _ord
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleRecap, toggleWallLock, wireDragStart, wireRoomClick });
