@@ -747,3 +747,31 @@ def test_repo_upstream_synced_does_not_apply_to_a_pip_install(monkeypatch):
         update, "repo_root",
         lambda: (_ for _ in ()).throw(update.NotAGitCheckout("not a git checkout")))
     assert not runtime_truth.fact("repo.upstream_synced").applies()
+
+
+# --- installed_hooks_stale(): `chela update`'s post-update reminder reuses the exact
+# comparison plugin.installed makes above, rather than a private one (CMX-170) -----------
+
+def test_installed_hooks_stale_is_false_on_a_healthy_fleet(fleet):
+    """`fleet` already installs a copy that matches what hooks_spec() renders right now."""
+    assert runtime_truth.installed_hooks_stale() is False
+
+
+def test_installed_hooks_stale_is_true_when_the_installed_copy_drifted(fleet, monkeypatch):
+    """CMX-56, verbatim: the INSTALLED copy still kills the gate hook after 2 seconds —
+    the same corruption `plugin.installed` itself catches must trip this reminder too."""
+    stale = hooks.hooks_spec(PORT)
+    stale["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"] = 2
+    install_plugin(stale)
+
+    assert runtime_truth.installed_hooks_stale() is True
+
+
+def test_installed_hooks_stale_is_false_with_nothing_installed_at_all(tmp_path, monkeypatch):
+    """No installed copy is a DIFFERENT problem (`plugin.installed` reports it loudly) —
+    not something `chela update` should tell someone to `/plugin update` about."""
+    claude = tmp_path / "claude"
+    (claude / "plugins").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+
+    assert runtime_truth.installed_hooks_stale() is False

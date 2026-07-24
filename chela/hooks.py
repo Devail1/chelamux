@@ -38,6 +38,7 @@ this replaces.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -213,11 +214,45 @@ def hooks_spec(port: int | None = None) -> dict:
     return {"hooks": hooks}
 
 
+_PORT_RE = re.compile(r"127\.0\.0\.1:\d+")
+
+
+def hooks_fingerprint(port: int | None = None) -> str:
+    """A hash of :func:`hooks_spec`, with the per-install port normalized out first.
+
+    Claude Code keys a plugin update on ``plugin.json``'s ``version`` — an install with a
+    matching version NO-OPs, hooks and all. So a change to the STRUCTURE of the rendered
+    hooks (a header, a timeout, a new event) has to force a version bump, or every existing
+    adopter silently keeps the old ones (this is exactly how #181 shipped
+    ``X-Chela-Wid`` to nobody already installed). :data:`EXPECTED_HOOKS_FINGERPRINT`
+    pins this hash to the version it was recorded for — see
+    ``tests/test_hooks.py::test_hooks_fingerprint_matches_the_recorded_version``.
+
+    The port is normalized to a placeholder first: two installs pointed at different
+    dashboard ports render byte-different manifests but are the SAME structural hooks, and
+    a port difference alone must never trip this guard.
+    """
+    rendered = json.dumps(hooks_spec(port or config.DEFAULT_DASHBOARD_PORT), sort_keys=True)
+    normalized = _PORT_RE.sub("127.0.0.1:PORT", rendered)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+# Recorded BY HAND, once per plugin.json version bump — never derived, or a change to
+# hooks_spec() and a change to this dict would move together and the guard would prove
+# nothing. To add an entry: bump plugin/.claude-plugin/plugin.json's version, then run
+# `python -c "from chela import hooks; print(hooks.hooks_fingerprint())"` and paste the
+# hash in here keyed by the new version.
+EXPECTED_HOOKS_FINGERPRINT: dict[str, str] = {
+    "0.2.1": "67b4358055f8df27922da7df6bf99c740ed23c800b19a03f0e41c485b4480bc9",
+}
+
+PLUGIN_VERSION = "0.2.1"
+
+
 def plugin_manifest() -> dict:
-    from chela import __version__
     return {
         "name": "chela",
-        "version": __version__,
+        "version": PLUGIN_VERSION,
         "description": "Feed a chela fleet's event log from Claude Code hooks, and "
                        "answer an AskUserQuestion from Telegram with no keystrokes.",
         "author": {"name": "chela"},
