@@ -3015,13 +3015,19 @@ function _applyWallFocus(agents) {
     const layout = focusLayout([_focusWid, ...order], _focusWid, total);
     _grid.batchUpdate();
     try {
+        // Park-then-place (same as _restoreManualLayout): a focus layout SPREADS
+        // panes into very different cells — one 8-wide main + a 4-wide strip — so
+        // moving each straight into its cell cascades collisions and the wide
+        // main never lands (it gets shoved into a lower row). Park every laid-out
+        // node far below first, then drop each onto its focus cell: nothing
+        // collides. Classes are toggled separately, over every node.
+        const laidOut = _grid.engine.nodes.filter(n => layout[n.id]);
+        laidOut.forEach((n, i) => _grid.update(n.el, { x: 0, y: 10000 + i * 2, w: 1, h: 1 }));
+        laidOut.forEach(n => _grid.update(n.el, layout[n.id]));
         _grid.engine.nodes.forEach(n => {
-            const rect = layout[n.id];
-            if (rect) _grid.update(n.el, rect);
-            if (n.el) {
-                n.el.classList.toggle('wall-focus-main', n.id === _focusWid);
-                n.el.classList.toggle('wall-focus-strip', !!rect && n.id !== _focusWid);
-            }
+            if (!n.el) return;
+            n.el.classList.toggle('wall-focus-main', n.id === _focusWid);
+            n.el.classList.toggle('wall-focus-strip', !!layout[n.id] && n.id !== _focusWid);
         });
     } finally {
         _grid.batchUpdate(false);
