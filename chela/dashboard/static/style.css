@@ -1779,6 +1779,14 @@ input[type="text"]:focus, textarea:focus, select:focus {
     font-size: 15px;
     margin: 0;
     word-break: break-word;
+    /* Clamp to ~2 lines: displayTitle() usually shortens this to the brief's
+       leading bold span, but a title with no bold span (or a very long bold
+       span) can still run long — the clamp keeps the header compact either
+       way instead of pushing the body pane down. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 .task-modal-body {
@@ -1799,7 +1807,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .task-modal-brief.md :is(h1, h2, h3, h4) { font-size: 14px; font-weight: 700; margin: 14px 0 6px; }
 .task-modal-brief.md :is(h1, h2, h3, h4):first-child { margin-top: 0; }
 .task-modal-brief.md p { margin: 6px 0; }
-.task-modal-brief.md .kn-ul { margin: 6px 0; padding-left: 20px; }
+.task-modal-brief.md :is(.kn-ul, .kn-ol) { margin: 6px 0; padding-left: 20px; }
 .task-modal-brief.md li { margin: 3px 0; }
 .task-modal-brief.md blockquote {
     border-left: 3px solid var(--border);
@@ -1877,9 +1885,34 @@ input[type="text"]:focus, textarea:focus, select:focus {
     margin-top: 4px;
     font-size: 11px;
     color: var(--text-dim);
-    white-space: pre-wrap;
     word-break: break-word;
 }
+/* .md: the timeline body is now rendered through knMd (verdict text like
+   "## ✅ KEEP AS-IS …" has real headings/lists/code), not shown as a raw
+   pre-wrapped string — so it needs the same block-element rules as
+   .task-modal-brief.md/.kn-body, just smaller to match the timeline's scale. */
+.task-modal-timeline-body.md p { margin: 4px 0; }
+.task-modal-timeline-body.md p:first-child { margin-top: 0; }
+.task-modal-timeline-body.md :is(h1, h2, h3, h4) {
+    font-size: 12px; font-weight: 700; margin: 8px 0 4px; color: var(--text);
+}
+.task-modal-timeline-body.md :is(h1, h2, h3, h4):first-child { margin-top: 0; }
+.task-modal-timeline-body.md :is(.kn-ul, .kn-ol) { margin: 4px 0; padding-left: 18px; }
+.task-modal-timeline-body.md li { margin: 2px 0; }
+.task-modal-timeline-body.md blockquote {
+    border-left: 3px solid var(--border);
+    margin: 6px 0;
+    padding-left: 8px;
+}
+.task-modal-timeline-body.md code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 3px; font-size: 10px;
+}
+.task-modal-timeline-body.md .kn-code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; margin: 4px 0; overflow-x: auto;
+}
+.task-modal-timeline-body.md .kn-code code { background: none; border: none; padding: 0; }
 
 .kanban-pr-wrap { display: inline-flex; }
 
@@ -3464,7 +3497,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kn-body { font-size: 13px; line-height: 1.6; max-width: 760px; }
 .kn-body :is(.kn-mh) { font-size: 14px; font-weight: 700; margin: 16px 0 6px; }
 .kn-body p { margin: 6px 0; }
-.kn-body .kn-ul { margin: 6px 0; padding-left: 20px; }
+.kn-body :is(.kn-ul, .kn-ol) { margin: 6px 0; padding-left: 20px; }
 .kn-body li { margin: 3px 0; }
 .kn-body blockquote { border-left: 3px solid var(--border); margin: 8px 0;
     padding: 2px 0 2px 12px; color: var(--text-dim); }

@@ -233,3 +233,59 @@ test('knShowGraph FAIL-LOUD: a missing graph renderer shows a visible error, not
         container.remove();
     }
 });
+
+// --- knMd: ordered-list support (Work-view task-modal polish) --------------
+//
+// knMd is shared by the Knowledge view (this file's own subject) AND the
+// task-modal brief pane / review timeline (taskmodal.js, taskmodalmodel.js) —
+// so these guards live here, against the real export, rather than only being
+// exercised indirectly through taskmodal_model.test.mjs's briefHtml fixture.
+
+test('knMd: a `1.`/`2.` run renders one <ol> with inline-rendered <li> items', () => {
+    // 🔴 GUARD: this is the ordered-list contract taskmodal.js's brief pane and
+    // review timeline both depend on. Corrupt by emitting `<ul class="kn-ul">`
+    // for a numbered run (treating it as a bullet list) and this goes RED on
+    // the tag names; corrupt by leaving the numeral in the <li> text (e.g.
+    // matching the whole line instead of the captured group) and it goes RED
+    // on the item text.
+    const html = kn.knMd('1. First `step`.\n2. Second **step**.\n', 'x.md');
+    assert.equal(
+        html,
+        '<ol class="kn-ol"><li>First <code>step</code>.</li><li>Second <strong>step</strong>.</li></ol>',
+    );
+});
+
+test('knMd: a `-` run still renders <ul> — ordered-list support does not regress bullets', () => {
+    // 🔴 GUARD: the Knowledge view's existing bullet-list output must be
+    // untouched by adding <ol> support. Corrupt by routing `-`/`*` lines
+    // through the new ordered-list branch (or merging the two list kinds into
+    // one shared tag) and this goes RED.
+    const html = kn.knMd('- one\n- two\n', 'x.md');
+    assert.equal(html, '<ul class="kn-ul"><li>one</li><li>two</li></ul>');
+});
+
+test('knMd: a heading between a `-` run and a `1.` run splits them into separate lists', () => {
+    // 🔴 GUARD: a heading (or, per the two tests above, a blank line) must
+    // close whatever list is open. Corrupt by only closing the `ul` case (not
+    // `ol`) on a heading/blank line and a `1.` run started right after a `-`
+    // run — or right after a heading — would either merge into the prior list
+    // or leave a dangling unclosed tag; either way this exact string breaks.
+    const html = kn.knMd('- bullet one\n## Steps\n1. step one\n2. step two\n', 'x.md');
+    assert.equal(
+        html,
+        '<ul class="kn-ul"><li>bullet one</li></ul>'
+        + '<h2 class="kn-mh">Steps</h2>'
+        + '<ol class="kn-ol"><li>step one</li><li>step two</li></ol>',
+    );
+});
+
+test('knMd: switching list kind mid-run (no blank line between) closes the old list, opens the new one', () => {
+    // A `-` line immediately after a `1.` run (or vice versa) is a KIND
+    // switch, not a continuation — each must be its own list, not one
+    // straddling both tag types.
+    const html = kn.knMd('1. one\n- two\n', 'x.md');
+    assert.equal(
+        html,
+        '<ol class="kn-ol"><li>one</li></ol><ul class="kn-ul"><li>two</li></ul>',
+    );
+});

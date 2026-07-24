@@ -3023,10 +3023,17 @@ def _run_critic(wf: WorkflowDef, task: Task, conn: sqlite3.Connection) -> None:
     the one thing v1 forbids, because the code never gives its output a way to.
 
     It reviews the **task-specific brief** — the TODO item the human actually wrote
-    (``task.title`` / ``task.raw``), NOT the rendered WORKFLOW.md prompt. The template is
-    boilerplate identical on every dispatch and already carries every field-signal, so
-    reviewing it would report "complete" for every task and the critic would never say
-    anything. The text that varies per task is the only text worth reviewing.
+    (``task.title`` / ``task.body`` or ``task.raw``), NOT the rendered WORKFLOW.md prompt.
+    The template is boilerplate identical on every dispatch and already carries every
+    field-signal, so reviewing it would report "complete" for every task and the critic
+    would never say anything. The text that varies per task is the only text worth
+    reviewing. ``task.body`` (chela.sources.markdown._task_body — title + the bullet's
+    dedented OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation, when the source captured one)
+    is what the human actually wrote past the title; using only ``task.raw`` (the bare
+    bullet line) starved the four-field detector of everything after the first line, so it
+    fired "no explicit objective/boundaries/verify" on briefs that named all three further
+    down. Falls back to ``task.raw`` for a bare one-line task or a source with no notion of
+    a continuation (gh_issues) — same fallback ``_task_brief`` uses for ``runs.brief``.
 
     Writes ``critic_notes`` ("" ⇒ ran, nothing to add) and ``critic_reviewed_at`` when the
     critic is on; a disabled critic writes NOTHING, leaving both NULL — "the critic never ran",
@@ -3035,7 +3042,7 @@ def _run_critic(wf: WorkflowDef, task: Task, conn: sqlite3.Connection) -> None:
     try:
         if not critic.critic_enabled(wf):
             return
-        brief_text = f"{task.title}\n{task.raw}"
+        brief_text = f"{task.title}\n{task.body or task.raw}"
         review = critic.review_brief(brief_text)
         files = critic.target_files(brief_text)
         inflight = _inflight_target_files(conn, task.id)

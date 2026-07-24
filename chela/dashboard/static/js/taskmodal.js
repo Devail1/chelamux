@@ -2,7 +2,8 @@
 import { $, escHtml, closeModal, shortTime, showModal } from './util.js';
 import { _runDisplayId, _runPrCell } from './dispatcher.js';
 import { runStatusBadgeClass } from './runstate.js';
-import { briefHtml, briefSource, timelineSteps } from './taskmodalmodel.js';
+import { briefHtml, briefSource, displayTitle, timelineSteps } from './taskmodalmodel.js';
+import { knMd, knInline } from './knowledge.js';
 
 // ---------------------------------------------------------------------------
 // The task-detail modal — a Jira-like "issue" view a kanban card click opens
@@ -98,7 +99,7 @@ function _timelineHtml(item) {
             ${s.round != null ? `<span class="ts">round ${escHtml(String(s.round))}</span>` : ''}
             ${s.at ? `<span class="ts">${escHtml(shortTime(s.at))}</span>` : ''}
           </div>
-          ${s.detail ? `<div class="task-modal-timeline-body">${escHtml(s.detail)}</div>` : ''}
+          ${s.detail ? `<div class="task-modal-timeline-body md">${knMd(s.detail, 'review.md')}</div>` : ''}
         </li>`).join('') + '</ol>';
 }
 
@@ -134,7 +135,11 @@ function openTaskModal(item) {
     if (!item) return;
     const wf = _wfShort(item.workflow_path);
     const displayId = _runDisplayId(item);
-    const title = escHtml((item.title || '(untitled)').slice(0, 300));
+    // displayTitle() strips the leading bold-span brief down to its concise
+    // inner text (display-only — the PARSED item.title is never touched, see
+    // taskmodalmodel.js's doc comment); knInline renders what's left (any
+    // remaining markdown/emoji) instead of leaving literal `**`/backticks.
+    const title = knInline(displayTitle(item.title || '(untitled)').slice(0, 300), 'task.md');
     const rows = _sideRows(item);
 
     const html = `

@@ -40,6 +40,23 @@ export function briefHtml(text) {
     return knMd(text, 'brief.md');
 }
 
+// The modal header's display title. ⛔ Display-only — never touches the
+// PARSED `title` field: a task's id is the hash of that title (chela.sources.
+// markdown._task_id), so mutating it anywhere would orphan in-flight runs.
+// Our briefs' first line is the whole bullet, e.g.
+// "**📥 Move the Decisions log … (Liav, 2026-07-24).** Design is SETTLED…" —
+// showing that raw is both long and full of literal `**`. When the title
+// opens with a bold span, the concise title IS that span's inner text, so
+// this returns just that; anything without a leading bold span (a plain
+// one-line task title) is returned unchanged. Pure: taskmodal.js is
+// responsible for running the result through knInline at render time so any
+// remaining markdown/emoji renders instead of showing as literal text.
+export function displayTitle(rawTitle) {
+    if (!rawTitle) return rawTitle || '';
+    const m = String(rawTitle).match(/^\*\*([^*]+)\*\*/);
+    return m ? m[1] : rawTitle;
+}
+
 // review_history is a JSON TEXT column (chela.dispatcher.reviews_of's JS-side
 // counterpart) — a list of {round, at, body, verdict} written oldest-first by
 // request_changes()/reopen. Never throws: null, '', or malformed/non-list/

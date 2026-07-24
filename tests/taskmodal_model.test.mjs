@@ -87,18 +87,48 @@ test('briefHtml: a heading + numbered list + inline code render via knMd', () =>
     // 🔴 GUARD: this is the EXACT knMd output for this fixture (verified against
     // knowledge.js directly) — taskmodal.js's brief pane depends on this shape:
     // a `#{1,4}` heading renders <h3 class="kn-mh">, inline `` `code` `` becomes
-    // <code>, and (knMd has NO numbered-list support — only `-`/`*` bullets) a
-    // "1. " line renders as a plain <p>, numeral preserved as text. Regressing
-    // ANY of these (heading level, code wrapping, or accidentally starting to
-    // eat the "1. " prefix) changes this string and goes RED.
+    // <code>, and a `1.`/`2.` run renders as one <ol class="kn-ol"> with the
+    // numeral stripped from each <li>. Regressing ANY of these (heading level,
+    // code wrapping, dropping ordered-list support, or emitting <ul> instead of
+    // <ol> for numbers) changes this string and goes RED.
     assert.equal(
         html,
         '<h3 class="kn-mh">OBJECTIVE</h3>'
         + '<p>Build <code>sample()</code> with these steps:</p>'
-        + '<p>1. First step with <code>code</code>.</p>'
-        + '<p>2. Second step.</p>'
+        + '<ol class="kn-ol"><li>First step with <code>code</code>.</li><li>Second step.</li></ol>'
         + '<p>Some paragraph.</p>',
     );
+});
+
+// --- displayTitle: display-only concise header, never the parsed title -----
+
+test('displayTitle: a leading bold span becomes the display title, trailing text dropped', () => {
+    // 🔴 GUARD: this is the shape our briefs actually have — the parsed `title`
+    // is the WHOLE bullet line (title-hash = task id, so it is never rewritten;
+    // see taskmodalmodel.js's doc comment). Corrupt this by dropping the
+    // bold-extract (return rawTitle unchanged) and this fails because the raw
+    // `**`/trailing sentence would leak through; corrupt it the other way
+    // (return the trailing text instead of the captured group) and the
+    // assertion also fails, since it would no longer equal the bold span.
+    const raw = '**📥 Move the Decisions log to the wiki.** Design is SETTLED — build EXACTLY as spec\'d.';
+    assert.equal(tm.displayTitle(raw), '📥 Move the Decisions log to the wiki.');
+});
+
+test('displayTitle: a title with no leading bold span is returned unchanged', () => {
+    assert.equal(tm.displayTitle('plain one-line task title'), 'plain one-line task title');
+});
+
+test('displayTitle: bold text elsewhere (not leading) is not extracted', () => {
+    // Only a bold span that STARTS the string counts as "the concise title" —
+    // a `**bold**` in the middle of a plain-text title is not the same shape.
+    assert.equal(tm.displayTitle('do the thing with **emphasis** in the middle'),
+        'do the thing with **emphasis** in the middle');
+});
+
+test('displayTitle: empty/null/undefined resolve gracefully, never throw', () => {
+    assert.equal(tm.displayTitle(''), '');
+    assert.equal(tm.displayTitle(null), '');
+    assert.equal(tm.displayTitle(undefined), '');
 });
 
 // --- timelineSteps: never throws, always an ordered list of {state, detail} --
