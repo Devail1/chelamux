@@ -1670,6 +1670,69 @@ def _ago(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h ago"
 
 
+# --- fact: has this checkout's branch diverged from its upstream? --------------------
+#
+# CMX-168 taught ``chela update`` to recover when the upstream history was rewritten
+# (``git filter-repo`` + force-push): back up the pre-rewrite HEAD, then reset onto the
+# new history. But that recovery only ever runs when a human (or the auto-update sweep)
+# actually invokes ``chela update`` — someone who instead runs ``chela doctor`` learned
+# nothing was wrong at all. This fact closes that gap: it asks the same question
+# ``chela update`` asks (is HEAD diverged from ``@{u}``?) and points at the fix, but it
+# NEVER fetches or resets anything itself — the ``reset --hard`` action lives only in
+# ``chela.update.apply``. ``fetch=False`` keeps this as fresh as the last real fetch
+# (a `chela update --check`, the daemon's periodic notifier) and never a network call —
+# the same trade the `update_available` capability row already makes.
+
+def _upstream_synced_applies() -> bool:
+    from chela import update                        # lazy: doctor must import cheaply
+
+    try:
+        update.repo_root()
+    except update.NotAGitCheckout:
+        return False                                 # no fact of a pip install
+    return True
+
+
+def _upstream_synced_status():
+    """Seam: the real answer is ``chela.update.commits_behind(fetch=False)``; the test
+    suite hands this a fixed status instead of shelling out to git."""
+    from chela import update                        # lazy: doctor must import cheaply
+
+    return update.commits_behind(fetch=False)
+
+
+def _upstream_synced_read() -> Observation:
+    from chela import update                        # lazy: doctor must import cheaply
+
+    try:
+        status = _upstream_synced_status()
+    except update.NotAGitCheckout as e:
+        return cannot_verify(str(e))
+    if not status.ok:
+        return cannot_verify(status.error or "git rev-list failed")
+    return observed(status)
+
+
+def _upstream_synced_report(_declared: None, obs: Observation) -> list[Finding]:
+    status = obs.value
+    if status.error:
+        return []                                    # e.g. "no upstream configured"
+    if status.ahead == 0:
+        return [Finding(OK, "repo is in sync with its upstream (no local divergence)")]
+    return [Finding(
+        ERROR,
+        f"repo is {status.ahead} commit(s) AHEAD of its upstream on branch "
+        f"{status.branch!r} — diverged, not fast-forwardable",
+        "This is exactly the shape an upstream history rewrite (e.g. `git filter-repo` + "
+        "force-push) leaves behind — as well as genuine unpushed local commits. `chela "
+        "update` tells the two apart and recovers safely from a real rewrite (backs up "
+        "the pre-rewrite HEAD to a `refs/chela-backup/...` ref, then resets onto the new "
+        "history), or refuses loudly, explaining why, if it is not one. Run `chela "
+        "update` to find out which — doctor only detects the condition; it never "
+        "fetches or resets this repo itself.",
+    )]
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -1888,6 +1951,17 @@ def facts() -> list[Fact]:
             read_back=_collector_read,
             report=_collector_report,
             applies=_collector_applies,
+        ),
+        Fact(
+            name="repo.upstream_synced",
+            declared_by="nothing — chela never records this; a checkout's branch "
+                        "either tracks its upstream cleanly or it doesn't",
+            owned_by="git — the local remote-tracking ref (`@{u}`), as fresh as the "
+                     "last real `git fetch` chela ran",
+            declare=lambda: None,
+            read_back=_upstream_synced_read,
+            report=_upstream_synced_report,
+            applies=_upstream_synced_applies,
         ),
     ]
 
