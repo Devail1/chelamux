@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -942,6 +943,210 @@ def _workflows_report(declared: list[Path], obs: Observation) -> list[Finding]:
     return out
 
 
+# --- fact: the AGENT COMMAND each dispatched workflow resolves to, and whether the
+# shell that runs it can actually find the binary -------------------------------------
+#
+# `resolve_agent_cmd()` picks a command line — the workflow's own `agent.cmd`, else the
+# Settings permission mode, else the built-in default — and chela hands it to tmux
+# `send-keys` VERBATIM. Nobody has ever asked whether it will actually run: a typo'd
+# `agent.cmd`, or a fleet whose `claude` lives somewhere the spawning shell's PATH does
+# not reach (the exact bug class `CHELA_TMUX_SESSION`'s PM2 trap is — a service PATH that
+# quietly differs from an interactive one), types a command into a fresh pane that
+# answers ``command not found`` and never becomes ready. `_wait_for_ready` then times out
+# and sends the prompt ANYWAY, so the run sits `claimed` — holding a concurrency slot —
+# with a window that is not running an agent, and nothing says why.
+
+def _agent_commands() -> dict[str, dict]:
+    """``{workflow path: {repo, cmd, source}}`` — what resolve_agent_cmd() will actually
+    hand to tmux for each dispatched workflow that parses (an unparseable one is already
+    reported by ``dispatch.workflows``)."""
+    from chela import dispatcher                    # lazy: doctor must import cheaply
+
+    out: dict[str, dict] = {}
+    for path in dispatched_workflows():
+        if not path.exists():
+            continue
+        try:
+            wf = load_workflow(path)
+        except Exception:
+            continue
+        cmd, source = dispatcher.resolve_agent_cmd(wf)
+        out[str(path)] = {"repo": str(path.parent), "cmd": cmd, "source": source}
+    return out
+
+
+def _agent_cmd_which(binary: str) -> str | None:
+    """A seam: the real answer is the shell PATH; the suite hands this a fixed one."""
+    return shutil.which(binary)
+
+
+def _agent_cmd_read() -> Observation:
+    declared = _agent_commands()
+    if not declared:
+        return observed({})                        # nothing dispatches — nothing to ask
+    return observed({
+        path: _agent_cmd_which(shlex.split(claim["cmd"])[0]) is not None
+        for path, claim in declared.items()
+    })
+
+
+def _agent_cmd_report(declared: dict[str, dict], obs: Observation) -> list[Finding]:
+    if not declared:
+        return []
+    found: dict[str, bool] = obs.value or {}
+    missing = [
+        (path, claim) for path, claim in sorted(declared.items())
+        if not found.get(path, True)
+    ]
+    out = [
+        Finding(
+            ERROR,
+            f"{Path(path).name}: agent command "
+            f"{shlex.split(claim['cmd'])[0]!r} is not on PATH",
+            f"Resolved (source: {claim['source']}) to: {claim['cmd']!r}. tmux types this "
+            "into a fresh window and gets `command not found` back — the window never "
+            "becomes ready, `_wait_for_ready` times out and sends the prompt anyway, and "
+            "the run sits `claimed` forever holding a concurrency slot with no agent "
+            "behind it. Install the binary, fix `agent.cmd` in the WORKFLOW.md, or check "
+            "the Settings permission mode.",
+        )
+        for path, claim in missing
+    ]
+    if not out:
+        out.append(Finding(
+            OK, f"{len(declared)} dispatched workflow(s): the agent command resolves to "
+                "a binary that is really on PATH"))
+    return out
+
+
+# --- fact: whether `gh` can actually authenticate the PR every dispatched agent opens --
+#
+# Every dispatched WORKFLOW.md's prompt ends with `gh pr create` (see
+# examples/WORKFLOW.md, step 4) — chela's OWN dispatcher reads a PR's checks back with
+# `gh` too (``pr.checks``, above). An adopter who followed `skills/chela-setup`'s
+# prerequisite list (`gh --version`) confirmed the binary is THERE; nobody ever asked
+# whether it is actually LOGGED IN. Unauthenticated, every agent finishes its whole task
+# and fails on the very last line of an otherwise-successful run — reported nowhere but
+# that one agent's own transcript.
+
+def _gh_auth_status() -> bool | None:
+    """A seam: the real answer is `gh auth status`'s exit code; the suite hands this a
+    fixed one instead of shelling out. ``None`` means `gh` itself could not be asked."""
+    if shutil.which("gh") is None:
+        return None
+    out = subprocess.run(
+        ["gh", "auth", "status"], capture_output=True, text=True, timeout=15)
+    return out.returncode == 0
+
+
+def _gh_auth_read() -> Observation:
+    if not dispatched_workflows():
+        return observed(None)                      # nothing dispatches — no PR to open
+    authed = _gh_auth_status()
+    if authed is None:
+        return cannot_verify(
+            "`gh` is not on PATH, so chela cannot ask whether it is authenticated — and "
+            "every dispatched workflow's agent ends its run with `gh pr create`, which "
+            "would fail the exact same way.")
+    return observed(authed)
+
+
+def _gh_auth_report(_declared: None, obs: Observation) -> list[Finding]:
+    if obs.value is None:
+        return []
+    if not obs.value:
+        return [Finding(
+            ERROR,
+            "gh is NOT authenticated — every dispatched agent's `gh pr create` will fail",
+            "`gh auth status` says no account is logged in. An agent runs its whole task "
+            "to completion and only discovers this on its very last step, then reports "
+            "the blocker in its own transcript — nothing else surfaces it. Run `gh auth "
+            "login` as the user chela's fleet runs as.",
+        )]
+    return [Finding(OK, "gh is authenticated — dispatched agents can open PRs")]
+
+
+# --- fact: the BASE BRANCH each dispatched workflow forks from and targets ------------
+#
+# `_spawn()` runs `git worktree add -b <branch> <path> <base_branch>` with `check=True` —
+# a `workspace.base_branch` that does not exist in the repo (the adopter's default branch
+# is `master`, the example says `main`; a typo; a branch never pushed) fails EVERY
+# dispatch of that workflow the same way: the task is claimed, marked `failed` with a raw
+# git stderr line as the only explanation, and retried until MAX_ATTEMPTS — burning every
+# attempt on a config error nothing ever named.
+
+def _base_branches() -> dict[str, dict]:
+    """``{workflow path: {repo, base_branch}}`` for every dispatched workflow that
+    parses — the ref every worktree forks from and every PR targets."""
+    out: dict[str, dict] = {}
+    for path in dispatched_workflows():
+        if not path.exists():
+            continue
+        try:
+            wf = load_workflow(path)
+        except Exception:
+            continue
+        out[str(path)] = {
+            "repo": str(path.parent),
+            "base_branch": str(wf.get("workspace", "base_branch", default="master")),
+        }
+    return out
+
+
+def _ref_exists(repo: str, branch: str) -> bool:
+    """Ask git directly: does `branch` exist as a local OR `origin`-tracking ref?"""
+    for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+        out = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--verify", "--quiet", ref],
+            capture_output=True, text=True, timeout=15,
+        )
+        if out.returncode == 0:
+            return True
+    return False
+
+
+def _base_branch_read() -> Observation:
+    declared = _base_branches()
+    if not declared:
+        return observed({})                        # nothing dispatches — nothing to ask
+    if shutil.which("git") is None:
+        return cannot_verify(
+            "git is not on PATH — chela cannot ask whether the branch every worktree "
+            "forks from and every PR targets actually exists.")
+    return observed({
+        path: _ref_exists(claim["repo"], claim["base_branch"])
+        for path, claim in declared.items()
+    })
+
+
+def _base_branch_report(declared: dict[str, dict], obs: Observation) -> list[Finding]:
+    if not declared:
+        return []
+    found: dict[str, bool] = obs.value or {}
+    missing = [
+        (path, claim) for path, claim in sorted(declared.items())
+        if not found.get(path, True)
+    ]
+    out = [
+        Finding(
+            ERROR,
+            f"{Path(path).name}: base_branch {claim['base_branch']!r} does not exist in "
+            f"{claim['repo']}",
+            "Every worktree is created with `git worktree add -b <branch> ... "
+            f"{claim['base_branch']}` — with no such ref this fails at the FIRST "
+            "dispatch: the task is claimed, marked `failed` with a raw git stderr line "
+            f"as the only explanation, and retried until MAX_ATTEMPTS. Fix "
+            f"workspace.base_branch in {path}, or create the branch.",
+        )
+        for path, claim in missing
+    ]
+    if not out:
+        out.append(Finding(
+            OK, f"{len(declared)} dispatched workflow(s): base_branch exists in git for "
+                "each"))
+    return out
+
+
 # --- fact: the dispatch hold — a paused queue is a DISABLED SUBSYSTEM -----------------
 
 def _hold_read() -> Observation:
@@ -1334,6 +1539,37 @@ def facts() -> list[Fact]:
             declare=dispatched_workflows,
             read_back=_workflows_read,
             report=_workflows_report,
+        ),
+        Fact(
+            name="dispatch.agent_cmd",
+            declared_by="each dispatched workflow's resolved `agent.cmd` "
+                        "(resolve_agent_cmd's own precedence: WORKFLOW.md, else "
+                        "Settings, else the built-in default)",
+            owned_by="the shell PATH — whether the resolved command's binary can "
+                     "actually be found and run",
+            declare=_agent_commands,
+            read_back=_agent_cmd_read,
+            report=_agent_cmd_report,
+        ),
+        Fact(
+            name="dispatch.gh_auth",
+            declared_by="nothing — chela never records this; every dispatched "
+                        "WORKFLOW.md's prompt ends with `gh pr create`",
+            owned_by="gh's own auth state (`gh auth status`)",
+            declare=lambda: None,
+            read_back=_gh_auth_read,
+            report=_gh_auth_report,
+        ),
+        Fact(
+            name="dispatch.base_branch",
+            declared_by="each dispatched workflow's `workspace.base_branch` (default "
+                        "`master`) — what every worktree forks from and every PR "
+                        "targets",
+            owned_by="git — the branch (local, or `origin`-tracking) either exists in "
+                     "the repo or it does not",
+            declare=_base_branches,
+            read_back=_base_branch_read,
+            report=_base_branch_report,
         ),
         Fact(
             name="dispatch.hold",
