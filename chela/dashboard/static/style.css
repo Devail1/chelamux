@@ -1759,6 +1759,19 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .task-modal-close:hover { color: var(--text); background: var(--bg); }
 
+/* The wrapper taskmodal.js fills. It must be a flex column that FILLS
+   .modal-task and passes the height constraint down (min-height:0), or the
+   modal's 86vh cap clips a long brief/timeline instead of letting
+   .task-modal-body scroll — the wrapper was display:block, so it grew to
+   content height and the body inside it never became scrollable. */
+#task-modal-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
 .task-modal-head {
     flex: 0 0 auto;
     padding-right: 28px;   /* room for the close button */
@@ -1796,12 +1809,17 @@ input[type="text"]:focus, textarea:focus, select:focus {
     grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
     gap: 20px;
     align-items: start;
+    /* Breathing room below the last row so a long brief/timeline that scrolls
+       doesn't end flush against the modal's bottom edge (reads as cut off). */
+    padding-bottom: 16px;
 }
 
 @media (max-width: 720px) {
     .task-modal-body { grid-template-columns: 1fr; }
     .modal-task { max-width: 96vw; max-height: 92vh; }
 }
+
+.task-modal-main { min-width: 0; }
 
 .task-modal-brief.md { font-size: 13px; line-height: 1.6; min-width: 0; }
 .task-modal-brief.md :is(h1, h2, h3, h4) { font-size: 14px; font-weight: 700; margin: 14px 0 6px; }

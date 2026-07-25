@@ -3,6 +3,8 @@ import { $, BASE_PATH, attrEsc, escHtml } from './util.js';
 import { _runDisplayId, _runPrCell } from './dispatcher.js';
 import { pollWork, postWorkDelete } from './work.js';
 import { openTaskModal } from './taskmodal.js';
+import { displayTitle } from './taskmodalmodel.js';
+import { knInline } from './knowledge.js';
 
 // ---------------------------------------------------------------------------
 // Render: the Board segment of WORK (the global cross-workflow kanban)
@@ -133,7 +135,12 @@ function _kCard(card) {
     // Register this card in render order so a click can resolve it back to the
     // FULL object (task-detail modal — CMX task-modal) without a second fetch.
     const kidx = _kanbanCardIndex.push(card) - 1;
-    const title = escHtml((card.title || '').slice(0, 200));
+    // Same treatment the modal header gets: displayTitle() strips the leading
+    // bold-span brief down to its concise title (render-only — never touches the
+    // parsed `title` that a task id hashes from), knInline() renders any
+    // remaining inline markdown/emoji (and does its own escHtml). Without this
+    // the board showed the raw multi-line `**bold**` brief bullet verbatim.
+    const title = knInline(displayTitle(card.title || '').slice(0, 200), 'task.md');
     const wf = escHtml(_wfName(card.workflow_path));
     const delBtn = _kCardDeleteBtn(card);
     if (card.status === 'backlog') {

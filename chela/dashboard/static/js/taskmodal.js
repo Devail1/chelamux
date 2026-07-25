@@ -7,10 +7,13 @@ import { knMd, knInline } from './knowledge.js';
 
 // ---------------------------------------------------------------------------
 // The task-detail modal — a Jira-like "issue" view a kanban card click opens
-// (Work-view redesign). LEFT: the task's brief rendered as markdown (reusing
-// knowledge.js's knMd — no new markdown dependency). RIGHT: a details sidebar
-// (workflow / branch / PR / CI / attempts / rework / judge / timestamps /
-// error) + the review timeline built from `review_history`.
+// (Work-view redesign). LEFT (wide): the task's brief rendered as markdown
+// (reusing knowledge.js's knMd — no new markdown dependency) + the review
+// timeline built from `review_history` below it — both markdown-heavy, so they
+// get the roomy column (and the timeline still reads when the brief pane is a
+// one-line "no brief" note, which most legacy runs are). RIGHT (narrow): the
+// compact details sidebar (workflow / branch / PR / CI / attempts / rework /
+// judge / timestamps / error).
 //
 // openTaskModal(item) is intentionally "pure enough": it takes the SAME card
 // object kanban.js already has in hand (from the one /api/dispatcher poll) and
@@ -152,12 +155,14 @@ function openTaskModal(item) {
         <h3 class="task-modal-title">${title}</h3>
       </div>
       <div class="task-modal-body">
-        <div class="task-modal-brief md">${_briefPane(item)}</div>
+        <div class="task-modal-main">
+          <div class="task-modal-brief md">${_briefPane(item)}</div>
+          <div class="task-modal-sub">Review timeline</div>
+          ${_timelineHtml(item)}
+        </div>
         <div class="task-modal-side">
           <div class="task-modal-sub">Details</div>
           ${rows || '<div class="task-modal-empty">No details recorded.</div>'}
-          <div class="task-modal-sub">Review timeline</div>
-          ${_timelineHtml(item)}
         </div>
       </div>`;
 
