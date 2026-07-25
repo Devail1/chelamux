@@ -108,6 +108,14 @@ _RE_ERRORS = re.compile(r"(\d+) errors?\b")
 _RE_NODE_PASS = re.compile(r"^# pass (\d+)$", re.M)
 _RE_NODE_FAIL = re.compile(r"^# fail (\d+)$", re.M)
 
+# ⛔ CMX-177: a count is not a cause. pytest's short summary line ("FAILED path::test - why")
+# and node --test's TAP line ("not ok N - test name") are the only place either format names
+# WHICH test failed, and they are what turns "1 failed" into something a human can act on.
+_RE_PYTEST_FAILED_NAME = re.compile(r"^FAILED (\S+)", re.M)
+_RE_NODE_FAILED_NAME = re.compile(r"^not ok \d+ - (.+)$", re.M)
+
+MAX_NAMED_FAILURES = 5
+
 SUITE_TAIL_CHARS = 3000
 
 
@@ -317,6 +325,17 @@ def _last_meaningful_line(tail: str, limit: int = 300) -> str:
     return ""
 
 
+def _failing_test_names(tail: str, limit: int = MAX_NAMED_FAILURES) -> list[str]:
+    """WHICH test(s) failed, not just how many. [] if the tail names none (truncated output,
+    an unrecognized runner) — the caller falls back to the bare count, never invents a name."""
+    names: list[str] = []
+    for n in _RE_PYTEST_FAILED_NAME.findall(tail) + _RE_NODE_FAILED_NAME.findall(tail):
+        n = n.strip()
+        if n and n not in names:
+            names.append(n)
+    return names[:limit]
+
+
 def run_suite(test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS) -> SuiteResult:
     """Run the repo's OWN test command and read its exit code. Never raises.
 
@@ -514,12 +533,91 @@ def provision_suite_env(worktree: Path, timeout: float = 600.0) -> str:
     return ""
 
 
+def _diagnose_red_baseline(
+    worktree: Path, test_cmd: str, base_branch: str, timeout: float,
+) -> str:
+    """WHY the baseline is red: this branch's own doing, already broken on ``base_branch``, or
+    undeterminable. One sentence, always — never blank.
+
+    ⛔ CMX-177. Before this, a red baseline said only "the suite is NOT GREEN before any
+    mutation (`…` exited 1: 3 failed, 1105 passed)" — an exit code and a count name no
+    cause, and the operator cannot tell "rework the PR" from "fix base_branch" from "fix the
+    judge's box" apart. Observed live 2026-07-25: cmx-174 came back `cannot_verify` three
+    times because its baseline carried failures the base branch (``dev``) had ALREADY fixed
+    by the time it was judged — the branch was stale, not broken — and a human had to
+    manually re-run the suite in a scratch worktree to learn that. CMX-176 closed the
+    staleness (the worktree is refreshed from ``origin/<base>`` before the baseline ever
+    runs); this closes the diagnosis: if the baseline is STILL red after that refresh, check
+    ``origin/<base>`` ALONE, so the report can say which of the two it actually is.
+
+    This never changes whether the run is ``cannot_verify`` — a red baseline blocks nothing
+    either way, whatever caused it. It only names the cause in the sentence a human reads.
+    """
+    if not base_branch:
+        return ("the workflow names no `workspace.base_branch`, so the judge could not check "
+                "whether this predates the PR")
+    ref = f"origin/{base_branch}"
+    resolved = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True, errors="replace",
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return (f"`{ref}` does not resolve in the judge worktree, so the judge could not check "
+                "whether this predates the PR — this may be a fresh regression, or the judge's "
+                "environment could not see the base branch")
+    base_sha = resolved.stdout.strip()
+
+    head = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, errors="replace",
+    )
+    if head.returncode != 0 or not head.stdout.strip():
+        return "the judge could not read the worktree's own HEAD to compare it against base_branch"
+    orig_sha = head.stdout.strip()
+
+    if base_sha == orig_sha:
+        # Nothing to separate the PR's own commits from base — the worktree tip IS base.
+        return (f"this worktree's HEAD already equals `{ref}` — there is no PR content left to "
+                "separate from a base-branch failure; whatever is red here is red on "
+                "base_branch itself")
+
+    checkout = subprocess.run(
+        ["git", "-C", str(worktree), "checkout", "--quiet", "--detach", base_sha],
+        capture_output=True, text=True, errors="replace",
+    )
+    if checkout.returncode != 0:
+        return (f"`{ref}` could not be checked out in the judge worktree "
+                f"({(checkout.stderr or '').strip()[:200]}) — the judge could not tell whether "
+                "this predates the PR")
+    try:
+        base_result = run_suite(test_cmd, worktree, timeout)
+    finally:
+        restore = subprocess.run(
+            ["git", "-C", str(worktree), "checkout", "--quiet", "--detach", orig_sha],
+            capture_output=True, text=True, errors="replace",
+        )
+        if restore.returncode != 0:
+            log.error("judge: could not restore worktree %s to %s after the base_branch "
+                      "diagnostic", worktree, orig_sha)
+
+    if not base_result.ok:
+        return (f"the judge tried `{test_cmd}` against `{ref}` alone and it would not even run "
+                f"({base_result.detail}) — treat this as a problem with the judge's own "
+                "environment, not a verdict on this PR")
+    if not base_result.green:
+        return (f"⛔ RED ON BASE TOO — `{ref}` alone ({_suite_line(base_result)}) is ALSO red. "
+                "This failure predates the PR: it needs a fix on base_branch, not rework here")
+    return (f"RED ONLY ON THIS BRANCH — `{ref}` alone is green ({_suite_line(base_result)}). "
+            "This branch's own commits are what turned the suite red")
+
+
 def run_experiments(
     worktree: Path,
     test_cmd: str,
     raw: dict,
     *,
     timeout: float = SUITE_TIMEOUT_SECONDS,
+    base_branch: str = "",
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
 
@@ -536,8 +634,15 @@ def run_experiments(
       "the suite passed under the mutation", so a suite that was ALREADY passing-for-free
       (or not running at all) makes every mutation survive and every PR block. The judge is
       only ever as trustworthy as the suite it starts from, and it says so when that suite
-      is not trustworthy;
+      is not trustworthy. ⛔ CMX-177: it also names WHICH test failed and, given
+      ``base_branch``, whether ``origin/<base_branch>`` alone is ALSO red (this failure
+      predates the PR) or green (this branch's own doing) — see
+      :func:`_diagnose_red_baseline`;
     * **no experiments at all** — nothing was checked. That is not a clean bill of health.
+
+    ``base_branch`` is optional and used ONLY to diagnose a red baseline (never to change
+    whether the run is ``cannot_verify``, and never touched if the baseline is green) — pass
+    "" (the default) when it is not known, and the report says so instead of guessing.
     """
     report = Report()
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -587,9 +692,16 @@ def run_experiments(
         # what the dashboard shows, and for three weeks it showed "exited 1" on every PR
         # while the suite itself was saying "jsdom is not installed" one pipe away.
         why = baseline.detail or _last_meaningful_line(baseline.tail)
+        # ⛔ CMX-177: a count is not a cause either. Name WHICH test(s), and then check
+        # `origin/<base_branch>` alone to say whether this is this branch's own doing or
+        # already broken upstream — three different actions (rework / fix base / fix the
+        # judge's box) that used to collapse into the same "exited 1" dead end.
+        named = _failing_test_names(baseline.tail)
+        which = f" — failing: {', '.join(named)}" if named else ""
+        cause = _diagnose_red_baseline(worktree, test_cmd, base_branch, timeout)
         report.cannot_verify = (
             f"the suite is NOT GREEN before any mutation (`{test_cmd}` exited "
-            f"{baseline.exit_code}{': ' + why if why else ''}). Every "
+            f"{baseline.exit_code}{': ' + why if why else ''}{which}). {cause}. Every "
             "mutation experiment measures 'did the suite go red?', so a suite that is already "
             "red measures nothing. ⛔ Nothing was blocked and nothing was cleared."
         )
@@ -858,8 +970,10 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         elif not worktree.is_dir():
             report = Report(cannot_verify=f"the judge worktree {worktree} is gone")
         else:
+            base_branch = wf.get("workspace", "base_branch", default="master")
             report = run_experiments(
                 worktree, test_cmd, raw, timeout=judge_suite_timeout(wf),
+                base_branch=base_branch if isinstance(base_branch, str) else "",
             )
 
         blocking = report.blocking
