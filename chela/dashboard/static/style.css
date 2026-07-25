@@ -453,6 +453,15 @@ body {
    `.gs-min-btn, .gs-max-btn { display: none }` mobile rule below (same trap
    the pane-header-v2 comment above already flags for this pair of classes). */
 .gs-min-btn svg, .gs-max-btn svg { vertical-align: middle; }
+/* Mobile single-pane fullscreen toggle (paneHead, terminals.js) — same
+   base-hide/mobile-reveal shape as `.term-switcher`/`.term-keybar` below
+   (not the specificity-trap shape the comment above warns about: this is a
+   *different* selector, not `.gs-min-btn`/`.gs-max-btn` themselves). Belt and
+   suspenders: paneHead() only ever renders this button when
+   !draggable && _isMobileTerm(), so it never exists in a desktop DOM at all —
+   this base rule only guards a stale render surviving a resize past 768px. */
+.gs-mobile-full-btn { display: none; }
+.gs-mobile-full-btn svg { vertical-align: middle; }
 .gs-keys button:hover { border-color: var(--accent); }
 .gs-keys button.btn-accent { background: var(--accent); color: #0d1117; border-color: var(--accent); }
 /* × kill — only rendered for non-managed sessions. Red hover signals it's
@@ -2630,16 +2639,33 @@ input[type="text"]:focus, textarea:focus, select:focus {
     #term-wall-grid { display: none !important; }
     #panel-terminals > div:first-child { flex-wrap: wrap; }
     #term-agent { margin-left: 0 !important; flex: 1 1 100%; }
-    /* leave room for the docked key bar; cap expanded height + scroll if it overflows.
-       CMX-130: this 70vh was tuned against the old collapsible #term-bar and never
-       updated when the v2 keybar (fixed, always-on) replaced it below — the fixed
-       bar painted over the pane's own bottom slice instead of sitting past it.
-       Subtract --term-keybar-h AND env(safe-area-inset-bottom) so the pane's bottom
-       edge clears the fixed bar's FULL footprint: the keybar's own bottom padding is
-       `calc(6px + env(safe-area-inset-bottom))`, so on a home-indicator phone the bar
-       is 47px + inset tall — subtracting only the 47px would leave the inset's worth
-       of the pane's bottom row (input box + "auto mode on") still under the bar. */
-    .term-single .term-pane { height: calc(70vh - var(--term-keybar-h, 0px) - env(safe-area-inset-bottom)); }
+    /* Fill the screen: 100dvh (NOT vh — the mobile address bar collapses and
+       vh overshoots the real visible height) minus the chrome that sits
+       above/below the pane on a phone. CMX-130's 70vh was a rough guess
+       tuned against the old collapsible #term-bar and left dead space below
+       the pane once the v2 fixed keybar replaced it (this fixes that).
+       --gs-head-h / --term-switcher-h below are the two new measured
+       constants: --gs-head-h is the mobile .gs-head row itself (2px+2px
+       padding around the title+subtitle label — two lines now the ai-title
+       subtitle is shown again, above); --term-switcher-h is the agent-pill
+       strip's own footprint (28px pill row + 2px padding-bottom + 8px
+       margin-bottom). --term-keybar-h (47px, below) and --term-ctx-bar-h
+       (30px, :root) already existed. Subtracting the keybar's footprint AND
+       env(safe-area-inset-bottom) separately still matters (CMX-130): the
+       keybar's own bottom padding is `calc(6px + env(safe-area-inset-bottom))`,
+       so on a home-indicator phone the bar is 47px + inset tall — subtracting
+       only the 47px would leave the inset's worth of the pane's bottom row
+       (input box + "auto mode on") still under the bar. */
+    :root { --gs-head-h: 32px; --term-switcher-h: 38px; }
+    .term-single .term-pane {
+        height: calc(100dvh - var(--gs-head-h) - var(--term-switcher-h) - var(--term-keybar-h, 0px) - var(--term-ctx-bar-h) - env(safe-area-inset-bottom));
+    }
+    /* The pane sits inset by .canvas's (14px, shared chrome — left alone) AND
+       .content's (12px, above in this same block) horizontal padding —
+       reclaim just .content's own 12px each side so the pane itself runs
+       closer to the screen edges without touching shared ancestor padding
+       that every other mobile panel also relies on. */
+    .term-single { margin: 0 -12px; }
     #term-bar { max-height: 60vh; overflow-y: auto; }
 
     /* Dense layout: Special & Ctrl as full-width rows; D-pad + Nav + Scroll
@@ -3375,14 +3401,38 @@ input[type="text"]:focus, textarea:focus, select:focus {
        desktop bar. See CMX-133 below for what happens to the window-control
        keys (drag/min/max/kill) themselves. */
     .gs-head { padding: 2px 8px; font-size: 11px; }
-    /* CMX-146: single mobile pane is already tight on vertical space — drop the
-       dim ai-title subtitle here, keep it for wall/desktop panes. */
-    .pane-subtitle { display: none; }
-    /* CMX-133: drag/minimize/maximize genuinely don't apply to the forced
-       single pane, but × kill is the only way to tear a session down on
-       phones (no wall, no overflow-menu equivalent) — keep just that button. */
+    /* CMX-146 hid the dim ai-title subtitle here (single mobile pane was tight
+       on vertical space); un-hidden per Liav's 2026-07-25 call — it already
+       truncates to one line via the base rule above (overflow/ellipsis/
+       nowrap), just trimmed a touch smaller than .gs-head's 11px so it reads
+       as clearly secondary without growing the compact header. */
+    .pane-subtitle { display: block; font-size: 9.5px; }
+    /* CMX-133: drag/minimize genuinely don't apply to the forced single pane,
+       but × kill is the only way to tear a session down on phones (no wall,
+       no overflow-menu equivalent) — keep just that button. */
     .gs-keys { display: flex; }
+    /* Maximize doesn't apply either (there's nothing else on the wall to
+       overlay over) — replaced by ONE mobile-only fullscreen toggle instead
+       (.gs-mobile-full-btn, revealed just below): it grows the pane to
+       100dvh and hides the surrounding chrome, tap again to restore. */
     .gs-min-btn, .gs-max-btn { display: none; }
+    .gs-mobile-full-btn { display: inline-flex; }
+
+    /* term-mobile-full: body class toggled by chela.termMobileFull (bound to
+       .gs-mobile-full-btn above). Hides the chrome around the single pane —
+       the agent-pill switcher above it, the fixed keybar below it, and the
+       pane's own context bar — so the pane's own height rule (below) can
+       claim the full 100dvh. The compact .gs-head (and its × kill) is
+       deliberately NOT in this list: it's the only way back out of
+       fullscreen, so it must stay visible and reachable in both states. */
+    body.term-mobile-full .term-switcher,
+    body.term-mobile-full .term-keybar,
+    body.term-mobile-full .term-ctx-bar { display: none !important; }
+    body.term-mobile-full .term-single .term-pane { height: 100dvh; }
+    /* .term-frame normally reserves --term-ctx-bar-h of bottom margin for the
+       now-hidden context bar (see the base .term-frame rule) — zero it here
+       so that space isn't left as a dead strip under the terminal. */
+    body.term-mobile-full .term-single .term-pane .term-frame { margin-bottom: 0; }
     /* CMX-117: branch + context text moved out of .gs-head into the bottom
        .term-ctx-bar, which is NOT part of .gs-head — hide just the text on
        phones (same declutter intent as above) and keep the ambient fill. */
