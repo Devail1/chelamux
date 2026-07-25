@@ -453,6 +453,15 @@ body {
    `.gs-min-btn, .gs-max-btn { display: none }` mobile rule below (same trap
    the pane-header-v2 comment above already flags for this pair of classes). */
 .gs-min-btn svg, .gs-max-btn svg { vertical-align: middle; }
+/* Mobile single-pane fullscreen toggle (paneHead, terminals.js) — same
+   base-hide/mobile-reveal shape as `.term-switcher`/`.term-keybar` below
+   (not the specificity-trap shape the comment above warns about: this is a
+   *different* selector, not `.gs-min-btn`/`.gs-max-btn` themselves). Belt and
+   suspenders: paneHead() only ever renders this button when
+   !draggable && _isMobileTerm(), so it never exists in a desktop DOM at all —
+   this base rule only guards a stale render surviving a resize past 768px. */
+.gs-mobile-full-btn { display: none; }
+.gs-mobile-full-btn svg { vertical-align: middle; }
 .gs-keys button:hover { border-color: var(--accent); }
 .gs-keys button.btn-accent { background: var(--accent); color: #0d1117; border-color: var(--accent); }
 /* × kill — only rendered for non-managed sessions. Red hover signals it's
@@ -1727,6 +1736,213 @@ input[type="text"]:focus, textarea:focus, select:focus {
     margin-top: 14px;
 }
 
+/* ---- Task-detail modal (Work-view redesign) ----
+   A kanban card click opens #modal-task: the brief (markdown) on the left,
+   a details sidebar + review timeline on the right. Wider than the stock
+   .modal (which caps at 90vw with no min), and its own 2-column body that
+   stacks under ~720px — the brief is the primary read, so it goes first in
+   source order and the sidebar follows underneath on narrow viewports. */
+
+.modal-task {
+    position: relative;
+    width: min(860px, 100%);
+    max-width: 92vw;
+    max-height: 86vh;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.task-modal-close {
+    position: absolute;
+    top: 10px; right: 10px;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 5px;
+}
+.task-modal-close:hover { color: var(--text); background: var(--bg); }
+
+/* The wrapper taskmodal.js fills. It must be a flex column that FILLS
+   .modal-task and passes the height constraint down (min-height:0), or the
+   modal's 86vh cap clips a long brief/timeline instead of letting
+   .task-modal-body scroll — the wrapper was display:block, so it grew to
+   content height and the body inside it never became scrollable. */
+#task-modal-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.task-modal-head {
+    flex: 0 0 auto;
+    padding-right: 28px;   /* room for the close button */
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+}
+
+.task-modal-headline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+
+.task-modal-title {
+    font-size: 15px;
+    margin: 0;
+    word-break: break-word;
+    /* Clamp to ~2 lines: displayTitle() usually shortens this to the brief's
+       leading bold span, but a title with no bold span (or a very long bold
+       span) can still run long — the clamp keeps the header compact either
+       way instead of pushing the body pane down. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.task-modal-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    gap: 20px;
+    align-items: start;
+    /* Breathing room below the last row so a long brief/timeline that scrolls
+       doesn't end flush against the modal's bottom edge (reads as cut off). */
+    padding-bottom: 16px;
+}
+
+@media (max-width: 720px) {
+    .task-modal-body { grid-template-columns: 1fr; }
+    .modal-task { max-width: 96vw; max-height: 92vh; }
+}
+
+.task-modal-main { min-width: 0; }
+
+.task-modal-brief.md { font-size: 13px; line-height: 1.6; min-width: 0; }
+.task-modal-brief.md :is(h1, h2, h3, h4) { font-size: 14px; font-weight: 700; margin: 14px 0 6px; }
+.task-modal-brief.md :is(h1, h2, h3, h4):first-child { margin-top: 0; }
+.task-modal-brief.md p { margin: 6px 0; }
+.task-modal-brief.md :is(.kn-ul, .kn-ol) { margin: 6px 0; padding-left: 20px; }
+.task-modal-brief.md li { margin: 3px 0; }
+.task-modal-brief.md blockquote {
+    border-left: 3px solid var(--border);
+    margin: 8px 0;
+    padding-left: 10px;
+    color: var(--text-dim);
+}
+.task-modal-brief.md code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 4px; font-size: 12px;
+}
+.task-modal-brief.md .kn-code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; overflow-x: auto;
+}
+.task-modal-brief.md .kn-code code { background: none; border: none; padding: 0; }
+
+.task-modal-side { min-width: 0; font-size: 12px; }
+
+.task-modal-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 14px 0 6px;
+}
+.task-modal-sub:first-child { margin-top: 0; }
+
+.task-modal-row {
+    display: flex;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+    align-items: baseline;
+}
+.task-modal-row-label {
+    flex: 0 0 82px;
+    color: var(--text-dim);
+    font-size: 11px;
+}
+.task-modal-row-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-word;
+}
+
+.task-modal-empty { color: var(--text-dim); font-size: 12px; padding: 4px 0; }
+
+.task-modal-error {
+    color: var(--red);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.task-modal-timeline {
+    list-style: none;
+    margin: 0; padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.task-modal-timeline-step {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    background: var(--bg);
+}
+.task-modal-timeline-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.task-modal-timeline-body {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    word-break: break-word;
+}
+/* .md: the timeline body is now rendered through knMd (verdict text like
+   "## ✅ KEEP AS-IS …" has real headings/lists/code), not shown as a raw
+   pre-wrapped string — so it needs the same block-element rules as
+   .task-modal-brief.md/.kn-body, just smaller to match the timeline's scale. */
+.task-modal-timeline-body.md p { margin: 4px 0; }
+.task-modal-timeline-body.md p:first-child { margin-top: 0; }
+.task-modal-timeline-body.md :is(h1, h2, h3, h4) {
+    font-size: 12px; font-weight: 700; margin: 8px 0 4px; color: var(--text);
+}
+.task-modal-timeline-body.md :is(h1, h2, h3, h4):first-child { margin-top: 0; }
+.task-modal-timeline-body.md :is(.kn-ul, .kn-ol) { margin: 4px 0; padding-left: 18px; }
+.task-modal-timeline-body.md li { margin: 2px 0; }
+.task-modal-timeline-body.md blockquote {
+    border-left: 3px solid var(--border);
+    margin: 6px 0;
+    padding-left: 8px;
+}
+.task-modal-timeline-body.md code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 3px; font-size: 10px;
+}
+.task-modal-timeline-body.md .kn-code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; margin: 4px 0; overflow-x: auto;
+}
+.task-modal-timeline-body.md .kn-code code { background: none; border: none; padding: 0; }
+
+.kanban-pr-wrap { display: inline-flex; }
+
 /* ---- Timestamp ---- */
 
 .ts { color: var(--text-dim); font-size: 11px; }
@@ -1796,7 +2012,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
 .kanban-board {
     display: grid;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 10px;
     align-items: stretch;
 }
@@ -1841,12 +2057,15 @@ input[type="text"]:focus, textarea:focus, select:focus {
     flex: 0 0 auto;
 }
 
+/* 5 lanes (Backlog / To Do / In Progress / Review / Done — kanbanlanemodel.js's
+   KANBAN_LANES). Review holds awaiting_review + changes_requested +
+   needs_human + failed cards together — its head colour is a lane-level cue
+   only; each card's own status pill (kanban.js's STATUS_CHIPS) is what says
+   which of the four it is. */
 .kanban-col-backlog .kanban-col-head { color: var(--text-dim); }
-.kanban-col-open .kanban-col-head { color: var(--text); }
-.kanban-col-claimed .kanban-col-head { color: var(--accent); }
-.kanban-col-running .kanban-col-head { color: var(--green); }
-.kanban-col-awaiting_review .kanban-col-head { color: var(--yellow); }
-.kanban-col-failed .kanban-col-head { color: var(--red); }
+.kanban-col-todo .kanban-col-head { color: var(--text); }
+.kanban-col-in_progress .kanban-col-head { color: var(--green); }
+.kanban-col-review .kanban-col-head { color: var(--yellow); }
 .kanban-col-done .kanban-col-head { color: var(--text-dim); }
 
 .kanban-cards {
@@ -1949,20 +2168,34 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-card-failed          { border-left-color: var(--red); background: rgba(248, 81, 73, 0.04); }
 .kanban-card-done            { border-left-color: var(--text-dim); opacity: 0.75; }
 
-/* The rework loop's two other states share the Awaiting Review column. The border is a
+/* The rework loop's two other states, plus failed, share the Review lane. The border is a
    secondary cue only — the card also carries a WORD (.kanban-state-chip), because a
    colour on its own is not a signal anyone can be assumed to read. */
 .kanban-card-changes_requested { border-left-color: var(--orange, #d18616); background: rgba(209, 134, 22, 0.06); }
 .kanban-card-needs_human       { border-left-color: var(--red); background: rgba(248, 81, 73, 0.07); }
 
+/* Per-card status pill (kanban.js's STATUS_CHIPS) — shown on every non-backlog card so a
+   reader can tell two cards sharing a lane apart (claimed vs running in In Progress;
+   awaiting/changes/needs-human/failed in Review). The base rule is a neutral outline; each
+   `.st-*` modifier only ADDS a colour — the pill's WORD (set in kanban.js) is what actually
+   carries the meaning, exactly like .kanban-ci-chip below. */
 .kanban-state-chip {
-    background: rgba(248, 81, 73, 0.12);
-    border: 1px solid rgba(248, 81, 73, 0.45);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
     border-radius: 10px;
     padding: 0 8px;
     font-size: 10px;
     white-space: nowrap;
 }
+.kanban-state-chip.st-open         { color: var(--text-dim); }
+.kanban-state-chip.st-claimed      { color: var(--accent); border-color: rgba(88, 166, 255, 0.45); background: rgba(88, 166, 255, 0.10); }
+.kanban-state-chip.st-running      { color: var(--green); border-color: rgba(63, 185, 80, 0.45); background: rgba(63, 185, 80, 0.10); }
+.kanban-state-chip.st-awaiting     { color: var(--yellow); border-color: rgba(210, 153, 34, 0.45); background: rgba(210, 153, 34, 0.10); }
+.kanban-state-chip.st-changes      { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
+.kanban-state-chip.st-needs-human  { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); font-weight: 600; }
+.kanban-state-chip.st-failed       { color: var(--red); border-color: rgba(248, 81, 73, 0.55); background: rgba(248, 81, 73, 0.14); font-weight: 600; }
+.kanban-state-chip.st-done         { color: var(--text-dim); }
 
 /* The CI chip (CMX-69): what GitHub's checks say about this card's PR. The glyph and the
    WORD carry the state; the colour only agrees with them. A red-weak reader must be able
@@ -2190,7 +2423,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 
 /* ---- Mobile layout controls (Kanban) ---- */
-/* The Swipe/Rows toggle + swipe quick-nav strip. Hidden on desktop (the 7-col
+/* The Swipe/Rows toggle + swipe quick-nav strip. Hidden on desktop (the 5-lane
    grid needs no controls); the ≤768px block below flips them on. */
 .kanban-mobile-controls { display: none; }
 
@@ -2307,7 +2540,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     }
     .kanban-nav-chip.active .kanban-nav-count { background: rgba(13, 17, 23, 0.18); color: #0d1117; }
 
-    /* Default (swipe carousel): horizontal scroll-snap; all 7 columns swipe
+    /* Default (swipe carousel): horizontal scroll-snap; all 5 lanes swipe
        with a peek of the next. */
     .kanban-board {
         display: flex;
@@ -2406,16 +2639,31 @@ input[type="text"]:focus, textarea:focus, select:focus {
     #term-wall-grid { display: none !important; }
     #panel-terminals > div:first-child { flex-wrap: wrap; }
     #term-agent { margin-left: 0 !important; flex: 1 1 100%; }
-    /* leave room for the docked key bar; cap expanded height + scroll if it overflows.
-       CMX-130: this 70vh was tuned against the old collapsible #term-bar and never
-       updated when the v2 keybar (fixed, always-on) replaced it below — the fixed
-       bar painted over the pane's own bottom slice instead of sitting past it.
-       Subtract --term-keybar-h AND env(safe-area-inset-bottom) so the pane's bottom
-       edge clears the fixed bar's FULL footprint: the keybar's own bottom padding is
-       `calc(6px + env(safe-area-inset-bottom))`, so on a home-indicator phone the bar
-       is 47px + inset tall — subtracting only the 47px would leave the inset's worth
-       of the pane's bottom row (input box + "auto mode on") still under the bar. */
-    .term-single .term-pane { height: calc(70vh - var(--term-keybar-h, 0px) - env(safe-area-inset-bottom)); }
+    /* Fill the screen: 100dvh (NOT vh — the mobile address bar collapses and
+       vh overshoots the real visible height) minus the chrome that sits
+       above/below the pane on a phone. CMX-130's 70vh was a rough guess
+       tuned against the old collapsible #term-bar and left dead space below
+       the pane once the v2 fixed keybar replaced it (this fixes that).
+       --gs-head-h / --term-switcher-h below are the two new measured
+       constants: --gs-head-h is the mobile .gs-head row itself (2px+2px
+       padding around the title+subtitle label — two lines now the ai-title
+       subtitle is shown again, above); --term-switcher-h is the agent-pill
+       strip's own footprint (28px pill row + 2px padding-bottom + 8px
+       margin-bottom). --term-keybar-h (47px, below) and --term-ctx-bar-h
+       (30px, :root) already existed. Subtracting the keybar's footprint AND
+       env(safe-area-inset-bottom) separately still matters (CMX-130): the
+       keybar's own bottom padding is `calc(6px + env(safe-area-inset-bottom))`,
+       so on a home-indicator phone the bar is 47px + inset tall — subtracting
+       only the 47px would leave the inset's worth of the pane's bottom row
+       (input box + "auto mode on") still under the bar. */
+    :root { --gs-head-h: 32px; --term-switcher-h: 38px; }
+    .term-single .term-pane {
+        height: calc(100dvh - var(--gs-head-h) - var(--term-switcher-h) - var(--term-keybar-h, 0px) - var(--term-ctx-bar-h) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
+    }
+    /* NB: the pane is DELIBERATELY left inset by .content's horizontal padding
+       (no width reclaim). That side gutter is what lets a touch-drag beside the
+       terminal scroll the PAGE instead of being swallowed by the iframe — a
+       full-bleed pane traps the scroll. Do not re-add a negative margin here. */
     #term-bar { max-height: 60vh; overflow-y: auto; }
 
     /* Dense layout: Special & Ctrl as full-width rows; D-pad + Nav + Scroll
@@ -3151,18 +3399,67 @@ input[type="text"]:focus, textarea:focus, select:focus {
        desktop bar. See CMX-133 below for what happens to the window-control
        keys (drag/min/max/kill) themselves. */
     .gs-head { padding: 2px 8px; font-size: 11px; }
-    /* CMX-146: single mobile pane is already tight on vertical space — drop the
-       dim ai-title subtitle here, keep it for wall/desktop panes. */
-    .pane-subtitle { display: none; }
-    /* CMX-133: drag/minimize/maximize genuinely don't apply to the forced
-       single pane, but × kill is the only way to tear a session down on
-       phones (no wall, no overflow-menu equivalent) — keep just that button. */
+    /* CMX-146 hid the dim ai-title subtitle here (single mobile pane was tight
+       on vertical space); un-hidden per Liav's 2026-07-25 call — it already
+       truncates to one line via the base rule above (overflow/ellipsis/
+       nowrap), just trimmed a touch smaller than .gs-head's 11px so it reads
+       as clearly secondary without growing the compact header. */
+    .pane-subtitle { display: block; font-size: 9.5px; }
+    /* CMX-133: drag/minimize genuinely don't apply to the forced single pane,
+       but × kill is the only way to tear a session down on phones (no wall,
+       no overflow-menu equivalent) — keep just that button. */
     .gs-keys { display: flex; }
+    /* Maximize doesn't apply either (there's nothing else on the wall to
+       overlay over) — replaced by ONE mobile-only fullscreen toggle instead
+       (.gs-mobile-full-btn, revealed just below): it grows the pane to
+       100dvh and hides the surrounding chrome, tap again to restore. */
     .gs-min-btn, .gs-max-btn { display: none; }
-    /* CMX-117: branch + context text moved out of .gs-head into the bottom
-       .term-ctx-bar, which is NOT part of .gs-head — hide just the text on
-       phones (same declutter intent as above) and keep the ambient fill. */
-    .term-ctx-bar .gs-branch, .term-ctx-bar .gs-ctx { display: none; }
+    .gs-mobile-full-btn { display: inline-flex; }
+
+    /* term-mobile-full: body class toggled by chela.termMobileFull (bound to
+       .gs-mobile-full-btn above). Hides the INFORMATIONAL chrome around the
+       single pane — the agent-pill switcher above it and the pane's own
+       context bar — so the pane's height rule (below) can claim nearly the
+       whole screen. Two things deliberately stay: the compact .gs-head (with
+       its collapse toggle + × kill — the only way back OUT of fullscreen), and
+       the keybar (Liav, 2026-07-25), because it is not clutter but the mobile
+       INPUT METHOD: Esc/Tab/Ctrl/arrows/Paste are unreachable without it, and
+       fullscreen is exactly when you're working in the terminal. */
+    body.term-mobile-full .term-switcher,
+    body.term-mobile-full .term-ctx-bar { display: none !important; }
+    /* True overlay, not just a tall box: the pane normally sits BELOW the
+       topbar (~53px) in flow, so a bare `height:100dvh` overshoots the
+       viewport and pushes the terminal's bottom rows under the fold. Pin it
+       to the viewport (fixed + top/left/right:0) so the height below is
+       measured against the whole screen — topbar included. Subtract the
+       keybar's FULL footprint (--term-keybar-h + the safe-area inset its own
+       bottom padding carries — same CMX-130 reasoning as the non-fullscreen
+       rule above) so the fixed bar sits past the pane instead of painting
+       over the terminal's bottom row. z-index 100 clears the topbar (auto);
+       the pane no longer overlaps the keybar (35) geometrically, so their
+       z-order is moot, and both stay under modals (200). */
+    body.term-mobile-full .term-single .term-pane {
+        position: fixed;
+        top: 0; left: 0; right: 0;
+        /* --kb-occluded (published by _kbPin from VisualViewport) is how much
+           the SOFTWARE KEYBOARD covers — 0 when it's closed. dvh does not track
+           it, so without this the terminal's input line hides behind the
+           keyboard exactly when you're typing into it. */
+        height: calc(100dvh - var(--term-keybar-h, 0px) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
+        z-index: 100;
+    }
+    /* .term-frame normally reserves --term-ctx-bar-h of bottom margin for the
+       now-hidden context bar (see the base .term-frame rule) — zero it here
+       so that space isn't left as a dead strip under the terminal. */
+    body.term-mobile-full .term-single .term-pane .term-frame { margin-bottom: 0; }
+    /* CMX-117 hid the bottom-bar branch + context text on phones (declutter);
+       Liav's 2026-07-25 call brings them back — the mobile single pane has room
+       for the bottom bar now, and branch/context% are worth having. We DON'T
+       re-hide them here: they fall through to the desktop `.gs-branch/.gs-ctx`
+       rules + the `hidden` attribute that _applyTermContext toggles by data
+       presence (so an empty/context-less pane still shows nothing). The №
+       pane-number chip needs no rule — it's never rendered on the single pane
+       (_ctxBarHTML(wid, draggable=false) omits .gs-idx entirely). */
 
     /* CMX-130: the keybar below is `position: fixed` — it floats over whatever
        flow content sits at the bottom of the viewport rather than pushing it
@@ -3308,7 +3605,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kn-body { font-size: 13px; line-height: 1.6; max-width: 760px; }
 .kn-body :is(.kn-mh) { font-size: 14px; font-weight: 700; margin: 16px 0 6px; }
 .kn-body p { margin: 6px 0; }
-.kn-body .kn-ul { margin: 6px 0; padding-left: 20px; }
+.kn-body :is(.kn-ul, .kn-ol) { margin: 6px 0; padding-left: 20px; }
 .kn-body li { margin: 3px 0; }
 .kn-body blockquote { border-left: 3px solid var(--border); margin: 8px 0;
     padding: 2px 0 2px 12px; color: var(--text-dim); }

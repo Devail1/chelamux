@@ -1291,15 +1291,44 @@ test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in 
         `${consumedVars.join(', ') || '(none)'}. A longer/renamed name references an undeclared var ` +
         '(→ 0px fallback) and silently reverts the keybar-overlap fix.');
 
-    // --- OPERATORS + STRUCTURE: both terms must be SUBTRACTED from a 70vh base, exact names.
-    //     "contains var(--term-keybar-h)" and "contains env(safe-area-inset-bottom)" both stay
-    //     true if you flip a `-` to `+` (adds the footprint → TALLER pane, WORSE overlap) or
-    //     change the 70vh base. Pin the whole shape so the sign and base can't drift. ---
-    assert.match(paneCalc,
-        /height:\s*calc\(\s*70vh\s*-\s*var\(\s*--term-keybar-h\s*(?:,[^)]*)?\)\s*-\s*env\(\s*safe-area-inset-bottom\s*\)\s*\)/,
-        '.term-single .term-pane height must be exactly `calc(70vh - var(--term-keybar-h[, fallback]) - ' +
-        'env(safe-area-inset-bottom))` — base 70vh, BOTH terms SUBTRACTED (a flipped + grows the pane and ' +
-        'worsens the overlap), exact var name. Any of those silently reverts the keybar-overlap fix.');
+    // --- BASE: 100dvh, and dvh NOT vh. The pane fills the screen minus its chrome (the
+    //     old 70vh base was a guess that left dead space below the pane — replaced when
+    //     the mobile Wall was reworked). `dvh` is load-bearing and NOT interchangeable
+    //     with `vh`: the mobile address bar collapses, and `vh` measures the LARGEST
+    //     viewport, so a `100vh` pane overshoots the visible area and pushes the
+    //     terminal's bottom rows (the input line) under the fold. `\b` after `dvh` stops
+    //     a bare `100vh` from ever satisfying this. ---
+    assert.match(paneCalc, /height:\s*calc\(\s*100dvh\b/,
+        '.term-single .term-pane height must be calc(100dvh - …): fill the screen, and dvh NOT vh ' +
+        '(vh measures the largest viewport, so the address bar collapsing hides the input line).');
+    assert.ok(!/height:\s*calc\(\s*100vh\b/.test(paneCalc),
+        '.term-single .term-pane must not use 100vh — see above, dvh is the whole point.');
+
+    // --- OPERATORS: every chrome term must be SUBTRACTED, by exact name. "contains
+    //     var(--term-keybar-h)" and "contains env(safe-area-inset-bottom)" both stay true
+    //     if you flip a `-` to `+` (adds the footprint → TALLER pane, WORSE overlap), so
+    //     the minus sign is pinned against each term individually. The calc carries
+    //     several other subtracted terms now (header, switcher, ctx-bar, keyboard inset),
+    //     so this pins each invariant term rather than the whole literal string. ---
+    assert.match(paneCalc, /-\s*var\(\s*--term-keybar-h\s*(?:,[^)]*)?\)/,
+        '.term-single .term-pane height must SUBTRACT var(--term-keybar-h[, fallback]) — a flipped `+` ' +
+        'grows the pane and worsens the keybar overlap this guard exists to prevent.');
+    assert.match(paneCalc, /-\s*env\(\s*safe-area-inset-bottom\s*\)/,
+        '.term-single .term-pane height must SUBTRACT env(safe-area-inset-bottom) — the keybar\'s own ' +
+        'bottom padding carries the inset, so omitting it leaves the pane\'s bottom row under the bar.');
+
+    // --- THE SOFTWARE KEYBOARD: --kb-occluded is how much the on-screen keyboard covers,
+    //     published by terminals.js `_kbPin` from VisualViewport (the ONLY API that reports
+    //     it — dvh tracks the browser's own chrome, not the keyboard). Without this term the
+    //     pane keeps full height while the keyboard is up and the input line you are typing
+    //     into sits behind it. Subtracted, by exact name, same reasoning as above. ---
+    assert.ok(consumedVars.includes('--kb-occluded'),
+        `.term-single .term-pane height must consume var(--kb-occluded) by exact name — captured: ` +
+        `${consumedVars.join(', ') || '(none)'}. Without it the pane ignores the on-screen keyboard ` +
+        'and hides the terminal\'s input line exactly while you are typing into it.');
+    assert.match(paneCalc, /-\s*var\(\s*--kb-occluded\s*(?:,[^)]*)?\)/,
+        '.term-single .term-pane height must SUBTRACT var(--kb-occluded) — a flipped `+` grows the pane ' +
+        'when the keyboard opens, which is the opposite of the fix.');
 });
 
 // CMX-146 — Claude's own auto-generated session title rides as a dim `.pane-subtitle`

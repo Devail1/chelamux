@@ -305,6 +305,52 @@ def test_a_crashing_critic_never_breaks_dispatch(tmp_path):
     assert row["critic_notes"] is None
 
 
+def test_critic_brief_text_includes_the_full_body_not_just_title_and_raw(tmp_path):
+    # 🔴 The regression this fix addresses: `_run_critic` built `brief_text` from only
+    # `task.title` + `task.raw` — the bare bullet line — even when the source
+    # (chela.sources.markdown._task_body) had captured a full multi-line brief on
+    # `task.body` (the bullet's dedented OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation).
+    # So the four-field detector only ever saw the one-line title, and fired "no explicit
+    # objective/boundaries/verify" on every dispatch even when the brief named all three
+    # further down. Spy on `critic.review_brief` (same pattern as
+    # test_the_critic_runs_after_the_agent_is_launched) to capture the EXACT `brief_text`
+    # `_run_critic` builds, and assert it contains body content absent from title/raw.
+    # Corrupt: revert `brief_text = f"{task.title}\n{task.body or task.raw}"` back to
+    # `f"{task.title}\n{task.raw}"` and every assertion below goes RED (none of these
+    # markers exist in title+raw, and the exact-string check at the end would instead pass,
+    # which is itself the tell).
+    body = (
+        "do a thing\n\n"
+        "## OBJECTIVE\nImplement the widget so the toolbar renders.\n\n"
+        "## BOUNDARIES\nStay in scope: touch only chela/widget.py.\n\n"
+        "## VERIFY\nRun ruff and pytest; self-verify each guard before you hand off.\n"
+    )
+    task = Task(
+        id="abc123", title="do a thing", file=str(tmp_path / "TODO.md"),
+        line_number=7, raw="- [ ] do a thing", body=body,
+    )
+    seen: dict[str, str] = {}
+    real_review = critic.review_brief
+
+    def _spy(text):
+        seen["brief_text"] = text
+        return real_review(text)
+
+    conn = _conn()
+    with patch.object(critic, "review_brief", side_effect=_spy):
+        assert _spawn(_wf(tmp_path), tmp_path, conn, task=task) is True
+
+    assert "brief_text" in seen, "critic.review_brief must have been called"
+    brief_text = seen["brief_text"]
+    assert "OBJECTIVE" in brief_text, "brief_text must include task.body's OBJECTIVE section"
+    assert "BOUNDARIES" in brief_text, "brief_text must include task.body's BOUNDARIES section"
+    assert "VERIFY" in brief_text, "brief_text must include task.body's VERIFY section"
+    assert brief_text != f"{task.title}\n{task.raw}", (
+        "brief_text regressed back to title+raw only — the body was dropped"
+    )
+    assert brief_text == f"{task.title}\n{task.body}"
+
+
 def test_the_critic_runs_after_the_agent_is_launched(tmp_path):
     # Advisory-only means the dispatch is already DONE when the critic runs. If review_brief
     # is reached, the row must already be 'running' — the critic can only ever look at a

@@ -625,6 +625,20 @@
   </div>
 </div>
 
+<!-- Task-detail modal (Work-view redesign): a kanban card click opens this —
+     the brief rendered as markdown + review timeline on the left (both
+     markdown-heavy, so they get the wide column), a compact details sidebar
+     on the right. taskmodal.js fills #task-modal-content and shows
+     it (openTaskModal); the close button, Escape and a backdrop click all
+     route through chela.closeTaskModal() so its own listeners unwind. -->
+<div class="modal-overlay" id="modal-task">
+  <div class="modal modal-task">
+    <button class="task-modal-close" type="button" onclick="chela.closeTaskModal()"
+            aria-label="Close">&times;</button>
+    <div id="task-modal-content"></div>
+  </div>
+</div>
+
 <!-- Init a repo for the dispatcher -->
 <div class="modal-overlay" id="modal-init">
   <div class="modal">

@@ -1036,6 +1036,16 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # in both, which is exactly "the critic never ran".
         ("critic_notes", "ALTER TABLE runs ADD COLUMN critic_notes TEXT"),
         ("critic_reviewed_at", "ALTER TABLE runs ADD COLUMN critic_reviewed_at TEXT"),
+        # 📋 Task-detail modal (Work-view redesign). `brief` is the task's full
+        # multi-line brief (`Task.body` — the markdown source's title + its dedented
+        # OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation, when it captured one;
+        # else `Task.raw`/title — see `_task_brief`, below) copied onto the run row
+        # at CLAIM time (`_spawn`) so the modal still has the brief to show once the
+        # task has left `open_tasks` (which only lists UNCLAIMED tasks). Additive and
+        # read-only downstream: nothing in the dispatch/rework/judge path reads this
+        # column back. A pre-migration row simply reads NULL — the modal degrades to
+        # "no brief recorded", never a crash.
+        ("brief", "ALTER TABLE runs ADD COLUMN brief TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -2961,11 +2971,12 @@ def tick(workflow_path: str | Path) -> dict:
             except Exception as e:
                 log.exception("Dispatch failed for task %s", task.id)
                 conn.execute(
-                    """INSERT INTO runs (task_id, workflow_path, title, status, attempt, last_error, started_at)
-                       VALUES (?, ?, ?, 'failed', ?, ?, ?)
+                    """INSERT INTO runs (task_id, workflow_path, title, status, attempt, last_error, started_at, brief)
+                       VALUES (?, ?, ?, 'failed', ?, ?, ?, ?)
                        ON CONFLICT(task_id) DO UPDATE SET
-                         status='failed', attempt=excluded.attempt, last_error=excluded.last_error""",
-                    (task.id, str(wf.path), task.title, attempt, str(e), _now()),
+                         status='failed', attempt=excluded.attempt, last_error=excluded.last_error,
+                         brief=excluded.brief""",
+                    (task.id, str(wf.path), task.title, attempt, str(e), _now(), _task_brief(task)),
                 )
                 conn.commit()
                 continue
@@ -3012,6 +3023,17 @@ def _max_existing_task_number(repo_path: Path, project_key: str) -> int:
     return best
 
 
+def _task_brief(task: Task) -> str | None:
+    """What to persist onto `runs.brief` at claim time — the task-detail modal's
+    left pane. `task.body` (the markdown source's full title + dedented
+    OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation) wins when the source
+    captured one; a bare one-line task, or a source with no notion of a
+    continuation (gh_issues), falls back to `task.raw` (the bullet line / issue
+    URL), and — belt-and-suspenders, should raw itself ever be empty — `task.title`.
+    """
+    return task.body or task.raw or task.title
+
+
 def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) -> bool:
     repo_path = wf.path.parent
     base_branch = wf.get("workspace", "base_branch", default="master")
@@ -3055,15 +3077,15 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # conflict: leaving attempt 1's id would point the next run_review at a corpse
     # (or, worse, at whatever window tmux later recycled that id onto).
     conn.execute(
-        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number)
-           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?)
+        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief)
+           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(task_id) DO UPDATE SET
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
-             window_epoch=NULL""",
-        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number),
+             window_epoch=NULL, brief=excluded.brief""",
+        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number, _task_brief(task)),
     )
     conn.commit()
 
@@ -3106,10 +3128,17 @@ def _run_critic(wf: WorkflowDef, task: Task, conn: sqlite3.Connection) -> None:
     the one thing v1 forbids, because the code never gives its output a way to.
 
     It reviews the **task-specific brief** — the TODO item the human actually wrote
-    (``task.title`` / ``task.raw``), NOT the rendered WORKFLOW.md prompt. The template is
-    boilerplate identical on every dispatch and already carries every field-signal, so
-    reviewing it would report "complete" for every task and the critic would never say
-    anything. The text that varies per task is the only text worth reviewing.
+    (``task.title`` / ``task.body`` or ``task.raw``), NOT the rendered WORKFLOW.md prompt.
+    The template is boilerplate identical on every dispatch and already carries every
+    field-signal, so reviewing it would report "complete" for every task and the critic
+    would never say anything. The text that varies per task is the only text worth
+    reviewing. ``task.body`` (chela.sources.markdown._task_body — title + the bullet's
+    dedented OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation, when the source captured one)
+    is what the human actually wrote past the title; using only ``task.raw`` (the bare
+    bullet line) starved the four-field detector of everything after the first line, so it
+    fired "no explicit objective/boundaries/verify" on briefs that named all three further
+    down. Falls back to ``task.raw`` for a bare one-line task or a source with no notion of
+    a continuation (gh_issues) — same fallback ``_task_brief`` uses for ``runs.brief``.
 
     Writes ``critic_notes`` ("" ⇒ ran, nothing to add) and ``critic_reviewed_at`` when the
     critic is on; a disabled critic writes NOTHING, leaving both NULL — "the critic never ran",
@@ -3118,7 +3147,7 @@ def _run_critic(wf: WorkflowDef, task: Task, conn: sqlite3.Connection) -> None:
     try:
         if not critic.critic_enabled(wf):
             return
-        brief_text = f"{task.title}\n{task.raw}"
+        brief_text = f"{task.title}\n{task.body or task.raw}"
         review = critic.review_brief(brief_text)
         files = critic.target_files(brief_text)
         inflight = _inflight_target_files(conn, task.id)

@@ -816,6 +816,16 @@ function paneHead(wid, draggable) {
     // nothing to dock it beside) — only render it for draggable wall tiles.
     const min = draggable
         ? `<button class="gs-min-btn" onclick="chela.termMinFor(this)" title="Minimize to dock">${lucideIcon('minus', 14)}</button>` : '';
+    // Mobile single-pane fullscreen toggle (2026-07-25, Liav's call): the ONE
+    // mobile equivalent of desktop's min/max window controls, neither of
+    // which apply to a forced single pane (no dock, no other tiles to
+    // overlay). !draggable already means single mode, which in practice only
+    // happens on mobile — desktop's Single/Wall toggle buttons are
+    // permanently hidden (index.html) so wall never renders draggable=false —
+    // but _isMobileTerm() is still checked explicitly so a stale render can
+    // never leak this into a desktop header.
+    const mobileFull = (!draggable && _isMobileTerm())
+        ? `<button class="gs-mobile-full-btn" onclick="chela.termMobileFull(this)" title="Fill screen">${lucideIcon('maximize-2', 14)}</button>` : '';
     // Pin is also wall-only: it exempts this tile from applyGridLayout's
     // auto-reflow (grid presets), so single mode (no reflow to opt out of) gets
     // no button either.
@@ -883,6 +893,7 @@ function paneHead(wid, draggable) {
         <span class="gs-win-ctl">
           ${min}
           <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">${lucideIcon('maximize-2', 14)}</button>
+          ${mobileFull}
           ${kill}
         </span>
       </span>
@@ -996,6 +1007,27 @@ function termMaxFor(btn) {
     btn.innerHTML = isMax ? lucideIcon('minimize-2', 14) : lucideIcon('maximize-2', 14);
     btn.title = isMax ? 'Restore pane' : 'Maximize pane';
     btn.setAttribute('aria-pressed', isMax ? 'true' : 'false');
+}
+
+// ---- Mobile single-pane fullscreen toggle (2026-07-25) ---------------------
+//
+// Desktop's min/max window controls don't apply to a forced single pane (no
+// dock, no other tiles to overlay) — this is the ONE mobile equivalent: grow
+// the pane to the full 100dvh and hide the surrounding chrome (agent-pill
+// switcher, keybar, context bar) so the terminal gets the whole screen. A
+// transient body class, not persisted (pc_wall_* is layout state; this is a
+// per-visit view toggle, and it's cheap to rebuild the same way every time) —
+// style.css (.term-mobile-full) does the actual hiding/resizing, scoped
+// inside the same @media (max-width: 768px) block as everything else mobile,
+// so desktop is untouched by construction. The compact .gs-head — and its ×
+// kill button — stays visible in both states: this same toggle button is the
+// only way out, and it never disappears (it's part of .gs-head).
+function termMobileFull(btn) {
+    if (!btn) return;
+    const on = document.body.classList.toggle('term-mobile-full');
+    btn.innerHTML = on ? lucideIcon('minimize-2', 14) : lucideIcon('maximize-2', 14);
+    btn.title = on ? 'Exit fullscreen' : 'Fill screen';
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
 }
 
 // ---- Minimize-to-dock (wall mode) -----------------------------------------
@@ -1504,6 +1536,10 @@ async function renderTerminals() {
     // body class so it doesn't outlive the element it was tracking.
     _stopAllReadyPolls();
     document.body.classList.remove('pane-is-maximized');
+    // A fresh single-pane header is about to render at its default (non-full)
+    // icon/title — don't leave a stale term-mobile-full body class hiding
+    // chrome the new header no longer claims to control.
+    document.body.classList.remove('term-mobile-full');
 
     // Ready -> real iframe; not ready -> spinner placeholder (polled into an
     // iframe by _startPlaceholderPolls once the ttyd port lands).
@@ -2121,15 +2157,20 @@ function _applyWallTileFrame(agents) {
 // target).
 function _ctxBarHTML(wid, draggable) {
     const idxNum = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
-    // Wall redesign slice 1: model + PR chip + cost, wall-only (same gate as
-    // idxNum above) — filled/shown by _applyWallTileFrame (PR, agents-driven)
-    // and _applyTermContext (model/cost, context-poll-driven), never both at
-    // once for the same field, so there is exactly one writer per chip.
+    // The model chip rides in the bar on EVERY surface — wall tiles AND the
+    // mobile single pane (Liav, 2026-07-25). It's context-poll-driven
+    // (_applyTermContext fills it from c.model, guarded by `if (modelChip)`),
+    // so it just needed to exist in the single-pane bar to light up.
+    const modelChip = `<span class="gs-model" hidden></span>`;
+    // PR + cost stay wall-only (same gate as idxNum above): PR is agents-driven
+    // (_applyWallTileFrame) and both add width the compact mobile bar doesn't
+    // need. _applyTermContext writes cost, _applyWallTileFrame writes PR — never
+    // both to the same field, so there is exactly one writer per chip.
     const meta = draggable
-        ? `<span class="gs-model" hidden></span>
-           <a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
+        ? `<a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
            <span class="gs-cost" hidden></span>` : '';
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
+      ${modelChip}
       ${meta}
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
@@ -3209,7 +3250,21 @@ function kbCtrlKey(letter) {
 function _kbPin() {
     const bar = document.getElementById('term-keybar');
     const vv = window.visualViewport;
-    if (!bar || !vv) return;
+    if (!vv) return;
+    // Publish how much of the layout viewport's BOTTOM the on-screen keyboard
+    // is covering, as --kb-occluded, so the pane's height rules can subtract it
+    // (style.css, mobile block). This is the whole reason the var exists: `dvh`
+    // tracks the browser's own dynamic chrome (address bar) but NOT the software
+    // keyboard, so on iOS a 100dvh pane keeps its full height when the keyboard
+    // opens and the terminal's bottom rows — the INPUT LINE you are typing into —
+    // sit behind it. VisualViewport is the only thing that reports the keyboard.
+    // Mobile-only: desktop browser zoom also moves the visual viewport, and we
+    // don't want that resizing wall tiles.
+    const occluded = _isMobileTerm()
+        ? Math.max(0, Math.round(window.innerHeight - (vv.offsetTop + vv.height)))
+        : 0;
+    document.documentElement.style.setProperty('--kb-occluded', occluded + 'px');
+    if (!bar) return;
     const top = Math.max(0, Math.round(vv.offsetTop + vv.height - bar.offsetHeight));
     bar.style.bottom = 'auto';
     bar.style.top = top + 'px';
@@ -3224,4 +3279,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _ord
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
