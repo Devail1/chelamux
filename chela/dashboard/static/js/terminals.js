@@ -3,6 +3,7 @@ import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, at
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
+import { actionBarKind, costView, ctxLevel, focusLayout, prChip, rankOrder, recapView, tileState } from './wallmodel.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -25,8 +26,49 @@ let _renderedWids = [];           // pane wids currently in the DOM (live render
 let _termTimer = null;            // fast reactive poll while the terminals tab is open
 let _wallPreset = _loadWallPreset();   // active {cols, rows} fill preset; default 2 columns
 let _wallLocked = localStorage.getItem('pc_wall_locked') === '1';   // lock = swap-on-drag, no resize
+// Wall redesign slice 2: auto-arrange toggle (default OFF). Manual layout
+// (pc_wall_layout) stays SACRED — auto mode only ever computes a live grid
+// fill from rankOrder() and applies it via GridStack; it never writes
+// pc_wall_layout, so toggling off always restores exactly what the user left.
+let _wallAuto = localStorage.getItem('pc_wall_auto') === '1';
+// Comma-joined wid sequence last applied by auto-arrange, so the 4s poll only
+// touches GridStack when the ranked order actually changed (no per-tick thrash).
+// Reset to '' to force the next _applyAutoArrange to (re)apply unconditionally
+// (toggle-on, preset change while auto, or a fresh buildWall).
+let _autoOrderSig = '';
+// Focus layout toggle (default OFF): one pane large, the rest a right-side
+// strip (wallmodel.js's focusLayout). Mutually exclusive with auto-arrange —
+// both toggles OWN the layout, so turning one on turns the other off (see
+// toggleWallFocus / toggleWallAuto). Manual layout (pc_wall_layout) is just
+// as sacred here as it is for auto: this mode never writes it, and toggling
+// off restores it verbatim via the SAME _restoreManualLayout auto-arrange uses.
+let _wallFocus = localStorage.getItem('pc_wall_focus') === '1';
+// Which pane is currently the large "focus" pane. Chosen when Focus turns on
+// (_pickFocusWid) and updated by clicking a strip pane's header (promote).
+let _focusWid = null;
+// Sig of "focus wid | strip order" last applied, mirroring _autoOrderSig —
+// the 4s poll only touches GridStack when the focus target or the tiled pane
+// set actually changed, never on every tick.
+let _focusOrderSig = '';
 let _paneActivity = {};           // wid -> epoch ms a pane last STARTED being busy; drives the taskbar MRU sort
 let _paneStatus = {};             // wid -> last seen session_status, for rising-edge (idle→busy) detection
+
+// Wall redesign slice 1: which panes have their recap PINNED OPEN (click the
+// one-line recap to expand it to the full text). Persisted per-wid so the 4s
+// repaint and a reload keep it open, like the layout/minimized state above.
+const RECAP_OPEN_KEY = 'pc_wall_recap_open';
+function _loadRecapOpen() { try { return new Set(JSON.parse(localStorage.getItem(RECAP_OPEN_KEY) || '[]')); } catch (e) { return new Set(); } }
+function _saveRecapOpen() { try { localStorage.setItem(RECAP_OPEN_KEY, JSON.stringify([..._recapOpen])); } catch (e) { /* ignore */ } }
+let _recapOpen = _loadRecapOpen();
+// Toggle from the recap line's inline onclick. Attribute survives the repaint's
+// textContent= (which only replaces child text, never attributes).
+function toggleRecap(el) {
+    const wid = el && el.dataset && el.dataset.recapFor;
+    if (!wid) return;
+    if (_recapOpen.has(wid)) _recapOpen.delete(wid); else _recapOpen.add(wid);
+    _saveRecapOpen();
+    el.classList.toggle('recap-open', _recapOpen.has(wid));
+}
 let _dockOrderSig = '';           // last rendered chip order, so a status poll only rebuilds on a real reorder
 
 // Active wall preset persists across reloads (and drives the resize re-fit).
@@ -106,7 +148,7 @@ function _swapToFrame(wid) {
     // Ctrl+V shim can read the clipboard (the paste event path works without it,
     // but clipboard.read()/readText() is blocked in a subframe lacking this).
     ifr.setAttribute('allow', 'clipboard-read; clipboard-write');
-    ifr.src = _termSrc(wid);
+    ifr.src = _termFrameSrc(wid);
     ifr.title = _paneTitle(wid);
     ph.replaceWith(ifr);
 }
@@ -404,6 +446,18 @@ function renamePane(ev, span, wid) {
 // in agreement.
 function _termSrc(wid) { return '/term/' + encodeURIComponent(wid) + '/'; }
 function _termLink(wid) { return location.origin + BASE_PATH + _termSrc(wid); }
+
+// iframe-only src: same clean path, plus a per-connection `cid` (CMX-175). ttyd's
+// bundled client JS builds its WebSocket URL from `location.search` verbatim, so
+// this round-trips onto the /term/<wid>/ws upgrade request and lets the backend
+// (term_ws in app.py) match THIS iframe's connection to its own tmux client tty —
+// see the ignore-size watch reporting below. NEVER use this for the copyable
+// share link (_termLink) — that must stay the clean URL a joiner reuses verbatim.
+function _newCid() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+    return 'c' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
+function _termFrameSrc(wid) { return _termSrc(wid) + '?cid=' + _newCid(); }
 
 // Per-wid shared flag (seeded from /api/agents .shared, flipped by toggleShare)
 // and the latest header-facepile presence (from the in-iframe chelaPresence hook).
@@ -774,6 +828,16 @@ function paneHead(wid, draggable) {
     // nothing to dock it beside) — only render it for draggable wall tiles.
     const min = draggable
         ? `<button class="gs-min-btn" onclick="chela.termMinFor(this)" title="Minimize to dock">${lucideIcon('minus', 14)}</button>` : '';
+    // Mobile single-pane fullscreen toggle (2026-07-25, Liav's call): the ONE
+    // mobile equivalent of desktop's min/max window controls, neither of
+    // which apply to a forced single pane (no dock, no other tiles to
+    // overlay). !draggable already means single mode, which in practice only
+    // happens on mobile — desktop's Single/Wall toggle buttons are
+    // permanently hidden (index.html) so wall never renders draggable=false —
+    // but _isMobileTerm() is still checked explicitly so a stale render can
+    // never leak this into a desktop header.
+    const mobileFull = (!draggable && _isMobileTerm())
+        ? `<button class="gs-mobile-full-btn" onclick="chela.termMobileFull(this)" title="Fill screen">${lucideIcon('maximize-2', 14)}</button>` : '';
     // Pin is also wall-only: it exempts this tile from applyGridLayout's
     // auto-reflow (grid presets), so single mode (no reflow to opt out of) gets
     // no button either.
@@ -807,6 +871,19 @@ function paneHead(wid, draggable) {
     // pane № (Alt+N jump target) moved OUT of the header entirely, down to
     // the bottom bar — see _ctxBarHTML.
     const dot = `<span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span>`;
+    // Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill —
+    // glyph + word ALWAYS carry the state (Liav is red-weak; colour is
+    // decoration on top, see .gs-state-* in style.css). Wall-only, like the
+    // min/pin buttons above — single mode renders nothing here at all, so
+    // mobile's forced single mode (< 768px) is untouched by construction.
+    // Rendered idle/neutral here (mirrors .gs-dot's own "starts neutral" build
+    // pattern); _applyWallTileFrame (called synchronously right after the
+    // wall is built — see renderTerminals) fills the real state before the
+    // browser ever paints it.
+    const state = draggable
+        ? `<span class="gs-state gs-state-idle" data-state-for="${attrEsc(wid)}" title="idle">
+             <span class="gs-state-glyph" aria-hidden="true">○</span><span class="gs-state-word">idle</span>
+           </span>` : '';
     const menu = `<span class="gs-menu-wrap">
         <button class="gs-menu-btn" onclick="chela.togglePaneOverflow(event, this)"
                 aria-haspopup="true" aria-expanded="false" title="Session actions">${lucideIcon('more-vertical', 14)}</button>
@@ -819,6 +896,7 @@ function paneHead(wid, draggable) {
       </span>`;
     return `<div class="gs-head">
       ${dot}
+      ${state}
       ${menu}
       ${label}
       ${roomBadge}
@@ -827,6 +905,7 @@ function paneHead(wid, draggable) {
         <span class="gs-win-ctl">
           ${min}
           <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">${lucideIcon('maximize-2', 14)}</button>
+          ${mobileFull}
           ${kill}
         </span>
       </span>
@@ -942,6 +1021,27 @@ function termMaxFor(btn) {
     btn.setAttribute('aria-pressed', isMax ? 'true' : 'false');
 }
 
+// ---- Mobile single-pane fullscreen toggle (2026-07-25) ---------------------
+//
+// Desktop's min/max window controls don't apply to a forced single pane (no
+// dock, no other tiles to overlay) — this is the ONE mobile equivalent: grow
+// the pane to the full 100dvh and hide the surrounding chrome (agent-pill
+// switcher, keybar, context bar) so the terminal gets the whole screen. A
+// transient body class, not persisted (pc_wall_* is layout state; this is a
+// per-visit view toggle, and it's cheap to rebuild the same way every time) —
+// style.css (.term-mobile-full) does the actual hiding/resizing, scoped
+// inside the same @media (max-width: 768px) block as everything else mobile,
+// so desktop is untouched by construction. The compact .gs-head — and its ×
+// kill button — stays visible in both states: this same toggle button is the
+// only way out, and it never disappears (it's part of .gs-head).
+function termMobileFull(btn) {
+    if (!btn) return;
+    const on = document.body.classList.toggle('term-mobile-full');
+    btn.innerHTML = on ? lucideIcon('minimize-2', 14) : lucideIcon('maximize-2', 14);
+    btn.title = on ? 'Exit fullscreen' : 'Fill screen';
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
 // ---- Minimize-to-dock (wall mode) -----------------------------------------
 //
 // Minimizing a tile removes it from the Gridstack engine (freeing its cells)
@@ -1018,6 +1118,7 @@ function minimizePane(wid) {
     _saveMinimized();
     renderMinDock();
     _refitWallForDock();        // wall re-packs above the (taller) dock
+    _reportWatchForWid(wid);    // docked tile stops dictating the shared window's size (CMX-175)
 }
 
 function termMinFor(btn) {
@@ -1167,6 +1268,7 @@ function restoreFromDock(wid) {
     }
     renderMinDock();
     _refitWallForDock();        // dock may have emptied → grow the wall back
+    _reportWatchForWid(wid);    // back on screen → resumes counting toward the shared window's size (CMX-175)
 }
 
 // Live busy/idle/waiting indicator. The dot starts neutral and is coloured by
@@ -1218,6 +1320,9 @@ function _applyTermStatus(agents) {
     });
     _lazyDock(agents);   // dock the dispatcher's quiet workers; pop out the ones that block
     _colorTermDots(agents);
+    _applyWallTileFrame(agents);   // wall redesign slice 1: state pill / recap / PR chip / action bar
+    _applyAutoArrange(agents);     // wall redesign slice 2: re-rank the wall — no-op unless auto is on and the order changed
+    _applyWallFocus(agents);       // wall redesign (Focus toggle): re-fit the one-large + strip layout — no-op unless focus is on and the target/pane-set changed
     // Wall tick is the fast path (4s) — refresh the tab signal here too so the
     // title/favicon update promptly on the flagship view, not just on the 30s
     // sidebar refresh. updateTabSignal is idempotent, so the two callers agree.
@@ -1246,17 +1351,29 @@ function _applyTermContext(ctx) {
         const head = bar.parentElement && bar.parentElement.querySelector('.gs-head');
         const ctxChip = bar.querySelector('.gs-ctx');
         const branchChip = bar.querySelector('.gs-branch');
+        // Wall redesign slice 1: model + cost chips are wall-only (_ctxBarHTML
+        // only renders them when draggable) — null on single mode's bar, so
+        // every write below is guarded the same way ctxChip/branchChip are.
+        const modelChip = bar.querySelector('.gs-model');
+        const costChip = bar.querySelector('.gs-cost');
         if (!c || c.used_pct == null) {
             fill.style.width = '0';
             fill.className = 'term-ctx-fill';
             bar.title = 'Context: —';
             if (ctxChip) ctxChip.hidden = true;
             if (branchChip) branchChip.hidden = true;
+            if (modelChip) modelChip.hidden = true;
+            if (costChip) costChip.hidden = true;
             return;
         }
         const pct = c.used_pct;
         fill.style.width = Math.min(100, pct) + '%';
-        const sev = pct > 80 ? ' ctx-danger' : pct > 60 ? ' ctx-warn' : '';
+        // Routed through wallmodel.js's ctxLevel — the SAME thresholds this
+        // slice's guard tests pin (tests/wall_tile.test.mjs), so the pure
+        // logic under test is what actually drives the rendered fill/chip,
+        // not a second copy of the 60/80 thresholds living only here.
+        const lvl = ctxLevel(pct);
+        const sev = lvl === 'bad' ? ' ctx-danger' : lvl === 'warn' ? ' ctx-warn' : '';
         fill.className = 'term-ctx-fill' + sev + (c.estimated ? ' est' : '');
         const bits = [`Context: ${c.used}/${c.total} (${pct}%${c.estimated ? '~' : ''})`];
         if (c.model) bits.push(c.model);
@@ -1283,6 +1400,15 @@ function _applyTermContext(ctx) {
             } else {
                 branchChip.hidden = true;
             }
+        }
+        if (modelChip) {
+            if (c.model) { modelChip.textContent = c.model; modelChip.hidden = false; }
+            else modelChip.hidden = true;
+        }
+        if (costChip) {
+            const cost = costView(c.cost_usd);
+            if (cost) { costChip.textContent = cost; costChip.title = 'session cost'; costChip.hidden = false; }
+            else costChip.hidden = true;
         }
     });
 }
@@ -1424,11 +1550,15 @@ async function renderTerminals() {
     // body class so it doesn't outlive the element it was tracking.
     _stopAllReadyPolls();
     document.body.classList.remove('pane-is-maximized');
+    // A fresh single-pane header is about to render at its default (non-full)
+    // icon/title — don't leave a stale term-mobile-full body class hiding
+    // chrome the new header no longer claims to control.
+    document.body.classList.remove('term-mobile-full');
 
     // Ready -> real iframe; not ready -> spinner placeholder (polled into an
     // iframe by _startPlaceholderPolls once the ttyd port lands).
     const frame = w => _termReady.has(w)
-        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termSrc(w)}" title="${escHtml(_paneTitle(w))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termFrameSrc(w)}" title="${escHtml(_paneTitle(w))}"></iframe>`
         : _termPlaceholder(w);
     const stage = $('#term-stage');
     if (!wids.length) {
@@ -1460,6 +1590,7 @@ async function renderTerminals() {
 
     renderMobileSwitcher();   // phone single-mode agent pills (no-op on desktop)
     _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
+    _bindFocusPromote();      // click a strip pane's header to promote it while Focus is on (idempotent)
     _refreshRooms();          // paint room accents on the first render, not 4s later
 }
 
@@ -1621,11 +1752,67 @@ function _restoreTermFrames() {
     if (TERMINALS_ON && currentTab === 'terminals') termTick();
 }
 
+// ---- Per-client ignore-size (CMX-175) ---------------------------------------
+//
+// The teardown above resolves size contention by DISCONNECTING a backgrounded
+// tab's ttyd clients after TERM_HIDE_GRACE_MS — effective, but it kills the
+// socket (a visible reconnect) and only fires once a tab has been hidden a
+// while. tmux's per-client `ignore-size` flag gets the SAME outcome — THIS tab's
+// clients stop dragging the shared window to their own geometry — instantly and
+// non-destructively, so report it the moment a tile stops (or starts) being
+// watched: tab backgrounded/foregrounded, or pane minimized/restored. Both
+// mechanisms coexist: this one fixes the acute sizing fight; the teardown still
+// exists to reclaim --max-clients slots from a genuinely abandoned tab.
+//
+// A tile only counts as "watched" while the browser tab is visible AND it isn't
+// collapsed into the dock — a minimized tile is still a live tmux client (just
+// CSS-hidden), so left alone it would go on dictating the shared window's size
+// from inside the dock.
+function _isWatched(wid) {
+    return document.visibilityState !== 'hidden' && !_minimized.has(wid);
+}
+
+// /term/<wid>/?cid=... → cid. Mirrors _widOfFrame's src-parsing (including the
+// suspended-src fallback so a torn-down tile's last-known cid is still visible).
+function _cidOfFrame(ifr) {
+    const src = ifr.dataset.suspendedSrc || ifr.getAttribute('src') || '';
+    const m = src.match(/[?&]cid=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+}
+
+// Report one iframe's current watched state to the ONE tmux client app.py's
+// term_ws matched to its cid — never the whole session, so a sibling tab/device
+// watching the same wid is untouched. Best-effort: a missed flip just leaves
+// tmux's default (`largest` fights over every attached client, today's behavior).
+function _reportWatch(ifr) {
+    const src = ifr.getAttribute('src') || '';
+    if (!src || src === 'about:blank') return;      // torn down — nothing to flag
+    const wid = _widOfFrame(ifr);
+    const cid = _cidOfFrame(ifr);
+    if (!wid || !cid) return;
+    api('/api/term/' + encodeURIComponent(wid) + '/watch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cid, watching: _isWatched(wid) }),
+    }).catch(() => {});
+}
+
+function _reportAllWatch() {
+    document.querySelectorAll('#term-stage iframe.term-frame').forEach(_reportWatch);
+}
+
+function _reportWatchForWid(wid) {
+    const ifr = Array.from(document.querySelectorAll('#term-stage iframe.term-frame'))
+        .find(f => _widOfFrame(f) === wid);
+    if (ifr) _reportWatch(ifr);
+}
+
 // Single registration at module load. TERMINALS_ON is checked at fire time (it
 // may not be resolved yet here), mirroring the window 'resize' handler above.
 document.addEventListener('visibilitychange', () => {
     if (!TERMINALS_ON) return;
     clearTimeout(_termHideTimer);
+    _reportAllWatch();
     if (document.hidden) {
         _termHideTimer = setTimeout(_teardownTermFrames, TERM_HIDE_GRACE_MS);
     } else if (_termSuspended) {
@@ -1834,6 +2021,7 @@ document.addEventListener('load', e => {
     const ifr = e.target;
     if (!ifr || ifr.tagName !== 'IFRAME' || !ifr.classList.contains('term-frame')) return;
     _wireIframeShortcuts(ifr);
+    _reportWatch(ifr);   // register this fresh connection's watched state (CMX-175)
 }, true);
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
@@ -1904,16 +2092,125 @@ function destroyGrid() {
 // gs-id is the stable wid so a rename never re-keys the tile.
 function _wallTileHTML(wid, x, y, w, h) {
     const body = _termReady.has(wid)
-        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termSrc(wid)}" title="${escHtml(_paneTitle(wid))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termFrameSrc(wid)}" title="${escHtml(_paneTitle(wid))}"></iframe>`
         : _termPlaceholder(wid);
     const pinnedCls = _pinned.has(wid) ? ' pane-pinned' : '';
     return `<div class="grid-stack-item${pinnedCls}" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
     ${paneHead(wid, true)}
+    ${_recapLineHTML(wid)}
     ${body}
     ${_ctxBarHTML(wid, true)}
+    ${_actionBarHTML(wid)}
   </div>
 </div>`;
+}
+
+// Wall redesign slice 1: the away-summary line, Claude's own "what happened
+// while you were away" — never shown on the Wall before this. Dim, one line,
+// recap_ts in the tooltip. Rendered hidden by default (mirrors the ctx bar's
+// chips); _applyWallTileFrame fills it synchronously right after the wall is
+// built (renderTerminals calls _applyTermStatus(_agentsCache) immediately
+// after buildWall), so there is no visible flash of "hidden then shown".
+function _recapLineHTML(wid) {
+    return `<div class="pane-recap" data-recap-for="${attrEsc(wid)}" hidden onclick="chela.toggleRecap(this)"></div>`;
+}
+
+// Wall redesign slice 1: the amber Approve/Answer bar (wantsHuman) or blue
+// Review bar (finished, PR up) — sends its key via the EXISTING
+// /api/term/key path (termKeyFor -> chela.termActionClick below), no new
+// endpoint. Always rendered (hidden by default) so _applyWallTileFrame can
+// find it by data-action-for on every poll, same pattern as the ctx bar.
+function _actionBarHTML(wid) {
+    return `<div class="term-action-bar" data-action-for="${attrEsc(wid)}" hidden></div>`;
+}
+
+// The action bar's inner markup for a given {kind, label} (wallmodel.js
+// actionBarKind). 'review' links straight to the PR (no key to send);
+// 'answer'/'approve' send Enter via the existing /api/term/key path — Enter
+// accepts Claude's own highlighted default choice at a permission gate and
+// submits a typed reply, which is the one safe, universal action available
+// through the whitelisted key set (app.py::_TERM_KEYS) without a new endpoint.
+function _actionBarContent(wid, kind) {
+    if (kind.kind === 'review') {
+        const chip = prChip((_agentByWid(wid) || {}).pr);
+        const url = chip ? chip.url : '#';
+        return `<span class="term-action-label">✓ PR ready for review</span>
+          <a class="term-action-btn" href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">Review</a>`;
+    }
+    const label = kind.label === 'Answer' ? '◆ Needs an answer' : '◆ Needs approval';
+    return `<span class="term-action-label">${escHtml(label)}</span>
+      <button type="button" class="term-action-btn" onclick="chela.termActionClick(this,'${_jsStr(wid)}')">${escHtml(kind.label)}</button>`;
+}
+
+// Send the action bar's key (Enter) via the existing /api/term/key path.
+async function termActionClick(btn, wid) {
+    if (!btn) return;
+    btn.disabled = true;
+    try {
+        await termKeyFor(wid, 'Enter');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// Wall redesign slice 1: repaint every wall tile's new frame elements (state
+// pill, recap line, PR chip, action bar) from a fresh /api/agents poll — the
+// SAME agents array _applyTermStatus already has, so this runs as one more
+// step of that existing 4s tick rather than a second poll. Model/cost/branch
+// (ctx-poll-driven) are repainted separately by _applyTermContext, which
+// already owns that bar's other chips.
+function _applyWallTileFrame(agents) {
+    if (!agents) return;
+    const by = {};
+    agents.forEach(a => { if (a.window_id) by[a.window_id] = a; });
+
+    document.querySelectorAll('#panel-terminals .gs-state[data-state-for]').forEach(el => {
+        const a = by[el.dataset.stateFor];
+        const s = tileState(a, wantsHuman(a));
+        el.className = 'gs-state gs-state-' + s.cls;
+        el.title = s.word;
+        const g = el.querySelector('.gs-state-glyph');
+        const w = el.querySelector('.gs-state-word');
+        if (g) g.textContent = s.glyph;
+        if (w) w.textContent = s.word;
+    });
+
+    document.querySelectorAll('#panel-terminals .pane-recap[data-recap-for]').forEach(el => {
+        const r = recapView(by[el.dataset.recapFor]);
+        el.hidden = !r;
+        el.textContent = r ? r.text : '';
+        // The line clamps to one row; the tooltip reveals the FULL recap (plus
+        // its as-of time), so nothing is lost to truncation on a glance.
+        el.title = r ? (r.text + (r.tsTitle ? '\n\n(as of ' + r.tsTitle + ')' : '')) : '';
+        el.classList.toggle('recap-open', !!r && _recapOpen.has(el.dataset.recapFor));
+    });
+
+    document.querySelectorAll('#panel-terminals .gs-pr[data-pr-for]').forEach(el => {
+        const a = by[el.dataset.prFor];
+        const chip = prChip(a && a.pr);
+        if (!chip) { el.hidden = true; el.removeAttribute('href'); el.textContent = ''; return; }
+        el.hidden = false;
+        el.href = chip.url;
+        el.textContent = '⚑ ' + chip.label;
+        el.title = 'Open PR ' + chip.label + (chip.repository ? ' — ' + chip.repository : '');
+    });
+
+    document.querySelectorAll('#panel-terminals .term-action-bar[data-action-for]').forEach(el => {
+        const wid = el.dataset.actionFor;
+        const a = by[wid];
+        const kind = actionBarKind(a, wantsHuman(a));
+        const host = el.closest('.grid-stack-item-content');
+        if (!kind) {
+            if (!el.hidden) { el.hidden = true; el.className = 'term-action-bar'; el.innerHTML = ''; }
+            if (host) host.classList.remove('has-term-action');
+            return;
+        }
+        el.hidden = false;
+        el.className = 'term-action-bar action-' + kind.kind;
+        el.innerHTML = _actionBarContent(wid, kind);
+        if (host) host.classList.add('has-term-action');
+    });
 }
 
 // Per-tile context-window bar pinned to the tile bottom edge (CMX-117: now the
@@ -1931,7 +2228,21 @@ function _wallTileHTML(wid, x, y, w, h) {
 // target).
 function _ctxBarHTML(wid, draggable) {
     const idxNum = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
+    // The model chip rides in the bar on EVERY surface — wall tiles AND the
+    // mobile single pane (Liav, 2026-07-25). It's context-poll-driven
+    // (_applyTermContext fills it from c.model, guarded by `if (modelChip)`),
+    // so it just needed to exist in the single-pane bar to light up.
+    const modelChip = `<span class="gs-model" hidden></span>`;
+    // PR + cost stay wall-only (same gate as idxNum above): PR is agents-driven
+    // (_applyWallTileFrame) and both add width the compact mobile bar doesn't
+    // need. _applyTermContext writes cost, _applyWallTileFrame writes PR — never
+    // both to the same field, so there is exactly one writer per chip.
+    const meta = draggable
+        ? `<a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
+           <span class="gs-cost" hidden></span>` : '';
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
+      ${modelChip}
+      ${meta}
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
       ${idxNum}
@@ -2014,7 +2325,9 @@ function buildWall(wids) {
         const item = gsEl.querySelector(`.grid-stack-item[gs-id="${_cssEsc(wid)}"]`);
         if (item) _minimizeItem(item);
     });
-    _applyWallLock();   // restore the locked (swap-on-drag) feel across reloads
+    _autoOrderSig = '';    // fresh tile set: force the next auto-arrange apply, don't trust a stale sig
+    _focusOrderSig = '';   // same, for Focus: force the next _applyWallFocus apply on a fresh tile set
+    _applyWallInteractivity();   // restore the locked (swap-on-drag) / auto-arrange / focus feel across reloads
     renderMinDock();
     _replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
     _refreshPaneIdx();      // Alt+N badges (keyboard-fast pane switcher)
@@ -2057,7 +2370,7 @@ async function addWallTiles(wids) {
         if (!_renderedWids.includes(wid)) _renderedWids.push(wid);
     });
     _startPlaceholderPolls();   // seed readiness polls for any placeholders we just added
-    _applyWallLock();           // a tile added while locked must inherit no-resize
+    _applyWallInteractivity();  // a tile added while locked/auto must inherit no-resize / no-move
     renderMinDock();            // taskbar lists every pane → add the new chip(s)
     _refitWallForDock();        // taskbar may have grown a row → re-fit the wall above it
     _replayRoomAccents();       // a fresh tile already in a room wears its accent at once
@@ -2156,6 +2469,30 @@ function _lockGlyph(locked) {
         <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="${shackle}"/></svg>`;
 }
 
+// Lucide target (https://lucide.dev/icons/target), 14px to match the lock
+// glyph — deliberately a DIFFERENT shape from the lock/preset icons so the
+// auto-arrange toggle reads as its own control at a glance. Static (unlike
+// the lock glyph it doesn't swap shape on/off — .gl-btn.active carries the
+// on/off signal, same as the preset picker's buttons).
+function _autoGlyph() {
+    return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>`;
+}
+
+// Focus layout glyph: a big rect (the focus pane) beside two stacked small
+// rects (the strip) — deliberately a DIFFERENT shape from lock/auto/preset
+// icons (echoes _gridGlyph's rounded-rect idiom, sized to match) so Focus
+// reads as its own control, not a preset variant. Static, same reasoning as
+// _autoGlyph — .gl-btn.active carries the on/off signal.
+function _focusGlyph() {
+    return `<svg viewBox="0 0 18 14" width="18" height="14" fill="currentColor" aria-hidden="true">
+        <rect x="1" y="1" width="10" height="12" rx="1"/>
+        <rect x="13" y="1" width="4" height="5" rx="1"/>
+        <rect x="13" y="8" width="4" height="5" rx="1"/>
+    </svg>`;
+}
+
 // Populate the toolbar's glyph picker once. Idempotent (dataset guard) so the
 // per-render renderTerminals() call is cheap.
 function _buildGridPicker() {
@@ -2174,6 +2511,8 @@ function _buildGridPicker() {
         b.classList.toggle('active', !!(_wallPreset && p.cols === _wallPreset.cols && p.rows === _wallPreset.rows));
     });
     _reflectLockBtn();
+    _reflectAutoBtn();
+    _reflectFocusBtn();
 }
 
 // ---- Layout lock (swap-on-drop) --------------------------------------------
@@ -2197,18 +2536,95 @@ function _reflectLockBtn() {
         : 'Lock layout — drag swaps panes, resize off';
 }
 
-// Push the current lock state onto the live grid. Safe to call any time _grid
-// exists (e.g. right after buildWall, so a reload restores the locked feel).
-function _applyWallLock() {
+// Wall redesign slice 2: reflect the auto-arrange toggle's on/off state on its
+// toolbar button — same pattern as _reflectLockBtn (static icon here, since
+// unlike lock there's no second shape to swap to; .gl-btn.active carries the
+// state, same as the preset picker's buttons).
+function _reflectAutoBtn() {
+    const b = $('#term-auto-btn');
+    if (!b) return;
+    b.classList.toggle('active', _wallAuto);
+    b.innerHTML = _autoGlyph();
+    b.title = _wallAuto
+        ? 'Auto-arrange ON — panes rank by attention (needs you → working → idle → done). Click to restore your manual layout.'
+        : 'Auto-arrange — rank panes by attention (needs you → working → idle → done)';
+}
+
+// Focus layout: reflect the toggle's on/off state on its toolbar button —
+// same pattern as _reflectAutoBtn (static icon; .gl-btn.active carries state).
+function _reflectFocusBtn() {
+    const b = $('#term-focus-btn');
+    if (!b) return;
+    b.classList.toggle('active', _wallFocus);
+    b.innerHTML = _focusGlyph();
+    b.title = _wallFocus
+        ? 'Focus ON — one pane large, the rest a strip. Click a strip pane’s header to promote it. Click to restore your manual layout.'
+        : 'Focus — one pane large, the rest a strip';
+}
+
+// Push the current lock + auto-arrange + focus state onto the live grid. Safe
+// to call any time _grid exists (e.g. right after buildWall, so a reload
+// restores the locked/auto/focus feel). Auto-arrange and Focus both COMPUTE
+// the layout (rankOrder / focusLayout), so either one disables move AND
+// resize outright — a manual drag/resize would just get overwritten by the
+// next poll's re-apply, so disabling is the honest UI rather than a confusing
+// revert. They are mutually exclusive (toggleWallAuto/toggleWallFocus enforce
+// it), so at most one of them is ever true here.
+function _applyWallInteractivity() {
     if (!_grid) return;
-    _grid.enableResize(!_wallLocked); // no resizing while locked (move stays on → drag-to-swap)
+    _grid.enableMove(!_wallAuto && !_wallFocus);
+    _grid.enableResize(!_wallLocked && !_wallAuto && !_wallFocus);
     _reflectLockBtn();
+    _reflectAutoBtn();
+    _reflectFocusBtn();
 }
 
 function toggleWallLock(btn) {
     _wallLocked = !_wallLocked;
     localStorage.setItem('pc_wall_locked', _wallLocked ? '1' : '0');
-    _applyWallLock();
+    _applyWallInteractivity();
+    if (btn) btn.blur();
+}
+
+// Wall redesign slice 2: flip the auto-arrange toggle. Turning ON immediately
+// ranks the current fleet and applies it (no waiting for the next 4s poll);
+// turning OFF re-applies the saved pc_wall_layout verbatim — auto mode never
+// wrote to that key, so this is a pure restore, never a reconstruction.
+// Auto-arrange and Focus both own the layout, so turning Auto on turns Focus
+// off first (see toggleWallFocus for the mirror case).
+function toggleWallAuto(btn) {
+    _wallAuto = !_wallAuto;
+    localStorage.setItem('pc_wall_auto', _wallAuto ? '1' : '0');
+    if (_wallAuto && _wallFocus) { _wallFocus = false; localStorage.setItem('pc_wall_focus', '0'); _focusWid = null; _focusOrderSig = ''; _clearFocusClasses(); }
+    _autoOrderSig = '';   // stale from a previous auto session — force a fresh apply either way
+    _applyWallInteractivity();
+    if (_wallAuto) _applyAutoArrange(_agentsCache);
+    else _restoreManualLayout();
+    if (btn) btn.blur();
+}
+
+// Focus layout toggle: one pane large (_focusWid), the rest a right-side
+// strip (wallmodel.js's focusLayout). Turning ON picks a focus pane
+// (_pickFocusWid: the user's click-focused pane, else the first wantsHuman
+// pane, else the first tiled pane) and applies immediately, same "don't wait
+// for the next poll" contract as auto-arrange. Turning OFF restores
+// pc_wall_layout verbatim via the SAME _restoreManualLayout auto-arrange
+// uses — Focus never wrote that key either. Mutually exclusive with
+// auto-arrange: turning Focus on turns Auto off first.
+function toggleWallFocus(btn) {
+    _wallFocus = !_wallFocus;
+    localStorage.setItem('pc_wall_focus', _wallFocus ? '1' : '0');
+    if (_wallFocus && _wallAuto) { _wallAuto = false; localStorage.setItem('pc_wall_auto', '0'); _autoOrderSig = ''; }
+    _focusOrderSig = '';   // stale from a previous focus session — force a fresh apply either way
+    _applyWallInteractivity();
+    if (_wallFocus) {
+        _pickFocusWid();
+        _applyWallFocus(_agentsCache);
+    } else {
+        _focusWid = null;
+        _clearFocusClasses();
+        _restoreManualLayout();
+    }
     if (btn) btn.blur();
 }
 
@@ -2472,8 +2888,14 @@ function _replayRoomAccents() {
     if (_roomsCache) applyRoomAccents($('#term-stage'), _roomsCache);
 }
 
-// Apply a layout to the current wall panes, sized to fill the viewport height
-// with NO bottom gap.
+// Lay the current (non-pinned) wall tiles out to fill the viewport height with
+// NO bottom gap, ordered by `keyFn(wid)` (ascending; ties broken by current
+// x/y so an un-reordered wall keeps its existing positions). This is the
+// shared fill engine behind BOTH applyGridLayout's taskbar-order presets and
+// _applyAutoArrange's rank-order auto layout — one layout engine, two
+// orderings, per docs/wall-redesign.md ("REUSE the existing preset/fill
+// layout code"). Returns false (no-op) if there's no live grid or no
+// unpinned tiles; callers decide what (if anything) to persist.
 //
 //  - Column presets (rows === 1): distribute every pane across `cols` columns
 //    (balanced — earlier columns take the remainder), and split each column's
@@ -2483,29 +2905,18 @@ function _replayRoomAccents() {
 //    the viewport height, flowed row-major. Panes beyond cols×rows wrap below
 //    and scroll. (Fewer panes than cells leaves the trailing cells empty — the
 //    explicit-grid trade-off.)
-function applyGridLayout(cols, rows, btn) {
-    const host = $('#term-grid-presets');
-    if (btn) {
-        host.querySelectorAll('.gl-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-    }
-    // Remember the active preset so a viewport resize can re-fit it (the fill
-    // is viewport-relative, so a different screen / window size needs a recompute).
-    _wallPreset = { cols, rows };
-    localStorage.setItem('pc_wall_preset', JSON.stringify(_wallPreset));   // persist for reloads + resize re-fit
-    if (!_grid) return;
+function _fillNodesByOrder(keyFn, cols, rows) {
+    if (!_grid) return false;
     const { rows: total, cellPx } = _wallFill();
     _grid.cellHeight(cellPx);                  // exact divisor so `total` rows fill the height
-    // Lay panes out in the taskbar order (pc_pane_order); fall back to current
-    // column-order so an un-reordered wall keeps its existing positions. Pinned
-    // panes are excluded entirely — a preset reflows every OTHER pane around
-    // them, leaving a pinned tile's x/y/w/h exactly where the user put it
-    // (per-pane layout pin, CMX-108).
+    // Pinned panes are excluded entirely — a fill reflows every OTHER pane
+    // around them, leaving a pinned tile's x/y/w/h exactly where the user put
+    // it (per-pane layout pin, CMX-108).
     const nodes = _grid.engine.nodes.slice()
         .filter(n => !_pinned.has(n.id))
-        .sort((a, b) => (_orderIndex(a.id) - _orderIndex(b.id)) || (a.x - b.x) || (a.y - b.y));
+        .sort((a, b) => (keyFn(a.id) - keyFn(b.id)) || (a.x - b.x) || (a.y - b.y));
     const N = nodes.length;
-    if (!N) return;
+    if (!N) return false;
 
     _grid.batchUpdate();
     try {
@@ -2532,8 +2943,8 @@ function applyGridLayout(cols, rows, btn) {
             const lastH = Math.max(3, total - (rows - 1) * hBase);
             const rowY = r => (r < rows) ? r * hBase : (rows - 1) * hBase + lastH + (r - rows) * hBase;
             const rowH = r => (r === rows - 1) ? lastH : hBase;
-            // Row-major in taskbar order so cells fill left-to-right, top-down.
-            nodes.sort((a, b) => (_orderIndex(a.id) - _orderIndex(b.id)) || (a.y - b.y) || (a.x - b.x));
+            // Row-major in `keyFn` order so cells fill left-to-right, top-down.
+            nodes.sort((a, b) => (keyFn(a.id) - keyFn(b.id)) || (a.y - b.y) || (a.x - b.x));
             nodes.forEach((node, i) => {
                 const r = Math.floor(i / cols);
                 _grid.update(node.el, { x: (i % cols) * w, y: rowY(r), w, h: rowH(r) });
@@ -2542,11 +2953,199 @@ function applyGridLayout(cols, rows, btn) {
     } finally {
         _grid.batchUpdate(false);
     }
+    return true;
+}
+
+// Apply a preset layout to the current wall panes (taskbar order, pc_pane_order
+// — see _orderIndex). Persists the result to pc_wall_layout, the SAME manual-
+// layout key a drag/resize writes to, so a preset click is itself a manual
+// arrangement. While auto-arrange is on, positions are computed from
+// rankOrder() instead (never taskbar order) and NEVER persisted here — a
+// preset click while auto is on only changes the column/row count auto fills
+// into, per the auto-arrange contract (manual layout is sacred; auto must
+// never be able to clobber it, including via this button).
+function applyGridLayout(cols, rows, btn) {
+    const host = $('#term-grid-presets');
+    if (btn) {
+        host.querySelectorAll('.gl-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+    }
+    // Remember the active preset so a viewport resize can re-fit it (the fill
+    // is viewport-relative, so a different screen / window size needs a recompute).
+    _wallPreset = { cols, rows };
+    localStorage.setItem('pc_wall_preset', JSON.stringify(_wallPreset));   // persist for reloads + resize re-fit
+    if (!_grid) return;
+    // Focus owns the layout while it's on (fixed 8/4 split, not a column
+    // count) — a preset click or a viewport resize (this fn's other caller)
+    // just refits the SAME focus layout to the new viewport, it never falls
+    // through to the column/row fill below.
+    if (_wallFocus) {
+        _focusOrderSig = '';
+        _applyWallFocus(_agentsCache);
+        return;
+    }
+    if (_wallAuto) {
+        _autoOrderSig = '';   // force a re-apply at the new column/row count
+        _applyAutoArrange(_agentsCache);
+        return;
+    }
+    if (!_fillNodesByOrder(_orderIndex, cols, rows)) return;
     const out = {};
     _grid.save(false).forEach(nd => {
         if (nd.id != null) out[nd.id] = { x: nd.x, y: nd.y, w: nd.w, h: nd.h };
     });
     localStorage.setItem('pc_wall_layout', JSON.stringify(out));
+}
+
+// Wall redesign slice 2: rank the panes currently ON THE WALL by attention
+// (rankOrder, wallmodel.js) and apply that order via the shared fill engine —
+// no-op unless auto-arrange is on. Compares the new order against the last
+// one actually applied (_autoOrderSig) so a 4s poll with no attention-state
+// change never touches GridStack (no thrash, no wasted reflow). Deliberately
+// NEVER writes pc_wall_layout: that key is the sacred manual arrangement,
+// restored verbatim by _restoreManualLayout on toggle-off.
+function _applyAutoArrange(agents) {
+    if (!_wallAuto || _termMode !== 'wall' || !_grid) return;
+    const tiled = new Set(_grid.engine.nodes.map(n => n.id));
+    const relevant = (agents || []).filter(a => a && a.window_id && tiled.has(a.window_id));
+    const wantsByWid = {};
+    relevant.forEach(a => { wantsByWid[a.window_id] = wantsHuman(a); });
+    const order = rankOrder(relevant, wantsByWid);
+    const sig = order.join(',');
+    if (sig === _autoOrderSig) return;   // ranked order unchanged since the last apply — skip
+    _autoOrderSig = sig;
+    const idx = {};
+    order.forEach((wid, i) => { idx[wid] = i; });
+    // A tile GridStack knows about but that fell out of the fresh agents poll
+    // (a transient gap, not yet dropped) sorts last rather than throwing.
+    _fillNodesByOrder(wid => (wid in idx ? idx[wid] : Number.MAX_SAFE_INTEGER), _wallPreset.cols, _wallPreset.rows);
+}
+
+// Wall redesign slice 2: restore the user's manual arrangement (pc_wall_layout)
+// verbatim when auto-arrange is toggled off. Only touches tiles that actually
+// have a saved position — a tile added while auto was on (never manually
+// placed) simply stays wherever auto last put it, same as any other
+// never-dragged tile today.
+function _restoreManualLayout() {
+    if (!_grid) return;
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('pc_wall_layout') || '{}'); } catch (e) { /* noop */ }
+    const valid = s => s && Number.isInteger(s.x) && Number.isInteger(s.y) && s.w > 0 && s.h > 0;
+    const nodes = _grid.engine.nodes.filter(n => !_pinned.has(n.id) && valid(saved[n.id]));
+    if (!nodes.length) return;
+    _grid.batchUpdate();
+    try {
+        // TWO-PASS park-then-place. A restore often SWAPS columns (auto-arrange
+        // put a working pane where an idle one is saved, and vice-versa); moving
+        // one straight into a spot the other still occupies makes GridStack shove
+        // the occupant away, and the swap never settles (both tiles cascade into
+        // one column). So first park every node in its own empty row far below
+        // the grid, clearing the real area, THEN drop each onto its saved cell —
+        // now nothing collides. Both passes are inside one batch, so the parked
+        // positions are transient and never paint.
+        nodes.forEach((n, i) => _grid.update(n.el, { x: 0, y: 10000 + i * 2, w: 1, h: 1 }));
+        nodes.forEach(n => {
+            const s = saved[n.id];
+            _grid.update(n.el, { x: s.x, y: s.y, w: s.w, h: s.h });
+        });
+    } finally {
+        _grid.batchUpdate(false);
+    }
+}
+
+// ---- Focus layout (one pane large, the rest a strip) -----------------------
+//
+// Choose which pane becomes the large focus pane the moment Focus turns on
+// (or its current target falls off the wall — killed, minimized out, pinned):
+// the user's own click-focused pane (._focusedPane — the SAME signal that
+// paints the .term-focused ring, docs/wall-redesign.md's focus tracking)
+// first, else the first pane that wantsHuman (the attention signal the whole
+// redesign is built on), else the first tiled pane. Pinned panes are never
+// eligible — they sit out of every fill, same as auto-arrange/presets.
+function _pickFocusWid() {
+    _focusWid = null;
+    if (!_grid) return;
+    const tiled = _grid.engine.nodes
+        .map(n => n.id)
+        .filter(id => id != null && !_pinned.has(id));
+    if (!tiled.length) return;
+    const tiledSet = new Set(tiled);
+    if (_focusedPane) {
+        const item = _focusedPane.closest('.grid-stack-item');
+        const wid = item && item.getAttribute('gs-id');
+        if (wid && tiledSet.has(wid)) { _focusWid = wid; return; }
+    }
+    const wanter = (_agentsCache || []).find(a => a && a.window_id && tiledSet.has(a.window_id) && wantsHuman(a));
+    if (wanter) { _focusWid = wanter.window_id; return; }
+    _focusWid = tiled[0];
+}
+
+// Strip the promote/large-pane CSS hooks from every tile — called on
+// toggle-off (and implicitly superseded by a fresh _applyWallFocus pass on
+// toggle-on) so a leftover class never survives into manual/auto mode.
+function _clearFocusClasses() {
+    if (!_grid) return;
+    _grid.engine.nodes.forEach(n => { if (n.el) n.el.classList.remove('wall-focus-main', 'wall-focus-strip'); });
+    const gsEl = $('#term-stage') && $('#term-stage').querySelector('.grid-stack');
+    if (gsEl) gsEl.classList.remove('wall-focus-on');
+}
+
+// Apply the Focus layout — no-op unless Focus is on. Mirrors _applyAutoArrange's
+// shape (agents in, sig-guarded, never writes pc_wall_layout) but writes
+// GridStack directly instead of going through _fillNodesByOrder: that shared
+// engine only expresses "flow N panes in an order across a fixed cols×rows
+// grid," not focusLayout's fixed 8-vs-4-column split with one pane pinned
+// large — so this computes the {wid:{x,y,w,h}} map itself (wallmodel.js's
+// focusLayout, PURE) and applies it in one batch, same GridStack idiom every
+// other fill here uses.
+function _applyWallFocus(agents) {
+    if (!_wallFocus || _termMode !== 'wall' || !_grid) return;
+    const tiled = _grid.engine.nodes
+        .map(n => n.id)
+        .filter(id => id != null && !_pinned.has(id));
+    if (!tiled.length) return;
+    const tiledSet = new Set(tiled);
+    // The current target fell off the wall (killed/minimized/pinned since it
+    // was chosen) — pick a fresh one before laying out.
+    if (!_focusWid || !tiledSet.has(_focusWid)) _pickFocusWid();
+    if (!_focusWid) return;
+    const relevant = (agents || []).filter(a => a && a.window_id && tiledSet.has(a.window_id));
+    const wantsByWid = {};
+    relevant.forEach(a => { wantsByWid[a.window_id] = wantsHuman(a); });
+    // Strip order = needs-you-first (rankOrder, same ranking auto-arrange
+    // uses), minus the focus pane itself — it's already large, not in the strip.
+    const order = rankOrder(relevant, wantsByWid).filter(wid => wid !== _focusWid);
+    // A tile GridStack knows about but missing from the fresh agents poll (a
+    // transient gap, not yet dropped) still needs a strip slot — append it at
+    // the end, the same fallback _applyAutoArrange gives an unranked tile.
+    tiled.forEach(wid => { if (wid !== _focusWid && !order.includes(wid)) order.push(wid); });
+    const sig = _focusWid + '|' + order.join(',');
+    if (sig === _focusOrderSig) return;   // target + strip order unchanged since the last apply — skip
+    _focusOrderSig = sig;
+    const { rows: total, cellPx } = _wallFill();
+    _grid.cellHeight(cellPx);   // exact divisor so `total` rows fill the height, same as _fillNodesByOrder
+    const layout = focusLayout([_focusWid, ...order], _focusWid, total);
+    _grid.batchUpdate();
+    try {
+        // Park-then-place (same as _restoreManualLayout): a focus layout SPREADS
+        // panes into very different cells — one 8-wide main + a 4-wide strip — so
+        // moving each straight into its cell cascades collisions and the wide
+        // main never lands (it gets shoved into a lower row). Park every laid-out
+        // node far below first, then drop each onto its focus cell: nothing
+        // collides. Classes are toggled separately, over every node.
+        const laidOut = _grid.engine.nodes.filter(n => layout[n.id]);
+        laidOut.forEach((n, i) => _grid.update(n.el, { x: 0, y: 10000 + i * 2, w: 1, h: 1 }));
+        laidOut.forEach(n => _grid.update(n.el, layout[n.id]));
+        _grid.engine.nodes.forEach(n => {
+            if (!n.el) return;
+            n.el.classList.toggle('wall-focus-main', n.id === _focusWid);
+            n.el.classList.toggle('wall-focus-strip', !!layout[n.id] && n.id !== _focusWid);
+        });
+    } finally {
+        _grid.batchUpdate(false);
+    }
+    const gsEl = $('#term-stage') && $('#term-stage').querySelector('.grid-stack');
+    if (gsEl) gsEl.classList.add('wall-focus-on');
 }
 
 // ---- Mobile agent switcher -------------------------------------------------
@@ -2645,6 +3244,34 @@ function _bindHeaderSwipe() {
     _termSwipeBound = true;
 }
 
+// Promote a STRIP pane to the large focus slot by clicking its HEADER — same
+// delegated-off-#term-stage idiom as _bindHeaderSwipe (survives buildWall's
+// innerHTML rebuilds, bound once). Only the header promotes: the iframe stays
+// fully interactive (click-to-focus-and-type is untouched), and only while
+// Focus mode is actually on. Buttons/links inside the header (kill/min/max/
+// menu/pin/wire) keep doing their own thing rather than ALSO promoting — the
+// menu button already stopPropagation()s its click (togglePaneOverflow), and
+// this skips any other button/link/popover explicitly.
+let _focusPromoteBound = false;
+function _bindFocusPromote() {
+    if (_focusPromoteBound) return;
+    const stage = document.getElementById('term-stage');
+    if (!stage) return;
+    stage.addEventListener('click', e => {
+        if (!_wallFocus || _termMode !== 'wall') return;
+        if (e.target.closest('button, a, .popover')) return;   // let their own handlers act alone
+        const head = e.target.closest('.gs-head');
+        if (!head) return;
+        const item = head.closest('.grid-stack-item');
+        const wid = item && item.getAttribute('gs-id');
+        if (!wid || wid === _focusWid || _pinned.has(wid)) return;
+        _focusWid = wid;
+        _focusOrderSig = '';   // target changed — force a re-apply
+        _applyWallFocus(_agentsCache);
+    });
+    _focusPromoteBound = true;
+}
+
 // Keep the strip in sync when the viewport crosses the mobile breakpoint.
 window.addEventListener('resize', () => {
     if (TERMINALS_ON && currentTab === 'terminals') renderMobileSwitcher();
@@ -2694,7 +3321,21 @@ function kbCtrlKey(letter) {
 function _kbPin() {
     const bar = document.getElementById('term-keybar');
     const vv = window.visualViewport;
-    if (!bar || !vv) return;
+    if (!vv) return;
+    // Publish how much of the layout viewport's BOTTOM the on-screen keyboard
+    // is covering, as --kb-occluded, so the pane's height rules can subtract it
+    // (style.css, mobile block). This is the whole reason the var exists: `dvh`
+    // tracks the browser's own dynamic chrome (address bar) but NOT the software
+    // keyboard, so on iOS a 100dvh pane keeps its full height when the keyboard
+    // opens and the terminal's bottom rows — the INPUT LINE you are typing into —
+    // sit behind it. VisualViewport is the only thing that reports the keyboard.
+    // Mobile-only: desktop browser zoom also moves the visual viewport, and we
+    // don't want that resizing wall tiles.
+    const occluded = _isMobileTerm()
+        ? Math.max(0, Math.round(window.innerHeight - (vv.offsetTop + vv.height)))
+        : 0;
+    document.documentElement.style.setProperty('--kb-occluded', occluded + 'px');
+    if (!bar) return;
     const top = Math.max(0, Math.round(vv.offsetTop + vv.height - bar.offsetHeight));
     bar.style.bottom = 'auto';
     bar.style.top = top + 'px';
@@ -2709,4 +3350,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _ord
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });

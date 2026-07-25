@@ -762,6 +762,28 @@ def term_http(wid, rest):
     return Response(body, status=status, headers=headers)
 
 
+# How long term_ws waits for ttyd to spawn ITS tmux client after `upstream`
+# connects, so the diff below can identify which tty is this connection's (see
+# _TERM_CID_TTY). Only paid when the iframe sent a `cid` — i.e. only our own
+# frontend, never a bare ttyd client hitting this route directly.
+_TERM_TTY_CLAIM_TRIES = 10
+_TERM_TTY_CLAIM_INTERVAL_S = 0.05
+
+
+def _claim_new_client_tty(session, before):
+    """Find the tty ttyd just attached for THIS connection. Opening `upstream`
+    is what makes ttyd spawn the tmux client, asynchronously, so poll briefly
+    for a tty absent from the pre-connect snapshot. Excludes ttys already
+    claimed by another live connection to shrink the race window when two
+    browsers attach to the same session at once."""
+    for _ in range(_TERM_TTY_CLAIM_TRIES):
+        fresh = _session_client_ttys(session) - before - set(_TERM_CID_TTY.values())
+        if fresh:
+            return next(iter(fresh))
+        time.sleep(_TERM_TTY_CLAIM_INTERVAL_S)
+    return None
+
+
 if _sock is not None:
     @_sock.route("/term/<wid>/ws")
     def term_ws(ws, wid):
@@ -777,6 +799,12 @@ if _sock is not None:
         port = _terminals_port_map().get(wid)
         if not port:
             return
+        # cid (see _termSrc) identifies THIS iframe's connection so /api/term/
+        # <wid>/watch can later target its specific tmux client with
+        # ignore-size, without touching a sibling connection to the same wid.
+        cid = request.args.get("cid", "")
+        session = _webterm_session(wid) if cid else ""
+        before = _session_client_ttys(session) if cid else set()
         import simple_websocket
         import threading
         try:
@@ -786,6 +814,11 @@ if _sock is not None:
             )
         except Exception:
             return
+
+        if cid:
+            tty = _claim_new_client_tty(session, before)
+            if tty:
+                _TERM_CID_TTY[(wid, cid)] = tty
 
         def _pump_upstream_to_browser():
             try:
@@ -817,6 +850,8 @@ if _sock is not None:
                 upstream.close()
             except Exception:
                 pass
+            if cid:
+                _TERM_CID_TTY.pop((wid, cid), None)
 
 
 @app.route("/api/term/ready")
@@ -873,6 +908,82 @@ def api_term_clients():
     except Exception:
         pass  # tmux hiccup → all-zero counts → wall skips teardown (safe)
     return jsonify(counts)
+
+
+# ---------------------------------------------------------------------------
+# Per-client `ignore-size` (CMX-175)
+# ---------------------------------------------------------------------------
+# A grouped session's window is shared by every attached tmux client (each wall
+# tile / mobile pane is one), and a tmux window has exactly one size. With
+# `window-size largest` (scripts/agent-terminals.sh) the BIGGEST attached client
+# wins, so a small phone pane opened alongside a big desktop wall gets stretched
+# to the desktop's geometry and needs horizontal scrolling to read. Switching to
+# `window-size latest` would trade this for the opposite bug (whichever client
+# resized most recently — often a small or stale one — shrinks the window for
+# everyone), so instead a client that is demonstrably NOT being watched (its tab
+# is backgrounded, or its pane is minimized to the dock) gets tmux's per-client
+# `ignore-size` flag, which drops it out of the `largest` computation entirely —
+# `largest` then only competes among clients that plausibly ARE being watched.
+#
+# Correlating "this browser tab says its pane isn't being watched" to "this ONE
+# tmux client" needs a per-connection id: `_termSrc` mints a `cid` for each
+# iframe and embeds it in the iframe's src query string. ttyd's bundled client JS
+# builds its WebSocket URL from `location.search` verbatim (verified against the
+# vendored ttyd 1.7.7 binary), so the cid round-trips onto the `/term/<wid>/ws`
+# upgrade request and `term_ws` below can read it off `request.args`. From there
+# `term_ws` diffs `tmux list-clients` immediately before/after opening its
+# upstream connection — which is the exact moment ttyd spawns the tmux client —
+# to learn which tty belongs to THIS connection, and keeps the (wid, cid) -> tty
+# mapping alive only for the connection's lifetime.
+_TERM_CID_TTY: dict[tuple[str, str], str] = {}
+
+
+def _session_client_ttys(session: str) -> set[str]:
+    """Every client tty currently attached to a grouped session."""
+    try:
+        out = subprocess.run(
+            ["tmux", "list-clients", "-t", session, "-F", "#{client_tty}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return set()
+    if out.returncode != 0:
+        return set()
+    return {ln.strip() for ln in out.stdout.splitlines() if ln.strip()}
+
+
+def _set_client_ignore_size(tty: str, ignore: bool) -> None:
+    """Set/clear the ignore-size flag on one tmux client by tty. Best-effort:
+    the client may have disconnected between the frontend's report and this
+    call, in which case tmux errors and there is nothing left to flag anyway."""
+    flag = "ignore-size" if ignore else "!ignore-size"
+    try:
+        subprocess.run(["tmux", "refresh-client", "-t", tty, "-f", flag],
+                       capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+@app.route("/api/term/<wid>/watch", methods=["POST"])
+@require_auth
+def api_term_watch(wid):
+    """A wall tile reports whether IT is currently being watched (tab
+    foregrounded, pane not minimized) vs. a passive mirror of the same shared
+    tmux window on another tab/device. Toggles ignore-size on the ONE tmux
+    client `term_ws` matched to this (wid, cid) — sibling clients on the same
+    window are untouched. Unlike the tab-hidden teardown (_teardownTermFrames
+    in terminals.js) this never closes the connection, so flipping it back is
+    instant with no reconnect flicker."""
+    _require_terminals()
+    if wid not in _terminals_port_map():
+        abort(404)  # only real terminal windows; also blocks tmux target injection
+    data = request.get_json(force=True) or {}
+    cid = str(data.get("cid") or "")
+    watching = bool(data.get("watching"))
+    tty = _TERM_CID_TTY.get((wid, cid))
+    if tty:
+        _set_client_ignore_size(tty, ignore=not watching)
+    return jsonify({"ok": True, "tracked": bool(tty)})
 
 
 # Per-wid share state (in-memory; presence-only, no auth): wid -> {"cols","rows"},
@@ -2598,6 +2709,16 @@ def api_dispatcher():
                         "title": t.title,
                         "file": t.file,
                         "line_number": t.line_number,
+                        # The bullet line as the tracker wrote it (the original line for
+                        # a markdown tracker; the issue URL for gh_issues — see
+                        # chela.sources.Task.raw) — the fallback when there's no `body`.
+                        "raw": t.raw,
+                        # The task's FULL multi-line brief (title + its dedented
+                        # OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation — see
+                        # chela.sources.markdown._task_body), or None for a bare
+                        # one-line task or a source with no notion of a continuation
+                        # (gh_issues). The task-detail modal prefers this over `raw`.
+                        "body": t.body,
                     }
                     for t in open_tasks
                     if t.id not in in_flight_ids

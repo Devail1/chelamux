@@ -531,10 +531,20 @@ function knInline(s, base) {
 
 // Minimal block-level markdown → HTML for OKF bodies (headings, lists,
 // blockquotes, fenced code, paragraphs). Intentionally tiny and dependency-free.
+//
+// `listType` tracks which of the two list kinds (if any) is currently open —
+// 'ul' for a `-`/`*` run, 'ol' for a `1.`/`2.` run — instead of a single
+// boolean, so a `-` run and a `1.` run are never merged into one list even if
+// they're adjacent (switching kinds closes the old list and opens the new
+// one, same as a blank line or heading would).
 function knMd(src, base) {
     const lines = (src || '').split('\n');
-    let html = '', inList = false, inCode = false;
-    const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+    let html = '', listType = null, inCode = false;
+    const closeList = () => {
+        if (listType === 'ul') html += '</ul>';
+        else if (listType === 'ol') html += '</ol>';
+        listType = null;
+    };
     for (const raw of lines) {
         if (/^```/.test(raw)) {
             closeList();
@@ -548,8 +558,18 @@ function knMd(src, base) {
         const h = line.match(/^(#{1,4})\s+(.*)$/);
         if (h) { closeList(); const lv = h[1].length; html += `<h${lv} class="kn-mh">${knInline(h[2], base)}</h${lv}>`; continue; }
         if (/^>\s?/.test(line)) { closeList(); html += `<blockquote>${knInline(line.replace(/^>\s?/, ''), base)}</blockquote>`; continue; }
+        const ol = line.match(/^\s*\d+\.\s+(.+)$/);
+        if (ol) {
+            if (listType !== 'ol') { closeList(); html += '<ol class="kn-ol">'; listType = 'ol'; }
+            html += `<li>${knInline(ol[1], base)}</li>`;
+            continue;
+        }
         const li = line.match(/^[-*]\s+(.*)$/);
-        if (li) { if (!inList) { html += '<ul class="kn-ul">'; inList = true; } html += `<li>${knInline(li[1], base)}</li>`; continue; }
+        if (li) {
+            if (listType !== 'ul') { closeList(); html += '<ul class="kn-ul">'; listType = 'ul'; }
+            html += `<li>${knInline(li[1], base)}</li>`;
+            continue;
+        }
         closeList();
         html += `<p>${knInline(line, base)}</p>`;
     }
@@ -559,7 +579,10 @@ function knMd(src, base) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { _kn, knBackToGlance, refreshKnowledge, knGraphModel, knNodeColor, knNodeGlyph, knNodeLabel, knGraphError };
+// knMd/knInline: the dependency-free markdown->HTML renderer, exported for
+// taskmodal.js (the task-detail modal's brief pane) to reuse verbatim rather
+// than pulling in a markdown library for a second dashboard surface.
+export { _kn, knBackToGlance, refreshKnowledge, knGraphModel, knNodeColor, knNodeGlyph, knNodeLabel, knGraphError, knMd, knInline };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

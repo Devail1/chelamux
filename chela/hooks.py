@@ -331,8 +331,7 @@ PLUGIN_NAME = "chela"
 
 def claude_config_dir() -> Path:
     """Claude Code's config directory — ``$CLAUDE_CONFIG_DIR`` or ``~/.claude``."""
-    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    return Path(raw).expanduser() if raw else Path.home() / ".claude"
+    return transcripts.claude_config_dir()
 
 
 def plugins_dir() -> Path:

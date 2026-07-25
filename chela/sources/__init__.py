@@ -11,6 +11,12 @@ class Task:
     file: str             # absolute path of source file ("" for non-file sources)
     line_number: int      # 1-based (issue number for gh_issues)
     raw: str              # original line as written (issue URL for gh_issues)
+    # The full multi-line brief when the source can capture one — for the markdown
+    # source, `title` + the bullet's indented continuation block (its OBJECTIVE/
+    # BOUNDARIES/GUARDS/VERIFY paragraphs), dedented; `None` for a bare one-line
+    # task or a source that has no notion of a continuation (gh_issues — an issue's
+    # body isn't fetched here; see chela.sources.gh_issues.GhIssuesSource).
+    body: str | None = None
 
 
 def get_source(wf: WorkflowDef):

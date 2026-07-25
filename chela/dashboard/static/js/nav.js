@@ -626,7 +626,7 @@ function renderSettings(focus) {
             <div class="s-row">
                 <span class="s-rowlabel">Size</span>
                 <select id="term-size-select" class="s-select" onchange="chela.setTermSize(this.value)">
-                    ${['12', '13', '14', '15', '16', '18']
+                    ${['8', '10', '12', '13', '14', '15', '16', '18']
                         .map(s => `<option value="${s}"${termSize === s ? ' selected' : ''}>${s}px</option>`)
                         .join('')}
                 </select>

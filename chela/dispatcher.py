@@ -479,49 +479,104 @@ def _claim_order(wf: WorkflowDef, source, on_disk: list[Task]) -> list[Task]:
     return remote_tasks + unpushed
 
 
-def _base_write_precheck(repo: Path, base: str, rel: str, what: str) -> bool:
-    """Preconditions shared by every unattended writer to ``base_branch`` — the
-    tracker strike and the trial ledger (see :func:`_strike_merged_tasks` and
-    :func:`_write_trial_ledger`): only the branch we were told to write, never a
-    human's in-progress edit swept into our commit, and fast-forwarded to the
-    remote before we touch anything. FAILS CLOSED — a False here means the
-    caller writes nothing this tick and simply retries the next one.
+def _tracker_is_versioned(repo: Path, rel: str) -> bool:
+    """Whether `rel` is eligible to ever land on `origin/<base>` — i.e. NOT excluded by
+    `repo`'s own `.gitignore` — used by :func:`_strike_merged_tasks` and
+    :func:`_write_trial_ledger` to decide whether an unattended write may go through the
+    isolated base-write worktree at all.
+
+    Deliberately `git check-ignore`, NOT `git ls-files --error-unmatch`: both a
+    gitignored path AND a path that is simply new — never yet committed by anyone, e.g.
+    a `trial_ledger:` on its very first write, still untracked because nothing has
+    written it yet — return the same "unknown to git" result from `ls-files
+    --error-unmatch`, so that check cannot tell "deliberately local-only" apart from
+    "not created yet". `check-ignore` can: it matches gitignore *patterns* against a
+    pathname regardless of whether the path exists or has ever been committed, so a
+    brand-new, non-ignored path still reads as versioned (eligible), while
+    chelamux's own gitignored `TODO.md` reads as not.
+
+    A git failure (missing binary, timeout) or an ambiguous `check-ignore` result
+    (exit 128) both default to `True` — the safe direction is to keep using the
+    isolated worktree machinery, not to silently fall back to writing `repo` in place.
     """
-    head = _git_out(_git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
-    if head != base:
-        log.warning("%s skipped: %s is on %r, not %r", what, repo, head or "?", base)
-        return False
+    cp = _git(repo, "check-ignore", "-q", "--", rel)
+    return cp is None or cp.returncode != 0
 
-    status = _git(repo, "status", "--porcelain", "--", rel)
-    if not _git_ok(status):
-        return False
-    if status.stdout.strip():
-        log.warning("%s skipped: %s has uncommitted changes", what, rel)
-        return False
 
-    # Get level with the remote first, fast-forward only: a diverged base branch
-    # is a skip-and-retry, never a rebase we weren't asked for and never a force.
+BASE_WRITE_DIRNAME = "_base-write"
+
+
+def _base_write_worktree(repo: Path, base: str, root: Path, what: str) -> Path | None:
+    """The isolated, chela-owned checkout every unattended ``base_branch`` writer — the
+    tracker strike and the trial ledger (see :func:`_strike_merged_tasks` and
+    :func:`_write_trial_ledger`) — actually reads, edits, commits and pushes from.
+    NEVER ``repo`` itself.
+
+    ``repo`` is the human's interactive checkout. It can be on any branch, mid-rebase,
+    with edits staged, at whatever moment a tick happens to fire — and none of that has
+    any bearing on whether chela is allowed to advance ``base_branch``. The old precheck
+    read ``repo``'s HEAD and working tree and skipped (silently, forever, until a human
+    noticed the warning log) the instant either didn't match what an unattended writer
+    needs. A DETACHED worktree at ``root/_base-write`` — reused across ticks, one per
+    workspace root — sidesteps the whole class of failure: nothing but this function ever
+    touches it, so its own staleness or dirt is never a human's to have caused, and every
+    precondition below is a self-heal, not a "leave it for a human" skip. Detached, not a
+    branch checkout, on purpose: ``repo`` (or a rework worktree) very often already has
+    ``base`` checked out, and ``git worktree add <branch>`` refuses a branch that is live
+    anywhere else — detached HEAD has no such conflict, and ``git push HEAD:base`` does
+    not care whether HEAD is a branch or a bare commit.
+
+    :func:`worktree.detached_worktree` does the self-heal for free: reusing an existing
+    worktree resets it (``checkout --detach --force``) and cleans it (``clean -fdx``)
+    before handing it back, discarding anything left over from an interrupted previous
+    write — which is always safe here, since nothing legitimate is ever left uncommitted
+    in this worktree between calls.
+
+    FAILS CLOSED only on what is genuinely not ours to fix: no remote to write through,
+    or a fetch that fails. Returns ``None`` when the caller should write nothing this
+    tick and simply retry the next one; otherwise the worktree path, fetched to
+    ``origin/<base>`` and clean.
+    """
     remote = _git_out(_git(repo, "remote"))
-    if remote:
-        if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
-            log.warning("%s skipped: could not fetch origin/%s", what, base)
-            return False
-        if not _git_ok(_git(repo, "merge", "--ff-only", "FETCH_HEAD")):
-            log.warning(
-                "%s skipped: %s has diverged from origin/%s — leaving it for a human",
-                what, base, base,
-            )
-            return False
-    return True
+    if not remote:
+        log.warning("%s skipped: %s has no remote to write %s through", what, repo, base)
+        return None
+    if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
+        log.warning("%s skipped: could not fetch origin/%s", what, base)
+        return None
+
+    # Resolve FETCH_HEAD to a concrete sha IN `repo`'s context, right here — FETCH_HEAD
+    # is a per-worktree pseudo-ref (`repo/.git/FETCH_HEAD`, not the shared common dir), so
+    # handing the literal string to `detached_worktree` works for a brand NEW worktree
+    # (created via `git -C repo worktree add`, still `repo`'s context) but silently fails
+    # to resolve on REUSE (`git -C wt checkout`, the isolated worktree's own context) —
+    # not a hard failure, just a `BranchGone` neither raises: `checkout` errors out, the
+    # fallback path deletes and recreates the whole worktree instead of the fast reset
+    # this function's docstring promises, every single tick. A concrete sha resolves
+    # identically from any worktree sharing this repo's object store.
+    sha = _git_out(_git(repo, "rev-parse", "FETCH_HEAD"))
+    if not sha:
+        log.warning("%s skipped: FETCH_HEAD did not resolve after fetching origin/%s", what, base)
+        return None
+
+    wt_path = (root / BASE_WRITE_DIRNAME).resolve()
+    try:
+        wt_path, _ = detached_worktree(repo, sha, wt_path)
+    except BranchGone:
+        log.warning("%s skipped: origin/%s did not resolve after fetch", what, base)
+        return None
+    except subprocess.CalledProcessError as e:
+        log.warning("%s skipped: could not prepare the base-write worktree: %s", what, e)
+        return None
+    return wt_path
 
 
-def _base_write_commit_push(repo: Path, base: str, rel: str, subject: str, body: str, what: str) -> bool:
-    """Commit ``rel`` (already rewritten on disk by the caller — possibly a BRAND
-    NEW path, e.g. the trial ledger's first-ever write) and push to
-    ``base_branch``, rolling the local commit back if the push is rejected —
-    someone else pushed between our fetch and our push, so this retries next
-    tick rather than force-pushing. Never commits a path other than ``rel``,
-    whatever else a human may have staged in this checkout.
+def _base_write_commit_push(wt: Path, base: str, rel: str, subject: str, body: str, what: str) -> bool:
+    """Commit ``rel`` (already rewritten on disk by the caller, in the isolated worktree
+    ``wt`` — see :func:`_base_write_worktree` — possibly a BRAND NEW path, e.g. the trial
+    ledger's first-ever write) and push to ``base_branch``, rolling the local commit back
+    if the push is rejected — someone else pushed between our fetch and our push, so this
+    retries next tick rather than force-pushing. Never commits a path other than ``rel``.
 
     ``git commit -- rel`` alone (no prior ``git add``) only picks up changes to
     a path git already tracks; a never-before-committed ``rel`` is silently
@@ -532,33 +587,31 @@ def _base_write_commit_push(repo: Path, base: str, rel: str, subject: str, body:
     errors out and would leave it staged-but-uncommitted forever, failing
     every future tick's "clean tree" precheck.
     """
-    parent = _git_out(_git(repo, "rev-parse", "HEAD"))
-    existed_before = bool(parent) and _git_ok(_git(repo, "cat-file", "-e", f"{parent}:{rel}"))
+    parent = _git_out(_git(wt, "rev-parse", "HEAD"))
+    existed_before = bool(parent) and _git_ok(_git(wt, "cat-file", "-e", f"{parent}:{rel}"))
 
     def _restore() -> None:
         if existed_before:
-            _git(repo, "checkout", "HEAD", "--", rel)
+            _git(wt, "checkout", "HEAD", "--", rel)
         else:
-            _git(repo, "reset", "--", rel)
-            (repo / rel).unlink(missing_ok=True)
+            _git(wt, "reset", "--", rel)
+            (wt / rel).unlink(missing_ok=True)
 
-    if not _git_ok(_git(repo, "add", "--", rel)):
+    if not _git_ok(_git(wt, "add", "--", rel)):
         log.warning("%s: git add failed for %s", what, rel)
         return False
-    if not _git_ok(_git(repo, "commit", "-m", subject, "-m", body, "--", rel)):
+    if not _git_ok(_git(wt, "commit", "-m", subject, "-m", body, "--", rel)):
         log.warning("%s: commit failed; restoring %s", what, rel)
         _restore()
         return False
 
-    remote = _git_out(_git(repo, "remote"))
-    if remote:
-        mine = _git_out(_git(repo, "rev-parse", "HEAD"))
-        if not _git_ok(_git(repo, "push", "origin", f"HEAD:{base}", timeout=GIT_NET_TIMEOUT_SECONDS)):
-            if parent and mine and _git_out(_git(repo, "rev-parse", "HEAD")) == mine:
-                _git(repo, "reset", "--soft", parent)
-                _restore()
-            log.warning("%s: push to %s rejected — rolled back, retrying next tick", what, base)
-            return False
+    mine = _git_out(_git(wt, "rev-parse", "HEAD"))
+    if not _git_ok(_git(wt, "push", "origin", f"HEAD:{base}", timeout=GIT_NET_TIMEOUT_SECONDS)):
+        if parent and mine and _git_out(_git(wt, "rev-parse", "HEAD")) == mine:
+            _git(wt, "reset", "--soft", parent)
+            _restore()
+        log.warning("%s: push to %s rejected — rolled back, retrying next tick", what, base)
+        return False
     return True
 
 
@@ -577,10 +630,24 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
     by fuzzy text, and the strike is idempotent — see markdown.strike_lines.
 
     This runs unattended under PM2, so every step FAILS CLOSED — see
-    :func:`_base_write_precheck` / :func:`_base_write_commit_push`, which this
-    shares with :func:`_write_trial_ledger`. A missed checkbox is cosmetic and
-    self-heals — the pending set is recomputed from the runs table on every
-    tick, not remembered — whereas a mangled base branch is not.
+    :func:`_base_write_worktree` / :func:`_base_write_commit_push`, which this
+    shares with :func:`_write_trial_ledger`. It writes through the isolated
+    base-write worktree, never ``wf.path.parent`` (the human's interactive
+    checkout) — see :func:`_base_write_worktree` for why. A missed checkbox is
+    cosmetic and self-heals — the pending set is recomputed from the runs
+    table on every tick, not remembered — whereas a mangled base branch is
+    not.
+
+    Not every tracker is even eligible for this at all: a gitignored tracker (chelamux's
+    own `TODO.md` — a deliberate, local, per-install queue, never committed) does not
+    exist in `origin/<base>`'s tree and never will, so the isolated base-write worktree
+    (see :func:`_base_write_worktree`) can never see it either — routing the strike
+    through it there would silently and permanently no-op the strike (a regression
+    caught in review, CMX-174 round 1). :func:`_tracker_is_versioned` branches on this
+    BEFORE any worktree/fetch/commit/push machinery: an ineligible tracker is struck
+    directly, in place, on `repo`'s own tracker file — no isolation needed, because
+    nothing there is ever pushed anywhere. This is the normal, intended path for a
+    local-only queue, not a degraded fallback, so it never warns.
 
     Returns the number of lines actually struck.
     """
@@ -599,35 +666,49 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
         log.warning("tracker strike skipped: %s is outside the repo %s", tracker, repo)
         return 0
 
-    if not _base_write_precheck(repo, base, rel, "tracker strike"):
+    if not _tracker_is_versioned(repo, rel):
+        struck = _log_and_collect_struck(close_tasks(task_ids), "tracker strike")
+        if struck:
+            log.info("tracker strike: marked %d task(s) done in %s: %s", len(struck), rel, ", ".join(struck))
+        return len(struck)
+
+    root = resolve_workspace_root(wf)
+    wt = _base_write_worktree(repo, base, root, "tracker strike")
+    if wt is None:
         return 0
 
     try:
-        results = close_tasks(task_ids)
+        results = close_tasks(task_ids, at=wt / rel)
     except OSError as e:
         log.warning("tracker strike failed to write %s: %s", rel, e)
-        _git(repo, "checkout", "--", rel)
+        _git(wt, "checkout", "--", rel)
         return 0
 
-    for tid, outcome in sorted(results.items()):
-        if outcome == "missing":
-            log.warning(
-                "tracker strike: no line matches task %s — a human edited or "
-                "removed it; not guessing", tid,
-            )
-        elif outcome == "already":
-            log.info("tracker strike: task %s was already struck", tid)
-    struck = sorted(t for t, outcome in results.items() if outcome == "struck")
+    struck = _log_and_collect_struck(results, "tracker strike")
     if not struck:
         return 0
 
     subject = f"chore({rel}): strike {len(struck)} merged task" + ("s" if len(struck) > 1 else "")
     body = "\n".join(f"- {tid}" for tid in struck)
-    if not _base_write_commit_push(repo, base, rel, subject, body, "tracker strike"):
+    if not _base_write_commit_push(wt, base, rel, subject, body, "tracker strike"):
         return 0
 
     log.info("tracker strike: marked %d task(s) done on %s: %s", len(struck), base, ", ".join(struck))
     return len(struck)
+
+
+def _log_and_collect_struck(results: dict[str, str], what: str) -> list[str]:
+    """Shared between the two `_strike_merged_tasks` paths (in-place and base-write):
+    log the missing/already-struck outcomes and return the sorted ids actually struck."""
+    for tid, outcome in sorted(results.items()):
+        if outcome == "missing":
+            log.warning(
+                "%s: no line matches task %s — a human edited or removed it; not guessing",
+                what, tid,
+            )
+        elif outcome == "already":
+            log.info("%s: task %s was already struck", what, tid)
+    return sorted(t for t, outcome in results.items() if outcome == "struck")
 
 
 # --- the trial ledger (CMX-105) ---------------------------------------------
@@ -744,13 +825,22 @@ def reconcile_trial_ledger(existing_text: str, rows: list[sqlite3.Row]) -> tuple
 def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
     """Project this workflow's `runs` table onto its trial ledger, on base_branch, in
     ONE commit — see :func:`reconcile_trial_ledger` for the merge and
-    :func:`_base_write_precheck` / :func:`_base_write_commit_push` for the unattended-
-    write discipline this shares with :func:`_strike_merged_tasks`.
+    :func:`_base_write_worktree` / :func:`_base_write_commit_push` for the unattended-
+    write discipline this shares with :func:`_strike_merged_tasks`. Writes through the
+    isolated base-write worktree, never `wf.path.parent` (the human's interactive
+    checkout) — see :func:`_base_write_worktree` for why.
 
     Opt-in via `trial_ledger: <path>` (CMX-105) — a workflow without the key returns 0
     immediately, no git touched, no behavior change. Scoped to `workflow_path`, same as
     every other per-workflow query here: a shared repo with two workflows must not have
     one's trials counted on the other's ledger.
+
+    A `trial_ledger:` opt-in is a committed artifact BY DEFINITION — the whole point is
+    a git-visible count a repo's own guards can read, including from a throwaway judge
+    worktree that never sees `~/.chela/scheduler.db`. If the configured path is
+    gitignored (see :func:`_tracker_is_versioned`), this warns and writes nothing rather
+    than silently keeping an honesty ledger that only ever exists on one box — worse
+    than no ledger at all, since a repo's guard would trust it.
 
     Returns the number of NEW trial lines appended this call.
     """
@@ -759,7 +849,13 @@ def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
         return 0
 
     repo = wf.path.parent
-    path = repo / rel
+    if not _tracker_is_versioned(repo, rel):
+        log.warning(
+            "trial ledger skipped: %s is gitignored in %s — a trial_ledger must be a "
+            "committed artifact; point it at a path that is not excluded", rel, repo,
+        )
+        return 0
+
     rows = conn.execute(
         "SELECT task_id, started_at, status, attempt, pr_state FROM runs WHERE workflow_path=?",
         (str(wf.path),),
@@ -776,23 +872,32 @@ def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
             log.warning("trial ledger: %s is not valid — skipping this tick: %s", rel, e)
             return None
 
+    base = wf.get("workspace", "base_branch", default="master")
+    root = resolve_workspace_root(wf)
+
     # Cheap check first — no git touched when nothing would change, same as the
-    # tracker strike's caller only invoking it `if pending_strikes:`.
-    merged = _reconcile(path.read_text() if path.exists() else "")
+    # tracker strike's caller only invoking it `if pending_strikes:`. Reads whatever
+    # this workflow's isolated base-write worktree last saw (possibly stale — another
+    # writer may have moved base_branch since; that is fine, the real write below
+    # re-reads fresh) rather than `wf.path.parent`, which the human checkout may have
+    # moved to an unrelated branch entirely.
+    cached = (root / BASE_WRITE_DIRNAME / rel)
+    merged = _reconcile(cached.read_text() if cached.exists() else "")
     if merged is None:
         return 0
     _, appended, resolved = merged
     if not appended and not resolved:
         return 0
 
-    base = wf.get("workspace", "base_branch", default="master")
-    if not _base_write_precheck(repo, base, rel, "trial ledger"):
+    wt = _base_write_worktree(repo, base, root, "trial ledger")
+    if wt is None:
         return 0
 
-    # Re-read AFTER the precheck's fetch/ff-merge and re-reconcile against
-    # whatever is on base_branch NOW, in case it moved since the read above —
+    # Re-read AFTER the worktree is fetched and self-healed, and re-reconcile against
+    # whatever is on base_branch NOW, in case it moved since the cheap read above —
     # the same "recompute, don't trust the pre-network read" discipline
     # `_strike_merged_tasks` gets from `close_tasks` reading the tracker itself.
+    path = wt / rel
     merged = _reconcile(path.read_text() if path.exists() else "")
     if merged is None:
         return 0
@@ -804,7 +909,7 @@ def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
     subject = f"chore({rel}): trial ledger — {len(appended)} new, {len(resolved)} resolved"
     body = "\n".join(f"+ {tid}" for tid in appended) + ("\n" if appended and resolved else "") + \
         "\n".join(f"~ {tid}" for tid in resolved)
-    if not _base_write_commit_push(repo, base, rel, subject, body, "trial ledger"):
+    if not _base_write_commit_push(wt, base, rel, subject, body, "trial ledger"):
         return 0
 
     log.info(
@@ -931,6 +1036,16 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # in both, which is exactly "the critic never ran".
         ("critic_notes", "ALTER TABLE runs ADD COLUMN critic_notes TEXT"),
         ("critic_reviewed_at", "ALTER TABLE runs ADD COLUMN critic_reviewed_at TEXT"),
+        # 📋 Task-detail modal (Work-view redesign). `brief` is the task's full
+        # multi-line brief (`Task.body` — the markdown source's title + its dedented
+        # OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation, when it captured one;
+        # else `Task.raw`/title — see `_task_brief`, below) copied onto the run row
+        # at CLAIM time (`_spawn`) so the modal still has the brief to show once the
+        # task has left `open_tasks` (which only lists UNCLAIMED tasks). Additive and
+        # read-only downstream: nothing in the dispatch/rework/judge path reads this
+        # column back. A pre-migration row simply reads NULL — the modal degrades to
+        # "no brief recorded", never a crash.
+        ("brief", "ALTER TABLE runs ADD COLUMN brief TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -2856,11 +2971,12 @@ def tick(workflow_path: str | Path) -> dict:
             except Exception as e:
                 log.exception("Dispatch failed for task %s", task.id)
                 conn.execute(
-                    """INSERT INTO runs (task_id, workflow_path, title, status, attempt, last_error, started_at)
-                       VALUES (?, ?, ?, 'failed', ?, ?, ?)
+                    """INSERT INTO runs (task_id, workflow_path, title, status, attempt, last_error, started_at, brief)
+                       VALUES (?, ?, ?, 'failed', ?, ?, ?, ?)
                        ON CONFLICT(task_id) DO UPDATE SET
-                         status='failed', attempt=excluded.attempt, last_error=excluded.last_error""",
-                    (task.id, str(wf.path), task.title, attempt, str(e), _now()),
+                         status='failed', attempt=excluded.attempt, last_error=excluded.last_error,
+                         brief=excluded.brief""",
+                    (task.id, str(wf.path), task.title, attempt, str(e), _now(), _task_brief(task)),
                 )
                 conn.commit()
                 continue
@@ -2907,6 +3023,17 @@ def _max_existing_task_number(repo_path: Path, project_key: str) -> int:
     return best
 
 
+def _task_brief(task: Task) -> str | None:
+    """What to persist onto `runs.brief` at claim time — the task-detail modal's
+    left pane. `task.body` (the markdown source's full title + dedented
+    OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation) wins when the source
+    captured one; a bare one-line task, or a source with no notion of a
+    continuation (gh_issues), falls back to `task.raw` (the bullet line / issue
+    URL), and — belt-and-suspenders, should raw itself ever be empty — `task.title`.
+    """
+    return task.body or task.raw or task.title
+
+
 def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) -> bool:
     repo_path = wf.path.parent
     base_branch = wf.get("workspace", "base_branch", default="master")
@@ -2950,15 +3077,15 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # conflict: leaving attempt 1's id would point the next run_review at a corpse
     # (or, worse, at whatever window tmux later recycled that id onto).
     conn.execute(
-        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number)
-           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?)
+        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief)
+           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(task_id) DO UPDATE SET
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
-             window_epoch=NULL""",
-        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number),
+             window_epoch=NULL, brief=excluded.brief""",
+        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number, _task_brief(task)),
     )
     conn.commit()
 
@@ -3001,10 +3128,17 @@ def _run_critic(wf: WorkflowDef, task: Task, conn: sqlite3.Connection) -> None:
     the one thing v1 forbids, because the code never gives its output a way to.
 
     It reviews the **task-specific brief** — the TODO item the human actually wrote
-    (``task.title`` / ``task.raw``), NOT the rendered WORKFLOW.md prompt. The template is
-    boilerplate identical on every dispatch and already carries every field-signal, so
-    reviewing it would report "complete" for every task and the critic would never say
-    anything. The text that varies per task is the only text worth reviewing.
+    (``task.title`` / ``task.body`` or ``task.raw``), NOT the rendered WORKFLOW.md prompt.
+    The template is boilerplate identical on every dispatch and already carries every
+    field-signal, so reviewing it would report "complete" for every task and the critic
+    would never say anything. The text that varies per task is the only text worth
+    reviewing. ``task.body`` (chela.sources.markdown._task_body — title + the bullet's
+    dedented OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation, when the source captured one)
+    is what the human actually wrote past the title; using only ``task.raw`` (the bare
+    bullet line) starved the four-field detector of everything after the first line, so it
+    fired "no explicit objective/boundaries/verify" on briefs that named all three further
+    down. Falls back to ``task.raw`` for a bare one-line task or a source with no notion of
+    a continuation (gh_issues) — same fallback ``_task_brief`` uses for ``runs.brief``.
 
     Writes ``critic_notes`` ("" ⇒ ran, nothing to add) and ``critic_reviewed_at`` when the
     critic is on; a disabled critic writes NOTHING, leaving both NULL — "the critic never ran",
@@ -3013,7 +3147,7 @@ def _run_critic(wf: WorkflowDef, task: Task, conn: sqlite3.Connection) -> None:
     try:
         if not critic.critic_enabled(wf):
             return
-        brief_text = f"{task.title}\n{task.raw}"
+        brief_text = f"{task.title}\n{task.body or task.raw}"
         review = critic.review_brief(brief_text)
         files = critic.target_files(brief_text)
         inflight = _inflight_target_files(conn, task.id)
@@ -3547,6 +3681,57 @@ def _judge_vars(wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str) -> 
     }
 
 
+def _refresh_judge_worktree(repo: Path, worktree: Path, base: str) -> str:
+    """Merge fresh ``origin/<base>`` into the judge's throwaway worktree before it is judged.
+
+    ⛔ CMX-176. A dispatched run's branch is cut at claim time and then sits — through
+    review, rework rounds, and CI — while ``base_branch`` moves on underneath it. Judging
+    that stale tip means a fix that landed on base after the claim is absent from the
+    mutation baseline, so the pre-mutation suite goes red for reasons that have nothing to
+    do with this PR, and the judge correctly (and uselessly) refuses every experiment:
+    cannot_verify. **Observed live 2026-07-25 on cmx-174 (#222):** the branch was 14 commits
+    behind ``dev``, its merge-base predating the ``_isolate_claude_projects`` conftest fix,
+    so 3-4 telegram tests failed from a leak already closed on base. A human ran
+    ``gh pr update-branch`` by hand and the baseline went to 1830 passed / 0 failed. This is
+    that same catch-up, done automatically, right before the baseline is ever measured.
+
+    The merge lands in the judge's OWN throwaway detached copy — never the run's real
+    worktree, never pushed, never touching the actual PR branch on GitHub — so
+    ``JUDGE_PROMPT``'s "do not commit, push, or edit the PR's branch" stays true no matter
+    what this does. A real commit (not ``--no-commit``) is required: ``run_experiments``'s
+    ``_git_dirty`` check demands a clean tree before a single mutation runs, and a merge
+    left staged-but-uncommitted would trip that guard on every judged PR.
+
+    ⛔ DEGRADES, NEVER BLOCKS on anything short of a REAL conflict: no ``origin`` remote, no
+    network, a repo this is not a git repo at all (a unit test's fake worktree) — every one
+    of those leaves the worktree exactly as :func:`detached_worktree` left it, and judging
+    proceeds on the un-refreshed tip, same as before this existed. Only a genuine merge
+    conflict is reported back — the one case where "proceed anyway" would judge a tree that
+    does not even resolve, and the caller turns it into a NAMED cannot_verify instead of a
+    judge agent wasted on it.
+    """
+    if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
+        return ""              # no remote / no network / not a git repo — nothing to refresh
+    target = _git_out(_git(repo, "rev-parse", f"origin/{base}"))
+    if not target:
+        return ""              # base_branch does not resolve on origin — nothing to merge in
+    behind = _git_out(_git(worktree, "rev-list", "--count", f"HEAD..{target}"))
+    if not behind or behind == "0":
+        return ""              # already caught up (or the count could not be read)
+    merge = _git(worktree, "merge", "--no-edit", "--quiet", target)
+    if merge is not None and merge.returncode == 0:
+        log.info("judge: refreshed worktree %s from origin/%s (was %s commit(s) behind)",
+                  worktree, base, behind)
+        return ""
+    _git(worktree, "merge", "--abort")
+    detail = (merge.stderr or merge.stdout or "").strip()[:300] if merge else "the merge could not be run"
+    return (
+        f"this run's branch is {behind} commit(s) behind origin/{base} and could not be "
+        f"refreshed automatically ({detail or 'merge conflict'}) — rebase or merge "
+        f"origin/{base} into it by hand before it can be judged"
+    )
+
+
 def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Connection) -> bool:
     """Put a judge on this PR's head — in a throwaway worktree, on a detached HEAD.
 
@@ -3585,6 +3770,18 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
         set_judge_state(task_id, judge.J_CANNOT_VERIFY,
                         f"the judge worktree could not be created: {str(detail).strip()[:300]}")
         log.warning("judge: %s: could not check out %s: %s", task_id, sha[:12], detail)
+        return False
+
+    # ⛔ CMX-176: refresh BEFORE the agent ever sees this tree — a stale worktree measured a
+    # baseline that had nothing to do with the PR (see _refresh_judge_worktree). This never
+    # blocks on its own (no remote/no network just proceeds unrefreshed); only a REAL merge
+    # conflict against base_branch stops the spawn, and it stops it with a named diagnosis
+    # instead of a wasted judge agent and a mystery red baseline.
+    base = wf.get("workspace", "base_branch", default="master")
+    stale = _refresh_judge_worktree(wf.path.parent, worktree, base)
+    if stale:
+        set_judge_state(task_id, judge.J_CANNOT_VERIFY, stale)
+        log.warning("judge: %s: %s", task_id, stale)
         return False
 
     prompt = render_prompt(

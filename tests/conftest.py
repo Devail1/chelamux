@@ -151,6 +151,27 @@ def _isolate_claude_config(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_claude_projects(tmp_path, monkeypatch):
+    """A scratch transcript root per test — the one hole the fence didn't cover.
+
+    ``transcripts.CLAUDE_PROJECTS_DIR`` is a module-level constant latched at import
+    from ``~/.claude/projects`` (it does not read ``CLAUDE_CONFIG_DIR``), so redirecting
+    the env var above does nothing for it. Any resolver that returns None then falls back
+    to ``sessions.explain`` → ``resolve_window`` → ``transcript_for_session(base=None)``,
+    which globs and reads the developer's REAL transcripts — tripping
+    :func:`_no_live_state` on whichever ``@N`` window happens to exist in the live tmux
+    session. That is exactly why the telegram monitor/relay tests fail nondeterministically
+    on a machine running chela (and why the judge, which runs on such a machine, saw the
+    suite red on every dispatched run). Point it at an empty scratch dir; a test that wants
+    transcripts on disk still overrides this with its own ``monkeypatch.setattr``.
+    """
+    from chela import transcripts
+
+    projects = tmp_path / "claude-projects"
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", projects)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_chela_dir(tmp_path, monkeypatch):
     """A scratch ``$CHELA_DIR`` per test — env AND ``config.CHELA_DIR``.
 
