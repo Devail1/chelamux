@@ -106,7 +106,7 @@ function _swapToFrame(wid) {
     // Ctrl+V shim can read the clipboard (the paste event path works without it,
     // but clipboard.read()/readText() is blocked in a subframe lacking this).
     ifr.setAttribute('allow', 'clipboard-read; clipboard-write');
-    ifr.src = _termSrc(wid);
+    ifr.src = _termFrameSrc(wid);
     ifr.title = _paneTitle(wid);
     ph.replaceWith(ifr);
 }
@@ -404,6 +404,18 @@ function renamePane(ev, span, wid) {
 // in agreement.
 function _termSrc(wid) { return '/term/' + encodeURIComponent(wid) + '/'; }
 function _termLink(wid) { return location.origin + BASE_PATH + _termSrc(wid); }
+
+// iframe-only src: same clean path, plus a per-connection `cid` (CMX-175). ttyd's
+// bundled client JS builds its WebSocket URL from `location.search` verbatim, so
+// this round-trips onto the /term/<wid>/ws upgrade request and lets the backend
+// (term_ws in app.py) match THIS iframe's connection to its own tmux client tty —
+// see the ignore-size watch reporting below. NEVER use this for the copyable
+// share link (_termLink) — that must stay the clean URL a joiner reuses verbatim.
+function _newCid() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+    return 'c' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
+function _termFrameSrc(wid) { return _termSrc(wid) + '?cid=' + _newCid(); }
 
 // Per-wid shared flag (seeded from /api/agents .shared, flipped by toggleShare)
 // and the latest header-facepile presence (from the in-iframe chelaPresence hook).
@@ -1018,6 +1030,7 @@ function minimizePane(wid) {
     _saveMinimized();
     renderMinDock();
     _refitWallForDock();        // wall re-packs above the (taller) dock
+    _reportWatchForWid(wid);    // docked tile stops dictating the shared window's size (CMX-175)
 }
 
 function termMinFor(btn) {
@@ -1167,6 +1180,7 @@ function restoreFromDock(wid) {
     }
     renderMinDock();
     _refitWallForDock();        // dock may have emptied → grow the wall back
+    _reportWatchForWid(wid);    // back on screen → resumes counting toward the shared window's size (CMX-175)
 }
 
 // Live busy/idle/waiting indicator. The dot starts neutral and is coloured by
@@ -1428,7 +1442,7 @@ async function renderTerminals() {
     // Ready -> real iframe; not ready -> spinner placeholder (polled into an
     // iframe by _startPlaceholderPolls once the ttyd port lands).
     const frame = w => _termReady.has(w)
-        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termSrc(w)}" title="${escHtml(_paneTitle(w))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termFrameSrc(w)}" title="${escHtml(_paneTitle(w))}"></iframe>`
         : _termPlaceholder(w);
     const stage = $('#term-stage');
     if (!wids.length) {
@@ -1621,11 +1635,67 @@ function _restoreTermFrames() {
     if (TERMINALS_ON && currentTab === 'terminals') termTick();
 }
 
+// ---- Per-client ignore-size (CMX-175) ---------------------------------------
+//
+// The teardown above resolves size contention by DISCONNECTING a backgrounded
+// tab's ttyd clients after TERM_HIDE_GRACE_MS — effective, but it kills the
+// socket (a visible reconnect) and only fires once a tab has been hidden a
+// while. tmux's per-client `ignore-size` flag gets the SAME outcome — THIS tab's
+// clients stop dragging the shared window to their own geometry — instantly and
+// non-destructively, so report it the moment a tile stops (or starts) being
+// watched: tab backgrounded/foregrounded, or pane minimized/restored. Both
+// mechanisms coexist: this one fixes the acute sizing fight; the teardown still
+// exists to reclaim --max-clients slots from a genuinely abandoned tab.
+//
+// A tile only counts as "watched" while the browser tab is visible AND it isn't
+// collapsed into the dock — a minimized tile is still a live tmux client (just
+// CSS-hidden), so left alone it would go on dictating the shared window's size
+// from inside the dock.
+function _isWatched(wid) {
+    return document.visibilityState !== 'hidden' && !_minimized.has(wid);
+}
+
+// /term/<wid>/?cid=... → cid. Mirrors _widOfFrame's src-parsing (including the
+// suspended-src fallback so a torn-down tile's last-known cid is still visible).
+function _cidOfFrame(ifr) {
+    const src = ifr.dataset.suspendedSrc || ifr.getAttribute('src') || '';
+    const m = src.match(/[?&]cid=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+}
+
+// Report one iframe's current watched state to the ONE tmux client app.py's
+// term_ws matched to its cid — never the whole session, so a sibling tab/device
+// watching the same wid is untouched. Best-effort: a missed flip just leaves
+// tmux's default (`largest` fights over every attached client, today's behavior).
+function _reportWatch(ifr) {
+    const src = ifr.getAttribute('src') || '';
+    if (!src || src === 'about:blank') return;      // torn down — nothing to flag
+    const wid = _widOfFrame(ifr);
+    const cid = _cidOfFrame(ifr);
+    if (!wid || !cid) return;
+    api('/api/term/' + encodeURIComponent(wid) + '/watch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cid, watching: _isWatched(wid) }),
+    }).catch(() => {});
+}
+
+function _reportAllWatch() {
+    document.querySelectorAll('#term-stage iframe.term-frame').forEach(_reportWatch);
+}
+
+function _reportWatchForWid(wid) {
+    const ifr = Array.from(document.querySelectorAll('#term-stage iframe.term-frame'))
+        .find(f => _widOfFrame(f) === wid);
+    if (ifr) _reportWatch(ifr);
+}
+
 // Single registration at module load. TERMINALS_ON is checked at fire time (it
 // may not be resolved yet here), mirroring the window 'resize' handler above.
 document.addEventListener('visibilitychange', () => {
     if (!TERMINALS_ON) return;
     clearTimeout(_termHideTimer);
+    _reportAllWatch();
     if (document.hidden) {
         _termHideTimer = setTimeout(_teardownTermFrames, TERM_HIDE_GRACE_MS);
     } else if (_termSuspended) {
@@ -1834,6 +1904,7 @@ document.addEventListener('load', e => {
     const ifr = e.target;
     if (!ifr || ifr.tagName !== 'IFRAME' || !ifr.classList.contains('term-frame')) return;
     _wireIframeShortcuts(ifr);
+    _reportWatch(ifr);   // register this fresh connection's watched state (CMX-175)
 }, true);
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
@@ -1904,7 +1975,7 @@ function destroyGrid() {
 // gs-id is the stable wid so a rename never re-keys the tile.
 function _wallTileHTML(wid, x, y, w, h) {
     const body = _termReady.has(wid)
-        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termSrc(wid)}" title="${escHtml(_paneTitle(wid))}"></iframe>`
+        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termFrameSrc(wid)}" title="${escHtml(_paneTitle(wid))}"></iframe>`
         : _termPlaceholder(wid);
     const pinnedCls = _pinned.has(wid) ? ' pane-pinned' : '';
     return `<div class="grid-stack-item${pinnedCls}" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
