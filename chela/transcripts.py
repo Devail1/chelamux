@@ -1,7 +1,8 @@
 """Read recap + PR-link + title records from Claude Code session JSONL transcripts.
 
 Each Claude Code session writes a JSONL transcript at
-    ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
+    $CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/<session-id>.jsonl
+(``~/.claude/projects/...`` when ``CLAUDE_CONFIG_DIR`` is unset — Claude Code's default)
 where <encoded-cwd> replaces every `/` and `.` in the cwd with `-`.
 
 We want three things per agent:
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +31,23 @@ from chela import discovery
 
 log = logging.getLogger(__name__)
 
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+def claude_config_dir() -> Path:
+    """Claude Code's config directory — ``$CLAUDE_CONFIG_DIR`` or ``~/.claude``.
+
+    Claude Code relocates its ENTIRE config dir this way, and the transcript tree every
+    function below reads (``<config dir>/projects/...``) lives under it. Hardcoding
+    ``~/.claude`` here used to mean any adopter who sets ``CLAUDE_CONFIG_DIR`` got NO
+    transcript resolution at all — recaps, PR links, ai-titles and the telegram outbound
+    relay all silently went dead, with every window's resolver returning None. Mirrored
+    (not imported) by :func:`chela.hooks.claude_config_dir`: hooks imports this module, not
+    the other way round.
+    """
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    return Path(raw).expanduser() if raw else Path.home() / ".claude"
+
+
+CLAUDE_PROJECTS_DIR = claude_config_dir() / "projects"
 
 # Cap on how far back we scan a transcript looking for a record. Two MB is
 # plenty for the latest recap/PR — they are typically within the last few KB.
