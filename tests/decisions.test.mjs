@@ -23,6 +23,8 @@ import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py e
 
 const BODY = `<section class="side-section" id="side-decisions">
   <div id="decisions-chip"></div>
+  <span id="decisions-unread" hidden></span>
+  <input type="text" id="decisions-search">
   <div class="decisions-list" id="decisions-list"></div>
 </section>`;
 
@@ -30,6 +32,8 @@ let decisions, orchestrator;
 let requests;
 let LOG_RESPONSE;
 let STATUS_RESPONSE;
+let DISPATCHER_RESPONSE;
+let DISPATCHER_REJECT;
 
 before(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
@@ -42,8 +46,14 @@ before(async () => {
     globalThis.fetch = (url) => {
         const path = String(url);
         requests.push(path);
-        const body = path.includes('/api/orchestrator/status') ? STATUS_RESPONSE : LOG_RESPONSE;
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+        if (path.includes('/api/orchestrator/status')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(STATUS_RESPONSE) });
+        }
+        if (path.includes('/api/dispatcher')) {
+            if (DISPATCHER_REJECT) return Promise.reject(new Error('dispatcher unreachable'));
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(DISPATCHER_RESPONSE) });
+        }
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(LOG_RESPONSE) });
     };
     globalThis.window.chela = globalThis.window.chela || {};
     orchestrator = await import('../chela/dashboard/static/js/orchestrator.js');
@@ -54,6 +64,10 @@ beforeEach(() => {
     requests = [];
     STATUS_RESPONSE = { wid: null, name: null, state: 'unregistered', why: '', queued: 0 };
     LOG_RESPONSE = { boot_id: 'b1', events: [], gap: null, first_seq: 0, last_seq: 0, next_seq: 0 };
+    DISPATCHER_RESPONSE = { configured: true, workflows: [] };   // no match — the common "not found" case
+    DISPATCHER_REJECT = false;
+    decisions.setDecisionsQuery('');   // module-level state — never leak a query across tests
+    delete window.chela.openTaskModal;
 });
 
 const rows = () => document.querySelectorAll('#decisions-list .feed-row');
@@ -116,4 +130,224 @@ test('a gap is rendered, never silently swallowed', async () => {
     const gapEl = document.querySelector('#decisions-list .feed-gap');
     assert.ok(gapEl, 'a reported gap must show on screen');
     assert.ok(gapEl.textContent.includes('boot_id changed'));
+});
+
+// --- CMX-178: click-through to the task-detail modal ------------------------
+
+test('a row whose payload names a task_id is click-through (data-seq + clickable class)', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review',
+            payload: { task_id: 't9', title: 'cmx-9 task', branch_name: 'cmx-9', pr_url: 'https://x/9' },
+        }],
+    };
+    await decisions.enterDecisions();
+    const row = rows()[0];
+    assert.ok(row.classList.contains('feed-row-clickable'), 'a task_id-bearing row must carry the clickable class');
+    assert.equal(row.dataset.seq, '1');
+});
+
+// 🔴 GUARD: a bare window/inbox-plumbing event (no task_id in its payload) has
+// nothing to click through to — this must NOT render as clickable. Deleting
+// the `itemFromDecisionPayload(e) != null` check in decisions.js's _rowHtml
+// makes every row clickable, including this one, and this assert goes red.
+test('🔴 GUARD: a row with no task_id in its payload is NOT click-through', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'inbox_undeliverable', wid: null,
+            summary: 'the inbox address is dead', payload: { wid: '@0', why: 'no claude running' },
+        }],
+    };
+    await decisions.enterDecisions();
+    const row = rows()[0];
+    assert.equal(row.classList.contains('feed-row-clickable'), false);
+    assert.equal(row.dataset.seq, undefined);
+});
+
+test('clicking a click-through row with NO dispatcher match falls back to the payload, marked partial', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review',
+            payload: {
+                task_id: 't9', title: 'cmx-9 task', run_status: 'awaiting_review',
+                branch_name: 'cmx-9', pr_url: 'https://x/9',
+            },
+        }],
+    };
+    DISPATCHER_RESPONSE = { configured: true, workflows: [] };   // no run anywhere named t9
+    await decisions.enterDecisions();
+    let opened = null;
+    window.chela.openTaskModal = (item) => { opened = item; };
+
+    // jsdom (no runScripts) does not execute inline onclick="…" attributes, so
+    // this drives the exact function the row's onclick calls (decisions.js's
+    // openDecisionTicket), rather than simulating a real click event.
+    await decisions.openDecisionTicket(document.querySelector('#decisions-list .feed-row'));
+
+    assert.ok(requests.some(r => r.includes('/api/dispatcher')),
+        'a click must try the dispatcher first, even when it will come up empty');
+    assert.ok(opened, 'clicking a click-through row must call window.chela.openTaskModal');
+    assert.equal(opened.task_id, 't9');
+    assert.equal(opened.branch_name, 'cmx-9');
+    assert.equal(opened.status, 'awaiting_review');
+    // 🔴 GUARD: a partial ticket that does not SAY it is partial reads as a
+    // lie ("No brief recorded" when the truth is "not loaded here"). Dropping
+    // the DISPATCHER_AGED_OUT_NOTE stamp in partialItemFromDecisionPayload
+    // makes this assert fail.
+    assert.ok(opened.body && opened.body.includes('aged out'),
+        'the fallback ticket must carry a visible aged-out/partial notice');
+});
+
+test('clicking a click-through row WITH a dispatcher match opens the authoritative run object', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review',
+            payload: { task_id: 't9', title: 'cmx-9 task', run_status: 'awaiting_review' },
+        }],
+    };
+    // 🔴 GUARD: this run object carries `brief` — a field ONLY the dispatcher
+    // has, never the decision payload. Asserting on it proves openTaskModal
+    // received THIS object, not one built by itemFromDecisionPayload/
+    // partialItemFromDecisionPayload.
+    DISPATCHER_RESPONSE = {
+        configured: true,
+        workflows: [{
+            open_tasks: [], backlog_items: [],
+            active_runs: [{ task_id: 't9', brief: 'The FULL brief, from the dispatcher.', status: 'awaiting_review' }],
+            awaiting_review_runs: [], recent_runs: [],
+        }],
+    };
+    await decisions.enterDecisions();
+    let opened = null;
+    window.chela.openTaskModal = (item) => { opened = item; };
+
+    await decisions.openDecisionTicket(document.querySelector('#decisions-list .feed-row'));
+
+    assert.ok(opened, 'a dispatcher match must still open the modal');
+    assert.equal(opened.brief, 'The FULL brief, from the dispatcher.',
+        'openTaskModal must receive the dispatcher\'s own run object, not the payload-normalised one');
+});
+
+test('clicking a click-through row when the dispatcher fetch REJECTS still opens the fallback, never throws', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review',
+            payload: { task_id: 't9', title: 'cmx-9 task', run_status: 'awaiting_review' },
+        }],
+    };
+    DISPATCHER_REJECT = true;
+    await decisions.enterDecisions();
+    let opened = null;
+    window.chela.openTaskModal = (item) => { opened = item; };
+
+    await assert.doesNotReject(() =>
+        decisions.openDecisionTicket(document.querySelector('#decisions-list .feed-row')));
+
+    assert.ok(opened, 'a rejected dispatcher fetch must still open the fallback ticket');
+    assert.equal(opened.task_id, 't9');
+    assert.ok(opened.body && opened.body.includes('aged out'), 'the fallback must still carry the partial notice');
+});
+
+test('clicking a row is a no-op (never throws) when no task modal handler is registered', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{ seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'x', payload: { task_id: 't1' } }],
+    };
+    await decisions.enterDecisions();
+    await assert.doesNotReject(() =>
+        decisions.openDecisionTicket(document.querySelector('#decisions-list .feed-row')));
+});
+
+// --- CMX-178: search ----------------------------------------------------------
+
+test('the search box narrows the rendered list without re-fetching', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 2, last_seq: 2, next_seq: 2,
+        events: [
+            { seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-1 awaiting review', payload: { branch_name: 'cmx-1' } },
+            { seq: 2, ts: 1001, type: 'run_review', wid: '@4', summary: 'cmx-2 awaiting review', payload: { branch_name: 'cmx-2' } },
+        ],
+    };
+    await decisions.enterDecisions();
+    assert.equal(rows().length, 2, 'both decisions must render before any search is typed');
+
+    const requestsBefore = requests.length;
+    decisions.setDecisionsQuery('cmx-1');
+
+    assert.equal(rows().length, 1, 'the search must hide the non-matching row');
+    assert.ok(rows()[0].textContent.includes('cmx-1'));
+    assert.equal(requests.length, requestsBefore, 'filtering the held events must not trigger a new fetch');
+});
+
+test('a search with no matches shows a "no match" message, not a blank/empty-log message', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{ seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-1 awaiting review', payload: {} }],
+    };
+    await decisions.enterDecisions();
+    decisions.setDecisionsQuery('does-not-exist-anywhere');
+
+    assert.equal(rows().length, 0);
+    const empty = document.querySelector('#decisions-list .side-empty');
+    assert.ok(empty, 'a no-match search must still render an explanatory empty state');
+    assert.ok(empty.textContent.includes('does-not-exist-anywhere'));
+    assert.ok(!empty.textContent.includes('No decisions logged yet'),
+        'a filtered-to-zero result must read differently from a genuinely empty log');
+});
+
+test('clearing the search brings back the full held list, still with no re-fetch', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 2, last_seq: 2, next_seq: 2,
+        events: [
+            { seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-1 awaiting review', payload: {} },
+            { seq: 2, ts: 1001, type: 'run_review', wid: '@4', summary: 'cmx-2 awaiting review', payload: {} },
+        ],
+    };
+    await decisions.enterDecisions();
+    decisions.setDecisionsQuery('cmx-1');
+    assert.equal(rows().length, 1);
+    decisions.setDecisionsQuery('');
+    assert.equal(rows().length, 2, 'clearing the query must restore every held event');
+});
+
+// 🔴 GUARD: filtering is a VIEW concern (what's rendered); the unread badge is
+// a SEEN concern (what a human has looked at) — they must never be coupled.
+// Computing the badge over `filterDecisionEvents(_events, _query)` instead of
+// the full `_events` would silently mark a filtered-away unread event as seen,
+// and nothing else would catch it: the row just wouldn't be on screen to miss.
+test('🔴 GUARD: filtering the rendered list does not touch the unread badge', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{ seq: 1, ts: 1000, type: 'finished', wid: '@3', summary: 'cmx-seed', payload: {} }],
+    };
+    await decisions.enterDecisions();
+
+    // A fresh, definitely-unseen event (a seq far beyond anything else in this
+    // suite) so the badge has something real to count, whatever value this
+    // file's shared lastSeen cursor already sits at.
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 100000, next_seq: 100000,
+        events: [{
+            seq: 100000, ts: 2000, type: 'run_review', wid: '@4',
+            summary: 'cmx-unread awaiting review', payload: { branch_name: 'cmx-unread' },
+        }],
+    };
+    await decisions.tickDecisions();
+
+    const badge = document.querySelector('#decisions-unread');
+    const before = badge.textContent;
+    assert.notEqual(before, '', 'the freshly-arrived event must register as unread before any filter runs');
+
+    // Filter down to ONLY the old, already-seen event — hiding the unread row
+    // from the rendered list entirely.
+    decisions.setDecisionsQuery('cmx-seed');
+    assert.equal(rows().length, 1, 'the filter must actually hide the unread row from view');
+    assert.ok(!rows()[0].textContent.includes('cmx-unread'));
+    assert.equal(document.querySelector('#decisions-unread').textContent, before,
+        'filtering the rendered VIEW must not change the unread badge — filtering is a VIEW concern, seen-state is not');
 });

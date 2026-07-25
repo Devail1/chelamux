@@ -584,6 +584,12 @@
           title="Every dispatch outcome, ever — recorded here whether or not a live session is receiving it. Click a pane's ⊙ toggle on the Wall to have it delivered straight into that session instead of landing only here.">Decisions</span>
   </div>
   <div id="decisions-chip"></div>
+  <!-- CMX-178: a client-side substring filter over the events already held
+       (decisionsmodel.js's filterDecisionEvents) — finds an OLD decision the
+       short list below has scrolled past, with no new fetch. -->
+  <input type="text" class="decisions-search" id="decisions-search"
+         placeholder="Search task, branch, PR…" autocomplete="off"
+         oninput="chela.setDecisionsQuery(this.value)">
   <div class="decisions-list" id="decisions-list"></div>
 </div>
 

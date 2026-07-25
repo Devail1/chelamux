@@ -3715,6 +3715,10 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .decisions-chip-who { color: var(--text); font-weight: 600; }
 .decisions-chip-queued { color: var(--text-dim); }
 .decisions-chip-why { color: var(--text-dim); width: 100%; }
+/* CMX-178: the search box that filters the list below (decisions.js's
+   setDecisionsQuery). Full-width, same input styling as everywhere else in
+   the app (input[type="text"] above) — just spaced to sit under the chip. */
+.decisions-search { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
 .decisions-list { border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
     max-height: 38vh; overflow-y: auto; }
 /* Sidebar-width row: the Feed's 5-column grid (56px 72px 108px auto 1fr, ~250px
@@ -3727,6 +3731,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .decisions-list .feed-seq { display: none; }
 .decisions-list .feed-summary { flex: 1 1 100%; font-size: 12px; }
+/* CMX-178: a row whose payload names a task_id (decisions.js's
+   itemFromDecisionPayload) click-throughs to the task-detail modal — cursor
+   + hover are the only affordance needed, the row's content is unchanged. */
+.decisions-list .feed-row-clickable { cursor: pointer; }
+.decisions-list .feed-row-clickable:hover { background: var(--surface); }
 
 /* Cost — fleet spend table (current-snapshot, v1; see cost.js). */
 .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
