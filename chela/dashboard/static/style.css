@@ -2003,7 +2003,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
 .kanban-board {
     display: grid;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 10px;
     align-items: stretch;
 }
@@ -2048,12 +2048,15 @@ input[type="text"]:focus, textarea:focus, select:focus {
     flex: 0 0 auto;
 }
 
+/* 5 lanes (Backlog / To Do / In Progress / Review / Done — kanbanlanemodel.js's
+   KANBAN_LANES). Review holds awaiting_review + changes_requested +
+   needs_human + failed cards together — its head colour is a lane-level cue
+   only; each card's own status pill (kanban.js's STATUS_CHIPS) is what says
+   which of the four it is. */
 .kanban-col-backlog .kanban-col-head { color: var(--text-dim); }
-.kanban-col-open .kanban-col-head { color: var(--text); }
-.kanban-col-claimed .kanban-col-head { color: var(--accent); }
-.kanban-col-running .kanban-col-head { color: var(--green); }
-.kanban-col-awaiting_review .kanban-col-head { color: var(--yellow); }
-.kanban-col-failed .kanban-col-head { color: var(--red); }
+.kanban-col-todo .kanban-col-head { color: var(--text); }
+.kanban-col-in_progress .kanban-col-head { color: var(--green); }
+.kanban-col-review .kanban-col-head { color: var(--yellow); }
 .kanban-col-done .kanban-col-head { color: var(--text-dim); }
 
 .kanban-cards {
@@ -2156,20 +2159,34 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-card-failed          { border-left-color: var(--red); background: rgba(248, 81, 73, 0.04); }
 .kanban-card-done            { border-left-color: var(--text-dim); opacity: 0.75; }
 
-/* The rework loop's two other states share the Awaiting Review column. The border is a
+/* The rework loop's two other states, plus failed, share the Review lane. The border is a
    secondary cue only — the card also carries a WORD (.kanban-state-chip), because a
    colour on its own is not a signal anyone can be assumed to read. */
 .kanban-card-changes_requested { border-left-color: var(--orange, #d18616); background: rgba(209, 134, 22, 0.06); }
 .kanban-card-needs_human       { border-left-color: var(--red); background: rgba(248, 81, 73, 0.07); }
 
+/* Per-card status pill (kanban.js's STATUS_CHIPS) — shown on every non-backlog card so a
+   reader can tell two cards sharing a lane apart (claimed vs running in In Progress;
+   awaiting/changes/needs-human/failed in Review). The base rule is a neutral outline; each
+   `.st-*` modifier only ADDS a colour — the pill's WORD (set in kanban.js) is what actually
+   carries the meaning, exactly like .kanban-ci-chip below. */
 .kanban-state-chip {
-    background: rgba(248, 81, 73, 0.12);
-    border: 1px solid rgba(248, 81, 73, 0.45);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
     border-radius: 10px;
     padding: 0 8px;
     font-size: 10px;
     white-space: nowrap;
 }
+.kanban-state-chip.st-open         { color: var(--text-dim); }
+.kanban-state-chip.st-claimed      { color: var(--accent); border-color: rgba(88, 166, 255, 0.45); background: rgba(88, 166, 255, 0.10); }
+.kanban-state-chip.st-running      { color: var(--green); border-color: rgba(63, 185, 80, 0.45); background: rgba(63, 185, 80, 0.10); }
+.kanban-state-chip.st-awaiting     { color: var(--yellow); border-color: rgba(210, 153, 34, 0.45); background: rgba(210, 153, 34, 0.10); }
+.kanban-state-chip.st-changes      { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
+.kanban-state-chip.st-needs-human  { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); font-weight: 600; }
+.kanban-state-chip.st-failed       { color: var(--red); border-color: rgba(248, 81, 73, 0.55); background: rgba(248, 81, 73, 0.14); font-weight: 600; }
+.kanban-state-chip.st-done         { color: var(--text-dim); }
 
 /* The CI chip (CMX-69): what GitHub's checks say about this card's PR. The glyph and the
    WORD carry the state; the colour only agrees with them. A red-weak reader must be able
@@ -2397,7 +2414,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 
 /* ---- Mobile layout controls (Kanban) ---- */
-/* The Swipe/Rows toggle + swipe quick-nav strip. Hidden on desktop (the 7-col
+/* The Swipe/Rows toggle + swipe quick-nav strip. Hidden on desktop (the 5-lane
    grid needs no controls); the ≤768px block below flips them on. */
 .kanban-mobile-controls { display: none; }
 
@@ -2514,7 +2531,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     }
     .kanban-nav-chip.active .kanban-nav-count { background: rgba(13, 17, 23, 0.18); color: #0d1117; }
 
-    /* Default (swipe carousel): horizontal scroll-snap; all 7 columns swipe
+    /* Default (swipe carousel): horizontal scroll-snap; all 5 lanes swipe
        with a peek of the next. */
     .kanban-board {
         display: flex;

@@ -5,42 +5,45 @@ import { pollWork, postWorkDelete } from './work.js';
 import { openTaskModal } from './taskmodal.js';
 import { displayTitle } from './taskmodalmodel.js';
 import { knInline } from './knowledge.js';
+import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
 
 // ---------------------------------------------------------------------------
 // Render: the Board segment of WORK (the global cross-workflow kanban)
 //
-// Flattens the /api/dispatcher payload into a single board: Backlog, Open
-// (open_tasks), Claimed / Running / Awaiting Review / Failed / Done (runs). The
-// workflow chip + filter chips let one board surface state across every
-// configured workflow.
+// Flattens the /api/dispatcher payload into a single board, then groups it
+// into 5 Jira-style lanes (Backlog / To Do / In Progress / Review / Done —
+// kanbanlanemodel.js's laneOf()). A lane can hold more than one underlying
+// status (In Progress = claimed + running; Review = awaiting_review +
+// changes_requested + needs_human + failed), so every non-backlog card also
+// carries its own status pill (STATUS_CHIPS below) — that's what lets a
+// reader tell two cards sharing a lane apart. The workflow chip + filter
+// chips let one board surface state across every configured workflow.
 //
 // It no longer FETCHES: work.js owns the one poll of /api/dispatcher and hands the
 // same payload here and to the runs tables (this module used to run a second timer
 // against that endpoint, and the sidebar badges a third).
 //
 // Note: dispatcher.tick() currently deletes done rows on reconcile, so the
-// Done column is typically empty — recent_runs surfaces failed runs instead
+// Done lane is typically empty — recent_runs surfaces failed runs instead
 // (tracked in BACKLOG; see TODO comment for the underlying limitation).
 // ---------------------------------------------------------------------------
 
 const KANBAN_DONE_LIMIT = 20;
-const KANBAN_COLS = ['backlog', 'open', 'claimed', 'running', 'awaiting_review', 'failed', 'done'];
-const KANBAN_COL_LABELS = {
-    backlog: 'Backlog',
-    open: 'Open',
-    claimed: 'Claimed',
-    running: 'Running',
-    awaiting_review: 'Awaiting Review',
-    failed: 'Failed',
-    done: 'Done',
-};
-// The rework loop's states (CMX-68). They ride in the Awaiting Review column — a run the
-// reviewer sent back has an open PR and is nowhere near done — but they are NOT awaiting
-// review, and the card must not pretend otherwise. Text, deliberately: a border colour is
-// a secondary cue, never the whole message.
-const REVIEW_STATE_CHIPS = {
-    changes_requested: '🔁 changes requested',
-    needs_human: '🛑 needs a human',
+// Per-card status pill (glyph + word) shown on every non-backlog card. The
+// WORD is what carries the meaning; `cls` only adds a secondary colour cue
+// (Liav is red-weak — hue alone is never the signal, here or anywhere else in
+// this file). `failed` is the one that most needs to read unmistakably: it
+// now shares the Review lane with awaiting_review, so its pill is red AND
+// says "failed" in plain text.
+const STATUS_CHIPS = {
+    open:               { label: '○ open',             cls: 'st-open' },
+    claimed:            { label: '◔ claimed',           cls: 'st-claimed' },
+    running:            { label: '▶ running',           cls: 'st-running' },
+    awaiting_review:    { label: '👀 awaiting review',   cls: 'st-awaiting' },
+    changes_requested:  { label: '🔁 changes requested', cls: 'st-changes' },
+    needs_human:        { label: '🛑 needs a human',     cls: 'st-needs-human' },
+    failed:             { label: '✗ failed',            cls: 'st-failed' },
+    done:               { label: '✓ done',              cls: 'st-done' },
 };
 // What GitHub says about a card's checks. Every one of these is a WORD plus a glyph — the
 // colour is a secondary cue and never the signal (Liav is red-weak, and "is this PR red?"
@@ -55,10 +58,11 @@ const CI_CHIPS = {
     none:    { label: '– no ci',      cls: 'ci-none' },
     unknown: { label: '? ci unknown', cls: 'ci-unknown' },
 };
-// Columns that start collapsed in the mobile "Rows" accordion — low-traffic
+// Lanes that start collapsed in the mobile "Rows" accordion — low-traffic
 // buckets the user rarely needs open at a glance. Overridden + persisted per
-// user once they tap a caret.
-const KANBAN_DEFAULT_COLLAPSED = ['backlog', 'failed', 'done'];
+// user once they tap a caret. Review is deliberately NOT here: a failed run
+// now lives there and must stay visible, not buried behind a collapsed lane.
+const KANBAN_DEFAULT_COLLAPSED = ['backlog', 'done'];
 
 let _kanbanFilter = 'all';    // workflow path or 'all'
 
@@ -191,11 +195,14 @@ function _kCard(card) {
     // buttons below, without touching dispatcher.js's shared _runPrCell.
     const prRaw = _runPrCell(card.pr_url);
     const pr = prRaw ? `<span class="kanban-pr-wrap" onclick="event.stopPropagation()">${prRaw}</span>` : '';
-    // The Awaiting Review column also holds the rework loop's other two states, so a card
-    // that is NOT awaiting review says which one it is — in words. (Liav is red-weak: hue
-    // is never the only signal, here or anywhere.)
-    const stateChip = REVIEW_STATE_CHIPS[card.status]
-        ? `<span class="kanban-state-chip">${escHtml(REVIEW_STATE_CHIPS[card.status])}</span>`
+    // Every non-backlog card carries its own status pill — several lanes now hold more
+    // than one status (In Progress: claimed/running; Review: awaiting_review/
+    // changes_requested/needs_human/failed), so this is what tells two cards in the same
+    // lane apart. Text, deliberately: a pill's colour is a secondary cue, never the whole
+    // message (Liav is red-weak, here or anywhere).
+    const chipMeta = STATUS_CHIPS[card.status];
+    const stateChip = chipMeta
+        ? `<span class="kanban-state-chip ${chipMeta.cls}">${escHtml(chipMeta.label)}</span>`
         : '';
     // Merge button rides next to the PR badge on Awaiting Review cards —
     // that's where cards with open, unmerged PRs live. dispatcher.tick()
@@ -477,10 +484,13 @@ function _kCol(key, label, cards) {
 }
 
 function _kanbanFlatten(data) {
-    // Build seven buckets across all workflows: Backlog (BACKLOG.md bullets,
-    // read-only) + six run/task statuses. workflow_path is injected onto
-    // open_tasks + backlog_items so cards in those columns still get a
-    // workflow chip (the API exposes it only at the workflow level).
+    // Build seven per-status buckets across all workflows: Backlog (BACKLOG.md
+    // bullets, read-only) + six run/task statuses. This is unchanged from the
+    // old 7-column board — _lanesFromBuckets() below is what regroups these
+    // into the 5 rendered lanes, so this function still reads the API exactly
+    // as before. workflow_path is injected onto open_tasks + backlog_items so
+    // cards in those buckets still get a workflow chip (the API exposes it
+    // only at the workflow level).
     const buckets = { backlog: [], open: [], claimed: [], running: [], awaiting_review: [], failed: [], done: [] };
     const wfs = [];
     for (const wf of (data.workflows || [])) {
@@ -543,6 +553,31 @@ function _kanbanFlatten(data) {
     return { buckets, workflows: wfs };
 }
 
+// Bucket key order fixes the WITHIN-lane concat order for lanes that combine
+// more than one bucket — 'running' before 'claimed' (In Progress = running,
+// then claimed) and 'awaiting_review' before 'failed' (Review = the review
+// loop's cards, which already carry their own awaiting_review/
+// changes_requested/needs_human status per _kanbanFlatten's comment above,
+// followed by failed). The LANE each bucket lands in still comes from
+// laneOf() — this array only controls ordering within a lane, never which
+// lane a bucket is assigned to.
+const _KANBAN_BUCKET_ORDER = ['backlog', 'open', 'running', 'claimed', 'awaiting_review', 'failed', 'done'];
+
+// Regroups _kanbanFlatten's 7 per-status buckets into the 5 rendered lanes.
+// No card is dropped or duplicated: every bucket key above is consumed
+// exactly once, laneOf() covers every one of them (see
+// tests/kanban_lane_model.test.mjs's completeness guard), and each bucket's
+// existing sort survives the concat untouched.
+function _lanesFromBuckets(buckets) {
+    const lanes = {};
+    for (const key of KANBAN_LANES) lanes[key] = [];
+    for (const bucketKey of _KANBAN_BUCKET_ORDER) {
+        const lane = laneOf(bucketKey);
+        lanes[lane] = lanes[lane].concat(buckets[bucketKey] || []);
+    }
+    return lanes;
+}
+
 function _renderKanbanFilters(workflows, mergeableCount = 0) {
     const wrap = $('#kanban-filters');
     if (!workflows.length) { wrap.innerHTML = ''; return; }
@@ -580,7 +615,7 @@ function setKanbanFilter(wf) {
 // --- Mobile layout: Swipe carousel vs. Rows accordion ---
 //
 // The mobile board offers two layouts, gated entirely behind the ≤768px media
-// query; desktop (≥769px) keeps its 7-column grid untouched. The active layout
+// query; desktop (≥769px) keeps its 5-lane grid untouched. The active layout
 // is a class on #work-board so both the board and the nav strip react to it.
 
 function _applyKanbanLayout() {
@@ -625,17 +660,17 @@ function toggleKanbanCol(col) {
     }
 }
 
-// Quick-nav strip (swipe layout only): one chip per column with its live
-// count; tapping snap-scrolls the carousel to that column.
-function _renderKanbanNav(buckets) {
+// Quick-nav strip (swipe layout only): one chip per lane with its live
+// count; tapping snap-scrolls the carousel to that lane.
+function _renderKanbanNav(lanes) {
     const strip = $('#kanban-nav-strip');
     if (!strip) return;
     const apply = arr => _kanbanFilter === 'all' ? arr : arr.filter(c => c.workflow_path === _kanbanFilter);
-    strip.innerHTML = KANBAN_COLS.map(k => {
-        const n = apply(buckets[k] || []).length;
+    strip.innerHTML = KANBAN_LANES.map(k => {
+        const n = apply(lanes[k] || []).length;
         return `<button class="kanban-nav-chip" type="button" data-col="${k}"
                        onclick="chela.kanbanNavTo('${k}')">
-                    <span class="kanban-nav-label">${KANBAN_COL_LABELS[k]}</span>
+                    <span class="kanban-nav-label">${KANBAN_LANE_LABELS[k]}</span>
                     <span class="kanban-nav-count">${n}</span>
                 </button>`;
     }).join('');
@@ -679,35 +714,32 @@ function renderKanban(data) {
     _kanbanCardIndex.length = 0;
 
     const { buckets, workflows } = _kanbanFlatten(data);
+    const lanes = _lanesFromBuckets(buckets);
 
-    // Apply the workflow filter to every column (Open included).
+    // Apply the workflow filter to every lane (Backlog/To Do included).
     const apply = arr => _kanbanFilter === 'all' ? arr : arr.filter(c => c.workflow_path === _kanbanFilter);
 
     // Merge-all count = awaiting_review cards that GitHub reports MERGEABLE in
     // the active filter. Drives the toolbar button's label + visibility. The status test
-    // is load-bearing since the rework loop shares this column: a `changes_requested` PR
-    // is perfectly MERGEABLE and must never be counted into a Merge-all — it is the PR a
-    // reviewer just REJECTED. (The server refuses it too; this keeps the count honest.)
+    // is load-bearing since the Review lane shares its cards across four statuses: a
+    // `changes_requested` PR is perfectly MERGEABLE and must never be counted into a
+    // Merge-all — it is the PR a reviewer just REJECTED. A `failed` run has no PR at all
+    // most of the time and the status check excludes it either way. (The server refuses
+    // all of these too; this keeps the count honest.)
     // ⛔ And a PR whose CI is RED (or pending, or never read) is never counted either — the
     // server skips it in the batch, and a count that included it would be promising a merge
     // that cannot happen. `none` (a repo with no CI at all) still counts: no checks is not
     // the same as failing checks.
-    const mergeableCount = apply(buckets.awaiting_review)
+    const mergeableCount = apply(lanes.review)
         .filter(c => c.status === 'awaiting_review' && c.pr_mergeable === 'MERGEABLE'
                      && (c.pr_checks === 'passing' || c.pr_checks === 'none')).length;
     _renderKanbanFilters(workflows, mergeableCount);
-    _renderKanbanNav(buckets);
+    _renderKanbanNav(lanes);
     _applyKanbanLayout();
 
-    board.innerHTML = [
-        _kCol('backlog',         'Backlog',         apply(buckets.backlog)),
-        _kCol('open',            'Open',            apply(buckets.open)),
-        _kCol('claimed',         'Claimed',         apply(buckets.claimed)),
-        _kCol('running',         'Running',         apply(buckets.running)),
-        _kCol('awaiting_review', 'Awaiting Review', apply(buckets.awaiting_review)),
-        _kCol('failed',          'Failed',          apply(buckets.failed)),
-        _kCol('done',            'Done',            apply(buckets.done)),
-    ].join('');
+    board.innerHTML = KANBAN_LANES
+        .map(key => _kCol(key, KANBAN_LANE_LABELS[key], apply(lanes[key])))
+        .join('');
 }
 
 
