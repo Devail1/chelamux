@@ -1244,6 +1244,95 @@ def _base_branch_report(declared: dict[str, dict], obs: Observation) -> list[Fin
     return out
 
 
+# --- fact: can every unattended BASE-BRANCH WRITER actually reach a remote? -----------
+#
+# CMX-174 moved the tracker strike and the trial ledger (see `dispatcher._strike_merged_
+# tasks` / `dispatcher._write_trial_ledger`) onto an isolated, chela-owned worktree,
+# detached from whatever the human's interactive checkout happens to be doing — a
+# dogfood branch, an uncommitted edit, a rebase no longer disables them, because they
+# never read that checkout's HEAD or working tree at all. What's left, deliberately, is
+# the one precondition that genuinely is NOT chela's to fix: `_base_write_worktree`
+# needs a git remote to fetch and push through. With none, it logs a WARNING and skips —
+# every tick, forever — and nothing else ever says so: merged tasks keep rendering as
+# open cards, and a trial ledger opted into for an honesty bar (lean-alpha's deflated-
+# Sharpe N) silently stops growing. This fact is the one thing worth surfacing about that
+# writer now that its old failure mode (the human's checkout) cannot happen any more.
+
+def _base_write_targets() -> dict[str, dict]:
+    """``{workflow path: {repo, base_branch}}`` for every dispatched workflow that parses
+    AND needs an unattended base-branch write: a markdown tracker (the strike always
+    applies to one) or a `trial_ledger:` opt-in (any tracker kind)."""
+    out: dict[str, dict] = {}
+    for path in dispatched_workflows():
+        if not path.exists():
+            continue
+        try:
+            wf = load_workflow(path)
+        except Exception:
+            continue
+        try:
+            source = get_source(wf)
+        except Exception:
+            continue
+        needs_write = getattr(source, "path", None) is not None or bool(wf.get("trial_ledger"))
+        if not needs_write:
+            continue
+        out[str(path)] = {
+            "repo": str(path.parent),
+            "base_branch": str(wf.get("workspace", "base_branch", default="master")),
+        }
+    return out
+
+
+def _has_remote(repo: str) -> bool:
+    """Ask git directly: does this repo have ANY remote configured?"""
+    out = subprocess.run(
+        ["git", "-C", repo, "remote"], capture_output=True, text=True, timeout=15,
+    )
+    return out.returncode == 0 and bool(out.stdout.strip())
+
+
+def _base_write_read() -> Observation:
+    declared = _base_write_targets()
+    if not declared:
+        return observed({})                        # nothing needs an unattended write
+    if shutil.which("git") is None:
+        return cannot_verify(
+            "git is not on PATH — chela cannot ask whether these repos have a remote to "
+            "write the tracker strike / trial ledger through.")
+    return observed({
+        path: _has_remote(claim["repo"]) for path, claim in declared.items()
+    })
+
+
+def _base_write_report(declared: dict[str, dict], obs: Observation) -> list[Finding]:
+    if not declared:
+        return []
+    found: dict[str, bool] = obs.value or {}
+    missing = [
+        (path, claim) for path, claim in sorted(declared.items())
+        if not found.get(path, True)
+    ]
+    out = [
+        Finding(
+            ERROR,
+            f"{Path(path).name}: {claim['repo']} has no git remote — the tracker strike "
+            "/ trial ledger cannot write base_branch",
+            "`_base_write_worktree` fetches `origin` before every unattended write to "
+            f"{claim['base_branch']!r}; with no remote configured it logs a WARNING and "
+            "skips, EVERY tick, forever. Merged tasks keep rendering as open cards, and "
+            f"a trial ledger opted into (if any) silently stops growing. Add an `origin` "
+            f"remote to {claim['repo']}.",
+        )
+        for path, claim in missing
+    ]
+    if not out:
+        out.append(Finding(
+            OK, f"{len(declared)} dispatched workflow(s) needing base-branch writes: each "
+                "repo has a remote to write the tracker strike / trial ledger through"))
+    return out
+
+
 # --- fact: the dispatch hold — a paused queue is a DISABLED SUBSYSTEM -----------------
 
 def _hold_read() -> Observation:
@@ -1874,6 +1963,18 @@ def facts() -> list[Fact]:
             declare=_base_branches,
             read_back=_base_branch_read,
             report=_base_branch_report,
+        ),
+        Fact(
+            name="dispatch.base_write_remote",
+            declared_by="nothing — chela never records this; a workflow needing an "
+                        "unattended base-branch write (a markdown tracker's strike, or "
+                        "a `trial_ledger:` opt-in) either has a repo remote to write "
+                        "through or it does not",
+            owned_by="git — `git -C <repo> remote`, the one precondition "
+                     "`dispatcher._base_write_worktree` cannot self-heal",
+            declare=_base_write_targets,
+            read_back=_base_write_read,
+            report=_base_write_report,
         ),
         Fact(
             name="dispatch.hold",
