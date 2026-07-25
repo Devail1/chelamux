@@ -3428,7 +3428,19 @@ input[type="text"]:focus, textarea:focus, select:focus {
     body.term-mobile-full .term-switcher,
     body.term-mobile-full .term-keybar,
     body.term-mobile-full .term-ctx-bar { display: none !important; }
-    body.term-mobile-full .term-single .term-pane { height: 100dvh; }
+    /* True overlay, not just a tall box: the pane normally sits BELOW the
+       topbar (~53px) in flow, so a bare `height:100dvh` overshoots the
+       viewport and pushes the terminal's bottom rows under the fold. Pin it
+       to the viewport (fixed + top/left/right:0) so 100dvh means the whole
+       screen — topbar included. z-index 100 clears the topbar (auto) and the
+       keybar (35) but stays under modals (200). The pane's own .gs-head (with
+       the collapse toggle + × kill) rides at top:0, so exit stays reachable. */
+    body.term-mobile-full .term-single .term-pane {
+        position: fixed;
+        top: 0; left: 0; right: 0;
+        height: 100dvh;
+        z-index: 100;
+    }
     /* .term-frame normally reserves --term-ctx-bar-h of bottom margin for the
        now-hidden context bar (see the base .term-frame rule) — zero it here
        so that space isn't left as a dead strip under the terminal. */
