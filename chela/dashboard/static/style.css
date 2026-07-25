@@ -2660,12 +2660,10 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .term-single .term-pane {
         height: calc(100dvh - var(--gs-head-h) - var(--term-switcher-h) - var(--term-keybar-h, 0px) - var(--term-ctx-bar-h) - env(safe-area-inset-bottom));
     }
-    /* The pane sits inset by .canvas's (14px, shared chrome — left alone) AND
-       .content's (12px, above in this same block) horizontal padding —
-       reclaim just .content's own 12px each side so the pane itself runs
-       closer to the screen edges without touching shared ancestor padding
-       that every other mobile panel also relies on. */
-    .term-single { margin: 0 -12px; }
+    /* NB: the pane is DELIBERATELY left inset by .content's horizontal padding
+       (no width reclaim). That side gutter is what lets a touch-drag beside the
+       terminal scroll the PAGE instead of being swallowed by the iframe — a
+       full-bleed pane traps the scroll. Do not re-add a negative margin here. */
     #term-bar { max-height: 60vh; overflow-y: auto; }
 
     /* Dense layout: Special & Ctrl as full-width rows; D-pad + Nav + Scroll
