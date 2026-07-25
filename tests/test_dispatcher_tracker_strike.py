@@ -18,7 +18,7 @@ import pytest
 
 from chela.sources.markdown import MarkdownSource, _title_id, strike_lines
 from chela import config, dispatcher
-from chela.workflow import WorkflowDef
+from chela.workflow import WorkflowDef, resolve_workspace_root
 
 
 # --- the strike itself (pure, no repo) -------------------------------------
@@ -131,34 +131,57 @@ def _log(repo: Path) -> list[str]:
     return out.stdout.split("\n")
 
 
+# The strike lands through the isolated base-write worktree (see
+# `dispatcher._base_write_worktree`), never `repo`'s own working tree — that is the whole
+# point of the fix (CMX-174). So the ground truth these tests check is what actually
+# landed on `origin`, not `repo`'s files; `repo` itself is asserted UNTOUCHED throughout.
+
+def _origin(repo: Path) -> Path:
+    return repo.parent / "origin.git"
+
+
+def _origin_log(repo: Path, ref: str = "dev") -> list[str]:
+    out = subprocess.run(
+        ["git", "--git-dir", str(_origin(repo)), "log", "--format=%s", ref],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.split("\n")
+
+
+def _origin_show(repo: Path, rel: str, ref: str = "dev") -> str:
+    out = subprocess.run(
+        ["git", "--git-dir", str(_origin(repo)), "show", f"{ref}:{rel}"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout
+
+
+def _base_write_wt(repo: Path) -> Path:
+    return resolve_workspace_root(_wf(repo)) / dispatcher.BASE_WRITE_DIRNAME
+
+
 def test_strike_commits_and_pushes_to_the_base_branch(repo):
     source = _source(repo)
     alpha, beta = (t.id for t in source.list_open_tasks())
 
     assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 1
 
-    assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [ ] beta\n"
-    assert "chore(TODO.md): strike 1 merged task" in _log(repo)[0]
-    # It landed on the remote, not just locally.
-    local = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-    ).stdout
-    remote = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "origin/dev"], capture_output=True, text=True, check=True
-    ).stdout
-    assert local == remote
+    assert _origin_show(repo, "TODO.md") == "- [x] alpha\n- [ ] beta\n"
+    assert "chore(TODO.md): strike 1 merged task" in _origin_log(repo)[0]
+    # The human's interactive checkout — never the writer — is left exactly alone.
+    assert (repo / "TODO.md").read_text() == "- [ ] alpha\n- [ ] beta\n"
 
 
 def test_two_runs_reconciling_together_produce_one_commit(repo):
     source = _source(repo)
     ids = [t.id for t in source.list_open_tasks()]
-    before = len(_log(repo))
+    before = len(_origin_log(repo))
 
     assert dispatcher._strike_merged_tasks(_wf(repo), source, ids) == 2
 
-    assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [x] beta\n"
-    assert len(_log(repo)) == before + 1  # ONE commit, not one per task
-    assert "strike 2 merged tasks" in _log(repo)[0]
+    assert _origin_show(repo, "TODO.md") == "- [x] alpha\n- [x] beta\n"
+    assert len(_origin_log(repo)) == before + 1  # ONE commit, not one per task
+    assert "strike 2 merged tasks" in _origin_log(repo)[0]
 
 
 def test_strike_fast_forwards_a_stale_base_branch_before_writing(repo, tmp_path):
@@ -177,57 +200,80 @@ def test_strike_fast_forwards_a_stale_base_branch_before_writing(repo, tmp_path)
     assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 1
 
     # Struck alpha AND kept the orchestrator's new item. No conflict, no clobber.
-    assert (repo / "TODO.md").read_text() == "- [ ] brand new item\n- [x] alpha\n- [ ] beta\n"
+    assert _origin_show(repo, "TODO.md") == "- [ ] brand new item\n- [x] alpha\n- [ ] beta\n"
 
 
-def test_strike_skips_when_the_checkout_is_not_on_the_base_branch(repo):
+def test_strike_lands_even_when_the_human_checkout_is_on_a_different_branch(repo):
+    """The headline bug (CMX-174): a human dogfooding in the shared checkout — a branch
+    switch, an in-progress rebase — must never silently disable the unattended strike."""
     subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "some-feature"], check=True)
     source = _source(repo)
     alpha = next(t.id for t in source.list_open_tasks() if t.title == "alpha")
 
-    assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 0
-    assert (repo / "TODO.md").read_text() == "- [ ] alpha\n- [ ] beta\n"  # untouched
+    assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 1
+    assert _origin_show(repo, "TODO.md") == "- [x] alpha\n- [ ] beta\n"
+    # The human's own checkout is left exactly where they put it.
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head == "some-feature"
 
 
-def test_strike_skips_when_a_human_has_the_tracker_dirty(repo):
+def test_strike_lands_even_when_a_human_has_the_tracker_dirty(repo):
     (repo / "TODO.md").write_text("- [ ] alpha\n- [ ] beta\n- [ ] a human is mid-edit\n")
     source = _source(repo)
     alpha = next(t.id for t in source.list_open_tasks() if t.title == "alpha")
 
-    assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 0
+    assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 1
+    assert _origin_show(repo, "TODO.md") == "- [x] alpha\n- [ ] beta\n"
     # The human's uncommitted work is still there, unstaged and uncommitted.
-    assert "a human is mid-edit" in (repo / "TODO.md").read_text()
-    assert "- [ ] alpha" in (repo / "TODO.md").read_text()
+    assert (repo / "TODO.md").read_text() == "- [ ] alpha\n- [ ] beta\n- [ ] a human is mid-edit\n"
 
 
-def test_strike_skips_when_the_base_branch_has_diverged(repo, tmp_path):
-    # Local dev has a commit the remote doesn't, and the remote has one local
-    # doesn't → ff-only fails. Leave it for a human; never force, never rebase.
-    other = tmp_path / "other"
-    subprocess.run(["git", "clone", str(tmp_path / "origin.git"), str(other)], check=True, capture_output=True)
-    for k, v in (("user.email", "t@example.com"), ("user.name", "T"), ("commit.gpgsign", "false")):
-        subprocess.run(["git", "-C", str(other), "config", k, v], check=True, capture_output=True)
-    (other / "other.txt").write_text("remote side\n")
-    subprocess.run(["git", "-C", str(other), "add", "other.txt"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(other), "commit", "-m", "remote"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(other), "push"], check=True, capture_output=True)
-
+def test_strike_ignores_local_divergence_in_the_human_checkout(repo):
+    # An unpushed local commit in the human's checkout — unrelated to the tracker,
+    # and with nothing to do with the isolated writer, which never reads `repo`'s
+    # working tree or its branch pointer at all.
     (repo / "local.txt").write_text("local side\n")
     subprocess.run(["git", "-C", str(repo), "add", "local.txt"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "local"], check=True, capture_output=True)
 
     source = _source(repo)
     alpha = next(t.id for t in source.list_open_tasks() if t.title == "alpha")
-    assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 0
-    assert (repo / "TODO.md").read_text() == "- [ ] alpha\n- [ ] beta\n"
-    assert _log(repo)[0] == "local"  # nothing committed on top
+    assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 1
+    assert _origin_show(repo, "TODO.md") == "- [x] alpha\n- [ ] beta\n"
+    assert _log(repo)[0] == "local"  # the human's own local commit is untouched
+
+
+def test_strike_self_heals_a_worktree_left_dirty_by_a_crashed_previous_write(repo):
+    """Nothing but `_base_write_worktree` ever visits the isolated worktree, so anything
+    sitting there is leftover from an interrupted previous write — safe to discard, never
+    a human's work. This is the self-heal (CMX-174 layer 2): reuse resets and cleans it
+    before every write, rather than failing closed on its own past mess."""
+    source = _source(repo)
+    alpha = next(t.id for t in source.list_open_tasks() if t.title == "alpha")
+    wt = _base_write_wt(repo)
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "--detach", str(wt), "dev"],
+        check=True, capture_output=True,
+    )
+    (wt / "TODO.md").write_text("garbage left behind by a crash\n")
+    (wt / "untracked-leftover.txt").write_text("junk\n")
+
+    assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 1
+
+    assert _origin_show(repo, "TODO.md") == "- [x] alpha\n- [ ] beta\n"
+    assert not (wt / "untracked-leftover.txt").exists()
 
 
 def test_strike_rolls_back_its_commit_when_the_push_is_rejected(repo):
     source = _source(repo)
     alpha = next(t.id for t in source.list_open_tasks() if t.title == "alpha")
-    head_before = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    origin_before = subprocess.run(
+        ["git", "--git-dir", str(_origin(repo)), "rev-parse", "dev"],
+        capture_output=True, text=True, check=True,
     ).stdout.strip()
 
     real_git = dispatcher._git
@@ -240,15 +286,17 @@ def test_strike_rolls_back_its_commit_when_the_push_is_rejected(repo):
     with patch.object(dispatcher, "_git", side_effect=flaky_git):
         assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 0
 
-    # Rolled all the way back — no orphan commit, no half-written tracker — so
-    # the next tick recomputes the pending strike and simply retries.
-    head_after = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    # Rolled all the way back on origin — no orphan commit, no half-written tracker —
+    # so the next tick recomputes the pending strike and simply retries.
+    origin_after = subprocess.run(
+        ["git", "--git-dir", str(_origin(repo)), "rev-parse", "dev"],
+        capture_output=True, text=True, check=True,
     ).stdout.strip()
-    assert head_after == head_before
-    assert (repo / "TODO.md").read_text() == "- [ ] alpha\n- [ ] beta\n"
+    assert origin_after == origin_before
+    assert (repo / "TODO.md").read_text() == "- [ ] alpha\n- [ ] beta\n"  # human checkout untouched
     status = subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True, check=True
+        ["git", "-C", str(_base_write_wt(repo)), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
     ).stdout
     assert status.strip() == ""
 
@@ -264,13 +312,13 @@ def test_strike_is_a_noop_for_a_source_that_cannot_close_tasks(repo):
 
 def test_strike_logs_and_skips_a_task_that_is_gone_from_the_tracker(repo, caplog):
     source = _source(repo)
-    before = len(_log(repo))
+    before = len(_origin_log(repo))
 
     with caplog.at_level("WARNING"):
         assert dispatcher._strike_merged_tasks(_wf(repo), source, ["deadbeef0000"]) == 0
 
     assert "not guessing" in caplog.text  # skipped AND logged, never guessed
-    assert len(_log(repo)) == before  # nothing committed
+    assert len(_origin_log(repo)) == before  # nothing committed
 
 
 # --- the tick: a merged PR is what finishes a run, and what strikes the line -
@@ -337,7 +385,7 @@ def test_tick_finishes_a_run_when_its_PR_MERGES_and_strikes_the_line(ticking, mo
     assert _status(alpha) == "done"
     assert summary["reconciled_done"] == 1
     assert summary["tracker_struck"] == 1
-    assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [ ] beta\n"
+    assert _origin_show(repo, "TODO.md") == "- [x] alpha\n- [ ] beta\n"
 
 
 def test_tick_leaves_an_open_PR_awaiting_review_and_does_not_strike(ticking, monkeypatch):
@@ -356,22 +404,30 @@ def test_tick_leaves_an_open_PR_awaiting_review_and_does_not_strike(ticking, mon
 
 def test_tick_retries_a_strike_that_could_not_land(ticking, monkeypatch):
     """The pending set is DERIVED from the runs table, never remembered — so a
-    strike blocked by a dirty tracker is simply retried on the next tick."""
+    strike blocked by e.g. a transient fetch failure is simply retried on the
+    next tick (a human mid-edit in the shared checkout no longer blocks it at
+    all — see test_strike_lands_even_when_a_human_has_the_tracker_dirty)."""
     repo = ticking
     wf_path = repo / "WORKFLOW.md"
     alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
     _seed_run(wf_path, alpha)
     monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("merged", "MERGEABLE"))
 
-    # Tick 1: a human is mid-edit, so the strike must not land...
-    (repo / "TODO.md").write_text("- [ ] alpha\n- [ ] beta\n- [ ] human edit\n")
-    assert dispatcher.tick(wf_path)["tracker_struck"] == 0
+    # Tick 1: the fetch fails transiently (a network blip) — the strike must not land...
+    real_git = dispatcher._git
+
+    def flaky_git(repo_path, *args, **kw):
+        if args and args[0] == "fetch":
+            return subprocess.CompletedProcess(args, 1, "", "network blip")
+        return real_git(repo_path, *args, **kw)
+
+    with patch.object(dispatcher, "_git", side_effect=flaky_git):
+        assert dispatcher.tick(wf_path)["tracker_struck"] == 0
     assert _status(alpha) == "done"  # the run is still finished — the PR merged
 
-    # ...tick 2: the human committed; the strike is recomputed and lands.
-    subprocess.run(["git", "-C", str(repo), "commit", "-am", "human"], check=True, capture_output=True)
+    # ...tick 2: the network recovers; the strike is recomputed and lands.
     assert dispatcher.tick(wf_path)["tracker_struck"] == 1
-    assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [ ] beta\n- [ ] human edit\n"
+    assert _origin_show(repo, "TODO.md") == "- [x] alpha\n- [ ] beta\n"
 
 
 # --- the out-of-band-merge guard (CMX-140) ----------------------------------
@@ -408,7 +464,7 @@ def test_tick_reconciles_a_failed_run_whose_PR_merged_out_of_band(ticking):
 
     assert _status(alpha) == "done"
     assert summary["tracker_struck"] == 1
-    assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [ ] beta\n"
+    assert _origin_show(repo, "TODO.md") == "- [x] alpha\n- [ ] beta\n"
 
 
 def test_a_failed_run_with_no_merge_still_retries(ticking, monkeypatch):

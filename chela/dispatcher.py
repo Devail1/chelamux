@@ -479,49 +479,80 @@ def _claim_order(wf: WorkflowDef, source, on_disk: list[Task]) -> list[Task]:
     return remote_tasks + unpushed
 
 
-def _base_write_precheck(repo: Path, base: str, rel: str, what: str) -> bool:
-    """Preconditions shared by every unattended writer to ``base_branch`` — the
+BASE_WRITE_DIRNAME = "_base-write"
+
+
+def _base_write_worktree(repo: Path, base: str, root: Path, what: str) -> Path | None:
+    """The isolated, chela-owned checkout every unattended ``base_branch`` writer — the
     tracker strike and the trial ledger (see :func:`_strike_merged_tasks` and
-    :func:`_write_trial_ledger`): only the branch we were told to write, never a
-    human's in-progress edit swept into our commit, and fast-forwarded to the
-    remote before we touch anything. FAILS CLOSED — a False here means the
-    caller writes nothing this tick and simply retries the next one.
+    :func:`_write_trial_ledger`) — actually reads, edits, commits and pushes from.
+    NEVER ``repo`` itself.
+
+    ``repo`` is the human's interactive checkout. It can be on any branch, mid-rebase,
+    with edits staged, at whatever moment a tick happens to fire — and none of that has
+    any bearing on whether chela is allowed to advance ``base_branch``. The old precheck
+    read ``repo``'s HEAD and working tree and skipped (silently, forever, until a human
+    noticed the warning log) the instant either didn't match what an unattended writer
+    needs. A DETACHED worktree at ``root/_base-write`` — reused across ticks, one per
+    workspace root — sidesteps the whole class of failure: nothing but this function ever
+    touches it, so its own staleness or dirt is never a human's to have caused, and every
+    precondition below is a self-heal, not a "leave it for a human" skip. Detached, not a
+    branch checkout, on purpose: ``repo`` (or a rework worktree) very often already has
+    ``base`` checked out, and ``git worktree add <branch>`` refuses a branch that is live
+    anywhere else — detached HEAD has no such conflict, and ``git push HEAD:base`` does
+    not care whether HEAD is a branch or a bare commit.
+
+    :func:`worktree.detached_worktree` does the self-heal for free: reusing an existing
+    worktree resets it (``checkout --detach --force``) and cleans it (``clean -fdx``)
+    before handing it back, discarding anything left over from an interrupted previous
+    write — which is always safe here, since nothing legitimate is ever left uncommitted
+    in this worktree between calls.
+
+    FAILS CLOSED only on what is genuinely not ours to fix: no remote to write through,
+    or a fetch that fails. Returns ``None`` when the caller should write nothing this
+    tick and simply retry the next one; otherwise the worktree path, fetched to
+    ``origin/<base>`` and clean.
     """
-    head = _git_out(_git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
-    if head != base:
-        log.warning("%s skipped: %s is on %r, not %r", what, repo, head or "?", base)
-        return False
-
-    status = _git(repo, "status", "--porcelain", "--", rel)
-    if not _git_ok(status):
-        return False
-    if status.stdout.strip():
-        log.warning("%s skipped: %s has uncommitted changes", what, rel)
-        return False
-
-    # Get level with the remote first, fast-forward only: a diverged base branch
-    # is a skip-and-retry, never a rebase we weren't asked for and never a force.
     remote = _git_out(_git(repo, "remote"))
-    if remote:
-        if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
-            log.warning("%s skipped: could not fetch origin/%s", what, base)
-            return False
-        if not _git_ok(_git(repo, "merge", "--ff-only", "FETCH_HEAD")):
-            log.warning(
-                "%s skipped: %s has diverged from origin/%s — leaving it for a human",
-                what, base, base,
-            )
-            return False
-    return True
+    if not remote:
+        log.warning("%s skipped: %s has no remote to write %s through", what, repo, base)
+        return None
+    if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
+        log.warning("%s skipped: could not fetch origin/%s", what, base)
+        return None
+
+    # Resolve FETCH_HEAD to a concrete sha IN `repo`'s context, right here — FETCH_HEAD
+    # is a per-worktree pseudo-ref (`repo/.git/FETCH_HEAD`, not the shared common dir), so
+    # handing the literal string to `detached_worktree` works for a brand NEW worktree
+    # (created via `git -C repo worktree add`, still `repo`'s context) but silently fails
+    # to resolve on REUSE (`git -C wt checkout`, the isolated worktree's own context) —
+    # not a hard failure, just a `BranchGone` neither raises: `checkout` errors out, the
+    # fallback path deletes and recreates the whole worktree instead of the fast reset
+    # this function's docstring promises, every single tick. A concrete sha resolves
+    # identically from any worktree sharing this repo's object store.
+    sha = _git_out(_git(repo, "rev-parse", "FETCH_HEAD"))
+    if not sha:
+        log.warning("%s skipped: FETCH_HEAD did not resolve after fetching origin/%s", what, base)
+        return None
+
+    wt_path = (root / BASE_WRITE_DIRNAME).resolve()
+    try:
+        wt_path, _ = detached_worktree(repo, sha, wt_path)
+    except BranchGone:
+        log.warning("%s skipped: origin/%s did not resolve after fetch", what, base)
+        return None
+    except subprocess.CalledProcessError as e:
+        log.warning("%s skipped: could not prepare the base-write worktree: %s", what, e)
+        return None
+    return wt_path
 
 
-def _base_write_commit_push(repo: Path, base: str, rel: str, subject: str, body: str, what: str) -> bool:
-    """Commit ``rel`` (already rewritten on disk by the caller — possibly a BRAND
-    NEW path, e.g. the trial ledger's first-ever write) and push to
-    ``base_branch``, rolling the local commit back if the push is rejected —
-    someone else pushed between our fetch and our push, so this retries next
-    tick rather than force-pushing. Never commits a path other than ``rel``,
-    whatever else a human may have staged in this checkout.
+def _base_write_commit_push(wt: Path, base: str, rel: str, subject: str, body: str, what: str) -> bool:
+    """Commit ``rel`` (already rewritten on disk by the caller, in the isolated worktree
+    ``wt`` — see :func:`_base_write_worktree` — possibly a BRAND NEW path, e.g. the trial
+    ledger's first-ever write) and push to ``base_branch``, rolling the local commit back
+    if the push is rejected — someone else pushed between our fetch and our push, so this
+    retries next tick rather than force-pushing. Never commits a path other than ``rel``.
 
     ``git commit -- rel`` alone (no prior ``git add``) only picks up changes to
     a path git already tracks; a never-before-committed ``rel`` is silently
@@ -532,33 +563,31 @@ def _base_write_commit_push(repo: Path, base: str, rel: str, subject: str, body:
     errors out and would leave it staged-but-uncommitted forever, failing
     every future tick's "clean tree" precheck.
     """
-    parent = _git_out(_git(repo, "rev-parse", "HEAD"))
-    existed_before = bool(parent) and _git_ok(_git(repo, "cat-file", "-e", f"{parent}:{rel}"))
+    parent = _git_out(_git(wt, "rev-parse", "HEAD"))
+    existed_before = bool(parent) and _git_ok(_git(wt, "cat-file", "-e", f"{parent}:{rel}"))
 
     def _restore() -> None:
         if existed_before:
-            _git(repo, "checkout", "HEAD", "--", rel)
+            _git(wt, "checkout", "HEAD", "--", rel)
         else:
-            _git(repo, "reset", "--", rel)
-            (repo / rel).unlink(missing_ok=True)
+            _git(wt, "reset", "--", rel)
+            (wt / rel).unlink(missing_ok=True)
 
-    if not _git_ok(_git(repo, "add", "--", rel)):
+    if not _git_ok(_git(wt, "add", "--", rel)):
         log.warning("%s: git add failed for %s", what, rel)
         return False
-    if not _git_ok(_git(repo, "commit", "-m", subject, "-m", body, "--", rel)):
+    if not _git_ok(_git(wt, "commit", "-m", subject, "-m", body, "--", rel)):
         log.warning("%s: commit failed; restoring %s", what, rel)
         _restore()
         return False
 
-    remote = _git_out(_git(repo, "remote"))
-    if remote:
-        mine = _git_out(_git(repo, "rev-parse", "HEAD"))
-        if not _git_ok(_git(repo, "push", "origin", f"HEAD:{base}", timeout=GIT_NET_TIMEOUT_SECONDS)):
-            if parent and mine and _git_out(_git(repo, "rev-parse", "HEAD")) == mine:
-                _git(repo, "reset", "--soft", parent)
-                _restore()
-            log.warning("%s: push to %s rejected — rolled back, retrying next tick", what, base)
-            return False
+    mine = _git_out(_git(wt, "rev-parse", "HEAD"))
+    if not _git_ok(_git(wt, "push", "origin", f"HEAD:{base}", timeout=GIT_NET_TIMEOUT_SECONDS)):
+        if parent and mine and _git_out(_git(wt, "rev-parse", "HEAD")) == mine:
+            _git(wt, "reset", "--soft", parent)
+            _restore()
+        log.warning("%s: push to %s rejected — rolled back, retrying next tick", what, base)
+        return False
     return True
 
 
@@ -577,10 +606,13 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
     by fuzzy text, and the strike is idempotent — see markdown.strike_lines.
 
     This runs unattended under PM2, so every step FAILS CLOSED — see
-    :func:`_base_write_precheck` / :func:`_base_write_commit_push`, which this
-    shares with :func:`_write_trial_ledger`. A missed checkbox is cosmetic and
-    self-heals — the pending set is recomputed from the runs table on every
-    tick, not remembered — whereas a mangled base branch is not.
+    :func:`_base_write_worktree` / :func:`_base_write_commit_push`, which this
+    shares with :func:`_write_trial_ledger`. It writes through the isolated
+    base-write worktree, never ``wf.path.parent`` (the human's interactive
+    checkout) — see :func:`_base_write_worktree` for why. A missed checkbox is
+    cosmetic and self-heals — the pending set is recomputed from the runs
+    table on every tick, not remembered — whereas a mangled base branch is
+    not.
 
     Returns the number of lines actually struck.
     """
@@ -599,14 +631,16 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
         log.warning("tracker strike skipped: %s is outside the repo %s", tracker, repo)
         return 0
 
-    if not _base_write_precheck(repo, base, rel, "tracker strike"):
+    root = resolve_workspace_root(wf)
+    wt = _base_write_worktree(repo, base, root, "tracker strike")
+    if wt is None:
         return 0
 
     try:
-        results = close_tasks(task_ids)
+        results = close_tasks(task_ids, at=wt / rel)
     except OSError as e:
         log.warning("tracker strike failed to write %s: %s", rel, e)
-        _git(repo, "checkout", "--", rel)
+        _git(wt, "checkout", "--", rel)
         return 0
 
     for tid, outcome in sorted(results.items()):
@@ -623,7 +657,7 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
 
     subject = f"chore({rel}): strike {len(struck)} merged task" + ("s" if len(struck) > 1 else "")
     body = "\n".join(f"- {tid}" for tid in struck)
-    if not _base_write_commit_push(repo, base, rel, subject, body, "tracker strike"):
+    if not _base_write_commit_push(wt, base, rel, subject, body, "tracker strike"):
         return 0
 
     log.info("tracker strike: marked %d task(s) done on %s: %s", len(struck), base, ", ".join(struck))
@@ -744,8 +778,10 @@ def reconcile_trial_ledger(existing_text: str, rows: list[sqlite3.Row]) -> tuple
 def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
     """Project this workflow's `runs` table onto its trial ledger, on base_branch, in
     ONE commit — see :func:`reconcile_trial_ledger` for the merge and
-    :func:`_base_write_precheck` / :func:`_base_write_commit_push` for the unattended-
-    write discipline this shares with :func:`_strike_merged_tasks`.
+    :func:`_base_write_worktree` / :func:`_base_write_commit_push` for the unattended-
+    write discipline this shares with :func:`_strike_merged_tasks`. Writes through the
+    isolated base-write worktree, never `wf.path.parent` (the human's interactive
+    checkout) — see :func:`_base_write_worktree` for why.
 
     Opt-in via `trial_ledger: <path>` (CMX-105) — a workflow without the key returns 0
     immediately, no git touched, no behavior change. Scoped to `workflow_path`, same as
@@ -758,8 +794,6 @@ def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
     if rel is None:
         return 0
 
-    repo = wf.path.parent
-    path = repo / rel
     rows = conn.execute(
         "SELECT task_id, started_at, status, attempt, pr_state FROM runs WHERE workflow_path=?",
         (str(wf.path),),
@@ -776,23 +810,32 @@ def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
             log.warning("trial ledger: %s is not valid — skipping this tick: %s", rel, e)
             return None
 
+    base = wf.get("workspace", "base_branch", default="master")
+    root = resolve_workspace_root(wf)
+
     # Cheap check first — no git touched when nothing would change, same as the
-    # tracker strike's caller only invoking it `if pending_strikes:`.
-    merged = _reconcile(path.read_text() if path.exists() else "")
+    # tracker strike's caller only invoking it `if pending_strikes:`. Reads whatever
+    # this workflow's isolated base-write worktree last saw (possibly stale — another
+    # writer may have moved base_branch since; that is fine, the real write below
+    # re-reads fresh) rather than `wf.path.parent`, which the human checkout may have
+    # moved to an unrelated branch entirely.
+    cached = (root / BASE_WRITE_DIRNAME / rel)
+    merged = _reconcile(cached.read_text() if cached.exists() else "")
     if merged is None:
         return 0
     _, appended, resolved = merged
     if not appended and not resolved:
         return 0
 
-    base = wf.get("workspace", "base_branch", default="master")
-    if not _base_write_precheck(repo, base, rel, "trial ledger"):
+    wt = _base_write_worktree(wf.path.parent, base, root, "trial ledger")
+    if wt is None:
         return 0
 
-    # Re-read AFTER the precheck's fetch/ff-merge and re-reconcile against
-    # whatever is on base_branch NOW, in case it moved since the read above —
+    # Re-read AFTER the worktree is fetched and self-healed, and re-reconcile against
+    # whatever is on base_branch NOW, in case it moved since the cheap read above —
     # the same "recompute, don't trust the pre-network read" discipline
     # `_strike_merged_tasks` gets from `close_tasks` reading the tracker itself.
+    path = wt / rel
     merged = _reconcile(path.read_text() if path.exists() else "")
     if merged is None:
         return 0
@@ -804,7 +847,7 @@ def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
     subject = f"chore({rel}): trial ledger — {len(appended)} new, {len(resolved)} resolved"
     body = "\n".join(f"+ {tid}" for tid in appended) + ("\n" if appended and resolved else "") + \
         "\n".join(f"~ {tid}" for tid in resolved)
-    if not _base_write_commit_push(repo, base, rel, subject, body, "trial ledger"):
+    if not _base_write_commit_push(wt, base, rel, subject, body, "trial ledger"):
         return 0
 
     log.info(

@@ -9,7 +9,9 @@ trial keeps its line.
 
 These tests pin the pure merge (`reconcile_trial_ledger`), the outcome
 classification (`_run_trial_outcome`), and the git guards shared with the
-tracker strike (`_base_write_precheck` / `_base_write_commit_push`).
+tracker strike (`_base_write_worktree` / `_base_write_commit_push`) — the
+isolated, chela-owned checkout every unattended write lands through, never
+the human's interactive checkout (CMX-174).
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from chela import config, dispatcher
-from chela.workflow import WorkflowDef
+from chela.workflow import WorkflowDef, resolve_workspace_root
 
 
 # --- outcome classification (pure, no repo) ---------------------------------
@@ -198,6 +200,35 @@ def _runs_conn(tmp_path, monkeypatch):
     return dispatcher._db()
 
 
+# The ledger lands through the isolated base-write worktree (see
+# `dispatcher._base_write_worktree`), never `repo`'s own working tree — that is the whole
+# point of the fix (CMX-174). So the ground truth these tests check is what actually
+# landed on `origin`, not `repo`'s files.
+
+def _origin(repo: Path) -> Path:
+    return repo.parent / "origin.git"
+
+
+def _origin_log(repo: Path, ref: str = "dev") -> list[str]:
+    out = subprocess.run(
+        ["git", "--git-dir", str(_origin(repo)), "log", "--format=%s", ref],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.split("\n")
+
+
+def _origin_show(repo: Path, rel: str, ref: str = "dev") -> str:
+    out = subprocess.run(
+        ["git", "--git-dir", str(_origin(repo)), "show", f"{ref}:{rel}"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout
+
+
+def _base_write_wt(repo: Path) -> Path:
+    return resolve_workspace_root(_wf(repo)) / dispatcher.BASE_WRITE_DIRNAME
+
+
 def test_write_trial_ledger_commits_and_pushes_a_new_trial(repo, tmp_path, monkeypatch):
     wf = _wf(repo)
     with _runs_conn(tmp_path, monkeypatch) as conn:
@@ -208,17 +239,11 @@ def test_write_trial_ledger_commits_and_pushes_a_new_trial(repo, tmp_path, monke
         )
         assert dispatcher._write_trial_ledger(wf, conn) == 1
 
-    text = (repo / "TRIALS.jsonl").read_text()
-    lines = dispatcher._parse_trial_ledger(text)
+    lines = dispatcher._parse_trial_ledger(_origin_show(repo, "TRIALS.jsonl"))
     assert [e["task_id"] for e in lines] == ["t1"]
     assert lines[0]["outcome"] == "pending"
-    assert "trial ledger" in _log(repo)[0]
-
-    origin_log = subprocess.run(
-        ["git", "--git-dir", str(tmp_path / "origin.git"), "log", "--format=%s", "dev"],
-        capture_output=True, text=True, check=True,
-    ).stdout
-    assert "trial ledger" in origin_log  # actually pushed, not just committed locally
+    assert "trial ledger" in _origin_log(repo)[0]  # actually pushed, not just committed
+    assert not (repo / "TRIALS.jsonl").exists()  # the human's own checkout is untouched
 
 
 def test_write_trial_ledger_resolves_an_existing_line_and_does_not_duplicate_it(repo, tmp_path, monkeypatch):
@@ -234,7 +259,7 @@ def test_write_trial_ledger_resolves_an_existing_line_and_does_not_duplicate_it(
         # A second run for the SAME task_id (a retry) never adds a line either.
         assert dispatcher._write_trial_ledger(wf, conn) == 0  # 0 NEW lines — one resolved
 
-    lines = dispatcher._parse_trial_ledger((repo / "TRIALS.jsonl").read_text())
+    lines = dispatcher._parse_trial_ledger(_origin_show(repo, "TRIALS.jsonl"))
     assert len(lines) == 1
     assert lines[0]["outcome"] == "merged"
 
@@ -251,14 +276,14 @@ def test_write_trial_ledger_keeps_a_died_runs_line_even_after_it_is_pruned(repo,
             (str(wf.path), dispatcher.MAX_ATTEMPTS, dispatcher._now()),
         )
         assert dispatcher._write_trial_ledger(wf, conn) == 1
-        before = dispatcher._parse_trial_ledger((repo / "TRIALS.jsonl").read_text())
+        before = dispatcher._parse_trial_ledger(_origin_show(repo, "TRIALS.jsonl"))
         assert before[0]["outcome"] == "died"
 
         # The row is now deleted from `runs` entirely (simulating cleanup).
         conn.execute("DELETE FROM runs WHERE task_id='dead'")
         assert dispatcher._write_trial_ledger(wf, conn) == 0  # nothing to reconcile
 
-    after = dispatcher._parse_trial_ledger((repo / "TRIALS.jsonl").read_text())
+    after = dispatcher._parse_trial_ledger(_origin_show(repo, "TRIALS.jsonl"))
     assert after == before  # the line survives, untouched
 
 
@@ -278,11 +303,15 @@ def test_write_trial_ledger_is_scoped_to_workflow_path(repo, tmp_path, monkeypat
         )
         assert dispatcher._write_trial_ledger(wf, conn) == 1
 
-    lines = dispatcher._parse_trial_ledger((repo / "TRIALS.jsonl").read_text())
+    lines = dispatcher._parse_trial_ledger(_origin_show(repo, "TRIALS.jsonl"))
     assert [e["task_id"] for e in lines] == ["mine"]
 
 
-def test_write_trial_ledger_skips_when_not_on_base_branch(repo, tmp_path, monkeypatch):
+def test_write_trial_ledger_lands_even_when_not_on_base_branch(repo, tmp_path, monkeypatch):
+    """The headline bug (CMX-174): a human dogfooding in the shared checkout — a branch
+    switch, an in-progress rebase — must never silently disable the unattended ledger
+    write. lean-alpha's honesty harness depends on this: N must count every dispatched
+    trial regardless of what the operator's own checkout happens to be doing."""
     subprocess.run(["git", "-C", str(repo), "checkout", "-b", "other"], check=True, capture_output=True)
     wf = _wf(repo)
     with _runs_conn(tmp_path, monkeypatch) as conn:
@@ -291,17 +320,28 @@ def test_write_trial_ledger_skips_when_not_on_base_branch(repo, tmp_path, monkey
             "VALUES ('t1', ?, 'x', 'running', 1, ?)",
             (str(wf.path), dispatcher._now()),
         )
-        assert dispatcher._write_trial_ledger(wf, conn) == 0
+        assert dispatcher._write_trial_ledger(wf, conn) == 1
+
+    lines = dispatcher._parse_trial_ledger(_origin_show(repo, "TRIALS.jsonl"))
+    assert [e["task_id"] for e in lines] == ["t1"]
+    # The human's own checkout is left exactly where they put it — no ledger file
+    # ever appears there.
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head == "other"
     assert not (repo / "TRIALS.jsonl").exists()
 
 
-def test_write_trial_ledger_skips_when_the_ledger_file_is_dirty(repo, tmp_path, monkeypatch):
+def test_write_trial_ledger_lands_even_when_a_human_has_the_ledger_dirty(repo, tmp_path, monkeypatch):
     seed = json.dumps({"task_id": "x", "dispatched_at": "", "outcome": "pending"}) + "\n"
     (repo / "TRIALS.jsonl").write_text(seed)
     subprocess.run(["git", "-C", str(repo), "add", "TRIALS.jsonl"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "seed ledger"], check=True, capture_output=True)
-    # Valid JSON (a human editing a line by hand, not corrupting the format) so
-    # this exercises the git dirty-tree gate, not the parse-error path below.
+    subprocess.run(["git", "-C", str(repo), "push"], check=True, capture_output=True)
+    # Valid JSON (a human editing a line by hand, not corrupting the format), left
+    # uncommitted in the shared checkout — must not block the isolated writer.
     dirty = seed + json.dumps({"task_id": "human-added", "dispatched_at": "", "outcome": "pending"}) + "\n"
     (repo / "TRIALS.jsonl").write_text(dirty)
 
@@ -312,16 +352,21 @@ def test_write_trial_ledger_skips_when_the_ledger_file_is_dirty(repo, tmp_path, 
             "VALUES ('t1', ?, 'x', 'running', 1, ?)",
             (str(wf.path), dispatcher._now()),
         )
-        assert dispatcher._write_trial_ledger(wf, conn) == 0
-    assert (repo / "TRIALS.jsonl").read_text() == dirty  # untouched
+        assert dispatcher._write_trial_ledger(wf, conn) == 1
+
+    lines = dispatcher._parse_trial_ledger(_origin_show(repo, "TRIALS.jsonl"))
+    assert [e["task_id"] for e in lines] == ["x", "t1"]
+    assert (repo / "TRIALS.jsonl").read_text() == dirty  # the human's edit, untouched
 
 
 def test_write_trial_ledger_degrades_instead_of_crashing_on_a_corrupt_ledger(repo, tmp_path, monkeypatch, caplog):
     (repo / "TRIALS.jsonl").write_text("not json at all\n")
     subprocess.run(["git", "-C", str(repo), "add", "TRIALS.jsonl"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "corrupt ledger"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "push"], check=True, capture_output=True)
 
     wf = _wf(repo)
+    origin_before = _origin_log(repo)
     with _runs_conn(tmp_path, monkeypatch) as conn:
         conn.execute(
             "INSERT INTO runs (task_id, workflow_path, title, status, attempt, started_at) "
@@ -331,7 +376,7 @@ def test_write_trial_ledger_degrades_instead_of_crashing_on_a_corrupt_ledger(rep
         with caplog.at_level("WARNING"):
             assert dispatcher._write_trial_ledger(wf, conn) == 0  # degrades, does not raise
     assert "not valid" in caplog.text
-    assert (repo / "TRIALS.jsonl").read_text() == "not json at all\n"  # untouched
+    assert _origin_log(repo) == origin_before  # nothing landed on top of the corrupt commit
 
 
 def test_write_trial_ledger_rolls_back_its_commit_when_the_push_is_rejected(repo, tmp_path, monkeypatch):
@@ -342,7 +387,7 @@ def test_write_trial_ledger_rolls_back_its_commit_when_the_push_is_rejected(repo
             "VALUES ('t1', ?, 'x', 'running', 1, ?)",
             (str(wf.path), dispatcher._now()),
         )
-        before = _log(repo)
+        origin_before = _origin_log(repo)
         with pytest.MonkeyPatch.context() as mp:
             real_git = dispatcher._git
 
@@ -358,8 +403,13 @@ def test_write_trial_ledger_rolls_back_its_commit_when_the_push_is_rejected(repo
             mp.setattr(dispatcher, "_git", fake_git)
             assert dispatcher._write_trial_ledger(wf, conn) == 0
 
-    assert _log(repo) == before  # commit rolled back, nothing left dangling
+    assert _origin_log(repo) == origin_before  # commit rolled back, nothing left dangling
     assert not (repo / "TRIALS.jsonl").exists()
+    status = subprocess.run(
+        ["git", "-C", str(_base_write_wt(repo)), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert status.strip() == ""
 
 
 # --- tick() integration: opt-out is byte-unchanged behavior -------------------
@@ -443,6 +493,7 @@ def test_tick_appends_a_trial_line_for_an_opted_in_workflow(tracker_repo, tmp_pa
     summary = dispatcher.tick(wf_path)
 
     assert summary["trial_ledger"] == 1
-    lines = dispatcher._parse_trial_ledger((repo / "TRIALS.jsonl").read_text())
+    lines = dispatcher._parse_trial_ledger(_origin_show(repo, "TRIALS.jsonl"))
     assert [e["task_id"] for e in lines] == ["t1"]
     assert lines[0]["outcome"] == "pending"
+    assert not (repo / "TRIALS.jsonl").exists()  # the human's own checkout is untouched
