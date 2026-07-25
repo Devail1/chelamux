@@ -479,6 +479,30 @@ def _claim_order(wf: WorkflowDef, source, on_disk: list[Task]) -> list[Task]:
     return remote_tasks + unpushed
 
 
+def _tracker_is_versioned(repo: Path, rel: str) -> bool:
+    """Whether `rel` is eligible to ever land on `origin/<base>` — i.e. NOT excluded by
+    `repo`'s own `.gitignore` — used by :func:`_strike_merged_tasks` and
+    :func:`_write_trial_ledger` to decide whether an unattended write may go through the
+    isolated base-write worktree at all.
+
+    Deliberately `git check-ignore`, NOT `git ls-files --error-unmatch`: both a
+    gitignored path AND a path that is simply new — never yet committed by anyone, e.g.
+    a `trial_ledger:` on its very first write, still untracked because nothing has
+    written it yet — return the same "unknown to git" result from `ls-files
+    --error-unmatch`, so that check cannot tell "deliberately local-only" apart from
+    "not created yet". `check-ignore` can: it matches gitignore *patterns* against a
+    pathname regardless of whether the path exists or has ever been committed, so a
+    brand-new, non-ignored path still reads as versioned (eligible), while
+    chelamux's own gitignored `TODO.md` reads as not.
+
+    A git failure (missing binary, timeout) or an ambiguous `check-ignore` result
+    (exit 128) both default to `True` — the safe direction is to keep using the
+    isolated worktree machinery, not to silently fall back to writing `repo` in place.
+    """
+    cp = _git(repo, "check-ignore", "-q", "--", rel)
+    return cp is None or cp.returncode != 0
+
+
 BASE_WRITE_DIRNAME = "_base-write"
 
 
@@ -614,6 +638,17 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
     table on every tick, not remembered — whereas a mangled base branch is
     not.
 
+    Not every tracker is even eligible for this at all: a gitignored tracker (chelamux's
+    own `TODO.md` — a deliberate, local, per-install queue, never committed) does not
+    exist in `origin/<base>`'s tree and never will, so the isolated base-write worktree
+    (see :func:`_base_write_worktree`) can never see it either — routing the strike
+    through it there would silently and permanently no-op the strike (a regression
+    caught in review, CMX-174 round 1). :func:`_tracker_is_versioned` branches on this
+    BEFORE any worktree/fetch/commit/push machinery: an ineligible tracker is struck
+    directly, in place, on `repo`'s own tracker file — no isolation needed, because
+    nothing there is ever pushed anywhere. This is the normal, intended path for a
+    local-only queue, not a degraded fallback, so it never warns.
+
     Returns the number of lines actually struck.
     """
     close_tasks = getattr(source, "close_tasks", None)
@@ -631,6 +666,12 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
         log.warning("tracker strike skipped: %s is outside the repo %s", tracker, repo)
         return 0
 
+    if not _tracker_is_versioned(repo, rel):
+        struck = _log_and_collect_struck(close_tasks(task_ids), "tracker strike")
+        if struck:
+            log.info("tracker strike: marked %d task(s) done in %s: %s", len(struck), rel, ", ".join(struck))
+        return len(struck)
+
     root = resolve_workspace_root(wf)
     wt = _base_write_worktree(repo, base, root, "tracker strike")
     if wt is None:
@@ -643,15 +684,7 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
         _git(wt, "checkout", "--", rel)
         return 0
 
-    for tid, outcome in sorted(results.items()):
-        if outcome == "missing":
-            log.warning(
-                "tracker strike: no line matches task %s — a human edited or "
-                "removed it; not guessing", tid,
-            )
-        elif outcome == "already":
-            log.info("tracker strike: task %s was already struck", tid)
-    struck = sorted(t for t, outcome in results.items() if outcome == "struck")
+    struck = _log_and_collect_struck(results, "tracker strike")
     if not struck:
         return 0
 
@@ -662,6 +695,20 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
 
     log.info("tracker strike: marked %d task(s) done on %s: %s", len(struck), base, ", ".join(struck))
     return len(struck)
+
+
+def _log_and_collect_struck(results: dict[str, str], what: str) -> list[str]:
+    """Shared between the two `_strike_merged_tasks` paths (in-place and base-write):
+    log the missing/already-struck outcomes and return the sorted ids actually struck."""
+    for tid, outcome in sorted(results.items()):
+        if outcome == "missing":
+            log.warning(
+                "%s: no line matches task %s — a human edited or removed it; not guessing",
+                what, tid,
+            )
+        elif outcome == "already":
+            log.info("%s: task %s was already struck", what, tid)
+    return sorted(t for t, outcome in results.items() if outcome == "struck")
 
 
 # --- the trial ledger (CMX-105) ---------------------------------------------
@@ -788,10 +835,25 @@ def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
     every other per-workflow query here: a shared repo with two workflows must not have
     one's trials counted on the other's ledger.
 
+    A `trial_ledger:` opt-in is a committed artifact BY DEFINITION — the whole point is
+    a git-visible count a repo's own guards can read, including from a throwaway judge
+    worktree that never sees `~/.chela/scheduler.db`. If the configured path is
+    gitignored (see :func:`_tracker_is_versioned`), this warns and writes nothing rather
+    than silently keeping an honesty ledger that only ever exists on one box — worse
+    than no ledger at all, since a repo's guard would trust it.
+
     Returns the number of NEW trial lines appended this call.
     """
     rel = _trial_ledger_rel(wf)
     if rel is None:
+        return 0
+
+    repo = wf.path.parent
+    if not _tracker_is_versioned(repo, rel):
+        log.warning(
+            "trial ledger skipped: %s is gitignored in %s — a trial_ledger must be a "
+            "committed artifact; point it at a path that is not excluded", rel, repo,
+        )
         return 0
 
     rows = conn.execute(
@@ -827,7 +889,7 @@ def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
     if not appended and not resolved:
         return 0
 
-    wt = _base_write_worktree(wf.path.parent, base, root, "trial ledger")
+    wt = _base_write_worktree(repo, base, root, "trial ledger")
     if wt is None:
         return 0
 

@@ -379,6 +379,32 @@ def test_write_trial_ledger_degrades_instead_of_crashing_on_a_corrupt_ledger(rep
     assert _origin_log(repo) == origin_before  # nothing landed on top of the corrupt commit
 
 
+def test_write_trial_ledger_warns_and_skips_when_the_ledger_path_is_gitignored(repo, tmp_path, monkeypatch, caplog):
+    """A `trial_ledger:` opt-in is a committed artifact by definition (CMX-174 round 1):
+    if the configured path is gitignored it can never land on origin/<base>, and an
+    honesty ledger that only ever exists on one box is worse than no ledger at all — so
+    this warns and writes nothing, rather than silently keeping a local-only copy."""
+    (repo / ".gitignore").write_text("TRIALS.jsonl\n")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "ignore the ledger"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "push"], check=True, capture_output=True)
+    origin_before = _origin_log(repo)
+
+    wf = _wf(repo)
+    with _runs_conn(tmp_path, monkeypatch) as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, attempt, started_at) "
+            "VALUES ('t1', ?, 'x', 'running', 1, ?)",
+            (str(wf.path), dispatcher._now()),
+        )
+        with caplog.at_level("WARNING"):
+            assert dispatcher._write_trial_ledger(wf, conn) == 0
+
+    assert "gitignored" in caplog.text
+    assert _origin_log(repo) == origin_before  # nothing committed
+    assert not (repo / "TRIALS.jsonl").exists()
+
+
 def test_write_trial_ledger_rolls_back_its_commit_when_the_push_is_rejected(repo, tmp_path, monkeypatch):
     wf = _wf(repo)
     with _runs_conn(tmp_path, monkeypatch) as conn:

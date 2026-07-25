@@ -321,6 +321,68 @@ def test_strike_logs_and_skips_a_task_that_is_gone_from_the_tracker(repo, caplog
     assert len(_origin_log(repo)) == before  # nothing committed
 
 
+# --- the gitignored tracker (CMX-174 round 1 regression) --------------------
+#
+# chelamux's OWN tracker: TODO.md is gitignored, deliberately never committed — a
+# local, per-install queue struck on disk only. It does not exist in origin/<base>'s
+# tree and never will, so the isolated base-write worktree (a freshly `clean -fdx`'d
+# checkout of origin/<base>) can never see it either. Routing the strike through it
+# for a tracker like this would make `close_tasks` see a permanently-missing path and
+# silently, permanently no-op the strike — strictly worse than the original bug this
+# task was filed to fix (round-1 regression this suite must never let back in).
+
+@pytest.fixture
+def gitignored_repo(tmp_path):
+    """Same shape as `repo`, but TODO.md is gitignored and untracked."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "dev", str(origin)], check=True, capture_output=True)
+    work = tmp_path / "work"
+    subprocess.run(["git", "clone", str(origin), str(work)], check=True, capture_output=True)
+    for k, v in (("user.email", "t@example.com"), ("user.name", "T"), ("commit.gpgsign", "false")):
+        subprocess.run(["git", "-C", str(work), "config", k, v], check=True, capture_output=True)
+    (work / ".gitignore").write_text("TODO.md\n")
+    subprocess.run(["git", "-C", str(work), "add", ".gitignore"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-m", "seed"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "push", "-u", "origin", "dev"], check=True, capture_output=True)
+    # Written AFTER the push, never added — stays untracked + gitignored.
+    (work / "TODO.md").write_text("- [ ] alpha\n- [ ] beta\n")
+    return work
+
+
+def test_strike_lands_on_disk_in_place_when_the_tracker_is_gitignored(gitignored_repo, caplog):
+    repo = gitignored_repo
+    # The checkout sitting on a non-base branch is exactly the scenario that used to
+    # (and, without this fix, would again) disable the strike entirely.
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "some-feature"], check=True)
+    source = _source(repo)
+    alpha = next(t.id for t in source.list_open_tasks() if t.title == "alpha")
+    before = len(_origin_log(repo))
+
+    with caplog.at_level("WARNING"):
+        assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 1
+
+    # Struck ON DISK, in the repo's own tracker — a gitignored tracker cannot exist on
+    # origin/<base> at all, so nothing is ever committed or pushed for it.
+    assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [ ] beta\n"
+    assert len(_origin_log(repo)) == before
+    # This is the intended, normal path for a local-only queue — never a degraded one.
+    assert caplog.text == ""
+
+
+def test_strike_never_touches_the_base_write_worktree_for_a_gitignored_tracker(gitignored_repo, monkeypatch):
+    repo = gitignored_repo
+    source = _source(repo)
+    alpha = next(t.id for t in source.list_open_tasks() if t.title == "alpha")
+
+    def _boom(*a, **kw):
+        raise AssertionError("_base_write_worktree must not be called for a gitignored tracker")
+
+    monkeypatch.setattr(dispatcher, "_base_write_worktree", _boom)
+
+    assert dispatcher._strike_merged_tasks(_wf(repo), source, [alpha]) == 1
+    assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [ ] beta\n"
+
+
 # --- the tick: a merged PR is what finishes a run, and what strikes the line -
 
 WORKFLOW = """---
