@@ -3719,6 +3719,10 @@ input[type="text"]:focus, textarea:focus, select:focus {
    setDecisionsQuery). Full-width, same input styling as everywhere else in
    the app (input[type="text"] above) — just spaced to sit under the chip. */
 .decisions-search { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
+/* Scope line under an ACTIVE decisions search: "3 of 120 loaded". Dim and small —
+   it qualifies the result set (the popover filters a bounded buffer, not all
+   history), it is not itself a result. Hidden when the box is empty. */
+.decisions-scope { font-size: 10px; color: var(--text-dim); margin: 0 0 6px; }
 .decisions-list { border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
     max-height: 38vh; overflow-y: auto; }
 /* Sidebar-width row: the Feed's 5-column grid (56px 72px 108px auto 1fr, ~250px

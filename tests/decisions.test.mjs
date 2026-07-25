@@ -300,6 +300,36 @@ test('a search with no matches shows a "no match" message, not a blank/empty-log
         'a filtered-to-zero result must read differently from a genuinely empty log');
 });
 
+test('🔴 GUARD: an active search says what it actually searched (N of M loaded)', async () => {
+    // The popover filters the events it HOLDS — `_refreshLog` pulls bounded batches, it
+    // does not have the whole log. A filtered list with no qualifier silently reads as
+    // "these are the only matches in your history" when it means "among the N I have".
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 3, last_seq: 3, next_seq: 3,
+        events: [
+            { seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-1 awaiting review', payload: { branch_name: 'cmx-1' } },
+            { seq: 2, ts: 1001, type: 'run_review', wid: '@4', summary: 'cmx-2 awaiting review', payload: { branch_name: 'cmx-2' } },
+            { seq: 3, ts: 1002, type: 'run_review', wid: '@5', summary: 'cmx-3 awaiting review', payload: { branch_name: 'cmx-3' } },
+        ],
+    };
+    await decisions.enterDecisions();
+
+    // No query: nothing to qualify — the list IS everything held.
+    assert.equal(document.querySelector('#decisions-list .decisions-scope'), null,
+        'an empty search box must not claim a scope — the list is simply everything held');
+
+    decisions.setDecisionsQuery('cmx-1');
+    const scope = document.querySelector('#decisions-list .decisions-scope');
+    assert.ok(scope, 'an active search must say what it searched');
+    assert.match(scope.textContent, /\b1\b[^0-9]*\b3\b/,
+        'the scope must name BOTH the match count and the held count (e.g. "1 of 3 loaded") — ' +
+        'a bare match count is the claim this guard exists to prevent');
+
+    decisions.setDecisionsQuery('');
+    assert.equal(document.querySelector('#decisions-list .decisions-scope'), null,
+        'clearing the box must drop the qualifier again');
+});
+
 test('clearing the search brings back the full held list, still with no re-fetch', async () => {
     LOG_RESPONSE = {
         boot_id: 'b1', gap: null, first_seq: 2, last_seq: 2, next_seq: 2,

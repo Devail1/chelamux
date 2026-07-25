@@ -320,7 +320,18 @@ function _render() {
         return;
     }
     const rows = filtered.slice().sort((a, b) => (b.seq || 0) - (a.seq || 0));
-    host.innerHTML = _gapHtml() + rows.map(_rowHtml).join('');
+    // ⛔ Say what was actually searched. This filter runs over the events the
+    // popover currently HOLDS (a bounded buffer — `_refreshLog` pulls batches,
+    // it does not have the whole log), so a bare filtered list silently implies
+    // "these are the only matches in your history" when it means "these are the
+    // matches among the N I have". Only shown while a query is active; with an
+    // empty box the list is simply everything held and there is nothing to
+    // qualify. /api/log has no free-text search — widening it is the only way
+    // to make this claim bigger, and that is deliberately not what this does.
+    const scope = _query.trim()
+        ? `<div class="decisions-scope">${filtered.length} of ${_events.length} loaded</div>`
+        : '';
+    host.innerHTML = _gapHtml() + scope + rows.map(_rowHtml).join('');
 }
 
 // --- Header popover: anchored + light-dismiss, same pattern as nav.js's
