@@ -23,6 +23,7 @@ import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py e
 
 const BODY = `<section class="side-section" id="side-decisions">
   <div id="decisions-chip"></div>
+  <input type="text" id="decisions-search">
   <div class="decisions-list" id="decisions-list"></div>
 </section>`;
 
@@ -54,6 +55,8 @@ beforeEach(() => {
     requests = [];
     STATUS_RESPONSE = { wid: null, name: null, state: 'unregistered', why: '', queued: 0 };
     LOG_RESPONSE = { boot_id: 'b1', events: [], gap: null, first_seq: 0, last_seq: 0, next_seq: 0 };
+    decisions.setDecisionsQuery('');   // module-level state — never leak a query across tests
+    delete window.chela.openTaskModal;
 });
 
 const rows = () => document.querySelectorAll('#decisions-list .feed-row');
@@ -116,4 +119,126 @@ test('a gap is rendered, never silently swallowed', async () => {
     const gapEl = document.querySelector('#decisions-list .feed-gap');
     assert.ok(gapEl, 'a reported gap must show on screen');
     assert.ok(gapEl.textContent.includes('boot_id changed'));
+});
+
+// --- CMX-178: click-through to the task-detail modal ------------------------
+
+test('a row whose payload names a task_id is click-through (data-seq + clickable class)', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review',
+            payload: { task_id: 't9', title: 'cmx-9 task', branch_name: 'cmx-9', pr_url: 'https://x/9' },
+        }],
+    };
+    await decisions.enterDecisions();
+    const row = rows()[0];
+    assert.ok(row.classList.contains('feed-row-clickable'), 'a task_id-bearing row must carry the clickable class');
+    assert.equal(row.dataset.seq, '1');
+});
+
+// 🔴 GUARD: a bare window/inbox-plumbing event (no task_id in its payload) has
+// nothing to click through to — this must NOT render as clickable. Deleting
+// the `itemFromDecisionPayload(e) != null` check in decisions.js's _rowHtml
+// makes every row clickable, including this one, and this assert goes red.
+test('🔴 GUARD: a row with no task_id in its payload is NOT click-through', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'inbox_undeliverable', wid: null,
+            summary: 'the inbox address is dead', payload: { wid: '@0', why: 'no claude running' },
+        }],
+    };
+    await decisions.enterDecisions();
+    const row = rows()[0];
+    assert.equal(row.classList.contains('feed-row-clickable'), false);
+    assert.equal(row.dataset.seq, undefined);
+});
+
+test('clicking a click-through row opens the task modal with the payload normalised', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review',
+            payload: {
+                task_id: 't9', title: 'cmx-9 task', run_status: 'awaiting_review',
+                branch_name: 'cmx-9', pr_url: 'https://x/9',
+            },
+        }],
+    };
+    await decisions.enterDecisions();
+    let opened = null;
+    window.chela.openTaskModal = (item) => { opened = item; };
+
+    // jsdom (no runScripts) does not execute inline onclick="…" attributes, so
+    // this drives the exact function the row's onclick calls (decisions.js's
+    // openDecisionTicket), rather than simulating a real click event.
+    decisions.openDecisionTicket(document.querySelector('#decisions-list .feed-row'));
+
+    assert.ok(opened, 'clicking a click-through row must call window.chela.openTaskModal');
+    assert.equal(opened.task_id, 't9');
+    assert.equal(opened.branch_name, 'cmx-9');
+    assert.equal(opened.status, 'awaiting_review');
+});
+
+test('clicking a row is a no-op (never throws) when no task modal handler is registered', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{ seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'x', payload: { task_id: 't1' } }],
+    };
+    await decisions.enterDecisions();
+    assert.doesNotThrow(() =>
+        decisions.openDecisionTicket(document.querySelector('#decisions-list .feed-row')));
+});
+
+// --- CMX-178: search ----------------------------------------------------------
+
+test('the search box narrows the rendered list without re-fetching', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 2, last_seq: 2, next_seq: 2,
+        events: [
+            { seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-1 awaiting review', payload: { branch_name: 'cmx-1' } },
+            { seq: 2, ts: 1001, type: 'run_review', wid: '@4', summary: 'cmx-2 awaiting review', payload: { branch_name: 'cmx-2' } },
+        ],
+    };
+    await decisions.enterDecisions();
+    assert.equal(rows().length, 2, 'both decisions must render before any search is typed');
+
+    const requestsBefore = requests.length;
+    decisions.setDecisionsQuery('cmx-1');
+
+    assert.equal(rows().length, 1, 'the search must hide the non-matching row');
+    assert.ok(rows()[0].textContent.includes('cmx-1'));
+    assert.equal(requests.length, requestsBefore, 'filtering the held events must not trigger a new fetch');
+});
+
+test('a search with no matches shows a "no match" message, not a blank/empty-log message', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{ seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-1 awaiting review', payload: {} }],
+    };
+    await decisions.enterDecisions();
+    decisions.setDecisionsQuery('does-not-exist-anywhere');
+
+    assert.equal(rows().length, 0);
+    const empty = document.querySelector('#decisions-list .side-empty');
+    assert.ok(empty, 'a no-match search must still render an explanatory empty state');
+    assert.ok(empty.textContent.includes('does-not-exist-anywhere'));
+    assert.ok(!empty.textContent.includes('No decisions logged yet'),
+        'a filtered-to-zero result must read differently from a genuinely empty log');
+});
+
+test('clearing the search brings back the full held list, still with no re-fetch', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 2, last_seq: 2, next_seq: 2,
+        events: [
+            { seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-1 awaiting review', payload: {} },
+            { seq: 2, ts: 1001, type: 'run_review', wid: '@4', summary: 'cmx-2 awaiting review', payload: {} },
+        ],
+    };
+    await decisions.enterDecisions();
+    decisions.setDecisionsQuery('cmx-1');
+    assert.equal(rows().length, 1);
+    decisions.setDecisionsQuery('');
+    assert.equal(rows().length, 2, 'clearing the query must restore every held event');
 });

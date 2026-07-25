@@ -34,10 +34,27 @@
 // neither is gated behind the popover being open. `_lastSeenSeq` persists in
 // localStorage (`chela.decisions.lastSeen`) so the badge survives a reload;
 // opening the popover is the only thing that advances it.
+//
+// CMX-178: two additions on top of the read-only feed above, both purely
+// client-side over data already on the wire (no new endpoint, no server
+// change):
+//   1. SEARCH (`#decisions-search`, setDecisionsQuery) — a substring filter
+//      over the events already held, so an OLD decision the short list has
+//      scrolled past is still findable.
+//   2. CLICK-THROUGH (openDecisionTicket) — every run_* payload already
+//      carries task_id/title/branch_name/pr_url/pr_state/attempt (and on the
+//      rework kinds, reviews/rework_count/last_error — see chela/inbox.py's
+//      run_events/_window_payload), which decisionsmodel.js's
+//      itemFromDecisionPayload turns into the exact shape taskmodal.js's
+//      openTaskModal already renders. A row click opens straight into that
+//      modal — no trip through Work to find the card.
 // ---------------------------------------------------------------------------
 import { $, api, escHtml } from './util.js';
 import { CLASSES, classOf, drainLog } from './feedmodel.js';
-import { formatUnreadCount, maxSeq, seedLastSeen, unreadCount, unreadUrgency } from './decisionsmodel.js';
+import {
+    filterDecisionEvents, formatUnreadCount, itemFromDecisionPayload, maxSeq,
+    seedLastSeen, unreadCount, unreadUrgency,
+} from './decisionsmodel.js';
 import { onOrchestratorChange, orchestratorState, refreshOrchestratorStatus } from './orchestrator.js';
 
 const LAST_SEEN_KEY = 'chela.decisions.lastSeen';
@@ -79,6 +96,14 @@ let _events = [];
 let _gap = null;
 let _inflight = false;
 let _loaded = false;   // true once the first real batch of events has landed
+
+// The SEARCH box (CMX-178) — find an old decision the short list has scrolled
+// past. Client-side over the events already held (not a server query): this
+// popover only ever holds DECISIONS_MAX of them, so a substring filter over
+// that is instant and needs no new endpoint. Persists across a popover
+// close/reopen (the input itself stays in the DOM — only `display` toggles),
+// deliberately: closing the popover mid-search should not lose your filter.
+let _query = '';
 
 function _fetchBatch({ after_seq, after_boot, limit }) {
     const qs = new URLSearchParams({ limit: String(limit) });
@@ -160,16 +185,52 @@ function _ts(e) {
 
 // Same markup/classes as the Feed's row (feed-row/feed-cls-*/feed-glyph/…) so a
 // decision reads identically here and there — one visual language, not two.
+//
+// A row whose payload names a task_id (itemFromDecisionPayload returns non-
+// null — CMX-178) is click-through: it carries `data-seq` and an onclick that
+// resolves back to this same event (openDecisionTicket, below) and opens it
+// in the task-detail modal Work already uses. A bare window/inbox-plumbing
+// event (no task_id — watch_epoch_lost, inbox_undeliverable, …) renders with
+// no click affordance: there is no ticket to go to.
 function _rowHtml(e) {
     const cls = classOf(e.type);
     const meta = CLASSES[cls] || CLASSES.other;
-    return `<div class="feed-row feed-cls-${escHtml(cls)}">
+    const clickable = itemFromDecisionPayload(e) != null;
+    const clickAttrs = clickable
+        ? ` data-seq="${escHtml(String(e.seq || ''))}" onclick="chela.openDecisionTicket(this)" title="Open this task"`
+        : '';
+    return `<div class="feed-row feed-cls-${escHtml(cls)}${clickable ? ' feed-row-clickable' : ''}"${clickAttrs}>
         <span class="feed-seq">${escHtml(String(e.seq || ''))}</span>
         <span class="feed-ts">${escHtml(_ts(e))}</span>
         <span class="feed-glyph" title="${escHtml(meta.word)}">${escHtml(meta.glyph)} ${escHtml(meta.word)}</span>
         <span class="feed-wid">${escHtml(e.wid || 'chela')}</span>
         <span class="feed-summary">${escHtml(e.summary || e.type || '')}</span>
     </div>`;
+}
+
+// Resolves a clicked row back to its event (by `seq`, unique per the log) and
+// opens the SAME task-detail modal a Kanban card opens (taskmodal.js's
+// openTaskModal). Reached via window.chela rather than a static import:
+// taskmodal.js sits inside the Work module cluster (dispatcher.js → work.js →
+// kanban.js/schedules.js → nav.js → main.js), and main.js starts its own
+// `setInterval` refresh loop at import time — pulling that whole graph into
+// this popover's otherwise-light module set would drag a second poll loop in
+// with it for no reason. window.chela is the exact seam index.html's inline
+// onclick handlers already reach through for the same kind of cross-module
+// call, so this is that same seam, called from JS instead of from markup.
+function openDecisionTicket(el) {
+    const seq = Number(el && el.dataset && el.dataset.seq);
+    const e = _events.find(ev => ev && ev.seq === seq);
+    const item = e && itemFromDecisionPayload(e);
+    if (item && window.chela && typeof window.chela.openTaskModal === 'function') {
+        window.chela.openTaskModal(item);
+    }
+}
+
+// Wired to the search box's oninput (index.html #decisions-search).
+function setDecisionsQuery(value) {
+    _query = value || '';
+    _render();
 }
 
 function _gapHtml() {
@@ -229,7 +290,15 @@ function _render() {
         host.innerHTML = _gapHtml() + '<div class="side-empty">No decisions logged yet</div>';
         return;
     }
-    const rows = _events.slice().sort((a, b) => (b.seq || 0) - (a.seq || 0));
+    // The search box filters what is RENDERED, not what is held — `_events`
+    // itself is untouched, so clearing the query brings the full backlog
+    // straight back with no re-fetch.
+    const filtered = filterDecisionEvents(_events, _query);
+    if (!filtered.length) {
+        host.innerHTML = _gapHtml() + `<div class="side-empty">No decisions match "${escHtml(_query)}"</div>`;
+        return;
+    }
+    const rows = filtered.slice().sort((a, b) => (b.seq || 0) - (a.seq || 0));
     host.innerHTML = _gapHtml() + rows.map(_rowHtml).join('');
 }
 
@@ -258,8 +327,11 @@ function hideDecisionsMenu() {
 }
 
 // --- Stage 0: ES-module exports ---
-export { DECISION_TYPES, enterDecisions, hideDecisionsMenu, onDecisionsLogDelta, openDecisionsMenu, tickDecisions };
+export {
+    DECISION_TYPES, enterDecisions, hideDecisionsMenu, onDecisionsLogDelta,
+    openDecisionsMenu, openDecisionTicket, setDecisionsQuery, tickDecisions,
+};
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { hideDecisionsMenu, openDecisionsMenu });
+Object.assign(window.chela, { hideDecisionsMenu, openDecisionsMenu, openDecisionTicket, setDecisionsQuery });
