@@ -3681,6 +3681,57 @@ def _judge_vars(wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str) -> 
     }
 
 
+def _refresh_judge_worktree(repo: Path, worktree: Path, base: str) -> str:
+    """Merge fresh ``origin/<base>`` into the judge's throwaway worktree before it is judged.
+
+    ⛔ CMX-176. A dispatched run's branch is cut at claim time and then sits — through
+    review, rework rounds, and CI — while ``base_branch`` moves on underneath it. Judging
+    that stale tip means a fix that landed on base after the claim is absent from the
+    mutation baseline, so the pre-mutation suite goes red for reasons that have nothing to
+    do with this PR, and the judge correctly (and uselessly) refuses every experiment:
+    cannot_verify. **Observed live 2026-07-25 on cmx-174 (#222):** the branch was 14 commits
+    behind ``dev``, its merge-base predating the ``_isolate_claude_projects`` conftest fix,
+    so 3-4 telegram tests failed from a leak already closed on base. A human ran
+    ``gh pr update-branch`` by hand and the baseline went to 1830 passed / 0 failed. This is
+    that same catch-up, done automatically, right before the baseline is ever measured.
+
+    The merge lands in the judge's OWN throwaway detached copy — never the run's real
+    worktree, never pushed, never touching the actual PR branch on GitHub — so
+    ``JUDGE_PROMPT``'s "do not commit, push, or edit the PR's branch" stays true no matter
+    what this does. A real commit (not ``--no-commit``) is required: ``run_experiments``'s
+    ``_git_dirty`` check demands a clean tree before a single mutation runs, and a merge
+    left staged-but-uncommitted would trip that guard on every judged PR.
+
+    ⛔ DEGRADES, NEVER BLOCKS on anything short of a REAL conflict: no ``origin`` remote, no
+    network, a repo this is not a git repo at all (a unit test's fake worktree) — every one
+    of those leaves the worktree exactly as :func:`detached_worktree` left it, and judging
+    proceeds on the un-refreshed tip, same as before this existed. Only a genuine merge
+    conflict is reported back — the one case where "proceed anyway" would judge a tree that
+    does not even resolve, and the caller turns it into a NAMED cannot_verify instead of a
+    judge agent wasted on it.
+    """
+    if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
+        return ""              # no remote / no network / not a git repo — nothing to refresh
+    target = _git_out(_git(repo, "rev-parse", f"origin/{base}"))
+    if not target:
+        return ""              # base_branch does not resolve on origin — nothing to merge in
+    behind = _git_out(_git(worktree, "rev-list", "--count", f"HEAD..{target}"))
+    if not behind or behind == "0":
+        return ""              # already caught up (or the count could not be read)
+    merge = _git(worktree, "merge", "--no-edit", "--quiet", target)
+    if merge is not None and merge.returncode == 0:
+        log.info("judge: refreshed worktree %s from origin/%s (was %s commit(s) behind)",
+                  worktree, base, behind)
+        return ""
+    _git(worktree, "merge", "--abort")
+    detail = (merge.stderr or merge.stdout or "").strip()[:300] if merge else "the merge could not be run"
+    return (
+        f"this run's branch is {behind} commit(s) behind origin/{base} and could not be "
+        f"refreshed automatically ({detail or 'merge conflict'}) — rebase or merge "
+        f"origin/{base} into it by hand before it can be judged"
+    )
+
+
 def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Connection) -> bool:
     """Put a judge on this PR's head — in a throwaway worktree, on a detached HEAD.
 
@@ -3719,6 +3770,18 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
         set_judge_state(task_id, judge.J_CANNOT_VERIFY,
                         f"the judge worktree could not be created: {str(detail).strip()[:300]}")
         log.warning("judge: %s: could not check out %s: %s", task_id, sha[:12], detail)
+        return False
+
+    # ⛔ CMX-176: refresh BEFORE the agent ever sees this tree — a stale worktree measured a
+    # baseline that had nothing to do with the PR (see _refresh_judge_worktree). This never
+    # blocks on its own (no remote/no network just proceeds unrefreshed); only a REAL merge
+    # conflict against base_branch stops the spawn, and it stops it with a named diagnosis
+    # instead of a wasted judge agent and a mystery red baseline.
+    base = wf.get("workspace", "base_branch", default="master")
+    stale = _refresh_judge_worktree(wf.path.parent, worktree, base)
+    if stale:
+        set_judge_state(task_id, judge.J_CANNOT_VERIFY, stale)
+        log.warning("judge: %s: %s", task_id, stale)
         return False
 
     prompt = render_prompt(
