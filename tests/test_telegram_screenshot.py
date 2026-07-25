@@ -88,3 +88,46 @@ def test_split_by_face_breaks_out_a_fallback_run():
 def test_renders_tui_marker_glyphs_to_png():
     png = screenshot.text_to_image("\n".join(_TUI_GLYPHS))
     assert png.startswith(_PNG_MAGIC)
+
+
+# --- Hebrew coverage -------------------------------------------------------
+# Liav's panes are frequently Hebrew, and a Hebrew pane screenshotted to Telegram
+# used to arrive as a row of tofu boxes while the SAME pane rendered correctly in
+# the web terminal (which loads its own Hebrew face). Cause: none of the three
+# fonts in the chain carried a single Hebrew codepoint. Same class as the TUI-glyph
+# tofu above — every surface needs the coverage it uses, independently.
+
+_HEBREW = "אבגדהוזחטיכלמנסעפצקרשת"
+
+
+def test_the_symbol_and_latin_tiers_really_lack_hebrew():
+    # Guards the assumption below: if JetBrains Mono (or a symbol tier) ever gains
+    # Hebrew upstream, the Hebrew tier is still correct but no longer load-bearing.
+    chain = screenshot._load_fallback_chain(24)
+    non_hebrew_tiers = [
+        (face, cmap) for face, cmap in chain
+        if "Miriam" not in str(getattr(face, "path", ""))
+    ]
+    for letter in _HEBREW:
+        assert not any(ord(letter) in cmap for _face, cmap in non_hebrew_tiers), letter
+
+
+def test_fallback_chain_covers_every_hebrew_letter():
+    # Drop the Hebrew tier from _FALLBACK_FONT_PATHS and this goes RED.
+    chain = screenshot._load_fallback_chain(24)
+    for letter in _HEBREW:
+        assert any(ord(letter) in cmap for _face, cmap in chain), letter
+
+
+def test_renders_hebrew_to_png_without_tofu():
+    # End-to-end: a Hebrew line must pick a real face for every letter, not the
+    # notdef box. `_face_for_char` returning None (or the primary) would mean tofu.
+    chain = screenshot._load_fallback_chain(24)
+    primary_face = chain[0][0]
+    for letter in _HEBREW:
+        face = screenshot._face_for_char(chain, primary_face, letter)
+        # The primary (JetBrains Mono) has no Hebrew, so falling back to it IS tofu.
+        assert face is not primary_face, letter
+    png = screenshot.text_to_image("שלום עולם", font_size=24, with_ansi=False)
+    assert png.startswith(b"\x89PNG")
+    assert len(png) > 100

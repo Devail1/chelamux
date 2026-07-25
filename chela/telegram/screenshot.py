@@ -45,9 +45,21 @@ _FONTS_DIR = Path(__file__).resolve().parent.parent / "dashboard" / "static" / "
 # face; Symbola (subset, freeware — see LICENSE-Symbola.txt) and Symbols
 # Nerd Font (MIT) are reused/subsetted purely to cover glyphs JetBrains Mono
 # lacks, rather than switching the whole render to a different font.
+#
+# Miriam Mono CLM (GPL-2.0 w/ font exception) is the HEBREW tier, and it has to be
+# here explicitly for the same reason the symbol tiers do: NONE of the other three
+# fonts carries a single Hebrew codepoint (verified against their cmaps — U+05D0 is
+# absent from all of them), so a Hebrew pane screenshotted to Telegram arrived as a
+# row of tofu boxes while the SAME pane rendered fine in the web terminal, which
+# loads its own Hebrew face. Every surface needs the coverage it uses, independently
+# — the same lesson the TUI-glyph tofu taught on the dashboard/telegram/collab
+# surfaces. Miriam Mono CLM specifically because it is (a) already bundled, (b)
+# MONOSPACED, which a terminal-grid render needs, and (c) the web terminal's own
+# default Hebrew face, so the two surfaces agree.
 _FONT_PATH = _FONTS_DIR / "JetBrainsMono.ttf"
 _FALLBACK_FONT_PATHS = (
     _FONT_PATH,
+    _FONTS_DIR / "MiriamMonoCLM-Book.ttf",
     _FONTS_DIR / "Symbola-Subset.ttf",
     _FONTS_DIR / "SymbolsNerdFontMono-Regular.ttf",
 )
