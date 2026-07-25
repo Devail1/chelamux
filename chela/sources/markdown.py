@@ -69,19 +69,29 @@ class MarkdownSource:
                 ids.add(_task_id(self.path, m.group(1).strip()))
         return ids
 
-    def close_tasks(self, task_ids: list[str]) -> dict[str, str]:
+    def close_tasks(self, task_ids: list[str], *, at: Path | None = None) -> dict[str, str]:
         """Flip the `- [ ]` lines for `task_ids` to `- [x]`. Returns id → outcome.
 
         The dispatcher is this file's SOLE writer (agents never touch the
         tracker — see dispatcher._strike_merged_tasks). Rewrites the file only
         when something actually changed, so calling it twice is a no-op.
+
+        ``at`` redirects the actual read/write to a different copy of this same
+        file — the dispatcher's isolated base-write worktree (see
+        ``dispatcher._base_write_worktree``), never the interactive checkout
+        this source was constructed against. Task ids are still hashed off
+        ``self.path.name`` (the filename, not its directory), so the ids match
+        whichever copy the strike runs against. Defaults to ``self.path`` so
+        every other caller — including the tests that predate the isolated
+        worktree — is unaffected.
         """
-        if not self.path.exists():
+        path = at if at is not None else self.path
+        if not path.exists():
             return {tid: "missing" for tid in task_ids}
-        text = self.path.read_text()
+        text = path.read_text()
         new_text, results = strike_lines(text, self.path.name, task_ids)
         if new_text != text:
-            self.path.write_text(new_text)
+            path.write_text(new_text)
         return results
 
 

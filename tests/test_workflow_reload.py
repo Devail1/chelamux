@@ -222,6 +222,16 @@ def _spawn_counter(monkeypatch) -> list:
     return spawned
 
 
+def _origin_show(repo: Path, rel: str = "TODO.md", ref: str = "dev") -> str:
+    """The tracker strike lands through the isolated base-write worktree (CMX-174), never
+    `repo`'s own working tree — so this reads what actually landed on `origin`."""
+    out = subprocess.run(
+        ["git", "--git-dir", str(repo.parent / "origin.git"), "show", f"{ref}:{rel}"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout
+
+
 def _seed_merged_run(wf_path: Path, task_id: str) -> None:
     with dispatcher._db() as conn:
         conn.execute(
@@ -269,7 +279,7 @@ def test_a_broken_workflow_blocks_dispatch_but_keeps_reconciling(ticking, monkey
     # ...while everything the last-good config already knew how to finish, finished.
     assert summary["reconciled_done"] == 1
     assert summary["tracker_struck"] == 1
-    assert (repo / "TODO.md").read_text() == "- [x] alpha\n- [ ] beta\n"
+    assert _origin_show(repo) == "- [x] alpha\n- [ ] beta\n"
     assert "Dispatch paused" in caplog.text
 
     # Fix the file: dispatch resumes on the next tick, still no restart.

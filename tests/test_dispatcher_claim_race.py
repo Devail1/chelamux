@@ -82,6 +82,16 @@ def _id(repo: Path, title: str) -> str:
     return next(t.id for t in _source(repo).list_open_tasks() if t.title == title)
 
 
+def _origin_show(repo: Path, tmp_path: Path, rel: str = "TODO.md", ref: str = "dev") -> str:
+    """The tracker strike lands through the isolated base-write worktree (CMX-174), never
+    `repo`'s own working tree — so this reads what actually landed on `origin`."""
+    out = subprocess.run(
+        ["git", "--git-dir", str(tmp_path / "origin.git"), "show", f"{ref}:{rel}"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout
+
+
 def _push_tracker(repo: Path, tmp_path: Path, text: str) -> None:
     """The orchestrator, in ITS checkout, rewriting the queue and pushing to origin —
     a different clone, exactly as it is live (the daemon's repo never sees the edit until
@@ -219,7 +229,7 @@ def test_releasing_the_hold_claims_the_NEW_top_item(repo, tmp_path, spawns):
     assert spawns.titles == ["URGENT item"]
 
 
-def test_a_hold_does_NOT_stop_reconciliation(repo, spawns):
+def test_a_hold_does_NOT_stop_reconciliation(repo, spawns, tmp_path):
     # CMX-53's lesson: dispatch and reconcile ride the same tick and went dark together.
     # A hold that also froze reconciliation would jam the very slot the orchestrator is
     # holding the queue to fill — the merged PR would never close out.
@@ -240,7 +250,7 @@ def test_a_hold_does_NOT_stop_reconciliation(repo, spawns):
     assert summary["dispatched"] == 0
     assert summary["reconciled_done"] == 1          # the run closed out and freed its slot
     assert summary["tracker_struck"] == 1           # and the dispatcher still struck it
-    assert (repo / "TODO.md").read_text() == "- [x] first item\n" + SECOND
+    assert _origin_show(repo, tmp_path) == "- [x] first item\n" + SECOND
 
 
 def test_an_expired_hold_resumes_dispatch_and_says_so_loudly(repo, spawns, caplog):

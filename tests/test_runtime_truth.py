@@ -133,6 +133,10 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_truth, "_agent_cmd_which", lambda binary: f"/usr/bin/{binary}")
     monkeypatch.setattr(runtime_truth, "_gh_auth_status", lambda: True)
     monkeypatch.setattr(runtime_truth, "_ref_exists", lambda repo, branch: True)
+    # dispatch.base_write_remote: the repo has a remote to write the (CMX-174) isolated
+    # tracker-strike / trial-ledger worktree through. `repo` here is a plain directory,
+    # not a real git checkout — same reason the git-backed facts above are all stubbed.
+    monkeypatch.setattr(runtime_truth, "_has_remote", lambda repo: True)
 
     # repo.upstream_synced: this checkout tracks its upstream cleanly — no local
     # divergence for `chela update` to have to recover from.
@@ -274,6 +278,14 @@ def _break_base_branch(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_base_write_remote(tmp_path, monkeypatch):
+    """The repo has no `origin` remote — the isolated base-write worktree (CMX-174) can
+    fetch and push nothing, so `_base_write_worktree` logs a WARNING and skips, every
+    tick, forever: merged tasks keep rendering as open cards."""
+    monkeypatch.setattr(runtime_truth, "_has_remote", lambda repo: False)
+    return doctor.ERROR
+
+
 def _break_tmux_windows(tmp_path, monkeypatch):
     """The run row says the agent is working in @1; tmux says @1 does not exist (CMX-62)."""
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@9": "something-else"})
@@ -411,6 +423,7 @@ CORRUPTIONS = {
     "dispatch.agent_cmd": _break_agent_cmd,
     "dispatch.gh_auth": _break_gh_auth,
     "dispatch.base_branch": _break_base_branch,
+    "dispatch.base_write_remote": _break_base_write_remote,
     "dispatch.hold": _break_dispatch_hold,
     "tmux.windows": _break_tmux_windows,
     "inbox.address": _break_inbox_address,
