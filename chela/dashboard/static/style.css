@@ -1828,8 +1828,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .modal-task { max-width: 96vw; max-height: 92vh; }
 }
 
-.task-modal-main { min-width: 0; }
-
 .task-modal-brief.md { font-size: 13px; line-height: 1.6; min-width: 0; }
 .task-modal-brief.md :is(h1, h2, h3, h4) { font-size: 14px; font-weight: 700; margin: 14px 0 6px; }
 .task-modal-brief.md :is(h1, h2, h3, h4):first-child { margin-top: 0; }
