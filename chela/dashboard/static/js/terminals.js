@@ -2157,15 +2157,20 @@ function _applyWallTileFrame(agents) {
 // target).
 function _ctxBarHTML(wid, draggable) {
     const idxNum = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
-    // Wall redesign slice 1: model + PR chip + cost, wall-only (same gate as
-    // idxNum above) — filled/shown by _applyWallTileFrame (PR, agents-driven)
-    // and _applyTermContext (model/cost, context-poll-driven), never both at
-    // once for the same field, so there is exactly one writer per chip.
+    // The model chip rides in the bar on EVERY surface — wall tiles AND the
+    // mobile single pane (Liav, 2026-07-25). It's context-poll-driven
+    // (_applyTermContext fills it from c.model, guarded by `if (modelChip)`),
+    // so it just needed to exist in the single-pane bar to light up.
+    const modelChip = `<span class="gs-model" hidden></span>`;
+    // PR + cost stay wall-only (same gate as idxNum above): PR is agents-driven
+    // (_applyWallTileFrame) and both add width the compact mobile bar doesn't
+    // need. _applyTermContext writes cost, _applyWallTileFrame writes PR — never
+    // both to the same field, so there is exactly one writer per chip.
     const meta = draggable
-        ? `<span class="gs-model" hidden></span>
-           <a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
+        ? `<a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
            <span class="gs-cost" hidden></span>` : '';
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
+      ${modelChip}
       ${meta}
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
