@@ -5,6 +5,7 @@ import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from chela import discovery, event_log, sessions, transcripts
 
@@ -247,3 +248,29 @@ def test_agent_transcript_summary_disambiguates_two_windows_sharing_one_cwd(
     # (arbitrary "newest") transcript — the bug this guards against.
     by_name_only = transcripts.agent_transcript_summary("anthony_work")
     assert by_name_only["ai_title"] in ("Refactor the risk engine", "Write the onboarding docs")
+
+
+# --- claude_config_dir: honouring $CLAUDE_CONFIG_DIR, not hardcoding ~/.claude ------
+# CMX-173: chela hardcoded ~/.claude/projects as the transcript root, so any adopter who
+# relocates Claude Code's config dir via $CLAUDE_CONFIG_DIR got NO transcript resolution
+# at all (recaps, PR links, ai-titles, the telegram relay all silently went dead).
+
+def test_claude_config_dir_honours_the_env_var(monkeypatch, tmp_path):
+    custom = tmp_path / "somewhere-else"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+    assert transcripts.claude_config_dir() == custom
+
+
+def test_claude_config_dir_defaults_to_dot_claude_when_unset(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    assert transcripts.claude_config_dir() == Path.home() / ".claude"
+
+
+def test_hooks_claude_config_dir_delegates_to_transcripts(monkeypatch, tmp_path):
+    """hooks.py must not keep its own copy of this logic — one source of truth, or the
+    two can silently drift back out of sync the way the original bug did."""
+    from chela import hooks
+
+    custom = tmp_path / "elsewhere"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+    assert hooks.claude_config_dir() == custom == transcripts.claude_config_dir()

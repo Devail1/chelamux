@@ -317,6 +317,20 @@
                 <button id="term-lock-btn" class="gl-btn" onclick="chela.toggleWallLock(this)"
                         title="Lock layout — drag swaps panes, resize off" aria-label="Lock layout"
                         style="margin-left:6px;"></button>
+                <!-- Wall redesign slice 2: auto-arrange — rank panes by attention (needs
+                     you -> working -> idle -> done) instead of the manual layout. Manual
+                     layout (pc_wall_layout) is sacred and untouched while this is on;
+                     toggling off restores it verbatim. -->
+                <button id="term-auto-btn" class="gl-btn" onclick="chela.toggleWallAuto(this)"
+                        title="Auto-arrange — rank panes by attention" aria-label="Auto-arrange"
+                        style="margin-left:6px;"></button>
+                <!-- Wall redesign: Focus layout — one pane large, the rest a compact
+                     strip. Mutually exclusive with auto-arrange (both own the
+                     layout); manual layout (pc_wall_layout) is sacred here too,
+                     untouched while this is on. -->
+                <button id="term-focus-btn" class="gl-btn" onclick="chela.toggleWallFocus(this)"
+                        title="Focus — one pane large, the rest a strip" aria-label="Focus"
+                        style="margin-left:6px;"></button>
             </span>
             <button id="term-new-shell" onclick="chela.spawnShell(this)" title="Spawn a new plain-shell window" style="margin-left:auto;">+ New shell</button>
         </div>
