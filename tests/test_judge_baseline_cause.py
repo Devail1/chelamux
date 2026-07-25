@@ -201,3 +201,92 @@ def test_run_experiments_without_a_base_branch_still_reports_cleanly(tmp_path, r
     assert report.state == judge.J_CANNOT_VERIFY
     assert "NOT GREEN" in report.cannot_verify
     assert "no `workspace.base_branch`" in report.cannot_verify
+
+
+# --- rework round: ANSI colour must not defeat the name extraction -----------------------
+#
+# Filed live against this branch: the judge daemon's own environment carries `FORCE_COLOR=3`
+# (inherited by whatever it spawns), and pytest's short summary line under colour is
+# `\x1b[31mFAILED\x1b[0m path::test - why` — the escape sits exactly where
+# `_RE_PYTEST_FAILED_NAME` anchors (`^FAILED`), so `findall` returned [] and the report fell
+# straight back to the bare-count message this feature exists to replace. CI never caught it
+# because CI does not force colour; the box the judge actually runs on does.
+
+
+def test_failing_test_names_survives_a_real_coloured_pytest_summary():
+    """A genuine coloured pytest tail (escapes embedded, not a sanitised string standing in
+    for one) must still yield the node id. This is the guarantee: remove `_strip_ansi` from
+    `_failing_test_names` and this goes red on its own, with no subprocess involved."""
+    tail = (
+        "\x1b[31m\x1b[1m=================================== FAILURES "
+        "===================================\x1b[0m\n"
+        "\x1b[31m\x1b[1m_______________________________ test_known_broken "
+        "________________________________\x1b[0m\n"
+        "\n"
+        "    def test_known_broken():\n"
+        ">       assert False, 'this one is broken on purpose'\n"
+        "\x1b[1m\x1b[31mE       AssertionError: this one is broken on purpose\x1b[0m\n"
+        "\n"
+        "test_suite.py:1: AssertionError\n"
+        "\x1b[36m\x1b[1m=============================== short test summary info "
+        "================================\x1b[0m\n"
+        "\x1b[31mFAILED\x1b[0m test_suite.py::test_known_broken - AssertionError: this one "
+        "is broken on purpose\n"
+        "\x1b[31m1 failed\x1b[0m in 0.04s\n"
+    )
+
+    assert judge._failing_test_names(tail) == ["test_suite.py::test_known_broken"]
+
+
+def test_run_experiments_names_the_failing_test_even_when_the_suite_is_forced_to_colour(
+    tmp_path, repo, origin,
+):
+    """End-to-end version of the guard above: force the CHILD suite itself to colour with
+    `--color=yes`, which pytest honours over the judge's own `NO_COLOR` hygiene env — so this
+    proves the strip in `_failing_test_names`, not the env fix in `run_suite`, is what saves
+    the name. Remove the strip and this goes red too."""
+    _commit_on(repo, "dev", FAILING_TEST, "dev itself is broken")
+    _push(repo, "dev")
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "unrelated.txt").write_text("noise\n")
+    _git("add", "unrelated.txt", cwd=repo)
+    _git("commit", "-m", "an unrelated PR commit", cwd=repo)
+    wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
+    _git("fetch", "origin", "dev", cwd=wt)
+
+    coloured_cmd = f'"{sys.executable}" -m pytest -q --color=yes'
+    report = judge.run_experiments(
+        wt, coloured_cmd, {"experiments": [_exp()]}, timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert "test_known_broken" in report.cannot_verify
+    assert "RED ON BASE TOO" in report.cannot_verify
+
+
+# --- rework round: a GREEN baseline must never pay for the base_branch diagnostic --------
+
+
+def test_diagnose_red_baseline_never_runs_against_a_green_baseline(tmp_path, repo, monkeypatch):
+    """The cost guard the brief made mandatory: `_diagnose_red_baseline` re-runs the WHOLE
+    suite against `origin/<base_branch>` — worth paying for on a RED baseline (it is the only
+    way to tell "this branch broke it" from "base was already broken"), but a GREEN baseline
+    has nothing to diagnose. Today this holds only because the call sits inside
+    `if not baseline.green:` in `run_experiments` — a refactor that hoists it out would
+    silently double the wall-clock of every judge run on the common path, and nothing else
+    here would fail. This test is what makes that refactor fail."""
+    _branch_from_head(repo, "pr-1")
+    wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
+
+    def _must_not_run(*args, **kwargs):
+        raise AssertionError("_diagnose_red_baseline ran against a GREEN baseline")
+
+    monkeypatch.setattr(judge, "_diagnose_red_baseline", _must_not_run)
+
+    report = judge.run_experiments(
+        wt, TEST_CMD, {"experiments": [_exp()]}, timeout=60, base_branch="dev",
+    )
+
+    assert report.baseline is not None
+    assert report.baseline.green

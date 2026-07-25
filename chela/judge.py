@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -113,6 +114,20 @@ _RE_NODE_FAIL = re.compile(r"^# fail (\d+)$", re.M)
 # WHICH test failed, and they are what turns "1 failed" into something a human can act on.
 _RE_PYTEST_FAILED_NAME = re.compile(r"^FAILED (\S+)", re.M)
 _RE_NODE_FAILED_NAME = re.compile(r"^not ok \d+ - (.+)$", re.M)
+
+# ⛔ CMX-177 rework: both patterns above anchor to the START of the line (`^FAILED`,
+# `^not ok`), but a coloured runner puts an SGR escape THERE instead — pytest's own summary
+# line is `\x1b[31mFAILED\x1b[0m path::test - why`, which never matches `^FAILED` at all.
+# `findall` then returns [], `named` is empty, and the report silently falls back to the
+# bare-count message this feature exists to replace. Observed live: the judge daemon's own
+# environment carries `FORCE_COLOR=3`, so this is not a hypothetical — it is the box the
+# judge actually runs on. Strip before matching, once, here — not at every call site, so a
+# future caller can't forget it.
+_RE_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _RE_ANSI_ESCAPE.sub("", text)
 
 MAX_NAMED_FAILURES = 5
 
@@ -328,12 +343,30 @@ def _last_meaningful_line(tail: str, limit: int = 300) -> str:
 def _failing_test_names(tail: str, limit: int = MAX_NAMED_FAILURES) -> list[str]:
     """WHICH test(s) failed, not just how many. [] if the tail names none (truncated output,
     an unrecognized runner) — the caller falls back to the bare count, never invents a name."""
+    plain = _strip_ansi(tail)
     names: list[str] = []
-    for n in _RE_PYTEST_FAILED_NAME.findall(tail) + _RE_NODE_FAILED_NAME.findall(tail):
+    for n in _RE_PYTEST_FAILED_NAME.findall(plain) + _RE_NODE_FAILED_NAME.findall(plain):
         n = n.strip()
         if n and n not in names:
             names.append(n)
     return names[:limit]
+
+
+def _no_color_env() -> dict[str, str]:
+    """The child's env, coloured output turned off. Hygiene alongside the ANSI strip in
+    :func:`_failing_test_names` — that strip is the guarantee (it must survive coloured
+    input from any producer, so it stays even with this), this is just why a human reading
+    ``report.cannot_verify`` doesn't see raw escapes. The judge daemon's own environment has
+    been observed running with ``FORCE_COLOR=3`` (inherited by whatever it spawns), so
+    popping it — not merely leaving it — is what makes this effective on that box; setting
+    only ``NO_COLOR`` and leaving ``FORCE_COLOR`` in place would still colour some runners
+    that check ``FORCE_COLOR`` first.
+    """
+    env = dict(os.environ)
+    env.pop("FORCE_COLOR", None)
+    env["NO_COLOR"] = "1"
+    env["PY_COLORS"] = "0"
+    return env
 
 
 def run_suite(test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS) -> SuiteResult:
@@ -351,7 +384,7 @@ def run_suite(test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS) 
     """
     try:
         out = subprocess.run(
-            test_cmd, shell=True, cwd=str(cwd),
+            test_cmd, shell=True, cwd=str(cwd), env=_no_color_env(),
             capture_output=True, text=True, errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
