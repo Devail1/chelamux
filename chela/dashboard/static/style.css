@@ -3443,10 +3443,14 @@ input[type="text"]:focus, textarea:focus, select:focus {
        now-hidden context bar (see the base .term-frame rule) — zero it here
        so that space isn't left as a dead strip under the terminal. */
     body.term-mobile-full .term-single .term-pane .term-frame { margin-bottom: 0; }
-    /* CMX-117: branch + context text moved out of .gs-head into the bottom
-       .term-ctx-bar, which is NOT part of .gs-head — hide just the text on
-       phones (same declutter intent as above) and keep the ambient fill. */
-    .term-ctx-bar .gs-branch, .term-ctx-bar .gs-ctx { display: none; }
+    /* CMX-117 hid the bottom-bar branch + context text on phones (declutter);
+       Liav's 2026-07-25 call brings them back — the mobile single pane has room
+       for the bottom bar now, and branch/context% are worth having. We DON'T
+       re-hide them here: they fall through to the desktop `.gs-branch/.gs-ctx`
+       rules + the `hidden` attribute that _applyTermContext toggles by data
+       presence (so an empty/context-less pane still shows nothing). The №
+       pane-number chip needs no rule — it's never rendered on the single pane
+       (_ctxBarHTML(wid, draggable=false) omits .gs-idx entirely). */
 
     /* CMX-130: the keybar below is `position: fixed` — it floats over whatever
        flow content sits at the bottom of the viewport rather than pushing it
