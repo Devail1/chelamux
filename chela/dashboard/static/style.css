@@ -2658,7 +2658,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
        (input box + "auto mode on") still under the bar. */
     :root { --gs-head-h: 32px; --term-switcher-h: 38px; }
     .term-single .term-pane {
-        height: calc(100dvh - var(--gs-head-h) - var(--term-switcher-h) - var(--term-keybar-h, 0px) - var(--term-ctx-bar-h) - env(safe-area-inset-bottom));
+        height: calc(100dvh - var(--gs-head-h) - var(--term-switcher-h) - var(--term-keybar-h, 0px) - var(--term-ctx-bar-h) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
     }
     /* NB: the pane is DELIBERATELY left inset by .content's horizontal padding
        (no width reclaim). That side gutter is what lets a touch-drag beside the
@@ -3417,26 +3417,35 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .gs-mobile-full-btn { display: inline-flex; }
 
     /* term-mobile-full: body class toggled by chela.termMobileFull (bound to
-       .gs-mobile-full-btn above). Hides the chrome around the single pane —
-       the agent-pill switcher above it, the fixed keybar below it, and the
-       pane's own context bar — so the pane's own height rule (below) can
-       claim the full 100dvh. The compact .gs-head (and its × kill) is
-       deliberately NOT in this list: it's the only way back out of
-       fullscreen, so it must stay visible and reachable in both states. */
+       .gs-mobile-full-btn above). Hides the INFORMATIONAL chrome around the
+       single pane — the agent-pill switcher above it and the pane's own
+       context bar — so the pane's height rule (below) can claim nearly the
+       whole screen. Two things deliberately stay: the compact .gs-head (with
+       its collapse toggle + × kill — the only way back OUT of fullscreen), and
+       the keybar (Liav, 2026-07-25), because it is not clutter but the mobile
+       INPUT METHOD: Esc/Tab/Ctrl/arrows/Paste are unreachable without it, and
+       fullscreen is exactly when you're working in the terminal. */
     body.term-mobile-full .term-switcher,
-    body.term-mobile-full .term-keybar,
     body.term-mobile-full .term-ctx-bar { display: none !important; }
     /* True overlay, not just a tall box: the pane normally sits BELOW the
        topbar (~53px) in flow, so a bare `height:100dvh` overshoots the
        viewport and pushes the terminal's bottom rows under the fold. Pin it
-       to the viewport (fixed + top/left/right:0) so 100dvh means the whole
-       screen — topbar included. z-index 100 clears the topbar (auto) and the
-       keybar (35) but stays under modals (200). The pane's own .gs-head (with
-       the collapse toggle + × kill) rides at top:0, so exit stays reachable. */
+       to the viewport (fixed + top/left/right:0) so the height below is
+       measured against the whole screen — topbar included. Subtract the
+       keybar's FULL footprint (--term-keybar-h + the safe-area inset its own
+       bottom padding carries — same CMX-130 reasoning as the non-fullscreen
+       rule above) so the fixed bar sits past the pane instead of painting
+       over the terminal's bottom row. z-index 100 clears the topbar (auto);
+       the pane no longer overlaps the keybar (35) geometrically, so their
+       z-order is moot, and both stay under modals (200). */
     body.term-mobile-full .term-single .term-pane {
         position: fixed;
         top: 0; left: 0; right: 0;
-        height: 100dvh;
+        /* --kb-occluded (published by _kbPin from VisualViewport) is how much
+           the SOFTWARE KEYBOARD covers — 0 when it's closed. dvh does not track
+           it, so without this the terminal's input line hides behind the
+           keyboard exactly when you're typing into it. */
+        height: calc(100dvh - var(--term-keybar-h, 0px) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
         z-index: 100;
     }
     /* .term-frame normally reserves --term-ctx-bar-h of bottom margin for the

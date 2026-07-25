@@ -3250,7 +3250,21 @@ function kbCtrlKey(letter) {
 function _kbPin() {
     const bar = document.getElementById('term-keybar');
     const vv = window.visualViewport;
-    if (!bar || !vv) return;
+    if (!vv) return;
+    // Publish how much of the layout viewport's BOTTOM the on-screen keyboard
+    // is covering, as --kb-occluded, so the pane's height rules can subtract it
+    // (style.css, mobile block). This is the whole reason the var exists: `dvh`
+    // tracks the browser's own dynamic chrome (address bar) but NOT the software
+    // keyboard, so on iOS a 100dvh pane keeps its full height when the keyboard
+    // opens and the terminal's bottom rows — the INPUT LINE you are typing into —
+    // sit behind it. VisualViewport is the only thing that reports the keyboard.
+    // Mobile-only: desktop browser zoom also moves the visual viewport, and we
+    // don't want that resizing wall tiles.
+    const occluded = _isMobileTerm()
+        ? Math.max(0, Math.round(window.innerHeight - (vv.offsetTop + vv.height)))
+        : 0;
+    document.documentElement.style.setProperty('--kb-occluded', occluded + 'px');
+    if (!bar) return;
     const top = Math.max(0, Math.round(vv.offsetTop + vv.height - bar.offsetHeight));
     bar.style.bottom = 'auto';
     bar.style.top = top + 'px';
