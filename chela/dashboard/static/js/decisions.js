@@ -41,19 +41,25 @@
 //   1. SEARCH (`#decisions-search`, setDecisionsQuery) — a substring filter
 //      over the events already held, so an OLD decision the short list has
 //      scrolled past is still findable.
-//   2. CLICK-THROUGH (openDecisionTicket) — every run_* payload already
-//      carries task_id/title/branch_name/pr_url/pr_state/attempt (and on the
-//      rework kinds, reviews/rework_count/last_error — see chela/inbox.py's
-//      run_events/_window_payload), which decisionsmodel.js's
-//      itemFromDecisionPayload turns into the exact shape taskmodal.js's
-//      openTaskModal already renders. A row click opens straight into that
-//      modal — no trip through Work to find the card.
+//   2. CLICK-THROUGH (openDecisionTicket) — a row click resolves the event's
+//      task_id against /api/dispatcher (the SAME poll Work's board reads),
+//      because the decision payload alone is missing exactly the fields the
+//      ticket exists to show (brief/judge_state/pr_checks/body — see
+//      decisionsmodel.js's findDispatcherRun doc comment). Found → that
+//      authoritative run/task object opens, identical to what a Work card
+//      would show for it. Not found (aged out of the dispatcher's bounded
+//      recent window) or the fetch fails → falls back to
+//      decisionsmodel.js's partialItemFromDecisionPayload, built from the
+//      event's own run_*/_window_payload fields (task_id/title/branch_name/
+//      pr_url/pr_state/attempt, and on rework kinds reviews/rework_count/
+//      last_error — see chela/inbox.py), but visibly marked partial rather
+//      than rendering "No brief recorded" as if the run genuinely had none.
 // ---------------------------------------------------------------------------
 import { $, api, escHtml } from './util.js';
 import { CLASSES, classOf, drainLog } from './feedmodel.js';
 import {
-    filterDecisionEvents, formatUnreadCount, itemFromDecisionPayload, maxSeq,
-    seedLastSeen, unreadCount, unreadUrgency,
+    filterDecisionEvents, findDispatcherRun, formatUnreadCount, itemFromDecisionPayload,
+    maxSeq, partialItemFromDecisionPayload, seedLastSeen, unreadCount, unreadUrgency,
 } from './decisionsmodel.js';
 import { onOrchestratorChange, orchestratorState, refreshOrchestratorStatus } from './orchestrator.js';
 
@@ -208,22 +214,37 @@ function _rowHtml(e) {
     </div>`;
 }
 
-// Resolves a clicked row back to its event (by `seq`, unique per the log) and
-// opens the SAME task-detail modal a Kanban card opens (taskmodal.js's
-// openTaskModal). Reached via window.chela rather than a static import:
-// taskmodal.js sits inside the Work module cluster (dispatcher.js → work.js →
-// kanban.js/schedules.js → nav.js → main.js), and main.js starts its own
-// `setInterval` refresh loop at import time — pulling that whole graph into
-// this popover's otherwise-light module set would drag a second poll loop in
-// with it for no reason. window.chela is the exact seam index.html's inline
-// onclick handlers already reach through for the same kind of cross-module
-// call, so this is that same seam, called from JS instead of from markup.
-function openDecisionTicket(el) {
+// Resolves a clicked row back to its event (by `seq`, unique per the log),
+// resolves the event's task_id against the dispatcher's own view of the
+// world, and opens the SAME task-detail modal a Kanban card opens
+// (taskmodal.js's openTaskModal). Reached via window.chela rather than a
+// static import: taskmodal.js sits inside the Work module cluster
+// (dispatcher.js → work.js → kanban.js/schedules.js → nav.js → main.js), and
+// main.js starts its own `setInterval` refresh loop at import time — pulling
+// that whole graph into this popover's otherwise-light module set would drag
+// a second poll loop in with it for no reason. window.chela is the exact
+// seam index.html's inline onclick handlers already reach through for the
+// same kind of cross-module call, so this is that same seam, called from JS
+// instead of from markup.
+//
+// One `/api/dispatcher` fetch per click (not a poll, not a re-import of
+// work.js) — the dispatcher object is the complete ticket, so it is tried
+// FIRST; the payload-only fallback only ever opens when that lookup comes up
+// empty or the fetch itself fails. Never throws, never blocks a dead click:
+// every path below still opens something.
+async function openDecisionTicket(el) {
     const seq = Number(el && el.dataset && el.dataset.seq);
     const e = _events.find(ev => ev && ev.seq === seq);
-    const item = e && itemFromDecisionPayload(e);
-    if (item && window.chela && typeof window.chela.openTaskModal === 'function') {
-        window.chela.openTaskModal(item);
+    const fallback = e && itemFromDecisionPayload(e);
+    if (!fallback) return;   // no task_id on this event — nothing to open
+    let item = null;
+    try {
+        const data = await api('/api/dispatcher');
+        item = findDispatcherRun(data, fallback.task_id);
+    } catch (err) { /* unreachable dispatcher — fall through to the partial ticket */ }
+    const toOpen = item || partialItemFromDecisionPayload(e);
+    if (toOpen && window.chela && typeof window.chela.openTaskModal === 'function') {
+        window.chela.openTaskModal(toOpen);
     }
 }
 

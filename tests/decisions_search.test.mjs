@@ -8,7 +8,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    filterDecisionEvents, itemFromDecisionPayload, matchesDecisionQuery,
+    filterDecisionEvents, findDispatcherRun, itemFromDecisionPayload, matchesDecisionQuery,
+    partialItemFromDecisionPayload,
 } from '../chela/dashboard/static/js/decisionsmodel.js';
 
 // --- itemFromDecisionPayload -------------------------------------------------
@@ -120,4 +121,73 @@ test('filterDecisionEvents with a blank query returns every held event, unfilter
 test('filterDecisionEvents on an empty/undefined list never throws', () => {
     assert.deepEqual(filterDecisionEvents([], 'x'), []);
     assert.deepEqual(filterDecisionEvents(undefined, 'x'), []);
+});
+
+// --- findDispatcherRun (CMX-178 rework) --------------------------------------
+
+test('finds a matching run in active_runs across multiple workflows', () => {
+    const data = {
+        workflows: [
+            { open_tasks: [], active_runs: [{ task_id: 'a1', brief: 'nope' }], awaiting_review_runs: [], recent_runs: [] },
+            { open_tasks: [], active_runs: [], awaiting_review_runs: [{ task_id: 't9', brief: 'the real brief' }], recent_runs: [] },
+        ],
+    };
+    const run = findDispatcherRun(data, 't9');
+    assert.ok(run, 'a run present in a later workflow\'s awaiting_review_runs must still be found');
+    assert.equal(run.brief, 'the real brief');
+});
+
+test('finds a matching OPEN TASK, keyed by `id` rather than `task_id`', () => {
+    const data = {
+        workflows: [{
+            open_tasks: [{ id: 'cmx-9', title: 'An open task', body: 'the brief' }],
+            active_runs: [], awaiting_review_runs: [], recent_runs: [],
+        }],
+    };
+    const task = findDispatcherRun(data, 'cmx-9');
+    assert.ok(task, 'open_tasks are keyed by `id`, not `task_id` — the lookup must check both');
+    assert.equal(task.body, 'the brief');
+});
+
+test('🔴 GUARD: returns null (not a wrong match) when nothing lines up', () => {
+    const data = {
+        workflows: [{ open_tasks: [], active_runs: [{ task_id: 'a1' }], awaiting_review_runs: [], recent_runs: [] }],
+    };
+    assert.equal(findDispatcherRun(data, 'not-present'), null);
+});
+
+test('findDispatcherRun never throws on a missing/malformed dispatcher response', () => {
+    assert.equal(findDispatcherRun(null, 't1'), null);
+    assert.equal(findDispatcherRun({}, 't1'), null);
+    assert.equal(findDispatcherRun({ workflows: [] }, 't1'), null);
+    assert.equal(findDispatcherRun({ workflows: [{}] }, 't1'), null);
+    assert.equal(findDispatcherRun({ workflows: [{ active_runs: [{}] }] }, 't1'), null);
+});
+
+test('findDispatcherRun with no task_id at all returns null rather than the first run', () => {
+    const data = { workflows: [{ active_runs: [{ task_id: 'a1' }] }] };
+    assert.equal(findDispatcherRun(data, null), null);
+    assert.equal(findDispatcherRun(data, undefined), null);
+});
+
+// --- partialItemFromDecisionPayload ------------------------------------------
+
+test('partialItemFromDecisionPayload normalises the payload AND stamps a visible aged-out note', () => {
+    const event = {
+        seq: 5, type: 'run_review',
+        payload: { task_id: 't9', title: 'cmx-9 task', run_status: 'awaiting_review', branch_name: 'cmx-9' },
+    };
+    const item = partialItemFromDecisionPayload(event);
+    assert.equal(item.task_id, 't9');
+    assert.equal(item.branch_name, 'cmx-9');
+    // 🔴 GUARD: this is the whole point — the brief pane (taskmodalmodel.js's
+    // briefSource: brief > body > raw) must not silently read "No brief
+    // recorded", which is a lie when the truth is "not loaded here".
+    assert.ok(item.body && item.body.length > 0, 'a partial ticket must carry a non-empty body note');
+    assert.ok(/aged out|not be reached/i.test(item.body), 'the note must explain WHY the ticket is partial');
+});
+
+test('partialItemFromDecisionPayload returns null when the payload has no task_id (nothing to fall back to)', () => {
+    const event = { seq: 6, type: 'inbox_undeliverable', payload: { wid: '@0' } };
+    assert.equal(partialItemFromDecisionPayload(event), null);
 });
