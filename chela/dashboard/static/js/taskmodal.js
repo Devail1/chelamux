@@ -8,12 +8,20 @@ import { knMd, knInline } from './knowledge.js';
 // ---------------------------------------------------------------------------
 // The task-detail modal — a Jira-like "issue" view a kanban card click opens
 // (Work-view redesign). LEFT (wide): the task's brief rendered as markdown
-// (reusing knowledge.js's knMd — no new markdown dependency) + the review
-// timeline built from `review_history` below it — both markdown-heavy, so they
-// get the roomy column (and the timeline still reads when the brief pane is a
-// one-line "no brief" note, which most legacy runs are). RIGHT (narrow): the
-// compact details sidebar (workflow / branch / PR / CI / attempts / rework /
-// judge / timestamps / error).
+// (reusing knowledge.js's knMd — no new markdown dependency). RIGHT (narrow):
+// the compact details sidebar (workflow / branch / PR / CI / attempts / rework
+// / judge / timestamps / error) followed by the review timeline built from
+// `review_history`.
+//
+// The timeline lived in the LEFT column for part of 2026-07-25 and was moved
+// back. Worth knowing why, so it doesn't get re-litigated: at the time almost
+// every run predated brief-capture-at-claim, so `_briefPane` rendered a
+// one-line "No brief recorded" note and the wide column was dead space while
+// the markdown-heavy timeline was squeezed into the sidebar. Once the daemon
+// picked up brief capture and real briefs started landing, the wide column had
+// its intended occupant back and the timeline returned to the sidebar. The
+// trade is deliberate: a long verdict is narrower here, but the brief — the
+// thing the ticket is actually about — leads.
 //
 // openTaskModal(item) is intentionally "pure enough": it takes the SAME card
 // object kanban.js already has in hand (from the one /api/dispatcher poll) and
@@ -155,14 +163,12 @@ function openTaskModal(item) {
         <h3 class="task-modal-title">${title}</h3>
       </div>
       <div class="task-modal-body">
-        <div class="task-modal-main">
-          <div class="task-modal-brief md">${_briefPane(item)}</div>
-          <div class="task-modal-sub">Review timeline</div>
-          ${_timelineHtml(item)}
-        </div>
+        <div class="task-modal-brief md">${_briefPane(item)}</div>
         <div class="task-modal-side">
           <div class="task-modal-sub">Details</div>
           ${rows || '<div class="task-modal-empty">No details recorded.</div>'}
+          <div class="task-modal-sub">Review timeline</div>
+          ${_timelineHtml(item)}
         </div>
       </div>`;
 

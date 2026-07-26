@@ -1828,8 +1828,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
     .modal-task { max-width: 96vw; max-height: 92vh; }
 }
 
-.task-modal-main { min-width: 0; }
-
 .task-modal-brief.md { font-size: 13px; line-height: 1.6; min-width: 0; }
 .task-modal-brief.md :is(h1, h2, h3, h4) { font-size: 14px; font-weight: 700; margin: 14px 0 6px; }
 .task-modal-brief.md :is(h1, h2, h3, h4):first-child { margin-top: 0; }
@@ -3717,6 +3715,14 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .decisions-chip-who { color: var(--text); font-weight: 600; }
 .decisions-chip-queued { color: var(--text-dim); }
 .decisions-chip-why { color: var(--text-dim); width: 100%; }
+/* CMX-178: the search box that filters the list below (decisions.js's
+   setDecisionsQuery). Full-width, same input styling as everywhere else in
+   the app (input[type="text"] above) — just spaced to sit under the chip. */
+.decisions-search { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
+/* Scope line under an ACTIVE decisions search: "3 of 120 loaded". Dim and small —
+   it qualifies the result set (the popover filters a bounded buffer, not all
+   history), it is not itself a result. Hidden when the box is empty. */
+.decisions-scope { font-size: 10px; color: var(--text-dim); margin: 0 0 6px; }
 .decisions-list { border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
     max-height: 38vh; overflow-y: auto; }
 /* Sidebar-width row: the Feed's 5-column grid (56px 72px 108px auto 1fr, ~250px
@@ -3729,6 +3735,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .decisions-list .feed-seq { display: none; }
 .decisions-list .feed-summary { flex: 1 1 100%; font-size: 12px; }
+/* CMX-178: a row whose payload names a task_id (decisions.js's
+   itemFromDecisionPayload) click-throughs to the task-detail modal — cursor
+   + hover are the only affordance needed, the row's content is unchanged. */
+.decisions-list .feed-row-clickable { cursor: pointer; }
+.decisions-list .feed-row-clickable:hover { background: var(--surface); }
 
 /* Cost — fleet spend table (current-snapshot, v1; see cost.js). */
 .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
