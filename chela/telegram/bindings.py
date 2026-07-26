@@ -80,14 +80,6 @@ class BindingRegistry:
         # (``editMessageText``) instead of pinning a new one each time, which would
         # flap Telegram's "pinned a message" notice on every retitle.
         self._pinned_message_ids: dict[str, str] = {}
-        # window_id -> the session id chela PINNED at spawn time (chela.spawn, via
-        # `claude --session-id <uuid>`). UNLIKE the caches above, this is not
-        # Telegram-topic-scoped — it is the window's own recorded identity, so
-        # bind()/unbind() must NOT clear it: rebinding a window to a different topic
-        # (or dropping its topic) says nothing about which session is still running
-        # in it. Recording-only for now; see docs/AGENT_IDENTITY.md slice 2a — nothing
-        # reads this map yet.
-        self._session_ids: dict[str, str] = {}
 
     @property
     def chat_id(self) -> str | None:
@@ -212,29 +204,6 @@ class BindingRegistry:
             return None
         return self._pinned_message_ids.get(w)
 
-    def set_session_id(self, window_id: str, session_id: str | None) -> None:
-        """Record the session id chela pinned when it spawned ``window_id``.
-
-        ``None``/empty CLEARS any prior entry rather than storing it — that is what a
-        spawn that hit an override (``--session-id``/``--resume``/``--continue`` already
-        in the launch command) must do: recording chela's generated uuid there would be
-        a fabricated claim about which session is actually running.
-        """
-        w = _norm(window_id)
-        if w is None:
-            return
-        if session_id:
-            self._session_ids[w] = str(session_id)
-        else:
-            self._session_ids.pop(w, None)
-
-    def session_id_for(self, window_id: str | int | None) -> str | None:
-        """The session id chela pinned at spawn for this window (None → none recorded)."""
-        w = _norm(window_id)
-        if w is None:
-            return None
-        return self._session_ids.get(w)
-
     def window_for_thread(self, thread_id: str | int | None) -> str | None:
         """The window bound to ``thread_id`` (None → unbound / General topic)."""
         t = _norm(thread_id)
@@ -259,7 +228,7 @@ class BindingRegistry:
     # -- persistence -------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise to ``{chat_id, bindings, topic_names, epochs, pinned_titles, pinned_message_ids, session_ids}``."""
+        """Serialise to ``{chat_id, bindings, topic_names, epochs, pinned_titles, pinned_message_ids}``."""
         return {
             "chat_id": self._chat_id,
             "bindings": dict(self._window_to_thread),
@@ -267,7 +236,6 @@ class BindingRegistry:
             "epochs": dict(self._epochs),
             "pinned_titles": dict(self._pinned_titles),
             "pinned_message_ids": dict(self._pinned_message_ids),
-            "session_ids": dict(self._session_ids),
         }
 
     @classmethod
@@ -298,11 +266,6 @@ class BindingRegistry:
         for window, title in (data.get("pinned_titles") or {}).items():
             if reg.thread_for_window(window) is not None:
                 reg.set_pinned_title(window, title)
-        # NOT gated on `thread_for_window` like the caches above: a session id is
-        # recorded at spawn, often well before (or without ever having) a bound topic,
-        # so restoring it only for currently-bound windows would drop most of it.
-        for window, session_id in (data.get("session_ids") or {}).items():
-            reg.set_session_id(window, session_id)
         return reg
 
     def save(self, path: str | Path | None = None) -> None:

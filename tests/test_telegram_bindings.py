@@ -111,8 +111,7 @@ def test_save_load_round_trip(tmp_path):
                     "topic_names": {},
                     "epochs": {},
                     "pinned_titles": {},
-                    "pinned_message_ids": {},
-                    "session_ids": {}}
+                    "pinned_message_ids": {}}
 
     loaded = BindingRegistry.load(path)
     assert loaded.chat_id == "777"
@@ -232,77 +231,3 @@ def test_load_tolerates_a_file_written_before_topic_names_existed(tmp_path):
     loaded = BindingRegistry.load(path)
     assert loaded.thread_for_window("@3") == "42"
     assert loaded.topic_name("@3") is None
-
-
-def test_session_id_round_trips_and_defaults_to_none():
-    reg = BindingRegistry("777")
-    assert reg.session_id_for("@3") is None          # never recorded
-    reg.set_session_id("@3", "36358c6b-1111-4a11-8888-abc123456789")
-    assert reg.session_id_for("@3") == "36358c6b-1111-4a11-8888-abc123456789"
-
-
-def test_session_id_can_be_recorded_without_any_topic_binding():
-    # chela.spawn records a session id the moment it spawns a window — long before
-    # (or without ever having) a Telegram topic bound to it.
-    reg = BindingRegistry("777")
-    reg.set_session_id("@9", "session-abc")
-    assert reg.session_id_for("@9") == "session-abc"
-    assert reg.thread_for_window("@9") is None       # still unbound
-
-
-def test_setting_a_falsy_session_id_clears_any_recorded_one():
-    # An override at spawn (--session-id/--resume/--continue already in the launch
-    # command) records NULL rather than a fabricated id — set_session_id(..., None)
-    # must actually clear, not store the string "None".
-    reg = BindingRegistry("777")
-    reg.set_session_id("@3", "some-id")
-    reg.set_session_id("@3", None)
-    assert reg.session_id_for("@3") is None
-    reg.set_session_id("@3", "")
-    assert reg.session_id_for("@3") is None
-
-
-def test_binding_and_unbinding_a_window_does_not_clear_its_session_id():
-    # Unlike topic_names/pinned_titles, a session id is not topic-scoped: rebinding
-    # or unbinding a window's Telegram topic says nothing about which claude session
-    # is still running in it.
-    reg = BindingRegistry("777")
-    reg.set_session_id("@3", "session-abc")
-    reg.bind("@3", "42")
-    assert reg.session_id_for("@3") == "session-abc"
-    reg.bind("@3", "99")                              # rebind to a different topic
-    assert reg.session_id_for("@3") == "session-abc"
-    reg.unbind("@3")
-    assert reg.session_id_for("@3") == "session-abc"
-
-
-def test_session_id_save_load_round_trip(tmp_path):
-    reg = BindingRegistry("777")
-    reg.set_session_id("@3", "session-abc")
-    path = tmp_path / "bindings.json"
-    reg.save(path)
-
-    loaded = BindingRegistry.load(path)
-    assert loaded.session_id_for("@3") == "session-abc"
-
-
-def test_load_tolerates_a_file_written_before_session_ids_existed(tmp_path):
-    path = tmp_path / "bindings.json"
-    path.write_text(json.dumps({"chat_id": "777", "bindings": {"@3": "42"}}))
-
-    loaded = BindingRegistry.load(path)
-    assert loaded.thread_for_window("@3") == "42"
-    assert loaded.session_id_for("@3") is None
-
-
-def test_session_id_restored_even_for_an_unbound_window(tmp_path):
-    # Restoration must NOT be gated on an existing binding (unlike topic_names /
-    # pinned_titles) — a spawned window may never get a topic at all.
-    path = tmp_path / "bindings.json"
-    path.write_text(json.dumps({
-        "chat_id": "777", "bindings": {}, "session_ids": {"@5": "session-xyz"},
-    }))
-
-    loaded = BindingRegistry.load(path)
-    assert loaded.thread_for_window("@5") is None
-    assert loaded.session_id_for("@5") == "session-xyz"
