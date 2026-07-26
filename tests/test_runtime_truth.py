@@ -802,3 +802,36 @@ def test_installed_hooks_stale_is_false_with_nothing_installed_at_all(tmp_path, 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
 
     assert runtime_truth.installed_hooks_stale() is False
+
+
+def test_js_suites_walk_never_descends_into_git(tmp_path, monkeypatch):
+    """The *.test.mjs disk walk must never ENTER .git (runtime_truth.py's own comment).
+
+    This guards TRAVERSAL, not the returned list: `rglob("*.test.mjs")` filtered by
+    `_SKIP_DIRS` afterwards returns the identical 35 files while still descending into
+    .git — where, under CI's parallel workers, a concurrent ref update can make an entry
+    vanish mid-walk and raise FileNotFoundError. So no assertion about the RESULT can
+    catch it; only one about which directories were visited can. Restoring the
+    rglob-then-filter implementation turns this red (the spy records nothing, which the
+    `assert visited` below rejects as "not wired up" rather than passing vacuously).
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "a.test.mjs").write_text("")
+    (tmp_path / ".git" / "refs").mkdir(parents=True)
+    monkeypatch.setattr(runtime_truth, "repo_root", lambda: tmp_path)
+
+    visited: list[Path] = []
+    real_walk = os.walk
+
+    def spy(top, *args, **kwargs):
+        for entry in real_walk(top, *args, **kwargs):
+            visited.append(Path(entry[0]))
+            yield entry
+
+    monkeypatch.setattr(runtime_truth.os, "walk", spy)
+    found = runtime_truth._js_suites_on_disk()
+
+    assert found == ["tests/a.test.mjs"]
+    assert visited, "the os.walk spy recorded nothing — the walker was never instrumented"
+    assert not any(".git" in p.parts for p in visited), (
+        f"the walk descended into .git: {[str(p) for p in visited]}")
