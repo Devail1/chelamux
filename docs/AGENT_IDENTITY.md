@@ -14,10 +14,34 @@ started. So every consumer that later asks "what is this window doing" or "where
 transcript" reconstructs the answer by scraping `/proc`, matching on `cwd` strings, or ranking
 files by recency.
 
-Those derived keys are not merely fragile. On a single-user box — the normal case — they are
-**provably ambiguous**, because every agent runs with the same `cwd`.
-
 The stable key exists at every layer and is discarded at every layer.
+
+### ⚠️ Correction (2026-07-26, owner) — `cwd` DOES identify a dispatched run
+
+An earlier draft of this doc claimed `cwd` is ambiguous for every agent. **That is wrong for
+dispatched agents and the correction matters, because it changes which slice is urgent.**
+
+Every dispatched run gets its own worktree, and that is structural, not incidental — a run
+cannot share a `cwd` with another, because a same-`cwd` claim forces a new `git worktree add`.
+Measured: **58 runs, 58 distinct worktree paths, zero reuse.** So for the dispatched fleet,
+`cwd` → *which run* is a sound key, and `by_cwd` was never ambiguous for those agents.
+
+Two real ambiguities survive that correction:
+
+1. **`cwd` does not identify a SESSION.** A rework re-spawn reuses the run's worktree and
+   starts a *fresh* claude session, so one project dir accumulates several
+   `<session-id>.jsonl` files and `transcripts.py` picks among them by recency. Measured:
+   cmx-181's worktree holds **3** transcripts, cmx-182's holds **2** — one per round. Unique
+   `cwd`, ambiguous session.
+2. **Interactive windows genuinely do collide.** They are not worktree-isolated: `@1` and
+   `@78` both run in `/home/liavedunix`, which is why the live relay reports
+   *"the cwd fallback is REFUSED … a relay into the wrong agent's topic is worse than
+   silence"* — **36 `relay.transcript_missing` events in the ring.** This is the ambiguity
+   with a demonstrated, user-visible cost, and it is the one to fix first.
+
+So the honest framing: **the status join was never broken for dispatched agents; transcript
+resolution is ambiguous at the session level everywhere, and at the window level only for
+interactive windows.**
 
 ## Ground truth — measured 2026-07-26, do not re-derive
 
@@ -46,9 +70,11 @@ The stable key exists at every layer and is discarded at every layer.
 - **Blast radius.** The derived status is read by 8 modules (`rooms`, `inbox`, `dashboard/app`,
   `orchestrator`, `notify`, `messenger`, `dispatcher`, `collab`); derived transcripts by 8
   (`orchestrator`, `sessions`, `okf`, `hooks`, `telegram/{reconcile,monitor,bindings}`, `inbox`).
-- **The ambiguity, on this box:** four live `claude` pids all report `cwd=/home/liavedunix`, so
-  `by_cwd` has one slot for four processes and the transcript glob sees four agents' files in one
-  directory.
+- **The ambiguity, on this box — INTERACTIVE windows only** (see the correction above; dispatched
+  runs are worktree-isolated): four live `claude` pids all report `cwd=/home/liavedunix`, so
+  `by_cwd` had one slot for four processes and the transcript glob sees four agents' files in one
+  directory. CMX-180 made `by_cwd` omit that key rather than guess; the transcript side still
+  refuses, which is what the 36 `relay.transcript_missing` events are.
 - **✅ The precedent already exists in-repo.** `~/.chela/telegram-bindings.json` records
   `bindings` (wid→topic) *and* `epochs` — the recycled-window-id problem solved by **recording**
   rather than re-deriving. This doc proposes extending that instinct to session identity.
@@ -123,14 +149,21 @@ Sequenced so the first slice is independently valuable and the risky decision co
 | # | Slice | Scope | Pure-logic guards | Manual verify |
 |---|-------|-------|-------------------|---------------|
 | **1** ▶ | **Honest fallback** — ambiguous `cwd` omitted **and** a distinct `unknown` tile state | `agent_manager`: include a `cwd` in `by_cwd` only if every live pid sharing it agrees on a status; an unknown/`None` status counts as **disagreement**. `wallmodel.tileState`: absent status → `? unknown`, not `○ idle`. ⛔ Ranking unchanged; ⛔ do NOT reuse CMX-179's outage marker (the feed *is* answering). | disagreement omits · agreement keeps (pins out the rejected "omit whenever >1 pid" rule) · `None` counts as disagreement · sole occupant unaffected · `unknown` ≠ `idle` in `tileState` · `rankOrder` output unchanged. | a pane that cannot be resolved reads `? unknown`; idle/busy panes unchanged; ordering visually identical. **FILED as a dispatch brief 2026-07-26.** |
-| **2** | **Pin + record the session id** | `spawn.py` appends `--session-id <uuid>` (inside the allowlist boundary); `runs.session_id` column + the window-binding store; recorded on spawn, cleared on window death. | uuid generated once and identical in the sent command and the stored row; a window chela did not spawn stores nothing. | a dispatched agent's `runs.session_id` matches the pid's `sessionId` in the live feed. |
+| **2a** ⬆ | **Pin + record the session id for INTERACTIVE windows** — *promoted, this is where the live failure is* | `spawn.py` appends `--session-id <uuid>` to the command it sends (inside the caller's `claude`-only allowlist boundary) and records `wid → session_id` beside the existing bindings. Interactive windows share `$HOME`, so this is the ambiguity costing 36 `relay.transcript_missing` events. | uuid generated once and identical in the sent command and the stored row; an override (`--session-id`/`--resume`/`--continue`) records NULL rather than a fabricated id. | a `/new` window's recorded id matches the `sessionId` the live feed reports for its pid; the relay stops refusing. |
+| **2b** ⬇ | **Pin + record for DISPATCHED runs** — *demoted: no present bug* | `dispatcher.py` (`resolve_agent_cmd` at `:3302`, `send-keys` at `:3322`), `runs.session_id` via the additive-migration list at `:951`. ⚠️ **Not urgent on its own** — `cwd` already identifies a dispatched run (58/58 unique, worktree-enforced). Its value is as a **slice 4 prerequisite**: it disambiguates *which session within the run*, the 2–3 transcripts a reworked run leaves behind. Do it when slice 4 is built, not before. | id sent == id stored; persisted BEFORE `send-keys` (never launch an agent chela cannot identify); override → NULL; migration additive + idempotent. | `runs.session_id` matches the pid's `sessionId` in the live feed. |
 | **3** | **Join status on `sessionId`** | `session_status_map` gains `by_session`; `status_by_wid` prefers recorded session → `by_pid` → unique-`by_cwd` → `None`. | precedence order, and that a recorded-but-absent session degrades to the next tier rather than to a wrong answer. | `@1` reads what it is actually doing; `busy` panes read `busy`. |
 | **4** | **Resolve transcripts by name** | `transcripts`: recorded session → direct path; glob/recency only as documented fallback. | recorded id opens that exact file even when a newer sibling exists in the same dir — the case the recency rank gets wrong. | `@22`/`@76`-class windows relay again. |
 | **5** | **Surface windowless sessions** | `kind: background` agents have no pane; give them a place (a dashboard row, not a fake wall tile). | — | this orchestrator session becomes visible as itself. |
 
 Slice 5 is the one with a real product decision in it — where windowless agents belong — and
-should be settled with the owner before it is dispatched. Slices 1 and 2 are independent and
-safe to file now; 1 is worth doing even if nothing else here is ever built.
+should be settled with the owner before it is dispatched. Slice 1 is shipped (CMX-180).
+**Slice 2a is the next one to file**; 2b waits for slice 4, per the correction above.
+
+⚠️ **A brief for 2b was written and withdrawn on 2026-07-26 before it produced anything**
+(filed as cmx-183, killed in flight, worktree reaped, no PR). It justified itself with the
+`$HOME` collision — which is *interactive-window* evidence — while scoping itself to the
+dispatcher, where `cwd` is already unique. **Check which population your evidence comes from
+before scoping a fix to a different one.**
 
 ⚠️ **Slice 1 needs both halves or it is a no-op** — found while writing its brief, and worth
 recording because the same trap will recur in slices 3 and 4. `tileState` (`wallmodel.js:49`)
