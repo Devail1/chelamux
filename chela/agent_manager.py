@@ -250,6 +250,12 @@ def session_status_map(force: bool = False) -> dict:
     """Maps from `claude agents --json`: by_pid {pid: status},
     by_cwd {cwd: status}, cwd_by_pid {pid: cwd}.
 
+    ``by_cwd`` omits any cwd shared by two or more live pids that disagree on
+    status (an unresolved/``None`` status counts as disagreement) — a cwd is
+    not a session id, and guessing a status for it is the exact honesty gap
+    docs/AGENT_IDENTITY.md's slice 1 closes. A cwd held by exactly one pid is
+    unaffected.
+
     Cached for :data:`_STATUS_TTL` s and single-flighted: a burst of concurrent
     callers collapses to ONE subprocess. ``force`` skips the TTL fast path (the
     caller needs fresh data) but still coalesces — if the winner refreshed the
@@ -301,6 +307,7 @@ def _refresh_status_locked() -> tuple[bool, str]:
     :func:`probe_native_status_feed`) that report it further, not just log it.
     """
     by_pid, by_cwd, cwd_by_pid = {}, {}, {}
+    cwd_statuses: dict[str, list] = {}
     try:
         r = subprocess.run(
             ["claude", "agents", "--json"],
@@ -315,7 +322,17 @@ def _refresh_status_locked() -> tuple[bool, str]:
                     if cwd:
                         cwd_by_pid[int(pid)] = cwd
                 if cwd:
-                    by_cwd[cwd] = st
+                    cwd_statuses.setdefault(cwd, []).append(st)
+            # A cwd is not a session id (docs/AGENT_IDENTITY.md) — every live pid
+            # sharing one must AGREE before it earns a status, and an unresolved
+            # (`None`) status counts as disagreement, same as a real mismatch.
+            # Otherwise the last pid processed silently overwrites an earlier
+            # one's status: a confidently wrong answer, worse than an omitted key.
+            for cwd, statuses in cwd_statuses.items():
+                if len(statuses) == 1:
+                    by_cwd[cwd] = statuses[0]
+                elif len(set(statuses)) == 1 and statuses[0] is not None:
+                    by_cwd[cwd] = statuses[0]
             _note_recovery()
             _status_cache.update(
                 ts=time.time(), by_pid=by_pid, by_cwd=by_cwd, cwd_by_pid=cwd_by_pid
