@@ -255,10 +255,28 @@ def session_status_map(force: bool = False) -> dict:
     caller needs fresh data) but still coalesces — if the winner refreshed the
     cache while ``force`` waited on the lock, it returns that instead of spawning
     a second command.
+
+    A non-``force`` caller NEVER blocks on the lock: :func:`start_background_refresh`
+    holds it for up to :data:`_STATUS_CMD_TIMEOUT` seconds while refreshing off the
+    request path, and a request arriving mid-refresh must not join that wait (the
+    brief's request-path ceiling must not grow past what it was before that thread
+    existed). It tries the lock; on contention it serves the cache as-is — stale by
+    at most one refresh cycle, but never blocking. ``force`` callers (the dispatcher,
+    ``chela doctor``) still block for a fresh answer, same as always.
     """
     entered = time.time()
     # Fast path: a recent cache satisfies everyone without touching the lock.
     if not force and entered - _status_cache["ts"] < _STATUS_TTL:
+        return _status_cache
+    if not force:
+        if not _status_lock.acquire(blocking=False):
+            return _status_cache
+        try:
+            if _status_cache["ts"] >= entered:
+                return _status_cache
+            _refresh_status_locked()
+        finally:
+            _status_lock.release()
         return _status_cache
     with _status_lock:
         # A concurrent caller may have refreshed the cache while we waited for the

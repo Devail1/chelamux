@@ -126,6 +126,40 @@ def test_single_flight_collapses_a_concurrent_burst(monkeypatch):
     assert stats["max_running"] == 1
 
 
+def test_non_force_call_never_blocks_while_a_refresh_holds_the_lock(monkeypatch):
+    """CMX-179 round-2 fix: start_background_refresh holds `_status_lock` for up to
+    `_STATUS_CMD_TIMEOUT` seconds. A non-force caller arriving mid-refresh must NOT
+    join that wait — it must serve the cache as-is instead (stale but never blocking),
+    or the request-path ceiling grows past what it was before the background thread
+    existed. Simulate an in-flight refresh by holding the lock directly."""
+    clock = _Clock(1000.0)
+    monkeypatch.setattr(agent_manager, "time", clock)
+    run, n = _counting_run(_ONE_AGENT)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    agent_manager.session_status_map()          # seed a cache
+    assert n["n"] == 1
+    clock.t += agent_manager._STATUS_TTL + 1.0  # now stale — a free lock would refresh
+
+    agent_manager._status_lock.acquire()        # simulate the background thread mid-refresh
+    try:
+        done = threading.Event()
+
+        def call():
+            agent_manager.session_status_map()  # not force
+            done.set()
+
+        t = threading.Thread(target=call)
+        t.start()
+        blocked = not done.wait(0.5)
+    finally:
+        agent_manager._status_lock.release()
+    t.join(timeout=1.0)
+
+    assert not blocked, "a non-force caller must never block while the lock is held"
+    assert n["n"] == 1, "the shut-out caller must not have spawned its own subprocess"
+
+
 # --- failure safety ----------------------------------------------------------
 
 def test_failure_keeps_last_good_cache(monkeypatch, caplog):
