@@ -10,6 +10,14 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Decisions inbox search box could not be clicked.** The popover closed itself
+  on any click anywhere inside it — including the click that should have focused the
+  search field — so the search added alongside it was unusable with a mouse. Clicks
+  inside the popover now keep it open; clicking outside still dismisses it, and
+  opening a decision's ticket closes it deliberately.
+
 ### Changed
 
 - **A pane whose status chela cannot resolve now says so, instead of claiming "idle".**

@@ -21,12 +21,16 @@ import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 
-const BODY = `<section class="side-section" id="side-decisions">
+// #btn-decisions + the #decisions-menu wrapper (not just the chip/list bare)
+// are real here, not decoration — the CMX-182 dismisser tests below drive the
+// actual light-dismiss listener, which looks both up by id.
+const BODY = `<button id="btn-decisions"></button>
+<div class="popover decisions-menu" id="decisions-menu" style="display:none;">
   <div id="decisions-chip"></div>
   <span id="decisions-unread" hidden></span>
-  <input type="text" id="decisions-search">
+  <input type="text" class="decisions-search" id="decisions-search">
   <div class="decisions-list" id="decisions-list"></div>
-</section>`;
+</div>`;
 
 let decisions, orchestrator;
 let requests;
@@ -38,7 +42,7 @@ let DISPATCHER_REJECT;
 before(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node']) {
+    for (const k of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'MouseEvent']) {
         Object.defineProperty(globalThis, k, {
             value: dom.window[k], writable: true, configurable: true,
         });
@@ -68,7 +72,14 @@ beforeEach(() => {
     DISPATCHER_REJECT = false;
     decisions.setDecisionsQuery('');   // module-level state — never leak a query across tests
     delete window.chela.openTaskModal;
+    decisions.hideDecisionsMenu();     // closes it AND tears down any dismiss listener from the prior test
 });
+
+// The dismiss listener is armed via `setTimeout(…, 0)` (openDecisionsMenu) so
+// that the SAME click which opened the popover (e.g. the #btn-decisions
+// button click) doesn't immediately re-trigger it. Tests need to wait out
+// that tick before dispatching a click of their own.
+const flushMicrotask = () => new Promise((r) => setTimeout(r, 0));
 
 const rows = () => document.querySelectorAll('#decisions-list .feed-row');
 const chip = () => document.querySelector('#decisions-chip .decisions-chip');
@@ -380,4 +391,89 @@ test('🔴 GUARD: filtering the rendered list does not touch the unread badge', 
     assert.ok(!rows()[0].textContent.includes('cmx-unread'));
     assert.equal(document.querySelector('#decisions-unread').textContent, before,
         'filtering the rendered VIEW must not change the unread badge — filtering is a VIEW concern, seen-state is not');
+});
+
+// --- CMX-182: the popover must not swallow clicks meant for its own contents --
+//
+// openDecisionsMenu (decisions.js) light-dismisses the popover with a `document`
+// click listener — same pattern as nav.js's openNewMenu/openPrimaryMenu
+// (tests/topbarmenu.test.mjs) — but #decisions-menu is the only one of the
+// three that holds an INTERACTIVE descendant (#decisions-search). Clicking
+// into the box to focus it used to bubble straight to the light-dismiss
+// listener and close the popover out from under the click (Liav, 2026-07-26).
+// The fix makes the dismisser itself containment-aware (ignore any click
+// whose target is inside #decisions-menu or #btn-decisions) rather than
+// requiring every interactive descendant to stop its own propagation — so
+// these tests drive the REAL dismisser with real bubbling MouseEvents, not a
+// source-text match.
+const decisionsMenu = () => document.getElementById('decisions-menu');
+const isOpen = () => decisionsMenu().style.display !== 'none';
+const clickOn = (el) => el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+test('🔴 GUARD: a click on the search box does not close the popover it lives inside', async () => {
+    decisions.openDecisionsMenu();
+    await flushMicrotask();
+    assert.ok(isOpen(), 'openDecisionsMenu must show the popover');
+
+    clickOn(document.getElementById('decisions-search'));
+
+    assert.ok(isOpen(), 'a click on #decisions-search must not reach the light-dismiss listener');
+});
+
+test('🔴 GUARD: a click anywhere else inside the popover (list/chip/padding) also does not close it', async () => {
+    decisions.openDecisionsMenu();
+    await flushMicrotask();
+
+    clickOn(document.getElementById('decisions-list'));
+    assert.ok(isOpen(), 'a click on #decisions-list must not close the popover');
+
+    clickOn(document.getElementById('decisions-chip'));
+    assert.ok(isOpen(), 'a click on #decisions-chip must not close the popover');
+
+    clickOn(decisionsMenu());
+    assert.ok(isOpen(), 'a click on the popover\'s own padding must not close it');
+});
+
+test('🔴 GUARD: an inside click does not disarm the dismisser — a SUBSEQUENT outside click still closes it', async () => {
+    decisions.openDecisionsMenu();
+    await flushMicrotask();
+
+    clickOn(document.getElementById('decisions-search'));   // inside click first
+    assert.ok(isOpen(), 'sanity: the inside click must not have already closed it');
+
+    clickOn(document.body);   // then a real outside click
+
+    assert.ok(!isOpen(),
+        'an outside click AFTER an inside click must still close the popover — a one-shot listener that ' +
+        'silently disarmed itself on the inside click would leave the popover permanently undismissable');
+});
+
+test('a click outside the popover closes it', async () => {
+    decisions.openDecisionsMenu();
+    await flushMicrotask();
+
+    clickOn(document.body);
+
+    assert.ok(!isOpen(), 'a click outside #decisions-menu and #btn-decisions must close the popover');
+});
+
+test('clicking a click-through row closes the popover itself, since the dismisser no longer fires on it', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review',
+            payload: { task_id: 't9', title: 'cmx-9 task', run_status: 'awaiting_review' },
+        }],
+    };
+    await decisions.enterDecisions();
+    window.chela.openTaskModal = () => {};
+    decisions.openDecisionsMenu();
+    await flushMicrotask();
+    assert.ok(isOpen(), 'sanity: the popover must be open before the row click');
+
+    await decisions.openDecisionTicket(document.querySelector('#decisions-list .feed-row'));
+
+    assert.ok(!isOpen(),
+        'opening a ticket from a row must close the decisions popover itself — the row click never reaches ' +
+        'document (it is inside #decisions-menu), so nothing else will close it');
 });

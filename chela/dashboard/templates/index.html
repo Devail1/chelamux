@@ -596,7 +596,10 @@
   <div id="decisions-chip"></div>
   <!-- CMX-178: a client-side substring filter over the events already held
        (decisionsmodel.js's filterDecisionEvents) — finds an OLD decision the
-       short list below has scrolled past, with no new fetch. -->
+       short list below has scrolled past, with no new fetch.
+       CMX-182: the light-dismiss listener (decisions.js openDecisionsMenu)
+       ignores clicks that land anywhere inside #decisions-menu, so this input
+       (and every other descendant) needs no stopPropagation of its own. -->
   <input type="text" class="decisions-search" id="decisions-search"
          placeholder="Search task, branch, PR…" autocomplete="off"
          oninput="chela.setDecisionsQuery(this.value)">

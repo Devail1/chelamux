@@ -232,6 +232,11 @@ function _rowHtml(e) {
 // FIRST; the payload-only fallback only ever opens when that lookup comes up
 // empty or the fetch itself fails. Never throws, never blocks a dead click:
 // every path below still opens something.
+//
+// CMX-182: a row is inside #decisions-menu, so the light-dismiss listener
+// (openDecisionsMenu, above) no longer closes the popover on this click — a
+// row click must close it itself, or the popover is left open behind the
+// ticket modal this opens on top of it.
 async function openDecisionTicket(el) {
     const seq = Number(el && el.dataset && el.dataset.seq);
     const e = _events.find(ev => ev && ev.seq === seq);
@@ -244,6 +249,7 @@ async function openDecisionTicket(el) {
     } catch (err) { /* unreachable dispatcher — fall through to the partial ticket */ }
     const toOpen = item || partialItemFromDecisionPayload(e);
     if (toOpen && window.chela && typeof window.chela.openTaskModal === 'function') {
+        hideDecisionsMenu();
         window.chela.openTaskModal(toOpen);
     }
 }
@@ -335,7 +341,15 @@ function _render() {
 }
 
 // --- Header popover: anchored + light-dismiss, same pattern as nav.js's
-// openPrimaryMenu/openNewMenu (#primary-menu/#new-menu). Opening marks every
+// openPrimaryMenu/openNewMenu (#primary-menu/#new-menu) — with one difference.
+// #new-menu/#primary-menu hold nothing but buttons, so ANY click landing
+// inside them is itself the dismissal action and closing on it is correct.
+// #decisions-menu holds a text input (#decisions-search, CMX-178) — a click
+// there is "please focus this box", not "please close the popover", so
+// CMX-182: the dismisser itself ignores clicks that land anywhere inside
+// #decisions-menu (or on the #btn-decisions launcher, which already has its
+// own stopPropagation above), rather than requiring every interactive
+// descendant to remember to stop its own propagation. Opening marks every
 // currently-held event as seen (clearing the unread badge) and ticks the log
 // so the popover is never showing a stale read the moment it appears.
 function openDecisionsMenu(ev) {
@@ -350,12 +364,27 @@ function openDecisionsMenu(ev) {
     m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
     _markSeen();
     tickDecisions();
-    setTimeout(() => document.addEventListener('click', hideDecisionsMenu, { once: true }), 0);
+    setTimeout(() => document.addEventListener('click', _dismissDecisionsMenuIfOutside), 0);
+}
+
+// Not `{ once: true }`: a click inside the popover must NOT disarm this
+// listener (that was the CMX-182 bug — the light-dismiss firing on the
+// search box's own click, once, closed the popover before it could re-arm
+// for the NEXT outside click). It stays registered across any number of
+// inside clicks and is only ever torn down by hideDecisionsMenu, which is
+// the sole path back to display:none.
+function _dismissDecisionsMenuIfOutside(ev) {
+    const m = $('#decisions-menu');
+    if (!m) return;
+    const btn = document.getElementById('btn-decisions');
+    if (m.contains(ev.target) || (btn && btn.contains(ev.target))) return;
+    hideDecisionsMenu();
 }
 
 function hideDecisionsMenu() {
     const m = $('#decisions-menu');
     if (m) m.style.display = 'none';
+    document.removeEventListener('click', _dismissDecisionsMenuIfOutside);
 }
 
 // --- Stage 0: ES-module exports ---
