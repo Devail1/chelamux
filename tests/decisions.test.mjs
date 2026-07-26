@@ -19,6 +19,9 @@
 // .test.mjs inside pytest; needs `npm ci` for jsdom).
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 
 const BODY = `<section class="side-section" id="side-decisions">
@@ -381,3 +384,34 @@ test('🔴 GUARD: filtering the rendered list does not touch the unread badge', 
     assert.equal(document.querySelector('#decisions-unread').textContent, before,
         'filtering the rendered VIEW must not change the unread badge — filtering is a VIEW concern, seen-state is not');
 });
+
+// --- CMX-182: the search box must survive its own click -----------------------
+//
+// openDecisionsMenu (decisions.js) light-dismisses the popover with a `document`
+// click listener — same pattern as nav.js's openNewMenu/openPrimaryMenu
+// (tests/topbarmenu.test.mjs). That pattern only works if every interactive
+// descendant stops its OWN click from bubbling to `document` (see
+// launcher.js's fav/recent row buttons); #decisions-search never did this, so
+// clicking into the box to focus it bubbled straight to the light-dismiss
+// listener and closed the popover out from under the click (Liav, 2026-07-26).
+//
+// jsdom (no `runScripts: "dangerously"`) never executes inline onclick="…"
+// attributes (see the comment on the click-through tests above), so this
+// cannot be driven by dispatching a real click at the real input — it is
+// checked the same way topbarmenu.test.mjs checks wiring jsdom can't execute:
+// against the REAL index.html source text.
+{
+    const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
+    const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
+
+    test('🔴 GUARD: #decisions-search stops its click from reaching the light-dismiss listener', () => {
+        const menu = HTML.match(/<div class="popover decisions-menu" id="decisions-menu"[\s\S]*?\n<\/div>/);
+        assert.ok(menu, '#decisions-menu block not found in index.html');
+        const input = menu[0].match(/<input[^>]*\bid="decisions-search"[^>]*>/);
+        assert.ok(input, '#decisions-search input not found inside #decisions-menu');
+        assert.match(input[0], /onclick="event\.stopPropagation\(\)"/,
+            '#decisions-search has no onclick stopPropagation — a click into the box bubbles to the ' +
+            'document light-dismiss listener (decisions.js openDecisionsMenu) and closes the popover ' +
+            'on its own click, exactly the reported bug');
+    });
+}
