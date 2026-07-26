@@ -66,7 +66,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chela import capabilities, config, discovery, epoch, event_log, hold, hooks, sessions
+from chela import agent_manager, capabilities, config, discovery, epoch, event_log, hold, hooks, sessions
 from chela.sources import get_source
 from chela.workflow import load_workflow
 
@@ -695,6 +695,51 @@ def _port_report(configured: int, obs: Observation) -> list[Finding]:
             "hooks still work — but the next clean start will not.)",
         )]
     return [Finding(OK, f"dashboard listening on {port} ({obs.detail})")]
+
+
+# --- fact: the native `claude agents --json` status feed the dashboard polls --------
+# CMX-179: the timeout guarding this call (`agent_manager._STATUS_CMD_TIMEOUT`) was BELOW
+# the command's real warm-start cost, so every call failed and the dashboard's busy/idle
+# pills silently froze fleet-wide — for 12 days, with 17,411 identical WARNING log lines
+# and nothing else saying so. The timeout is fixed, but a regression of the same shape
+# (the command gets slower again, or breaks outright) would be exactly as silent without a
+# check that actually asks it. This one does, right now, every `chela doctor` run.
+
+def _native_status_probe() -> tuple[bool, str]:
+    """A seam: the real answer is a fresh `claude agents --json` call (costs up to
+    ``agent_manager._STATUS_CMD_TIMEOUT`` seconds for real); the suite hands this a fixed
+    one instead of shelling out."""
+    return agent_manager.probe_native_status_feed()
+
+
+def _native_status_read() -> Observation:
+    if config.live_dashboard() is None:
+        # Nobody is polling this feed right now — nothing for the fact to report on, and
+        # probing it anyway would tax every `chela doctor` run on an idle install for free.
+        return absent("no dashboard is running — nothing is polling the native status feed")
+    if shutil.which("claude") is None:
+        return cannot_verify(
+            "`claude` is not on PATH, so chela cannot ask whether the native status feed "
+            "answers — and the dashboard's busy/idle pills would fail the exact same way.")
+    ok, detail = _native_status_probe()
+    return observed({"ok": ok, "detail": detail})
+
+
+def _native_status_report(_declared: None, obs: Observation) -> list[Finding]:
+    if obs.missing:
+        return [Finding(OK, f"native status feed: {obs.missing}")]
+    result = obs.value
+    if not result["ok"]:
+        return [Finding(
+            ERROR,
+            f"claude agents --json did NOT answer ({result['detail']})",
+            "The dashboard's busy/idle status for every window is served from a cache "
+            "that only updates on a SUCCESSFUL call — a persistent failure here freezes "
+            "every status pill fleet-wide at its last-known value, silently. Run `claude "
+            "agents --json` by hand to see the real error, and check "
+            "agent_manager._STATUS_CMD_TIMEOUT against how long it actually takes.",
+        )]
+    return [Finding(OK, f"claude agents --json answers ({result['detail']})")]
 
 
 # --- fact: the two plugin manifests, and only one of them runs -----------------------
@@ -1887,6 +1932,17 @@ def facts() -> list[Fact]:
             declare=config.dashboard_port,
             read_back=_port_read,
             report=_port_report,
+        ),
+        Fact(
+            name="agents.native_status_feed",
+            declared_by="nothing — chela never configures whether `claude agents --json` "
+                        "succeeds; the dashboard's status cache just assumes it answers "
+                        "within agent_manager._STATUS_CMD_TIMEOUT",
+            owned_by="the `claude` CLI itself — asked fresh, right now, the same call the "
+                     "dashboard's status cache makes",
+            declare=lambda: None,
+            read_back=_native_status_read,
+            report=_native_status_report,
         ),
         Fact(
             name="plugin.rendered",

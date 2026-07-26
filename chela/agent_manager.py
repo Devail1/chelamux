@@ -132,9 +132,57 @@ def is_claude_running(window_id: str) -> bool:
 #     runs at a time; concurrent callers block, then find the cache refreshed by
 #     the winner and return it instead of spawning their own.
 _STATUS_TTL = 2.0
-_STATUS_CMD_TIMEOUT = 10.0  # a hung `claude agents --json` must not stack forever
-_status_cache: dict = {"ts": 0.0, "by_pid": {}, "by_cwd": {}, "cwd_by_pid": {}}
+# ⛔ CMX-179: `claude agents --json` cold-starts around 12s and warm-starts 17-18s on the
+# dogfood box (measured 2026-07-26: 18.40 / 17.74 / 17.28s over three consecutive runs) —
+# the cost is CLI STARTUP, not payload (this box's fleet is 4 entries), so a bigger fleet
+# does not make it worse and trimming the query would not help. The old 10.0s timeout was
+# BELOW the warm-start floor, so every single call timed out — silently, from 2026-07-14
+# 17:00 to 2026-07-26: 17,411 identical "timed out" warnings in the dashboard error log,
+# ~250/hour with no gap in 83 consecutive hours, and nobody noticed because nothing but a
+# log line said so. Give real headroom above the measured worst case.
+_STATUS_CMD_TIMEOUT = 30.0
+# A single timeout can be a blip (a slow disk, a contended box) and is not worth raising
+# one's voice over — but a feed that has been down this long is a REGRESSION, and the
+# ordinary per-call WARNING (routine, and easy to lose in a flood of identical lines, which
+# is exactly how this went unnoticed for 12 days) is not loud enough. `_refresh_status_locked`
+# escalates once, at the ERROR level, the moment an outage crosses this age — and logs the
+# recovery too, so both edges of the episode are visible instead of just its interior.
+_STATUS_SUSTAINED_FAILURE_S = 120.0
+_status_cache: dict = {
+    "ts": 0.0, "by_pid": {}, "by_cwd": {}, "cwd_by_pid": {},
+    # down_since: wall-clock time of the FIRST failure in the current outage episode, or
+    # None while healthy. escalated: whether this episode already fired its one ERROR log
+    # (so a long outage does not re-log ERROR on every failed poll).
+    "down_since": None, "escalated": False,
+}
 _status_lock = threading.Lock()
+
+
+def native_status_health() -> dict:
+    """Whether `claude agents --json` is currently answering, from this process's cache.
+
+    Read-only view of the cache's own failure bookkeeping — no subprocess call. Reflects
+    only what THIS process has observed; a separate process (like a `chela doctor` CLI
+    invocation) has its own empty cache and must ask :func:`probe_native_status_feed`
+    instead, which asks the command directly.
+    """
+    down_since = _status_cache.get("down_since")
+    return {
+        "ok": down_since is None,
+        "down_since": down_since,
+        "down_for_s": (time.time() - down_since) if down_since is not None else 0.0,
+        "last_fetch_ts": _status_cache["ts"],
+    }
+
+
+def probe_native_status_feed() -> tuple[bool, str]:
+    """Force a fresh `claude agents --json` call, right now, and report whether it actually
+    answered — (ok, detail). Bypasses the TTL fast path so a caller that specifically wants
+    to know "is the feed alive RIGHT NOW" (``chela doctor``) is not satisfied by a stale
+    healthy cache from before an outage started.
+    """
+    with _status_lock:
+        return _refresh_status_locked()
 
 
 def session_status_map(force: bool = False) -> dict:
@@ -161,7 +209,7 @@ def session_status_map(force: bool = False) -> dict:
     return _status_cache
 
 
-def _refresh_status_locked() -> None:
+def _refresh_status_locked() -> tuple[bool, str]:
     """Run `claude agents --json` once and update the cache. Holds ``_status_lock``.
 
     On any failure the last-good maps are kept (a transient timeout must not blank
@@ -169,6 +217,9 @@ def _refresh_status_locked() -> None:
     instead of retry-storming. The completion time — not the caller's entry time —
     is stamped so every caller that entered while the command ran coalesces onto
     this result.
+
+    Returns ``(ok, detail)`` — ``detail`` is a human-readable outcome for callers (like
+    :func:`probe_native_status_feed`) that report it further, not just log it.
     """
     by_pid, by_cwd, cwd_by_pid = {}, {}, {}
     try:
@@ -186,24 +237,59 @@ def _refresh_status_locked() -> None:
                         cwd_by_pid[int(pid)] = cwd
                 if cwd:
                     by_cwd[cwd] = st
+            _note_recovery()
             _status_cache.update(
                 ts=time.time(), by_pid=by_pid, by_cwd=by_cwd, cwd_by_pid=cwd_by_pid
             )
-            return
-        log.warning(
-            "claude agents --json exited %s; keeping last status cache", r.returncode
-        )
+            return True, "ok"
+        detail = f"exited {r.returncode}"
+        _note_failure(f"claude agents --json {detail}; keeping last status cache")
     except subprocess.TimeoutExpired:
-        log.warning(
-            "claude agents --json timed out after %ss; keeping last status cache",
-            _STATUS_CMD_TIMEOUT,
-        )
+        detail = f"timed out after {_STATUS_CMD_TIMEOUT}s"
+        _note_failure(f"claude agents --json {detail}; keeping last status cache")
     except (ValueError, json.JSONDecodeError) as e:
-        log.warning("claude agents --json unparseable (%s); keeping last status cache", e)
-    except Exception:
+        detail = f"unparseable ({e})"
+        _note_failure(f"claude agents --json {detail}; keeping last status cache")
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
         log.exception("claude agents --json failed; keeping last status cache")
+        _note_failure_ts()
     # Stale-but-safe: preserve the last good maps, just back off for a TTL.
     _status_cache["ts"] = time.time()
+    return False, detail
+
+
+def _note_recovery() -> None:
+    """Called on a successful refresh. Logs (once) if the feed had been down."""
+    down_since = _status_cache.get("down_since")
+    if down_since is not None:
+        log.warning(
+            "claude agents --json recovered after %.0fs down", time.time() - down_since
+        )
+    _status_cache["down_since"] = None
+    _status_cache["escalated"] = False
+
+
+def _note_failure(warning: str) -> None:
+    """Log the routine per-call warning, and escalate once to ERROR if this outage has
+    crossed :data:`_STATUS_SUSTAINED_FAILURE_S` — see the constant's comment for why a
+    per-call WARNING alone was not loud enough to be noticed."""
+    log.warning(warning)
+    _note_failure_ts()
+
+
+def _note_failure_ts() -> None:
+    now = time.time()
+    if _status_cache.get("down_since") is None:
+        _status_cache["down_since"] = now
+    down_since = _status_cache["down_since"]
+    if not _status_cache.get("escalated") and now - down_since >= _STATUS_SUSTAINED_FAILURE_S:
+        log.error(
+            "claude agents --json has been failing for %.0fs (down_since=%.0f) — native "
+            "busy/idle status is stale fleet-wide, not just for one window",
+            now - down_since, down_since,
+        )
+        _status_cache["escalated"] = True
 
 
 def status_by_wid() -> dict[str, str]:
