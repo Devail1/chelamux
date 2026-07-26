@@ -28,7 +28,12 @@ def chela_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_DIR", str(tmp_path))
     monkeypatch.delenv("CHELA_ENV_FILE", raising=False)   # the suite disables it globally
     monkeypatch.delenv("CHELA_DASHBOARD_PORT", raising=False)
-    monkeypatch.delenv("CHELA_TMUX_SESSION", raising=False)
+    # Every test gets conftest.py's impossible session name, same as the rest of the suite —
+    # a bare `delenv` here would fall through to current_session()'s hardcoded default,
+    # "chela", which IS the real tmux session name on any box that runs chela. One test
+    # (test_missing_file_falls_back_to_defaults) genuinely wants the unset/default case; it
+    # opts into that locally rather than every other test opting out of this guarantee.
+    monkeypatch.setenv("CHELA_TMUX_SESSION", "chela-tests-no-such-session")
     # The landmine itself: pytest may be running inside a tmux pane, and
     # current_session() would then DERIVE that pane's session — a `webterm_*` mirror,
     # observed the first time this test ran. A service must never inherit one either;
@@ -75,12 +80,22 @@ def test_parses_comments_export_and_quotes(tmp_path):
     }
 
 
-def test_missing_file_falls_back_to_defaults(chela_dir):
+def test_missing_file_falls_back_to_defaults(chela_dir, monkeypatch):
     """A fresh install has no env file at all. That is not an error."""
+    monkeypatch.delenv("CHELA_TMUX_SESSION", raising=False)   # this test IS the default-fallback case
     assert config.parse_env_file(chela_dir / "chela.env") == {}
     assert config.load_env_file(chela_dir / "chela.env") == {}
     assert config.dashboard_port() == config.DEFAULT_DASHBOARD_PORT
     assert config.current_session() == "chela"
+
+
+def test_chela_dir_never_resolves_to_a_real_tmux_session(chela_dir):
+    """conftest.py:107 gives the suite an impossible session name so doctor's
+    tmux-reading facts cannot interrogate the developer's live fleet. This
+    file's fixture must never undo that — a `delenv` here resolves to the
+    hardcoded "chela" default, which IS the real session on a chela box."""
+    importlib.reload(config)
+    assert config.current_session() == "chela-tests-no-such-session"
 
 
 def test_an_exported_value_beats_the_file(chela_dir, monkeypatch):
@@ -221,15 +236,6 @@ def test_doctor_flags_a_plugin_baked_against_a_stale_port(chela_dir, monkeypatch
     # `test_doctor_flags_a_port_the_config_does_not_know_about` above — a published port
     # makes this fact shell out to the real `claude agents --json` otherwise.
     monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.1s"))
-    # plugin.hooks_flowing: `chela_dir` above deleted CHELA_TMUX_SESSION/TMUX_PANE to test
-    # the bare-process fallback elsewhere in this file — but that makes
-    # `config.current_session()` fall through to its hardcoded default, "chela", which is
-    # the REAL tmux session name on any box that actually runs chela (this one included).
-    # Installing a plugin below makes this fact apply, and it reads live windows via
-    # `sessions.panes()` under that resolved name — i.e. the suite's own live fleet, not a
-    # fixture. Give it a session name nothing can have, same idiom as conftest.py's
-    # session-wide default.
-    monkeypatch.setenv("CHELA_TMUX_SESSION", "chela-tests-no-such-session")
     hooks.render_plugin(chela_dir / "plugin", port=5001)
     _install_plugin(hooks.hooks_spec(5001))
     errors = _levels(doctor.check(), doctor.ERROR)
@@ -248,11 +254,6 @@ def test_doctor_is_quiet_when_everything_agrees(chela_dir, monkeypatch):
     # where `claude` is not on PATH (correctly; see runtime_truth._native_status_probe's
     # docstring). Stub the seam, the same idiom cmx-167 used for `_gh_auth_status`.
     monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.1s"))
-    # plugin.hooks_flowing: same fix as `test_doctor_flags_a_plugin_baked_against_a_stale_port`
-    # above — installing a plugin below makes this fact read live tmux windows, and
-    # `chela_dir`'s deleted CHELA_TMUX_SESSION resolves to the real "chela" session on this
-    # box otherwise.
-    monkeypatch.setenv("CHELA_TMUX_SESSION", "chela-tests-no-such-session")
     hooks.render_plugin(chela_dir / "plugin", port=5005)
     _install_plugin(hooks.hooks_spec(5005))
     assert _levels(doctor.check(), doctor.ERROR) == []
