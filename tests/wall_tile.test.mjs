@@ -265,6 +265,22 @@ test('rankOrder: an unknown pane (claude running, status unresolved) ranks with 
     assert.deepEqual(rankOrder(list, wantsByWid), ['@busy', '@unknown', '@done']);
 });
 
+test('rankOrder: unknown shares idle\'s exact tier — a private tier between busy and idle would reorder this', () => {
+    // 🔴 GUARD: the test above (@busy/@unknown/@done, no real idle pane) cannot
+    // tell "unknown is in the idle tier" apart from "unknown has its own tier
+    // strictly between busy(1) and idle(2)" — any such tier still sorts after
+    // busy and before done. Putting a REAL idle pane in the fixture, ahead of
+    // unknown, forces the distinction: if they are genuinely the same tier,
+    // the stable sort must keep idle before unknown (their input order); a
+    // private in-between tier for unknown would sort it ahead of idle instead.
+    const busy = agent({ window_id: '@busy', session_status: 'busy' });
+    const idle = agent({ window_id: '@idle', session_status: 'idle' });
+    const unknown = agent({ window_id: '@unknown', session_status: null, claude_running: true });
+    const list = [idle, unknown, busy];
+    const wantsByWid = { '@idle': false, '@unknown': false, '@busy': false };
+    assert.deepEqual(rankOrder(list, wantsByWid), ['@busy', '@idle', '@unknown']);
+});
+
 // --- focusLayout (Wall redesign: Focus layout toggle) ------------------------
 
 test('focusLayout: the focus pane gets {x:0,y:0,w:8} and the full height', () => {
