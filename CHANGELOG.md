@@ -10,8 +10,27 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Agent busy/idle status could silently stop updating for the whole fleet.** chela
+  reads native session status by shelling out to `claude agents --json`, under a
+  10-second timeout. That command's startup cost has grown past 10 s, so on affected
+  machines *every* call timed out, the status cache stayed empty, and the dashboard
+  drew every pane as **idle** — indistinguishable from a genuinely quiet fleet. The
+  "needs you" ring, taskbar ordering, tab-title count and auto-arrange ranking all
+  lost their input. Nothing surfaced it but a log line, so it could persist for
+  weeks. The timeout is now 45 s and the refresh happens on a background timer
+  instead of inside a web request, so a slow `claude` never stalls the dashboard.
+  Both are tunable: `CHELA_STATUS_CMD_TIMEOUT_S` and `CHELA_STATUS_TTL_S`.
+
 ### Added
 
+- **The dashboard now tells you when agent status is unavailable.** A topbar marker
+  (`⚠ agent status unavailable`, shortened to `⚠ status down` on narrow screens)
+  appears whenever the native status feed stops answering, so an empty status map is
+  never mistaken for a calm fleet again. Backed by a new `/api/agents/status_health`
+  endpoint and an `agents.native_status_feed` check in `chela doctor`, which asks the
+  command directly rather than trusting a cache that was healthy before the outage.
 - **`docs/GETTING_STARTED.md`** — a clone-to-first-dispatched-agent quickstart.
 - **`CODE_OF_CONDUCT.md`** (Contributor Covenant 2.1) and GitHub issue/PR templates.
 
