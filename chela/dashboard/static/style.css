@@ -606,6 +606,26 @@ body {
     .res-item .res-value { font-size: 11px; }
 }
 
+/* Native status feed health marker (#status-health-warn, CMX-179) — the topbar pill
+   statushealth.js shows whenever /api/agents/status_health reports the native
+   `claude agents --json` busy/idle feed is NOT answering. VERMILLION (a real fault,
+   not an FYI) but glyph ("⚠") + the word "unavailable" carry the signal, never colour
+   alone (Liav is red-weak) — same rule as .res-item/.decisions-dot below. Hidden by
+   default; shown only on an actual outage, never on a merely-empty-but-healthy fleet. */
+.status-health-warn {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 38px; padding: 0 13px; white-space: nowrap;
+    background: color-mix(in srgb, var(--ok-vermillion) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ok-vermillion) 55%, var(--border));
+    color: var(--ok-vermillion); border-radius: 999px;
+    font-size: 12.5px; font-weight: 600; line-height: 1;
+}
+.status-health-warn[hidden] { display: none; }
+
+@media (max-width: 768px) {
+    .status-health-warn { height: 34px; padding: 0 10px; font-size: 11.5px; }
+}
+
 /* Global active-shares indicator (safety kill-switch) — a persistent topbar pill
    shown whenever ANY session is shared, on every tab + mobile (where the pane
    header 🔗 is hidden). AMBER, not red: the primary user is red-weak and red is

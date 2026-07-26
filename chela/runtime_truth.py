@@ -705,10 +705,15 @@ def _port_report(configured: int, obs: Observation) -> list[Finding]:
 # (the command gets slower again, or breaks outright) would be exactly as silent without a
 # check that actually asks it. This one does, right now, every `chela doctor` run.
 
-def _native_status_probe() -> tuple[bool, str]:
+def _native_status_probe() -> tuple[bool, str] | None:
     """A seam: the real answer is a fresh `claude agents --json` call (costs up to
     ``agent_manager._STATUS_CMD_TIMEOUT`` seconds for real); the suite hands this a fixed
-    one instead of shelling out."""
+    one instead of shelling out. ``None`` means `claude` itself could not be asked (not on
+    PATH) — same shape as :func:`_gh_auth_status`, and for the same reason: the PATH check
+    must live INSIDE the seam, not in the caller, or a fixture that replaces this whole
+    function (as the test suite does) cannot bypass it."""
+    if shutil.which("claude") is None:
+        return None
     return agent_manager.probe_native_status_feed()
 
 
@@ -717,11 +722,12 @@ def _native_status_read() -> Observation:
         # Nobody is polling this feed right now — nothing for the fact to report on, and
         # probing it anyway would tax every `chela doctor` run on an idle install for free.
         return absent("no dashboard is running — nothing is polling the native status feed")
-    if shutil.which("claude") is None:
+    result = _native_status_probe()
+    if result is None:
         return cannot_verify(
             "`claude` is not on PATH, so chela cannot ask whether the native status feed "
             "answers — and the dashboard's busy/idle pills would fail the exact same way.")
-    ok, detail = _native_status_probe()
+    ok, detail = result
     return observed({"ok": ok, "detail": detail})
 
 

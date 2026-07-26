@@ -19,7 +19,7 @@ import sys
 
 import pytest
 
-from chela import config, dispatcher, doctor, hooks
+from chela import config, dispatcher, doctor, hooks, runtime_truth
 
 
 @pytest.fixture
@@ -224,6 +224,11 @@ def test_doctor_is_quiet_when_everything_agrees(chela_dir, monkeypatch):
     (chela_dir / "chela.env").write_text("CHELA_DASHBOARD_PORT=5005\n")
     monkeypatch.setenv("CHELA_DASHBOARD_PORT", "5005")
     config.publish_dashboard_port(5005)
+    # agents.native_status_feed: publishing the port above makes `config.live_dashboard()`
+    # non-None, so the fact would otherwise ask `claude` for real — CANNOT VERIFY on CI,
+    # where `claude` is not on PATH (correctly; see runtime_truth._native_status_probe's
+    # docstring). Stub the seam, the same idiom cmx-167 used for `_gh_auth_status`.
+    monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.1s"))
     hooks.render_plugin(chela_dir / "plugin", port=5005)
     _install_plugin(hooks.hooks_spec(5005))
     assert _levels(doctor.check(), doctor.ERROR) == []
