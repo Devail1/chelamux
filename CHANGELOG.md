@@ -10,6 +10,16 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **A pane whose status chela cannot resolve now says so, instead of claiming "idle".**
+  Agent busy/idle status is matched to a pane by process id, with the working directory
+  as a fallback — but on a single-user setup every agent shares one home directory, so
+  that fallback would hand one agent's status to another. It now stays silent unless
+  every process sharing a directory agrees, and a pane with no resolved status shows a
+  muted `? unknown` rather than a confident `○ idle`. Wall ordering is unchanged.
+  Background: `docs/AGENT_IDENTITY.md`.
+
 ### Fixed
 
 - **Agent busy/idle status could silently stop updating for the whole fleet.** chela

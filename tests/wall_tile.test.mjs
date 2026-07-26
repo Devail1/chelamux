@@ -60,6 +60,28 @@ test('tileState: idle with no PR is plain idle, not done', () => {
     assert.equal(tileState(a, wantsHuman(a)).cls, 'idle');
 });
 
+// docs/AGENT_IDENTITY.md slice 1: a pane chela cannot resolve a status for is
+// a distinct fact from one it confirmed is idle. `idle` is a real value
+// `claude agents --json` reports (see the test above); `session_status` being
+// absent while `claude_running` is true means chela's own join failed — that
+// must render as "unknown", never silently degrade to the "idle" glyph/word.
+test('tileState: claude running but session_status unresolved reads as unknown, not idle', () => {
+    const a = agent({ session_status: null, claude_running: true });
+    // 🔴 GUARD: falling through to the idle branch here is exactly the bug —
+    // a confidently wrong "idle" reads identically to a real idle claude.
+    assert.deepEqual(tileState(a, wantsHuman(a)), { glyph: '?', word: 'unknown', cls: 'unknown' });
+});
+
+test('tileState: no claude running at all (never resolved) is plain idle, not unknown', () => {
+    const a = agent({ session_status: null, claude_running: false });
+    assert.equal(tileState(a, wantsHuman(a)).cls, 'idle');
+});
+
+test('tileState: unknown is outranked by wantsHuman, same as every other state', () => {
+    const a = agent({ session_status: null, claude_running: true, needs_human: true });
+    assert.equal(tileState(a, wantsHuman(a)).cls, 'needs-you');
+});
+
 test('isFinished: a busy pane with a PR is NOT finished — still working, PR is stale/in-flight', () => {
     // 🔴 GUARD: dropping the session_status !== 'busy' check would flip an
     // actively-working pane (that already opened a draft PR) to "done".
@@ -229,6 +251,34 @@ test('rankOrder: all-same-rank input (idle tier) comes back in the exact input o
 test('rankOrder: empty input -> []', () => {
     assert.deepEqual(rankOrder([], {}), []);
     assert.deepEqual(rankOrder(null, {}), []);
+});
+
+test('rankOrder: an unknown pane (claude running, status unresolved) ranks with idle — auto-arrange is unchanged by slice 1', () => {
+    // docs/AGENT_IDENTITY.md: slice 1 only changes what the tile PILL says, not
+    // where the pane sits — _rankTier mirrors tileState's precedence but has no
+    // unknown-specific tier, so it must fall into the same bucket idle does.
+    const busy = agent({ window_id: '@busy', session_status: 'busy' });
+    const unknown = agent({ window_id: '@unknown', session_status: null, claude_running: true });
+    const done = agent({ window_id: '@done', session_status: 'idle', pr: { url: 'https://x/1' } });
+    const list = [done, unknown, busy];
+    const wantsByWid = { '@done': false, '@unknown': false, '@busy': false };
+    assert.deepEqual(rankOrder(list, wantsByWid), ['@busy', '@unknown', '@done']);
+});
+
+test('rankOrder: unknown shares idle\'s exact tier — a private tier between busy and idle would reorder this', () => {
+    // 🔴 GUARD: the test above (@busy/@unknown/@done, no real idle pane) cannot
+    // tell "unknown is in the idle tier" apart from "unknown has its own tier
+    // strictly between busy(1) and idle(2)" — any such tier still sorts after
+    // busy and before done. Putting a REAL idle pane in the fixture, ahead of
+    // unknown, forces the distinction: if they are genuinely the same tier,
+    // the stable sort must keep idle before unknown (their input order); a
+    // private in-between tier for unknown would sort it ahead of idle instead.
+    const busy = agent({ window_id: '@busy', session_status: 'busy' });
+    const idle = agent({ window_id: '@idle', session_status: 'idle' });
+    const unknown = agent({ window_id: '@unknown', session_status: null, claude_running: true });
+    const list = [idle, unknown, busy];
+    const wantsByWid = { '@idle': false, '@unknown': false, '@busy': false };
+    assert.deepEqual(rankOrder(list, wantsByWid), ['@busy', '@idle', '@unknown']);
 });
 
 // --- focusLayout (Wall redesign: Focus layout toggle) ------------------------

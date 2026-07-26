@@ -28,7 +28,12 @@ def chela_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_DIR", str(tmp_path))
     monkeypatch.delenv("CHELA_ENV_FILE", raising=False)   # the suite disables it globally
     monkeypatch.delenv("CHELA_DASHBOARD_PORT", raising=False)
-    monkeypatch.delenv("CHELA_TMUX_SESSION", raising=False)
+    # Every test gets conftest.py's impossible session name, same as the rest of the suite —
+    # a bare `delenv` here would fall through to current_session()'s hardcoded default,
+    # "chela", which IS the real tmux session name on any box that runs chela. One test
+    # (test_missing_file_falls_back_to_defaults) genuinely wants the unset/default case; it
+    # opts into that locally rather than every other test opting out of this guarantee.
+    monkeypatch.setenv("CHELA_TMUX_SESSION", "chela-tests-no-such-session")
     # The landmine itself: pytest may be running inside a tmux pane, and
     # current_session() would then DERIVE that pane's session — a `webterm_*` mirror,
     # observed the first time this test ran. A service must never inherit one either;
@@ -75,12 +80,22 @@ def test_parses_comments_export_and_quotes(tmp_path):
     }
 
 
-def test_missing_file_falls_back_to_defaults(chela_dir):
+def test_missing_file_falls_back_to_defaults(chela_dir, monkeypatch):
     """A fresh install has no env file at all. That is not an error."""
+    monkeypatch.delenv("CHELA_TMUX_SESSION", raising=False)   # this test IS the default-fallback case
     assert config.parse_env_file(chela_dir / "chela.env") == {}
     assert config.load_env_file(chela_dir / "chela.env") == {}
     assert config.dashboard_port() == config.DEFAULT_DASHBOARD_PORT
     assert config.current_session() == "chela"
+
+
+def test_chela_dir_never_resolves_to_a_real_tmux_session(chela_dir):
+    """conftest.py:107 gives the suite an impossible session name so doctor's
+    tmux-reading facts cannot interrogate the developer's live fleet. This
+    file's fixture must never undo that — a `delenv` here resolves to the
+    hardcoded "chela" default, which IS the real session on a chela box."""
+    importlib.reload(config)
+    assert config.current_session() == "chela-tests-no-such-session"
 
 
 def test_an_exported_value_beats_the_file(chela_dir, monkeypatch):
@@ -189,6 +204,12 @@ def _levels(findings, level):
 def test_doctor_flags_a_port_the_config_does_not_know_about(chela_dir, monkeypatch):
     monkeypatch.setenv("CHELA_DASHBOARD_PORT", "5001")
     config.publish_dashboard_port(5005)               # the dashboard bound something else
+    # agents.native_status_feed: publishing a port above makes `config.live_dashboard()`
+    # non-None, so this fact would otherwise shell out to the REAL `claude agents --json`
+    # (up to 30s, and its ok/not-ok verdict is whatever the live host happens to be doing
+    # right now — nothing to do with the port drift this test actually checks). Same seam,
+    # same idiom as `test_doctor_is_quiet_when_everything_agrees` below.
+    monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.1s"))
     errors = _levels(doctor.check(), doctor.ERROR)
     assert any("5005" in f.title and "5001" in f.title for f in errors)
 
@@ -211,6 +232,10 @@ def test_doctor_flags_a_plugin_baked_against_a_stale_port(chela_dir, monkeypatch
     """CMX-41, exactly: the manifest says 5001, the dashboard serves 5005."""
     monkeypatch.setenv("CHELA_DASHBOARD_PORT", "5005")
     config.publish_dashboard_port(5005)
+    # agents.native_status_feed: see the same stub in
+    # `test_doctor_flags_a_port_the_config_does_not_know_about` above — a published port
+    # makes this fact shell out to the real `claude agents --json` otherwise.
+    monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.1s"))
     hooks.render_plugin(chela_dir / "plugin", port=5001)
     _install_plugin(hooks.hooks_spec(5001))
     errors = _levels(doctor.check(), doctor.ERROR)

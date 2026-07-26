@@ -1444,10 +1444,19 @@ def _js_suites_on_disk() -> list[str]:
     root = repo_root()
     if root is None:
         return []
-    return sorted(
-        str(p.relative_to(root)) for p in root.rglob("*.test.mjs")
-        if not _SKIP_DIRS.intersection(p.relative_to(root).parts)
-    )
+    found: list[str] = []
+    # os.walk + pruning `dirnames` in place, not `root.rglob(...)` filtered after the
+    # fact: rglob still DESCENDS into .git to find nothing, and under CI's parallel
+    # pytest workers a concurrent git ref update can make a `.git/refs/...` entry
+    # vanish mid-walk — FileNotFoundError, from a directory this fact never needed to
+    # enter in the first place.
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        found.extend(
+            str((Path(dirpath) / name).relative_to(root))
+            for name in filenames if name.endswith(".test.mjs")
+        )
+    return sorted(found)
 
 
 def collected_js_suites(root: Path) -> Observation:
