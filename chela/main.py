@@ -1823,23 +1823,26 @@ def cmd_update(args) -> None:
         else:
             print(f"✅ {action} {result.behind_before} commit(s), re-synced deps "
                   "(no running chela-* PM2 services to restart)")
-        if result.plugin_updated:
-            print(f"🔌 refreshed the installed plugin: {', '.join(result.plugin_updated)} "
-                  "— restart your agent windows to pick up the new hooks (Claude Code "
-                  "reads them at startup, not live).")
-        if result.plugin_error:
-            print(f"⚠️  could not refresh the installed plugin: {result.plugin_error}")
-            print("   run by hand: `claude plugin marketplace update <marketplace>` then "
-                  "`claude plugin update chela@<marketplace>`, then restart your agent "
-                  "windows.")
+    # The plugin refresh (chela.update._refresh_plugin_if_needed) runs on EVERY apply()
+    # outcome, not just after a pull — a stale/unreadable install is a separate problem
+    # from the checkout being behind — so this reports independently of behind_before too.
+    if result.plugin_updated:
+        print(f"🔌 refreshed the installed plugin: {', '.join(result.plugin_updated)} "
+              "— restart your agent windows to pick up the new hooks (Claude Code "
+              "reads them at startup, not live).")
+    if result.plugin_error:
+        print(f"⚠️  could not refresh the installed plugin: {result.plugin_error}")
+        print("   run by hand: `claude plugin marketplace update <marketplace>` then "
+              "`claude plugin update chela@<marketplace>`, then restart your agent "
+              "windows.")
     if doctor.installed_hooks_stale():
-        # The refresh above (chela.update._update_plugin) already ran `claude plugin
-        # marketplace update` + `claude plugin update` for every installed copy — this is
-        # the safety net for when that still didn't converge (see plugin_error above for
-        # why), not the primary path; chela does not need a human to drive `/plugin`.
-        print("⚠️  chela's hooks still look stale — in Claude Code run `/plugin update` "
-              "(or `/plugin uninstall chela@chela` + `/plugin install chela@chela`), then "
-              "restart your agent windows.")
+        # The refresh above (chela.update._refresh_plugin_if_needed) already ran `claude
+        # plugin marketplace update` + `claude plugin update` for every confirmed-installed
+        # copy — this is the safety net for when that still didn't converge (see
+        # plugin_error above for why), not the primary path.
+        print("⚠️  chela's hooks still look stale — run `claude plugin update "
+              "chela@<marketplace>` (or in Claude Code, `/plugin update`), then restart "
+              "your agent windows.")
 
 
 def cmd_merge(args) -> None:

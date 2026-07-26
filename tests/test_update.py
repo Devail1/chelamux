@@ -77,21 +77,35 @@ class _FakeCP:
         self.stderr = stderr
 
 
-def _install_plugin(marketplace: str = "chela", version: str = "0.2.1") -> Path:
-    """A minimal installed copy of chela's plugin, registered the way Claude Code would —
-    isolated by the autouse ``CLAUDE_CONFIG_DIR`` fixture in ``tests/conftest.py`` — just
-    enough for :func:`update._plugin_marketplaces`/``_update_plugin`` to find it."""
+def _install_plugin(
+    marketplace: str = "chela", version: str = "0.2.1", *,
+    stale: bool = False, unreadable: bool = False, register: bool = True,
+) -> Path:
+    """A minimal installed copy of chela's plugin — isolated by the autouse
+    ``CLAUDE_CONFIG_DIR`` fixture in ``tests/conftest.py``.
+
+    ``stale=True`` writes a manifest with no hooks at all, so
+    :func:`chela.runtime_truth.installed_hooks_stale` reports drift. ``unreadable=True``
+    skips writing ``hooks.json`` entirely, so :func:`chela.hooks.installed_plugins` reports
+    ``hooks=None`` — the outage class CMX-186 exists for. ``register=False`` skips
+    Claude Code's own ``installed_plugins.json`` registry, leaving only the cache-scan
+    fallback (:func:`chela.hooks._cached_copies`) to find this copy — an *unconfirmed*
+    install ``_plugin_marketplaces`` must not act on.
+    """
     root = hooks.plugins_dir() / "cache" / marketplace / "chela" / version
     (root / "hooks").mkdir(parents=True)
-    (root / "hooks" / "hooks.json").write_text(json.dumps(hooks.hooks_spec()), encoding="utf-8")
-    registry = hooks.plugins_dir() / "installed_plugins.json"
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    data = {"version": 2, "plugins": {}}
-    if registry.exists():
-        data = json.loads(registry.read_text())
-    data["plugins"].setdefault(f"chela@{marketplace}", []).append(
-        {"scope": "user", "installPath": str(root), "version": version})
-    registry.write_text(json.dumps(data), encoding="utf-8")
+    if not unreadable:
+        manifest = {"hooks": {}} if stale else hooks.hooks_spec()
+        (root / "hooks" / "hooks.json").write_text(json.dumps(manifest), encoding="utf-8")
+    if register:
+        registry = hooks.plugins_dir() / "installed_plugins.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        data = {"version": 2, "plugins": {}}
+        if registry.exists():
+            data = json.loads(registry.read_text())
+        data["plugins"].setdefault(f"chela@{marketplace}", []).append(
+            {"scope": "user", "installPath": str(root), "version": version})
+        registry.write_text(json.dumps(data), encoding="utf-8")
     return root
 
 
@@ -352,6 +366,108 @@ def test_plugin_marketplaces_is_empty_when_nothing_is_installed(checkout):
     assert update._plugin_marketplaces() == []
 
 
+def test_plugin_marketplaces_excludes_a_cache_scan_fallback_copy(checkout):
+    """The registry is the only source `_plugin_marketplaces` trusts — a marketplace
+    guessed from a cache path (no `installed_plugins.json` entry) is not confirmed."""
+    _install_plugin(marketplace="acme", register=False)
+    assert update._plugin_marketplaces() == []
+
+
+# --- the staleness/unreadable gate (CMX-186 round 2) -----------------------------------
+
+def test_plugin_refresh_not_needed_when_everything_matches(checkout):
+    _install_plugin(marketplace="acme")
+    assert update._plugin_refresh_needed(hooks.installed_plugins()) is False
+
+
+def test_plugin_refresh_needed_on_drift(checkout):
+    _install_plugin(marketplace="acme", stale=True)
+    assert update._plugin_refresh_needed(hooks.installed_plugins()) is True
+
+
+def test_plugin_refresh_needed_when_unreadable(checkout):
+    """🔴 THE LOAD-BEARING GUARD: `installed_hooks_stale()` alone is BLIND to this case
+    (it requires `copy.hooks is not None`) — only checking `hooks is None` directly
+    catches the outage this ticket exists for (a sweep deleted the cache dir the registry
+    still points at)."""
+    _install_plugin(marketplace="acme", unreadable=True)
+    copies = hooks.installed_plugins()
+    assert copies[0].hooks is None
+    assert update._plugin_refresh_needed(copies) is True
+
+
+def test_plugin_refresh_not_needed_when_nothing_is_installed(checkout):
+    assert update._plugin_refresh_needed([]) is False
+
+
+def test_refresh_plugin_if_needed_skips_quietly_when_matching(checkout, monkeypatch):
+    _install_plugin(marketplace="acme")
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    updated, error = update._refresh_plugin_if_needed(checkout)
+
+    assert updated == []
+    assert error == ""
+
+
+def test_refresh_plugin_if_needed_runs_on_drift(checkout, monkeypatch):
+    _install_plugin(marketplace="acme", stale=True)
+    calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        calls.append(args)
+        return _FakeCP()
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    updated, error = update._refresh_plugin_if_needed(checkout)
+
+    assert calls, "the drift gate must have actually driven claude, not skipped"
+    assert updated == ["acme"]
+    assert error == ""
+
+
+def test_refresh_plugin_if_needed_runs_when_unreadable(checkout, monkeypatch):
+    _install_plugin(marketplace="acme", unreadable=True)
+    calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        calls.append(args)
+        return _FakeCP()
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    updated, error = update._refresh_plugin_if_needed(checkout)
+
+    assert calls, "the unreadable gate must have actually driven claude, not skipped"
+    assert updated == ["acme"]
+    assert error == ""
+
+
+def test_refresh_plugin_if_needed_skips_with_a_reason_when_registry_unconfirmed(
+    checkout, monkeypatch,
+):
+    """A copy found only via the cache-scan fallback (no `installed_plugins.json` entry)
+    that also needs a refresh must be reported, not silently mutated on a guess."""
+    _install_plugin(marketplace="acme", stale=True, register=False)
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        raise AssertionError(f"unexpected _sh call: {args} — must never invoke claude "
+                              "against an unconfirmed marketplace")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    updated, error = update._refresh_plugin_if_needed(checkout)
+
+    assert updated == []
+    assert error, "an unconfirmed-but-stale copy must be reported, not silently skipped"
+    assert "installed_plugins.json" in error
+
+
 def test_update_plugin_runs_marketplace_update_then_plugin_update(checkout, monkeypatch):
     _install_plugin(marketplace="acme")
     calls = []
@@ -401,9 +517,9 @@ def test_update_plugin_is_a_noop_when_nothing_is_installed(checkout, monkeypatch
     assert error == ""
 
 
-def test_apply_refreshes_the_installed_plugin_after_a_pull(checkout, upstream, monkeypatch):
+def test_apply_refreshes_a_drifted_plugin_after_a_pull(checkout, upstream, monkeypatch):
     _commit(upstream, "new.txt", "new\n")
-    _install_plugin(marketplace="acme")
+    _install_plugin(marketplace="acme", stale=True)
     plugin_calls = []
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
@@ -421,6 +537,7 @@ def test_apply_refreshes_the_installed_plugin_after_a_pull(checkout, upstream, m
     result = update.apply(checkout)
 
     assert result.ok is True
+    assert plugin_calls, "the drift gate must have actually driven claude, not skipped"
     assert result.plugin_updated == ["acme"]
     assert result.plugin_error == ""
     assert plugin_calls == [
@@ -429,8 +546,36 @@ def test_apply_refreshes_the_installed_plugin_after_a_pull(checkout, upstream, m
     ]
 
 
-def test_apply_skips_the_plugin_refresh_when_nothing_was_behind(checkout, monkeypatch):
-    """No pull happened -> nothing changed server-side -> no reason to touch `claude`."""
+def test_apply_does_not_touch_claude_for_a_healthy_plugin_even_when_behind(
+    checkout, upstream, monkeypatch,
+):
+    """The `not-needed` guard: a pull happening is not, on its own, a reason to touch
+    `claude` — only a drifted or unreadable installed copy is."""
+    _commit(upstream, "new.txt", "new\n")
+    _install_plugin(marketplace="acme")
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout="[]")
+        if args[:2] == ["uv", "sync"]:
+            return _FakeCP()
+        raise AssertionError(f"unexpected _sh call: {args} — claude must never run "
+                             "against a plugin that already matches")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.plugin_updated == []
+    assert result.plugin_error == ""
+
+
+def test_apply_skips_claude_when_nothing_is_behind_and_the_plugin_is_healthy(
+    checkout, monkeypatch,
+):
+    """The `not-needed` guard, on the up-to-date path: a healthy plugin plus nothing to
+    pull is still no reason to touch `claude`."""
     _install_plugin(marketplace="acme")
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
@@ -443,6 +588,58 @@ def test_apply_skips_the_plugin_refresh_when_nothing_was_behind(checkout, monkey
     assert result.ok is True
     assert result.behind_before == 0
     assert result.plugin_updated == []
+    assert result.plugin_error == ""
+
+
+def test_apply_refreshes_a_stale_plugin_even_with_nothing_behind(checkout, monkeypatch):
+    """🔴 THE LOAD-BEARING GUARD for CMX-186 round 2 — the exact outage this ticket exists
+    for: a checkout that is already up to date (no commit pending, nothing to pull) but
+    whose installed plugin copy is stale/unreadable (e.g. a cache sweep deleted the
+    directory `installed_plugins.json` still points at). The plugin step must run on this
+    early-return path too, or `chela update` never repairs the incident it was written
+    for. Reverting the gate to `if status.behind == 0: return ...` before the plugin
+    check turns this red."""
+    _install_plugin(marketplace="acme", stale=True)
+    plugin_calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[0] == "claude":
+            plugin_calls.append(args)
+            return _FakeCP()
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.behind_before == 0
+    assert plugin_calls, "the plugin step never ran on the already-up-to-date path"
+    assert result.plugin_updated == ["acme"]
+    assert result.plugin_error == ""
+
+
+def test_apply_is_still_ok_when_the_plugin_refresh_fails_with_nothing_behind(
+    checkout, monkeypatch,
+):
+    """Non-fatal even on the up-to-date path: a broken `claude` must not turn an
+    already-succeeded (trivially, nothing to do) update into a reported failure."""
+    _install_plugin(marketplace="acme", unreadable=True)
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[0] == "claude":
+            return _FakeCP(returncode=1, stderr="boom")
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.behind_before == 0
+    assert result.restarted == []
+    assert result.plugin_updated == []
+    assert "boom" in result.plugin_error
 
 
 # --- `--check` is read-only ----------------------------------------------------------
@@ -546,6 +743,43 @@ def test_update_prints_the_plugin_refresh_failure(checkout, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "could not refresh the installed plugin" in out
     assert "boom" in out
+
+
+def test_update_reports_the_plugin_refresh_even_when_already_up_to_date(
+    checkout, monkeypatch, capsys,
+):
+    """CMX-186 round 2: `apply()` now runs the plugin step on the up-to-date path too —
+    the CLI must surface that result there as well, not only in the "pulled N commits"
+    branch."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=0, plugin_updated=["acme"]))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "up to date — nothing to do" in out
+    assert "refreshed the installed plugin" in out
+    assert "acme" in out
+
+
+def test_update_fallback_reminder_leads_with_the_cli_command(checkout, monkeypatch, capsys):
+    """Nit fix: the reminder must lead with the command that actually works headlessly
+    (`claude plugin update chela@<marketplace>`), not `/plugin update` — that Claude Code
+    slash command is the thing that was wrong here; keep it only as the parenthetical."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=0))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: True)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "claude plugin update chela@<marketplace>" in out
+    cli_pos = out.index("claude plugin update chela@<marketplace>")
+    slash_pos = out.index("/plugin update")
+    assert cli_pos < slash_pos, "the CLI command must lead, `/plugin update` stays parenthetical"
 
 
 # --- notifier is edge-triggered + never pulls -----------------------------------------
