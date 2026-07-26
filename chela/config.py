@@ -409,6 +409,14 @@ NOTIFY_KIND = os.environ.get("CHELA_NOTIFY_KIND", "").strip().lower()  # "", ntf
 NOTIFY_TITLE = os.environ.get("CHELA_NOTIFY_TITLE", "chela: agent needs input")
 NOTIFY_INTERVAL = int(os.environ.get("CHELA_NOTIFY_INTERVAL", "20"))
 
+# CMX-187: how often (seconds) the daemon runs `chela doctor`'s full audit and pushes any
+# ERROR-level finding through the same notify channel as the needs-input check above.
+# `chela doctor` diagnosing a dead relay perfectly and nobody seeing it for hours (nothing
+# runs doctor unless a human does) is exactly the shape this closes. Longer than
+# CHELA_NOTIFY_INTERVAL by default: unlike scanning pane states, a full audit shells out to
+# git and `gh` for every parked run and PR under review, so it is not free to run every 20s.
+DOCTOR_CHECK_INTERVAL = int(os.environ.get("CHELA_DOCTOR_CHECK_INTERVAL", "300"))
+
 # Outbound Telegram relay: post every tool_use/tool_result event as its own
 # message (🔧 Bash / ✅ Bash result). That's a firehose on a phone, so it is OFF
 # by default — the relay then sends only text/thinking/user turns plus the

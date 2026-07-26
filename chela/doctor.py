@@ -29,9 +29,23 @@ registered; there is no eighth check to forget to write, and no private blind sp
 acquire. An owner that cannot be read is reported LOUDLY — never as a silent pass.
 
 :data:`ERROR` findings mean something is broken right now; the CLI exits 1.
+
+**CMX-187: a red finding used to reach only whoever happened to run ``chela doctor``.**
+On 2026-07-26, ``relay.transcripts`` diagnosed a dead outbound relay for ``@78``
+perfectly — ERROR, with the cause spelled out — and it sat unseen for hours: nobody was
+running doctor, so nobody ever read it. :func:`check_and_notify` closes that gap the same
+way :func:`chela.notify.check_waiting` and :func:`chela.update.check_and_notify` already
+close it for their own facts: called from the daemon loop on a bounded cadence, it pushes
+every ERROR finding through :mod:`chela.notify` on the transition into red, edge-triggered
+so a fact that stays broken is announced once, not every tick. Because it runs the same
+:func:`audit_all` the CLI does, a new registry fact is covered by the act of being
+registered — there is no second place to wire a push for it.
 """
 from __future__ import annotations
 
+import logging
+
+from chela import notify
 from chela.runtime_truth import (  # noqa: F401 — doctor's public surface, re-exported
     ERROR,
     KNOWN_VARS,
@@ -46,7 +60,36 @@ from chela.runtime_truth import (  # noqa: F401 — doctor's public surface, re-
     installed_hooks_stale,
 )
 
+log = logging.getLogger(__name__)
+
 
 def check() -> list[Finding]:
     """Every fact in the registry, in the order a human wants to read them."""
     return audit_all()
+
+
+def check_and_notify(previously_red: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    """Called from the daemon loop on a bounded cadence. Edge-triggered exactly like
+    :func:`chela.notify.check_waiting` / :func:`chela.update.check_and_notify`: an ERROR
+    finding is logged and (if configured) pushed once on the transition into red — never
+    once per tick, because a drumbeat of the same line is how an operator learns to ignore
+    the log.
+
+    Findings are identified by ``(fact, title)`` rather than by fact name alone, so a
+    *second*, distinct ERROR under an already-red fact (a different stuck PR, a different
+    dead window) still gets its own notification instead of hiding behind the first.
+
+    Returns the current red set, to be passed back in as the next call's
+    ``previously_red``.
+    """
+    findings = check()
+    current_red = {(f.fact, f.title) for f in findings if f.level == ERROR}
+    newly_red = current_red - previously_red
+    if not newly_red:
+        return current_red
+    for fact_name, title in sorted(newly_red):
+        log.error("doctor: %s: %s", fact_name, title)
+    if notify.enabled():
+        message = "\n".join(f"✗ {title}" for _, title in sorted(newly_red))
+        notify.send(message, title="chela doctor: new red finding(s)")
+    return current_red
