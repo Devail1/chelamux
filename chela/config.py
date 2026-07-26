@@ -264,6 +264,19 @@ SCHEDULER_POLL_INTERVAL = int(os.environ.get("CHELA_SCHEDULER_POLL_INTERVAL", "3
 # `chela dispatch <workflow>` CLI still works regardless.
 DISPATCH_TICK_INTERVAL = int(os.environ.get("CHELA_DISPATCH_TICK_INTERVAL", "60"))
 
+# CMX-179: `claude agents --json` (the native busy/idle status feed) cold-starts ~12s and
+# warm-starts 17-18s on measured hardware (chela/agent_manager.py's diagnostic comment has
+# the raw numbers) — the cost is CLI STARTUP, not payload. A timeout below the warm-start
+# floor times out on EVERY call, silently: this shipped as 10.0s from 2026-07-14 to
+# 2026-07-26 and produced 17,411 identical timeout WARNINGs (~250/hour) before anyone
+# noticed. Give real headroom above the measured worst case — do not "tidy" this back down.
+STATUS_CMD_TIMEOUT_S = float(os.environ.get("CHELA_STATUS_CMD_TIMEOUT_S", "45.0"))
+# How long the background refresher (agent_manager.start_background_refresh) trusts a
+# successful fetch before asking again. Deliberately NOT how long a request blocks — an
+# ordinary request only ever reads the cache; only this periodic thread pays the subprocess
+# cost, off the request path.
+STATUS_TTL_S = float(os.environ.get("CHELA_STATUS_TTL_S", "30.0"))
+
 
 def max_reworks() -> int:
     """How many times a PR that FAILED REVIEW may be sent back to its agent.
