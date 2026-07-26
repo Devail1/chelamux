@@ -629,9 +629,22 @@ body {
 .status-health-warn .shw-text {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
 }
+/* The narrow-viewport label is SWAPPED IN, not ellipsised. CMX-179 shipped with only
+   the long label plus `text-overflow: ellipsis` on it — but nothing capped the pill's
+   width, so the ellipsis never engaged: at 375px the 202px pill overflowed
+   .topbar-actions, the body scrolled sideways (scrollWidth 466 vs clientWidth 375) and
+   #btn-decisions was pushed off screen. Capping the width instead would have truncated
+   it to "agent statu…", cutting the one word that carries the signal — so on narrow
+   screens we say a SHORTER TRUE THING rather than a clipped long one. Both variants keep
+   glyph + word (never colour alone; Liav is red-weak), and the full sentence stays in
+   the pill's `title` at every width. display:none also keeps exactly one of the two out
+   of the accessibility tree, so a screen reader never announces both. */
+.status-health-warn .shw-text-narrow { display: none; }
 
 @media (max-width: 768px) {
     .status-health-warn { height: 34px; padding: 0 10px; font-size: 11.5px; }
+    .status-health-warn .shw-text { display: none; }
+    .status-health-warn .shw-text-narrow { display: inline; }
 }
 
 /* Global active-shares indicator (safety kill-switch) — a persistent topbar pill
