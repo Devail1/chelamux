@@ -54,6 +54,7 @@ from chela.config import (
     CONTEXT_SNAPSHOT_RETENTION_DAYS,
     SCHEDULER_POLL_INTERVAL,
     DISPATCH_WORKFLOWS,
+    DOCTOR_CHECK_INTERVAL,
     NOTIFY_INTERVAL,
     SHOW_TOOL_CALLS,
     STATUS_LINE,
@@ -204,6 +205,10 @@ def cmd_run(args) -> None:
     waiting_seen: set[str] = set()
     last_update_check = 0.0
     update_behind_seen = 0
+    # CMX-187: last (fact, title) pairs seen at ERROR — the edge-trigger state for
+    # doctor.check_and_notify, same shape as waiting_seen above.
+    last_doctor_check = 0.0
+    doctor_red_seen: set[tuple[str, str]] = set()
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
     # silently on its first tick instead of announcing every already-idle agent. (A
@@ -313,6 +318,19 @@ def cmd_run(args) -> None:
                 except Exception:
                     log.exception("Needs-input check failed")
                 last_notify_check = now
+
+            # 🩺 Doctor red-finding escalation (CMX-187): `chela doctor` only ever spoke to
+            # whoever ran it — a red finding could sit true and unseen for hours (exactly
+            # what happened to `relay.transcripts` on 2026-07-26). This runs the same audit
+            # on a bounded cadence and pushes every ERROR finding, edge-triggered like the
+            # needs-input check above. Logs regardless of notify being configured, so the
+            # daemon log itself is a surface even with no push channel set up.
+            if now - last_doctor_check >= DOCTOR_CHECK_INTERVAL:
+                try:
+                    doctor_red_seen = doctor.check_and_notify(doctor_red_seen)
+                except Exception:
+                    log.exception("Doctor red-finding check failed")
+                last_doctor_check = now
 
             # Self-update: informs by default (CMX-142 part 1) — `chela update` is a
             # human-run act, and `update.check_and_notify` never pulls. `CHELA_AUTO_UPDATE`
