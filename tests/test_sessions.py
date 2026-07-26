@@ -58,8 +58,8 @@ def _panes(monkeypatch, *panes: sessions.Pane):
 
 
 def _native(monkeypatch, mapping: dict):
-    """Stub the tier-3 native-status cache read: ``{pid: (session_id, started)}``."""
-    monkeypatch.setattr(agent_manager, "session_and_start_for_pid",
+    """Stub the tier-3 native-status cache read: ``{pid: (session_id, cwd)}``."""
+    monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid",
                         lambda pid: mapping.get(pid, (None, None)))
 
 
@@ -76,7 +76,7 @@ def no_native_status(monkeypatch):
     this every test here would be at the mercy of whatever pid/session a DIFFERENT test
     (or a real background refresh) last put in it. A test that wants tier 3 says so via
     :func:`_native`."""
-    monkeypatch.setattr(agent_manager, "session_and_start_for_pid", lambda pid: (None, None))
+    monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid", lambda pid: (None, None))
 
 
 # --- the outage ---------------------------------------------------------------------
@@ -220,6 +220,22 @@ def test_a_window_whose_process_cannot_be_read_does_not_inherit_a_SESSION_either
 # resolves a window with NO hook event and NO --resume, which the first two signals
 # simply cannot reach. This is the live bug: an adopted, hook-less window sharing $HOME
 # with siblings, so the cwd tier is also refused ("outbound is DEAD for this window").
+#
+# Bounded by cwd agreement, not startedAt: an earlier version of this tier compared the
+# pid's /proc start time against the feed's own `startedAt` for that pid, but the two
+# are not the same quantity (`startedAt` is the SESSION's start, not the process's fork
+# time) and it refused the ticket's own acceptance case (@78) as a result. The regression
+# test below uses REAL captured numbers for the pid's /proc start time — not one variable
+# shared with the feed's row — so re-introducing any startedAt-based comparison has real,
+# disagreeing numbers to trip on rather than a fixture built to agree by construction.
+
+# Real /proc-derived start time captured for pid 1339280 (the acceptance case's @78) on
+# the live box that failed review round 1. The feed's own (now-unread) `startedAt` for
+# that same pid was 1785073750.7 — 623 seconds EARLIER — which is exactly the disagreement
+# that made the old tolerance-based check refuse a correct answer.
+REAL_PID = 1339280
+REAL_PROC_STARTED = 1785074373.8
+
 
 def test_native_status_feed_resolves_a_window_the_shared_cwd_would_have_refused(
         projects, monkeypatch):
@@ -232,15 +248,21 @@ def test_native_status_feed_resolves_a_window_the_shared_cwd_would_have_refused(
     for the pid it actually has evidence for."""
     mine = _transcript(projects, "/home/u/repo", SID)
     _transcript(projects, "/home/u/repo", OTHER)          # the sibling sharing the cwd
-    started = time.time() - 60
     _panes(monkeypatch,
-           sessions.Pane(wid="@78", path="/home/u/repo", command="claude", claude_pid=42,
-                         launched_in="/home/u/repo", started=started),
+           sessions.Pane(wid="@78", path="/home/u/repo", command="claude",
+                         claude_pid=REAL_PID, launched_in="/home/u/repo",
+                         started=REAL_PROC_STARTED),
            sessions.Pane(wid="@79", path="/home/u/repo", command="claude", claude_pid=43,
-                         launched_in="/home/u/repo", started=started))
-    _native(monkeypatch, {42: (SID, started)})
+                         launched_in="/home/u/repo", started=REAL_PROC_STARTED))
+    calls = []
+
+    def _reader(pid):
+        calls.append(pid)
+        return {REAL_PID: (SID, "/home/u/repo")}.get(pid, (None, None))
+    monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid", _reader)
 
     res = sessions.resolve_window("@78")
+    assert calls == [REAL_PID], "tier 3 must actually reach the cache read"
     assert res.path == mine
     assert res.session_id == SID
     assert res.source == "native_status"
@@ -249,29 +271,34 @@ def test_native_status_feed_resolves_a_window_the_shared_cwd_would_have_refused(
     assert res2.path is None and not res2.ok and res2.source == "none"
 
 
-def test_native_status_feed_refuses_a_startedat_mismatch_pid_reuse(projects, monkeypatch):
-    """The cached sessionId for a pid is trusted only if the feed's OWN startedAt for
-    that pid agrees with /proc's start time for the process chela is looking at right
-    now. A large mismatch means the pid was recycled between the feed's last refresh and
-    now — the cached session belongs to a process that is no longer there, and inheriting
-    it would relay a dead session into a live topic, same principle as the event log's
-    start-time floor. Falls through to the cwd tier, which succeeds here (a fresh window,
-    no hook, no resume, sole occupant of its cwd)."""
+def test_native_status_feed_refuses_a_cwd_mismatch_pid_reuse(projects, monkeypatch):
+    """The cached sessionId for a pid is trusted only if the feed's OWN cwd for that pid
+    agrees with the pane's own origin. A disagreement means the pid was recycled between
+    the feed's last refresh and now — the cached session belongs to a process that is no
+    longer there, and inheriting it would relay a dead session into a live topic, same
+    principle as the event log's start-time floor. Falls through to the cwd tier, which
+    succeeds here (a fresh window, no hook, no resume, sole occupant of its cwd)."""
     live = _transcript(projects, "/home/u/repo", SID)
     _panes(monkeypatch, sessions.Pane(
         wid="@5", path="/home/u/repo", command="claude", claude_pid=42,
         launched_in="/home/u/repo", started=time.time()))
-    _native(monkeypatch, {42: (SID, time.time() - 999)})   # a long-dead process's startedAt
+    calls = []
+
+    def _reader(pid):
+        calls.append(pid)
+        return {42: (SID, "/home/u/a-dead-process-used-to-live-here")}.get(pid, (None, None))
+    monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid", _reader)
 
     res = sessions.resolve_window("@5")
+    assert calls == [42], "tier 3 must actually reach the cache read"
     assert res.source == "cwd"
     assert res.path == live
 
 
-def test_native_status_feed_refuses_when_startedat_is_unknown(projects, monkeypatch):
-    """The feed named a session for this pid but recorded no startedAt for it (or chela's
-    own /proc read of the pid's start time failed) — no floor either way, so unknown is
-    not a pass, same as the event log."""
+def test_native_status_feed_refuses_when_cwd_is_unknown(projects, monkeypatch):
+    """The feed named a session for this pid but recorded no cwd for it (or chela's own
+    /proc read of the pane's origin failed) — no floor either way, so unknown is not a
+    pass, same as the event log."""
     live = _transcript(projects, "/home/u/repo", SID)
     _panes(monkeypatch, sessions.Pane(
         wid="@5", path="/home/u/repo", command="claude", claude_pid=42,
@@ -289,11 +316,10 @@ def test_cmdline_still_wins_over_the_native_status_feed(projects, monkeypatch):
     when the native feed also has an answer — and a different one, at that."""
     resumed = _transcript(projects, "/home/u/repo", SID)
     _transcript(projects, "/home/u/repo", OTHER)
-    started = time.time()
     _panes(monkeypatch, sessions.Pane(
         wid="@5", path="/home/u/repo", command="claude", claude_pid=42,
-        launched_in="/home/u/repo", resumed=SID, started=started))
-    _native(monkeypatch, {42: (OTHER, started)})           # disagrees with --resume
+        launched_in="/home/u/repo", resumed=SID, started=time.time()))
+    _native(monkeypatch, {42: (OTHER, "/home/u/repo")})    # agrees on cwd, disagrees on session
 
     res = sessions.resolve_window("@5")
     assert res.source == "cmdline"

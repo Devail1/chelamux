@@ -37,16 +37,23 @@ window made by something that cannot be wrong about it:
    exact case above even when no hook ever fired (the daemon was down, the agent predates
    the plugin, the fleet was rebuilt by hand).
 3. **the native status feed** — CMX-184. `claude agents --json` reports a ``sessionId``
-   for every pid it lists (:func:`chela.agent_manager.session_and_start_for_pid`), which
+   for every pid it lists (:func:`chela.agent_manager.session_and_cwd_for_pid`), which
    answers for a window that has fired no hook and was not ``--resume``d — the exact case
    the first two signals cannot reach, and the one a hook-less, adopted window (never
-   spawned by chela, never resumed) is stuck in forever otherwise. Bounded the same way as
-   the event log, but against the feed's OWN ``startedAt`` rather than the wid: the pid's
-   ``/proc`` start time and the feed's cached ``startedAt`` for that pid must agree within
-   :data:`_NATIVE_PID_START_TOLERANCE_S`, or the pid was recycled between the feed's last
-   refresh and now and the cached session belongs to a **dead** process — refused, not
-   inherited. Reads the cache the dashboard's background refresh already keeps warm; never
-   spawns the command itself (see Cost, below).
+   spawned by chela, never resumed) is stuck in forever otherwise. Bounded by ``cwd``, not
+   by start time: an earlier version of this tier compared the pid's ``/proc`` start time
+   against the feed's own ``startedAt`` for that pid, but ``startedAt`` turned out to be
+   when the *session* began, not when the process forked — a resumed session predates its
+   process, a cold start postdates it — so the two are not the same quantity and no
+   tolerance admits one while excluding the other. Measured on a live box, they disagreed
+   by up to 113 days, in both directions, on processes that were never recycled at all.
+   What DOES mean the same thing on both sides is ``cwd``: the pid's own origin
+   (:attr:`Pane.origin`) must equal the ``cwd`` the feed cached for that same pid, or the
+   pid was recycled between the feed's last refresh and now and the cached session belongs
+   to a **dead** process's directory — refused, not inherited. A recycled pid that also
+   happens to land back in the exact same directory is a far narrower coincidence than a
+   recycled pid alone. Reads the cache the dashboard's background refresh already keeps
+   warm; never spawns the command itself (see Cost, below).
 4. **the cwd** — today's path, demoted to LAST. It is right for the only case the other
    signals cannot cover: a brand-new window that has fired no hook, was not resumed, and
    has no pid entry in the native feed either. It never overrides a session id that is
@@ -61,7 +68,8 @@ only read against the claude process's start time (tmux reuses window ids); if t
 time cannot be read — no ``/proc``, a wrapper deeper than :data:`_MAX_DEPTH` — there is no
 floor, so a recycled ``wid`` would inherit a **dead** agent's session. Unknown is not a
 pass: the event log is then refused, and ``detail`` says so. The native status feed is
-refused the same way — no readable process start time, no floor, no tier 3.
+refused the same way — no readable pid ``cwd`` (from ``/proc``), or none cached in the
+feed for that pid, no floor, no tier 3.
 
 A session id is globally unique, so a known session needs no project dir at all — glob
 ``~/.claude/projects/*/<sid>.jsonl`` (the id is validated first: it is pasted into a glob,
@@ -135,14 +143,6 @@ _SHIM_TIMEOUT = 2.0
 # whole tree — this runs on the hook path.
 _MAX_DEPTH = 3
 
-# How far apart /proc's start time for a pid and the native feed's cached `startedAt` for
-# that SAME pid may drift and still count as "the same process" (tier 3, below). Real
-# drift between the two clocks (claude's own Date.now() at its own startup vs. the
-# kernel's fork timestamp /proc reports) is sub-second; a mismatch past a few seconds means
-# the pid was recycled between the feed's last refresh and now, and the cached session
-# belongs to a process that is no longer there — refused, not inherited, same principle as
-# the event log's start-time floor.
-_NATIVE_PID_START_TOLERANCE_S = 5.0
 _MAX_CHILDREN = 32
 
 _TTL = 1.0
@@ -629,16 +629,15 @@ def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
 
     if pane and pane.claude_pid:
         from chela import agent_manager  # lazy, and a cache READ only — see the module Cost note
-        nsid, nstarted = agent_manager.session_and_start_for_pid(pane.claude_pid)
+        nsid, ncwd = agent_manager.session_and_cwd_for_pid(pane.claude_pid)
         if nsid and SESSION_RE.match(nsid):
-            if pane.started is None or nstarted is None or \
-                    abs(nstarted - pane.started) > _NATIVE_PID_START_TOLERANCE_S:
+            if pane.origin is None or ncwd is None or _norm(ncwd) != _norm(pane.origin):
                 tried.append(
                     f"the native status feed reports session {nsid} for pid "
-                    f"{pane.claude_pid}, but its recorded startedAt does not agree with "
-                    f"/proc's start time for that pid (or one of the two is unknown) — "
-                    "REFUSED: the pid may have been recycled since the feed last saw it, "
-                    "and a recycled pid would inherit a dead process's session")
+                    f"{pane.claude_pid}, but its cached cwd does not agree with the "
+                    "pane's own origin (or one of the two is unknown) — REFUSED: the pid "
+                    "may have been recycled since the feed last saw it, and a recycled "
+                    "pid would inherit a dead process's session")
             else:
                 path = transcript_for_session(nsid, base)
                 if path is not None:

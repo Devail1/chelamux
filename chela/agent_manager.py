@@ -164,12 +164,12 @@ _STATUS_SUSTAINED_FAILURE_S = 120.0
 _STATUS_WARN_THROTTLE_S = 300.0
 _status_cache: dict = {
     "ts": 0.0, "by_pid": {}, "by_cwd": {}, "cwd_by_pid": {},
-    # session_by_pid / started_by_pid: the `sessionId` / `startedAt` the feed reports
-    # alongside `status` and `cwd` for the same pid — CMX-184. `started_by_pid` is
-    # converted to epoch SECONDS (the feed reports epoch milliseconds) so callers
-    # compare like units against /proc-derived timestamps without doing the /1000
-    # themselves.
-    "session_by_pid": {}, "started_by_pid": {},
+    # session_by_pid: the `sessionId` the feed reports alongside `status` and `cwd` for
+    # the same pid — CMX-184. (The feed's `startedAt` was tried and dropped here: it is
+    # the SESSION's start time, not the process's fork time, and disagrees with /proc's
+    # start time for the same pid by up to 113 days in either direction on a live box —
+    # see chela/sessions.py's module docstring, tier 3.)
+    "session_by_pid": {},
     # down_since: wall-clock time of the FIRST failure in the current outage episode, or
     # None while healthy. escalated: whether this episode already fired its one ERROR log
     # (so a long outage does not re-log ERROR on every failed poll).
@@ -186,17 +186,22 @@ _status_cache: dict = {
 _status_lock = threading.Lock()
 
 
-def session_and_start_for_pid(pid: int | None) -> tuple[str | None, float | None]:
-    """The ``(sessionId, startedAt)`` the live `claude agents --json` feed last reported
-    for ``pid`` — CMX-184, the tier :mod:`chela.sessions` needed and this cache was
-    already throwing away.
+def session_and_cwd_for_pid(pid: int | None) -> tuple[str | None, str | None]:
+    """The ``(sessionId, cwd)`` the live `claude agents --json` feed last reported for
+    ``pid`` — CMX-184, the tier :mod:`chela.sessions` needed and this cache was already
+    throwing away.
 
     A pure read of whatever :func:`start_background_refresh`'s timer (or the last
     ``force=True`` caller) put in the cache — it never itself refreshes the cache or
     spawns the subprocess, so a caller on a tight budget (:func:`chela.sessions.resolve_window`
     runs on the hook path, blocked-agent-in-the-loop) can use it without adding a
-    subprocess call of its own. ``startedAt`` is converted to epoch SECONDS to match
-    :mod:`chela.sessions`' /proc-derived timestamps.
+    subprocess call of its own.
+
+    ``cwd`` — not ``startedAt`` — is the bound the caller checks the pid against: the
+    feed's ``startedAt`` is when the *session* began, not when the process forked, so it
+    cannot be compared against a ``/proc``-derived fork time at all (see
+    chela/sessions.py's module docstring, tier 3, for the measurement that found this out
+    the hard way).
 
     ``(None, None)`` for an unknown or absent pid, or a cold cache that has never been
     populated — never a guess.
@@ -204,7 +209,7 @@ def session_and_start_for_pid(pid: int | None) -> tuple[str | None, float | None
     if pid is None:
         return None, None
     return (_status_cache["session_by_pid"].get(pid),
-            _status_cache["started_by_pid"].get(pid))
+            _status_cache["cwd_by_pid"].get(pid))
 
 
 def native_status_health() -> dict:
@@ -334,7 +339,7 @@ def _refresh_status_locked() -> tuple[bool, str]:
     :func:`probe_native_status_feed`) that report it further, not just log it.
     """
     by_pid, by_cwd, cwd_by_pid = {}, {}, {}
-    session_by_pid, started_by_pid = {}, {}
+    session_by_pid = {}
     cwd_statuses: dict[str, list] = {}
     try:
         r = subprocess.run(
@@ -345,7 +350,7 @@ def _refresh_status_locked() -> tuple[bool, str]:
             for s in json.loads(r.stdout or "[]"):
                 st = s.get("status")
                 pid, cwd = s.get("pid"), s.get("cwd")
-                sid, started_ms = s.get("sessionId"), s.get("startedAt")
+                sid = s.get("sessionId")
                 if pid is not None:
                     pid = int(pid)
                     by_pid[pid] = st
@@ -353,8 +358,6 @@ def _refresh_status_locked() -> tuple[bool, str]:
                         cwd_by_pid[pid] = cwd
                     if isinstance(sid, str) and sid:
                         session_by_pid[pid] = sid
-                    if isinstance(started_ms, (int, float)):
-                        started_by_pid[pid] = started_ms / 1000.0
                 if cwd:
                     cwd_statuses.setdefault(cwd, []).append(st)
             # A cwd is not a session id (docs/AGENT_IDENTITY.md) — every live pid
@@ -370,7 +373,7 @@ def _refresh_status_locked() -> tuple[bool, str]:
             _note_recovery()
             _status_cache.update(
                 ts=time.time(), by_pid=by_pid, by_cwd=by_cwd, cwd_by_pid=cwd_by_pid,
-                session_by_pid=session_by_pid, started_by_pid=started_by_pid,
+                session_by_pid=session_by_pid,
             )
             return True, "ok"
         detail = f"exited {r.returncode}"
