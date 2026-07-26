@@ -122,7 +122,7 @@ Sequenced so the first slice is independently valuable and the risky decision co
 
 | # | Slice | Scope | Pure-logic guards | Manual verify |
 |---|-------|-------|-------------------|---------------|
-| **1** | **Honest fallback** — ambiguous `by_cwd` returns `None` | `agent_manager`: build `by_cwd` only for a `cwd` with exactly ONE live pid; ambiguous → omit. Surface "ambiguous, not idle" through the existing `status_health` marker. | given a feed with 2+ pids sharing a `cwd`, that `cwd` is absent from `by_cwd`; a unique `cwd` still resolves. Invert → RED. | the Wall stops asserting `idle` for panes it cannot actually resolve. |
+| **1** ▶ | **Honest fallback** — ambiguous `cwd` omitted **and** a distinct `unknown` tile state | `agent_manager`: include a `cwd` in `by_cwd` only if every live pid sharing it agrees on a status; an unknown/`None` status counts as **disagreement**. `wallmodel.tileState`: absent status → `? unknown`, not `○ idle`. ⛔ Ranking unchanged; ⛔ do NOT reuse CMX-179's outage marker (the feed *is* answering). | disagreement omits · agreement keeps (pins out the rejected "omit whenever >1 pid" rule) · `None` counts as disagreement · sole occupant unaffected · `unknown` ≠ `idle` in `tileState` · `rankOrder` output unchanged. | a pane that cannot be resolved reads `? unknown`; idle/busy panes unchanged; ordering visually identical. **FILED as a dispatch brief 2026-07-26.** |
 | **2** | **Pin + record the session id** | `spawn.py` appends `--session-id <uuid>` (inside the allowlist boundary); `runs.session_id` column + the window-binding store; recorded on spawn, cleared on window death. | uuid generated once and identical in the sent command and the stored row; a window chela did not spawn stores nothing. | a dispatched agent's `runs.session_id` matches the pid's `sessionId` in the live feed. |
 | **3** | **Join status on `sessionId`** | `session_status_map` gains `by_session`; `status_by_wid` prefers recorded session → `by_pid` → unique-`by_cwd` → `None`. | precedence order, and that a recorded-but-absent session degrades to the next tier rather than to a wrong answer. | `@1` reads what it is actually doing; `busy` panes read `busy`. |
 | **4** | **Resolve transcripts by name** | `transcripts`: recorded session → direct path; glob/recency only as documented fallback. | recorded id opens that exact file even when a newer sibling exists in the same dir — the case the recency rank gets wrong. | `@22`/`@76`-class windows relay again. |
@@ -131,6 +131,13 @@ Sequenced so the first slice is independently valuable and the risky decision co
 Slice 5 is the one with a real product decision in it — where windowless agents belong — and
 should be settled with the owner before it is dispatched. Slices 1 and 2 are independent and
 safe to file now; 1 is worth doing even if nothing else here is ever built.
+
+⚠️ **Slice 1 needs both halves or it is a no-op** — found while writing its brief, and worth
+recording because the same trap will recur in slices 3 and 4. `tileState` (`wallmodel.js:49`)
+falls through to `○ idle` whenever `session_status` is absent, so omitting an ambiguous `cwd`
+on the server merely swaps a wrong `busy` for a wrong `idle`. Honesty in the data model buys
+nothing until the surface can *express* "unknown". Whenever a slice here replaces a guess with
+a declared unknown, check what the consumer renders for the absent case before calling it done.
 
 ## Verification (whole workstream)
 
