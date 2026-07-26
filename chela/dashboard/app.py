@@ -2160,6 +2160,18 @@ def api_resources():
     return jsonify(resources.sample())
 
 
+@app.route("/api/agents/status_health")
+@require_auth
+def api_agents_status_health():
+    """Whether `claude agents --json` (the native busy/idle feed every /api/agents row
+    reads) is actually answering — CMX-179's load-bearing half. A cache read, not a fresh
+    probe: no subprocess call on this request (agent_manager.start_background_refresh
+    keeps the cache warm off the request path). The header renders a marker when
+    ``ok`` is false, so an empty status map and a genuinely all-idle fleet are
+    distinguishable on screen instead of both drawing every pane as idle."""
+    return jsonify(agent_manager.native_status_health())
+
+
 # ---------------------------------------------------------------------------
 # API: Schedules
 # ---------------------------------------------------------------------------
@@ -3763,6 +3775,11 @@ def main():
 
     scheduler.init()  # open the WAL scheduler DB + init schema once, before serving
     _start_notifier()
+    # CMX-179 objective 2: keep the native busy/idle status cache warm off the request
+    # path — this is the process that actually serves /api/agents, so it is the one that
+    # must pay the (up to config.STATUS_CMD_TIMEOUT_S) subprocess cost, on its own timer,
+    # instead of an inbound request paying it inline.
+    agent_manager.start_background_refresh()
     collab.start()  # P3: publish running agents as presence peers (to shared viewers)
 
     # Write down the port we are really binding, so another process (`chela plugin`,

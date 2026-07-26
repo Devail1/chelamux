@@ -11,6 +11,7 @@ import { initSSE } from './sse.js';
 import { refreshOrchestratorStatus } from './orchestrator.js';
 import { enterDecisions, tickDecisions } from './decisions.js';
 import { enterResources, tickResources } from './resources.js';
+import { enterStatusHealth, tickStatusHealth } from './statushealth.js';
 
 // ---------------------------------------------------------------------------
 // Refresh loop
@@ -34,6 +35,8 @@ async function refresh() {
         // Header resources strip — plain poll, no SSE delta (there is nothing
         // event-driven to push here, unlike Decisions).
         await tickResources();
+        // Native status feed health marker — same reasoning: no push side, a plain poll.
+        await tickStatusHealth();
         if (typeof refreshLauncher === 'function') refreshLauncher();
         const view = findView(VIEWS, currentTab);
         if (view && view.tick) await view.tick();
@@ -70,6 +73,9 @@ enterDecisions();
 // Seeds the header resources strip (CPU/RAM/Disk) on load, same reasoning as
 // enterDecisions() above — otherwise it stays blank until the first refresh().
 enterResources();
+// Seeds the native status feed health marker on load — otherwise a fleet that is
+// ALREADY down on page load stays unmarked until the first refresh() tick.
+enterStatusHealth();
 
 // --- Stage 0: ES-module exports ---
 export { refresh };

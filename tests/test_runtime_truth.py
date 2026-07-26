@@ -79,6 +79,9 @@ def fleet(tmp_path, monkeypatch):
 
     # the dashboard really bound PORT; a daemon really came up dispatching the workflow
     config.publish_dashboard_port(PORT)
+    # agents.native_status_feed: `claude agents --json` answers fine — the suite stubs the
+    # seam instead of shelling out for real (the real call costs up to 30s, see CMX-179).
+    monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.8s"))
     monkeypatch.setattr(config, "DISPATCH_WORKFLOWS", [repo / "WORKFLOW.md"])
     capabilities.publish(capabilities.effective())
 
@@ -400,6 +403,16 @@ def _break_relay_transcripts(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_native_status_feed(tmp_path, monkeypatch):
+    """CMX-179, verbatim: `claude agents --json` stops answering — the dashboard's
+    busy/idle cache would freeze fleet-wide, and only this check asks the command
+    directly instead of trusting a cache that was healthy before the outage started."""
+    monkeypatch.setattr(
+        runtime_truth, "_native_status_probe",
+        lambda: (False, "timed out after 30.0s"))
+    return doctor.ERROR
+
+
 def _break_upstream_synced(tmp_path, monkeypatch):
     """The branch is diverged from its upstream — the fingerprint an upstream history
     rewrite (`git filter-repo` + force-push) leaves behind (CMX-168), same shape as
@@ -434,6 +447,7 @@ CORRUPTIONS = {
     "windows.resolvable": _break_windows_resolvable,
     "fonts.glyph_coverage": _break_fonts_glyph_coverage,
     "repo.upstream_synced": _break_upstream_synced,
+    "agents.native_status_feed": _break_native_status_feed,
 }
 
 

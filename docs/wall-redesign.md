@@ -1,6 +1,6 @@
 # Wall redesign — design doc
 
-Status: **shipped on `wall-redesign` (dogfooding), not yet promoted to dev/main** · 2026-07-24 · owner: orchestrator (worktree-built slices, render-verified). Slices 1–3 done (status-dense tile, auto-arrange toggle, Focus layout); slice 5 (drag-to-swap) skipped — already existed in Lock mode. Remaining optional: status-driven *sizing* (panes grow/shrink by state).
+Status: **COMPLETE — shipped to `main` 2026-07-25** (PR #226) · owner: orchestrator (worktree-built slices, render-verified). Slices 1–3 done (status-dense tile, auto-arrange toggle, Focus layout); slice 4 (status-driven *sizing*) **closed, not built** — see the slice table; slice 5 (drag-to-swap) skipped — already existed in Lock mode. **Nothing in this doc is pending.**
 
 ## Context — why
 
@@ -69,19 +69,37 @@ Each slice is one `cmx-N` dispatch: **Fable designs the concrete mockup/spec →
 | **1** | **Tile redesign** | Status card: header pill, meta row, context bar, `recap` line, amber/needs + blue/done action bars. Presentational; wires to existing fields. | pill/level mapping (`status → glyph+word+class`), context `%`→warn/danger threshold, field-null → element hidden. | tile renders on desktop + 375 px; states show correctly; action bar sends the right key; no console errors; iframe unaffected. |
 | **2** ✅ | **Auto-arrange mode toggle** (merges old 2+4) | A default-off *Auto-arrange* toolbar toggle; when ON the wall continuously ranks panes by attention and lays them out in rank order; when OFF the manual layout is restored. **Owner decision: manual layout is sacred — auto never overwrites `pc_wall_layout`; ranking only applies while the toggle is on.** | pure `rankOrder(agents, wantsByWid)` — needs-you → busy → idle → done, stable within a rank. | auto on → needs-you/active to front without reloading iframes; auto off → manual layout restored byte-for-byte; drag/resize disabled while on. **Done — `wall-redesign`.** |
 | **3** ✅ | **Focus layout** (one large pane + strip) | Curated presets (even-grid/focus-one/priority-split) + one-click auto-arrange/reset. | preset → `{wid:{x,y,w,h}}` layout map; auto-arrange is deterministic given a fleet. | each preset applies; reset snaps sane; persists to localStorage. |
-| ~~4~~ | **Smart auto-layout — folded into slice 2** | The status-driven *ranking* shipped in slice 2's auto mode. What remains for a later pass is status-driven *sizing* (needs-you/active panes grow, idle/done shrink) — a refinement of the same toggle, not a separate mode. | — | — |
+| ~~4~~ | **Status-driven sizing — CLOSED 2026-07-26, deliberately NOT built** | The status-driven *ranking* shipped in slice 2's auto mode; the *sizing* half (needs-you/active panes grow, idle/done shrink) was prototyped and **declined by the owner**. Reasons, in order: (a) **auto-arrange already routes attention** — the pane that wants you is top-left, so size is a second signal for a mostly-solved problem; (b) **Focus already gives one large pane** on demand, driven deliberately by a human, which is the strong-contrast layout sizing would approximate automatically; (c) the prototype showed no geometry that is both effective and cheap — see below. ⛔ **Do not re-open without a new reason**; "the doc mentions sizing" is not one. | — | — |
 | ~~5~~ | **Drag-to-swap — SKIPPED (already exists)** | Discovered during scoping: **Lock mode already implements drag-to-swap** (`_snapshotForSwap`/`_swapTargetWid`/`_doSwap`, centroid hit-test, live target highlight, swap-*and-resize*) — drag a pane's header onto another. The only net-new would be full-pane drag *over the iframe* via a transparent overlay; owner decided header-drag is sufficient and skipped the overlay (avoids the iframe-pointer-events risk). | — | — |
 
 *(Later, separate workstreams — not this doc: A's collapsible "Needs you" rail; C's focus-mode toggle; cutting the Knowledge view; a Settings surface.)*
 
+### Slice 4 — the prototype evidence behind closing it
+
+The validation prototype this doc required for slice 4 was built (2026-07-26) before any dispatch, and it is what closed the slice. Three geometries were implemented as real layout math over a 12×12 grid and measured across five fleet shapes. The metric is **attention share** — the fraction of wall *area* held by needs-you + working panes; even fill (today's auto-arrange) is the baseline to beat.
+
+| Fleet | Panes | Even fill (today) | A · weighted columns | B · hero + strip | C · tier bands |
+|---|---:|---:|---:|---:|---:|
+| mixed day | 6 | 50% | 56% | 86% | 67% |
+| lone gate | 4 | 17% | 22% | 67% | 58% |
+| crisis | 8 | 67% | 67% | 94% | 67% |
+| calm | 5 | 17% | 22% | 67% | 50% |
+| big fleet | 12 | 50% | 56% | 83% | 58% |
+
+- **A — weighted columns** (keep the preset's columns, weight only the height split within each): +5 pts typical, and it **no-ops entirely whenever each column holds one pane** — 4 panes in the 4-column preset all stay `3×12`. Cheapest to build, too weak to be worth a line of code.
+- **B — hero + strip** (top-ranked pane takes an 8-wide full-height hero): biggest numbers, but **strip panes collapse to 1 row** on four of the five fleets, and on `crisis` it promotes one gated pane while burying the other two. It is also functionally the **Focus toggle**, which already ships and is driven deliberately.
+- **C — tier bands** (full-width horizontal band per state present): the only candidate that does something for every fleet shape, but the largest diff, and it **cascades** in GridStack (band widths differ row to row) so it needs the park-then-place guard `_applyWallFocus` uses. Its flat result on `crisis` is correct, not a bug — when 6 of 8 panes want you, there is no space to reclaim.
+
+**Owner verdict:** none of the three clears the bar given ordering + Focus already cover the need. Closed.
+
 ## Verification (whole workstream)
 
 - Per-slice: pure-logic guards go **RED** under corruption (orchestrator reads the assertions, not the pass count); CI green on 3.11 + 3.12; **manual render pass** on an isolated dashboard instance with a screenshot before merge.
-- Slices 4 & 5 get a **validation prototype/artifact first** (like the direction study), because auto-layout and drag-swap are interaction-novel and un-judgeable by CI.
+- Slices 4 & 5 got a **validation prototype/artifact first** (like the direction study), because auto-layout and drag-swap are interaction-novel and un-judgeable by CI. **This paid for itself: both slices were closed without a dispatch** — 5 skipped once scoping found Lock mode already did it, 4 declined once the prototype measured what each geometry actually buys.
 - No regression to transport (ttyd/poll/SSE), minimize-dock, share/wire/orchestrator, or mobile single-mode.
 
-## Open decisions (resolve as we reach them)
+## Decisions — all resolved
 
-- **Enhance vs replace GridStack** for slices 4/5 — default enhance; revisit only if the API can't express status-driven layout cleanly.
-- **Layout-state persistence** — keep `localStorage['pc_wall_layout']` per-`wid`; decide whether the auto-layout toggle state is per-device (localStorage) or synced.
-- **A real progress/phase signal** — deferred; v1 uses `used_pct`+`session_status`+`recap` proxies.
+- **Enhance vs replace GridStack** — ✅ **enhance, settled.** Slices 4/5 were the only ones that might have forced a replacement, and both closed without one. GridStack stays.
+- **Layout-state persistence** — ✅ **per-device localStorage**, as shipped: `pc_wall_layout` (manual arrangement, sacred), `pc_wall_preset`, `pc_wall_auto`, `pc_wall_focus`. No sync; a wall layout is a property of the screen you're sitting at.
+- **A real progress/phase signal** — ⏸ **still deferred**, and the only thing that could reopen this doc. v1 uses `used_pct` + `session_status` + `recap` proxies. If a genuine per-agent phase/turn signal is ever added to the backend, the tile and the ranking both get better inputs — and *that* would be the reason to revisit sizing, not the sizing idea on its own.

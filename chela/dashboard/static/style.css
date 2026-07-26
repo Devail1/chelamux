@@ -606,6 +606,47 @@ body {
     .res-item .res-value { font-size: 11px; }
 }
 
+/* Native status feed health marker (#status-health-warn, CMX-179) — the topbar pill
+   statushealth.js shows whenever /api/agents/status_health reports the native
+   `claude agents --json` busy/idle feed is NOT answering. VERMILLION (a real fault,
+   not an FYI) but glyph ("⚠") + the word "unavailable" carry the signal, never colour
+   alone (Liav is red-weak) — same rule as .res-item/.decisions-dot below. Hidden by
+   default; shown only on an actual outage, never on a merely-empty-but-healthy fleet. */
+.status-health-warn {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 38px; padding: 0 13px; white-space: nowrap;
+    background: color-mix(in srgb, var(--ok-vermillion) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ok-vermillion) 55%, var(--border));
+    color: var(--ok-vermillion); border-radius: 999px;
+    font-size: 12.5px; font-weight: 600; line-height: 1;
+    /* Shrinkable like .gs-branch below — .topbar-actions must never let this pill push
+       #btn-decisions off-screen on a narrow phone (CMX-179 round-2: it did, at 375px). The
+       glyph stays fixed-width; only the word ellipsizes, so glyph + word are still both
+       present down to whatever width the topbar actually has (never colour/glyph-alone). */
+    flex: 0 1 auto; min-width: 0;
+}
+.status-health-warn[hidden] { display: none; }
+.status-health-warn .shw-text {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+/* The narrow-viewport label is SWAPPED IN, not ellipsised. CMX-179 shipped with only
+   the long label plus `text-overflow: ellipsis` on it — but nothing capped the pill's
+   width, so the ellipsis never engaged: at 375px the 202px pill overflowed
+   .topbar-actions, the body scrolled sideways (scrollWidth 466 vs clientWidth 375) and
+   #btn-decisions was pushed off screen. Capping the width instead would have truncated
+   it to "agent statu…", cutting the one word that carries the signal — so on narrow
+   screens we say a SHORTER TRUE THING rather than a clipped long one. Both variants keep
+   glyph + word (never colour alone; Liav is red-weak), and the full sentence stays in
+   the pill's `title` at every width. display:none also keeps exactly one of the two out
+   of the accessibility tree, so a screen reader never announces both. */
+.status-health-warn .shw-text-narrow { display: none; }
+
+@media (max-width: 768px) {
+    .status-health-warn { height: 34px; padding: 0 10px; font-size: 11.5px; }
+    .status-health-warn .shw-text { display: none; }
+    .status-health-warn .shw-text-narrow { display: inline; }
+}
+
 /* Global active-shares indicator (safety kill-switch) — a persistent topbar pill
    shown whenever ANY session is shared, on every tab + mobile (where the pane
    header 🔗 is hidden). AMBER, not red: the primary user is red-weak and red is
