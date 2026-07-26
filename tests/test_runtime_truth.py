@@ -817,6 +817,11 @@ def test_js_suites_walk_never_descends_into_git(tmp_path, monkeypatch):
     """
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "a.test.mjs").write_text("")
+    # A real non-test .mjs sibling: this repo has two (tests/e2e_interop.mjs,
+    # tests/term_font_atlas_harness.mjs), so the fixture must contain one or a
+    # predicate broadened from "*.test.mjs" to "*.mjs" would pass unnoticed and the
+    # fact's DECLARED list would drift from what pytest actually collects.
+    (tmp_path / "tests" / "harness.mjs").write_text("")
     (tmp_path / ".git" / "refs").mkdir(parents=True)
     monkeypatch.setattr(runtime_truth, "repo_root", lambda: tmp_path)
 
