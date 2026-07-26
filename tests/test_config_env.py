@@ -189,6 +189,12 @@ def _levels(findings, level):
 def test_doctor_flags_a_port_the_config_does_not_know_about(chela_dir, monkeypatch):
     monkeypatch.setenv("CHELA_DASHBOARD_PORT", "5001")
     config.publish_dashboard_port(5005)               # the dashboard bound something else
+    # agents.native_status_feed: publishing a port above makes `config.live_dashboard()`
+    # non-None, so this fact would otherwise shell out to the REAL `claude agents --json`
+    # (up to 30s, and its ok/not-ok verdict is whatever the live host happens to be doing
+    # right now — nothing to do with the port drift this test actually checks). Same seam,
+    # same idiom as `test_doctor_is_quiet_when_everything_agrees` below.
+    monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.1s"))
     errors = _levels(doctor.check(), doctor.ERROR)
     assert any("5005" in f.title and "5001" in f.title for f in errors)
 
@@ -211,6 +217,19 @@ def test_doctor_flags_a_plugin_baked_against_a_stale_port(chela_dir, monkeypatch
     """CMX-41, exactly: the manifest says 5001, the dashboard serves 5005."""
     monkeypatch.setenv("CHELA_DASHBOARD_PORT", "5005")
     config.publish_dashboard_port(5005)
+    # agents.native_status_feed: see the same stub in
+    # `test_doctor_flags_a_port_the_config_does_not_know_about` above — a published port
+    # makes this fact shell out to the real `claude agents --json` otherwise.
+    monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.1s"))
+    # plugin.hooks_flowing: `chela_dir` above deleted CHELA_TMUX_SESSION/TMUX_PANE to test
+    # the bare-process fallback elsewhere in this file — but that makes
+    # `config.current_session()` fall through to its hardcoded default, "chela", which is
+    # the REAL tmux session name on any box that actually runs chela (this one included).
+    # Installing a plugin below makes this fact apply, and it reads live windows via
+    # `sessions.panes()` under that resolved name — i.e. the suite's own live fleet, not a
+    # fixture. Give it a session name nothing can have, same idiom as conftest.py's
+    # session-wide default.
+    monkeypatch.setenv("CHELA_TMUX_SESSION", "chela-tests-no-such-session")
     hooks.render_plugin(chela_dir / "plugin", port=5001)
     _install_plugin(hooks.hooks_spec(5001))
     errors = _levels(doctor.check(), doctor.ERROR)
@@ -229,6 +248,11 @@ def test_doctor_is_quiet_when_everything_agrees(chela_dir, monkeypatch):
     # where `claude` is not on PATH (correctly; see runtime_truth._native_status_probe's
     # docstring). Stub the seam, the same idiom cmx-167 used for `_gh_auth_status`.
     monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.1s"))
+    # plugin.hooks_flowing: same fix as `test_doctor_flags_a_plugin_baked_against_a_stale_port`
+    # above — installing a plugin below makes this fact read live tmux windows, and
+    # `chela_dir`'s deleted CHELA_TMUX_SESSION resolves to the real "chela" session on this
+    # box otherwise.
+    monkeypatch.setenv("CHELA_TMUX_SESSION", "chela-tests-no-such-session")
     hooks.render_plugin(chela_dir / "plugin", port=5005)
     _install_plugin(hooks.hooks_spec(5005))
     assert _levels(doctor.check(), doctor.ERROR) == []
