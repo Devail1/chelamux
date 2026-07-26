@@ -1,9 +1,20 @@
 """``chela update`` — self-update, in two halves.
 
 Adopters otherwise have to know the manual dance: ``git pull`` the checkout, ``uv sync``
-its deps, ``pm2 restart`` the services onto the new code. This module gives that dance a
-name and a safety rail, plus a heads-up (:func:`check_and_notify`, wired into the daemon
-loop in ``cmd_run``) when the checkout has fallen behind its upstream.
+its deps, ``pm2 restart`` the services onto the new code — AND refresh the plugin every
+agent loads its hooks from, which is a *separate* copy Claude Code made at install time
+(see :mod:`chela.hooks`) and which the server-side dance above never touches. This module
+gives the whole thing a name and a safety rail, plus a heads-up (:func:`check_and_notify`,
+wired into the daemon loop in ``cmd_run``) when the checkout has fallen behind its
+upstream.
+
+**The plugin half is not a human's job either.** ``claude plugin marketplace update
+<marketplace>`` and ``claude plugin update <plugin>@<marketplace>`` are both fully
+non-interactive — :func:`_update_plugin` runs them for every marketplace an installed copy
+of chela's plugin came from (:func:`chela.hooks.installed_plugins`) right after the pull.
+A stale installed copy is not a cosmetic gap: it once meant every window started after a
+sweep that deleted the plugin cache loaded NO hooks at all, silently killing outbound
+Telegram relay until someone noticed and re-ran the two CLI calls by hand.
 
 **Part 1 — human-run, always on.** :func:`apply` (what ``chela update`` calls) and
 :func:`check_and_notify` (the behind-notifier) only ever run when a human, or a script a
@@ -32,7 +43,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, notify
+from chela import config, hooks, notify
 from chela.dispatcher import GIT_TIMEOUT_SECONDS, _git, _git_ok, _git_out
 
 log = logging.getLogger(__name__)
@@ -70,6 +81,8 @@ class ApplyResult:
     restarted: list[str] = field(default_factory=list)
     rewrite_recovered: bool = False   # True if `apply()` recovered from a history rewrite
     backup_ref: str = ""              # where the pre-rewrite HEAD was preserved, if so
+    plugin_updated: list[str] = field(default_factory=list)  # marketplaces refreshed
+    plugin_error: str = ""            # set if a plugin refresh was attempted and failed
 
 
 def repo_root() -> Path:
@@ -161,6 +174,46 @@ def _running_pm2_services(repo: Path) -> list[str]:
         and str(p.get("name", "")).startswith("chela-")
         and (p.get("pm2_env") or {}).get("status") == "online"
     )
+
+
+def _plugin_marketplaces() -> list[str]:
+    """Every marketplace slug an installed copy of chela's plugin came from — dedup,
+    sorted for determinism. Empty when nothing is installed, which means there is no
+    installed copy for `chela update` to refresh (a genuinely different problem;
+    ``chela doctor``'s ``plugin.installed`` fact reports it)."""
+    return sorted({
+        copy.marketplace for copy in hooks.installed_plugins() if copy.marketplace
+    })
+
+
+def _update_plugin(repo: Path) -> tuple[list[str], str]:
+    """Refresh every INSTALLED copy of chela's plugin so it matches what was just pulled
+    — the half of a release the git-pull/uv-sync/pm2-restart dance above never reaches
+    (see the module docstring). Both ``claude`` subcommands are non-interactive.
+
+    Best-effort and non-fatal on purpose: the server-side update already succeeded by the
+    time this runs, and a missing/unauthenticated ``claude`` binary must not turn that
+    success into a reported failure. Returns the marketplaces successfully refreshed and
+    the first error hit, if any — stops at the first failure rather than half-refreshing
+    every remaining marketplace on a broken ``claude`` invocation.
+    """
+    updated: list[str] = []
+    for marketplace in _plugin_marketplaces():
+        mp_cp = _sh(["claude", "plugin", "marketplace", "update", marketplace], cwd=repo)
+        if mp_cp is None or mp_cp.returncode != 0:
+            err = (mp_cp.stderr.strip() if mp_cp is not None
+                   else "claude plugin marketplace update failed to run")
+            return updated, f"marketplace update ({marketplace}): {err}"
+
+        plugin_cp = _sh(["claude", "plugin", "update", f"{hooks.PLUGIN_NAME}@{marketplace}"],
+                         cwd=repo)
+        if plugin_cp is None or plugin_cp.returncode != 0:
+            err = (plugin_cp.stderr.strip() if plugin_cp is not None
+                   else "claude plugin update failed to run")
+            return updated, f"plugin update ({marketplace}): {err}"
+
+        updated.append(marketplace)
+    return updated, ""
 
 
 def _is_history_rewrite(repo: Path, old_upstream: str) -> bool:
@@ -282,8 +335,11 @@ def apply(repo: Path | None = None) -> ApplyResult:
                                 error=err, restarted=[], rewrite_recovered=rewrite_recovered,
                                 backup_ref=backup_ref)
 
+    plugin_updated, plugin_error = _update_plugin(repo)
+
     return ApplyResult(ok=True, step="done", behind_before=status.behind, restarted=services,
-                        rewrite_recovered=rewrite_recovered, backup_ref=backup_ref)
+                        rewrite_recovered=rewrite_recovered, backup_ref=backup_ref,
+                        plugin_updated=plugin_updated, plugin_error=plugin_error)
 
 
 def check_and_notify(previously_behind: int) -> int:
@@ -331,13 +387,17 @@ def auto_apply_sweep() -> ApplyResult:
 
     if result.ok:
         restarted = ", ".join(result.restarted) or "no services"
+        plugin_note = (f"; refreshed plugin ({', '.join(result.plugin_updated)})"
+                        if result.plugin_updated else "")
+        if result.plugin_error:
+            plugin_note = f"; plugin refresh FAILED: {result.plugin_error}"
         log.warning(
             "⬆️⚠️ auto-update: applied %d commit(s) UNATTENDED (CHELA_AUTO_UPDATE) — "
-            "restarted %s", result.behind_before, restarted,
+            "restarted %s%s", result.behind_before, restarted, plugin_note,
         )
         if notify.enabled():
             notify.send(
-                f"applied {result.behind_before} commit(s), restarted {restarted}",
+                f"applied {result.behind_before} commit(s), restarted {restarted}{plugin_note}",
                 title="chela: auto-update applied",
             )
     else:

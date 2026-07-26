@@ -11,6 +11,7 @@ actually run here.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import subprocess
 from pathlib import Path
@@ -18,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chela import config, main, update
+from chela import config, hooks, main, update
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -74,6 +75,24 @@ class _FakeCP:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+def _install_plugin(marketplace: str = "chela", version: str = "0.2.1") -> Path:
+    """A minimal installed copy of chela's plugin, registered the way Claude Code would —
+    isolated by the autouse ``CLAUDE_CONFIG_DIR`` fixture in ``tests/conftest.py`` — just
+    enough for :func:`update._plugin_marketplaces`/``_update_plugin`` to find it."""
+    root = hooks.plugins_dir() / "cache" / marketplace / "chela" / version
+    (root / "hooks").mkdir(parents=True)
+    (root / "hooks" / "hooks.json").write_text(json.dumps(hooks.hooks_spec()), encoding="utf-8")
+    registry = hooks.plugins_dir() / "installed_plugins.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    data = {"version": 2, "plugins": {}}
+    if registry.exists():
+        data = json.loads(registry.read_text())
+    data["plugins"].setdefault(f"chela@{marketplace}", []).append(
+        {"scope": "user", "installPath": str(root), "version": version})
+    registry.write_text(json.dumps(data), encoding="utf-8")
+    return root
 
 
 # --- dirty tree ⇒ refuse -------------------------------------------------------------
@@ -322,6 +341,110 @@ def test_happy_path_restarts_only_running_chela_services(checkout, upstream, mon
     assert restart_calls == [["pm2", "restart", "chela-daemon"]]
 
 
+# --- the plugin half of a release (CMX-186) -------------------------------------------
+
+def test_plugin_marketplaces_are_discovered_from_the_installed_plugin(checkout):
+    _install_plugin(marketplace="acme")
+    assert update._plugin_marketplaces() == ["acme"]
+
+
+def test_plugin_marketplaces_is_empty_when_nothing_is_installed(checkout):
+    assert update._plugin_marketplaces() == []
+
+
+def test_update_plugin_runs_marketplace_update_then_plugin_update(checkout, monkeypatch):
+    _install_plugin(marketplace="acme")
+    calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        calls.append(args)
+        return _FakeCP()
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    updated, error = update._update_plugin(checkout)
+
+    assert updated == ["acme"]
+    assert error == ""
+    assert calls == [
+        ["claude", "plugin", "marketplace", "update", "acme"],
+        ["claude", "plugin", "update", "chela@acme"],
+    ]
+
+
+def test_update_plugin_stops_at_the_first_failure(checkout, monkeypatch):
+    _install_plugin(marketplace="acme")
+    _install_plugin(marketplace="zzz")   # sorts after "acme" — must never be reached
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:3] == ["claude", "plugin", "marketplace"]:
+            return _FakeCP(returncode=1, stderr="boom")
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    updated, error = update._update_plugin(checkout)
+
+    assert updated == []
+    assert "boom" in error
+
+
+def test_update_plugin_is_a_noop_when_nothing_is_installed(checkout, monkeypatch):
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    updated, error = update._update_plugin(checkout)
+
+    assert updated == []
+    assert error == ""
+
+
+def test_apply_refreshes_the_installed_plugin_after_a_pull(checkout, upstream, monkeypatch):
+    _commit(upstream, "new.txt", "new\n")
+    _install_plugin(marketplace="acme")
+    plugin_calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout="[]")
+        if args[:2] == ["uv", "sync"]:
+            return _FakeCP()
+        if args[0] == "claude":
+            plugin_calls.append(args)
+            return _FakeCP()
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.plugin_updated == ["acme"]
+    assert result.plugin_error == ""
+    assert plugin_calls == [
+        ["claude", "plugin", "marketplace", "update", "acme"],
+        ["claude", "plugin", "update", "chela@acme"],
+    ]
+
+
+def test_apply_skips_the_plugin_refresh_when_nothing_was_behind(checkout, monkeypatch):
+    """No pull happened -> nothing changed server-side -> no reason to touch `claude`."""
+    _install_plugin(marketplace="acme")
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.behind_before == 0
+    assert result.plugin_updated == []
+
+
 # --- `--check` is read-only ----------------------------------------------------------
 
 def test_commits_behind_is_read_only(checkout, upstream, git_calls, monkeypatch):
@@ -397,6 +520,32 @@ def test_update_stays_quiet_when_the_installed_plugin_is_current(checkout, monke
     main.cmd_update(argparse.Namespace(check=False))
 
     assert "/plugin update" not in capsys.readouterr().out
+
+
+def test_update_prints_the_plugin_refresh_result(checkout, monkeypatch, capsys):
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=1, plugin_updated=["acme"]))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "refreshed the installed plugin" in out
+    assert "acme" in out
+
+
+def test_update_prints_the_plugin_refresh_failure(checkout, monkeypatch, capsys):
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=1, plugin_error="boom"))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "could not refresh the installed plugin" in out
+    assert "boom" in out
 
 
 # --- notifier is edge-triggered + never pulls -----------------------------------------

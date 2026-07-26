@@ -125,6 +125,22 @@ def test_manifest_drift_is_empty_when_they_agree(env):
     assert hooks.manifest_drift(hooks.hooks_spec(PORT), hooks.hooks_spec(PORT)) == []
 
 
+def test_marketplace_is_read_from_the_registry(env):
+    """`chela update` needs this to know which `claude plugin update <plugin>@<marketplace>`
+    to run (CMX-186) — the marketplace name is whatever the operator chose, not "chela"."""
+    _install(hooks.hooks_spec(PORT), marketplace="acme")
+    copies = hooks.installed_plugins()
+    assert copies[0].marketplace == "acme"
+
+
+def test_marketplace_is_read_from_the_cache_scan_fallback(env):
+    _install(hooks.hooks_spec(PORT), marketplace="acme", register=False)
+    (hooks.plugins_dir() / "installed_plugins.json").write_text("{not json", encoding="utf-8")
+    copies = hooks.installed_plugins()
+    assert copies[0].found_via == "a scan of the plugin cache"
+    assert copies[0].marketplace == "acme"
+
+
 # --- doctor -----------------------------------------------------------------------
 
 def test_doctor_ERRORs_when_the_installed_manifest_disagrees(env):

@@ -10,6 +10,19 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **`chela update` now refreshes the plugin too, not just the server.** A release has
+  two halves: the server-side `git pull` + `uv sync` + `pm2 restart`, and the plugin
+  every agent loads its hooks from — a separate copy Claude Code made at install time
+  that the server-side dance never touches. `claude plugin marketplace update
+  <marketplace>` and `claude plugin update <plugin>@<marketplace>` are both fully
+  non-interactive, so `chela update` now runs them itself, for every marketplace an
+  installed copy of the plugin came from, right after a pull. Previously this was left
+  to a printed reminder telling a human to run `/plugin update` by hand — which once
+  meant every agent window started after a plugin-cache sweep loaded no hooks at all,
+  silently killing outbound relay until someone noticed.
+
 ### Fixed
 
 - **The Decisions inbox search box could not be clicked.** The popover closed itself

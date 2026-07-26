@@ -1823,13 +1823,22 @@ def cmd_update(args) -> None:
         else:
             print(f"✅ {action} {result.behind_before} commit(s), re-synced deps "
                   "(no running chela-* PM2 services to restart)")
+        if result.plugin_updated:
+            print(f"🔌 refreshed the installed plugin: {', '.join(result.plugin_updated)} "
+                  "— restart your agent windows to pick up the new hooks (Claude Code "
+                  "reads them at startup, not live).")
+        if result.plugin_error:
+            print(f"⚠️  could not refresh the installed plugin: {result.plugin_error}")
+            print("   run by hand: `claude plugin marketplace update <marketplace>` then "
+                  "`claude plugin update chela@<marketplace>`, then restart your agent "
+                  "windows.")
     if doctor.installed_hooks_stale():
-        # Claude Code keys a plugin update on `plugin.json`'s version alone — a `chela
-        # update` that changed the rendered hooks does NOT push them into the plugin
-        # cache every agent already loaded from. That copy stays stale until a human
-        # re-triggers the client-side install; chela cannot drive `/plugin` itself.
-        print("⚠️  chela's hooks changed — in Claude Code run `/plugin update` (or "
-              "`/plugin uninstall chela@chela` + `/plugin install chela@chela`), then "
+        # The refresh above (chela.update._update_plugin) already ran `claude plugin
+        # marketplace update` + `claude plugin update` for every installed copy — this is
+        # the safety net for when that still didn't converge (see plugin_error above for
+        # why), not the primary path; chela does not need a human to drive `/plugin`.
+        print("⚠️  chela's hooks still look stale — in Claude Code run `/plugin update` "
+              "(or `/plugin uninstall chela@chela` + `/plugin install chela@chela`), then "
               "restart your agent windows.")
 
 
