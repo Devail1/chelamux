@@ -597,16 +597,12 @@
   <!-- CMX-178: a client-side substring filter over the events already held
        (decisionsmodel.js's filterDecisionEvents) — finds an OLD decision the
        short list below has scrolled past, with no new fetch.
-       CMX-182: onclick stopPropagation is load-bearing — openDecisionsMenu's
-       light-dismiss (decisions.js) attaches its close-on-outside-click
-       listener to `document`, same pattern as #new-menu/#primary-menu, and
-       every interactive descendant of a light-dismiss popover must stop its
-       own click from bubbling there or the popover swallows its own clicks
-       (this input couldn't even take focus before this fix). -->
+       CMX-182: the light-dismiss listener (decisions.js openDecisionsMenu)
+       ignores clicks that land anywhere inside #decisions-menu, so this input
+       (and every other descendant) needs no stopPropagation of its own. -->
   <input type="text" class="decisions-search" id="decisions-search"
          placeholder="Search task, branch, PR…" autocomplete="off"
-         oninput="chela.setDecisionsQuery(this.value)"
-         onclick="event.stopPropagation()">
+         oninput="chela.setDecisionsQuery(this.value)">
   <div class="decisions-list" id="decisions-list"></div>
 </div>
 
