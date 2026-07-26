@@ -12,6 +12,17 @@ history lives in `git log`.
 
 ### Fixed
 
+- **An adopted window that never fired a hook and was never `--resume`d could not
+  resolve its own session, so its outbound relay stayed dead.** Session resolution
+  tried the event log, then `--resume` on the command line, then fell back to guessing
+  from the working directory — and refused that guess outright when another window
+  shared the same directory, which every interactive window on a single-user box does.
+  It now also checks the `sessionId` that `claude agents --json` already reports for
+  the window's own pid — a signal chela was fetching every refresh and discarding.
+  Bounded the same way as the other tiers: the feed's own `startedAt` for that pid must
+  agree with the process's real start time, so a recycled pid can't inherit a dead
+  session. Background: `docs/AGENT_IDENTITY.md`.
+
 - **The Decisions inbox search box could not be clicked.** The popover closed itself
   on any click anywhere inside it — including the click that should have focused the
   search field — so the search added alongside it was unusable with a mouse. Clicks

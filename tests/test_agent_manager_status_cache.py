@@ -32,8 +32,8 @@ class _Clock:
 
 
 _RESET = dict(
-    ts=0.0, by_pid={}, by_cwd={}, cwd_by_pid={}, down_since=None, escalated=False,
-    last_success_ts=0.0, last_warning_ts=0.0,
+    ts=0.0, by_pid={}, by_cwd={}, cwd_by_pid={}, session_by_pid={}, started_by_pid={},
+    down_since=None, escalated=False, last_success_ts=0.0, last_warning_ts=0.0,
 )
 
 
@@ -91,6 +91,76 @@ def test_force_bypasses_the_ttl(monkeypatch):
     clock.t += 0.1                              # well within the TTL
     agent_manager.session_status_map(force=True)
     assert n["n"] == 2                          # force ignores the fresh cache
+
+
+# --- session_by_pid / started_by_pid (CMX-184) --------------------------------
+# `claude agents --json` reports a `sessionId` (and `startedAt`) for every pid it lists,
+# alongside `status`/`cwd` — the refresh used to parse it and throw it away. This is the
+# tier `chela.sessions.resolve_window` needed for a window that fired no hook and was
+# never --resume'd: chela.sessions.session_and_start_for_pid reads it as a pure cache
+# lookup, never a subprocess call of its own.
+
+_WITH_SESSION = json.dumps([{
+    "pid": 1339280, "cwd": "/home/liavedunix", "status": "idle",
+    "sessionId": "aaef8ff8-9b43-4416-a745-825a694e031a", "startedAt": 1785073750696,
+}])
+
+
+def test_refresh_captures_sessionid_and_startedat_per_pid(monkeypatch):
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert m["session_by_pid"] == {1339280: "aaef8ff8-9b43-4416-a745-825a694e031a"}
+    # startedAt is epoch MILLISECONDS on the wire; the cache converts to seconds so a
+    # caller compares like units against /proc-derived timestamps without doing it itself.
+    assert m["started_by_pid"][1339280] == pytest.approx(1785073750696 / 1000.0)
+
+
+def test_session_and_start_for_pid_reads_the_captured_map(monkeypatch):
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+    agent_manager.session_status_map()
+
+    sid, started = agent_manager.session_and_start_for_pid(1339280)
+    assert sid == "aaef8ff8-9b43-4416-a745-825a694e031a"
+    assert started == pytest.approx(1785073750696 / 1000.0)
+
+
+def test_session_and_start_for_pid_is_none_none_for_an_unknown_or_absent_pid(monkeypatch):
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+    agent_manager.session_status_map()
+
+    assert agent_manager.session_and_start_for_pid(99999) == (None, None)
+    assert agent_manager.session_and_start_for_pid(None) == (None, None)
+
+
+def test_a_pid_with_no_sessionid_in_the_payload_is_absent_from_the_map(monkeypatch):
+    """An entry lacking `sessionId` must not poison the map with a fabricated key —
+    pins the loop's `isinstance` guard, not just dict.get's default behaviour."""
+    run, _n = _counting_run(_ONE_AGENT)  # _ONE_AGENT carries no sessionId/startedAt
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert 4242 not in m["session_by_pid"]
+    assert 4242 not in m["started_by_pid"]
+
+
+def test_session_and_start_for_pid_never_spawns_a_subprocess(monkeypatch):
+    """The tier-3 budget guard (docs/AGENT_IDENTITY.md, CMX-184): `sessions.resolve_window`
+    runs on the hook path with an agent BLOCKED on it and must never trigger `claude
+    agents --json` itself — this accessor is a pure read of whatever the cache already
+    holds, cold or not."""
+    calls = []
+
+    def boom(cmd, **kw):
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd, 1)
+    monkeypatch.setattr(agent_manager.subprocess, "run", boom)
+
+    assert agent_manager.session_and_start_for_pid(1339280) == (None, None)
+    assert calls == [], "session_and_start_for_pid must never spawn a subprocess"
 
 
 # --- by_cwd honesty (docs/AGENT_IDENTITY.md slice 1) --------------------------

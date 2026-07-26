@@ -24,7 +24,7 @@ import time
 
 import pytest
 
-from chela import event_log, sessions, transcripts
+from chela import agent_manager, event_log, sessions, transcripts
 
 SID = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"       # the session of the live outage
 OTHER = "cf19ca61-ffbb-4dbf-a8c7-66b74294fa69"
@@ -57,10 +57,26 @@ def _panes(monkeypatch, *panes: sessions.Pane):
                         lambda force=False: {p.wid: p for p in panes})
 
 
+def _native(monkeypatch, mapping: dict):
+    """Stub the tier-3 native-status cache read: ``{pid: (session_id, started)}``."""
+    monkeypatch.setattr(agent_manager, "session_and_start_for_pid",
+                        lambda pid: mapping.get(pid, (None, None)))
+
+
 @pytest.fixture(autouse=True)
 def no_tmux(monkeypatch):
     """No live tmux in a unit test: a test that wants panes says so."""
     monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+
+
+@pytest.fixture(autouse=True)
+def no_native_status(monkeypatch):
+    """No live/cached native status feed in a unit test by default — the real cache is a
+    process-wide singleton (:mod:`chela.agent_manager`'s ``_status_cache``), so without
+    this every test here would be at the mercy of whatever pid/session a DIFFERENT test
+    (or a real background refresh) last put in it. A test that wants tier 3 says so via
+    :func:`_native`."""
+    monkeypatch.setattr(agent_manager, "session_and_start_for_pid", lambda pid: (None, None))
 
 
 # --- the outage ---------------------------------------------------------------------
@@ -197,6 +213,92 @@ def test_a_window_whose_process_cannot_be_read_does_not_inherit_a_SESSION_either
     assert res.session_id != SID
     assert res.path is None and not res.ok
     assert "REFUSED" in res.detail and "start time" in res.detail
+
+
+# --- tier 3: the native status feed (CMX-184) -----------------------------------------
+# `claude agents --json` reports a sessionId for every pid it lists — the tier that
+# resolves a window with NO hook event and NO --resume, which the first two signals
+# simply cannot reach. This is the live bug: an adopted, hook-less window sharing $HOME
+# with siblings, so the cwd tier is also refused ("outbound is DEAD for this window").
+
+def test_native_status_feed_resolves_a_window_the_shared_cwd_would_have_refused(
+        projects, monkeypatch):
+    """The actual bug, reproduced: no hook ever fired for @78, it was not --resume'd, and
+    it shares its cwd with a sibling — so the cwd fallback would refuse both of them
+    ("a relay into the wrong agent's topic is worse than silence"). But `claude agents
+    --json` names @78's session for its OWN pid, which needs neither a hook nor a
+    --resume, so it resolves anyway. Its sibling, absent from that feed, still gets the
+    honest refusal — this tier does not paper over genuine ambiguity, it only answers
+    for the pid it actually has evidence for."""
+    mine = _transcript(projects, "/home/u/repo", SID)
+    _transcript(projects, "/home/u/repo", OTHER)          # the sibling sharing the cwd
+    started = time.time() - 60
+    _panes(monkeypatch,
+           sessions.Pane(wid="@78", path="/home/u/repo", command="claude", claude_pid=42,
+                         launched_in="/home/u/repo", started=started),
+           sessions.Pane(wid="@79", path="/home/u/repo", command="claude", claude_pid=43,
+                         launched_in="/home/u/repo", started=started))
+    _native(monkeypatch, {42: (SID, started)})
+
+    res = sessions.resolve_window("@78")
+    assert res.path == mine
+    assert res.session_id == SID
+    assert res.source == "native_status"
+
+    res2 = sessions.resolve_window("@79")
+    assert res2.path is None and not res2.ok and res2.source == "none"
+
+
+def test_native_status_feed_refuses_a_startedat_mismatch_pid_reuse(projects, monkeypatch):
+    """The cached sessionId for a pid is trusted only if the feed's OWN startedAt for
+    that pid agrees with /proc's start time for the process chela is looking at right
+    now. A large mismatch means the pid was recycled between the feed's last refresh and
+    now — the cached session belongs to a process that is no longer there, and inheriting
+    it would relay a dead session into a live topic, same principle as the event log's
+    start-time floor. Falls through to the cwd tier, which succeeds here (a fresh window,
+    no hook, no resume, sole occupant of its cwd)."""
+    live = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@5", path="/home/u/repo", command="claude", claude_pid=42,
+        launched_in="/home/u/repo", started=time.time()))
+    _native(monkeypatch, {42: (SID, time.time() - 999)})   # a long-dead process's startedAt
+
+    res = sessions.resolve_window("@5")
+    assert res.source == "cwd"
+    assert res.path == live
+
+
+def test_native_status_feed_refuses_when_startedat_is_unknown(projects, monkeypatch):
+    """The feed named a session for this pid but recorded no startedAt for it (or chela's
+    own /proc read of the pid's start time failed) — no floor either way, so unknown is
+    not a pass, same as the event log."""
+    live = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@5", path="/home/u/repo", command="claude", claude_pid=42,
+        launched_in="/home/u/repo", started=time.time()))
+    _native(monkeypatch, {42: (SID, None)})
+
+    res = sessions.resolve_window("@5")
+    assert res.source == "cwd"
+    assert res.path == live
+
+
+def test_cmdline_still_wins_over_the_native_status_feed(projects, monkeypatch):
+    """Tier ordering: --resume off the pane's own command line is stronger evidence than
+    the native feed (it belongs to that pane BY CONSTRUCTION), so it must still win even
+    when the native feed also has an answer — and a different one, at that."""
+    resumed = _transcript(projects, "/home/u/repo", SID)
+    _transcript(projects, "/home/u/repo", OTHER)
+    started = time.time()
+    _panes(monkeypatch, sessions.Pane(
+        wid="@5", path="/home/u/repo", command="claude", claude_pid=42,
+        launched_in="/home/u/repo", resumed=SID, started=started))
+    _native(monkeypatch, {42: (OTHER, started)})           # disagrees with --resume
+
+    res = sessions.resolve_window("@5")
+    assert res.source == "cmdline"
+    assert res.path == resumed
+    assert res.session_id == SID
 
 
 # --- the fallback, and its limits ----------------------------------------------------
