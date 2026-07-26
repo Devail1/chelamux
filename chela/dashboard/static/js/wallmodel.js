@@ -45,11 +45,20 @@ export function isFinished(agent, wants) {
 //      checking busy first would misread a gated pane as "working".
 //   2. session_status === 'busy' → working.
 //   3. isFinished → done.
-//   4. else → idle.
+//   4. claude_running but session_status could not be resolved → unknown
+//      (docs/AGENT_IDENTITY.md slice 1: a pane chela cannot read a status for
+//      is NOT the same fact as one it confirmed is idle — collapsing the two
+//      is exactly the "confidently wrong answer" the doc calls out. `idle` is
+//      a real value `claude agents --json` reports; `session_status` being
+//      absent/null is chela failing to resolve it, not claude reporting calm).
+//   5. else → idle (never ran claude in this pane, or genuinely idle).
 export function tileState(agent, wants) {
     if (wants) return { glyph: '◆', word: 'needs you', cls: 'needs-you' };
     if (agent && agent.session_status === 'busy') return { glyph: '●', word: 'working', cls: 'working' };
     if (isFinished(agent, wants)) return { glyph: '✓', word: 'done', cls: 'done' };
+    if (agent && agent.claude_running && !agent.session_status) {
+        return { glyph: '?', word: 'unknown', cls: 'unknown' };
+    }
     return { glyph: '○', word: 'idle', cls: 'idle' };
 }
 

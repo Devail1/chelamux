@@ -93,6 +93,58 @@ def test_force_bypasses_the_ttl(monkeypatch):
     assert n["n"] == 2                          # force ignores the fresh cache
 
 
+# --- by_cwd honesty (docs/AGENT_IDENTITY.md slice 1) --------------------------
+# A cwd is not a session id: two live pids can share one (chela's own single-
+# user box: every agent shares $HOME). `by_cwd` must never guess a status for
+# an ambiguous cwd — it must omit the key rather than let one pid's status
+# silently clobber another's.
+
+def test_by_cwd_disagreement_omits_the_cwd(monkeypatch):
+    payload = json.dumps([
+        {"pid": 1, "cwd": "/home/x", "status": "busy"},
+        {"pid": 2, "cwd": "/home/x", "status": "idle"},
+    ])
+    run, _n = _counting_run(payload)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert "/home/x" not in m["by_cwd"]
+
+
+def test_by_cwd_agreement_keeps_the_cwd(monkeypatch):
+    """Pins out the rejected "omit whenever >1 pid shares a cwd" rule: two pids
+    sharing a cwd that AGREE must still resolve, not just get blanket-omitted."""
+    payload = json.dumps([
+        {"pid": 1, "cwd": "/home/x", "status": "busy"},
+        {"pid": 2, "cwd": "/home/x", "status": "busy"},
+    ])
+    run, _n = _counting_run(payload)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert m["by_cwd"]["/home/x"] == "busy"
+
+
+def test_by_cwd_none_status_counts_as_disagreement(monkeypatch):
+    payload = json.dumps([
+        {"pid": 1, "cwd": "/home/x", "status": "busy"},
+        {"pid": 2, "cwd": "/home/x", "status": None},
+    ])
+    run, _n = _counting_run(payload)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert "/home/x" not in m["by_cwd"]
+
+
+def test_by_cwd_sole_occupant_is_unaffected(monkeypatch):
+    run, _n = _counting_run(_ONE_AGENT)  # single pid at /home/x/proj, status busy
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert m["by_cwd"] == {"/home/x/proj": "busy"}
+
+
 # --- single-flight -----------------------------------------------------------
 
 def test_single_flight_collapses_a_concurrent_burst(monkeypatch):
