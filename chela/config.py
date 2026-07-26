@@ -412,10 +412,17 @@ NOTIFY_INTERVAL = int(os.environ.get("CHELA_NOTIFY_INTERVAL", "20"))
 # CMX-187: how often (seconds) the daemon runs `chela doctor`'s full audit and pushes any
 # ERROR-level finding through the same notify channel as the needs-input check above.
 # `chela doctor` diagnosing a dead relay perfectly and nobody seeing it for hours (nothing
-# runs doctor unless a human does) is exactly the shape this closes. Longer than
-# CHELA_NOTIFY_INTERVAL by default: unlike scanning pane states, a full audit shells out to
-# git and `gh` for every parked run and PR under review, so it is not free to run every 20s.
-DOCTOR_CHECK_INTERVAL = int(os.environ.get("CHELA_DOCTOR_CHECK_INTERVAL", "300"))
+# runs doctor unless a human does) is exactly the shape this closes.
+#
+# ⚠️ Hourly, matching UPDATE_CHECK_INTERVAL_SECONDS — NOT the 20s needs-input cadence. A
+# full audit is not "a bit more than scanning pane states": measured twice on a live box it
+# took 28.0s and 32.2s, because it shells out to `git` and `gh` per parked run and PR, runs
+# a `pytest --collect-only` for the JS-suite fact, and asks `claude agents --json` fresh
+# (12-18s on its own — CMX-179). At the 300s this shipped with, that is a ~10% permanent
+# duty cycle of subprocess churn on every install, forever, to re-derive a set that is
+# edge-triggered and so almost always unchanged. Raise the cadence only with a fresh
+# measurement of what an audit costs on the box in question.
+DOCTOR_CHECK_INTERVAL = int(os.environ.get("CHELA_DOCTOR_CHECK_INTERVAL", "3600"))
 
 # Outbound Telegram relay: post every tool_use/tool_result event as its own
 # message (🔧 Bash / ✅ Bash result). That's a firehose on a phone, so it is OFF
