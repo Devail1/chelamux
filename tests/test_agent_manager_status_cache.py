@@ -331,6 +331,36 @@ def test_nonzero_exit_keeps_last_good_cache(monkeypatch, caplog):
     assert any("exited 1" in r.message for r in caplog.records)
 
 
+def test_missing_claude_binary_logs_a_warning_not_a_traceback(monkeypatch, caplog):
+    # Real incident, 2026-07-27: a box with no `claude` on PATH (CI, a fresh dev
+    # machine before the CLI is installed) hit this via `subprocess.run` and fell
+    # into the catch-all `except Exception`, which `log.exception`s a full traceback
+    # — tripping test_graceful_shutdown.py's "daemon shuts down with no traceback"
+    # invariant even though nothing here actually crashed. FileNotFoundError is an
+    # expected, quiet failure mode everywhere else in this module; this call must
+    # treat it the same way — a plain WARNING, no traceback.
+    clock = _Clock(1000.0)
+    monkeypatch.setattr(agent_manager, "time", clock)
+    run, _n = _counting_run(_ONE_AGENT)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+    agent_manager.session_status_map()
+
+    def boom(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "claude")
+
+    monkeypatch.setattr(agent_manager.subprocess, "run", boom)
+    clock.t += agent_manager._STATUS_TTL + 1.0
+    with caplog.at_level("WARNING"):
+        m = agent_manager.session_status_map()
+
+    assert m["by_pid"] == {4242: "busy"}        # preserved across the missing binary
+    assert any(
+        r.levelname == "WARNING" and "FileNotFoundError" in r.message
+        for r in caplog.records
+    )
+    assert not any(r.exc_info for r in caplog.records), "must not log a traceback"
+
+
 # --- sustained-failure visibility (CMX-179) -----------------------------------
 # A single timeout is a blip and stays at WARNING. An outage that drags on past
 # `_STATUS_SUSTAINED_FAILURE_S` escalates ONCE to ERROR — this is what makes a real

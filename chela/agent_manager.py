@@ -399,6 +399,12 @@ def _refresh_status_locked() -> tuple[bool, str]:
     except (ValueError, json.JSONDecodeError) as e:
         detail = f"unparseable ({e})"
         _note_failure(f"claude agents --json {detail}; keeping last status cache")
+    except (FileNotFoundError, OSError) as e:
+        # No `claude` on PATH (CI, a bare dev box before the CLI is installed) — an
+        # expected, quiet failure mode everywhere else in this module, not a bug to
+        # traceback-log every warm-cache attempt over.
+        detail = f"{type(e).__name__}: {e}"
+        _note_failure(f"claude agents --json {detail}; keeping last status cache")
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         now = time.time()
