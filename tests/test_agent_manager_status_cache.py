@@ -331,6 +331,36 @@ def test_nonzero_exit_keeps_last_good_cache(monkeypatch, caplog):
     assert any("exited 1" in r.message for r in caplog.records)
 
 
+def test_missing_claude_binary_logs_a_warning_not_a_traceback(monkeypatch, caplog):
+    # Real incident, 2026-07-27: a box with no `claude` on PATH (CI, a fresh dev
+    # machine before the CLI is installed) hit this via `subprocess.run` and fell
+    # into the catch-all `except Exception`, which `log.exception`s a full traceback
+    # — tripping test_graceful_shutdown.py's "daemon shuts down with no traceback"
+    # invariant even though nothing here actually crashed. FileNotFoundError is an
+    # expected, quiet failure mode everywhere else in this module; this call must
+    # treat it the same way — a plain WARNING, no traceback.
+    clock = _Clock(1000.0)
+    monkeypatch.setattr(agent_manager, "time", clock)
+    run, _n = _counting_run(_ONE_AGENT)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+    agent_manager.session_status_map()
+
+    def boom(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "claude")
+
+    monkeypatch.setattr(agent_manager.subprocess, "run", boom)
+    clock.t += agent_manager._STATUS_TTL + 1.0
+    with caplog.at_level("WARNING"):
+        m = agent_manager.session_status_map()
+
+    assert m["by_pid"] == {4242: "busy"}        # preserved across the missing binary
+    assert any(
+        r.levelname == "WARNING" and "FileNotFoundError" in r.message
+        for r in caplog.records
+    )
+    assert not any(r.exc_info for r in caplog.records), "must not log a traceback"
+
+
 # --- sustained-failure visibility (CMX-179) -----------------------------------
 # A single timeout is a blip and stays at WARNING. An outage that drags on past
 # `_STATUS_SUSTAINED_FAILURE_S` escalates ONCE to ERROR — this is what makes a real
@@ -419,6 +449,43 @@ def test_empty_and_never_populated_is_never_reported_as_healthy(monkeypatch):
     monkeypatch.setattr(agent_manager, "time", clock)
     assert agent_manager._status_cache["by_pid"] == {}
     assert agent_manager.native_status_health()["ok"] is False
+
+
+# --- native_status_ever_fetched (CMX-189) -------------------------------------
+
+def test_native_status_ever_fetched_is_false_until_the_first_success(monkeypatch):
+    """The exact distinction `chela.sessions.resolve_window`'s tier 3 needs: a cache
+    that has never completed a fetch (down_since is also None here — no failure has
+    been recorded either, this cache has simply never been asked) must read as
+    NOT-fetched, not conflated with a healthy-but-quiet one."""
+    assert agent_manager.native_status_ever_fetched() is False
+
+    good, _ = _counting_run(_ONE_AGENT)
+    monkeypatch.setattr(agent_manager.subprocess, "run", good)
+    agent_manager.session_status_map()
+
+    assert agent_manager.native_status_ever_fetched() is True
+
+
+def test_native_status_ever_fetched_stays_true_through_a_later_outage(monkeypatch):
+    """A later failed refresh must not un-ring the bell: the process HAS fetched
+    successfully before, so a pid absent from the (now stale) cache is still "the feed
+    answered and doesn't have it", not "never asked" — `native_status_health().ok` is
+    what tracks the outage itself; this only tracks whether a fetch ever completed."""
+    clock = _Clock(1000.0)
+    monkeypatch.setattr(agent_manager, "time", clock)
+    good, _ = _counting_run(_ONE_AGENT)
+    monkeypatch.setattr(agent_manager.subprocess, "run", good)
+    agent_manager.session_status_map()
+    assert agent_manager.native_status_ever_fetched() is True
+
+    fail, _ = _counting_run("", returncode=1)
+    monkeypatch.setattr(agent_manager.subprocess, "run", fail)
+    clock.t += agent_manager._STATUS_TTL + 1.0
+    agent_manager.session_status_map(force=True)
+
+    assert agent_manager.native_status_health()["ok"] is False   # the outage IS visible
+    assert agent_manager.native_status_ever_fetched() is True    # but this stays True
 
 
 # --- CMX-179: the timeout floor -------------------------------------------------------

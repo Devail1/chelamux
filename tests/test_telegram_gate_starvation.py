@@ -437,3 +437,41 @@ def test_the_inbound_daemon_starts_the_pane_thread_beside_the_relay(daemon_env, 
     assert len(relays) == 1, "the inbound daemon never started the transcript relay"
     assert panes[0].args[0] is daemon_env.watchers[0]
     assert panes[0] is not relays[0]
+
+
+# ── CMX-188: the daemon entrypoint must warm its OWN status cache ────────────
+
+
+@pytest.mark.parametrize("no_inbound", [True, False])
+def test_cmd_telegram_warms_the_native_status_cache(daemon_env, monkeypatch, no_inbound):
+    """``chela telegram`` must call ``start_background_refresh`` itself — on BOTH the
+    ``--no-inbound`` and the default PTB daemon path.
+
+    ``chela.sessions`` tier 3 (CMX-184) reads ``agent_manager``'s ``session_by_pid``
+    cache but never refreshes it — the dashboard's ``main()`` is the only caller of
+    ``start_background_refresh`` in the whole tree (CMX-179: the feed costs 12-18s and
+    must stay off the hook path). That cache is per-process module state, so a
+    ``chela telegram`` process that never makes this call keeps an empty cache
+    forever: tier 3 is silently skipped on every resolve and ``relay.transcript_missing``
+    fires even for a window that resolves fine wherever the dashboard IS running.
+
+    Parametrized over both branches for the same reason
+    ``test_the_no_inbound_daemon_starts_the_pane_thread`` and
+    ``test_the_inbound_daemon_starts_the_pane_thread_beside_the_relay`` are two separate
+    tests: a single no_inbound=True-only assertion cannot tell "warms unconditionally"
+    from "warms only under --no-inbound" apart — gating the call inside
+    ``if args.no_inbound:`` would leave that one test green while silently dropping the
+    warm-up from the default (inbound) daemon, which is how most real deployments run.
+    """
+    monkeypatch.setattr(main, "_outbound_loop", lambda *a, **kw: None)  # foreground; return
+    if not no_inbound:
+        import chela.telegram as tg
+        app = SimpleNamespace(run_polling=lambda: None)
+        monkeypatch.setattr(tg, "build_application", lambda *a, **kw: app)
+
+    calls = []
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: calls.append(1))
+
+    main.cmd_telegram(_tg_args(no_inbound=no_inbound))
+
+    assert calls == [1], "chela telegram never warmed agent_manager's status cache itself"

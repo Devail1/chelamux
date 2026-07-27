@@ -133,6 +133,9 @@ def _run_one_daemon_tick(monkeypatch) -> None:
     monkeypatch.setattr(main.notify, "enabled", lambda: False)
     monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
     monkeypatch.setattr(main.inbox, "enabled", lambda: False)
+    # CMX-189: cmd_run now warms agent_manager's native-status cache itself — unstubbed,
+    # this spawns a REAL daemon thread hammering the real `claude` binary on a timer.
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
 
 
 def test_the_daemon_loop_calls_maintenance_tick_every_pass(monkeypatch):
@@ -219,6 +222,9 @@ def _run_daemon_ticks(monkeypatch, n: int) -> None:
     monkeypatch.setattr(main.notify, "enabled", lambda: False)
     monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
     monkeypatch.setattr(main.inbox, "enabled", lambda: False)
+    # CMX-189: cmd_run now warms agent_manager's native-status cache itself — unstubbed,
+    # this spawns a REAL daemon thread hammering the real `claude` binary on a timer.
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
 
 
 def test_the_daemon_loop_persists_last_capture_across_ticks(monkeypatch):

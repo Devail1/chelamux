@@ -237,6 +237,21 @@ def native_status_health() -> dict:
     }
 
 
+def native_status_ever_fetched() -> bool:
+    """Whether THIS process's cache has completed at least one successful
+    `claude agents --json` fetch — a cache READ, never a subprocess call.
+
+    :func:`session_and_cwd_for_pid` returns ``(None, None)`` for two completely
+    different situations — "the feed has answered and has nothing for this pid"
+    and "this process has never asked the feed at all" — and a caller cannot tell
+    them apart from that return value alone. CMX-189: a cold cache read as "the
+    feed says no session for this pid" cost real debugging time twice on
+    2026-07-27, so :func:`chela.sessions.resolve_window`'s tier 3 checks this
+    FIRST and says which one it saw.
+    """
+    return _status_cache.get("last_success_ts", 0.0) > 0.0
+
+
 def probe_native_status_feed() -> tuple[bool, str]:
     """Force a fresh `claude agents --json` call, right now, and report whether it actually
     answered — (ok, detail). Bypasses the TTL fast path so a caller that specifically wants
@@ -383,6 +398,12 @@ def _refresh_status_locked() -> tuple[bool, str]:
         _note_failure(f"claude agents --json {detail}; keeping last status cache")
     except (ValueError, json.JSONDecodeError) as e:
         detail = f"unparseable ({e})"
+        _note_failure(f"claude agents --json {detail}; keeping last status cache")
+    except (FileNotFoundError, OSError) as e:
+        # No `claude` on PATH (CI, a bare dev box before the CLI is installed) — an
+        # expected, quiet failure mode everywhere else in this module, not a bug to
+        # traceback-log every warm-cache attempt over.
+        detail = f"{type(e).__name__}: {e}"
         _note_failure(f"claude agents --json {detail}; keeping last status cache")
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
