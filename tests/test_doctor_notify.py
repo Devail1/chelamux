@@ -161,6 +161,9 @@ def _run_daemon_ticks(monkeypatch, n: int) -> None:
     # update's own hourly check must not shell out to real git and mask the assertions below.
     monkeypatch.setattr(main.update, "auto_apply_enabled", lambda: False)
     monkeypatch.setattr(main.update, "check_and_notify", lambda behind: behind)
+    # CMX-189: cmd_run now warms agent_manager's native-status cache itself — unstubbed,
+    # this spawns a REAL daemon thread hammering the real `claude` binary on a timer.
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
 
 
 def test_the_daemon_loop_calls_doctor_check_and_notify_on_the_first_tick(monkeypatch):

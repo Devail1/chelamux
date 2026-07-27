@@ -71,6 +71,14 @@ pass: the event log is then refused, and ``detail`` says so. The native status f
 refused the same way — no readable pid ``cwd`` (from ``/proc``), or none cached in the
 feed for that pid, no floor, no tier 3.
 
+**CMX-189.** :func:`chela.agent_manager.session_and_cwd_for_pid` returns ``(None, None)``
+for two different situations a caller cannot otherwise tell apart: the feed has answered
+and genuinely has nothing for this pid, or THIS PROCESS has never completed a fetch at all
+(nobody called ``start_background_refresh`` here). ``detail`` distinguishes them explicitly
+— :func:`chela.agent_manager.native_status_ever_fetched` is checked first — because reading
+a cold cache as "the feed was asked and had nothing" cost real debugging time twice on
+2026-07-27.
+
 A session id is globally unique, so a known session needs no project dir at all — glob
 ``~/.claude/projects/*/<sid>.jsonl`` (the id is validated first: it is pasted into a glob,
 so a ``*`` in it would match an *arbitrary agent's* transcript). And nothing here guesses:
@@ -647,6 +655,22 @@ def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
                 tried.append(
                     f"the native status feed names session {nsid} for pid "
                     f"{pane.claude_pid}, but no {nsid}.jsonl exists under the projects dir")
+        elif not agent_manager.native_status_ever_fetched():
+            # CMX-189: a cold cache (this process has never completed a `claude agents
+            # --json` fetch — e.g. it never called start_background_refresh) and a warm
+            # cache that simply has nothing for this pid both make session_and_cwd_for_pid
+            # return (None, None). Silently falling through to the cwd tier here is how
+            # this read as "the feed was consulted and had nothing" on 2026-07-27, when it
+            # had never been asked in this process at all.
+            tried.append(
+                f"the native status feed has NEVER answered in this process (no "
+                f"background refresh has completed yet), so tier 3 has nothing to say "
+                f"about pid {pane.claude_pid} — a cold cache, NOT the feed reporting no "
+                "session for it")
+        else:
+            tried.append(
+                f"the native status feed has answered in this process, but reports "
+                f"nothing for pid {pane.claude_pid}")
 
     cwd = pane.origin if pane else None
     if cwd is None:

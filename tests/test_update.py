@@ -989,6 +989,9 @@ def _run_one_daemon_tick(monkeypatch) -> None:
     monkeypatch.setattr(main.capabilities, "effective", lambda: [])
     monkeypatch.setattr(main.capabilities, "announce", lambda caps, log: None)
     monkeypatch.setattr(main.capabilities, "publish", lambda caps, boot_id: None)
+    # CMX-189: cmd_run now warms agent_manager's native-status cache itself — unstubbed,
+    # this spawns a REAL daemon thread hammering the real `claude` binary on a timer.
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
 
 
 def test_the_daemon_loop_calls_auto_apply_sweep_when_enabled(monkeypatch):

@@ -153,6 +153,9 @@ def test_the_daemon_loop_calls_maybe_wake_on_the_inbox_tick(monkeypatch):
     monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
     monkeypatch.setattr(main.notify, "enabled", lambda: False)
     monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+    # CMX-189: cmd_run now warms agent_manager's native-status cache itself — unstubbed,
+    # this spawns a REAL daemon thread hammering the real `claude` binary on a timer.
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
 
     # The inbox branch must run (that is where the auto-launch call lives), and it must be armed.
     monkeypatch.setattr(main.inbox, "enabled", lambda: True)
@@ -201,6 +204,9 @@ def test_the_daemon_loop_skips_maybe_wake_when_autolaunch_is_disabled(monkeypatc
     monkeypatch.setattr(main.inbox, "load", lambda: {"queue": [{"kind": "run_review"}]})
     monkeypatch.setattr(main.epoch, "current", lambda: "e1")
     monkeypatch.setattr(main.autolaunch, "enabled", lambda: False)
+    # CMX-189: cmd_run now warms agent_manager's native-status cache itself — unstubbed,
+    # this spawns a REAL daemon thread hammering the real `claude` binary on a timer.
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
 
     calls: list[tuple] = []
     monkeypatch.setattr(main.autolaunch, "maybe_wake", lambda *a, **k: calls.append(a))
@@ -499,6 +505,9 @@ def test_the_daemon_loop_calls_maybe_teardown_on_the_inbox_tick(monkeypatch):
     # Auto-launch itself OFF for this test — teardown must still be reached (it is checked
     # regardless of the launch flag; ownership is proven by the stamp, not by the flag).
     monkeypatch.setattr(main.autolaunch, "enabled", lambda: False)
+    # CMX-189: cmd_run now warms agent_manager's native-status cache itself — unstubbed,
+    # this spawns a REAL daemon thread hammering the real `claude` binary on a timer.
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
 
     launch_calls: list[tuple] = []
     monkeypatch.setattr(main.autolaunch, "maybe_wake", lambda *a, **k: launch_calls.append(a))

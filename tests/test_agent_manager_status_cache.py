@@ -421,6 +421,43 @@ def test_empty_and_never_populated_is_never_reported_as_healthy(monkeypatch):
     assert agent_manager.native_status_health()["ok"] is False
 
 
+# --- native_status_ever_fetched (CMX-189) -------------------------------------
+
+def test_native_status_ever_fetched_is_false_until_the_first_success(monkeypatch):
+    """The exact distinction `chela.sessions.resolve_window`'s tier 3 needs: a cache
+    that has never completed a fetch (down_since is also None here — no failure has
+    been recorded either, this cache has simply never been asked) must read as
+    NOT-fetched, not conflated with a healthy-but-quiet one."""
+    assert agent_manager.native_status_ever_fetched() is False
+
+    good, _ = _counting_run(_ONE_AGENT)
+    monkeypatch.setattr(agent_manager.subprocess, "run", good)
+    agent_manager.session_status_map()
+
+    assert agent_manager.native_status_ever_fetched() is True
+
+
+def test_native_status_ever_fetched_stays_true_through_a_later_outage(monkeypatch):
+    """A later failed refresh must not un-ring the bell: the process HAS fetched
+    successfully before, so a pid absent from the (now stale) cache is still "the feed
+    answered and doesn't have it", not "never asked" — `native_status_health().ok` is
+    what tracks the outage itself; this only tracks whether a fetch ever completed."""
+    clock = _Clock(1000.0)
+    monkeypatch.setattr(agent_manager, "time", clock)
+    good, _ = _counting_run(_ONE_AGENT)
+    monkeypatch.setattr(agent_manager.subprocess, "run", good)
+    agent_manager.session_status_map()
+    assert agent_manager.native_status_ever_fetched() is True
+
+    fail, _ = _counting_run("", returncode=1)
+    monkeypatch.setattr(agent_manager.subprocess, "run", fail)
+    clock.t += agent_manager._STATUS_TTL + 1.0
+    agent_manager.session_status_map(force=True)
+
+    assert agent_manager.native_status_health()["ok"] is False   # the outage IS visible
+    assert agent_manager.native_status_ever_fetched() is True    # but this stays True
+
+
 # --- CMX-179: the timeout floor -------------------------------------------------------
 # The original regression, guarded directly: the bug was a bare constant with NO floor
 # (10.0s, below the measured ~18s warm-start) and nothing that would have caught it
