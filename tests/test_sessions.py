@@ -327,6 +327,41 @@ def test_cmdline_still_wins_over_the_native_status_feed(projects, monkeypatch):
     assert res.session_id == SID
 
 
+# --- tier 3: a cold cache must SAY SO, not read as "asked and empty" (CMX-189) --------
+# `session_and_cwd_for_pid` returns (None, None) for two different facts a caller cannot
+# tell apart from the return value alone: the feed has answered in this process and has
+# nothing for this pid, or this process has never completed a fetch at all (nobody called
+# `start_background_refresh` here). Reading the silent case as the former — "the feed was
+# consulted and had nothing" — cost real debugging time twice on 2026-07-27.
+
+def test_a_cold_native_status_cache_says_so_explicitly(projects, monkeypatch):
+    _panes(monkeypatch, sessions.Pane(
+        wid="@9", path="/home/u/empty", command="claude", claude_pid=4,
+        launched_in="/home/u/empty", started=time.time()))
+    monkeypatch.setattr(agent_manager, "native_status_ever_fetched", lambda: False)
+
+    res = sessions.resolve_window("@9")
+    assert not res.ok
+    assert "NEVER answered" in res.detail
+    assert "cold cache" in res.detail
+
+
+def test_a_warm_but_empty_native_status_cache_says_the_pid_is_simply_absent(
+        projects, monkeypatch):
+    """The opposite fact: the feed HAS answered at least once in this process, it just has
+    nothing for THIS pid — a genuinely different situation from a cold cache, and the
+    message must not blur the two together."""
+    _panes(monkeypatch, sessions.Pane(
+        wid="@9", path="/home/u/empty", command="claude", claude_pid=4,
+        launched_in="/home/u/empty", started=time.time()))
+    monkeypatch.setattr(agent_manager, "native_status_ever_fetched", lambda: True)
+
+    res = sessions.resolve_window("@9")
+    assert not res.ok
+    assert "NEVER answered" not in res.detail
+    assert "reports nothing for pid 4" in res.detail
+
+
 # --- the fallback, and its limits ----------------------------------------------------
 
 def test_the_cwd_fallback_uses_the_ORIGIN_not_the_pane_path_a_cd_moved(

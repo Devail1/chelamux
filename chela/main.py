@@ -191,6 +191,15 @@ def cmd_run(args) -> None:
     caps = capabilities.effective()
     capabilities.announce(caps, log)
     capabilities.publish(caps, boot_id=boot_id)
+    # CMX-189: same per-process gap CMX-188 found and fixed in `cmd_telegram` — this
+    # daemon reads `chela.sessions` tier 3 (CMX-184, via `doctor.check_and_notify`'s
+    # `relay.transcripts` fact below) but is a SEPARATE process from whichever one
+    # actually calls `start_background_refresh` (the dashboard). Without this call,
+    # `session_by_pid`/`cwd_by_pid` stay `{}` here forever and tier 3 is silently
+    # skipped on every doctor sweep this daemon runs — indistinguishable, from the
+    # log, from the feed genuinely having nothing for a pid (see
+    # `agent_manager.native_status_ever_fetched`).
+    agent_manager.start_background_refresh()
     # Per-workflow, not global: each WORKFLOW.md carries its own effective poll
     # interval (`polling.interval_ms`, re-read on change), so they no longer share
     # one clock.
