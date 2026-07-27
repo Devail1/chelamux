@@ -1,7 +1,7 @@
 # Agent identity — design doc
 
-Status: **slices 1 + 2a shipped · slice 5 CLOSED (won't build) · 3 + 4 RE-SCOPED 2026-07-27
-(slice 3 needs an owner tie-break) · 2b open** · written
+Status: **slices 1 + 2a shipped · slice 5 CLOSED (won't build) · 4 and 3a RE-SCOPED, UNBLOCKED
+and NOT YET DISPATCHED · 3b deferred pending 3a's data · 2b open** · written
 2026-07-26, updated 2026-07-27 · author: orchestrator. Written after a day in which four
 apparently unrelated bugs turned out to be one. Read this before touching
 `agent_manager.session_status_map`, `transcripts.transcript_for_cwd`, `sessions.resolve_window`,
@@ -174,7 +174,8 @@ Sequenced so the first slice is independently valuable and the risky decision co
 | **1** ▶ | **Honest fallback** — ambiguous `cwd` omitted **and** a distinct `unknown` tile state | `agent_manager`: include a `cwd` in `by_cwd` only if every live pid sharing it agrees on a status; an unknown/`None` status counts as **disagreement**. `wallmodel.tileState`: absent status → `? unknown`, not `○ idle`. ⛔ Ranking unchanged; ⛔ do NOT reuse CMX-179's outage marker (the feed *is* answering). | disagreement omits · agreement keeps (pins out the rejected "omit whenever >1 pid" rule) · `None` counts as disagreement · sole occupant unaffected · `unknown` ≠ `idle` in `tileState` · `rankOrder` output unchanged. | a pane that cannot be resolved reads `? unknown`; idle/busy panes unchanged; ordering visually identical. **FILED as a dispatch brief 2026-07-26.** |
 | **2a** ⬆ | **Pin + record the session id for INTERACTIVE windows** — *promoted, this is where the live failure is* | `spawn.py` appends `--session-id <uuid>` to the command it sends (inside the caller's `claude`-only allowlist boundary) and records `wid → session_id` beside the existing bindings. Interactive windows share `$HOME`, so this is the ambiguity costing 36 `relay.transcript_missing` events. | uuid generated once and identical in the sent command and the stored row; an override (`--session-id`/`--resume`/`--continue`) records NULL rather than a fabricated id. | a `/new` window's recorded id matches the `sessionId` the live feed reports for its pid; the relay stops refusing. |
 | **2b** ⬇ | **Pin + record for DISPATCHED runs** — *demoted: no present bug* | `dispatcher.py` (`resolve_agent_cmd` at `:3302`, `send-keys` at `:3322`), `runs.session_id` via the additive-migration list at `:951`. ⚠️ **Not urgent on its own** — `cwd` already identifies a dispatched run (58/58 unique, worktree-enforced). Its value is as a **slice 4 prerequisite**: it disambiguates *which session within the run*, the 2–3 transcripts a reworked run leaves behind. Do it when slice 4 is built, not before. | id sent == id stored; persisted BEFORE `send-keys` (never launch an agent chela cannot identify); override → NULL; migration additive + idempotent. | `runs.session_id` matches the pid's `sessionId` in the live feed. |
-| **3** ⚠ | **RE-SCOPED 2026-07-27 — one identity per window, shared by status and transcript** (was: "join status on `sessionId`") | `status_by_wid` must derive a window's session the way `sessions.resolve_window` already does, then join the feed on `sessionId` — **not** on the pane's pid. ⚠️ **Carries an owner decision** (which agent `@1` *means*) — read "Re-scope of slices 3 and 4" below before dispatching. | that status and `sessions.resolve_window` name the SAME session for a window, or the window reads `unknown` — never two confident answers that disagree. | `@1`'s tile and `@1`'s Telegram topic agree about which agent is on the other end. |
+| **3a** ⚠ | **RE-SCOPED 2026-07-27 — say when a window hosts TWO agents** (was: "join status on `sessionId`") | `status_by_wid` resolves a window's session the way `sessions.resolve_window` already does; when that session ≠ the pane pid's session, report a distinct **split** state rather than either raw status. ⛔ NOT slice 1's `unknown` — this is "chela can tell, and there are two". **Ships with its `wallmodel.tileState` half or it is a no-op.** | agreeing sessions untouched · differing sessions report split and neither raw status · missing pane pid or missing event-log session degrades to today's behaviour, not to split. | with a `--fork-session` job live under `@1`, the tile stops claiming `idle`. |
+| **3b** ⏸ | **The tie-break — DEFERRED until 3a has produced data** | Then decide: does status follow the fork, or does the surface keep showing both? See "Re-scope of slices 3 and 4". | — | — |
 | **4** ⚠ | **RE-SCOPED 2026-07-27 — route the 4 surviving cwd-glob callers through the refusing resolver** (was: "resolve transcripts by name" — mostly already built) | `inbox.py:596`, `orchestrator.py:79` + `:188`, `context.py:278`, `dispatcher.py:1582` still reach `transcripts.transcript_for_cwd`'s `glob`+recency rank, which cannot refuse. Give them `sessions.resolve_window`'s answer so they inherit the refusal. ⛔ Do NOT delete `transcript_for_cwd` — it is `resolve_window`'s own last-resort tier. | a caller handed an ambiguous cwd gets `None`, not a sibling's transcript — corrupt by making the sibling newer. | context bars / cost / completion detection stop attributing one home-dir agent's work to another. |
 | **5** ⛔ | **~~Surface windowless sessions~~ — CLOSED, won't build (owner, 2026-07-27)** | `kind: background` agents stay invisible to chela. See "Why slice 5 is closed" below before re-proposing it. | — | — |
 
@@ -220,7 +221,9 @@ and `sessionids.session_id_for` still has **zero readers**). The correct id here
 **event log**, which is exactly what the transcript resolver already uses. The fix is to make
 status resolve through that same identity, not to add a fifth source.
 
-⚠️ **This carries an owner decision, and the two answers have opposite user-visible effects:**
+⚠️ **This carried an owner decision** — settled on 2026-07-27, see below. The two candidate
+answers had **opposite** user-visible effects, which is why it was not decided by whoever
+happened to write the brief:
 
 1. **Status follows the event-log session** (status matches the relay). `@1` reads `busy`
    — but the tile then contradicts *its own visible terminal*, which shows an idle interactive
@@ -229,12 +232,31 @@ status resolve through that same identity, not to add a fifth source.
    pane, one agent — but it **breaks the Telegram topic**: the fork's output is what the owner
    is actually reading in that topic today, and this would silence it.
 
-⛔ Do not pick one while writing the brief. Given slice 5 is closed — a fork gets no surface of
-its own — option 1 is the coherent default, but it makes a tile disagree with its own pane and
-that is the owner's call. **A defensible third path: ship the disagreement as an observable
-first** (when a window's event-log session ≠ its pane pid's session, the window is hosting two
-agents — say so rather than confidently reporting either), in slice 1's spirit, and settle the
-tie-break with data.
+**✅ SETTLED 2026-07-27 (owner delegated the call): option 3 first, then option 1 — slice 3
+splits into 3a and 3b.**
+
+- **Slice 3a — make the disagreement observable. Dispatchable now.** When a window's
+  event-log session ≠ its pane pid's session, that window is hosting **two** agents; say so
+  instead of confidently reporting either. ⛔ Do NOT reuse slice 1's `unknown` state — this is
+  not "chela cannot tell", it is "chela can tell, and there are two". It needs its own tile
+  state and its own word. *Guards:* a window whose two sessions agree is untouched; a window
+  whose sessions differ reports the split state and **neither** raw status; a window with no
+  pane pid (or no event-log session) degrades to today's behaviour, not to the split state.
+  *Manual verify:* with a `--fork-session` job live under `@1`, the tile stops claiming `idle`.
+- **Slice 3b — the tie-break, DEFERRED until 3a has produced data.** Only then decide whether
+  status follows the fork (option 1) or the surface keeps showing both.
+
+**Why, so this is not re-litigated.** Option 2 is disqualified: the fork's output is what the
+owner reads in that topic, so "the relay follows the pane" is a regression in the one channel
+that currently works. Option 1 *alone* manufactures a **new** confident-wrong answer — a tile
+reading `busy` above a visibly idle terminal — which is the exact failure shape slice 1 exists
+to prevent; shipping it before the split state exists would trade one lie for another. Option 3
+is the only one that adds no wrong answer, and it is cheap and reversible.
+
+⚠️ **The trap slice 1 already taught, and it applies verbatim here:** honesty in the data model
+buys nothing until the surface can express it. `wallmodel.tileState` falls through to `○ idle`
+for anything it does not recognise, so 3a is a **no-op unless the tile state ships with it**.
+Check what the consumer renders for the new case before calling it done.
 
 **Slice 4 — largely built; what remains is four unrefused callers.**
 
@@ -255,9 +277,10 @@ Already correct, for contrast: `dashboard/app.py:207` passes `window_id=`, and
 refusal. ⛔ `transcript_for_cwd` itself must stay: `sessions.py:692` is `resolve_window`'s own
 documented last-resort tier.
 
-**Sequence:** slice 4 is now the *lower-risk, better-evidenced* of the two and carries no
-product decision — do it first. Slice 3 needs the owner's tie-break before a brief can be
-written. Slice 2b remains a slice-4 prerequisite only for the `dispatcher.py:1582` row.
+**Sequence (as of 2026-07-27, nothing dispatched):** **slice 4**, then **slice 3a** — both are
+unblocked and neither carries an open decision any more. Slice 4 first: lower risk, and its
+guards are easier to corrupt convincingly. **3b** waits on data from 3a. **2b** remains a
+slice-4 prerequisite only for the `dispatcher.py:1582` row, so fold it in there or not at all.
 
 ### Why slice 5 is closed — measured 2026-07-27, do not re-derive
 
