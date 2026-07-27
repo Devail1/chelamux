@@ -1,0 +1,81 @@
+name: Deploy landing page
+
+# The landing site (chela.pages.dev) is a Cloudflare Pages project with NO git
+# integration — a push to main triggers nothing on Cloudflare's side. Before this
+# workflow existed, `landing/` was published by hand with `wrangler pages deploy`,
+# which meant the live site silently drifted from main whenever nobody remembered
+# to run it (it sat 3 days stale in July 2026, and the drift was invisible because
+# the repo looked correct).
+#
+# ⚠️ `push` to main ONLY — deliberately never `pull_request` or
+# `pull_request_target`. This repo is public, so a fork PR that could trigger a
+# job with access to CLOUDFLARE_API_TOKEN would hand the token to anyone who
+# opened a PR. Deploys happen after a change is merged, not while it is proposed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'landing/**'
+      - '.github/workflows/deploy-landing.yml'
+  workflow_dispatch:        # manual re-deploy, e.g. to re-publish an unchanged tree
+
+# Least privilege: the job reads the repo and talks to Cloudflare. Nothing else.
+permissions:
+  contents: read
+
+# A newer push supersedes an in-flight deploy rather than racing it to the edge.
+concurrency:
+  group: deploy-landing
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Skips cleanly on a fork without secrets instead of failing red.
+    if: github.repository == 'Devail1/chelamux'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish landing/ to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # --branch=main is REQUIRED, not cosmetic. wrangler infers the Pages
+          # environment from the branch it sees; anything other than the project's
+          # production branch publishes a PREVIEW deployment that reports
+          # "Deployment complete!" while chela.pages.dev keeps serving the old
+          # build. That exact mistake cost a debugging round in July 2026.
+          command: pages deploy landing --project-name=chela --branch=main
+
+      # Trusting the previous step's exit code is what made the preview-deploy
+      # mistake survive: wrangler exits 0 for a preview too. Assert on what the
+      # PRODUCTION URL actually serves.
+      - name: Verify the production URL serves this commit
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 10); do
+            # Cache-buster: Pages' edge can serve a stale copy of the old build for
+            # a short window after a successful deploy. A query string bypasses it,
+            # so this measures the DEPLOY rather than the cache.
+            #
+            # Write to a FILE — never `live=$(curl …)`. Command substitution strips
+            # trailing newlines, so the captured string differs from the on-disk file
+            # by exactly that newline and the diff below never matches. That mistake
+            # makes this guard fail on every successful deploy: a permanent false
+            # alarm reporting a broken deploy that worked fine.
+            curl -fsSL "https://chela.pages.dev/?cb=${GITHUB_SHA}${i}" -o /tmp/live.html
+            # Compare normalised tokens, never bytes: Pages rewrites whitespace, so
+            # the served HTML is never byte-identical to the file in the repo.
+            if diff -q \
+                 <(tr -s ' \n' '\n\n' < landing/index.html) \
+                 <(tr -s ' \n' '\n\n' < /tmp/live.html) >/dev/null; then
+              echo "✅ chela.pages.dev matches landing/index.html at ${GITHUB_SHA}"
+              exit 0
+            fi
+            echo "attempt $i: production does not match yet, retrying…"
+            sleep 15
+          done
+          echo "::error::Deploy reported success but chela.pages.dev never matched landing/index.html."
+          echo "Most likely a PREVIEW deployment (wrong --branch) rather than production."
+          exit 1
