@@ -1,7 +1,10 @@
 # Design: OKF Knowledge Layer + Viewer
 
-**Status:** Design / not yet implemented
-**Date:** 2026-06-29
+**Status:** ✅ **SHIPPED 2026-07-04** (`53efad0`, PR #13) — this began as a design doc and the
+design was built. `chela/okf.py` (734 lines), five `/api/knowledge/*` routes, and the dashboard's
+**Knowledge** view (`static/js/knowledge.js`) implement it. Read the code as the authority where
+the two disagree; the sections below describe intent, not necessarily the shipped shape.
+**Date:** written 2026-06-29 · status corrected 2026-07-27
 **Owner:** chela
 
 A design for exporting chela's accumulated fleet knowledge as a portable
