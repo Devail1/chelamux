@@ -363,6 +363,10 @@ uv run chela status
 uv sync --extra dashboard
 uv run chela dashboard
 
+<span class="c"># want the Telegram bridge too? name every extra in ONE command —</span>
+<span class="c"># `uv sync --extra X` replaces the env and drops the ones you leave out</span>
+uv sync --extra dashboard --extra telegram
+
 <span class="c"># does what's running still match your config?</span>
 uv run chela doctor</pre>
   </div>

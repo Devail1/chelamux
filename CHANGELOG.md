@@ -21,7 +21,14 @@ history lives in `git log`.
   installed copy of the plugin came from, right after a pull. Previously this was left
   to a printed reminder telling a human to run `/plugin update` by hand — which once
   meant every agent window started after a plugin-cache sweep loaded no hooks at all,
-  silently killing outbound relay until someone noticed.
+  silently killing outbound relay until someone noticed. (#241)
+
+- **A red `chela doctor` finding now reaches you instead of waiting to be asked.**
+  Doctor findings that reach ERROR escalate through `chela notify`, edge-triggered on
+  the transition into ERROR and keyed per finding, so a persistent fault reports once
+  rather than on every check. The check interval was also raised from 300 s to 3600 s:
+  a full `doctor.check()` measures 28–32 s on a live box, which at the old cadence was
+  a ~10% permanent duty cycle. (#240)
 
 ### Fixed
 
@@ -32,9 +39,24 @@ history lives in `git log`.
   shared the same directory, which every interactive window on a single-user box does.
   It now also checks the `sessionId` that `claude agents --json` already reports for
   the window's own pid — a signal chela was fetching every refresh and discarding.
-  Bounded the same way as the other tiers: the feed's own `startedAt` for that pid must
-  agree with the process's real start time, so a recycled pid can't inherit a dead
-  session. Background: `docs/AGENT_IDENTITY.md`.
+  Bounded so a recycled pid cannot inherit a dead process's session: the cwd the feed
+  cached for that pid must agree with the pane's own origin, and the tier is refused
+  when either is unknown. (An earlier attempt bounded it on the feed's `startedAt`
+  instead; that field is the *session's* start time, not the process's fork time, and
+  measuring it across every live pid on a real box gave deltas of −623 s, +16 s and
+  −113 days — it disagrees in both directions, so no tolerance can rescue it.)
+  Background: `docs/AGENT_IDENTITY.md`. (#239)
+
+- **…and that fix did nothing until the processes that read it warmed their own
+  cache.** The new tier reads a per-process status cache, and only the dashboard was
+  populating one — so in `chela telegram` (the process that actually relays) and in the
+  daemon, the tier had no data and silently fell through to the refusal it was meant to
+  replace. Outbound relay stayed dead while `chela doctor` reported the window
+  resolving fine, because forcing a probe warms the cache in the doctor's *own*
+  process: a check that warms the thing it checks cannot observe the process that
+  doesn't. Both long-lived services now warm their cache, and a cache that has never
+  completed a fetch now says so rather than presenting as "the feed had nothing for
+  this pid". (#243, #244)
 
 - **The Decisions inbox search box could not be clicked.** The popover closed itself
   on any click anywhere inside it — including the click that should have focused the
