@@ -1,7 +1,8 @@
 # Agent identity — design doc
 
-Status: **proposed, nothing built** · 2026-07-26 · author: orchestrator. Written after a day
-in which four apparently unrelated bugs turned out to be one. Read this before touching
+Status: **slices 1 + 2a shipped · slice 5 CLOSED (won't build) · 2b/3/4 open** · written
+2026-07-26, updated 2026-07-27 · author: orchestrator. Written after a day in which four
+apparently unrelated bugs turned out to be one. Read this before touching
 `agent_manager.session_status_map`, `transcripts.newest_transcript`, `sessions._claude_pid`,
 or anything that answers "which agent is this window".
 
@@ -48,6 +49,16 @@ interactive windows.**
 - **`claude agents --json` returns a `sessionId` for every entry.** Full key set:
   `['cwd', 'kind', 'name', 'pid', 'sessionId', 'startedAt']`. `kind` is `interactive` or
   `background`.
+- **⚠️ A pinned `--session-id` is NOT always the id the session runs as — measured
+  2026-07-27.** A live `background` agent's argv reads
+  `--session-id 36358c6b-… --fork-session --resume …/949143ad-….jsonl`, while the feed reports
+  `sessionId = 29b3560b-…` and the transcript that is actually growing is
+  `29b3560b-….jsonl` (214 KB, live); `36358c6b-….jsonl` is a stale 14 MB file from two days
+  earlier. **Under `--fork-session` the pin is superseded by a freshly-minted id.** chela's own
+  slice-2a spawns pass `--session-id` *without* `--fork-session`, so the pin is expected to hold
+  there — but this settles the "authoritative or hint" open decision below in favour of
+  **hint, always validated against the live feed**. ⛔ Never open a transcript path built from a
+  recorded id without confirming that id against `claude agents --json` first.
 - **`chela/agent_manager.py` never references `sessionId`.** `grep -n "sessionId\|session_id"`
   over that file returns nothing. It builds three maps, all keyed on the unstable fields:
   `by_pid[int(pid)]`, `cwd_by_pid[int(pid)]`, `by_cwd[cwd]` (`:314`–`:318`).
@@ -153,11 +164,48 @@ Sequenced so the first slice is independently valuable and the risky decision co
 | **2b** ⬇ | **Pin + record for DISPATCHED runs** — *demoted: no present bug* | `dispatcher.py` (`resolve_agent_cmd` at `:3302`, `send-keys` at `:3322`), `runs.session_id` via the additive-migration list at `:951`. ⚠️ **Not urgent on its own** — `cwd` already identifies a dispatched run (58/58 unique, worktree-enforced). Its value is as a **slice 4 prerequisite**: it disambiguates *which session within the run*, the 2–3 transcripts a reworked run leaves behind. Do it when slice 4 is built, not before. | id sent == id stored; persisted BEFORE `send-keys` (never launch an agent chela cannot identify); override → NULL; migration additive + idempotent. | `runs.session_id` matches the pid's `sessionId` in the live feed. |
 | **3** | **Join status on `sessionId`** | `session_status_map` gains `by_session`; `status_by_wid` prefers recorded session → `by_pid` → unique-`by_cwd` → `None`. | precedence order, and that a recorded-but-absent session degrades to the next tier rather than to a wrong answer. | `@1` reads what it is actually doing; `busy` panes read `busy`. |
 | **4** | **Resolve transcripts by name** | `transcripts`: recorded session → direct path; glob/recency only as documented fallback. | recorded id opens that exact file even when a newer sibling exists in the same dir — the case the recency rank gets wrong. | `@22`/`@76`-class windows relay again. |
-| **5** | **Surface windowless sessions** | `kind: background` agents have no pane; give them a place (a dashboard row, not a fake wall tile). | — | this orchestrator session becomes visible as itself. |
+| **5** ⛔ | **~~Surface windowless sessions~~ — CLOSED, won't build (owner, 2026-07-27)** | `kind: background` agents stay invisible to chela. See "Why slice 5 is closed" below before re-proposing it. | — | — |
 
-Slice 5 is the one with a real product decision in it — where windowless agents belong — and
-should be settled with the owner before it is dispatched. Slice 1 is shipped (CMX-180).
-**Slice 2a is the next one to file**; 2b waits for slice 4, per the correction above.
+Slice 1 is shipped (CMX-180) and slice 2a is shipped (CMX-185). Slice 5 was the one with a
+real product decision in it and **the owner closed it on 2026-07-27 — see below.** 2b waits
+for slice 4, per the correction above.
+
+### Why slice 5 is closed — measured 2026-07-27, do not re-derive
+
+The decision was "don't build", and these are the facts it rested on. Re-open only if one of
+them stops being true.
+
+- **The population is one, and it is the orchestrator's own fork.** `claude agents --json` on
+  this box: 5 agents, **1** with `kind: background` — this orchestrator session, which the
+  owner already watches through Telegram and its own terminal. A surface would have had a
+  single occupant that was already observable elsewhere.
+- **They are unreachable by construction, not merely unwired.** No pane means no ttyd
+  terminal, no `send-keys` (so no message / trigger / broadcast), no rooms, no rename, no
+  restart. Only kill-by-pid is technically available. Anything built here is a **read-only**
+  surface for an agent you cannot answer.
+- **chela can never *record* them — only discover them.** chela does not spawn background
+  agents; the harness forks them. So slice 2a's record-don't-derive instinct has no purchase
+  here, and (per the `--fork-session` finding in Ground truth) even their own argv pin
+  disagrees with the id they run as.
+- **They are absent, not misreported.** `grep` over `chela/*.py` finds **zero** references to
+  the feed's `kind` field, and `/api/agents` — which Feed, Wall, Agents and live Cost all
+  derive from — iterates `discovery.get_all_windows()`, i.e. tmux windows only. So there is no
+  *wrong* answer on screen today to correct; this would be new surface area, not a repair.
+  ⛔ That is the distinction to hold onto: slice 1 fixed a confident wrong answer, which is
+  worth building. Slice 5 would have added a true answer nobody had asked a question for.
+- **Cost attribution was ruled out with it (owner, same call).** Their transcripts carry **no
+  cost field**, and `context.live_snapshot` reads spend from the statusLine cache keyed by tmux
+  window name — which never fires for a paneless agent. So windowless spend is currently
+  *underivable*, not merely unshown; attributing it needs a token-sum estimator whose output
+  would sit beside statusLine-authoritative figures. Standing position: **leave it
+  unattributed**, and if it is ever built, mark it visibly as an estimate.
+
+**Re-open when:** background agents stop being a population of one — e.g. the dispatcher grows
+a windowless worker kind, or forked agents start doing work whose spend or failure is not
+visible anywhere else. At that point the cheapest honest surface is a read-only row in the
+Agents view; recap needs no new machinery, because a background agent's transcript opens
+directly from its feed `sessionId` (verified: `~/.claude/projects/-home-liavedunix/29b3560b-….jsonl`,
+live and growing).
 
 ⚠️ **A brief for 2b was written and withdrawn on 2026-07-26 before it produced anything**
 (filed as cmx-183, killed in flight, worktree reaped, no PR). It justified itself with the
@@ -183,11 +231,13 @@ a declared unknown, check what the consumer renders for the absent case before c
 
 ## Open decisions
 
-- **Where windowless (`kind: background`) agents appear** — slice 5; owner's call.
-- **Whether a recorded session id should be authoritative or merely a hint.** Authoritative is
-  simpler and faster; a hint that is always validated against the live feed is safer against the
-  stale-binding case above. Leaning: **hint, validated** — the cost is one lookup in a feed
-  chela already fetches.
+- ~~**Where windowless (`kind: background`) agents appear**~~ — **SETTLED 2026-07-27: nowhere.**
+  Slice 5 closed, won't build. See "Why slice 5 is closed".
+- ~~**Whether a recorded session id should be authoritative or merely a hint.**~~ — **SETTLED
+  2026-07-27 by measurement, not preference: a HINT, always validated against the live feed.**
+  The `--fork-session` evidence in Ground truth shows a pinned id can be superseded by the id
+  the session actually runs as, so an authoritative read can open a stale transcript that
+  exists and looks plausible. Slices 3 and 4 must validate before they trust.
 - **Whether `by_cwd` should survive slice 3 at all.** If recorded sessions plus `by_pid` cover
   every case that matters, an ambiguous-by-construction key may be worth deleting rather than
   repairing.
