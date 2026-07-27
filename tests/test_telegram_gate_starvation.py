@@ -437,3 +437,27 @@ def test_the_inbound_daemon_starts_the_pane_thread_beside_the_relay(daemon_env, 
     assert len(relays) == 1, "the inbound daemon never started the transcript relay"
     assert panes[0].args[0] is daemon_env.watchers[0]
     assert panes[0] is not relays[0]
+
+
+# ── CMX-188: the daemon entrypoint must warm its OWN status cache ────────────
+
+
+def test_cmd_telegram_warms_the_native_status_cache(daemon_env, monkeypatch):
+    """``chela telegram`` must call ``start_background_refresh`` itself.
+
+    ``chela.sessions`` tier 3 (CMX-184) reads ``agent_manager``'s ``session_by_pid``
+    cache but never refreshes it — the dashboard's ``main()`` is the only caller of
+    ``start_background_refresh`` in the whole tree (CMX-179: the feed costs 12-18s and
+    must stay off the hook path). That cache is per-process module state, so a
+    ``chela telegram`` process that never makes this call keeps an empty cache
+    forever: tier 3 is silently skipped on every resolve and ``relay.transcript_missing``
+    fires even for a window that resolves fine wherever the dashboard IS running.
+    """
+    monkeypatch.setattr(main, "_outbound_loop", lambda *a, **kw: None)  # foreground; return
+
+    calls = []
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: calls.append(1))
+
+    main.cmd_telegram(_tg_args(no_inbound=True))
+
+    assert calls == [1], "chela telegram never warmed agent_manager's status cache itself"
