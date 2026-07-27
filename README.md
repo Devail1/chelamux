@@ -429,6 +429,7 @@ rather than invoking `.venv/bin/python` directly.)
 | `CHELA_NOTIFY_CHAT_ID` | — | Telegram chat id (if not in the URL) |
 | `CHELA_NOTIFY_INTERVAL` | `20` | Pane-state scan interval (s) |
 | `CHELA_NOTIFY_TITLE` | `chela: agent needs input` | Title/subject line on the needs-input notification |
+| `CHELA_DOCTOR_CHECK_INTERVAL` | `300` | How often (s) the daemon runs `chela doctor`'s full audit and pushes any ERROR finding through `CHELA_NOTIFY_URL`, edge-triggered — so a red fact reaches you even if nobody runs `chela doctor` by hand |
 | `CHELA_INBOX_ALARM_GRACE_SECONDS` | `120` | Grace window before the inbox fires an undeliverable-decision phone alarm — long enough that a transient gap doesn't page you |
 | `CHELA_INBOX_ENABLED` | `true` | [Decisions inbox](#the-orchestration-loop). Inert until a session registers as the orchestrator; `false` disables it outright |
 | `CHELA_ORCHESTRATOR_WID` | — | Pin the window the inbox pushes into (`@0`). Otherwise it's whichever session ran `chela watch` |

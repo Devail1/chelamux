@@ -10,7 +10,31 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **`chela update` now refreshes the plugin too, not just the server.** A release has
+  two halves: the server-side `git pull` + `uv sync` + `pm2 restart`, and the plugin
+  every agent loads its hooks from — a separate copy Claude Code made at install time
+  that the server-side dance never touches. `claude plugin marketplace update
+  <marketplace>` and `claude plugin update <plugin>@<marketplace>` are both fully
+  non-interactive, so `chela update` now runs them itself, for every marketplace an
+  installed copy of the plugin came from, right after a pull. Previously this was left
+  to a printed reminder telling a human to run `/plugin update` by hand — which once
+  meant every agent window started after a plugin-cache sweep loaded no hooks at all,
+  silently killing outbound relay until someone noticed.
+
 ### Fixed
+
+- **An adopted window that never fired a hook and was never `--resume`d could not
+  resolve its own session, so its outbound relay stayed dead.** Session resolution
+  tried the event log, then `--resume` on the command line, then fell back to guessing
+  from the working directory — and refused that guess outright when another window
+  shared the same directory, which every interactive window on a single-user box does.
+  It now also checks the `sessionId` that `claude agents --json` already reports for
+  the window's own pid — a signal chela was fetching every refresh and discarding.
+  Bounded the same way as the other tiers: the feed's own `startedAt` for that pid must
+  agree with the process's real start time, so a recycled pid can't inherit a dead
+  session. Background: `docs/AGENT_IDENTITY.md`.
 
 - **The Decisions inbox search box could not be clicked.** The popover closed itself
   on any click anywhere inside it — including the click that should have focused the

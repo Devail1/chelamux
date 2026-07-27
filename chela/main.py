@@ -54,6 +54,7 @@ from chela.config import (
     CONTEXT_SNAPSHOT_RETENTION_DAYS,
     SCHEDULER_POLL_INTERVAL,
     DISPATCH_WORKFLOWS,
+    DOCTOR_CHECK_INTERVAL,
     NOTIFY_INTERVAL,
     SHOW_TOOL_CALLS,
     STATUS_LINE,
@@ -204,6 +205,10 @@ def cmd_run(args) -> None:
     waiting_seen: set[str] = set()
     last_update_check = 0.0
     update_behind_seen = 0
+    # CMX-187: last (fact, title) pairs seen at ERROR — the edge-trigger state for
+    # doctor.check_and_notify, same shape as waiting_seen above.
+    last_doctor_check = 0.0
+    doctor_red_seen: set[tuple[str, str]] = set()
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
     # silently on its first tick instead of announcing every already-idle agent. (A
@@ -313,6 +318,19 @@ def cmd_run(args) -> None:
                 except Exception:
                     log.exception("Needs-input check failed")
                 last_notify_check = now
+
+            # 🩺 Doctor red-finding escalation (CMX-187): `chela doctor` only ever spoke to
+            # whoever ran it — a red finding could sit true and unseen for hours (exactly
+            # what happened to `relay.transcripts` on 2026-07-26). This runs the same audit
+            # on a bounded cadence and pushes every ERROR finding, edge-triggered like the
+            # needs-input check above. Logs regardless of notify being configured, so the
+            # daemon log itself is a surface even with no push channel set up.
+            if now - last_doctor_check >= DOCTOR_CHECK_INTERVAL:
+                try:
+                    doctor_red_seen = doctor.check_and_notify(doctor_red_seen)
+                except Exception:
+                    log.exception("Doctor red-finding check failed")
+                last_doctor_check = now
 
             # Self-update: informs by default (CMX-142 part 1) — `chela update` is a
             # human-run act, and `update.check_and_notify` never pulls. `CHELA_AUTO_UPDATE`
@@ -1823,14 +1841,26 @@ def cmd_update(args) -> None:
         else:
             print(f"✅ {action} {result.behind_before} commit(s), re-synced deps "
                   "(no running chela-* PM2 services to restart)")
+    # The plugin refresh (chela.update._refresh_plugin_if_needed) runs on EVERY apply()
+    # outcome, not just after a pull — a stale/unreadable install is a separate problem
+    # from the checkout being behind — so this reports independently of behind_before too.
+    if result.plugin_updated:
+        print(f"🔌 refreshed the installed plugin: {', '.join(result.plugin_updated)} "
+              "— restart your agent windows to pick up the new hooks (Claude Code "
+              "reads them at startup, not live).")
+    if result.plugin_error:
+        print(f"⚠️  could not refresh the installed plugin: {result.plugin_error}")
+        print("   run by hand: `claude plugin marketplace update <marketplace>` then "
+              "`claude plugin update chela@<marketplace>`, then restart your agent "
+              "windows.")
     if doctor.installed_hooks_stale():
-        # Claude Code keys a plugin update on `plugin.json`'s version alone — a `chela
-        # update` that changed the rendered hooks does NOT push them into the plugin
-        # cache every agent already loaded from. That copy stays stale until a human
-        # re-triggers the client-side install; chela cannot drive `/plugin` itself.
-        print("⚠️  chela's hooks changed — in Claude Code run `/plugin update` (or "
-              "`/plugin uninstall chela@chela` + `/plugin install chela@chela`), then "
-              "restart your agent windows.")
+        # The refresh above (chela.update._refresh_plugin_if_needed) already ran `claude
+        # plugin marketplace update` + `claude plugin update` for every confirmed-installed
+        # copy — this is the safety net for when that still didn't converge (see
+        # plugin_error above for why), not the primary path.
+        print("⚠️  chela's hooks still look stale — run `claude plugin update "
+              "chela@<marketplace>` (or in Claude Code, `/plugin update`), then restart "
+              "your agent windows.")
 
 
 def cmd_merge(args) -> None:

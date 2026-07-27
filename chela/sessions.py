@@ -23,7 +23,7 @@ clothes, and it is wrong in three separate ways:
 
 This is the same key CMX-48 already ripped out of the event log ("events filed against
 the wrong window"), so the answer is the same: **resolve by ``session_id``**, and use
-evidence rather than proximity. Three signals, in order, each one a claim about *this*
+evidence rather than proximity. Four signals, in order, each one a claim about *this*
 window made by something that cannot be wrong about it:
 
 1. **the event log** — a hook fires INSIDE the agent's process and carries its
@@ -36,19 +36,40 @@ window made by something that cannot be wrong about it:
    pane's own claude process. It belongs to that pane by construction, so it resolves the
    exact case above even when no hook ever fired (the daemon was down, the agent predates
    the plugin, the fleet was rebuilt by hand).
-3. **the cwd** — today's path, demoted to LAST. It is right for the only case the other
-   two cannot cover: a brand-new window that has fired no hook and was not resumed. It
-   never overrides a session id that is actually known, and it **refuses an origin two
-   windows share** — exactly as :func:`chela.hooks._wid_in` does — because "newest file in
-   the project dir wins" is precisely how one agent's output lands in another's topic. The
-   event log is a bounded ring, so a quiet window's last hook event ages out on a busy
-   fleet and resolution *falls back here*: this is a Tuesday, not an edge case.
+3. **the native status feed** — CMX-184. `claude agents --json` reports a ``sessionId``
+   for every pid it lists (:func:`chela.agent_manager.session_and_cwd_for_pid`), which
+   answers for a window that has fired no hook and was not ``--resume``d — the exact case
+   the first two signals cannot reach, and the one a hook-less, adopted window (never
+   spawned by chela, never resumed) is stuck in forever otherwise. Bounded by ``cwd``, not
+   by start time: an earlier version of this tier compared the pid's ``/proc`` start time
+   against the feed's own ``startedAt`` for that pid, but ``startedAt`` turned out to be
+   when the *session* began, not when the process forked — a resumed session predates its
+   process, a cold start postdates it — so the two are not the same quantity and no
+   tolerance admits one while excluding the other. Measured on a live box, they disagreed
+   by up to 113 days, in both directions, on processes that were never recycled at all.
+   What DOES mean the same thing on both sides is ``cwd``: the pid's own origin
+   (:attr:`Pane.origin`) must equal the ``cwd`` the feed cached for that same pid, or the
+   pid was recycled between the feed's last refresh and now and the cached session belongs
+   to a **dead** process's directory — refused, not inherited. A recycled pid that also
+   happens to land back in the exact same directory is a far narrower coincidence than a
+   recycled pid alone. Reads the cache the dashboard's background refresh already keeps
+   warm; never spawns the command itself (see Cost, below).
+4. **the cwd** — today's path, demoted to LAST. It is right for the only case the other
+   signals cannot cover: a brand-new window that has fired no hook, was not resumed, and
+   has no pid entry in the native feed either. It never overrides a session id that is
+   actually known, and it **refuses an origin two windows share** — exactly as
+   :func:`chela.hooks._wid_in` does — because "newest file in the project dir wins" is
+   precisely how one agent's output lands in another's topic. The event log is a bounded
+   ring, so a quiet window's last hook event ages out on a busy fleet and resolution
+   *falls back here*: this is a Tuesday, not an edge case.
 
 Every signal that cannot be *bounded* is refused rather than believed. The event log is
 only read against the claude process's start time (tmux reuses window ids); if that start
 time cannot be read — no ``/proc``, a wrapper deeper than :data:`_MAX_DEPTH` — there is no
 floor, so a recycled ``wid`` would inherit a **dead** agent's session. Unknown is not a
-pass: the event log is then refused, and ``detail`` says so.
+pass: the event log is then refused, and ``detail`` says so. The native status feed is
+refused the same way — no readable pid ``cwd`` (from ``/proc``), or none cached in the
+feed for that pid, no floor, no tier 3.
 
 A session id is globally unique, so a known session needs no project dir at all — glob
 ``~/.claude/projects/*/<sid>.jsonl`` (the id is validated first: it is pasted into a glob,
@@ -58,9 +79,12 @@ a window whose transcript cannot be established resolves to **None**, loudly (se
 fact in :mod:`chela.runtime_truth`) — the silence is the bug.
 
 **Cost.** One ``tmux list-windows`` (TTL-cached) plus a handful of ``/proc`` reads per
-refresh: no ``pgrep``, no ``capture-pane``, no ``claude agents --json``. That budget is
-not decorative — :mod:`chela.hooks` resolves through here while a live agent is BLOCKED on
-the hook (CMX-41 rejected the pgrep path precisely because it takes seconds).
+refresh: no ``pgrep``, no ``capture-pane``, and no ``claude agents --json`` call of ITS
+OWN — tier 3 only ever reads the cache :mod:`chela.agent_manager`'s background refresh
+thread already keeps warm on its own 30s timer, elsewhere. That budget is not decorative —
+:mod:`chela.hooks` resolves through here while a live agent is BLOCKED on the hook (CMX-41
+rejected the pgrep path precisely because it takes seconds, and the native feed itself
+measures 12-18s cold — CMX-179 — which is exactly why this never spawns it inline).
 """
 from __future__ import annotations
 
@@ -118,6 +142,7 @@ _SHIM_TIMEOUT = 2.0
 # `env`, a launcher script) can sit in between. Walk a couple of generations, not the
 # whole tree — this runs on the hook path.
 _MAX_DEPTH = 3
+
 _MAX_CHILDREN = 32
 
 _TTL = 1.0
@@ -551,7 +576,7 @@ class Resolution:
     wid: str
     session_id: str | None = None
     path: Path | None = None
-    source: str = "none"          # event_log | cmdline | cwd | none
+    source: str = "none"          # event_log | cmdline | native_status | cwd | none
     detail: str = ""
 
     @property
@@ -602,6 +627,27 @@ def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
         tried.append(f"the pane runs `claude --resume {pane.resumed}`, but no "
                      f"{pane.resumed}.jsonl exists under the projects dir")
 
+    if pane and pane.claude_pid:
+        from chela import agent_manager  # lazy, and a cache READ only — see the module Cost note
+        nsid, ncwd = agent_manager.session_and_cwd_for_pid(pane.claude_pid)
+        if nsid and SESSION_RE.match(nsid):
+            if pane.origin is None or ncwd is None or _norm(ncwd) != _norm(pane.origin):
+                tried.append(
+                    f"the native status feed reports session {nsid} for pid "
+                    f"{pane.claude_pid}, but its cached cwd does not agree with the "
+                    "pane's own origin (or one of the two is unknown) — REFUSED: the pid "
+                    "may have been recycled since the feed last saw it, and a recycled "
+                    "pid would inherit a dead process's session")
+            else:
+                path = transcript_for_session(nsid, base)
+                if path is not None:
+                    return Resolution(wid, nsid, path, "native_status",
+                                      f"`claude agents --json` reports session {nsid} for "
+                                      f"pid {pane.claude_pid}")
+                tried.append(
+                    f"the native status feed names session {nsid} for pid "
+                    f"{pane.claude_pid}, but no {nsid}.jsonl exists under the projects dir")
+
     cwd = pane.origin if pane else None
     if cwd is None:
         from chela import discovery                # lazy: keeps the hook path off tmux twice
@@ -640,4 +686,4 @@ def explain(wid: str, base: Path | None = None) -> str:
     res = resolve_window(wid, base=base)
     if res.ok:
         return f"{res.path} (via {res.source}: {res.detail})"
-    return res.detail or "no evidence at all: no event, no command line, no cwd"
+    return res.detail or "no evidence at all: no event, no command line, no native status, no cwd"
