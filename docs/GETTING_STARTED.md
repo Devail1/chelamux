@@ -30,6 +30,17 @@ so the CLI stays lean:
 uv sync --extra dashboard
 ```
 
+The Telegram bridge (`chela telegram`) is its own extra as well:
+
+```bash
+uv sync --extra telegram
+```
+
+> ⚠️ **Ask for every extra you want in ONE command.** `uv sync --extra X` *replaces*
+> the environment rather than adding to it, so running the two lines above in sequence
+> leaves you with telegram and **no dashboard**. For both:
+> `uv sync --extra dashboard --extra telegram` (or `uv sync --all-extras`).
+
 ## 2. Authenticate Claude once
 
 chela never handles credentials — it drives the `claude` CLI inside your tmux

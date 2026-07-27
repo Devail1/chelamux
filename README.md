@@ -109,6 +109,13 @@ uv run chela status
 
 # dashboard + live terminal wall (separate install — keeps the core lean):
 uv sync --extra dashboard
+
+# Telegram bridge (chela telegram):
+uv sync --extra telegram
+
+# ...or both. NOTE: `uv sync --extra X` REPLACES the environment — it drops any
+# extra you don't name, so ask for every one you want in a single command:
+uv sync --extra dashboard --extra telegram      # or: uv sync --all-extras
 ```
 
 Requirements: Python ≥ 3.11, `tmux`, `git`, the `claude` CLI on `PATH`

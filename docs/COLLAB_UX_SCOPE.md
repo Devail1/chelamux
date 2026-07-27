@@ -1,5 +1,12 @@
 # chelamux collaboration UX — scoping doc
 
+**Status:** ⚠️ **PARTLY SHIPPED, partly superseded** (checked 2026-07-27). The presence/sharing
+core is built — `chela/collab.py`, `static/collab/`, and the `/api/term/*/share` routes. The
+external-sharing item (§4 P3 #13) was **superseded** by `docs/AUTH_PLANE_SCOPE.md`, which
+reversed this doc's Funnel-based approach in favour of an E2E relay-stream. ⛔ Read the code as
+the authority where the two disagree — the sections below record 2026-07-09 intent, not the
+shipped shape.
+
 _Scope: presence-only (no E2E, no auth tokens). Portfolio-first: design budget goes to share button + presence surfacing + the phone viewer. Produced by a Fable-5 scoping pass, 2026-07-09, grounded in the dashboard code._
 
 ## 1. Current state (grounded in code)

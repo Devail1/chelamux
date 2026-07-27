@@ -183,7 +183,11 @@ uv run chela status
 
 <span class="c"># dashboard + live terminal wall (separate install — keeps the core lean)</span>
 uv sync --extra dashboard
-uv run chela dashboard</pre>
+uv run chela dashboard
+
+<span class="c"># the Telegram bridge is its own extra. Name every extra you want in ONE</span>
+<span class="c"># command — `uv sync --extra X` replaces the env and drops the rest</span>
+uv sync --extra dashboard --extra telegram</pre>
 
     <div class="note"><p><strong>Authenticate Claude once.</strong> chela never touches credentials —
     it drives the <code>claude</code> CLI inside your tmux windows. Log in once on the machine

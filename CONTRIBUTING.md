@@ -60,6 +60,18 @@ its own corruption. Write guards that would catch you.
   `## [Unreleased]` (Added / Changed / Fixed), with the PR number.
 - **Update docs** when you change a `CHELA_*` knob, a command, or a hook — the README
   config table and `docs/` are adopter-facing and drift is user-visible.
+- **If your PR ships what a design doc in `docs/` proposed, update that doc's status line
+  in the same PR.** Every *design/scope* doc carries one in its header (see
+  `docs/wall-redesign.md`, `docs/OKF.md`, `docs/AGENT_IDENTITY.md`) — `SHIPPED <date> (<PR>)`,
+  `PARTLY SHIPPED`, `SUPERSEDED by <doc>`, or `CLOSED — won't build` with the reason.
+  Reference docs (`CONFIG.md`, `HOOKS.md`, `EVENTS.md`, …) describe current behaviour and
+  deliberately carry **no** status line — a status on a living reference is just one more
+  thing to go stale.
+
+  Design docs are the ones that rot, because nothing forces a correction: a wrong value in
+  `CONFIG.md` gets fixed the first time it bites someone, while a design doc that says "not
+  yet implemented" about a shipped feature can sit for months. `docs/OKF.md` said exactly
+  that for 23 days after OKF landed.
 - **Any change to the rendered hooks (`hooks_spec`) MUST bump `plugin/.claude-plugin/plugin.json`
   version** — Claude Code keys plugin updates on the version, so a hook change without a
   bump ships stale hooks to every adopter.
