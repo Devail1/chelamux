@@ -1531,6 +1531,17 @@ def cmd_telegram(args) -> None:
     def _describe() -> str:
         return ", ".join(registry.windows()) or "(auto-topics: awaiting agent windows)"
 
+    # CMX-188: agent_manager's status cache (chela.sessions tier 3 — CMX-184) is
+    # PER-PROCESS, and dashboard_app.main() warming it (chela/dashboard/app.py) does
+    # nothing for THIS process. Without this call session_by_pid/cwd_by_pid stay `{}`
+    # here forever — session_and_cwd_for_pid is a pure read that never refreshes on its
+    # own (by design: the feed costs 12-18s and must stay off the hook path) — so tier 3
+    # was silently skipped on every resolve and `relay.transcript_missing` fired
+    # indefinitely here even for a window `chela doctor` reports resolving fine (doctor
+    # force-probes the feed fresh via probe_native_status_feed, so its own empty cache
+    # never shows).
+    agent_manager.start_background_refresh()
+
     if args.no_inbound:
         # Outbound-only (no PTB dependency): the pane watch (and reconcile, if on) in
         # daemon threads, then poll transcripts in the foreground forever.
