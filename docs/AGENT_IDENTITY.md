@@ -1,9 +1,12 @@
 # Agent identity — design doc
 
-Status: **proposed, nothing built** · 2026-07-26 · author: orchestrator. Written after a day
-in which four apparently unrelated bugs turned out to be one. Read this before touching
-`agent_manager.session_status_map`, `transcripts.newest_transcript`, `sessions._claude_pid`,
-or anything that answers "which agent is this window".
+Status: **slices 1 + 2a shipped · slice 5 CLOSED (won't build) · 4 and 3a RE-SCOPED, UNBLOCKED
+and NOT YET DISPATCHED · 3b deferred pending 3a's data · 2b open** · written
+2026-07-26, updated 2026-07-27 · author: orchestrator. Written after a day in which four
+apparently unrelated bugs turned out to be one. Read this before touching
+`agent_manager.session_status_map`, `transcripts.transcript_for_cwd`, `sessions.resolve_window`,
+or anything that answers "which agent is this window". (Earlier drafts named
+`transcripts.newest_transcript` here — **that function no longer exists**.)
 
 ## The thesis
 
@@ -36,7 +39,9 @@ Two real ambiguities survive that correction:
 2. **Interactive windows genuinely do collide.** They are not worktree-isolated: `@1` and
    `@78` both run in `/home/liavedunix`, which is why the live relay reports
    *"the cwd fallback is REFUSED … a relay into the wrong agent's topic is worse than
-   silence"* — **36 `relay.transcript_missing` events in the ring.** This is the ambiguity
+   silence"* — **36 `relay.transcript_missing` events in the ring** (⚠️ a 2026-07-26 reading of
+   an older ring; the ring on 07-27 held **5**, newest 06:00:50Z — ⛔ don't quote 36 as
+   current, and see the re-scope section for why neither number proves much). This is the ambiguity
    with a demonstrated, user-visible cost, and it is the one to fix first.
 
 So the honest framing: **the status join was never broken for dispatched agents; transcript
@@ -48,14 +53,32 @@ interactive windows.**
 - **`claude agents --json` returns a `sessionId` for every entry.** Full key set:
   `['cwd', 'kind', 'name', 'pid', 'sessionId', 'startedAt']`. `kind` is `interactive` or
   `background`.
-- **`chela/agent_manager.py` never references `sessionId`.** `grep -n "sessionId\|session_id"`
-  over that file returns nothing. It builds three maps, all keyed on the unstable fields:
-  `by_pid[int(pid)]`, `cwd_by_pid[int(pid)]`, `by_cwd[cwd]` (`:314`–`:318`).
+- **⚠️ A pinned `--session-id` is NOT always the id the session runs as — measured
+  2026-07-27.** A live `background` agent's argv reads
+  `--session-id 36358c6b-… --fork-session --resume …/949143ad-….jsonl`, while the feed reports
+  `sessionId = 29b3560b-…` and the transcript that is actually growing is
+  `29b3560b-….jsonl` (214 KB, live); `36358c6b-….jsonl` is a stale 14 MB file from two days
+  earlier. **Under `--fork-session` the pin is superseded by a freshly-minted id.** chela's own
+  slice-2a spawns pass `--session-id` *without* `--fork-session`, so the pin is expected to hold
+  there — but this settles the "authoritative or hint" open decision below in favour of
+  **hint, always validated against the live feed**. ⛔ Never open a transcript path built from a
+  recorded id without confirming that id against `claude agents --json` first.
+- ~~**`chela/agent_manager.py` never references `sessionId`.**~~ **SUPERSEDED by CMX-184
+  (re-checked 2026-07-27).** It now keeps a fourth map, `session_by_pid` (`:172`), holding the
+  `sessionId` the feed reports beside `status` and `cwd` — read by `session_and_cwd_for_pid`,
+  which is what `sessions.resolve_window`'s tier 3 consults. The three original maps
+  (`by_pid`, `cwd_by_pid`, `by_cwd`) are unchanged and still keyed on the unstable fields.
+  ⚠️ **Relevant to slice 3:** the pid→session half already exists, so slice 3 is the
+  *reverse* view (`{sessionId: status}`) plus a `status_by_wid` that resolves a window's
+  session instead of its pid — not a new data source.
 - **Transcript files are named `<session-id>.jsonl`** — `transcripts.py`'s own docstring says
-  `$CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/<session-id>.jsonl`. But resolution
-  (`transcripts.py:268`) does `glob("*.jsonl")` and returns `max(found, key=_key)`, ranking by
-  newest *record* timestamp. **The exact filename is derivable from a key chela could have
-  recorded, and instead it guesses by recency.**
+  `$CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/<session-id>.jsonl`. ⚠️ **PARTLY SUPERSEDED —
+  re-checked 2026-07-27.** The claim "resolution globs and ranks by recency" was true of the
+  whole codebase when written; it is now true only of `transcript_for_cwd` (still at `:268`,
+  still `glob("*.jsonl")` → `max(found, key=_key)`) and of the **four callers that reach it
+  without a window id**. The relay path resolves by session id and refuses when ambiguous
+  (`sessions.resolve_window`). See "Re-scope of slices 3 and 4" for the surviving call sites —
+  ⛔ don't scope slice 4 off this bullet alone.
 - **`spawn.py` does not pin a session.** `spawn_window(cwd, *, command=None)` (`:99`) opens the
   window, pins the name, exports `CHELA_WID`, and `send-keys` the command (`:163`). Note it
   *sends* the command into a shell rather than running it as the window command, deliberately,
@@ -151,13 +174,150 @@ Sequenced so the first slice is independently valuable and the risky decision co
 | **1** ▶ | **Honest fallback** — ambiguous `cwd` omitted **and** a distinct `unknown` tile state | `agent_manager`: include a `cwd` in `by_cwd` only if every live pid sharing it agrees on a status; an unknown/`None` status counts as **disagreement**. `wallmodel.tileState`: absent status → `? unknown`, not `○ idle`. ⛔ Ranking unchanged; ⛔ do NOT reuse CMX-179's outage marker (the feed *is* answering). | disagreement omits · agreement keeps (pins out the rejected "omit whenever >1 pid" rule) · `None` counts as disagreement · sole occupant unaffected · `unknown` ≠ `idle` in `tileState` · `rankOrder` output unchanged. | a pane that cannot be resolved reads `? unknown`; idle/busy panes unchanged; ordering visually identical. **FILED as a dispatch brief 2026-07-26.** |
 | **2a** ⬆ | **Pin + record the session id for INTERACTIVE windows** — *promoted, this is where the live failure is* | `spawn.py` appends `--session-id <uuid>` to the command it sends (inside the caller's `claude`-only allowlist boundary) and records `wid → session_id` beside the existing bindings. Interactive windows share `$HOME`, so this is the ambiguity costing 36 `relay.transcript_missing` events. | uuid generated once and identical in the sent command and the stored row; an override (`--session-id`/`--resume`/`--continue`) records NULL rather than a fabricated id. | a `/new` window's recorded id matches the `sessionId` the live feed reports for its pid; the relay stops refusing. |
 | **2b** ⬇ | **Pin + record for DISPATCHED runs** — *demoted: no present bug* | `dispatcher.py` (`resolve_agent_cmd` at `:3302`, `send-keys` at `:3322`), `runs.session_id` via the additive-migration list at `:951`. ⚠️ **Not urgent on its own** — `cwd` already identifies a dispatched run (58/58 unique, worktree-enforced). Its value is as a **slice 4 prerequisite**: it disambiguates *which session within the run*, the 2–3 transcripts a reworked run leaves behind. Do it when slice 4 is built, not before. | id sent == id stored; persisted BEFORE `send-keys` (never launch an agent chela cannot identify); override → NULL; migration additive + idempotent. | `runs.session_id` matches the pid's `sessionId` in the live feed. |
-| **3** | **Join status on `sessionId`** | `session_status_map` gains `by_session`; `status_by_wid` prefers recorded session → `by_pid` → unique-`by_cwd` → `None`. | precedence order, and that a recorded-but-absent session degrades to the next tier rather than to a wrong answer. | `@1` reads what it is actually doing; `busy` panes read `busy`. |
-| **4** | **Resolve transcripts by name** | `transcripts`: recorded session → direct path; glob/recency only as documented fallback. | recorded id opens that exact file even when a newer sibling exists in the same dir — the case the recency rank gets wrong. | `@22`/`@76`-class windows relay again. |
-| **5** | **Surface windowless sessions** | `kind: background` agents have no pane; give them a place (a dashboard row, not a fake wall tile). | — | this orchestrator session becomes visible as itself. |
+| **3a** ⚠ | **RE-SCOPED 2026-07-27 — say when a window hosts TWO agents** (was: "join status on `sessionId`") | `status_by_wid` resolves a window's session the way `sessions.resolve_window` already does; when that session ≠ the pane pid's session, report a distinct **split** state rather than either raw status. ⛔ NOT slice 1's `unknown` — this is "chela can tell, and there are two". **Ships with its `wallmodel.tileState` half or it is a no-op.** | agreeing sessions untouched · differing sessions report split and neither raw status · missing pane pid or missing event-log session degrades to today's behaviour, not to split. | with a `--fork-session` job live under `@1`, the tile stops claiming `idle`. |
+| **3b** ⏸ | **The tie-break — DEFERRED until 3a has produced data** | Then decide: does status follow the fork, or does the surface keep showing both? See "Re-scope of slices 3 and 4". | — | — |
+| **4** ⚠ | **RE-SCOPED 2026-07-27 — route the 4 surviving cwd-glob callers through the refusing resolver** (was: "resolve transcripts by name" — mostly already built) | `inbox.py:596`, `orchestrator.py:79` + `:188`, `context.py:278`, `dispatcher.py:1582` still reach `transcripts.transcript_for_cwd`'s `glob`+recency rank, which cannot refuse. Give them `sessions.resolve_window`'s answer so they inherit the refusal. ⛔ Do NOT delete `transcript_for_cwd` — it is `resolve_window`'s own last-resort tier. | a caller handed an ambiguous cwd gets `None`, not a sibling's transcript — corrupt by making the sibling newer. | context bars / cost / completion detection stop attributing one home-dir agent's work to another. |
+| **5** ⛔ | **~~Surface windowless sessions~~ — CLOSED, won't build (owner, 2026-07-27)** | `kind: background` agents stay invisible to chela. See "Why slice 5 is closed" below before re-proposing it. | — | — |
 
-Slice 5 is the one with a real product decision in it — where windowless agents belong — and
-should be settled with the owner before it is dispatched. Slice 1 is shipped (CMX-180).
-**Slice 2a is the next one to file**; 2b waits for slice 4, per the correction above.
+Slice 1 is shipped (CMX-180) and slice 2a is shipped (CMX-185). Slice 5 was the one with a
+real product decision in it and **the owner closed it on 2026-07-27 — see below.** 2b waits
+for slice 4, per the correction above.
+
+### Re-scope of slices 3 and 4 — measured 2026-07-27, do not re-derive
+
+Both slices were written on 2026-07-26, **before** CMX-184/188/189 shipped. Their stated
+premises are now stale in different directions: slice 4 is *mostly already built*, and slice 3
+turns out to be pointing at a **different bug than the one it describes**. Measured on this
+box at 07:5x UTC, with the status cache warmed the way `chela telegram` warms its own
+(CMX-188) so the reading is representative of production rather than hand-warmed:
+
+**Ground state — the failure both slices were written for is not currently firing.**
+
+- All three live windows resolve through the **strongest** tier: `@29`, `@1`, `@118` all
+  `source=event_log`, all with a real path. Zero refusals. The plugin repair restored hooks,
+  and `@78` — the window that generated most of the noise — no longer exists.
+- `relay.transcript_missing`: **5 in the ring, newest 06:00:50Z**, none since. ⚠️ **Do not read
+  that as "fixed"**: the ring spans only ~2 h (920 events, 05:40→07:46Z), so this is *no
+  failures in the last ~1 h 45 m*, not a clean history. The doc's "36 events" figure is from a
+  different, older ring — ⛔ don't quote it as current.
+
+**Slice 3 — the real bug is a DISAGREEMENT, not a missing join.**
+
+Right now, live, chela gives two different answers for the same window:
+
+| consumer | how it resolves `@1` | answer |
+|---|---|---|
+| `agent_manager.status_by_wid` | pane pid (`claude_pid('@1')` = **1405503**) → `by_pid` | **`idle`** |
+| `sessions.resolve_window('@1')` | event log → session **`29b3560b`** | that session is pid **2447758**, which the feed reports **`busy`** |
+
+Pid 2447758 is a **windowless `--fork-session` job** whose hooks fire carrying the
+`CHELA_WID=@1` it inherited from the window it was forked out of. So `@1`'s **Wall tile reads
+`idle` while `@1`'s Telegram topic relays that fork's live output** — the doc's symptom #1,
+still live, and untouched by anything shipped so far.
+
+⛔ **The original slice-3 scope would not have fixed it.** It says "prefer the *recorded*
+session id" — but nothing is recorded for `@1` (slice 2a records only what `spawn.py` starts,
+and `sessionids.session_id_for` still has **zero readers**). The correct id here comes from the
+**event log**, which is exactly what the transcript resolver already uses. The fix is to make
+status resolve through that same identity, not to add a fifth source.
+
+⚠️ **This carried an owner decision** — settled on 2026-07-27, see below. The two candidate
+answers had **opposite** user-visible effects, which is why it was not decided by whoever
+happened to write the brief:
+
+1. **Status follows the event-log session** (status matches the relay). `@1` reads `busy`
+   — but the tile then contradicts *its own visible terminal*, which shows an idle interactive
+   pane. Consistent with Telegram, inconsistent with what you can see.
+2. **The relay follows the pane** (relay matches status). Structurally tidier — one window, one
+   pane, one agent — but it **breaks the Telegram topic**: the fork's output is what the owner
+   is actually reading in that topic today, and this would silence it.
+
+**✅ SETTLED 2026-07-27 (owner delegated the call): option 3 first, then option 1 — slice 3
+splits into 3a and 3b.**
+
+- **Slice 3a — make the disagreement observable. Dispatchable now.** When a window's
+  event-log session ≠ its pane pid's session, that window is hosting **two** agents; say so
+  instead of confidently reporting either. ⛔ Do NOT reuse slice 1's `unknown` state — this is
+  not "chela cannot tell", it is "chela can tell, and there are two". It needs its own tile
+  state and its own word. *Guards:* a window whose two sessions agree is untouched; a window
+  whose sessions differ reports the split state and **neither** raw status; a window with no
+  pane pid (or no event-log session) degrades to today's behaviour, not to the split state.
+  *Manual verify:* with a `--fork-session` job live under `@1`, the tile stops claiming `idle`.
+- **Slice 3b — the tie-break, DEFERRED until 3a has produced data.** Only then decide whether
+  status follows the fork (option 1) or the surface keeps showing both.
+
+**Why, so this is not re-litigated.** Option 2 is disqualified: the fork's output is what the
+owner reads in that topic, so "the relay follows the pane" is a regression in the one channel
+that currently works. Option 1 *alone* manufactures a **new** confident-wrong answer — a tile
+reading `busy` above a visibly idle terminal — which is the exact failure shape slice 1 exists
+to prevent; shipping it before the split state exists would trade one lie for another. Option 3
+is the only one that adds no wrong answer, and it is cheap and reversible.
+
+⚠️ **The trap slice 1 already taught, and it applies verbatim here:** honesty in the data model
+buys nothing until the surface can express it. `wallmodel.tileState` falls through to `○ idle`
+for anything it does not recognise, so 3a is a **no-op unless the tile state ships with it**.
+Check what the consumer renders for the new case before calling it done.
+
+**Slice 4 — largely built; what remains is four unrefused callers.**
+
+The premise "`transcripts.py:268` globs and ranks by recency" no longer describes the relay
+path: `sessions.resolve_window` resolves **by session id** through four tiers and returns
+`None` rather than guessing. `newest_transcript` no longer exists. What survives is
+`transcript_for_cwd`'s glob, reached by callers that never hand over a window id:
+
+| call site | consequence today |
+|---|---|
+| `context.py:278` (`agent_context_from_transcript`, no `window_id`) | context bars / cost for a `$HOME` agent can read a sibling's transcript |
+| `inbox.py:596` (`last_assistant_activity(cwd)`) | completion detection can credit another agent's turn |
+| `orchestrator.py:79`, `:188` (`transcript_for_cwd(win["cwd"])`) | same collision on the orchestrator read path |
+| `dispatcher.py:1582` (`agent_transcript_summary(window_name)`, no `window_id`) | worktrees are unique, so this is safe *between* runs but still picks by recency **within** a reworked run's 2–3 transcripts — this is the call site that makes slice **2b** worth doing |
+
+Already correct, for contrast: `dashboard/app.py:207` passes `window_id=`, and
+`telegram/{monitor,reconcile}` call `sessions.transcript_for_window` — both inherit the
+refusal. ⛔ `transcript_for_cwd` itself must stay: `sessions.py:692` is `resolve_window`'s own
+documented last-resort tier.
+
+**Sequence (as of 2026-07-27, nothing dispatched):** **slice 4**, then **slice 3a** — both are
+unblocked and neither carries an open decision any more. Slice 4 first: lower risk, and its
+guards are easier to corrupt convincingly. **3b** waits on data from 3a. **2b** remains a
+slice-4 prerequisite only for the `dispatcher.py:1582` row, so fold it in there or not at all.
+
+### Why slice 5 is closed — measured 2026-07-27, do not re-derive
+
+The decision was "don't build", and these are the facts it rested on. Re-open only if one of
+them stops being true.
+
+- **The population is one, and it is the orchestrator's own fork.** `claude agents --json` on
+  this box: 5 agents, **1** with `kind: background` — this orchestrator session, which the
+  owner already watches through Telegram and its own terminal. A surface would have had a
+  single occupant that was already observable elsewhere.
+- **They are unreachable by construction, not merely unwired.** No pane means no ttyd
+  terminal, no `send-keys` (so no message / trigger / broadcast), no rooms, no rename, no
+  restart. Only kill-by-pid is technically available. Anything built here is a **read-only**
+  surface for an agent you cannot answer.
+- **chela can never *record* them — only discover them.** chela does not spawn background
+  agents; the harness forks them. So slice 2a's record-don't-derive instinct has no purchase
+  here, and (per the `--fork-session` finding in Ground truth) even their own argv pin
+  disagrees with the id they run as.
+- **They are absent, not misreported.** `grep` over `chela/*.py` finds **zero** references to
+  the feed's `kind` field, and `/api/agents` — which Feed, Wall, Agents and live Cost all
+  derive from — iterates `discovery.get_all_windows()`, i.e. tmux windows only. So there is no
+  *wrong* answer on screen today to correct; this would be new surface area, not a repair.
+  ⛔ That is the distinction to hold onto: slice 1 fixed a confident wrong answer, which is
+  worth building. Slice 5 would have added a true answer nobody had asked a question for.
+- **Cost attribution was ruled out with it (owner, same call).** Their transcripts carry **no
+  cost field**, and `context.live_snapshot` reads spend from the statusLine cache keyed by tmux
+  window name — which never fires for a paneless agent. So windowless spend is currently
+  *underivable*, not merely unshown; attributing it needs a token-sum estimator whose output
+  would sit beside statusLine-authoritative figures. Standing position: **leave it
+  unattributed**, and if it is ever built, mark it visibly as an estimate.
+
+**Re-open when:** background agents stop being a population of one — e.g. the dispatcher grows
+a windowless worker kind, or forked agents start doing work whose spend or failure is not
+visible anywhere else. At that point the cheapest honest surface is a read-only row in the
+Agents view; recap needs no new machinery, because a background agent's transcript opens
+directly from its feed `sessionId` (verified: `~/.claude/projects/-home-liavedunix/29b3560b-….jsonl`,
+live and growing).
 
 ⚠️ **A brief for 2b was written and withdrawn on 2026-07-26 before it produced anything**
 (filed as cmx-183, killed in flight, worktree reaped, no PR). It justified itself with the
@@ -183,11 +343,13 @@ a declared unknown, check what the consumer renders for the absent case before c
 
 ## Open decisions
 
-- **Where windowless (`kind: background`) agents appear** — slice 5; owner's call.
-- **Whether a recorded session id should be authoritative or merely a hint.** Authoritative is
-  simpler and faster; a hint that is always validated against the live feed is safer against the
-  stale-binding case above. Leaning: **hint, validated** — the cost is one lookup in a feed
-  chela already fetches.
+- ~~**Where windowless (`kind: background`) agents appear**~~ — **SETTLED 2026-07-27: nowhere.**
+  Slice 5 closed, won't build. See "Why slice 5 is closed".
+- ~~**Whether a recorded session id should be authoritative or merely a hint.**~~ — **SETTLED
+  2026-07-27 by measurement, not preference: a HINT, always validated against the live feed.**
+  The `--fork-session` evidence in Ground truth shows a pinned id can be superseded by the id
+  the session actually runs as, so an authoritative read can open a stale transcript that
+  exists and looks plausible. Slices 3 and 4 must validate before they trust.
 - **Whether `by_cwd` should survive slice 3 at all.** If recorded sessions plus `by_pid` cover
   every case that matters, an ambiguous-by-construction key may be worth deleting rather than
   repairing.
