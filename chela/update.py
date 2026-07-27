@@ -1,9 +1,25 @@
 """``chela update`` — self-update, in two halves.
 
 Adopters otherwise have to know the manual dance: ``git pull`` the checkout, ``uv sync``
-its deps, ``pm2 restart`` the services onto the new code. This module gives that dance a
-name and a safety rail, plus a heads-up (:func:`check_and_notify`, wired into the daemon
-loop in ``cmd_run``) when the checkout has fallen behind its upstream.
+its deps, ``pm2 restart`` the services onto the new code — AND refresh the plugin every
+agent loads its hooks from, which is a *separate* copy Claude Code made at install time
+(see :mod:`chela.hooks`) and which the server-side dance above never touches. This module
+gives the whole thing a name and a safety rail, plus a heads-up (:func:`check_and_notify`,
+wired into the daemon loop in ``cmd_run``) when the checkout has fallen behind its
+upstream.
+
+**The plugin half is not a human's job either, and it does not wait for a pull.** ``claude
+plugin marketplace update <marketplace>`` and ``claude plugin update <plugin>@<marketplace>``
+are both fully non-interactive — :func:`_refresh_plugin_if_needed` runs them, on EVERY
+``apply()`` outcome including the already-up-to-date one, whenever an installed copy of
+chela's plugin (:func:`chela.hooks.installed_plugins`) is drifted or unreadable. A stale
+installed copy is not a cosmetic gap and is not always caused by a commit landing: the
+motivating incident was a plugin-in-use sweep that deleted the cache directory
+``installed_plugins.json`` still pointed at, on a checkout with nothing to pull — every
+window started after that loaded NO hooks at all, silently killing outbound Telegram relay
+until someone noticed and re-ran the two CLI calls by hand. Gated (:func:`_plugin_refresh_needed`)
+so a healthy install costs the sweep nothing: two ``claude`` invocations only fire when a
+copy actually needs them, never on every tick.
 
 **Part 1 — human-run, always on.** :func:`apply` (what ``chela update`` calls) and
 :func:`check_and_notify` (the behind-notifier) only ever run when a human, or a script a
@@ -32,7 +48,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, notify
+from chela import config, hooks, notify
 from chela.dispatcher import GIT_TIMEOUT_SECONDS, _git, _git_ok, _git_out
 
 log = logging.getLogger(__name__)
@@ -70,6 +86,8 @@ class ApplyResult:
     restarted: list[str] = field(default_factory=list)
     rewrite_recovered: bool = False   # True if `apply()` recovered from a history rewrite
     backup_ref: str = ""              # where the pre-rewrite HEAD was preserved, if so
+    plugin_updated: list[str] = field(default_factory=list)  # marketplaces refreshed
+    plugin_error: str = ""            # set if a plugin refresh was attempted and failed
 
 
 def repo_root() -> Path:
@@ -161,6 +179,107 @@ def _running_pm2_services(repo: Path) -> list[str]:
         and str(p.get("name", "")).startswith("chela-")
         and (p.get("pm2_env") or {}).get("status") == "online"
     )
+
+
+def _plugin_marketplaces() -> list[str]:
+    """Every marketplace slug an installed copy of chela's plugin is CONFIRMED to have come
+    from — dedup, sorted for determinism.
+
+    Confirmed means found via Claude Code's own ``installed_plugins.json``, not the
+    cache-scan fallback (:func:`chela.hooks._cached_copies`, used when that registry is
+    missing or unreadable): a marketplace *guessed* from a cache path is not something
+    chela verified it installed, and mutating it on a guess is exactly the "which copy is
+    this even" mistake the registry exists to prevent. Empty when nothing is installed (a
+    genuinely different problem; ``chela doctor``'s ``plugin.installed`` fact reports it)
+    or when the registry itself is unreadable (the fallback found copies, but none count).
+    """
+    return sorted({
+        copy.marketplace for copy in hooks.installed_plugins()
+        if copy.marketplace and copy.found_via == "installed_plugins.json"
+    })
+
+
+def _update_plugin(repo: Path) -> tuple[list[str], str]:
+    """Refresh every CONFIRMED-installed copy of chela's plugin so it matches what was just
+    pulled — the half of a release the git-pull/uv-sync/pm2-restart dance above never
+    reaches (see the module docstring). Both ``claude`` subcommands are non-interactive.
+
+    Best-effort and non-fatal on purpose: the server-side update already succeeded by the
+    time this runs, and a missing/unauthenticated ``claude`` binary must not turn that
+    success into a reported failure. Returns the marketplaces successfully refreshed and
+    the first error hit, if any — stops at the first failure rather than half-refreshing
+    every remaining marketplace on a broken ``claude`` invocation.
+
+    Unconditional over ``_plugin_marketplaces()`` — the decision of WHETHER to call this at
+    all belongs to :func:`_plugin_refresh_needed`, not here, so the mechanics stay testable
+    on their own.
+    """
+    updated: list[str] = []
+    for marketplace in _plugin_marketplaces():
+        mp_cp = _sh(["claude", "plugin", "marketplace", "update", marketplace], cwd=repo)
+        if mp_cp is None or mp_cp.returncode != 0:
+            err = (mp_cp.stderr.strip() if mp_cp is not None
+                   else "claude plugin marketplace update failed to run")
+            return updated, f"marketplace update ({marketplace}): {err}"
+
+        plugin_cp = _sh(["claude", "plugin", "update", f"{hooks.PLUGIN_NAME}@{marketplace}"],
+                         cwd=repo)
+        if plugin_cp is None or plugin_cp.returncode != 0:
+            err = (plugin_cp.stderr.strip() if plugin_cp is not None
+                   else "claude plugin update failed to run")
+            return updated, f"plugin update ({marketplace}): {err}"
+
+        updated.append(marketplace)
+    return updated, ""
+
+
+def _plugin_refresh_needed(copies: list[hooks.InstalledPlugin]) -> bool:
+    """Whether at least one installed copy warrants running ``claude plugin ...`` at all.
+
+    Two DIFFERENT conditions, both real, neither a substitute for the other:
+
+    - drift (:func:`chela.runtime_truth.installed_hooks_stale`) — a readable manifest that
+      disagrees with what would render now (the CMX-41 port-drift class). Requires
+      ``copy.hooks is not None``, so it is blind to the next case.
+    - unreadable (``copy.hooks is None``) — the outage this ticket exists for: an installed
+      copy Claude Code still points at, but whose ``hooks/hooks.json`` a sweep or a failed
+      install left missing or broken. Drift can't see this; only checking ``hooks is None``
+      directly does.
+
+    Without this gate, every hourly ``auto_apply_sweep`` tick would run two
+    network-touching ``claude`` invocations forever, even when nothing needs it.
+    """
+    from chela import runtime_truth  # lazy: runtime_truth -> capabilities -> update (cycle)
+
+    return bool(copies) and (
+        runtime_truth.installed_hooks_stale()
+        or any(copy.hooks is None for copy in copies)
+    )
+
+
+def _refresh_plugin_if_needed(repo: Path) -> tuple[list[str], str]:
+    """Gate + drive the plugin half of a release. Called on EVERY ``apply()`` outcome that
+    reaches this point — including the already-up-to-date path — since a plugin can go
+    stale or unreadable with no commit involved (a cache sweep, a manual uninstall, a
+    failed install): see the module docstring.
+
+    Skips quietly (``[], ""``) when nothing needs it. When something does but every
+    candidate copy was only found via the cache-scan fallback (the registry itself is
+    missing or unreadable), skips with a reason instead of guessing which cache directory
+    to mutate — chela did not confirm it installed that copy.
+    """
+    copies = hooks.installed_plugins()
+    if not _plugin_refresh_needed(copies):
+        return [], ""
+
+    marketplaces = _plugin_marketplaces()
+    if not marketplaces:
+        return [], (
+            "an installed copy looks stale or unreadable, but its marketplace could not "
+            f"be confirmed (found via {copies[0].found_via}, not installed_plugins.json) "
+            "— skipping rather than mutating a copy chela never confirmed it installed"
+        )
+    return _update_plugin(repo)
 
 
 def _is_history_rewrite(repo: Path, old_upstream: str) -> bool:
@@ -259,7 +378,13 @@ def apply(repo: Path | None = None) -> ApplyResult:
         backup_ref = recovery.backup_ref
 
     if status.behind == 0 and not rewrite_recovered:
-        return ApplyResult(ok=True, step="done", behind_before=0)
+        # A plugin can go stale or unreadable with NO commit involved (a cache sweep, a
+        # manual uninstall, a failed install) — this check must not live behind "we just
+        # pulled", or the exact outage it exists for never gets repaired (see module
+        # docstring). It never touches the working tree, so it's safe on this early return.
+        plugin_updated, plugin_error = _refresh_plugin_if_needed(repo)
+        return ApplyResult(ok=True, step="done", behind_before=0,
+                            plugin_updated=plugin_updated, plugin_error=plugin_error)
 
     if not rewrite_recovered:
         pull_cp = _git(repo, "pull", "--ff-only")
@@ -282,8 +407,11 @@ def apply(repo: Path | None = None) -> ApplyResult:
                                 error=err, restarted=[], rewrite_recovered=rewrite_recovered,
                                 backup_ref=backup_ref)
 
+    plugin_updated, plugin_error = _refresh_plugin_if_needed(repo)
+
     return ApplyResult(ok=True, step="done", behind_before=status.behind, restarted=services,
-                        rewrite_recovered=rewrite_recovered, backup_ref=backup_ref)
+                        rewrite_recovered=rewrite_recovered, backup_ref=backup_ref,
+                        plugin_updated=plugin_updated, plugin_error=plugin_error)
 
 
 def check_and_notify(previously_behind: int) -> int:
@@ -331,13 +459,17 @@ def auto_apply_sweep() -> ApplyResult:
 
     if result.ok:
         restarted = ", ".join(result.restarted) or "no services"
+        plugin_note = (f"; refreshed plugin ({', '.join(result.plugin_updated)})"
+                        if result.plugin_updated else "")
+        if result.plugin_error:
+            plugin_note = f"; plugin refresh FAILED: {result.plugin_error}"
         log.warning(
             "⬆️⚠️ auto-update: applied %d commit(s) UNATTENDED (CHELA_AUTO_UPDATE) — "
-            "restarted %s", result.behind_before, restarted,
+            "restarted %s%s", result.behind_before, restarted, plugin_note,
         )
         if notify.enabled():
             notify.send(
-                f"applied {result.behind_before} commit(s), restarted {restarted}",
+                f"applied {result.behind_before} commit(s), restarted {restarted}{plugin_note}",
                 title="chela: auto-update applied",
             )
     else:

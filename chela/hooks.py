@@ -343,7 +343,10 @@ class InstalledPlugin:
     """One installed copy of chela's plugin — the manifest an agent actually loads.
 
     ``hooks`` is the parsed manifest, or ``None`` with ``error`` set when it cannot be
-    read or is not the shape we know. Never both.
+    read or is not the shape we know. Never both. ``marketplace`` is the slug it was
+    installed under (the ``<marketplace>`` half of ``<plugin>@<marketplace>``) — what
+    ``chela update`` needs to refresh this copy with `claude plugin update
+    chela@<marketplace>`; ``None`` only if that could not be determined either.
     """
 
     root: Path
@@ -351,14 +354,16 @@ class InstalledPlugin:
     found_via: str
     hooks: dict | None
     error: str | None
+    marketplace: str | None = None
 
     @property
     def manifest(self) -> Path:
         return self.root / "hooks" / "hooks.json"
 
 
-def _registered_copies() -> list[tuple[Path, str | None]]:
-    """``(installPath, version)`` per installed copy, from Claude Code's own bookkeeping.
+def _registered_copies() -> list[tuple[Path, str | None, str | None]]:
+    """``(installPath, version, marketplace)`` per installed copy, from Claude Code's own
+    bookkeeping.
 
     Version-proof by construction: the path is *recorded*, not reconstructed.
     """
@@ -370,11 +375,12 @@ def _registered_copies() -> list[tuple[Path, str | None]]:
     plugins = data.get("plugins") if isinstance(data, dict) else None
     if not isinstance(plugins, dict):
         return []
-    out: list[tuple[Path, str | None]] = []
+    out: list[tuple[Path, str | None, str | None]] = []
     for key, entries in plugins.items():
         # the key is `<plugin>@<marketplace>`; the marketplace is whatever the operator
-        # named it, so only the plugin half is ours to match.
-        if str(key).split("@", 1)[0] != PLUGIN_NAME or not isinstance(entries, list):
+        # named it when they added it.
+        plugin_name, _, marketplace = str(key).partition("@")
+        if plugin_name != PLUGIN_NAME or not isinstance(entries, list):
             continue
         for entry in entries:
             if not isinstance(entry, dict):
@@ -383,22 +389,27 @@ def _registered_copies() -> list[tuple[Path, str | None]]:
             if isinstance(install, str) and install:
                 version = entry.get("version")
                 out.append((Path(install).expanduser(),
-                            version if isinstance(version, str) else None))
+                            version if isinstance(version, str) else None,
+                            marketplace or None))
     return out
 
 
-def _cached_copies() -> list[tuple[Path, str | None]]:
+def _cached_copies() -> list[tuple[Path, str | None, str | None]]:
     """The fallback, when the registry is missing or has changed shape: scan the cache.
 
     ``<plugins>/cache/<marketplace>/<plugin>/<version>/`` — globbed at every level,
-    including the version, so a bump moves the directory and this still finds it.
+    including the version, so a bump moves the directory and this still finds it. The
+    marketplace is read off that same path, one level up from the plugin name.
     """
     try:
         manifests = sorted(
             (plugins_dir() / "cache").glob(f"*/{PLUGIN_NAME}/*/hooks/hooks.json"))
     except OSError:
         return []
-    return [(m.parent.parent, m.parent.parent.name) for m in manifests]
+    return [
+        (m.parent.parent, m.parent.parent.name, m.parent.parent.parent.parent.name)
+        for m in manifests
+    ]
 
 
 def installed_plugins() -> list[InstalledPlugin]:
@@ -410,7 +421,7 @@ def installed_plugins() -> list[InstalledPlugin]:
     if not found:
         found, via = _cached_copies(), "a scan of the plugin cache"
     copies: list[InstalledPlugin] = []
-    for root, version in found:
+    for root, version, marketplace in found:
         data: dict | None = None
         error: str | None = None
         try:
@@ -425,7 +436,7 @@ def installed_plugins() -> list[InstalledPlugin]:
             error = f"it cannot be read: {exc}"
         except ValueError as exc:
             error = f"it is not valid JSON: {exc}"
-        copies.append(InstalledPlugin(root, version, via, data, error))
+        copies.append(InstalledPlugin(root, version, via, data, error, marketplace))
     return copies
 
 
