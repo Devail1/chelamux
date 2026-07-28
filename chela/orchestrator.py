@@ -7,6 +7,12 @@ the same data layer the dashboard `/api/agents` reads (``agent_manager`` +
 ``transcripts``), so a CLI peek and a dashboard row agree, and none of it needs
 the dashboard HTTP server running.
 
+Transcript resolution goes through ``sessions.transcript_for_window`` (session id
+first, cwd only as a last resort — and REFUSED even then if another live window
+shares the same cwd), never a bare cwd guess: two windows launched in the same
+directory otherwise race for "newest transcript" and one window's `read`/`peek`
+silently serves the other's session (CMX-190; same root cause as CMX-153).
+
 Authority for "what is this agent doing" is the native ``session_status``
 (busy/idle/waiting) and the JSONL transcript — never a pane scrape (a raw
 ``capture-pane`` shows Claude Code's grey *ghost-text* suggestion as if it were
@@ -21,7 +27,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
-from chela import agent_manager, discovery, transcripts
+from chela import agent_manager, discovery, sessions, transcripts
 
 # Per-turn character cap for the tail/query digests — enough to read intent
 # without dumping a whole essay per turn. `--all` is uncapped (full read).
@@ -76,7 +82,7 @@ def peek(wid: str) -> dict | None:
     live, health = agent_manager.liveness(claude_running, sess_status)
     win_type = agent_manager.window_type(wid, claude_running)
 
-    path = transcripts.transcript_for_cwd(win["cwd"])
+    path = sessions.transcript_for_window(wid)
     summary = transcripts.summary_for_path(path)
     ctx = transcripts.latest_context_usage(path) if path is not None else None
 
@@ -185,9 +191,10 @@ def read(wid: str, *, tail: int | None = None, query: str | None = None,
     win = resolve_window(wid)
     if win is None:
         return {"ok": False, "error": f"{wid} is not a live window", "wid": wid}
-    path = transcripts.transcript_for_cwd(win["cwd"])
+    path = sessions.transcript_for_window(wid)
     if path is None:
-        return {"ok": False, "error": f"no transcript found for {wid} ({win['cwd']})",
+        return {"ok": False, "error": f"no transcript found for {wid} ({win['cwd']}): "
+                f"{sessions.explain(wid)}",
                 "wid": wid, "name": win["name"]}
 
     turns = list(transcripts.iter_turns(path))

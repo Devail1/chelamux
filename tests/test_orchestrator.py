@@ -4,12 +4,15 @@ Exercised against synthetic tmux/transcript state via monkeypatch, so no live
 tmux, dashboard server, or claude process is needed.
 """
 import json
+import os
 import subprocess
+import time
 import types
 
 import pytest
 
-from chela import agent_manager, config, discovery, orchestrator, transcripts
+from chela import agent_manager, config, discovery, orchestrator, sessions, transcripts
+from chela.sessions import Pane
 
 
 # --- zero-config session scope (config.current_session precedence) -------------
@@ -146,7 +149,7 @@ def wired(tmp_path, monkeypatch):
     _write_transcript(f)
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@7": "worker"})
     monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: "/home/x/proj")
-    monkeypatch.setattr(transcripts, "transcript_for_cwd", lambda cwd, base=None: f)
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid, base=None: f)
     return f
 
 
@@ -179,6 +182,45 @@ def test_read_unknown_window(monkeypatch):
     assert r["ok"] is False and "not a live window" in r["error"]
 
 
+def test_read_two_windows_sharing_a_cwd_do_not_alias(tmp_path, monkeypatch):
+    """CMX-190: @7 and @8 both live in /home/x/proj. Resolution is PER-WINDOW
+    (via `sessions.transcript_for_window`), so each gets its own transcript
+    instead of both racing for whichever file has the newest record."""
+    f7 = tmp_path / "s7.jsonl"
+    f8 = tmp_path / "s8.jsonl"
+    _write_transcript(f7)
+    f8.write_text(json.dumps({
+        "type": "assistant", "timestamp": "2026-07-11T11:00:00Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "other agent's work"}]},
+    }) + "\n")
+
+    monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@7": "one", "@8": "two"})
+    monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: "/home/x/proj")
+
+    by_window = {"@7": f7, "@8": f8}
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid, base=None: by_window[wid])
+
+    r7 = orchestrator.read("@7", all_turns=True)
+    r8 = orchestrator.read("@8", all_turns=True)
+    assert r7["ok"] and r8["ok"]
+    assert r7["turns"] != r8["turns"]
+    assert not any("other agent's work" in t for t in r7["turns"])
+    assert any("other agent's work" in t for t in r8["turns"])
+
+
+def test_read_refused_cwd_guess_surfaces_explanation(monkeypatch):
+    """When `sessions` refuses to guess (e.g. a shared cwd with no other
+    evidence), `read` must surface WHY, not just a bare 'no transcript'."""
+    monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@7": "worker"})
+    monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: "/home/x/proj")
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid, base=None: None)
+    monkeypatch.setattr(sessions, "explain", lambda wid, base=None: "cwd fallback REFUSED: @7, @8 share a cwd")
+
+    r = orchestrator.read("@7", tail=5)
+    assert r["ok"] is False
+    assert "REFUSED" in r["error"] and "@8" in r["error"]
+
+
 # --- peek assembly -------------------------------------------------------------
 
 def test_peek_assembles_from_shared_layer(tmp_path, monkeypatch):
@@ -186,7 +228,7 @@ def test_peek_assembles_from_shared_layer(tmp_path, monkeypatch):
     _write_transcript(f)
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@7": "worker"})
     monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: "/home/x/proj")
-    monkeypatch.setattr(transcripts, "transcript_for_cwd", lambda cwd, base=None: f)
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid, base=None: f)
     monkeypatch.setattr(agent_manager, "session_status_map",
                         lambda force=False: {"by_pid": {123: "busy"}, "cwd_by_pid": {}, "by_cwd": {}})
     monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: 123)
@@ -208,3 +250,76 @@ def test_peek_assembles_from_shared_layer(tmp_path, monkeypatch):
 def test_peek_none_for_dead_window(monkeypatch):
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {})
     assert orchestrator.peek("@999") is None
+
+
+def test_peek_two_windows_sharing_a_cwd_do_not_alias(tmp_path, monkeypatch):
+    """CMX-190: peek must resolve by window id, not by cwd — else @7 and @8
+    (same cwd) would both surface whichever transcript has the newest record."""
+    f7 = tmp_path / "s7.jsonl"
+    f8 = tmp_path / "s8.jsonl"
+    _write_transcript(f7)  # recap: "recap text"
+    f8.write_text(json.dumps(
+        {"type": "system", "subtype": "away_summary", "content": "other agent's recap"}
+    ) + "\n")
+
+    monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@7": "one", "@8": "two"})
+    monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: "/home/x/proj")
+    by_window = {"@7": f7, "@8": f8}
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid, base=None: by_window[wid])
+    monkeypatch.setattr(agent_manager, "session_status_map",
+                        lambda force=False: {"by_pid": {}, "cwd_by_pid": {}, "by_cwd": {}})
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: None)
+    monkeypatch.setattr(agent_manager, "window_type", lambda wid, running=None: "claude")
+
+    p7 = orchestrator.peek("@7")
+    p8 = orchestrator.peek("@8")
+    assert p7["recap"] == "recap text"
+    assert p8["recap"] == "other agent's recap"
+
+
+# --- CMX-190 mechanism guards -------------------------------------------------
+#
+# The two tests above stub `sessions.transcript_for_window`, so they prove the
+# WIRING (read/peek pass the wid to a per-window resolver) but never exercise the
+# aliasing itself. These two drive the real resolvers, with the fixture built so
+# the SIBLING owns the newest mtime — i.e. the pre-fix code does not merely fail,
+# it confidently returns the WRONG transcript.
+
+def _sessions_sharing_a_cwd(tmp_path):
+    """Two sessions under one project dir; @7's own transcript is the OLDER one."""
+    proj = tmp_path / "projects" / "-home-x-proj"
+    proj.mkdir(parents=True)
+    s7, s8 = proj / "sess7.jsonl", proj / "sess8.jsonl"
+    now = time.time()
+    for f, txt, ts in ((s7, "SEVEN's work", now - 500), (s8, "EIGHT's work", now)):
+        f.write_text(json.dumps({
+            "type": "assistant", "timestamp": "2026-07-11T10:00:00Z",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": txt}]},
+        }) + "\n")
+        os.utime(f, (ts, ts))
+    return "/home/x/proj", tmp_path / "projects", s7, s8
+
+
+def test_cwd_guess_returns_the_sibling_not_the_owner(tmp_path):
+    """The mechanism CMX-190 removes: keyed on cwd, resolution is just
+    newest-mtime-wins, so @7 is handed @8's transcript with full confidence.
+    If this ever stops holding, the guard below is testing nothing."""
+    cwd, base, s7, s8 = _sessions_sharing_a_cwd(tmp_path)
+    assert transcripts.transcript_for_cwd(cwd, base=base) == s8 != s7
+
+
+def test_shared_cwd_is_refused_not_guessed(tmp_path, monkeypatch):
+    """@7 and @8 are both live in one cwd with no session evidence. The resolver
+    must REFUSE — handing back a sibling's transcript is worse than silence,
+    because a refusal reads as 'unknown' and a wrong transcript reads as fact."""
+    cwd, base, s7, s8 = _sessions_sharing_a_cwd(tmp_path)
+    pane_map = {"@7": Pane(wid="@7", launched_in=cwd, claude_pid=101),
+                "@8": Pane(wid="@8", launched_in=cwd, claude_pid=102)}
+    monkeypatch.setattr(sessions, "panes", lambda force=False: pane_map)
+
+    res = sessions.resolve_window("@7", base=base)
+    assert res.path is None, "must refuse, not hand back the sibling's transcript"
+    assert "REFUSED" in (res.detail or "")
+    # and the refusal must NAME the sibling, so an operator can see the ambiguity
+    assert "@8" in res.detail
