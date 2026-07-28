@@ -131,9 +131,17 @@ def _decide_immediately(monkeypatch):
     monkeypatch.setattr(inbox, "DEATH_CONFIRM_SECONDS", 0)
 
 
+def _confirm_idle_immediately(monkeypatch):
+    """Collapse the idle-confirm window (CMX-193) — that race is covered by its own
+    tests below, and every test not specifically about it wants "idle" trusted on sight,
+    same as before that fix existed."""
+    monkeypatch.setattr(inbox, "IDLE_CONFIRM_SECONDS", 0)
+
+
 # --- the edge trigger ----------------------------------------------------------
 
 def test_busy_to_idle_on_a_watched_window_fires_once(store_file, windows, sends, monkeypatch):
+    _confirm_idle_immediately(monkeypatch)
     _registered()
     _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
 
@@ -213,6 +221,7 @@ def test_an_unwatched_window_finishing_is_never_reported(store_file, windows, se
 
 def test_no_push_while_the_orchestrator_is_busy_then_delivered_on_next_idle(
         store_file, windows, sends, monkeypatch):
+    _confirm_idle_immediately(monkeypatch)
     _registered()
     # Agent finished, but the orchestrator is mid-thought — never interrupt it.
     _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
@@ -238,6 +247,7 @@ def test_never_push_into_a_waiting_orchestrator(store_file, windows, sends, monk
     # THE dangerous one. A `waiting` session sits on a permission/question prompt:
     # pasting our notification would be consumed as the ANSWER to that gate. `not
     # busy` is NOT good enough — the gate is a strict equality against `idle`.
+    _confirm_idle_immediately(monkeypatch)
     _registered()
     _statuses(monkeypatch, {ORCH: inbox.WAITING, AGENT: inbox.IDLE})
 
@@ -324,6 +334,7 @@ def test_nothing_is_pushed_when_no_orchestrator_is_registered(
         store_file, windows, sends, monkeypatch):
     # Identity is EXPLICIT: with nobody registered the inbox is inert. It must be
     # impossible for an event to land in a random agent's session by default.
+    _confirm_idle_immediately(monkeypatch)
     store = inbox.load()
     store["watches"] = {AGENT: {"note": "", "since": 0}}   # watched, but no orchestrator
     inbox.save(store)
@@ -523,6 +534,7 @@ def test_a_junk_recorded_id_is_refused_not_trusted():
 
 def test_a_task_that_starts_and_finishes_between_two_polls_is_still_reported(
         store_file, windows, sends, monkeypatch):
+    _confirm_idle_immediately(monkeypatch)
     _registered()
     # Both samples see idle: the entire busy period fell between them. The transcript is
     # the evidence — the agent wrote an assistant turn AFTER the watch was registered.
@@ -546,6 +558,7 @@ def test_completion_is_reported_even_with_no_baseline_at_all(
         store_file, windows, sends, monkeypatch):
     # The daemon restarted while the agent worked, so there is no previous sample to
     # compare against. The evidence path needs none — it must still report.
+    _confirm_idle_immediately(monkeypatch)
     _registered()
     watched_since = inbox.watches()[AGENT]["since"]
     monkeypatch.setattr(inbox.sessions, "transcript_for_window",
@@ -581,6 +594,7 @@ def test_evidence_ignores_work_that_predates_the_watch(
         store_file, windows, sends, monkeypatch):
     # An idle window whose last assistant turn is OLDER than the watch has not done
     # anything for THIS dispatch — reporting it would be a phantom completion.
+    _confirm_idle_immediately(monkeypatch)
     _registered()
     watched_since = inbox.watches()[AGENT]["since"]
     monkeypatch.setattr(inbox.sessions, "transcript_for_window",
@@ -683,6 +697,110 @@ def test_did_work_since_still_resolves_via_cwd_with_no_sibling_to_confuse_it(
     assert inbox.did_work_since("@7", since) is True
 
 
+# --- BUG 4 (live, CMX-193): `finished` fired on `idle` sampled MID-TASK -----------
+#
+# CMX-191's own ticket said, verbatim: "do NOT change the busy→idle edge detector; this
+# ticket fixes the evidence path only." That scoping was wrong. `now == IDLE` is a single
+# sample of Claude Code's OWN native status, and that status can read `idle` for one tick
+# in the GAP BETWEEN TWO TOOL CALLS of an agent that has many more queued — a `finished`
+# fired mid-task because idle was sampled in exactly that gap, not at genuine end-of-turn.
+# Both detection paths (the busy→idle edge, AND the work-since-watch evidence, which needs
+# no edge at all) trusted a lone sample; both needed the stamp-then-confirm discipline
+# `gone_since`/`DEATH_CONFIRM_SECONDS` already applies to a vanished window.
+
+def test_a_busy_to_idle_edge_that_snaps_back_to_busy_is_not_reported_finished(
+        store_file, windows, sends, monkeypatch):
+    # Pure edge, no transcript evidence at all: a busy→idle transition alone used to fire
+    # instantly. It must not, when the very next sample shows the agent busy again — proof
+    # the "idle" was the gap between two tool calls, not the finish.
+    _registered()
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+    prev = inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+    assert sends == []
+    assert AGENT in inbox.watches()          # it still owes the orchestrator the work
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+    inbox.tick(prev)
+    assert sends == []
+    assert AGENT in inbox.watches()
+
+
+def test_a_lone_idle_sample_mid_task_is_not_reported_finished(
+        store_file, windows, sends, monkeypatch):
+    # The evidence path is the more dangerous one: it needs no edge at all, so a single
+    # `idle` sample plus "wrote an assistant turn at some point" used to be enough on its
+    # own — exactly the same shape BUG 2 fires on for a genuinely short task. This agent
+    # is not done, though: the transcript has assistant activity (it is working), and the
+    # very next tick catches it busy again.
+    _registered()
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+    prev = inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+    assert sends == []                       # NOT reported on the lone sample
+    assert AGENT in inbox.watches()
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+    inbox.tick(prev)
+    assert sends == []
+    assert AGENT in inbox.watches()
+
+
+def test_finished_still_fires_once_idle_holds_through_the_confirm_window(
+        store_file, windows, sends, monkeypatch):
+    # The debounce only DELAYS the report — it must not swallow a real completion. Same
+    # shape as test_a_death_still_fires_once_the_settle_window_has_passed uses for
+    # gone_since/DEATH_CONFIRM_SECONDS.
+    _registered()
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    prev = inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+    assert sends == []                       # first idle sample only stamps idle_since
+
+    store = inbox.load()                     # ...the confirm window elapses
+    store["watches"][AGENT]["idle_since"] -= inbox.IDLE_CONFIRM_SECONDS + 1
+    inbox.save(store)
+    inbox.tick(prev)
+
+    assert len(sends) == 1
+    assert "finished the task you dispatched" in sends[0][1]
+    assert inbox.watches() == {}
+
+
+def test_finished_still_fires_via_the_edge_when_no_transcript_resolves(
+        store_file, windows, sends, monkeypatch):
+    # The evidence path (did_work_since) is CORRECTLY blind for a window whose transcript
+    # can't be resolved (CMX-191/CMX-192: hook-blind sessions, same-cwd siblings that refuse
+    # rather than guess). For those, the busy->idle EDGE is the only detector — it must
+    # still fire once idle is confirmed, even though the immediately-previous sample (`was`)
+    # is IDLE, not BUSY, by the time the confirm window has elapsed. `no_transcript_evidence`
+    # (autouse) already keeps transcript_for_window -> None here, so only the edge path can
+    # carry this test.
+    _registered()
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    prev = inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+    assert sends == []                       # first idle sample only stamps idle_since
+
+    store = inbox.load()                     # ...the confirm window elapses
+    store["watches"][AGENT]["idle_since"] -= inbox.IDLE_CONFIRM_SECONDS + 1
+    inbox.save(store)
+    inbox.tick(prev)                         # `was` here is IDLE (from prev's cur), not BUSY
+
+    assert len(sends) == 1
+    assert "finished the task you dispatched" in sends[0][1]
+    assert inbox.watches() == {}
+
+
 # --- BUG 1 (live): a `chela watch` registered at RUNTIME was silently clobbered ---
 
 def test_a_watch_registered_during_a_tick_is_not_clobbered(store_file, windows, sends, monkeypatch):
@@ -713,6 +831,7 @@ def test_a_watch_registered_at_runtime_works_without_a_daemon_restart(
         store_file, windows, sends, monkeypatch):
     # The daemon has already ticked (orchestrator unregistered, nothing watched) — the
     # state a long-running daemon is really in when you first use the feature.
+    _confirm_idle_immediately(monkeypatch)
     _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
     inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
     assert inbox.orchestrator_wid() is None
