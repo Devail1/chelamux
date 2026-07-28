@@ -246,12 +246,19 @@ def _encode(record: dict) -> str:
 
 
 def append(type: str, summary: str = "", payload: dict | None = None, *,
-           wid: str | None = None, session_id: str | None = None) -> dict | None:
+           wid: str | None = None, session_id: str | None = None,
+           rejected_wid: str | None = None) -> dict | None:
     """Append one event. THE write path — programmatic, so it needs no agent to test.
 
     ``type`` is the inbox's ``kind`` (see the module docstring): one event schema, not
     two. ``summary`` is collapsed to a single line — it is what a notification renders;
     the ``payload`` is what a filter, a de-dup or a UI actually works with.
+
+    ``rejected_wid`` is the ``X-Chela-Wid`` value ``chela.hooks.ingest`` saw but declined
+    to trust because it named a window that was not live — kept distinct from ``wid`` (and
+    from an unset header, which leaves this ``None`` too) so a reader can tell "no header"
+    apart from "a stale header naming a dead window", the one shape that is always a fault
+    (CMX-192).
 
     Returns the stored record, or None if the append failed. It NEVER raises: the next
     caller of this function is a Claude Code hook running synchronously inside a live
@@ -265,6 +272,7 @@ def append(type: str, summary: str = "", payload: dict | None = None, *,
         "type": str(type),
         "wid": wid,
         "session_id": session_id,
+        "rejected_wid": rejected_wid,
         "summary": " ".join((summary or "").split()),
         "payload": payload if isinstance(payload, dict) else {},
     }

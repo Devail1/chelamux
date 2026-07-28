@@ -623,6 +623,24 @@ def _explicit_wid(hint: str | None,
     return hint if hint in live else None
 
 
+def _explicit_wid_dead(hint: str | None,
+                       panes: dict[str, sessions.Pane] | None = None) -> str | None:
+    """The ``X-Chela-Wid`` value itself, but ONLY on the one shape :func:`_explicit_wid`
+    folds silently into ``None`` alongside "no header at all": well-formed, present, and
+    naming a window that is not live right now.
+
+    Unset (no ``$CHELA_WID`` — a session chela did not launch) and malformed both return
+    ``None`` here too, same as a live wid — those are never a fault and must never warn.
+    A well-formed hint naming a dead window IS always a fault: it means the agent was
+    relaunched by hand and inherited a stale ``$CHELA_WID`` from tmux's global environment
+    (the CMX-192 root cause, verbatim), and this is the one signal that says so.
+    """
+    if not hint or not _WID_RE.match(hint):
+        return None
+    live = _panes() if panes is None else panes
+    return None if hint in live else hint
+
+
 def wid_for_session(session_id: str | None,
                     transcript_path: str | None = None,
                     explicit_wid: str | None = None) -> str | None:
@@ -822,6 +840,7 @@ def ingest(event: str, body, explicit_wid: str | None = None) -> dict | None:
                 explicit_wid=explicit_wid,
             ),
             session_id=session_id,
+            rejected_wid=_explicit_wid_dead(explicit_wid),
         )
     except Exception:                          # noqa: BLE001 — see the docstring
         log.exception("hooks: ingest failed for %s — event dropped", event)
