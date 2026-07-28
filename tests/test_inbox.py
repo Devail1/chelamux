@@ -776,6 +776,31 @@ def test_finished_still_fires_once_idle_holds_through_the_confirm_window(
     assert inbox.watches() == {}
 
 
+def test_finished_still_fires_via_the_edge_when_no_transcript_resolves(
+        store_file, windows, sends, monkeypatch):
+    # The evidence path (did_work_since) is CORRECTLY blind for a window whose transcript
+    # can't be resolved (CMX-191/CMX-192: hook-blind sessions, same-cwd siblings that refuse
+    # rather than guess). For those, the busy->idle EDGE is the only detector — it must
+    # still fire once idle is confirmed, even though the immediately-previous sample (`was`)
+    # is IDLE, not BUSY, by the time the confirm window has elapsed. `no_transcript_evidence`
+    # (autouse) already keeps transcript_for_window -> None here, so only the edge path can
+    # carry this test.
+    _registered()
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    prev = inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+    assert sends == []                       # first idle sample only stamps idle_since
+
+    store = inbox.load()                     # ...the confirm window elapses
+    store["watches"][AGENT]["idle_since"] -= inbox.IDLE_CONFIRM_SECONDS + 1
+    inbox.save(store)
+    inbox.tick(prev)                         # `was` here is IDLE (from prev's cur), not BUSY
+
+    assert len(sends) == 1
+    assert "finished the task you dispatched" in sends[0][1]
+    assert inbox.watches() == {}
+
+
 # --- BUG 1 (live): a `chela watch` registered at RUNTIME was silently clobbered ---
 
 def test_a_watch_registered_during_a_tick_is_not_clobbered(store_file, windows, sends, monkeypatch):

@@ -860,6 +860,12 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
                 meta["idle_since"] = now_ts   # first sample only stamps; never decides
         else:
             meta.pop("idle_since", None)      # busy/waiting again — that idle was a blip
+        if now == BUSY or was == BUSY:
+            # persisted for the LIFE of the watch, not just this tick: `was` alone is only
+            # the immediately-previous sample, which the confirm delay has long since rolled
+            # past by the time idle confirms — but `was` still matters HERE, for a watch
+            # whose very first observed tick is already the busy->idle transition itself.
+            meta["saw_busy"] = True
         store["watches"][wid] = meta
         idle_since = meta.get("idle_since")
         confirmed_idle = (
@@ -867,7 +873,12 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
             and now_ts - idle_since >= IDLE_CONFIRM_SECONDS
         )
 
-        finished_edge = was == BUSY and confirmed_idle
+        # `was == BUSY` only ever looks at the tick immediately before this one — but by
+        # the time confirmed_idle is true, several ticks of continuous idle have already
+        # elapsed, so `was` is IDLE, never BUSY, and this edge could never fire. `saw_busy`
+        # instead remembers, for the LIFE of the watch, whether a busy sample was ever seen
+        # — the same stamp-on-meta discipline `idle_since` uses just above.
+        finished_edge = meta.get("saw_busy") and confirmed_idle
         # The not-missed path: confirmed idle, and the transcript proves it worked for us.
         # Gated on confirmed idle so an agent still mid-task — busy, waiting, or merely
         # caught in the gap between two tool calls — is never called done.
