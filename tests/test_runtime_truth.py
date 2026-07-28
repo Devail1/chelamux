@@ -379,6 +379,17 @@ def _break_hooks_attributed(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_hooks_wid_rejected(tmp_path, monkeypatch):
+    """A SessionStart's `X-Chela-Wid` named a window that was not live — a stale
+    `$CHELA_WID` inherited from tmux's global environment, the actual CMX-192 root cause.
+    The record is the exact shape `chela/hooks.py:ingest` writes: `rejected_wid` kept,
+    distinct from the ordinary unset case where that field stays `None`."""
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000001",
+                     rejected_wid="@999")
+    return doctor.WARN
+
+
 def _break_windows_resolvable(tmp_path, monkeypatch):
     """A host with no /proc (macOS) whose PATH is missing `pgrep` — every window's two
     strongest resolution signals silently collapse to None (chela.sessions' own docstring,
@@ -455,6 +466,7 @@ CORRUPTIONS = {
     "tests.js_suites": _break_tests_js_suites,
     "plugin.hooks_flowing": _break_hooks_flowing,
     "plugin.hooks_attributed": _break_hooks_attributed,
+    "plugin.hooks_wid_rejected": _break_hooks_wid_rejected,
     "windows.resolvable": _break_windows_resolvable,
     "fonts.glyph_coverage": _break_fonts_glyph_coverage,
     "repo.upstream_synced": _break_upstream_synced,

@@ -445,6 +445,67 @@ def test_ingest_files_the_event_under_the_explicit_wid_when_it_is_live(monkeypat
     assert record["wid"] == "@3"
 
 
+# --- rejected_wid: the dead-window signal `_explicit_wid` swallows silently (CMX-192) --
+#
+# `_explicit_wid` falls through to None for THREE different shapes — unset, malformed, and
+# well-formed-but-dead — and that collapse is correct for resolution (a bad header must
+# never behave worse than no header). But it means nothing downstream can tell "this
+# session simply has no $CHELA_WID" apart from "this session's $CHELA_WID names a window
+# that used to exist and doesn't anymore", which is always a fault. `_explicit_wid_dead`
+# and the `rejected_wid` it feeds into `ingest` are the one place that distinction survives.
+
+def test_explicit_wid_dead_is_none_when_the_header_is_simply_unset():
+    assert hooks._explicit_wid_dead(None, panes={}) is None
+    assert hooks._explicit_wid_dead("", panes={}) is None
+
+
+@pytest.mark.parametrize("hint", ["not-a-wid", "@", "@abc", "@3;rm -rf /", "3"])
+def test_explicit_wid_dead_is_none_for_a_malformed_header(hint):
+    """Malformed input must never be reported as a dead-window fault either — it is
+    attacker-adjacent HTTP input, not a diagnosable window id."""
+    assert hooks._explicit_wid_dead(hint, panes={}) is None
+
+
+def test_explicit_wid_dead_is_none_when_the_header_names_a_live_window():
+    panes = {"@3": object()}
+    assert hooks._explicit_wid_dead("@3", panes=panes) is None
+
+
+def test_explicit_wid_dead_names_the_window_when_it_is_not_live():
+    """The one case that must survive: well-formed, present, and not live right now."""
+    assert hooks._explicit_wid_dead("@999", panes={}) == "@999"
+
+
+def test_ingest_never_reports_rejected_wid_when_the_header_is_simply_unset(monkeypatch):
+    monkeypatch.setattr(hooks, "_slug_from_disk", lambda session_id: None)
+    record = hooks.ingest("SessionStart", _body(), explicit_wid=None)
+    assert record["wid"] is None
+    assert record["rejected_wid"] is None
+
+
+def test_ingest_never_reports_rejected_wid_for_a_malformed_header(monkeypatch):
+    monkeypatch.setattr(hooks, "_slug_from_disk", lambda session_id: None)
+    record = hooks.ingest("SessionStart", _body(), explicit_wid="not-a-wid")
+    assert record["rejected_wid"] is None
+
+
+def test_ingest_never_reports_rejected_wid_when_the_header_is_live(monkeypatch):
+    monkeypatch.setattr(hooks, "_panes", _panes({"/repo": [("@3", "claude")]}))
+    record = hooks.ingest("SessionStart", _body(cwd="/elsewhere"), explicit_wid="@3")
+    assert record["wid"] == "@3"
+    assert record["rejected_wid"] is None
+
+
+def test_ingest_reports_rejected_wid_when_the_header_names_a_dead_window(monkeypatch):
+    """This is the shape distinguishable from unset: `wid` still falls through to
+    inference (None, here — no panes at all), but `rejected_wid` names the stale header
+    a session-that-chela-did-not-launch would never have sent."""
+    monkeypatch.setattr(hooks, "_slug_from_disk", lambda session_id: None)
+    record = hooks.ingest("SessionStart", _body(), explicit_wid="@999")
+    assert record["wid"] is None
+    assert record["rejected_wid"] == "@999"
+
+
 def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
     """Baked in as ``${CHELA_WID:-}`` — expanded by the agent's OWN shell at hook time, not
     by chela (this string is one manifest shared by the whole fleet, so it cannot bake in

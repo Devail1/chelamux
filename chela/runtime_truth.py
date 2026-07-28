@@ -971,37 +971,106 @@ def _hooks_flowing_applies() -> bool:
 # bookkeeping rows, which legitimately belong to "chela itself") — so, for this type alone,
 # `wid=None` is never an intentional ownerless event. It is always a hole in attribution.
 
+def _ring_bound_note(records: list[dict]) -> str:
+    """What :func:`chela.event_log.ring` actually let a fact see — bounded and rolling
+    (``deque(maxlen=RING_SIZE)``, "live reads never touch the rolled files", verbatim).
+
+    A fact that scans the ring and finds nothing must never say so as an unqualified
+    universal claim: the ring can just as easily be silent because the evidence SCROLLED
+    OUT as because the fault never happened. Naming the window scanned is what keeps a
+    green here from being over-read as "never happened" when it only means "not in the
+    last N events".
+    """
+    if not records:
+        return "the ring is empty — nothing has been logged yet"
+    first, last = records[0].get("seq"), records[-1].get("seq")
+    return f"last {len(records)} event(s) in the ring (seq {first}-{last})"
+
+
 def _hooks_unattributed_read() -> Observation:
     """Every ``hook.*`` record in the ring that landed with no window but still names a
     session — the copy :func:`chela.hooks.ingest` actually wrote, read back exactly as a
     ``--wid`` filter would see it (or rather, would fail to)."""
+    records = event_log.ring()
     orphans: dict[str, int] = {}
-    for rec in event_log.ring():
+    for rec in records:
         rtype = rec.get("type") or ""
         if rec.get("wid") is None and rtype.startswith(hooks.TYPE_PREFIX):
             sid = rec.get("session_id")
             if sid:
                 orphans[sid] = orphans.get(sid, 0) + 1
-    return observed(orphans)
+    return observed({"orphans": orphans, "bound": _ring_bound_note(records)})
 
 
 def _hooks_unattributed_report(_declared: None, obs: Observation) -> list[Finding]:
-    orphans: dict[str, int] = obs.value
+    orphans: dict[str, int] = obs.value["orphans"]
+    bound = obs.value["bound"]
     if not orphans:
-        return [Finding(OK, "no hook-blind sessions — every hook.* record either resolved "
-                            "a window or carries no session to attribute")]
+        return [Finding(OK, f"no hook-blind sessions in the {bound} — every hook.* "
+                            "record in that window either resolved a window or carries "
+                            "no session to attribute")]
     total = sum(orphans.values())
     named = ", ".join(sorted(orphans))
     return [Finding(
         WARN,
-        f"{total} hook.* event(s) unattributable — {len(orphans)} hook-blind session(s): "
-        f"{named}",
+        f"{total} hook.* event(s) unattributable — {len(orphans)} hook-blind session(s) "
+        f"in the {bound}: {named}",
         "chela.hooks.wid_for_session could not resolve a live window for these sessions "
         "(two agents launched in one cwd, CMX-190 — or the window closed before the POST "
         "landed). The events were NOT dropped: session_id is kept on the record, but "
         "`chela events --wid @N` can never reach them because there is no wid to filter "
         "on. Correlate by session_id against `~/.claude/projects/*/<session_id>.jsonl`, or "
-        "`chela events --type <type>` and grep the JSON for these ids.",
+        "`chela events --type <type>` and grep the JSON for these ids. This scan is "
+        "bounded to the ring above — an older or quieter hook-blind session may already "
+        "have scrolled out; it is not ruled out by this being clean.",
+    )]
+
+
+# --- fact: an X-Chela-Wid header that named a DEAD window ----------------------------
+#
+# `_explicit_wid` (hooks.py) correctly refuses a header naming a window that is not live
+# right now — falling through to the same origin-based inference any other hook uses — but
+# it says NOTHING when it does. An unset header is the ordinary case (a session chela did
+# not launch has no `$CHELA_WID`) and must never warn; a well-formed header naming a DEAD
+# window is always a fault: the agent inherited a stale `$CHELA_WID` from tmux's global
+# environment after the window it once named had closed (the actual CMX-192 root cause).
+# `chela.hooks.ingest` keeps that rejected value on the record (`rejected_wid`), distinct
+# from the unset case (`rejected_wid=None` there too) — this fact reads it back.
+
+def _hooks_rejected_wid_read() -> Observation:
+    """Every ``hook.*`` record in the ring whose ``X-Chela-Wid`` named a window that was
+    not live — ``rejected_wid``, read back exactly as :func:`chela.hooks.ingest` wrote
+    it. Distinct from the unset case, which never sets this field at all."""
+    records = event_log.ring()
+    dead: dict[str, str] = {}
+    for rec in records:
+        rtype = rec.get("type") or ""
+        rejected = rec.get("rejected_wid")
+        if rejected and rtype.startswith(hooks.TYPE_PREFIX):
+            sid = rec.get("session_id") or "?"
+            dead[sid] = rejected
+    return observed({"dead": dead, "bound": _ring_bound_note(records)})
+
+
+def _hooks_rejected_wid_report(_declared: None, obs: Observation) -> list[Finding]:
+    dead: dict[str, str] = obs.value["dead"]
+    bound = obs.value["bound"]
+    if not dead:
+        return [Finding(OK, f"no rejected X-Chela-Wid headers in the {bound} — every "
+                            "header seen either named a live window or was unset")]
+    named = ", ".join(f"{sid}→{wid}" for sid, wid in sorted(dead.items()))
+    return [Finding(
+        WARN,
+        f"{len(dead)} session(s) sent an X-Chela-Wid naming a DEAD window in the "
+        f"{bound}: {named}",
+        "A well-formed $CHELA_WID that names a window which is not live right now is "
+        "always a fault, never the ordinary unset case — it means the agent inherited a "
+        "stale window id, most often from tmux's global environment surviving a manual "
+        "relaunch (the CMX-192 root cause). chela.hooks.wid_for_session still fell back "
+        "to origin-based inference for these, so the event was not necessarily lost — "
+        "but the stale id is worth chasing down across the plugin cache, "
+        "installed_plugins.json, the daemon, /proc env and the tmux global env. This "
+        "scan is bounded to the ring above.",
     )]
 
 
@@ -2047,6 +2116,16 @@ def facts() -> list[Fact]:
             declare=lambda: None,
             read_back=_hooks_unattributed_read,
             report=_hooks_unattributed_report,
+            applies=_hooks_flowing_applies,
+        ),
+        Fact(
+            name="plugin.hooks_wid_rejected",
+            declared_by="chela.hooks.ingest — every hook event it appends",
+            owned_by="the event log's own copy — hook.* records whose X-Chela-Wid named "
+                     "a window that was not live (rejected_wid), never the unset case",
+            declare=lambda: None,
+            read_back=_hooks_rejected_wid_read,
+            report=_hooks_rejected_wid_report,
             applies=_hooks_flowing_applies,
         ),
         Fact(
