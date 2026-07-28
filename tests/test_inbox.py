@@ -644,6 +644,13 @@ def test_did_work_since_refuses_a_shared_cwd_rather_than_crediting_a_sibling(
         "@8": sessions.Pane(wid="@8", launched_in=cwd, claude_pid=102),
     }
     monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+    # Without this, reverting the fix to the old `discovery.get_window_cwd_by_id(wid)` +
+    # `transcripts.last_assistant_activity(cwd)` body hits the REAL (unstubbed) tmux call,
+    # which returns None for a synthetic wid in a test environment — short-circuiting to
+    # False for the wrong reason (couldn't look anything up) rather than the right one
+    # (refused a shared cwd). Reinstated so the guard actually exercises the buggy cwd
+    # lookup it is meant to pin.
+    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: cwd)
 
     # Pins the fixture: the mechanism this guards against really does pick the sibling's
     # (newer) transcript with full confidence. If this stops holding, the assertion below
@@ -668,6 +675,10 @@ def test_did_work_since_still_resolves_via_cwd_with_no_sibling_to_confuse_it(
     monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
     pane_map = {"@7": sessions.Pane(wid="@7", launched_in=cwd, claude_pid=101)}
     monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+    # Same reasoning as the sibling guard above: reinstated so a reverted, pre-fix
+    # `did_work_since` (which calls the real, unstubbed tmux lookup) exercises the actual
+    # cwd path instead of failing on an environment quirk.
+    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: cwd)
 
     assert inbox.did_work_since("@7", since) is True
 
