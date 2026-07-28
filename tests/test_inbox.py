@@ -16,12 +16,21 @@ Pure: tmux/`claude agents --json`/send are all stubbed, so no live session is to
 """
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
-from chela import dispatcher, event_log, inbox
+from chela import agent_manager, dispatcher, event_log, inbox, sessions, transcripts
+
+# Captured at collection time, before the `no_transcript_evidence` autouse fixture
+# (below) overwrites `sessions.transcript_for_window` on every test — the CMX-191
+# guards need the REAL resolver reinstated to exercise the code they're pinning.
+_REAL_TRANSCRIPT_FOR_WINDOW = sessions.transcript_for_window
 
 ORCH = "@1"      # the orchestrator's own window
 AGENT = "@2"     # a window it delegated work to
@@ -71,13 +80,15 @@ def sends(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_transcript_evidence(monkeypatch):
-    """Default: the transcript shows no work (so status transitions are the only signal).
+    """Default: no window resolves a transcript (so status transitions are the only signal).
 
     Autouse so no test can reach the real tmux/transcripts of the LIVE fleet, and so the
-    evidence path is opt-in per test rather than silently on.
+    evidence path is opt-in per test rather than silently on. Stubs ``sessions.transcript_
+    for_window`` — the per-WINDOW resolver ``did_work_since`` actually calls — not the old
+    cwd-keyed ``transcripts.last_assistant_activity``, which two windows sharing a cwd
+    cannot disambiguate (CMX-191).
     """
-    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: f"/proj/{wid}")
-    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity", lambda cwd: None)
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", lambda wid: None)
 
 
 @pytest.fixture(autouse=True)
@@ -516,8 +527,10 @@ def test_a_task_that_starts_and_finishes_between_two_polls_is_still_reported(
     # Both samples see idle: the entire busy period fell between them. The transcript is
     # the evidence — the agent wrote an assistant turn AFTER the watch was registered.
     watched_since = inbox.watches()[AGENT]["since"]
-    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity",
-                        lambda cwd: watched_since + 5)
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
     _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
 
     prev = inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})   # never saw it busy
@@ -535,8 +548,10 @@ def test_completion_is_reported_even_with_no_baseline_at_all(
     # compare against. The evidence path needs none — it must still report.
     _registered()
     watched_since = inbox.watches()[AGENT]["since"]
-    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity",
-                        lambda cwd: watched_since + 5)
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
     _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
 
     inbox.tick({})                        # empty prev — a fresh daemon
@@ -550,8 +565,10 @@ def test_evidence_never_reports_an_agent_that_is_still_working(
     # Work-since-watch alone must never mean "done" — the idle gate still rules.
     _registered()
     watched_since = inbox.watches()[AGENT]["since"]
-    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity",
-                        lambda cwd: watched_since + 5)
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
 
     for status in (inbox.BUSY, inbox.WAITING):
         _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: status})
@@ -566,14 +583,93 @@ def test_evidence_ignores_work_that_predates_the_watch(
     # anything for THIS dispatch — reporting it would be a phantom completion.
     _registered()
     watched_since = inbox.watches()[AGENT]["since"]
-    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity",
-                        lambda cwd: watched_since - 60)
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since - 60)
     _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
 
     inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
 
     assert sends == []
     assert AGENT in inbox.watches()
+
+
+# --- BUG 3 (live, CMX-191): did_work_since used to be keyed on CWD, not the WINDOW --
+#
+# `did_work_since` used to resolve `discovery.get_window_cwd_by_id(wid)` then read
+# `transcripts.last_assistant_activity(cwd)` — the newest transcript in that DIRECTORY,
+# not this window's own session. Two sibling agents dispatched into the same cwd meant
+# one's assistant turn got credited to the OTHER's watch: `@122` was reported "finished"
+# 38s after dispatch, wedged mid a `pre_tool_use`/`post_tool_use` pair, with no commit
+# and no output to show for it — the orchestrator went and "verified" work that never
+# happened. Same root cause as CMX-190 (`chela read`/`peek`), same fix: resolve by
+# window via :mod:`chela.sessions`, and REFUSE rather than guess when the cwd is shared.
+# These bypass `tick()` and drive `inbox.did_work_since` directly against real files on
+# disk, with real `sessions.Pane`/`panes()` plumbing — the two functions the old cwd
+# shortcut skipped entirely.
+
+def _write_assistant_turn(path, when_epoch):
+    when = datetime.fromtimestamp(when_epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    path.write_text(json.dumps(
+        {"type": "assistant", "timestamp": when, "message": {"content": "x"}}) + "\n")
+    os.utime(path, (when_epoch, when_epoch))
+
+
+@pytest.fixture
+def no_native_status(monkeypatch):
+    """`sessions.resolve_window`'s tier 3 (the native `claude agents --json` cache)
+    answered and has nothing — deterministic, so tier 4 (cwd) is always reached."""
+    monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid", lambda pid: (None, None))
+    monkeypatch.setattr(agent_manager, "native_status_ever_fetched", lambda: True)
+
+
+def test_did_work_since_refuses_a_shared_cwd_rather_than_crediting_a_sibling(
+        tmp_path, monkeypatch, no_native_status):
+    """@7's watch is idle; its SIBLING @8 (launched in the same cwd) wrote an assistant
+    turn after `since`, @7 did not. The old cwd-keyed mechanism hands @7's watch @8's
+    evidence with full confidence — resolving by window must REFUSE instead."""
+    cwd = "/home/x/proj"
+    proj = tmp_path / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True)
+    now = time.time()
+    since = now - 100
+    _write_assistant_turn(proj / "mine.jsonl", now - 500)     # @7's own — before `since`
+    _write_assistant_turn(proj / "sibling.jsonl", now)        # @8's — after `since`
+
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    pane_map = {
+        "@7": sessions.Pane(wid="@7", launched_in=cwd, claude_pid=101),
+        "@8": sessions.Pane(wid="@8", launched_in=cwd, claude_pid=102),
+    }
+    monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+
+    # Pins the fixture: the mechanism this guards against really does pick the sibling's
+    # (newer) transcript with full confidence. If this stops holding, the assertion below
+    # is testing nothing.
+    assert transcripts.last_assistant_activity(cwd) > since
+
+    assert inbox.did_work_since("@7", since) is False
+
+
+def test_did_work_since_still_resolves_via_cwd_with_no_sibling_to_confuse_it(
+        tmp_path, monkeypatch, no_native_status):
+    """Same window, no ambiguity: CMX-191 fixes the ALIASING, not the cwd fallback
+    itself — a lone window in its own directory must still be detected as finished."""
+    cwd = "/home/x/proj"
+    proj = tmp_path / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True)
+    now = time.time()
+    since = now - 100
+    _write_assistant_turn(proj / "mine.jsonl", now)
+
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    pane_map = {"@7": sessions.Pane(wid="@7", launched_in=cwd, claude_pid=101)}
+    monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+
+    assert inbox.did_work_since("@7", since) is True
 
 
 # --- BUG 1 (live): a `chela watch` registered at RUNTIME was silently clobbered ---
