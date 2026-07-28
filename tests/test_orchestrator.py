@@ -4,12 +4,15 @@ Exercised against synthetic tmux/transcript state via monkeypatch, so no live
 tmux, dashboard server, or claude process is needed.
 """
 import json
+import os
 import subprocess
+import time
 import types
 
 import pytest
 
 from chela import agent_manager, config, discovery, orchestrator, sessions, transcripts
+from chela.sessions import Pane
 
 
 # --- zero-config session scope (config.current_session precedence) -------------
@@ -272,3 +275,51 @@ def test_peek_two_windows_sharing_a_cwd_do_not_alias(tmp_path, monkeypatch):
     p8 = orchestrator.peek("@8")
     assert p7["recap"] == "recap text"
     assert p8["recap"] == "other agent's recap"
+
+
+# --- CMX-190 mechanism guards -------------------------------------------------
+#
+# The two tests above stub `sessions.transcript_for_window`, so they prove the
+# WIRING (read/peek pass the wid to a per-window resolver) but never exercise the
+# aliasing itself. These two drive the real resolvers, with the fixture built so
+# the SIBLING owns the newest mtime — i.e. the pre-fix code does not merely fail,
+# it confidently returns the WRONG transcript.
+
+def _sessions_sharing_a_cwd(tmp_path):
+    """Two sessions under one project dir; @7's own transcript is the OLDER one."""
+    proj = tmp_path / "projects" / "-home-x-proj"
+    proj.mkdir(parents=True)
+    s7, s8 = proj / "sess7.jsonl", proj / "sess8.jsonl"
+    now = time.time()
+    for f, txt, ts in ((s7, "SEVEN's work", now - 500), (s8, "EIGHT's work", now)):
+        f.write_text(json.dumps({
+            "type": "assistant", "timestamp": "2026-07-11T10:00:00Z",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": txt}]},
+        }) + "\n")
+        os.utime(f, (ts, ts))
+    return "/home/x/proj", tmp_path / "projects", s7, s8
+
+
+def test_cwd_guess_returns_the_sibling_not_the_owner(tmp_path):
+    """The mechanism CMX-190 removes: keyed on cwd, resolution is just
+    newest-mtime-wins, so @7 is handed @8's transcript with full confidence.
+    If this ever stops holding, the guard below is testing nothing."""
+    cwd, base, s7, s8 = _sessions_sharing_a_cwd(tmp_path)
+    assert transcripts.transcript_for_cwd(cwd, base=base) == s8 != s7
+
+
+def test_shared_cwd_is_refused_not_guessed(tmp_path, monkeypatch):
+    """@7 and @8 are both live in one cwd with no session evidence. The resolver
+    must REFUSE — handing back a sibling's transcript is worse than silence,
+    because a refusal reads as 'unknown' and a wrong transcript reads as fact."""
+    cwd, base, s7, s8 = _sessions_sharing_a_cwd(tmp_path)
+    pane_map = {"@7": Pane(wid="@7", launched_in=cwd, claude_pid=101),
+                "@8": Pane(wid="@8", launched_in=cwd, claude_pid=102)}
+    monkeypatch.setattr(sessions, "panes", lambda force=False: pane_map)
+
+    res = sessions.resolve_window("@7", base=base)
+    assert res.path is None, "must refuse, not hand back the sibling's transcript"
+    assert "REFUSED" in (res.detail or "")
+    # and the refusal must NAME the sibling, so an operator can see the ambiguity
+    assert "@8" in res.detail
