@@ -954,6 +954,57 @@ def _hooks_flowing_applies() -> bool:
     return bool(hooks.installed_plugins())
 
 
+# --- fact: a hook DID reach the log, but chela could not say whose window it was ------
+#
+# `plugin.hooks_flowing` above asks "did ANY hook arrive from this live window" and stops
+# there. It misses the opposite shape entirely: a hook arrives, is appended, and STILL
+# never lands in that window's lane, because `hooks.wid_for_session` (CMX-48/CMX-190)
+# resolved to None — two agents sharing one origin cwd, or the window closing between the
+# tool call and the POST landing. `chela/hooks.py:ingest` deliberately keeps `session_id`
+# on that record rather than dropping it (an unattributed event is "visibly ownerless",
+# never worse than a misattributed one — the same rule `chela/inbox.py` states for its own
+# `wid=None` rows) — but nothing ever READ that copy back. The record sat in the log,
+# correlatable by session_id, and `chela events --wid @N` could never surface it: an agent
+# was hook-blind for a whole session and nothing said so out loud.
+#
+# Every `hook.*` record has a real Claude Code session behind it (unlike the inbox's own
+# bookkeeping rows, which legitimately belong to "chela itself") — so, for this type alone,
+# `wid=None` is never an intentional ownerless event. It is always a hole in attribution.
+
+def _hooks_unattributed_read() -> Observation:
+    """Every ``hook.*`` record in the ring that landed with no window but still names a
+    session — the copy :func:`chela.hooks.ingest` actually wrote, read back exactly as a
+    ``--wid`` filter would see it (or rather, would fail to)."""
+    orphans: dict[str, int] = {}
+    for rec in event_log.ring():
+        rtype = rec.get("type") or ""
+        if rec.get("wid") is None and rtype.startswith(hooks.TYPE_PREFIX):
+            sid = rec.get("session_id")
+            if sid:
+                orphans[sid] = orphans.get(sid, 0) + 1
+    return observed(orphans)
+
+
+def _hooks_unattributed_report(_declared: None, obs: Observation) -> list[Finding]:
+    orphans: dict[str, int] = obs.value
+    if not orphans:
+        return [Finding(OK, "no hook-blind sessions — every hook.* record either resolved "
+                            "a window or carries no session to attribute")]
+    total = sum(orphans.values())
+    named = ", ".join(sorted(orphans))
+    return [Finding(
+        WARN,
+        f"{total} hook.* event(s) unattributable — {len(orphans)} hook-blind session(s): "
+        f"{named}",
+        "chela.hooks.wid_for_session could not resolve a live window for these sessions "
+        "(two agents launched in one cwd, CMX-190 — or the window closed before the POST "
+        "landed). The events were NOT dropped: session_id is kept on the record, but "
+        "`chela events --wid @N` can never reach them because there is no wid to filter "
+        "on. Correlate by session_id against `~/.claude/projects/*/<session_id>.jsonl`, or "
+        "`chela events --type <type>` and grep the JSON for these ids.",
+    )]
+
+
 # --- fact: what the RUNNING daemon came up with --------------------------------------
 
 def _daemon_read() -> Observation:
@@ -1986,6 +2037,16 @@ def facts() -> list[Fact]:
             declare=_hooks_flowing_declared,
             read_back=_hooks_flowing_read,
             report=_hooks_flowing_report,
+            applies=_hooks_flowing_applies,
+        ),
+        Fact(
+            name="plugin.hooks_attributed",
+            declared_by="chela.hooks.ingest — every hook event it appends",
+            owned_by="the event log's own copy — hook.* records where wid_for_session "
+                     "actually landed None",
+            declare=lambda: None,
+            read_back=_hooks_unattributed_read,
+            report=_hooks_unattributed_report,
             applies=_hooks_flowing_applies,
         ),
         Fact(
