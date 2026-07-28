@@ -276,8 +276,8 @@ def transcript_for_cwd(cwd: str | None, base: Path | None = None) -> Path | None
     return max(found, key=_key)
 
 
-def last_assistant_activity(cwd: str | None, base: Path | None = None) -> float | None:
-    """Epoch seconds of the newest ASSISTANT record in ``cwd``'s active transcript.
+def last_assistant_activity_at(path: Path) -> float | None:
+    """Epoch seconds of the newest ASSISTANT record in the transcript at ``path``.
 
     "Did this agent actually do work, and by when?" — the evidence the decisions inbox
     uses to detect a completion it never sampled (see chela.inbox). ASSISTANT, not just
@@ -286,12 +286,14 @@ def last_assistant_activity(cwd: str | None, base: Path | None = None) -> float 
 
     Content-derived (the record's timestamp), not the file mtime — same reasoning as
     :func:`_last_record_ts`. Sidechains (sub-agent turns) are skipped: a finished task
-    always ends with a main-chain assistant turn. None when there is no transcript, no
-    assistant turn yet, or the timestamp is unparseable.
+    always ends with a main-chain assistant turn. None when there is no assistant turn
+    yet, the timestamp is unparseable, or ``path`` cannot be read.
+
+    Takes a resolved PATH, not a cwd — the caller (:func:`chela.inbox.did_work_since`)
+    already knows which window it is asking about, and a cwd cannot tell two windows in
+    one directory apart (see :mod:`chela.sessions`). Resolving here from a bare cwd would
+    reopen exactly that hole one call up.
     """
-    path = transcript_for_cwd(cwd, base=base)
-    if path is None:
-        return None
     rec = latest_record(path, lambda o: (
         o.get("type") == "assistant"
         and not o.get("isSidechain")
@@ -303,6 +305,20 @@ def last_assistant_activity(cwd: str | None, base: Path | None = None) -> float 
         return datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+def last_assistant_activity(cwd: str | None, base: Path | None = None) -> float | None:
+    """:func:`last_assistant_activity_at`, resolved from a cwd — the LAST RESORT.
+
+    ⚠️ Same caveat as :func:`transcript_for_cwd`: a cwd cannot tell two windows sharing
+    one directory apart. Kept for callers that genuinely have nothing but a directory;
+    a caller that has a window id should resolve via :mod:`chela.sessions` instead (see
+    :func:`chela.inbox.did_work_since`).
+    """
+    path = transcript_for_cwd(cwd, base=base)
+    if path is None:
+        return None
+    return last_assistant_activity_at(path)
 
 
 def _resolve_agent_transcript(agent_name: str, window_id: str | None = None) -> Path | None:

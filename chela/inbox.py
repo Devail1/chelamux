@@ -576,7 +576,7 @@ def pr_ref(pr_url: str | None) -> str:
 
 
 def did_work_since(wid: str, since: float) -> bool:
-    """Did this agent's transcript gain an ASSISTANT turn after ``since``?
+    """Did THIS window's transcript gain an ASSISTANT turn after ``since``?
 
     The completion evidence that makes detection independent of the poll rate. The
     busy→idle edge alone cannot see a task shorter than the sampling interval: a 15s
@@ -589,11 +589,27 @@ def did_work_since(wid: str, since: float) -> bool:
     work for THIS dispatch; combined with the window now being idle, it is finished.
     We require an *assistant* turn specifically: the dispatched prompt itself lands as
     a *user* record, so counting any activity would read "your prompt arrived" as "the
-    agent replied". Best-effort — no transcript (or an unreadable one) simply yields
-    False, leaving the busy→idle edge as the detector.
+    agent replied".
+
+    ⛔ Resolved by ``wid`` via :func:`chela.sessions.transcript_for_window`, NOT by cwd.
+    A cwd-keyed lookup (the original implementation) hands back whichever transcript in
+    that directory wrote the newest record — so a SIBLING window in the same cwd that
+    happens to still be mid-tool-call gets its assistant turn credited to the window this
+    watch is actually about, and an agent that has done no work at all is reported
+    "finished". Live-observed 2026-07-28 (CMX-191): ``@122`` was reported finished 38s
+    after dispatch, wedged between a `pre_tool_use` and its own matching `post_tool_use`
+    — provably still mid-tool-call, with no commit and no output to show for it. Same root
+    cause as CMX-190 (`read`/`peek`), same fix (resolve by window, refuse when the cwd is
+    ambiguous — see :mod:`chela.sessions`).
+
+    Best-effort — a window whose transcript cannot be resolved (no transcript yet, or the
+    cwd is shared and no stronger signal disambiguates it) simply yields False, leaving
+    the busy→idle edge as the detector.
     """
-    cwd = discovery.get_window_cwd_by_id(wid)
-    last = transcripts.last_assistant_activity(cwd)
+    path = sessions.transcript_for_window(wid)
+    if path is None:
+        return False
+    last = transcripts.last_assistant_activity_at(path)
     return last is not None and last > since
 
 

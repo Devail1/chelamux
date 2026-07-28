@@ -47,8 +47,7 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
     monkeypatch.delenv("CHELA_ORCHESTRATOR_WID", raising=False)
     monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
-    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity", lambda cwd: None)
-    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: f"/proj/{wid}")
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", lambda wid: None)
     return tmp_path / "inbox.json"
 
 

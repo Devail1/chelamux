@@ -234,7 +234,7 @@ def live_inbox(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
     monkeypatch.delenv("CHELA_ORCHESTRATOR_WID", raising=False)
     monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
-    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity", lambda cwd: None)
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", lambda wid: None)
     monkeypatch.setattr(inbox.notify, "enabled", lambda: False)   # no phone push from a test
 
     statuses: dict[str, str] = {}
