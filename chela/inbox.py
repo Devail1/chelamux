@@ -152,6 +152,20 @@ SETTLED_RUN_STATES = ("awaiting_review", "changes_requested", "needs_human", "do
 # gone only STAMPS it; the claim is made a tick later, re-reading the run state.
 DEATH_CONFIRM_SECONDS = 30
 
+# How long a watched window must read `idle` CONTINUOUSLY before "idle" is trusted for a
+# finished decision. `now == IDLE` is one sample of Claude Code's own native status, and
+# that status can read `idle` for a single tick in the GAP BETWEEN TWO TOOL CALLS of an
+# agent that is nowhere near done — observed live 2026-07-28 (CMX-193): a `finished` fired
+# mid-task, because idle was sampled in exactly that gap rather than at genuine end-of-turn.
+# CMX-191 fixed WHOSE work `did_work_since` credits; this fixes WHETHER `idle` itself can be
+# believed on sight — the scoping call in CMX-191's own ticket ("do not touch the busy→idle
+# edge detector") was wrong, and this is the fourth bug in the family to prove it. The fix
+# mirrors `gone_since`/DEATH_CONFIRM_SECONDS immediately below: the first idle sample only
+# stamps `idle_since`, and "idle" only counts once it has held for this long without a busy
+# sample in between. A window that goes back to busy before then clears the stamp — it was
+# mid-task, not done — and the confirmation restarts from scratch on its next idle sample.
+IDLE_CONFIRM_SECONDS = 30
+
 # A run's `title` is the WHOLE tracker line — for this repo, a multi-paragraph brief
 # with landmines and references. It is a task body, not a notification: pushing it
 # verbatim pasted an essay into the orchestrator's window. The summary carries this
@@ -773,6 +787,13 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
     registered (:func:`did_work_since`) is also finished. The evidence path needs no
     baseline at all, which is why it also survives a daemon restart mid-task.
 
+    ⛔ Neither path trusts a single ``now == IDLE`` sample — see ``IDLE_CONFIRM_SECONDS``.
+    Claude Code's own native status can read ``idle`` for one tick in the gap between two
+    tool calls of a still-running agent (CMX-193), so "idle" only counts once it has held,
+    with no busy sample in between, for the confirm window. This writes ``idle_since`` back
+    onto the watch, cleared the instant a busy sample is seen — the same stamp-then-confirm
+    shape as ``gone_since`` just below.
+
     A window that is GONE is corroborated against ``runs`` (see :func:`_gone_event`)
     rather than being called dead on sight, and only after ``DEATH_CONFIRM_SECONDS``,
     so the run row racing the window's exit cannot produce a false death. This writes
@@ -827,12 +848,30 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
 
         meta["name"] = names[wid]         # keep the id→name link fresh while it lives
         meta.pop("gone_since", None)      # it came back (or tmux blipped) — not gone
-        store["watches"][wid] = meta
         name = names[wid]
-        finished_edge = was == BUSY and now == IDLE
-        # The not-missed path: idle now, and the transcript proves it worked for us.
-        # Gated on `idle` so an agent still mid-task (busy/waiting) is never called done.
-        finished_evidence = now == IDLE and did_work_since(wid, since)
+
+        # ⛔ A lone `now == IDLE` sample is not proof this watch is done — see
+        # IDLE_CONFIRM_SECONDS. Stamp-then-confirm, exactly like `gone_since` above: the
+        # first idle sample only records when the idle run STARTED; a busy sample at any
+        # point resets it, because that idle run was a blip in an ongoing task, not the end
+        # of one.
+        if now == IDLE:
+            if not meta.get("idle_since"):
+                meta["idle_since"] = now_ts   # first sample only stamps; never decides
+        else:
+            meta.pop("idle_since", None)      # busy/waiting again — that idle was a blip
+        store["watches"][wid] = meta
+        idle_since = meta.get("idle_since")
+        confirmed_idle = (
+            now == IDLE and idle_since is not None
+            and now_ts - idle_since >= IDLE_CONFIRM_SECONDS
+        )
+
+        finished_edge = was == BUSY and confirmed_idle
+        # The not-missed path: confirmed idle, and the transcript proves it worked for us.
+        # Gated on confirmed idle so an agent still mid-task — busy, waiting, or merely
+        # caught in the gap between two tool calls — is never called done.
+        finished_evidence = confirmed_idle and did_work_since(wid, since)
         if finished_edge or finished_evidence:
             out.append(_event("finished",
                               _line(wid, name, "finished the task you dispatched — "
