@@ -41,6 +41,7 @@ let DISPATCHER_RESPONSE;
 let DISPATCHER_REJECT;
 let SUBSCRIBE_RESPONSE;
 let AGENTS_RESPONSE;   // CMX-194 rework: what /api/agents returns, for the cache-priming tests
+let AGENTS_REJECT;     // CMX-194 round 7: make /api/agents fail, to take _render's catch
 let SUBSCRIBE_GATE;    // CMX-194 round 3: a promise that holds the subscribe response open, or null
 
 before(async () => {
@@ -70,6 +71,7 @@ before(async () => {
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(DISPATCHER_RESPONSE) });
         }
         if (path.includes('/api/agents')) {
+            if (AGENTS_REJECT) return Promise.reject(new Error('agents unreachable'));
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(AGENTS_RESPONSE) });
         }
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(LOG_RESPONSE) });
@@ -89,6 +91,7 @@ beforeEach(() => {
     DISPATCHER_REJECT = false;
     SUBSCRIBE_RESPONSE = { ok: true, wid: '@9', name: 'agent-9', state: 'ok', why: '', queued: 0 };
     AGENTS_RESPONSE = [];
+    AGENTS_REJECT = false;
     SUBSCRIBE_GATE = null;             // module-level state — never leak a held response across tests
     util.setAgentsCache([]);           // module-level state — never leak a fleet across tests
     decisions.setDecisionsQuery('');   // module-level state — never leak a query across tests
@@ -173,9 +176,17 @@ const reregEmpty = () => document.querySelector('.decisions-chip-rereg-empty');
 //       => reregBtn() is null, throws before any of the above
 //   - reregisterOrchestrator dropped from Object.assign(window.chela, {...})
 //       => chela.reregisterOrchestrator is undefined, throws a TypeError at call time
+// ⚠️ Mirrors the browser on `disabled` too. Compiling the onclick attribute
+// invokes the handler regardless of the attribute, so before round 7 a button
+// rendered permanently disabled still "clicked" here — the suite could not
+// tell a live control from a dead one. A real click on a disabled button never
+// reaches the handler, so neither does this: it throws instead, because every
+// caller is asserting a click that WORKS, and silently doing nothing would just
+// move the lie one level down.
 function clickReregisterButton() {
     const btn = reregBtn();
     if (!btn) throw new Error('re-register button is not rendered');
+    if (btn.disabled) throw new Error('re-register button is DISABLED — a real click would not reach the handler');
     const onclick = btn.getAttribute('onclick') || '';
     return new Function('chela', `return (${onclick})`)(window.chela);
 }
@@ -203,6 +214,15 @@ test('a dangling chip with a live session offers a re-register picker, not a dis
     // click became a no-op.
     assert.match(reregBtn().getAttribute('onclick'), /chela\.reregisterOrchestrator\(\)/,
         'the re-register button is not wired to chela.reregisterOrchestrator()');
+    // 🔴 GUARD: and it must be CLICKABLE. Round 6 moved the in-flight disable
+    // into the rendered markup, which is right — but every disabled assertion
+    // reads `true` mid-flight or `false` on a node the `finally` already
+    // touched by hand, so nothing pinned the idle arm. Rendering ' disabled'
+    // unconditionally left in-flight semantics intact and the control the whole
+    // PR exists for permanently dead, on every re-render, with no error
+    // anywhere.
+    assert.equal(reregBtn().disabled, false,
+        'a freshly rendered button with nothing in flight must be clickable');
 });
 
 test('🔴 GUARD: an ok/unregistered/unstamped chip never shows the re-register control', async () => {
@@ -310,6 +330,33 @@ test('🔴 GUARD: a HEALTHY chip never fetches /api/agents — the cache fill is
 
     assert.ok(!requests.some(r => r.includes('/api/agents')),
         'a healthy address must not trigger the candidate refetch — that would poll on every render');
+});
+
+// 🔴 GUARD (CMX-194 round 7): the try/catch around that fetch states its own
+// invariant — "transient — the picker just stays on the empty state until the
+// next render" — and nothing asserted it, because the test double resolved
+// /api/agents unconditionally. The blast radius is the whole panel, not just
+// the picker: the fetch sits BEFORE _renderDot/_renderBadge/the chip swap/the
+// list render, and _refreshLog now `await`s _render, so an escaping rejection
+// propagates out of enterDecisions/tickDecisions/onDecisionsLogDelta unhandled
+// and the panel goes dark. Exclusively on a recoverable state — i.e. precisely
+// when the operator opened it to fix a broken address, and a server restart is
+// both a cause of dangling AND a plausible cause of a failing /api/agents.
+test('🔴 GUARD: a failing /api/agents leaves the panel rendering — the fill is best-effort, not load-bearing', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{ seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review', payload: {} }],
+    };
+    AGENTS_REJECT = true;
+
+    await decisions.enterDecisions();   // must not reject
+
+    assert.ok(chip(), 'the chip must still render when the candidate fetch fails');
+    assert.equal(chip().className, 'decisions-chip decisions-chip-bad',
+        'the dangling state must still be visible — the panel must not go dark');
+    assert.equal(rows().length, 1, 'the decisions list must still render');
+    assert.ok(reregEmpty(), 'no candidates could be fetched, so the empty state shows — and the panel stays usable');
 });
 
 // ⚠️ FIXTURE REQUIREMENT — the selected wid must NOT be options[0]. Candidates
