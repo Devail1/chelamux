@@ -41,6 +41,7 @@ let DISPATCHER_RESPONSE;
 let DISPATCHER_REJECT;
 let SUBSCRIBE_RESPONSE;
 let AGENTS_RESPONSE;   // CMX-194 rework: what /api/agents returns, for the cache-priming tests
+let SUBSCRIBE_GATE;    // CMX-194 round 3: a promise that holds the subscribe response open, or null
 
 before(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
@@ -55,7 +56,11 @@ before(async () => {
         requests.push(path);
         if (path.includes('/api/orchestrator/subscribe')) {
             if (opts && opts.body) subscribeBodies.push(JSON.parse(opts.body));
-            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SUBSCRIBE_RESPONSE) });
+            const respond = () => ({ ok: true, status: 200, json: () => Promise.resolve(SUBSCRIBE_RESPONSE) });
+            // SUBSCRIBE_GATE lets a test hold the response open and observe the
+            // handler MID-flight (the disabled-button guard below). Null — the
+            // default — resolves immediately, exactly as before.
+            return SUBSCRIBE_GATE ? SUBSCRIBE_GATE.then(respond) : Promise.resolve(respond());
         }
         if (path.includes('/api/orchestrator/status')) {
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(STATUS_RESPONSE) });
@@ -84,6 +89,7 @@ beforeEach(() => {
     DISPATCHER_REJECT = false;
     SUBSCRIBE_RESPONSE = { ok: true, wid: '@9', name: 'agent-9', state: 'ok', why: '', queued: 0 };
     AGENTS_RESPONSE = [];
+    SUBSCRIBE_GATE = null;             // module-level state — never leak a held response across tests
     util.setAgentsCache([]);           // module-level state — never leak a fleet across tests
     decisions.setDecisionsQuery('');   // module-level state — never leak a query across tests
     delete window.chela.openTaskModal;
@@ -303,6 +309,64 @@ test('🔴 GUARD: a refused re-register leaves the dangling chip visibly danglin
         'a refused subscribe must not quietly clear the dangling state from the chip');
     assert.ok(reregBtn(), 'the retry control must still be there after a refusal');
     assert.equal(reregBtn().disabled, false, 'the button must re-enable after the attempt settles');
+});
+
+// 🔴 GUARD (CMX-194 round 3, judge experiment 1): the assertion above —
+// `disabled === false` AFTER the promise settles — is tautologically green.
+// It fires once the `finally` has run, when the flag reads false whether or
+// not it was ever set, so mutating `btn.disabled = true` to `= false` kept
+// the whole suite passing. The disable exists to stop a SECOND take-over
+// being fired by a second click while the first is still in flight, so it
+// has to be observed WHILE in flight. SUBSCRIBE_GATE holds the response open
+// so there is a mid-flight moment to look at; the assertion after the gate is
+// released keeps the `finally` covered, which is a different invariant.
+test('🔴 GUARD: the re-register button is DISABLED while the subscribe is in flight', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    util.setAgentsCache([{ window_id: '@5', name: 'liavedunix', claude_running: true }]);
+    await decisions.enterDecisions();
+    let release;
+    SUBSCRIBE_GATE = new Promise(resolve => { release = resolve; });
+    SUBSCRIBE_RESPONSE = { ok: true, wid: '@5', name: 'liavedunix', state: 'ok', why: '', queued: 0 };
+
+    const inFlight = decisions.reregisterOrchestrator();   // deliberately NOT awaited
+    await Promise.resolve();                               // let the handler reach its first await
+
+    assert.equal(reregBtn().disabled, true,
+        'the button must be disabled while the subscribe is in flight — a second click would fire a second take-over');
+
+    release();
+    await inFlight;
+
+    assert.equal(chip().className, 'decisions-chip decisions-chip-ok',
+        'the settled subscribe must still repaint the chip green');
+});
+
+// 🔴 GUARD (CMX-194 round 3, judge's non-blocking note taken): nothing
+// asserted WHICH candidate is pre-selected — both multi-candidate tests set
+// `.value` explicitly and both tests reading `.value` had a single candidate,
+// so reversing the comparator (or dropping the window_id tiebreak) stayed
+// green. The pre-selected option is what a user subscribes if they click
+// straight away, so the ordering is not cosmetic. Two windows share a name
+// here on purpose — that is the live shape on the dogfood box
+// (`liavedunix` / `liavedunix-2` in one cwd) and the only case the tiebreak
+// exists for.
+test('🔴 GUARD: the pre-selected candidate is first in sort order — clicking straight away subscribes THAT one', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    util.setAgentsCache([
+        { window_id: '@5', name: 'liavedunix', claude_running: true },
+        { window_id: '@6', name: 'agent-b', claude_running: true },
+        { window_id: '@4', name: 'agent-b', claude_running: true },   // same name → window_id breaks the tie
+    ]);
+    await decisions.enterDecisions();
+
+    assert.deepEqual([...reregSelect().options].map(o => o.value), ['@4', '@6', '@5'],
+        'candidates must be ordered by name, then by window_id');
+    assert.equal(reregSelect().value, '@4', 'the default selection must be the first candidate in sort order');
+
+    await decisions.reregisterOrchestrator();
+
+    assert.equal(subscribeBodies[0].wid, '@4',
+        'a click without touching the picker must subscribe the pre-selected candidate');
 });
 
 test('🔴 GUARD: the log fetch is scoped to decision kinds, not the whole firehose', async () => {
