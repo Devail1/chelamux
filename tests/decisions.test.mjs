@@ -40,6 +40,7 @@ let STATUS_RESPONSE;
 let DISPATCHER_RESPONSE;
 let DISPATCHER_REJECT;
 let SUBSCRIBE_RESPONSE;
+let AGENTS_RESPONSE;   // CMX-194 rework: what /api/agents returns, for the cache-priming tests
 
 before(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
@@ -63,6 +64,9 @@ before(async () => {
             if (DISPATCHER_REJECT) return Promise.reject(new Error('dispatcher unreachable'));
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(DISPATCHER_RESPONSE) });
         }
+        if (path.includes('/api/agents')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(AGENTS_RESPONSE) });
+        }
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(LOG_RESPONSE) });
     };
     globalThis.window.chela = globalThis.window.chela || {};
@@ -79,6 +83,7 @@ beforeEach(() => {
     DISPATCHER_RESPONSE = { configured: true, workflows: [] };   // no match — the common "not found" case
     DISPATCHER_REJECT = false;
     SUBSCRIBE_RESPONSE = { ok: true, wid: '@9', name: 'agent-9', state: 'ok', why: '', queued: 0 };
+    AGENTS_RESPONSE = [];
     util.setAgentsCache([]);           // module-level state — never leak a fleet across tests
     decisions.setDecisionsQuery('');   // module-level state — never leak a query across tests
     delete window.chela.openTaskModal;
@@ -143,6 +148,32 @@ const reregSelect = () => document.querySelector('#decisions-reregister-wid');
 const reregBtn = () => document.querySelector('.decisions-chip-rereg-btn');
 const reregEmpty = () => document.querySelector('.decisions-chip-rereg-empty');
 
+// Drives the RENDERED button, not the module export. jsdom (no
+// runScripts:"dangerously" — deliberately unset here, see the WIRING GUARD
+// below) never executes inline onclick="..." attributes on a real
+// dispatchEvent('click') — verified directly: dispatching a click at a bare
+// `onclick="window.__hit=1"` button left `__hit` at 0. So a literal
+// `.dispatchEvent(new MouseEvent('click'))` would prove nothing here; it
+// would silently no-op under every one of the three corruption cuts below,
+// which is worse than not having the test. Instead this reads the ACTUAL
+// onclick attribute string off the rendered button and compiles+runs exactly
+// that source against the ACTUAL `window.chela` surface — the same two
+// things a real click would go through (attribute -> window.chela ->
+// function), just compiled by this test instead of by jsdom's HTML parser.
+// That makes it fail under all three cuts the judge named:
+//   - onclick="chela.reregisterOrchestrator()" -> onclick=""
+//       => `new Function('chela', 'return ()')` is a SyntaxError at compile time
+//   - _reregisterHtml(s) dropped from _chipHtml
+//       => reregBtn() is null, throws before any of the above
+//   - reregisterOrchestrator dropped from Object.assign(window.chela, {...})
+//       => chela.reregisterOrchestrator is undefined, throws a TypeError at call time
+function clickReregisterButton() {
+    const btn = reregBtn();
+    if (!btn) throw new Error('re-register button is not rendered');
+    const onclick = btn.getAttribute('onclick') || '';
+    return new Function('chela', `return (${onclick})`)(window.chela);
+}
+
 test('a dangling chip with a live session offers a re-register picker, not a dismiss', async () => {
     STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
     util.setAgentsCache([
@@ -194,6 +225,28 @@ test('a dangling chip with NO live Claude session says so, and offers no button 
         'the empty-state span exists but does not say there is no live session to re-register to');
 });
 
+// 🔴 GUARD (CMX-194 rework round 2): _reregisterCandidates() reads
+// _agentsCache but this popover never populates it itself — sse.js blanks it
+// on any window spawn/kill and only refetches while the agents/terminals tab
+// is active. An EMPTY cache must not be reported as "no live Claude session"
+// — that's a lie the picker is specifically here to avoid. Cache starts
+// empty (beforeEach's util.setAgentsCache([])) and is deliberately left that
+// way here; only AGENTS_RESPONSE is primed, so this only goes green if
+// decisions.js itself fetches /api/agents before deciding there are no
+// candidates.
+test('a dangling chip with an EMPTY cache fetches /api/agents before claiming there is no live session', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    AGENTS_RESPONSE = [{ window_id: '@5', name: 'liavedunix', claude_running: true }];
+    await decisions.enterDecisions();
+
+    assert.ok(requests.some(r => r.includes('/api/agents')),
+        'an empty cache on a recoverable state must trigger a fetch to /api/agents');
+    assert.ok(reregSelect(), 'the fetched candidate must render the picker');
+    assert.equal(reregSelect().value, '@5');
+    assert.equal(reregEmpty(), null,
+        'a live candidate came back from the fetch — the empty-state message must not render');
+});
+
 test('clicking re-register subscribes the selected window as the new orchestrator', async () => {
     STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 2 };
     util.setAgentsCache([
@@ -212,6 +265,30 @@ test('clicking re-register subscribes the selected window as the new orchestrato
     // actually fixes the address rather than just hiding the complaint.
     assert.equal(chip().className, 'decisions-chip decisions-chip-ok');
     assert.ok(chip().textContent.includes('@6'));
+});
+
+// 🔴 GUARD (CMX-194 rework round 2, judge experiment 1 + the untested-but-
+// implied third cut): the test above calls decisions.reregisterOrchestrator()
+// as a module export directly — it proves the HANDLER's logic is right, but
+// not that a real click ever REACHES the handler. This test drives the
+// rendered button via clickReregisterButton() (see its doc comment for why
+// that's not a literal dispatchEvent) so the full onclick -> window.chela ->
+// function path is exercised, not just asserted as source text.
+test('🔴 GUARD: the RENDERED button, not the module export, reaches chela.reregisterOrchestrator() and subscribes', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 2 };
+    util.setAgentsCache([
+        { window_id: '@5', name: 'liavedunix', claude_running: true },
+        { window_id: '@6', name: 'agent-b', claude_running: true },
+    ]);
+    await decisions.enterDecisions();
+    reregSelect().value = '@6';
+    SUBSCRIBE_RESPONSE = { ok: true, wid: '@6', name: 'agent-b', state: 'ok', why: '', queued: 2 };
+
+    await clickReregisterButton();
+
+    assert.equal(subscribeBodies.length, 1, 'the rendered button must POST to /api/orchestrator/subscribe exactly once');
+    assert.equal(subscribeBodies[0].wid, '@6', 'must subscribe the SELECTED window, not the old dangling one');
+    assert.equal(chip().className, 'decisions-chip decisions-chip-ok');
 });
 
 test('🔴 GUARD: a refused re-register leaves the dangling chip visibly dangling, not silently cleared', async () => {

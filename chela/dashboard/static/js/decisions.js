@@ -55,7 +55,7 @@
 //      last_error — see chela/inbox.py), but visibly marked partial rather
 //      than rendering "No brief recorded" as if the run genuinely had none.
 // ---------------------------------------------------------------------------
-import { $, _agentsCache, api, escHtml } from './util.js';
+import { $, _agentsCache, api, escHtml, setAgentsCache } from './util.js';
 import { CLASSES, classOf, drainLog } from './feedmodel.js';
 import {
     filterDecisionEvents, findDispatcherRun, formatUnreadCount, itemFromDecisionPayload,
@@ -138,7 +138,7 @@ async function _refreshLog(reset = false) {
     } finally {
         _inflight = false;
     }
-    _render();
+    await _render();
 }
 
 // The one-time page-load seed (main.js) — a fresh read of both the owner and
@@ -194,8 +194,28 @@ function _reregisterCandidates() {
     return (_agentsCache || [])
         .filter(a => a && a.window_id && a.claude_running)
         .slice()
-        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))
+            || String(a.window_id).localeCompare(String(b.window_id)));
 }
+
+// _reregisterCandidates() above reads _agentsCache but never populates it —
+// sse.js:32 blanks the cache on ANY window spawn/kill and only refetches
+// while the agents/terminals tab is active, so on any other tab an empty
+// cache silently persists until the next refresh() tick (REFRESH_MS=30000).
+// An empty cache is indistinguishable from "no live sessions", which is
+// exactly the wrong lie for the control meant to recover a dead address to
+// tell. Same pattern as terminals.js:1503 (renderTerminals): only refetch
+// when the state is actually recoverable AND the cache is empty — never a
+// second poller, just an opportunistic fill on the render path that's about
+// to need it. Folded straight into _render (below) rather than pulled into
+// its own always-async helper: `await someAsyncFn()` yields a microtask tick
+// even when that function's body never itself awaits anything, which would
+// silently make _render's DOM update land a tick late for EVERY render, not
+// just the recoverable-and-empty one — and setDecisionsQuery/_markSeen's
+// callers rely on _render finishing synchronously when there's nothing to
+// fetch. Awaiting only inside the `if` keeps that guarantee: no branch taken
+// means no await reached means the rest of _render still runs to completion
+// before this call returns, exactly as before this fix.
 
 function _reregisterHtml(s) {
     if (!RECOVERABLE_STATES.has(s.state)) return '';
@@ -376,7 +396,13 @@ function _markSeen() {
     _renderBadge();
 }
 
-function _render() {
+async function _render() {
+    const _s = orchestratorState();
+    if (RECOVERABLE_STATES.has(_s.state) && !(_agentsCache && _agentsCache.length)) {
+        try {
+            setAgentsCache(await api('/api/agents'));
+        } catch (e) { /* transient — the picker just stays on the empty state until the next render */ }
+    }
     _renderDot();
     _renderBadge();
     const chip = $('#decisions-chip');
