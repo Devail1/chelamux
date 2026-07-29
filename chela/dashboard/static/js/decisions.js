@@ -55,13 +55,15 @@
 //      last_error — see chela/inbox.py), but visibly marked partial rather
 //      than rendering "No brief recorded" as if the run genuinely had none.
 // ---------------------------------------------------------------------------
-import { $, api, escHtml } from './util.js';
+import { $, _agentsCache, api, escHtml } from './util.js';
 import { CLASSES, classOf, drainLog } from './feedmodel.js';
 import {
     filterDecisionEvents, findDispatcherRun, formatUnreadCount, itemFromDecisionPayload,
     maxSeq, partialItemFromDecisionPayload, seedLastSeen, unreadCount, unreadUrgency,
 } from './decisionsmodel.js';
-import { onOrchestratorChange, orchestratorState, refreshOrchestratorStatus } from './orchestrator.js';
+import {
+    onOrchestratorChange, orchestratorState, orchestratorSubscribe, refreshOrchestratorStatus,
+} from './orchestrator.js';
 
 const LAST_SEEN_KEY = 'chela.decisions.lastSeen';
 
@@ -170,6 +172,50 @@ const CHIP_META = {
     unstamped: { glyph: '◐', word: 'unverified', cls: 'warn' },
 };
 
+// A dangling/gone address has no self-heal path left (chela/inbox.py's
+// resolve_heal only re-resolves a RENUMBERED window — after a reboot the old
+// session is simply gone, so nothing left in the process can fix this). The
+// only way out was, until now, a HUMAN typing `chela watch` in a shell. This
+// is that same fix — `chela.inbox.register` via /api/orchestrator/subscribe
+// (orchestratorSubscribe, already used by the per-pane "⊙ Orchestrator"
+// toggle in terminals.js) — reachable from the chip itself, so the fix is one
+// click away from the exact place that reports the problem. Deliberately NOT
+// a dismiss: there is no way to suppress this chip without either building
+// persistent state (which the NEXT dangling address would then also hide
+// behind — the fail-open shape this repo keeps paying for) or actually fixing
+// the address, which is what this does instead.
+const RECOVERABLE_STATES = new Set(['dangling', 'gone']);
+
+// Only a window with a LIVE Claude session can usefully hold the role — the
+// inbox writes prompt text into it (chela/inbox.py::deliver). `chela/
+// dashboard/app.py`'s /api/agents stamps this as `claude_running`; a bare
+// shell window would just accumulate the queue behind a second dead address.
+function _reregisterCandidates() {
+    return (_agentsCache || [])
+        .filter(a => a && a.window_id && a.claude_running)
+        .slice()
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+}
+
+function _reregisterHtml(s) {
+    if (!RECOVERABLE_STATES.has(s.state)) return '';
+    const candidates = _reregisterCandidates();
+    if (!candidates.length) {
+        return '<div class="decisions-chip-reregister">'
+            + '<span class="decisions-chip-rereg-empty">no live Claude session to re-register — open one, then retry</span>'
+            + '</div>';
+    }
+    const options = candidates.map(a =>
+        `<option value="${escHtml(a.window_id)}">${escHtml(a.name || a.window_id)} (${escHtml(a.window_id)})</option>`
+    ).join('');
+    return `<div class="decisions-chip-reregister">
+        <select class="decisions-chip-rereg-select" id="decisions-reregister-wid"
+                title="The live session that should receive the decisions inbox">${options}</select>
+        <button type="button" class="decisions-chip-rereg-btn" onclick="chela.reregisterOrchestrator()"
+                title="Register the selected session as the orchestrator — the same take-over &#39;chela watch&#39; does from a shell">↻ Re-register</button>
+    </div>`;
+}
+
 function _chipHtml() {
     const s = orchestratorState();
     const meta = CHIP_META[s.state] || CHIP_META.unregistered;
@@ -181,7 +227,31 @@ function _chipHtml() {
         <span class="decisions-chip-who">${who}</span>
         ${queued}
         ${why}
+        ${_reregisterHtml(s)}
     </div>`;
+}
+
+// Wired to the chip's "↻ Re-register" button (only rendered while the address
+// is dangling/gone — see _reregisterHtml). Takes over the single orchestrator
+// slot with whatever live session the dropdown names; orchestratorSubscribe
+// applies the result to the shared status and fires onOrchestratorChange,
+// which is what actually repaints this chip back to `ok` — this function
+// itself only re-renders to reflect a disabled-button/failed-click state,
+// never assumes success.
+async function reregisterOrchestrator() {
+    const sel = $('#decisions-reregister-wid');
+    const wid = sel && sel.value;
+    if (!wid) return;
+    const btn = document.querySelector('.decisions-chip-rereg-btn');
+    if (btn) btn.disabled = true;
+    try {
+        const result = await orchestratorSubscribe(wid);
+        if (!result || !result.ok) {
+            console.error('re-register failed', result && result.error);
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 function _ts(e) {
@@ -390,9 +460,11 @@ function hideDecisionsMenu() {
 // --- Stage 0: ES-module exports ---
 export {
     DECISION_TYPES, enterDecisions, hideDecisionsMenu, onDecisionsLogDelta,
-    openDecisionsMenu, openDecisionTicket, setDecisionsQuery, tickDecisions,
+    openDecisionsMenu, openDecisionTicket, reregisterOrchestrator, setDecisionsQuery, tickDecisions,
 };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { hideDecisionsMenu, openDecisionsMenu, openDecisionTicket, setDecisionsQuery });
+Object.assign(window.chela, {
+    hideDecisionsMenu, openDecisionsMenu, openDecisionTicket, reregisterOrchestrator, setDecisionsQuery,
+});

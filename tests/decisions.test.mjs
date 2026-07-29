@@ -32,12 +32,14 @@ const BODY = `<button id="btn-decisions"></button>
   <div class="decisions-list" id="decisions-list"></div>
 </div>`;
 
-let decisions, orchestrator;
+let decisions, orchestrator, util;
 let requests;
+let subscribeBodies;   // bodies of every POST to /api/orchestrator/subscribe, in order
 let LOG_RESPONSE;
 let STATUS_RESPONSE;
 let DISPATCHER_RESPONSE;
 let DISPATCHER_REJECT;
+let SUBSCRIBE_RESPONSE;
 
 before(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
@@ -47,9 +49,13 @@ before(async () => {
             value: dom.window[k], writable: true, configurable: true,
         });
     }
-    globalThis.fetch = (url) => {
+    globalThis.fetch = (url, opts) => {
         const path = String(url);
         requests.push(path);
+        if (path.includes('/api/orchestrator/subscribe')) {
+            if (opts && opts.body) subscribeBodies.push(JSON.parse(opts.body));
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SUBSCRIBE_RESPONSE) });
+        }
         if (path.includes('/api/orchestrator/status')) {
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(STATUS_RESPONSE) });
         }
@@ -60,16 +66,20 @@ before(async () => {
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(LOG_RESPONSE) });
     };
     globalThis.window.chela = globalThis.window.chela || {};
+    util = await import('../chela/dashboard/static/js/util.js');
     orchestrator = await import('../chela/dashboard/static/js/orchestrator.js');
     decisions = await import('../chela/dashboard/static/js/decisions.js');
 });
 
 beforeEach(() => {
     requests = [];
+    subscribeBodies = [];
     STATUS_RESPONSE = { wid: null, name: null, state: 'unregistered', why: '', queued: 0 };
     LOG_RESPONSE = { boot_id: 'b1', events: [], gap: null, first_seq: 0, last_seq: 0, next_seq: 0 };
     DISPATCHER_RESPONSE = { configured: true, workflows: [] };   // no match — the common "not found" case
     DISPATCHER_REJECT = false;
+    SUBSCRIBE_RESPONSE = { ok: true, wid: '@9', name: 'agent-9', state: 'ok', why: '', queued: 0 };
+    util.setAgentsCache([]);           // module-level state — never leak a fleet across tests
     decisions.setDecisionsQuery('');   // module-level state — never leak a query across tests
     delete window.chela.openTaskModal;
     decisions.hideDecisionsMenu();     // closes it AND tears down any dismiss listener from the prior test
@@ -119,6 +129,87 @@ test('a dangling/gone owner is a visibly BAD chip, not a quiet green one', async
     // the class above still says "bad".
     assert.ok(chip().textContent.includes('✕'),
         'the dangling/gone chip carries no non-colour glyph — indistinguishable from OK without colour');
+});
+
+// --- CMX-194: dangling/gone re-register (NOT a dismiss) -----------------------
+//
+// A dangling/gone orchestrator address has no self-heal path left (chela/
+// inbox.py's resolve_heal only re-resolves a RENUMBERED window, not one whose
+// session is actually gone — e.g. after a reboot). Liav asked for a "dismiss"
+// button; the fix is a RE-REGISTER control instead — it must stay on screen
+// until the address is actually fixed, never silenced.
+
+const reregSelect = () => document.querySelector('#decisions-reregister-wid');
+const reregBtn = () => document.querySelector('.decisions-chip-rereg-btn');
+const reregEmpty = () => document.querySelector('.decisions-chip-rereg-empty');
+
+test('a dangling chip with a live session offers a re-register picker, not a dismiss', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    util.setAgentsCache([
+        { window_id: '@5', name: 'liavedunix', claude_running: true },
+    ]);
+    await decisions.enterDecisions();
+
+    assert.ok(reregSelect(), 'a dangling chip with a live candidate must offer the re-register select');
+    assert.ok(reregBtn(), 'a dangling chip with a live candidate must offer the re-register button');
+    assert.equal(reregSelect().value, '@5');
+    // 🔴 GUARD: no dismiss affordance anywhere in the chip — the chip must
+    // still say "dangling", not be hidable while the address stays broken.
+    assert.ok(chip().textContent.includes('dangling'));
+});
+
+test('🔴 GUARD: an ok/unregistered/unstamped chip never shows the re-register control', async () => {
+    for (const state of ['ok', 'unregistered', 'unstamped']) {
+        STATUS_RESPONSE = { wid: '@5', name: 'x', state, why: '', queued: 0 };
+        util.setAgentsCache([{ window_id: '@5', name: 'x', claude_running: true }]);
+        await decisions.enterDecisions();
+        assert.equal(reregSelect(), null, `state=${state} must not render the re-register select`);
+        assert.equal(reregBtn(), null, `state=${state} must not render the re-register button`);
+    }
+});
+
+test('a dangling chip with NO live Claude session says so, and offers no button to click', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'gone', why: 'no claude running', queued: 0 };
+    util.setAgentsCache([{ window_id: '@2', name: 'shell-only', claude_running: false }]);
+    await decisions.enterDecisions();
+
+    assert.equal(reregSelect(), null, 'no live candidate — nothing to select');
+    assert.equal(reregBtn(), null, 'no live candidate — nothing to click');
+    assert.ok(reregEmpty(), 'must say explicitly that there is no live session to re-register to');
+});
+
+test('clicking re-register subscribes the selected window as the new orchestrator', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 2 };
+    util.setAgentsCache([
+        { window_id: '@5', name: 'liavedunix', claude_running: true },
+        { window_id: '@6', name: 'agent-b', claude_running: true },
+    ]);
+    await decisions.enterDecisions();
+    reregSelect().value = '@6';
+    SUBSCRIBE_RESPONSE = { ok: true, wid: '@6', name: 'agent-b', state: 'ok', why: '', queued: 2 };
+
+    await decisions.reregisterOrchestrator();
+
+    assert.equal(subscribeBodies.length, 1, 'clicking re-register must POST to /api/orchestrator/subscribe exactly once');
+    assert.equal(subscribeBodies[0].wid, '@6', 'must subscribe the SELECTED window, not the old dangling one');
+    // The chip must now reflect the new live owner — proving the control
+    // actually fixes the address rather than just hiding the complaint.
+    assert.equal(chip().className, 'decisions-chip decisions-chip-ok');
+    assert.ok(chip().textContent.includes('@6'));
+});
+
+test('🔴 GUARD: a refused re-register leaves the dangling chip visibly dangling, not silently cleared', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    util.setAgentsCache([{ window_id: '@5', name: 'liavedunix', claude_running: true }]);
+    await decisions.enterDecisions();
+    SUBSCRIBE_RESPONSE = { ok: false, error: 'no such window: @5' };
+
+    await decisions.reregisterOrchestrator();
+
+    assert.equal(chip().className, 'decisions-chip decisions-chip-bad',
+        'a refused subscribe must not quietly clear the dangling state from the chip');
+    assert.ok(reregBtn(), 'the retry control must still be there after a refusal');
+    assert.equal(reregBtn().disabled, false, 'the button must re-enable after the attempt settles');
 });
 
 test('🔴 GUARD: the log fetch is scoped to decision kinds, not the whole firehose', async () => {

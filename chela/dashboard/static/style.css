@@ -3757,6 +3757,20 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .decisions-chip-who { color: var(--text); font-weight: 600; }
 .decisions-chip-queued { color: var(--text-dim); }
 .decisions-chip-why { color: var(--text-dim); width: 100%; }
+/* The dangling/gone re-register control (decisions.js's _reregisterHtml) —
+   the fix for an address self-heal cannot reach (a reboot, not a renumbering:
+   chela/inbox.py's resolve_heal only covers the latter). Deliberately NOT a
+   dismiss: it stays on screen until the address is actually fixed, one click
+   away, rather than offering to hide a real undeliverable-queue condition. */
+.decisions-chip-reregister { display: flex; align-items: center; gap: 6px; width: 100%; }
+.decisions-chip-rereg-select { flex: 1 1 auto; min-width: 0; font-size: 11px; }
+.decisions-chip-rereg-btn { flex: 0 0 auto; font-size: 11px; padding: 3px 8px;
+    border-radius: 6px; border: 1px solid var(--ok-vermillion); background: transparent;
+    color: var(--ok-vermillion); cursor: pointer; }
+.decisions-chip-rereg-btn:hover { background: var(--ok-vermillion); color: var(--bg); }
+.decisions-chip-rereg-btn:disabled { opacity: 0.5; cursor: default; background: transparent;
+    color: var(--ok-vermillion); }
+.decisions-chip-rereg-empty { color: var(--text-dim); font-style: italic; width: 100%; }
 /* CMX-178: the search box that filters the list below (decisions.js's
    setDecisionsQuery). Full-width, same input styling as everywhere else in
    the app (input[type="text"] above) — just spaced to sit under the chip. */
