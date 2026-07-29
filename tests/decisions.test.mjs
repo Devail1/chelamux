@@ -253,6 +253,39 @@ test('a dangling chip with an EMPTY cache fetches /api/agents before claiming th
         'a live candidate came back from the fetch — the empty-state message must not render');
 });
 
+// 🔴 GUARD (CMX-194 round 4): the other half of the fetch gate — the state
+// check. _render's opportunistic /api/agents fill is scoped to a RECOVERABLE
+// address precisely so it never becomes a second poller: a healthy chip
+// re-renders on every SSE frame and every keystroke, and refetching on each
+// would be exactly that. Neutralising `RECOVERABLE_STATES.has(_s.state) &&`
+// to `true &&` IS currently caught — but only incidentally, by the CMX-178
+// test at the bottom of this file that happens to snapshot `requests.length`
+// for an unrelated reason. Rewrite that test and this invariant goes
+// unguarded silently. This pins it to the invariant it belongs to.
+// ⚠️ Asserted across a SECOND render, not across enterDecisions() itself.
+// enterDecisions runs `Promise.all([refreshOrchestratorStatus(), _refreshLog()])`
+// — concurrently — so the log leg can reach _render before the status leg has
+// applied the new state. orchestrator.js's applied state is module-level and
+// beforeEach resets only STATUS_RESPONSE, so that first render still sees the
+// PREVIOUS test's state. Written the naive way, this test read `dangling`
+// (leaked from the test above), fetched, and failed for a reason that had
+// nothing to do with the invariant. Settling the state first also makes this a
+// truer statement of the thing being guarded: the fill must not fire on a
+// re-render of an already-healthy chip, which is what "not a second poller"
+// actually means.
+test('🔴 GUARD: a HEALTHY chip never fetches /api/agents — the cache fill is not a second poller', async () => {
+    STATUS_RESPONSE = { wid: '@5', name: 'liavedunix', state: 'ok', why: '', queued: 0 };
+    AGENTS_RESPONSE = [{ window_id: '@5', name: 'liavedunix', claude_running: true }];
+    await decisions.enterDecisions();   // settles the shared status to `ok`
+    util.setAgentsCache([]);            // empty cache — alone, that must NOT be enough
+    requests = [];                      // only what happens from here counts
+
+    await decisions.tickDecisions();    // a plain re-render of an already-healthy chip
+
+    assert.ok(!requests.some(r => r.includes('/api/agents')),
+        'a healthy address must not trigger the candidate refetch — that would poll on every render');
+});
+
 test('clicking re-register subscribes the selected window as the new orchestrator', async () => {
     STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 2 };
     util.setAgentsCache([
@@ -362,6 +395,15 @@ test('🔴 GUARD: the pre-selected candidate is first in sort order — clicking
     assert.deepEqual([...reregSelect().options].map(o => o.value), ['@4', '@6', '@5'],
         'candidates must be ordered by name, then by window_id');
     assert.equal(reregSelect().value, '@4', 'the default selection must be the first candidate in sort order');
+    // 🔴 GUARD: an option's VALUE is what gets subscribed, but its LABEL is the
+    // only thing a human picks by — and the two `agent-b` candidates above are
+    // distinguishable ONLY by the `(wid)` suffix. Asserting the full label text
+    // closes both cuts at once: blanking the option to `<option value=…></option>`
+    // and dropping just the ` (${escHtml(a.window_id)})` suffix, which would
+    // render two visually identical options for @4 and @6.
+    assert.match(reregSelect().options[0].textContent, /^agent-b \(@4\)$/,
+        'each option must name its window as "name (wid)" — two same-named sessions are otherwise indistinguishable');
+    assert.match(reregSelect().options[1].textContent, /^agent-b \(@6\)$/);
 
     await decisions.reregisterOrchestrator();
 

@@ -230,6 +230,7 @@ function _reregisterHtml(s) {
     ).join('');
     return `<div class="decisions-chip-reregister">
         <select class="decisions-chip-rereg-select" id="decisions-reregister-wid"
+                aria-label="Session to re-register as orchestrator"
                 title="The live session that should receive the decisions inbox">${options}</select>
         <button type="button" class="decisions-chip-rereg-btn" onclick="chela.reregisterOrchestrator()"
                 title="Register the selected session as the orchestrator — the same take-over &#39;chela watch&#39; does from a shell">↻ Re-register</button>
