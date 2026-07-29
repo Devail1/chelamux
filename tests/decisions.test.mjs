@@ -413,6 +413,50 @@ test('🔴 GUARD: the re-register button is DISABLED while the subscribe is in f
         'the settled subscribe must still repaint the chip green');
 });
 
+// 🔴 GUARD (CMX-194 round 6): the disable must survive a RE-RENDER, and the
+// protection must be the invariant, not the flag. The address is still
+// dangling while the request is in flight, so a log frame / tick / keystroke
+// re-renders the chip and replaces the disabled button with a fresh enabled
+// one; the `finally` then cleared `disabled` on an already-detached node. The
+// test above cannot see that — no render happens inside its gate — so it
+// proved "the flag gets set", not "a second click cannot fire a second
+// take-over". This asserts the consequence directly, across a render.
+test('🔴 GUARD: a re-render mid-flight cannot re-arm the button into a second take-over', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    util.setAgentsCache([{ window_id: '@5', name: 'liavedunix', claude_running: true }]);
+    await decisions.enterDecisions();
+    let release;
+    SUBSCRIBE_GATE = new Promise(resolve => { release = resolve; });
+    // REFUSED on purpose: a successful take-over flips the state to `ok` and the
+    // whole control correctly disappears, so there would be no button left to
+    // assert on. A refusal keeps the chip dangling — which is also the case that
+    // exercises the bug, since the `finally` has to re-enable the button that is
+    // in the document NOW, not the detached one the handler captured.
+    SUBSCRIBE_RESPONSE = { ok: false, error: 'no such window: @5' };
+
+    const inFlight = decisions.reregisterOrchestrator();   // not awaited
+    await Promise.resolve();
+    await decisions.tickDecisions();                       // an SSE frame / tick lands mid-flight
+
+    assert.equal(reregBtn().disabled, true,
+        'the re-rendered button must come back DISABLED while the take-over is still in flight');
+    // The second click the disable exists to stop. Deliberately NOT awaited: if
+    // the re-entry guard is removed this call blocks on the same held gate, and
+    // awaiting it would hang the suite instead of failing it — a corruption must
+    // go RED, not make the run stop finishing.
+    const second = decisions.reregisterOrchestrator();
+    await Promise.resolve();
+    assert.equal(subscribeBodies.length, 1,
+        'a second invocation mid-flight must not fire a second take-over');
+
+    release();
+    await Promise.all([inFlight, second]);
+
+    assert.ok(reregBtn(), 'a refused take-over must leave the retry control in place');
+    assert.equal(reregBtn().disabled, false,
+        'the LIVE button must re-enable once the attempt settles — re-enabling the detached one leaves it dead');
+});
+
 // 🔴 GUARD (CMX-194 round 3, judge's non-blocking note taken): nothing
 // asserted WHICH candidate is pre-selected — both multi-candidate tests set
 // `.value` explicitly and both tests reading `.value` had a single candidate,
@@ -443,11 +487,78 @@ test('🔴 GUARD: the pre-selected candidate is first in sort order — clicking
     assert.match(reregSelect().options[0].textContent, /^agent-b \(@4\)$/,
         'each option must name its window as "name (wid)" — two same-named sessions are otherwise indistinguishable');
     assert.match(reregSelect().options[1].textContent, /^agent-b \(@6\)$/);
+    // 🔴 GUARD: the button's text is its ONLY label and — since round 4 ruled
+    // it needs no aria-label precisely BECAUSE its text content names it — its
+    // entire accessible name. Nothing read it: the tests reach the button by
+    // class and only ever read its `onclick`. Blanking it leaves a live, wired,
+    // clickable control rendering as an empty box with no accessible name.
+    assert.match(reregBtn().textContent, /Re-register/,
+        'the button must name itself — its text content is its only accessible name');
 
     await decisions.reregisterOrchestrator();
 
     assert.equal(subscribeBodies[0].wid, '@4',
         'a click without touching the picker must subscribe the pre-selected candidate');
+});
+
+// 🔴 GUARD (CMX-194 round 6): the operator's pick must SURVIVE a re-render.
+// _render rebuilds the chip with innerHTML on every call, which rebuilds the
+// <select> and drops the selection back to options[0] — and while dangling the
+// chip re-renders on every SSE log frame, every 30 s tick, and every keystroke
+// in the search box. So the handler-side `sel.value` guard was closed while
+// production still lost the pick: choose the second session, a log frame
+// lands, the picker snaps back to the first, click → the inbox goes to the
+// wrong one. Worst exactly where this control matters, two same-named windows
+// differing only by tmux id.
+test('🔴 GUARD: the operator\'s selection survives a re-render — the pick is not reset to the first option', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    util.setAgentsCache([
+        { window_id: '@5', name: 'liavedunix', claude_running: true },
+        { window_id: '@6', name: 'agent-b', claude_running: true },
+    ]);
+    await decisions.enterDecisions();
+    assert.equal(reregSelect().options[0].value, '@6', 'fixture: the selection below must not be the first option');
+    reregSelect().value = '@5';
+
+    await decisions.tickDecisions();   // the re-render that used to discard it
+
+    assert.equal(reregSelect().value, '@5',
+        'a re-render must not reset the picker — the operator would click and hand the inbox to the wrong session');
+
+    await decisions.reregisterOrchestrator();
+    assert.equal(subscribeBodies[0].wid, '@5', 'and the POST must still carry the preserved pick');
+});
+
+// 🔴 GUARD: the flip side — a pick that is no longer a live candidate must NOT
+// be restored. Assigning a select a value no option carries sets it to '' with
+// selectedIndex -1 (spec, and jsdom follows it), and reregisterOrchestrator
+// treats a falsy wid as "nothing to do" — so without the membership check the
+// button silently becomes a no-op after the chosen session exits.
+//
+// ⚠️ Driven by setDecisionsQuery, which renders EXACTLY ONCE. tickDecisions
+// renders twice (the status leg's onOrchestratorChange, then the log leg), and
+// the second pass reads the value the first one already blanked — so `keep` is
+// falsy by then, no restore is attempted, and the select shows the default
+// anyway. Written that way this test passed even with the check removed: green
+// for a reason unrelated to the invariant.
+test('🔴 GUARD: a selection whose window vanished falls back to the default, never a blanked picker', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    util.setAgentsCache([
+        { window_id: '@5', name: 'liavedunix', claude_running: true },
+        { window_id: '@6', name: 'agent-b', claude_running: true },
+    ]);
+    await decisions.enterDecisions();
+    reregSelect().value = '@5';
+
+    util.setAgentsCache([{ window_id: '@6', name: 'agent-b', claude_running: true }]);   // @5 exits
+    decisions.setDecisionsQuery('');   // exactly one render
+
+    assert.equal(reregSelect().value, '@6', 'the vanished pick must fall back to the surviving candidate');
+
+    await decisions.reregisterOrchestrator();
+
+    assert.equal(subscribeBodies[0].wid, '@6',
+        'the POST must carry the fallback, never the wid of a session that is gone');
 });
 
 test('🔴 GUARD: the log fetch is scoped to decision kinds, not the whole firehose', async () => {
