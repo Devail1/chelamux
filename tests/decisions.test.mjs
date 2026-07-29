@@ -253,6 +253,32 @@ test('a dangling chip with an EMPTY cache fetches /api/agents before claiming th
         'a live candidate came back from the fetch — the empty-state message must not render');
 });
 
+// 🔴 GUARD (CMX-194 round 5): the SAME fill, on the OTHER recoverable state.
+// RECOVERABLE_STATES is {'dangling','gone'} and _reregisterHtml's gate is
+// guarded for both — but until this test _render's fetch gate was only ever
+// exercised on 'dangling': the one empty-cache test used 'dangling', and both
+// 'gone' tests pre-seeded a NON-empty cache, so the cache half short-circuited
+// and the state half was never read on a 'gone' path. Narrowing the gate to
+// `_s.state === 'dangling'` therefore changed nothing any test could see.
+// ADDR_GONE (chela/inbox.py) means "this epoch's @N, but no claude is running
+// in it any more" — reachable whenever the orchestrator's Claude exits while
+// the rest of the fleet is live — and on any tab but agents/terminals the
+// cache is empty, so under that narrowing a 'gone' chip claims there is no
+// live session to re-register when there is one. That is precisely the lie the
+// round-2 fix removed, left open for half the states the constant names.
+test('🔴 GUARD: a GONE chip with an EMPTY cache also fetches /api/agents — both recoverable states, not just dangling', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'gone', why: 'no claude running', queued: 1 };
+    AGENTS_RESPONSE = [{ window_id: '@7', name: 'liavedunix', claude_running: true }];
+    await decisions.enterDecisions();
+
+    assert.ok(requests.some(r => r.includes('/api/agents')),
+        'an empty cache on a GONE address must trigger the fetch, exactly as a dangling one does');
+    assert.ok(reregSelect(), 'the fetched candidate must render the picker');
+    assert.equal(reregSelect().value, '@7');
+    assert.equal(reregEmpty(), null,
+        'a live candidate came back — a GONE chip must not claim there is no live session');
+});
+
 // 🔴 GUARD (CMX-194 round 4): the other half of the fetch gate — the state
 // check. _render's opportunistic /api/agents fill is scoped to a RECOVERABLE
 // address precisely so it never becomes a second poller: a healthy chip
@@ -286,6 +312,14 @@ test('🔴 GUARD: a HEALTHY chip never fetches /api/agents — the cache fill is
         'a healthy address must not trigger the candidate refetch — that would poll on every render');
 });
 
+// ⚠️ FIXTURE REQUIREMENT — the selected wid must NOT be options[0]. Candidates
+// sort by name, so 'agent-b'(@6) renders FIRST and 'liavedunix'(@5) second;
+// selecting @5 is therefore the only arrangement that can tell "reads the
+// dropdown" apart from "always takes the first option". Until round 5 both
+// multi-candidate tests selected @6 — which IS options[0] — so a handler that
+// ignored the picker entirely passed every one of them, and a user who picked
+// the second session would have silently handed the inbox to the first.
+// ⛔ Do not "simplify" this by selecting the first candidate.
 test('clicking re-register subscribes the selected window as the new orchestrator', async () => {
     STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 2 };
     util.setAgentsCache([
@@ -293,17 +327,19 @@ test('clicking re-register subscribes the selected window as the new orchestrato
         { window_id: '@6', name: 'agent-b', claude_running: true },
     ]);
     await decisions.enterDecisions();
-    reregSelect().value = '@6';
-    SUBSCRIBE_RESPONSE = { ok: true, wid: '@6', name: 'agent-b', state: 'ok', why: '', queued: 2 };
+    assert.equal(reregSelect().options[0].value, '@6', 'fixture: the selection below must not be the first option');
+    reregSelect().value = '@5';
+    SUBSCRIBE_RESPONSE = { ok: true, wid: '@5', name: 'liavedunix', state: 'ok', why: '', queued: 2 };
 
     await decisions.reregisterOrchestrator();
 
     assert.equal(subscribeBodies.length, 1, 'clicking re-register must POST to /api/orchestrator/subscribe exactly once');
-    assert.equal(subscribeBodies[0].wid, '@6', 'must subscribe the SELECTED window, not the old dangling one');
+    assert.equal(subscribeBodies[0].wid, '@5',
+        'must subscribe the SELECTED window — not the first option, and not the old dangling one');
     // The chip must now reflect the new live owner — proving the control
     // actually fixes the address rather than just hiding the complaint.
     assert.equal(chip().className, 'decisions-chip decisions-chip-ok');
-    assert.ok(chip().textContent.includes('@6'));
+    assert.ok(chip().textContent.includes('@5'));
 });
 
 // 🔴 GUARD (CMX-194 rework round 2, judge experiment 1 + the untested-but-
@@ -320,13 +356,16 @@ test('🔴 GUARD: the RENDERED button, not the module export, reaches chela.rere
         { window_id: '@6', name: 'agent-b', claude_running: true },
     ]);
     await decisions.enterDecisions();
-    reregSelect().value = '@6';
-    SUBSCRIBE_RESPONSE = { ok: true, wid: '@6', name: 'agent-b', state: 'ok', why: '', queued: 2 };
+    // Same fixture requirement as the test above: @6 renders first, so select @5.
+    assert.equal(reregSelect().options[0].value, '@6', 'fixture: the selection below must not be the first option');
+    reregSelect().value = '@5';
+    SUBSCRIBE_RESPONSE = { ok: true, wid: '@5', name: 'liavedunix', state: 'ok', why: '', queued: 2 };
 
     await clickReregisterButton();
 
     assert.equal(subscribeBodies.length, 1, 'the rendered button must POST to /api/orchestrator/subscribe exactly once');
-    assert.equal(subscribeBodies[0].wid, '@6', 'must subscribe the SELECTED window, not the old dangling one');
+    assert.equal(subscribeBodies[0].wid, '@5',
+        'must subscribe the SELECTED window — not the first option, and not the old dangling one');
     assert.equal(chip().className, 'decisions-chip decisions-chip-ok');
 });
 
