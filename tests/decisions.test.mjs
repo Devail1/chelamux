@@ -156,6 +156,16 @@ test('a dangling chip with a live session offers a re-register picker, not a dis
     // 🔴 GUARD: no dismiss affordance anywhere in the chip — the chip must
     // still say "dangling", not be hidable while the address stays broken.
     assert.ok(chip().textContent.includes('dangling'));
+    // 🔴 WIRING GUARD: jsdom doesn't execute inline onclick="..." attributes
+    // without runScripts:"dangerously" (not set here, matching
+    // topbarmenu.test.mjs/wallnav.test.mjs), so a click can't be dispatched
+    // and observed end to end. Assert the wiring as a source fact instead —
+    // this is what catches a blanked/stripped onclick that the "call
+    // decisions.reregisterOrchestrator() directly" test below cannot: that
+    // call bypasses the button entirely and would stay green even if a real
+    // click became a no-op.
+    assert.match(reregBtn().getAttribute('onclick'), /chela\.reregisterOrchestrator\(\)/,
+        'the re-register button is not wired to chela.reregisterOrchestrator()');
 });
 
 test('🔴 GUARD: an ok/unregistered/unstamped chip never shows the re-register control', async () => {
@@ -176,6 +186,12 @@ test('a dangling chip with NO live Claude session says so, and offers no button 
     assert.equal(reregSelect(), null, 'no live candidate — nothing to select');
     assert.equal(reregBtn(), null, 'no live candidate — nothing to click');
     assert.ok(reregEmpty(), 'must say explicitly that there is no live session to re-register to');
+    // 🔴 GUARD: presence of the element alone isn't the claim being made — the
+    // element must actually CARRY the "no live session" copy, not render
+    // empty. A blanked message would leave a mute span here that satisfies
+    // reregEmpty() while telling the operator nothing.
+    assert.match(reregEmpty().textContent, /no live Claude session to re-register/,
+        'the empty-state span exists but does not say there is no live session to re-register to');
 });
 
 test('clicking re-register subscribes the selected window as the new orchestrator', async () => {
