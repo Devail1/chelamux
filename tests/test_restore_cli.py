@@ -271,11 +271,11 @@ def test_chela_restore_dispatch_reaches_the_report_and_names_all_three_stores(li
     out = capsys.readouterr().out
     assert exc.value.code == 1, "a MANUAL row must still fail the command end-to-end"
     # scan_all's output — the inbox watch a dead server stamped.
-    assert "inbox.watches" in out and "@3" in out, (
+    assert _line_with(out, "[inbox.watches]", "@3"), (
         "cmd_restore must consume restore.scan_all — emptied, it prints a clean bill of "
         "health while rows dangle in every store"
     )
-    assert "session-ids" in out and "@5" in out
+    assert _line_with(out, "[session-ids]", "@5", "(tmux epoch")
     # ...and the bindings dict built from the REAL telegram-bindings.json.
     assert "telegram.bindings" in out and "@2" in out, (
         "the bindings row must reach the report — dropping the write must not become "
@@ -300,8 +300,10 @@ def test_chela_restore_says_CANNOT_VERIFY_when_tmux_cannot_be_asked(live_stores,
     # ⭐ Sibling of the doctor Fact's `owned_by` (round 14), on the CLI surface: a CANNOT
     # VERIFY that does not name WHAT could not be read is unactionable — the operator
     # cannot tell a dead tmux from a broken chela.
-    assert "tmux" in out and "unreachable" in out, (
-        f"the CANNOT VERIFY line must name what could not be read. Got:\n{out}"
+    cv = _line_with(out, "CANNOT VERIFY")
+    assert "tmux" in cv and "unreachable" in cv, (
+        f"the CANNOT VERIFY line must name what could not be read, ON THAT LINE — 'tmux' "
+        f"also appears in the orphan block's own wording. Got: {cv!r}"
     )
 
 
@@ -440,10 +442,11 @@ def test_a_live_session_is_classified_REVIVABLE_through_plans_DEFAULT_resolver(
         _drive(["restore"])
 
     out = capsys.readouterr().out
-    assert "REVIVABLE" in out, (
-        "no row was classified REVIVABLE — plan()'s default session resolver is severed"
+    rev = _line_with(out, "REVIVABLE", "[session-ids]")
+    assert "@7 -> @42" in rev, (
+        "no row was classified REVIVABLE — plan()'s default session resolver is severed. "
+        "⛔ Scoped to the row line: 'REVIVABLE' also appears in the closing help text."
     )
-    assert "@7 -> @42" in out, "the REVIVABLE row must name the address it moved to"
 
 
 def test_the_roster_join_supplies_the_relaunch_COMMAND_for_a_manual_row(live_stores, capsys):
@@ -669,6 +672,13 @@ def test_the_doctor_finding_TELLS_the_operator_what_to_do(live_stores):
     assert "relaunch command" in detail, (
         f"MANUAL must be explained, not just named. Got: {detail!r}"
     )
+    # ...and the LABELS themselves, which are the strings `chela restore` actually prints.
+    # Round 21 filed the words-without-meaning cut; this is its exact inverse, and a detail
+    # that describes both verdicts without naming either cannot be matched to the output.
+    assert "REVIVABLE" in detail and "MANUAL" in detail, (
+        f"the detail must NAME the labels the command prints, not only describe them. "
+        f"Got: {detail!r}"
+    )
 
 
 def test_the_doctor_finding_is_OK_and_quiet_when_nothing_is_orphaned(live_stores):
@@ -696,8 +706,13 @@ def test_the_verdict_block_COUNTS_what_it_classified(live_stores, capsys):
     # ...and NAMES them. The third rendered surface with this invariant, after the doctor
     # Fact's `owned_by` and the CLI's CANNOT VERIFY: a count with no subject leaves the
     # operator unable to tell WHICH stores were even looked at.
+    header = _line_with(out, "classified row(s)")
     for store in ("inbox orchestrator", "telegram-bindings", "session-ids"):
-        assert store in out, f"the verdict block must name {store} as one of the three"
+        assert store in header, (
+            f"the header must name {store} as one of the three it looked at — every store "
+            f"name also appears on its own ROW line, so a whole-output check cannot see a "
+            f"store dropped from the header. Got: {header!r}"
+        )
 
 
 def test_the_report_STATES_its_own_read_only_contract(live_stores, capsys):
