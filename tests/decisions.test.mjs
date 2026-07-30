@@ -42,6 +42,7 @@ let DISPATCHER_REJECT;
 let SUBSCRIBE_RESPONSE;
 let AGENTS_RESPONSE;   // CMX-194 rework: what /api/agents returns, for the cache-priming tests
 let AGENTS_REJECT;     // CMX-194 round 7: make /api/agents fail, to take _render's catch
+let AGENTS_SLOW;       // CMX-194 round 8: defer /api/agents by a MACROTASK — see the wiring guard
 let SUBSCRIBE_GATE;    // CMX-194 round 3: a promise that holds the subscribe response open, or null
 
 before(async () => {
@@ -72,7 +73,15 @@ before(async () => {
         }
         if (path.includes('/api/agents')) {
             if (AGENTS_REJECT) return Promise.reject(new Error('agents unreachable'));
-            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(AGENTS_RESPONSE) });
+            const respond = () => ({ ok: true, status: 200, json: () => Promise.resolve(AGENTS_RESPONSE) });
+            // AGENTS_SLOW defers the response past the MICROTASK queue (setTimeout is a
+            // macrotask). Every other double here resolves already-resolved promises, so
+            // an un-awaited `_render()` still happens to finish inside the same flush that
+            // settles `refreshOrchestratorStatus()` — the fill lands by luck, not by the
+            // `await`. Deferring it removes the luck. Default null: unchanged elsewhere.
+            return AGENTS_SLOW
+                ? new Promise(resolve => setTimeout(() => resolve(respond()), 0))
+                : Promise.resolve(respond());
         }
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(LOG_RESPONSE) });
     };
@@ -92,6 +101,7 @@ beforeEach(() => {
     SUBSCRIBE_RESPONSE = { ok: true, wid: '@9', name: 'agent-9', state: 'ok', why: '', queued: 0 };
     AGENTS_RESPONSE = [];
     AGENTS_REJECT = false;
+    AGENTS_SLOW = false;               // module-level state — never leak a deferral across tests
     SUBSCRIBE_GATE = null;             // module-level state — never leak a held response across tests
     util.setAgentsCache([]);           // module-level state — never leak a fleet across tests
     decisions.setDecisionsQuery('');   // module-level state — never leak a query across tests
@@ -271,6 +281,42 @@ test('a dangling chip with an EMPTY cache fetches /api/agents before claiming th
     assert.equal(reregSelect().value, '@5');
     assert.equal(reregEmpty(), null,
         'a live candidate came back from the fetch — the empty-state message must not render');
+});
+
+// 🔴 GUARD (CMX-194 round 8): `_refreshLog` must AWAIT `_render()`.
+//
+// `_render` became async in this PR for one reason: the opportunistic
+// /api/agents fill must complete BEFORE the chip is built, or the operator
+// observes a dangling chip with no picker. `await _render()` in _refreshLog is
+// the single production line that wires that into the path which actually
+// executes — and until this test, reverting it to `_render()` left the whole
+// suite green. Rounds 5 and 7 both reasoned about that cut and reached OPPOSITE
+// conclusions without running it; round 8 ran it and it SURVIVED. A trace is
+// not a suite run.
+//
+// ⭐ Why the existing empty-cache tests could not see it: every fetch double
+// returns an ALREADY-RESOLVED promise, so the un-awaited render's fetch chain
+// drains inside the same microtask flush that settles refreshOrchestratorStatus()
+// — enterDecisions' Promise.all resolves late enough that the picker is there
+// anyway. The guard held by accident of scheduling, not by the await. AGENTS_SLOW
+// defers the response past the microtask queue, which is the honest shape of a
+// real network call, and removes the accident.
+test('🔴 GUARD: enterDecisions does not resolve until the agents fill has rendered the picker', async () => {
+    STATUS_RESPONSE = { wid: '@1', name: 'liavedunix', state: 'dangling', why: 'tmux server restarted', queued: 1 };
+    AGENTS_RESPONSE = [{ window_id: '@5', name: 'liavedunix', claude_running: true }];
+    AGENTS_SLOW = true;                 // the fill can no longer land inside the microtask drain
+
+    await decisions.enterDecisions();
+
+    // Drop the `await` in _refreshLog and enterDecisions resolves while the fill is still
+    // parked on the fetch: the chip is observable WITHOUT its picker, which is the exact
+    // state this control exists to prevent.
+    assert.ok(reregSelect(),
+        'enterDecisions resolved before the /api/agents fill rendered the picker — '
+        + '_refreshLog must await _render()');
+    assert.equal(reregSelect().value, '@5');
+    assert.equal(reregEmpty(), null,
+        'a live candidate was fetched — the "no live session" message must not render');
 });
 
 // 🔴 GUARD (CMX-194 round 5): the SAME fill, on the OTHER recoverable state.
