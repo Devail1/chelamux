@@ -612,6 +612,12 @@ def test_orphans_with_no_verdicts_must_never_report_nothing_orphaned(
     assert "never writes to a store" in out, (
         "a report with orphans but no verdicts must still state the contract"
     )
+    # 🔴 ...and the EMPTY block must not print its header. A "0 classified row(s)" heading
+    # over nothing tells the operator a section was checked and came back clean, which is
+    # a different claim from "there was nothing to check here".
+    assert "classified row(s)" not in out, (
+        f"the verdict block printed a header with nothing to list. Got:\n{out}"
+    )
 
 
 def test_a_genuinely_clean_box_DOES_report_nothing_orphaned(live_stores, tmp_path, capsys):
@@ -805,3 +811,37 @@ def test_every_rendered_string_on_the_doctor_FACT_names_its_subject(live_stores)
         "an unreadable owner must WARN, never render as a pass — this fact exists precisely "
         "for the case where nothing could be read"
     )
+
+
+@pytest.fixture()
+def verdicts_but_no_orphans(live_stores, tmp_path):
+    """The mirror of `orphans_but_no_verdicts`: keep only what `plan()` classifies.
+
+    ⚠️ Filed as a PAIR with its twin, per round 16's lesson — closing one member of a
+    two-member class leaves the other exactly as unguarded as before.
+    """
+    chela_dir = tmp_path / "chela"
+    inbox_file = chela_dir / "inbox.json"
+    store = json.loads(inbox_file.read_text())
+    store["watches"] = {}                     # scan_all's inbox source -> nothing
+    inbox_file.write_text(json.dumps(store))
+    (chela_dir / "session-ids.json").write_text(json.dumps({}))   # feeds BOTH blocks
+    from chela import dispatcher
+    live_stores.setattr(dispatcher, "list_runs", lambda *a, **k: [])   # scan_all's runs
+    return live_stores
+
+
+def test_verdicts_with_no_orphans_must_not_print_an_empty_ORPHAN_header(
+        verdicts_but_no_orphans, capsys):
+    """🔴 The twin. `plan()` classifies the inbox orchestrator and telegram-bindings rows,
+    neither of which `scan_all` scans — so verdicts-without-orphans is a real state, and the
+    orphan header over an empty list claims a section was checked and came back clean."""
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    assert "classified row(s)" in out, "the verdict block must still print"
+    assert "stamped by a tmux server that is no longer running" not in out, (
+        f"the orphan block printed a header with nothing to list. Got:\n{out}"
+    )
+    assert "never writes to a store" in out
