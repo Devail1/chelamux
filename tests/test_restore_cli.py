@@ -102,9 +102,9 @@ def test_restore_exits_ZERO_when_nothing_is_orphaned(restore_env, capsys):
 
 # --- objective 5's operator-visible half ----------------------------------------------
 
-def _watch_env(monkeypatch, session):
+def _watch_env(monkeypatch, session, self_wid="@0"):
     from chela import inbox, orchestrator
-    monkeypatch.setattr(orchestrator, "self_wid", lambda: "@0")
+    monkeypatch.setattr(orchestrator, "self_wid", lambda: self_wid)
     monkeypatch.setattr(main, "_resolve_wid", lambda w: "@7")
     monkeypatch.setattr(inbox, "watch",
                         lambda *a, **k: {"ok": True, "wid": "@7", "note": "",
@@ -128,6 +128,21 @@ def test_watch_warns_when_no_session_identity_resolved(monkeypatch, capsys):
     assert "chela watch" in err and "hook" in err, (
         f"the warning must name the remedy, not just the failure. Got: {err!r}"
     )
+
+
+def test_watch_stays_QUIET_when_the_caller_is_not_REGISTERING_itself(monkeypatch, capsys):
+    """🔴 The warning is scoped to a registration. `_identity_of` only runs when a caller
+    registers ITSELF as orchestrator (`by=self_wid`); with no self_wid there is no
+    registration, so `session` is absent for a reason that is not a failure. Drop the
+    `self_wid and` guard and every `chela watch @N` from a non-registering caller warns
+    about a disarmed self-heal that was never being armed — noise on the exact channel
+    objective 5 exists to keep meaningful.
+    """
+    _watch_env(monkeypatch, None, self_wid=None)
+
+    main.cmd_watch(SimpleNamespace(wid="@7", note=""))
+
+    assert "could not resolve a session identity" not in capsys.readouterr().err
 
 
 def test_watch_stays_QUIET_when_an_identity_did_resolve(monkeypatch, capsys):
@@ -276,6 +291,12 @@ def test_chela_restore_says_CANNOT_VERIFY_when_tmux_cannot_be_asked(live_stores,
         "an unreadable epoch is unknown, not healthy — saying nothing is a false pass"
     )
     assert "not a clean bill of health" in out
+    # ⭐ Sibling of the doctor Fact's `owned_by` (round 14), on the CLI surface: a CANNOT
+    # VERIFY that does not name WHAT could not be read is unactionable — the operator
+    # cannot tell a dead tmux from a broken chela.
+    assert "tmux" in out and "unreachable" in out, (
+        f"the CANNOT VERIFY line must name what could not be read. Got:\n{out}"
+    )
 
 
 # --- END-TO-END, asserted on the STORES rather than on stdout ----------------------------

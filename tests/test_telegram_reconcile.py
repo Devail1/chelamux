@@ -1144,9 +1144,18 @@ def test_a_swallowed_roster_failure_is_LOGGED(monkeypatch, caplog):
     with caplog.at_level(logging.ERROR, logger="chela.main"):
         _run_one_tick(monkeypatch, roster_raises=OSError("no space left on device"))
 
-    assert any("roster" in r.message.lower() for r in caplog.records), (
+    hits = [r for r in caplog.records if "roster" in r.message.lower()]
+    assert hits, (
         f"a swallowed roster failure must be logged. Records: {[r.message for r in caplog.records]}"
     )
+    # ⭐ ...WITH its cause. `log.exception` attaches exc_info; `log.error` does not, and the
+    # message alone ("recording the fleet snapshot failed") cannot distinguish a full disk
+    # from a bad CHELA_DIR from a bug — which is the whole reason to log a swallow at all.
+    assert any(r.exc_info for r in hits), (
+        "the log line must carry the traceback (log.exception, not log.error) — a swallow "
+        "that records only that something failed is barely better than silence"
+    )
+    assert any(r.levelname == "ERROR" for r in hits)
 
 
 def test_a_failing_roster_write_does_not_take_down_the_reconcile_tick(monkeypatch):
