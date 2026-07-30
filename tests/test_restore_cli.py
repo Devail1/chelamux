@@ -247,7 +247,7 @@ def live_stores(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "list_runs", lambda *a, **k: [{
         "task_id": "abc123", "title": "cmx-77 do a thing", "status": "running",
         "window_id": "@9", "window_epoch": OLD,
-        "judge_window_id": "@10", "judge_window_epoch": OLD,
+        "judge_window_id": "@10", "judge_window_epoch": OLD, "judge_state": "running",
     }])
     monkeypatch.setattr(epoch, "current", lambda: NOW)
 
@@ -534,8 +534,15 @@ def test_the_orphan_report_NAMES_each_row_not_just_its_dead_address(live_stores,
 
     out = capsys.readouterr().out
     assert "reviewing cmx-41" in out, "the inbox watch lost its note"
-    assert "abc123 (running)" in out, "the dispatcher run lost its task id / status"
-    assert "abc123 judge" in out, "the judge half lost its label"
+    agent_line = _line_with(out, "[dispatcher.runs]", "@9")
+    assert "abc123 (running)" in agent_line, (
+        f"the agent half's label must name the run and its status. Got: {agent_line!r}"
+    )
+    judge_line = _line_with(out, "[dispatcher.runs (judge)]", "@10")
+    assert "abc123 judge (running)" in judge_line, (
+        f"the judge half's label must name the judge's STATE — without it the operator "
+        f"cannot tell a judge that was mid-run from one that had settled. Got: {judge_line!r}"
+    )
     # Line-scoped: SID_DEAD also appears in the MANUAL row's relaunch command.
     orphan_line = _line_with(out, "[session-ids]", "@5", "(tmux epoch")
     assert SID_DEAD in orphan_line, "the session-ids row lost its identifying session id"

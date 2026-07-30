@@ -424,3 +424,43 @@ def test_the_session_ids_arm_passes_the_rows_OWN_session():
 
     assert len(verdicts) == 1
     assert verdicts[0].session_id == "sid-in-the-row"
+
+
+# 🔴 GUARDS (CMX-195 round 24): both `scan_runs` labels, and both `or '?'` fallbacks.
+#
+# `Orphan.label` is the only thing saying WHICH row a dangling `@N` is. Each half of a run
+# row builds its own — `f"{task} ({status})"` and `f"{task} judge ({judge_state})"` — and
+# each falls back to `'?'` when the state is absent. `'?'` is not decoration: it marks
+# "chela does not know", which is a different report from a state that is genuinely blank.
+
+def _runs_row(**kw):
+    base = {"task_id": "abc123", "status": "running", "window_id": "@9",
+            "window_epoch": OLD, "judge_window_id": "@10", "judge_window_epoch": OLD,
+            "judge_state": "running"}
+    base.update(kw)
+    return [base]
+
+
+def test_both_run_halves_label_themselves_with_their_state():
+    orphans = scan_runs(_runs_row(), NEW)
+    labels = {o.store: o.label for o in orphans}
+    assert labels["dispatcher.runs"] == "abc123 (running)"
+    assert labels["dispatcher.runs (judge)"] == "abc123 judge (running)"
+
+
+def test_an_absent_state_renders_as_UNKNOWN_not_as_blank():
+    """⭐ `or '?'` — a blank reads as "there is no state", which is a claim; `?` reads as
+    "chela could not tell", which is the truth. Same distinction the CANNOT VERIFY arms
+    carry, one surface down."""
+    orphans = scan_runs(_runs_row(status=None, judge_state=None), NEW)
+    labels = {o.store: o.label for o in orphans}
+    assert labels["dispatcher.runs"] == "abc123 (?)"
+    assert labels["dispatcher.runs (judge)"] == "abc123 judge (?)"
+
+
+def test_an_absent_task_id_still_identifies_the_row_as_unknown():
+    """The third `or '?'`-shaped fallback on the same function."""
+    orphans = scan_runs(_runs_row(task_id=None), NEW)
+    assert all(o.label.startswith("?") for o in orphans), (
+        f"a row with no task id must say so, got {[o.label for o in orphans]}"
+    )
