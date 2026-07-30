@@ -130,9 +130,11 @@ def test_record_defaults_to_resolving_the_session_from_the_live_panes(roster, mo
 
     seen = {}
 
+    LIVE_PANES = {"@1": object(), "@9": object()}      # a distinctive, NON-empty map
+
     def _fake_panes():
         seen["panes_called"] = True
-        return {"@1": object()}
+        return LIVE_PANES
 
     def _fake_session_of_window(wid, pane_map=None):
         seen["pane_map"] = pane_map
@@ -149,7 +151,13 @@ def test_record_defaults_to_resolving_the_session_from_the_live_panes(roster, mo
         "a blank session_id makes every REVIVABLE verdict impossible"
     )
     assert seen.get("panes_called"), "one panes() snapshot must be shared across the tick"
-    assert seen["pane_map"] is not None, "the shared pane map must be passed through"
+    # ⛔ NOT `is not None` — `{}` is not None, and handing `session_of_window` an EMPTY map
+    # makes it resolve nothing while still "passing a pane map". Assert IDENTITY with what
+    # panes() actually returned; that is the only thing an empty dict cannot satisfy.
+    assert seen["pane_map"] is LIVE_PANES, (
+        f"the LIVE pane snapshot must be handed through, got {seen['pane_map']!r} — an "
+        "empty map resolves no session, so every recorded session_id would be blank"
+    )
 
 
 def test_record_default_session_lands_on_disk_not_just_in_the_return_value(roster):
