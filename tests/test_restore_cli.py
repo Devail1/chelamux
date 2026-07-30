@@ -579,3 +579,94 @@ def test_the_doctor_fact_compares_against_the_RUNNING_epoch(live_stores):
         f"the doctor fact must see the dangling rows, got {obs.value} — the running epoch "
         "never reached the scan"
     )
+
+
+# --- the two enumerable classes, closed exhaustively -------------------------------------
+#
+# 🔴 GUARDS (CMX-195 round 9), scoped by grep rather than by the verdict.
+#
+# CLASS A — every bare-except swallow in this feature. There are exactly FOUR:
+#   chela/main.py:1349        the reconcile tick's roster.record  -> guarded round 5
+#   chela/main.py:1712        cmd_restore's list_runs             -> guarded round 6
+#   chela/runtime_truth.py    _restore_scan's list_runs           -> below
+#   chela/roster.py:56        _load's malformed-file degrade      -> tests/test_roster.py
+#
+# CLASS B — every FIELD the report renders. The store and wid halves are pinned by the
+# assertions above; the rest were not, and a field that no test reads can be deleted from
+# the format string in silence.
+
+def _line_with(out, *markers):
+    """The single output line containing every marker — or fail loudly.
+
+    ⚠️ `x in out` is the wrong-path trap one level down: a session id appears BOTH as a
+    session-ids orphan's label and inside a MANUAL row's `claude --resume` command, so a
+    whole-output substring check passes while the field under test is gone. Assertions
+    about a FIELD must be scoped to the LINE that field belongs to.
+    """
+    hits = [ln for ln in out.splitlines() if all(m in ln for m in markers)]
+    assert len(hits) == 1, f"expected exactly one line with {markers}, got {hits}"
+    return hits[0]
+
+
+def test_the_orphan_report_NAMES_each_row_not_just_its_dead_address(live_stores, capsys):
+    """🔴 `Orphan.label` is the only thing saying WHICH row a dangling `@N` is — the watch's
+    note, `task_id (status)` for a dispatcher run, the SESSION ID for a session-ids row.
+    Without it the operator gets a list of bare addresses from a server that no longer
+    exists, which is unactionable: `@9` names nothing once the fleet is renumbered."""
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    assert "reviewing cmx-41" in out, "the inbox watch lost its note"
+    assert "abc123 (running)" in out, "the dispatcher run lost its task id / status"
+    assert "abc123 judge" in out, "the judge half lost its label"
+    # Line-scoped: SID_DEAD also appears in the MANUAL row's relaunch command.
+    orphan_line = _line_with(out, "[session-ids]", "@5", "(tmux epoch")
+    assert SID_DEAD in orphan_line, "the session-ids row lost its identifying session id"
+    assert OLD in orphan_line, "the orphan line lost the epoch that stamped it"
+
+
+def test_the_verdict_lines_name_the_session_and_the_address_it_moved_to(live_stores, capsys):
+    """🔴 Class B for the verdict block: a REVIVABLE line without its session id cannot be
+    acted on, and one without `-> @new` does not say where the agent went."""
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    line = _line_with(out, "REVIVABLE", "[session-ids]")
+    assert SID_LIVE in line, "the REVIVABLE line lost the session that is alive"
+    assert "@7 -> @42" in line, "the REVIVABLE line lost the address it moved to"
+
+
+def test_apply_lines_name_the_row_they_acted_on(live_stores, capsys):
+    """🔴 Class B for --apply: 'REVIVED'/'ARCHIVED' with no address is an audit trail of
+    nothing — the operator cannot tell which row moved where."""
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--apply"])
+
+    out = capsys.readouterr().out
+    assert "@7 -> @42" in _line_with(out, "REVIVED"), "the REVIVED line lost its addresses"
+    archived = _line_with(out, "ARCHIVED", "[session-ids]")
+    assert "@5" in archived, "the ARCHIVED line lost its address"
+    assert OLD in archived, "the ARCHIVED line lost the epoch it was filed under"
+
+
+def test_the_doctor_facts_OWN_swallow_survives_a_broken_runs_db(live_stores):
+    """🔴 CLASS A, member 3. `_restore_scan` wraps `dispatcher.list_runs()` for exactly the
+    reason cmd_restore's twin comment gives, and round 5 closed the CLI copy — this one has
+    never been made to fail. A locked runs DB is the normal state right after the hard kill
+    this fact exists to detect; propagating there turns `chela doctor` from a green lie into
+    a crash, and the fact reports nothing either way."""
+    from chela import dispatcher, runtime_truth
+
+    def _boom(*a, **k):
+        raise RuntimeError("database is locked")
+
+    live_stores.setattr(dispatcher, "list_runs", _boom)
+
+    # Must not raise, and must still count the rows the OTHER two stores hold.
+    n = runtime_truth._restore_scan(NOW)
+
+    assert n == 3, (  # inbox.watches @3 · session-ids @5 and @7 (the runs halves are lost)
+        f"a dead runs DB must cost the runs rows and nothing else, got {n}"
+    )

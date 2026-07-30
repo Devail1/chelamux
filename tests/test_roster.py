@@ -200,3 +200,29 @@ def test_record_default_session_lands_on_disk_not_just_in_the_return_value(roste
 
     on_disk = json.loads((roster._STORE).read_text())
     assert on_disk["epochs"][NEW]["windows"]["@2"]["session_id"] == "sid-beta"
+
+
+# 🔴 GUARD (CMX-195 round 9): a malformed roster.json must DEGRADE, never crash its reader.
+#
+# `_load`'s shape check is the read half of this module's never-lose-data story — the same
+# paragraph that justifies the atomic `os.replace` on the write side. Neuter it and a file
+# that is valid JSON but the wrong SHAPE (a list, a string, `epochs` not a dict) reaches
+# `data["epochs"]` and raises TypeError out of every caller: `plan()`'s roster join runs
+# inside `chela restore`, and `record()` runs inside the chela-telegram daemon's reconcile
+# tick — so a corrupt snapshot would take down the tick that exists to rewrite it, which is
+# unrecoverable without a human deleting the file.
+
+@pytest.mark.parametrize("garbage", ['[]', '"nope"', '{"epochs": []}', '{"epochs": "x"}',
+                                     'not json at all'])
+def test_a_malformed_roster_degrades_to_empty_instead_of_raising(roster, garbage):
+    roster._STORE.parent.mkdir(parents=True, exist_ok=True)
+    roster._STORE.write_text(garbage)
+
+    # The read path: no row, no exception.
+    assert roster.window(OLD, "@1") is None
+
+    # ...and the WRITE path still recovers, rather than inheriting the corruption.
+    rec = roster.record({"@1": "orch"}, {"@1"}, NEW, _cwd_for({"@1": "/home/x"}),
+                        _session_for({"@1": "sid-1"}))
+    assert rec["windows"]["@1"]["cwd"] == "/home/x"
+    assert json.loads(roster._STORE.read_text())["epochs"][NEW]["windows"]["@1"]
