@@ -128,6 +128,12 @@ def test_watch_warns_when_no_session_identity_resolved(monkeypatch, capsys):
     assert "chela watch" in err and "hook" in err, (
         f"the warning must name the remedy, not just the failure. Got: {err!r}"
     )
+    # ⭐ ...and the CONSEQUENCE, which is objective 5's entire point: a registration with no
+    # identity looks healthy while CMX-82's self-heal is disarmed for it. "Try again later"
+    # keeps the remedy and drops the reason it matters.
+    assert "self-heal is unavailable" in err, (
+        f"the warning must say WHAT is broken, not merely that a lookup failed. Got: {err!r}"
+    )
 
 
 def test_watch_stays_QUIET_when_the_caller_is_not_REGISTERING_itself(monkeypatch, capsys):
@@ -655,8 +661,13 @@ def test_the_doctor_finding_TELLS_the_operator_what_to_do(live_stores):
     assert len(findings) == 1 and findings[0].level == runtime_truth.WARN
     detail = findings[0].detail or ""
     assert "chela restore" in detail, "the WARN must name the command that explains the rows"
-    assert "REVIVABLE" in detail and "MANUAL" in detail, (
-        "it must say what the two verdicts mean — a count with no remedy is not actionable"
+    # ⛔ Naming the two words is not saying what they MEAN. An operator who has never seen
+    # this fact cannot act on "REVIVABLE or MANUAL"; the detail has to carry the difference.
+    assert "alive under a new address" in detail, (
+        f"REVIVABLE must be explained, not just named. Got: {detail!r}"
+    )
+    assert "relaunch command" in detail, (
+        f"MANUAL must be explained, not just named. Got: {detail!r}"
     )
 
 
@@ -700,7 +711,12 @@ def test_the_report_STATES_its_own_read_only_contract(live_stores, capsys):
 
     out = capsys.readouterr().out
     assert "never writes to a store" in out, "the read-only contract must be stated"
+    # There is no write half, so this line IS the remediation — for BOTH classes of row.
     assert "chela watch/register" in out, "a REVIVABLE row's remediation must be named"
+    assert "re-dispatch" in out and "clear a row" in out, (
+        f"a MANUAL row's remediations must be named too — naming only the REVIVABLE one "
+        f"leaves the majority class with no next step. Got:\n{out}"
+    )
 
 
 def test_a_MANUAL_row_with_no_roster_join_SAYS_it_has_nothing_on_record(live_stores, capsys):
