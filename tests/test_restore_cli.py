@@ -234,3 +234,111 @@ def test_chela_restore_says_CANNOT_VERIFY_when_tmux_cannot_be_asked(live_stores,
         "an unreadable epoch is unknown, not healthy — saying nothing is a false pass"
     )
     assert "not a clean bill of health" in out
+
+
+# --- END-TO-END, asserted on the STORES rather than on stdout ----------------------------
+#
+# 🔴 GUARDS (CMX-195 round 6). Round 5 drove the real dispatch but asserted only on stdout,
+# and stdout turned out to be satisfiable by the WRONG path: a dangling session-ids row is
+# printed TWICE — once by `scan_all`'s orphan list and once by `plan`'s verdict list — so
+# cutting the `plan()` half changed nothing any grep could see. Output is evidence that
+# something printed; the STORE is evidence that the command did its job.
+#
+# The round-2 review already settled this assertion shape for the bindings arm ("assert on
+# the file, not on a mock's call count"). These extend it to the dry run and to --apply.
+
+def _store_bytes(chela_dir):
+    return {p.name: p.read_bytes() for p in sorted(chela_dir.glob("*.json"))}
+
+
+def test_a_plain_chela_restore_touches_NOTHING_on_disk(live_stores, tmp_path, capsys):
+    """🔴 The dry-run promise, asserted on bytes. `cmd_restore`'s docstring and the CLI help
+    both say "dry-run by default ... it does not touch any of them".
+
+    Flip `--apply`'s default and a plain `chela restore` — the command an operator runs to
+    LOOK — archives and removes rows for real, while printing the same store names and
+    exiting the same 1. Only the files can tell.
+    """
+    chela_dir = tmp_path / "chela"
+    before = _store_bytes(chela_dir)
+
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore"])
+
+    assert exc.value.code == 1
+    assert _store_bytes(chela_dir) == before, (
+        "a dry run wrote to a store — `chela restore` without --apply must be read-only"
+    )
+    assert not (chela_dir / "roster.json").exists(), (
+        "a dry run archived a row into roster.json — nothing may be archived without --apply"
+    )
+
+
+def test_apply_acts_on_the_plan_it_computed_and_the_session_ids_row_LEAVES_its_store(
+        live_stores, tmp_path, capsys):
+    """🔴 Two cuts, one store-level assertion.
+
+    `plan` must receive `sessionids.entries()` (hand it `{}` and no session-ids row is ever
+    CLASSIFIED, only listed), and `--apply` must be handed the plan it just computed (hand it
+    `[]` and the operator's recovery step is silently a no-op). Both survive any stdout
+    assertion, because the orphan list prints the row either way. Neither survives this: the
+    row must be gone from `session-ids.json` and recorded in `roster.json`.
+    """
+    chela_dir = tmp_path / "chela"
+
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--apply"])
+
+    assert exc.value.code == 1, "the agent behind an archived MANUAL row is still orphaned"
+
+    remaining = json.loads((chela_dir / "session-ids.json").read_text())
+    assert "@5" not in remaining, (
+        "the dangling session-ids row survived --apply — either plan() never saw "
+        "sessionids.entries(), or apply() was not handed the computed plan"
+    )
+
+    archived = json.loads((chela_dir / "roster.json").read_text())
+    assert OLD in json.dumps(archived), (
+        "a row removed from its store must be archived under the epoch that stamped it — "
+        "removed-but-unarchived is data loss"
+    )
+
+
+def test_apply_leaves_a_CURRENT_row_alone(live_stores, tmp_path):
+    """The counterweight: `--apply` that emptied the store unconditionally would satisfy the
+    guard above. A row stamped with the RUNNING epoch is not orphaned and must survive."""
+    chela_dir = tmp_path / "chela"
+    (chela_dir / "session-ids.json").write_text(json.dumps({
+        "@5": {"session_id": "sid-old", "epoch": OLD},
+        "@6": {"session_id": "sid-live", "epoch": NOW},
+    }))
+
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--apply"])
+
+    remaining = json.loads((chela_dir / "session-ids.json").read_text())
+    assert "@6" in remaining, "a row stamped with the CURRENT epoch is not orphaned"
+    assert "@5" not in remaining
+
+
+def test_a_broken_runs_db_does_not_crash_the_report(live_stores, capsys):
+    """🔴 GUARD: "a DB hiccup must never crash a status report" — cmd_restore's own comment.
+
+    Same shape as the roster write's swallow in `_reconcile_loop`: every other test stubs
+    `list_runs` to return `[]`, so narrowing the `except` changes nothing. But a locked or
+    half-written runs DB is the normal state right after a hard kill — which is the exact
+    condition an operator runs this command in.
+    """
+    from chela import dispatcher
+
+    def _boom(*a, **k):
+        raise RuntimeError("database is locked")
+
+    live_stores.setattr(dispatcher, "list_runs", _boom)
+
+    with pytest.raises(SystemExit) as exc:      # SystemExit, NOT RuntimeError
+        _drive(["restore"])
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "session-ids" in out, "the rest of the report must survive a dead runs DB"
