@@ -1048,7 +1048,8 @@ def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=
     # the operator's live CHELA_DIR as a side effect of driving the loop.
     def _fake_record(live_windows, agent_ids, now_epoch, cwd_for, *a, **kw):
         seen["roster_call"] = {"live": live_windows, "agents": agent_ids,
-                               "now_epoch": now_epoch, "cwd_for": cwd_for}
+                               "now_epoch": now_epoch, "cwd_for": cwd_for,
+                               "extra_args": a, "extra_kwargs": kw}
         if roster_raises is not None:
             raise roster_raises
         return None
@@ -1105,6 +1106,14 @@ def test_the_reconcile_loop_actually_writes_the_roster_snapshot(monkeypatch):
     assert call["cwd_for"]("@9") == "/home/liav/projects/thing", (
         "the tick must hand roster.record the REAL cwd resolver — a blanked one still "
         "satisfies an is-not-None check while erasing every relaunch command"
+    )
+    # ⭐ ...and it must pass NO session resolver, so `record`'s own default (guarded in
+    # tests/test_roster.py) is what runs. Round 5 closed the default INSIDE roster.py; a
+    # call site passing an explicit `lambda wid: None` bypasses that guard entirely and
+    # blanks every recorded session_id — which is the sole basis for a REVIVABLE verdict.
+    assert call["extra_args"] == () and call["extra_kwargs"] == {}, (
+        f"the tick must not override record()'s session resolver, got "
+        f"{call['extra_args']} / {call['extra_kwargs']}"
     )
 
 

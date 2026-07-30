@@ -123,6 +123,11 @@ def test_watch_warns_when_no_session_identity_resolved(monkeypatch, capsys):
         "is on disk — CMX-82's self-heal is disarmed and nothing says so"
     )
     assert "@0" in err, "the warning must name the window whose identity failed"
+    # ...and what to DO about it. A warning that only says something failed leaves the
+    # operator with a disarmed self-heal and no way to re-arm it.
+    assert "chela watch" in err and "hook" in err, (
+        f"the warning must name the remedy, not just the failure. Got: {err!r}"
+    )
 
 
 def test_watch_stays_QUIET_when_an_identity_did_resolve(monkeypatch, capsys):
@@ -676,4 +681,55 @@ def test_a_MANUAL_row_with_no_roster_join_SAYS_it_has_nothing_on_record(live_sto
     line = _line_with(capsys.readouterr().out, "[telegram.bindings]", "@2", "MANUAL")
     assert "no cwd/session on record" in line, (
         "a MANUAL row with nothing to relaunch from must say so, not go silent"
+    )
+
+
+# --- the doctor fact's remaining surfaces ------------------------------------------------
+#
+# 🔴 GUARDS (CMX-195 round 13). `_restore_read` has TWO unverifiable arms and the report has
+# TWO rendered titles; each was half-guarded. Closed as a set, not one at a time.
+
+def test_the_fact_CANNOT_VERIFY_when_tmux_is_not_on_PATH(live_stores):
+    """🔴 The second unverifiable arm. `_tmux_or_unverifiable()` returning None means chela
+    cannot even ask what epoch is running — turning that into `observed(0)` makes the fact
+    report a clean bill of health it has no basis for. ⛔ A green check must never be the
+    thing that could not look."""
+    from chela import runtime_truth
+
+    live_stores.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: None)
+    obs = runtime_truth._restore_read()
+
+    assert obs.unverifiable, "no tmux on PATH is CANNOT VERIFY, never a pass"
+    assert "tmux" in obs.unverifiable.lower(), (
+        f"the reason must say what could not be read, got {obs.unverifiable!r}"
+    )
+
+
+def test_the_fact_CANNOT_VERIFY_when_no_tmux_server_is_running(live_stores):
+    """🔴 The first arm, kept alongside its twin so neither can rot alone."""
+    from chela import epoch, runtime_truth
+
+    live_stores.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    live_stores.setattr(epoch, "current", lambda: None)
+    obs = runtime_truth._restore_read()
+
+    assert obs.unverifiable, "no running server means no epoch to compare against"
+    assert "epoch" in obs.unverifiable.lower()
+
+
+def test_both_doctor_titles_NAME_the_condition(live_stores):
+    """🔴 `cmd_doctor` prints every finding via `Finding.render()` == f"{symbol} {title}",
+    so the title is the entire line an operator reads. Blank the OK title and a healthy box
+    prints a bare tick that says nothing; blank the WARN title and the count vanishes."""
+    from chela import runtime_truth
+
+    ok = runtime_truth._restore_report(None, runtime_truth.observed(0))[0]
+    assert "no stamped rows" in ok.title and "epoch" in ok.title, (
+        f"the OK line must name what was checked, got {ok.title!r}"
+    )
+
+    live_stores.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    warn = runtime_truth._restore_report(None, runtime_truth._restore_read())[0]
+    assert "5" in warn.title and "chela restore" in warn.title, (
+        f"the WARN line must carry the count and the command, got {warn.title!r}"
     )
