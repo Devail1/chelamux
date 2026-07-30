@@ -1282,6 +1282,14 @@ def resolve_heal(store: dict, statuses: dict[str, str],
     identity to heal from. Reads tmux + /proc, so the caller runs this OUTSIDE the store lock;
     :func:`_apply_heal` re-checks under the lock before it trusts the result. ``None`` when there
     is no identity, the address is fine, or the session cannot be found live — never a guess.
+
+    NOTE: this does NOT cover a REBOOT. Healing here re-resolves from the recorded session id,
+    and a reboot kills that session outright — so ``wid_for_session`` finds nothing and the
+    address dangles until a human runs ``chela watch``. Measured 2026-07-29: the store still
+    named session ``50b0b601`` on tmux epoch ``792-…`` with nothing to resolve it to. CMX-194
+    shipped the dashboard half (a re-register control on the dangling chip, so the fix is one
+    click rather than a shell); the auto-heal half — a name-based resolve, gated unique-or-
+    nothing — is deliberately NOT built here and is tracked as **CMX-195**.
     """
     session = orchestrator_session(store)
     if not session:
