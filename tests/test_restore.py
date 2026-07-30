@@ -304,3 +304,61 @@ def test_manual_command_is_built_when_BOTH_halves_are_present():
 def test_manual_command_is_None_for_a_REVIVABLE_row():
     """A REVIVABLE row is re-registered, not relaunched — it must never carry the one-liner."""
     assert _v(verdict="REVIVABLE", new_wid="@9").manual_command() is None
+
+
+# 🔴 GUARDS (CMX-195 round 17): `_classify`'s fallback CHAIN has a direction.
+#
+# `sid = session_id or roster_row.get("session_id")` — the row's OWN session id wins, and
+# the roster is the fallback for stores that carry none of their own (telegram-bindings
+# stamps no session; that is stated as the reason plan() needs the roster at all). Every
+# prior test either had both halves agreeing or only one present, so the precedence was
+# never observable and passing `None` for the row's own id changed nothing.
+
+def _cls(session_id, roster_row, wid_for_session=lambda sid: None):
+    return _classify("session-ids", "@5", OLD, session_id, NEW,
+                     lambda *a, **k: roster_row, wid_for_session)
+
+
+def test_the_rows_OWN_session_id_wins_over_the_rosters():
+    v = _cls("sid-from-the-row", {"session_id": "sid-from-the-roster", "cwd": "/x"})
+    assert v.session_id == "sid-from-the-row", (
+        "the store's own session id is the source; the roster is only a fallback"
+    )
+
+
+def test_the_roster_supplies_the_session_when_the_row_carries_none():
+    """The fallback direction — this is what a telegram-bindings row depends on entirely."""
+    v = _cls(None, {"session_id": "sid-from-the-roster", "cwd": "/x"})
+    assert v.session_id == "sid-from-the-roster"
+
+
+def test_a_rows_own_session_id_alone_can_make_it_REVIVABLE():
+    """⭐ The consequence, not just the field: drop the row's own id and a session-ids row
+    whose roster entry is missing (or predates the snapshot) can never be REVIVABLE."""
+    v = _cls("sid-live", {"cwd": "/x"}, wid_for_session=lambda sid: "@42" if sid == "sid-live" else None)
+    assert v.verdict == "REVIVABLE" and v.new_wid == "@42"
+
+
+def test_no_session_anywhere_is_MANUAL_not_a_crash():
+    v = _cls(None, {"cwd": "/x"})
+    assert v.verdict == "MANUAL" and v.session_id is None
+
+
+def test_plan_HANDS_classify_the_session_ids_rows_own_session_id():
+    """🔴 The call site, not the function. The four guards above pin `_classify`'s fallback
+    chain — and all four pass when `plan()` hands it `None` for the row's own id, because
+    they call `_classify` directly. This drives `plan`, with a roster row carrying NO
+    session of its own, so the store's id is the only thing that can make the row REVIVABLE.
+
+    ⚠️ Same shape as round 5's lesson one level in: a guarded function is not a guarded call.
+    """
+    entries = {"@5": {"session_id": "sid-live", "epoch": OLD}}
+    verdicts = plan({}, {}, entries, NEW,
+                    roster_lookup=lambda *a, **k: {"cwd": "/home/x"},   # no session_id
+                    wid_for_session=lambda sid: "@42" if sid == "sid-live" else None)
+
+    assert len(verdicts) == 1
+    assert verdicts[0].verdict == "REVIVABLE" and verdicts[0].new_wid == "@42", (
+        "plan() must pass the session-ids row's OWN session id to _classify — with the "
+        "roster carrying none, dropping it makes every such row MANUAL forever"
+    )

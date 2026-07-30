@@ -197,3 +197,31 @@ def test_a_malformed_roster_degrades_to_empty_instead_of_raising(roster, garbage
                         _session_for({"@1": "sid-1"}))
     assert rec["windows"]["@1"]["cwd"] == "/home/x"
     assert json.loads(roster._STORE.read_text())["epochs"][NEW]["windows"]["@1"]
+
+
+def test_prune_evicts_the_STALEST_epoch_not_the_lowest_key(roster):
+    """🔴 GUARD (CMX-195 round 17): retention is ranked by `last_seen`, not by key order.
+
+    A tmux epoch is `<pid>-<start_time>`, and pids WRAP — so lexical/numeric key order and
+    recency are unrelated. `test_retains_only_the_last_5_epochs` records E0..E6, where key
+    order, insertion order and last_seen all coincide, so sorting by the KEY passes it while
+    evicting whatever happens to sort first. Here they deliberately disagree: the epoch with
+    the lowest key is the MOST recent, so a key-sorted prune would delete exactly the one a
+    restore is most likely to need.
+    """
+    # keys descend while recency ascends — 'z' is stalest, 'a' is newest
+    for i, key in enumerate(["z", "y", "x", "w", "v", "u", "a"]):
+        roster.record({"@1": "x"}, {"@1"}, key, _cwd_for({"@1": f"/{key}"}),
+                      session_for=lambda w: "sid")
+        data = json.loads(roster._STORE.read_text())
+        data["epochs"][key]["last_seen"] = 1000.0 + i      # recorded order == recency
+        roster._save(data)
+    # one more record forces a prune with the doctored last_seen values in place
+    roster.record({"@1": "x"}, {"@1"}, "final", _cwd_for({"@1": "/final"}),
+                  session_for=lambda w: "sid")
+
+    kept = set(json.loads(roster._STORE.read_text())["epochs"])
+    assert "z" not in kept and "y" not in kept, "the STALEST epochs must be the ones evicted"
+    assert "a" in kept, (
+        f"the most RECENT epoch was evicted — prune is ranked by key, not last_seen. Kept: {kept}"
+    )
