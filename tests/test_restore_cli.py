@@ -351,11 +351,16 @@ def test_apply_acts_on_the_plan_it_computed_and_the_session_ids_row_LEAVES_its_s
         "sessionids.entries(), or apply() was not handed the computed plan"
     )
 
+    # ⛔ Field-level, not `OLD in json.dumps(...)`: the epoch is the record's KEY, so a
+    # whole-blob substring check passes even when every field inside it is blank.
     archived = json.loads((chela_dir / "roster.json").read_text())
-    assert OLD in json.dumps(archived), (
-        "a row removed from its store must be archived under the epoch that stamped it — "
-        "removed-but-unarchived is data loss"
+    row = archived["epochs"][OLD]["windows"]["@5"]
+    assert row["archived"] is True, "removed-but-unarchived is data loss"
+    assert row["store"] == "session-ids", (
+        "an archived row must record WHICH store it was removed from — without it the "
+        "archive cannot be read back to undo, or even to say what was lost"
     )
+    assert row["session_id"] == SID_DEAD
 
 
 def test_apply_leaves_a_CURRENT_row_alone(live_stores, tmp_path):
@@ -670,3 +675,63 @@ def test_the_doctor_facts_OWN_swallow_survives_a_broken_runs_db(live_stores):
     assert n == 3, (  # inbox.watches @3 · session-ids @5 and @7 (the runs halves are lost)
         f"a dead runs DB must cost the runs rows and nothing else, got {n}"
     )
+
+
+# 🔴 GUARD (CMX-195 round 10): the early return reads BOTH halves of the report.
+#
+# `scan_all` owns three sources (inbox.watches, dispatcher.runs, dispatcher.runs (judge))
+# that `plan()` does NOT classify — so `verdicts == []` while `orphans` is non-empty is a
+# REAL state, not a contrived one: it is exactly a box whose dead server left dispatcher
+# and watch rows behind but whose orchestrator/bindings/session-ids happen to be clean.
+# Drop `orphans` from the condition and `chela restore` prints "nothing orphaned — every
+# stamped row matches the running tmux epoch" while three sources hold rows, and exits 0.
+# That is the silent false negative this whole ticket was written from, reintroduced at the
+# last branch before the report.
+#
+# ⚠️ `live_stores` always produces verdicts, so no test could reach this combination.
+
+@pytest.fixture()
+def orphans_but_no_verdicts(live_stores, tmp_path):
+    """Strip every source `plan()` classifies, keep every source `scan_all` owns."""
+    chela_dir = tmp_path / "chela"
+    inbox_file = chela_dir / "inbox.json"
+    store = json.loads(inbox_file.read_text())
+    store["orchestrator"] = None            # plan's inbox arm -> nothing
+    store["orchestrator_epoch"] = None
+    store["orchestrator_session"] = None
+    inbox_file.write_text(json.dumps(store))
+    (chela_dir / "telegram-bindings.json").write_text(json.dumps(
+        {"chat_id": "-100777", "bindings": {}, "epochs": {}}))
+    (chela_dir / "session-ids.json").write_text(json.dumps({}))
+    return live_stores
+
+
+def test_orphans_with_no_verdicts_must_never_report_nothing_orphaned(
+        orphans_but_no_verdicts, capsys):
+    main.cmd_restore(SimpleNamespace(apply=False))     # no MANUAL row -> exits 0
+
+    out = capsys.readouterr().out
+    assert "nothing orphaned" not in out, (
+        "three sources hold dangling rows and the command claimed a clean bill of health"
+    )
+    # watches @3 · dispatcher.runs @9 · dispatcher.runs (judge) @10
+    assert "3 row(s) stamped by a tmux server that is no longer running" in out
+    assert "@3" in out and "@9" in out and "@10" in out
+
+
+def test_a_genuinely_clean_box_DOES_report_nothing_orphaned(live_stores, tmp_path, capsys):
+    """The counterweight: deleting the early return entirely would satisfy the guard above
+    while leaving a healthy box with no positive confirmation at all."""
+    chela_dir = tmp_path / "chela"
+    chela_dir.joinpath("inbox.json").write_text(json.dumps({
+        "orchestrator": None, "orchestrator_epoch": None, "orchestrator_session": None,
+        "orchestrator_name": None, "queue": [], "runs_seen": {}, "watches": {}}))
+    chela_dir.joinpath("telegram-bindings.json").write_text(json.dumps(
+        {"chat_id": "-100777", "bindings": {}, "epochs": {}}))
+    chela_dir.joinpath("session-ids.json").write_text(json.dumps({}))
+    from chela import dispatcher
+    live_stores.setattr(dispatcher, "list_runs", lambda *a, **k: [])
+
+    main.cmd_restore(SimpleNamespace(apply=False))
+
+    assert "nothing orphaned" in capsys.readouterr().out
