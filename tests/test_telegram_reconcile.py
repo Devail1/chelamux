@@ -1018,7 +1018,7 @@ class _OneTick:
 
 
 def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=False,
-                  roster_raises=None):
+                  roster_raises=None, cwds=None):
     """Run ONE tick of the real ``chela.main._reconcile_loop``; return its kwargs."""
     from chela import discovery, main, roster
     from chela import telegram as tg
@@ -1058,7 +1058,8 @@ def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=
     monkeypatch.setattr(tg, "dispatched_window_ids", _fake_dispatched)
     monkeypatch.setattr(tg, "reconcile_bindings", _fake_reconcile)
     monkeypatch.setattr(tg, "sync_pinned_titles", _fake_sync_pinned_titles)
-    monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: None)
+    monkeypatch.setattr(discovery, "get_window_cwd_by_id",
+                        lambda wid: (cwds or {}).get(wid))
 
     stop = _OneTick()
     main._reconcile_loop(BindingRegistry("777"), _StubTopicApi(), 7, stop)
@@ -1090,13 +1091,21 @@ def test_the_reconcile_loop_actually_writes_the_roster_snapshot(monkeypatch):
 
     The tick is the ONLY writer, so this is the only place the invariant can be observed.
     """
-    seen = _run_one_tick(monkeypatch)
+    seen = _run_one_tick(monkeypatch, cwds={"@9": "/home/liav/projects/thing"})
     call = seen.get("roster_call")
     assert call is not None, "the reconcile tick must call roster.record — objective 1"
     # ...and with the fleet it already has in hand, not a re-derived one.
     assert call["live"] == {"@9": "cmx-73", "@6": "orchestrator"}
     assert call["agents"] == {"@9", "@6"}
-    assert call["cwd_for"] is not None
+    # ⛔ NOT `is not None` — that is what round 6 asserted, and `lambda wid: None` IS not
+    # None, so blanking the resolver at the call site was invisible. `cwd` is half of what
+    # the roster preserves: without it every MANUAL row degrades from the exact
+    # `cd <cwd> && CHELA_WID=@N claude --resume <sid>` one-liner to "(no cwd/session on
+    # record)", which is objective 2's entire operator payload. Assert the VALUE.
+    assert call["cwd_for"]("@9") == "/home/liav/projects/thing", (
+        "the tick must hand roster.record the REAL cwd resolver — a blanked one still "
+        "satisfies an is-not-None check while erasing every relaunch command"
+    )
 
 
 def test_the_roster_snapshot_is_stamped_with_the_epoch_the_tick_read(monkeypatch):

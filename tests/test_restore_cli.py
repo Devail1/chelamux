@@ -159,11 +159,23 @@ def _drive(argv):
 
 @pytest.fixture()
 def live_stores(tmp_path, monkeypatch):
-    """A REAL temp CHELA_DIR with a REAL dangling row in each of the three stores.
+    """A REAL temp CHELA_DIR with a dangling row in EVERY source restore reads.
 
     ⛔ Stubs nothing inside `restore` — not `scan_all`, not `plan`, not the bindings
     dict-build. Only `dispatcher.list_runs` (a sqlite read) and `epoch.current` (tmux) are
     faked, because they are leaf I/O rather than the wiring under test.
+
+    ⚠️ Round 7 lesson: an END-TO-END fixture is only as strong as the DATA it holds. Rounds
+    5-6 called this "a dangling row in each of the three stores" — but restore reads SIX
+    row sources across two entry points, and this fixture held three of them. Every source
+    it left empty was a wiring cut nothing could see, no matter how the assertions were
+    shaped. Enumerated from the code rather than from memory:
+
+      scan_all -> inbox.watches · dispatcher.runs · dispatcher.runs (judge) · session-ids
+      plan     -> inbox.orchestrator · telegram.bindings · session-ids
+
+    ⛔ If a future change teaches restore a NEW source, it must be seeded here too, or it
+    is unguarded by construction.
     """
     chela_dir = tmp_path / "chela"
     chela_dir.mkdir(parents=True)
@@ -171,9 +183,13 @@ def live_stores(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_INBOX_FILE", str(chela_dir / "inbox.json"))
     monkeypatch.setenv("CHELA_TELEGRAM_BINDINGS", str(chela_dir / "telegram-bindings.json"))
 
+    # inbox.json carries TWO independent sources: the orchestrator's own registration
+    # (plan's arm — the row objective 5 and CMX-82 are both about) and `watches`
+    # (scan_all's). Seeding only the second left the first unguarded for three rounds.
     (chela_dir / "inbox.json").write_text(json.dumps({
-        "orchestrator": None, "orchestrator_epoch": None, "orchestrator_session": None,
-        "orchestrator_name": None, "queue": [], "runs_seen": {},
+        "orchestrator": "@1", "orchestrator_epoch": OLD,
+        "orchestrator_session": "sid-orch-from-a-dead-server",
+        "orchestrator_name": "liavedunix", "queue": [], "runs_seen": {},
         "watches": {"@3": {"note": "reviewing cmx-41", "since": 1.0,
                            "name": "agent-3", "epoch": OLD}},
     }))
@@ -192,8 +208,16 @@ def live_stores(tmp_path, monkeypatch):
     import chela.roster as roster_mod
     importlib.reload(roster_mod)
 
+    # The dispatcher `runs` table — the store the round-1 review credited as a real
+    # improvement on the brief, and the largest scanner in restore.py. It carries BOTH
+    # halves: the agent window and the judge's. Stubbed to `[]` for three rounds, which
+    # made `scan_runs` decorative from the CLI's side.
     from chela import dispatcher, epoch
-    monkeypatch.setattr(dispatcher, "list_runs", lambda *a, **k: [])
+    monkeypatch.setattr(dispatcher, "list_runs", lambda *a, **k: [{
+        "task_id": "abc123", "title": "cmx-77 do a thing", "status": "running",
+        "window_id": "@9", "window_epoch": OLD,
+        "judge_window_id": "@10", "judge_window_epoch": OLD,
+    }])
     monkeypatch.setattr(epoch, "current", lambda: NOW)
     return monkeypatch
 
@@ -342,3 +366,73 @@ def test_a_broken_runs_db_does_not_crash_the_report(live_stores, capsys):
     assert exc.value.code == 1
     out = capsys.readouterr().out
     assert "session-ids" in out, "the rest of the report must survive a dead runs DB"
+
+
+# --- the sources rounds 5-6 never seeded -------------------------------------------------
+#
+# 🔴 GUARDS (CMX-195 round 7). Each of these is a row source `live_stores` now holds and
+# nothing previously observed. They are separate tests, not extra asserts on an existing
+# one, so a failure names WHICH source went dark.
+
+def test_the_dispatcher_runs_table_reaches_the_report_both_halves(live_stores, capsys):
+    """🔴 `scan_runs` reads the agent window AND the judge's. Cut the runs list out of the
+    scan and every dangling window in the dispatcher is invisible to the one command an
+    operator runs after a hard kill — while the report still looks complete, because
+    inbox.watches and session-ids keep printing."""
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    assert "dispatcher.runs" in out and "@9" in out, "the agent window half went dark"
+    assert "dispatcher.runs (judge)" in out and "@10" in out, "the JUDGE window half"
+
+
+def test_a_dangling_orchestrator_registration_is_CLASSIFIED_and_apply_clears_it(
+        live_stores, tmp_path):
+    """🔴 Store-level, because stdout cannot tell: `inbox.orchestrator` is the arm `apply`
+    calls `inbox.register`/`unregister` on, and it is the row the live 2026-07-30 defect was
+    ON. Hand `plan` an empty dict and the arm is dead from the CLI — a dangling registration
+    is never classified, and --apply can neither re-stamp nor clear it. `store` is still
+    passed to `scan_all`, so the watches half prints identically and no output changes.
+    """
+    chela_dir = tmp_path / "chela"
+    before = json.loads((chela_dir / "inbox.json").read_text())
+    assert before["orchestrator"] == "@1", "fixture precondition: a dangling registration"
+
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--apply"])
+
+    after = json.loads((chela_dir / "inbox.json").read_text())
+    assert after["orchestrator"] is None, (
+        "a dangling orchestrator registration survived --apply — plan() never saw the "
+        "inbox store, so CMX-82's own row is unreachable from the CLI"
+    )
+    assert after["orchestrator_epoch"] is None
+
+
+def test_the_doctor_fact_reads_the_three_LIVE_stores(live_stores, tmp_path):
+    """🔴 `runtime_truth._restore_scan` is the ONLY thing that joins inbox watches + the
+    runs table + session-ids for the doctor fact, and every test that touches the fact
+    monkeypatches it. Cut its three inputs and the fact counts 0 forever — `chela doctor`
+    stays green through the next OOM, which is verbatim the hole this ticket's measured
+    receipt named.
+
+    Driven over the same real temp CHELA_DIR, so the seam itself is under test rather than
+    the report that consumes it.
+    """
+    from chela import runtime_truth
+
+    n = runtime_truth._restore_scan(NOW)
+
+    # inbox.watches @3 · dispatcher.runs @9 · dispatcher.runs (judge) @10 · session-ids @5
+    assert n == 4, f"the fact must count every dangling row across the live stores, got {n}"
+
+
+def test_the_doctor_fact_counts_ZERO_when_every_row_is_current(live_stores, tmp_path):
+    """The counterweight: a fact hard-wired to a nonzero count would satisfy the guard
+    above while reporting a permanent false alarm."""
+    from chela import runtime_truth
+
+    assert runtime_truth._restore_scan(OLD) == 0, (
+        "every fixture row is stamped OLD — asked about OLD, nothing is dangling"
+    )
