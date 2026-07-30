@@ -552,6 +552,12 @@ def test_the_verdict_lines_name_the_session_and_the_address_it_moved_to(live_sto
     line = _line_with(out, "REVIVABLE", "[session-ids]")
     assert SID_LIVE in line, "the REVIVABLE line lost the session that is alive"
     assert "@7 -> @42" in line, "the REVIVABLE line lost the address it moved to"
+    # ⭐ ...and the CLAIM that makes it revivable. "(session <sid>)" states a fact about the
+    # row; "is alive there now" states the live evidence the verdict rests on — the reason
+    # re-registering is safe rather than a guess.
+    assert "is alive there now" in line, (
+        f"the REVIVABLE line must state the live claim, not just the session. Got: {line!r}"
+    )
 
 
 def test_the_doctor_facts_OWN_swallow_survives_a_broken_runs_db(live_stores):
@@ -810,6 +816,12 @@ def test_both_doctor_titles_NAME_the_condition(live_stores):
     warn = runtime_truth._restore_report(None, runtime_truth._restore_read())[0]
     assert "5" in warn.title and "chela restore" in warn.title, (
         f"the WARN line must carry the count and the command, got {warn.title!r}"
+    )
+    # ...and NAME the condition. "5 stamped row(s) → chela restore" counts something and
+    # says nothing about what is wrong with it; the OK arm names its condition, so the WARN
+    # arm — the one an operator actually has to act on — must too.
+    assert "dead epoch" in warn.title, (
+        f"the WARN title must name the CONDITION, not only count it, got {warn.title!r}"
     )
 
 

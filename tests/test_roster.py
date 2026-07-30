@@ -133,7 +133,7 @@ def test_record_defaults_to_resolving_the_session_from_the_live_panes(roster, mo
     LIVE_PANES = {"@1": object(), "@9": object()}      # a distinctive, NON-empty map
 
     def _fake_panes():
-        seen["panes_called"] = True
+        seen["panes_calls"] = seen.get("panes_calls", 0) + 1
         return LIVE_PANES
 
     def _fake_session_of_window(wid, pane_map=None):
@@ -144,13 +144,22 @@ def test_record_defaults_to_resolving_the_session_from_the_live_panes(roster, mo
     monkeypatch.setattr(sessions, "session_of_window", _fake_session_of_window)
 
     # NO session_for argument — this is exactly how _reconcile_loop calls it.
-    rec = roster.record({"@1": "orch"}, {"@1"}, OLD, _cwd_for({"@1": "/home/x"}))
+    # THREE windows, because the promise is one snapshot per TICK, not per window.
+    rec = roster.record({"@1": "orch", "@9": "a", "@8": "b"}, {"@1", "@9", "@8"}, OLD,
+                        _cwd_for({"@1": "/home/x", "@9": "/a", "@8": "/b"}))
 
     assert rec["windows"]["@1"]["session_id"] == "sid-alpha", (
         "the default session_for must resolve through sessions.session_of_window — "
         "a blank session_id makes every REVIVABLE verdict impossible"
     )
-    assert seen.get("panes_called"), "one panes() snapshot must be shared across the tick"
+    # ⛔ NOT "was it called" — the promise in record()'s docstring is ONE snapshot shared
+    # across the tick ("this adds no tmux call of its own beyond session_for"). Calling
+    # panes() per window still passes any was-it-called or identity check, while turning
+    # one tmux+/proc scan into N on the daemon's hot path.
+    assert seen.get("panes_calls") == 1, (
+        f"panes() must be called ONCE per tick, not once per window — got "
+        f"{seen.get('panes_calls')} calls for 3 windows"
+    )
     # ⛔ NOT `is not None` — `{}` is not None, and handing `session_of_window` an EMPTY map
     # makes it resolve nothing while still "passing a pane map". Assert IDENTITY with what
     # panes() actually returned; that is the only thing an empty dict cannot satisfy.
