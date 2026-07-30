@@ -1017,7 +1017,8 @@ class _OneTick:
         self.waited.append(interval)
 
 
-def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=False):
+def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=False,
+                  roster_raises=None):
     """Run ONE tick of the real ``chela.main._reconcile_loop``; return its kwargs."""
     from chela import discovery, main, roster
     from chela import telegram as tg
@@ -1048,6 +1049,8 @@ def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=
     def _fake_record(live_windows, agent_ids, now_epoch, cwd_for, *a, **kw):
         seen["roster_call"] = {"live": live_windows, "agents": agent_ids,
                                "now_epoch": now_epoch, "cwd_for": cwd_for}
+        if roster_raises is not None:
+            raise roster_raises
         return None
 
     monkeypatch.setattr(roster, "record", _fake_record)
@@ -1108,6 +1111,27 @@ def test_the_roster_snapshot_is_stamped_with_the_epoch_the_tick_read(monkeypatch
     monkeypatch.setattr(epoch_mod, "current", lambda: "999-1785358190")
     seen = _run_one_tick(monkeypatch)
     assert seen["roster_call"]["now_epoch"] == "999-1785358190"
+
+
+def test_a_failing_roster_write_does_not_take_down_the_reconcile_tick(monkeypatch):
+    """🔴 GUARD (CMX-195): the roster is a PASSENGER on this tick, never its driver.
+
+    Bindings reaping, the dispatched probe and pinned-title sync all ride behind the roster
+    write. A full disk or a bad-permissions `roster.json` must cost the snapshot and nothing
+    else — narrow that `except Exception` (the judge narrowed it to `ValueError`) and any
+    other failure propagates out, silently killing the whole tick for the live
+    `chela-telegram` daemon.
+
+    ⚠️ The capture stub in `_run_one_tick` never raises, which is precisely why this cut
+    survived round 4. Make the guarded call actually fail, then assert the tick got PAST it.
+    """
+    seen = _run_one_tick(monkeypatch, roster_raises=OSError("no space left on device"))
+
+    assert seen.get("roster_call") is not None, "the roster write must have been attempted"
+    assert "kwargs" in seen, (
+        "the tick must reach reconcile_bindings even when the roster write blew up — "
+        "the snapshot is best-effort, the reconcile is not"
+    )
 
 
 def test_the_reconcile_loop_hands_the_live_fleet_to_the_dispatched_probe(monkeypatch):
