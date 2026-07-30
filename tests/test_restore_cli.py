@@ -606,6 +606,12 @@ def test_orphans_with_no_verdicts_must_never_report_nothing_orphaned(
     # watches @3 · dispatcher.runs @9 · dispatcher.runs (judge) @10
     assert "3 row(s) stamped by a tmux server that is no longer running" in out
     assert "@3" in out and "@9" in out and "@10" in out
+    # ⭐ The read-only contract is stated on EVERY report, not only the one with verdicts.
+    # Indent that print into the `if verdicts:` block and this report — the pure-scan_all
+    # one — silently loses the only line saying the command is safe to run and what to do.
+    assert "never writes to a store" in out, (
+        "a report with orphans but no verdicts must still state the contract"
+    )
 
 
 def test_a_genuinely_clean_box_DOES_report_nothing_orphaned(live_stores, tmp_path, capsys):
@@ -670,6 +676,11 @@ def test_the_verdict_block_COUNTS_what_it_classified(live_stores, capsys):
     assert "4 classified row(s)" in out, (
         f"the verdict block miscounted what plan() returned. Got:\n{out}"
     )
+    # ...and NAMES them. The third rendered surface with this invariant, after the doctor
+    # Fact's `owned_by` and the CLI's CANNOT VERIFY: a count with no subject leaves the
+    # operator unable to tell WHICH stores were even looked at.
+    for store in ("inbox orchestrator", "telegram-bindings", "session-ids"):
+        assert store in out, f"the verdict block must name {store} as one of the three"
 
 
 def test_the_report_STATES_its_own_read_only_contract(live_stores, capsys):
@@ -721,8 +732,14 @@ def test_the_fact_CANNOT_VERIFY_when_tmux_is_not_on_PATH(live_stores):
     obs = runtime_truth._restore_read()
 
     assert obs.unverifiable, "no tmux on PATH is CANNOT VERIFY, never a pass"
-    assert "tmux" in obs.unverifiable.lower(), (
-        f"the reason must say what could not be read, got {obs.unverifiable!r}"
+    # ⛔ Pinned on text UNIQUE to this arm. "tmux" and "epoch" both appear in BOTH reasons,
+    # so either word is satisfied by the OTHER arm's message — the two were swappable.
+    assert "not on PATH" in obs.unverifiable, (
+        f"arm 1 must say tmux is MISSING, got {obs.unverifiable!r}"
+    )
+    assert "no tmux server is running" not in obs.unverifiable, (
+        "the two CANNOT VERIFY arms must stay distinguishable: 'install tmux' and 'start a "
+        "server' are completely different next actions"
     )
 
 
@@ -735,7 +752,10 @@ def test_the_fact_CANNOT_VERIFY_when_no_tmux_server_is_running(live_stores):
     obs = runtime_truth._restore_read()
 
     assert obs.unverifiable, "no running server means no epoch to compare against"
-    assert "epoch" in obs.unverifiable.lower()
+    assert "no tmux server is running" in obs.unverifiable, (
+        f"arm 2 must say the SERVER is down, not that tmux is absent, got {obs.unverifiable!r}"
+    )
+    assert "not on PATH" not in obs.unverifiable
 
 
 def test_both_doctor_titles_NAME_the_condition(live_stores):
