@@ -28,7 +28,12 @@ history lives in `git log`.
   one-liner is printed). `chela restore --apply` re-stamps REVIVABLE rows and
   archives-then-removes MANUAL ones — nothing is ever destroyed without first
   being written into `roster.json` — and exits nonzero while anything is still
-  MANUAL, so it composes into a restart procedure. `chela doctor` now also
+  MANUAL, so it composes into a restart procedure. `telegram-bindings.json` is
+  the one store `--apply` never writes: `chela-telegram` owns that file (one
+  in-memory registry per daemon lifetime, saved from that object every
+  reconcile tick, no lock or merge), so a second writer here would race it and
+  silently erase whichever side saved last — a dangling binding is still
+  reported, and left for the daemon's own reconcile tick to reap. `chela doctor` now also
   carries a `restore.dead_epoch_rows` finding, so the count surfaces without a
   human remembering to run the command by hand. It never relaunches, spawns, or
   resumes an agent. Also fixes the disarmed-identity bug that let this happen in

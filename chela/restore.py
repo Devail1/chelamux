@@ -50,8 +50,14 @@ updated) or **MANUAL** (nothing live claims that session — a human decides, wi
 ``cd <cwd> && CHELA_WID=@N claude --resume <sid>`` one-liner to do it). :func:`apply` is the
 only thing in this module that writes: it re-stamps REVIVABLE rows in place and ARCHIVES
 MANUAL rows into :mod:`chela.roster`'s dead-epoch record before removing them from their
-live store — nothing here is ever destroyed without first being written down. Neither
-function ever touches tmux itself: no window is relaunched, spawned, resumed, or killed.
+live store — nothing here is ever destroyed without first being written down. ⛔ EXCEPT
+``telegram-bindings.json``: ``chela-telegram`` owns that file (one in-memory
+``BindingRegistry`` per daemon lifetime, saved from that same object every reconcile tick),
+so a second load-mutate-save here would race it and silently erase whichever side wrote
+last. A ``telegram.bindings`` verdict is still classified and reported by :func:`plan`; it
+is just never acted on by :func:`apply` — it comes back in ``skipped``, and the daemon's own
+reconcile tick reaps it. Neither function ever touches tmux itself: no window is relaunched,
+spawned, resumed, or killed.
 """
 from __future__ import annotations
 
@@ -214,35 +220,36 @@ def plan(orchestrator: dict, bindings: dict, session_entries: dict,
 def apply(verdicts: list[Verdict], now_epoch: str | None) -> dict:
     """Act on a :func:`plan`: re-stamp REVIVABLE rows, archive-then-remove MANUAL ones.
 
-    The only tmux-facing thing here is reading the current bindings file — no window is
-    relaunched, spawned, resumed, or killed (the ticket's hard boundary; see the module
-    docstring). MANUAL rows are archived into :func:`chela.roster.archive` BEFORE they are
-    removed from their live store, so a row this drops is never lost, only moved.
+    ⛔ ``telegram.bindings`` rows are never written here. ``chela-telegram`` builds ONE
+    :class:`~chela.telegram.bindings.BindingRegistry` at daemon start and calls ``.save()``
+    from that same in-memory object on every reconcile tick — an unlocked whole-file write
+    with no merge and no read-back (see ``chela/sessionids.py``'s module docstring, which
+    already explains why session ids are NOT stored in this file, for the identical reason).
+    A second load-mutate-save here races that daemon: whichever side saves last silently
+    erases the other's write, in either direction. The daemon's own reconcile tick already
+    reaps a dangling binding (``reconcile_bindings``, driven by the same ``now_epoch`` it
+    computes every tick), so a ``telegram.bindings`` verdict is classified and reported —
+    it lands in ``skipped``, never in ``revived``/``archived`` — and left for the daemon to
+    act on; nothing here touches ``telegram-bindings.json``.
+
+    No window is relaunched, spawned, resumed, or killed (the ticket's hard boundary; see
+    the module docstring). MANUAL rows in the two stores this function does own are archived
+    into :func:`chela.roster.archive` BEFORE they are removed from their live store, so a row
+    this drops is never lost, only moved.
     """
     from chela import inbox, sessionids
-    from chela.telegram.bindings import BindingRegistry
 
     revived: list[Verdict] = []
     archived: list[Verdict] = []
-    bindings_reg = None
-    bindings_dirty = False
-
-    def _bindings():
-        nonlocal bindings_reg
-        if bindings_reg is None:
-            bindings_reg = BindingRegistry.load()
-        return bindings_reg
+    skipped: list[Verdict] = []
 
     for v in verdicts:
+        if v.store == "telegram.bindings":
+            skipped.append(v)
+            continue
         if v.verdict == "REVIVABLE":
             if v.store == "inbox.orchestrator":
                 inbox.register(v.new_wid)
-            elif v.store == "telegram.bindings":
-                reg = _bindings()
-                thread = reg.thread_for_window(v.wid)
-                if thread is not None:
-                    reg.bind(v.new_wid, thread, epoch=now_epoch)
-                    bindings_dirty = True
             elif v.store == "session-ids":
                 sessionids.remove(v.wid)
                 if v.session_id:
@@ -254,13 +261,8 @@ def apply(verdicts: list[Verdict], now_epoch: str | None) -> dict:
                             "cwd": v.cwd, "label": v.label})
             if v.store == "inbox.orchestrator":
                 inbox.unregister(v.wid)
-            elif v.store == "telegram.bindings":
-                if _bindings().unbind(v.wid):
-                    bindings_dirty = True
             elif v.store == "session-ids":
                 sessionids.remove(v.wid)
             archived.append(v)
 
-    if bindings_dirty:
-        _bindings().save()
-    return {"revived": revived, "archived": archived}
+    return {"revived": revived, "archived": archived, "skipped": skipped}

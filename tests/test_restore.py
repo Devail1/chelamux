@@ -15,6 +15,8 @@ it is the one function in this module allowed to write.
 from __future__ import annotations
 
 import importlib
+import os
+from pathlib import Path
 
 import pytest
 
@@ -365,34 +367,42 @@ def test_apply_manual_orchestrator_is_archived_and_unregistered(apply_env):
     assert archived["session_id"] == "orch-sid"
 
 
-def test_apply_revivable_bindings_rebinds_the_same_thread_to_the_new_wid(apply_env):
+def test_apply_never_writes_the_bindings_file(apply_env):
+    """GUARD: `chela-telegram` owns `telegram-bindings.json` (one in-memory
+    `BindingRegistry` per daemon lifetime, saved from that same object every reconcile
+    tick) — a second load-mutate-save here races it and silently erases whichever side
+    saves last. Assert on the file's bytes and mtime, not a mock's call count: a spy that
+    records nothing is a wiring bug, not a pass. Corrupting this by restoring the old
+    `BindingRegistry.load()/.save()` calls in `apply()` must turn this RED."""
     from chela.telegram.bindings import BindingRegistry
 
     reg = BindingRegistry.load()
     reg.bind("@1", "1001", epoch=OLD)
     reg.save()
 
-    v = Verdict("telegram.bindings", "@1", OLD, "REVIVABLE", "sess-sid", "@9", None, "")
-    apply_env["restore"].apply([v], NEW)
+    bindings_path = Path(os.environ["CHELA_TELEGRAM_BINDINGS"])
+    before_bytes = bindings_path.read_bytes()
+    before_mtime_ns = bindings_path.stat().st_mtime_ns
 
-    reg2 = BindingRegistry.load()
-    assert reg2.window_for_thread("1001") == "@9"
-    assert reg2.thread_for_window("@1") is None
+    revivable = Verdict("telegram.bindings", "@1", OLD, "REVIVABLE", "sess-sid", "@9", None, "")
+    manual = Verdict("telegram.bindings", "@2", OLD, "MANUAL", None, None, "/proj", "")
+    apply_env["restore"].apply([revivable, manual], NEW)
+
+    assert bindings_path.read_bytes() == before_bytes
+    assert bindings_path.stat().st_mtime_ns == before_mtime_ns
 
 
-def test_apply_manual_bindings_unbinds_and_archives(apply_env):
-    from chela.telegram.bindings import BindingRegistry
+def test_apply_bindings_rows_come_back_skipped_not_silently_dropped(apply_env):
+    """GUARD: dropping the bindings write must not drop the row from the report — it must
+    still surface (as `skipped`, distinct from `revived`/`archived` since nothing was
+    written), never vanish."""
+    revivable = Verdict("telegram.bindings", "@1", OLD, "REVIVABLE", "sess-sid", "@9", None, "")
+    manual = Verdict("telegram.bindings", "@2", OLD, "MANUAL", None, None, "/proj", "")
+    result = apply_env["restore"].apply([revivable, manual], NEW)
 
-    reg = BindingRegistry.load()
-    reg.bind("@1", "1001", epoch=OLD)
-    reg.save()
-
-    v = Verdict("telegram.bindings", "@1", OLD, "MANUAL", None, None, "/proj", "")
-    apply_env["restore"].apply([v], NEW)
-
-    reg2 = BindingRegistry.load()
-    assert reg2.thread_for_window("@1") is None
-    assert apply_env["roster"].window(OLD, "@1") is not None
+    assert result["skipped"] == [revivable, manual]
+    assert result["revived"] == []
+    assert result["archived"] == []
 
 
 def test_apply_returns_revived_and_archived_lists(apply_env, monkeypatch):
@@ -406,3 +416,4 @@ def test_apply_returns_revived_and_archived_lists(apply_env, monkeypatch):
     result = apply_env["restore"].apply([revivable, manual], NEW)
     assert result["revived"] == [revivable]
     assert result["archived"] == [manual]
+    assert result["skipped"] == []

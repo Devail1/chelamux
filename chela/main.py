@@ -1742,6 +1742,10 @@ def cmd_restore(args) -> None:
             print(f"  [{v.store}] {v.wid}  ARCHIVED (no live session; recorded under "
                   f"{epoch.describe(v.stamped_epoch)} in roster.json and removed from its "
                   f"store)")
+        for v in result["skipped"]:
+            print(f"  [{v.store}] {v.wid}  NOT APPLIED — telegram-bindings.json is owned "
+                  f"by the chela-telegram daemon; its own reconcile tick reaps this once it "
+                  f"is running against the current epoch")
         if not verdicts:
             print("nothing to apply — no dangling row in a session-stamped store.")
     else:
