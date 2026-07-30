@@ -1019,7 +1019,7 @@ class _OneTick:
 
 def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=False):
     """Run ONE tick of the real ``chela.main._reconcile_loop``; return its kwargs."""
-    from chela import discovery, main
+    from chela import discovery, main, roster
     from chela import telegram as tg
 
     live = {"@9": "cmx-73", "@6": "orchestrator"} if live is None else live
@@ -1042,6 +1042,15 @@ def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=
         }
         return False
 
+    # CMX-195: the tick now also writes the durable fleet snapshot. Capture it instead of
+    # letting the real one run — otherwise every test in this section writes a roster into
+    # the operator's live CHELA_DIR as a side effect of driving the loop.
+    def _fake_record(live_windows, agent_ids, now_epoch, cwd_for, *a, **kw):
+        seen["roster_call"] = {"live": live_windows, "agents": agent_ids,
+                               "now_epoch": now_epoch, "cwd_for": cwd_for}
+        return None
+
+    monkeypatch.setattr(roster, "record", _fake_record)
     monkeypatch.setattr(tg, "live_agent_windows", lambda: (live, set(live)))
     monkeypatch.setattr(tg, "dispatched_window_ids", _fake_dispatched)
     monkeypatch.setattr(tg, "reconcile_bindings", _fake_reconcile)
@@ -1065,6 +1074,40 @@ def test_the_reconcile_loop_actually_wires_the_dispatched_feature(monkeypatch):
     assert kwargs["gate_for"] is tg.blocked_on_human   # ...and NOT pending_gate alone (D1)
     assert kwargs["bind_dispatched"] is False
     assert seen["stop"].waited == [7]
+
+
+def test_the_reconcile_loop_actually_writes_the_roster_snapshot(monkeypatch):
+    """🔴 GUARD (CMX-195): objective 1 is the WRITE, not the module.
+
+    ``chela/roster.py`` is exhaustively tested as a pure function, and every one of those
+    tests passes with the call deleted from ``_reconcile_loop`` — at which point no roster
+    is ever written on this box and ``chela restore`` can never answer the question the
+    ticket exists for ("what did the dead server have?"). The judge proved exactly that by
+    replacing the call site with ``pass`` and watching 2058 tests stay green.
+
+    The tick is the ONLY writer, so this is the only place the invariant can be observed.
+    """
+    seen = _run_one_tick(monkeypatch)
+    call = seen.get("roster_call")
+    assert call is not None, "the reconcile tick must call roster.record — objective 1"
+    # ...and with the fleet it already has in hand, not a re-derived one.
+    assert call["live"] == {"@9": "cmx-73", "@6": "orchestrator"}
+    assert call["agents"] == {"@9", "@6"}
+    assert call["cwd_for"] is not None
+
+
+def test_the_roster_snapshot_is_stamped_with_the_epoch_the_tick_read(monkeypatch):
+    """🔴 GUARD (CMX-195): a snapshot keyed on the WRONG epoch is worse than none.
+
+    ``record`` returns None and writes nothing on a falsy epoch, so passing the tick's
+    ``now_epoch`` through is what makes the snapshot joinable later. Hand the loop a known
+    epoch and assert it arrives.
+    """
+    from chela import epoch as epoch_mod
+
+    monkeypatch.setattr(epoch_mod, "current", lambda: "999-1785358190")
+    seen = _run_one_tick(monkeypatch)
+    assert seen["roster_call"]["now_epoch"] == "999-1785358190"
 
 
 def test_the_reconcile_loop_hands_the_live_fleet_to_the_dispatched_probe(monkeypatch):

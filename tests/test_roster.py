@@ -143,3 +143,60 @@ def test_archive_merges_into_an_existing_window_row(roster):
     assert row["cwd"] == "/x"           # original data preserved
     assert row["note"] == "manual"      # archive metadata merged in
     assert row["archived"] is True
+
+
+# 🔴 GUARD (CMX-195): the DEFAULT session_for branch — production's only path.
+#
+# Every test above hands `record` an explicit `session_for`, so the branch that runs on the
+# live box (`sessions.panes()` + `sessions.session_of_window`) is never taken. The judge
+# proved it: replacing that default with `lambda wid: None` left all 2058 tests green,
+# while on the box it silently blanks every recorded `session_id` — and a recorded session
+# id is the SOLE basis for a REVIVABLE verdict, so restore would classify every row MANUAL
+# forever and the auto-rebind arm would be dead code that no test could see.
+
+def test_record_defaults_to_resolving_the_session_from_the_live_panes(roster, monkeypatch):
+    from chela import sessions
+
+    seen = {}
+
+    def _fake_panes():
+        seen["panes_called"] = True
+        return {"@1": object()}
+
+    def _fake_session_of_window(wid, pane_map=None):
+        seen["pane_map"] = pane_map
+        return {"@1": "sid-alpha"}.get(wid)
+
+    monkeypatch.setattr(sessions, "panes", _fake_panes)
+    monkeypatch.setattr(sessions, "session_of_window", _fake_session_of_window)
+
+    # NO session_for argument — this is exactly how _reconcile_loop calls it.
+    rec = roster.record({"@1": "orch"}, {"@1"}, OLD, _cwd_for({"@1": "/home/x"}))
+
+    assert rec["windows"]["@1"]["session_id"] == "sid-alpha", (
+        "the default session_for must resolve through sessions.session_of_window — "
+        "a blank session_id makes every REVIVABLE verdict impossible"
+    )
+    assert seen.get("panes_called"), "one panes() snapshot must be shared across the tick"
+    assert seen["pane_map"] is not None, "the shared pane map must be passed through"
+
+
+def test_record_default_session_lands_on_disk_not_just_in_the_return_value(roster):
+    """The return value is a convenience; the FILE is what restore joins against."""
+    from chela import sessions
+
+    sessions_panes = {}
+
+    def _fake_session_of_window(wid, pane_map=None):
+        return {"@2": "sid-beta"}.get(wid)
+
+    orig_panes, orig_sow = sessions.panes, sessions.session_of_window
+    sessions.panes = lambda: sessions_panes
+    sessions.session_of_window = _fake_session_of_window
+    try:
+        roster.record({"@2": "cmx-9"}, {"@2"}, NEW, _cwd_for({"@2": "/tmp"}))
+    finally:
+        sessions.panes, sessions.session_of_window = orig_panes, orig_sow
+
+    on_disk = json.loads((roster._STORE).read_text())
+    assert on_disk["epochs"][NEW]["windows"]["@2"]["session_id"] == "sid-beta"
