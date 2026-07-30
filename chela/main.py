@@ -1734,7 +1734,7 @@ def cmd_restore(args) -> None:
     manual = [v for v in verdicts if v.verdict == "MANUAL"]
 
     if args.apply:
-        result = restore.apply(verdicts, now_epoch)
+        result = restore.apply(verdicts)
         for v in result["revived"]:
             print(f"  [{v.store}] {v.wid} -> {v.new_wid}  REVIVED (re-stamped to the "
                   f"current epoch)")

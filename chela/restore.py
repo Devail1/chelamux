@@ -217,7 +217,7 @@ def plan(orchestrator: dict, bindings: dict, session_entries: dict,
     return out
 
 
-def apply(verdicts: list[Verdict], now_epoch: str | None) -> dict:
+def apply(verdicts: list[Verdict]) -> dict:
     """Act on a :func:`plan`: re-stamp REVIVABLE rows, archive-then-remove MANUAL ones.
 
     ⛔ ``telegram.bindings`` rows are never written here. ``chela-telegram`` builds ONE
@@ -227,8 +227,8 @@ def apply(verdicts: list[Verdict], now_epoch: str | None) -> dict:
     already explains why session ids are NOT stored in this file, for the identical reason).
     A second load-mutate-save here races that daemon: whichever side saves last silently
     erases the other's write, in either direction. The daemon's own reconcile tick already
-    reaps a dangling binding (``reconcile_bindings``, driven by the same ``now_epoch`` it
-    computes every tick), so a ``telegram.bindings`` verdict is classified and reported —
+    reaps a dangling binding (``reconcile_bindings``, driven by the epoch it computes every
+    tick), so a ``telegram.bindings`` verdict is classified and reported —
     it lands in ``skipped``, never in ``revived``/``archived`` — and left for the daemon to
     act on; nothing here touches ``telegram-bindings.json``.
 

@@ -36,6 +36,14 @@ from chela import restore as restore_mod
 NOW = "9001-1784099999"
 OLD = "786-1784045825"
 
+# ⚠️ Session ids must satisfy `chela.sessions.SESSION_RE` (hex + dashes, 8-64 chars) or
+# `wid_for_session` returns None BEFORE reaching any seam — which is why rounds 5-7 never
+# observed a REVIVABLE verdict: their ids ("sid-from-a-dead-server") failed the regex.
+SID_DEAD = "bbbbbbbb-1111-2222-3333-444444444444"      # nothing live runs it -> MANUAL
+SID_LIVE = "cccccccc-5555-6666-7777-888888888888"      # resumed under @42  -> REVIVABLE
+SID_ORCH = "aaaaaaaa-9999-0000-1111-222222222222"
+CWD_FIVE = "/home/liav/projects/five"
+
 
 def _verdict(verdict, store="session-ids", wid="@1"):
     return restore_mod.Verdict(
@@ -188,7 +196,7 @@ def live_stores(tmp_path, monkeypatch):
     # (scan_all's). Seeding only the second left the first unguarded for three rounds.
     (chela_dir / "inbox.json").write_text(json.dumps({
         "orchestrator": "@1", "orchestrator_epoch": OLD,
-        "orchestrator_session": "sid-orch-from-a-dead-server",
+        "orchestrator_session": SID_ORCH,
         "orchestrator_name": "liavedunix", "queue": [], "runs_seen": {},
         "watches": {"@3": {"note": "reviewing cmx-41", "since": 1.0,
                            "name": "agent-3", "epoch": OLD}},
@@ -198,8 +206,19 @@ def live_stores(tmp_path, monkeypatch):
         "topic_names": {"@2": "nautilus"}, "epochs": {"@2": OLD},
     }))
     (chela_dir / "session-ids.json").write_text(json.dumps({
-        "@5": {"session_id": "sid-from-a-dead-server", "epoch": OLD},
+        "@5": {"session_id": SID_DEAD, "epoch": OLD},
+        "@7": {"session_id": SID_LIVE, "epoch": OLD},
     }))
+    # The roster the reconcile tick would have written while OLD was the running server.
+    # Without it, `plan`'s DEFAULT `roster_lookup` has nothing to join and a severed join
+    # is indistinguishable from a working one — which is what hid it for three rounds.
+    (chela_dir / "roster.json").write_text(json.dumps({"epochs": {OLD: {
+        "first_seen": 1.0, "last_seen": 2.0, "windows": {
+            "@1": {"name": "liavedunix", "cwd": "/home/liav", "session_id": SID_ORCH},
+            "@5": {"name": "agent-5", "cwd": CWD_FIVE, "session_id": SID_DEAD},
+            "@7": {"name": "agent-7", "cwd": "/home/liav/projects/seven",
+                   "session_id": SID_LIVE},
+        }}}}))
 
     import chela.config as config
     importlib.reload(config)
@@ -219,6 +238,14 @@ def live_stores(tmp_path, monkeypatch):
         "judge_window_id": "@10", "judge_window_epoch": OLD,
     }])
     monkeypatch.setattr(epoch, "current", lambda: NOW)
+
+    # ⭐ The LEAF is faked (which pane claims a session), never the seam. `plan`'s default
+    # `wid_for_session` stays the real `sessions.wid_for_session`, so blanking that default
+    # is observable — SID_LIVE resolves to a live window, SID_DEAD to nothing.
+    from chela import sessions
+    monkeypatch.setattr(sessions, "panes", lambda *a, **k: {})
+    monkeypatch.setattr(sessions, "wid_claiming_session",
+                        lambda sid, pane_map=None: "@42" if sid == SID_LIVE else None)
     return monkeypatch
 
 
@@ -293,7 +320,10 @@ def test_a_plain_chela_restore_touches_NOTHING_on_disk(live_stores, tmp_path, ca
     assert _store_bytes(chela_dir) == before, (
         "a dry run wrote to a store — `chela restore` without --apply must be read-only"
     )
-    assert not (chela_dir / "roster.json").exists(), (
+    # roster.json is in the glob above, but assert it explicitly: it is the archive
+    # destination, so an unchanged roster is the direct evidence nothing was archived.
+    assert json.loads((chela_dir / "roster.json").read_text()) == json.loads(
+        before["roster.json"]), (
         "a dry run archived a row into roster.json — nothing may be archived without --apply"
     )
 
@@ -424,8 +454,9 @@ def test_the_doctor_fact_reads_the_three_LIVE_stores(live_stores, tmp_path):
 
     n = runtime_truth._restore_scan(NOW)
 
-    # inbox.watches @3 · dispatcher.runs @9 · dispatcher.runs (judge) @10 · session-ids @5
-    assert n == 4, f"the fact must count every dangling row across the live stores, got {n}"
+    # inbox.watches @3 · dispatcher.runs @9 · dispatcher.runs (judge) @10
+    # · session-ids @5 and @7
+    assert n == 5, f"the fact must count every dangling row across the live stores, got {n}"
 
 
 def test_the_doctor_fact_counts_ZERO_when_every_row_is_current(live_stores, tmp_path):
@@ -435,4 +466,116 @@ def test_the_doctor_fact_counts_ZERO_when_every_row_is_current(live_stores, tmp_
 
     assert runtime_truth._restore_scan(OLD) == 0, (
         "every fixture row is stamped OLD — asked about OLD, nothing is dangling"
+    )
+
+
+# --- the two DI defaults, and the branches only --apply reaches -------------------------
+#
+# 🔴 GUARDS (CMX-195 round 8). `plan()` has exactly TWO callable defaults — verified by
+# signature scan, not by reading:
+#
+#     chela.restore.plan(roster_lookup=)   -> chela.roster.window
+#     chela.restore.plan(wid_for_session=) -> chela.sessions.wid_for_session
+#
+# `cmd_restore` passes neither, so the defaults ARE production, and every plan/_classify
+# test in test_restore.py passes both explicitly. `roster.record`'s equivalent was closed
+# in round 5; these are the last two of their kind in this feature.
+
+def test_a_live_session_is_classified_REVIVABLE_through_plans_DEFAULT_resolver(
+        live_stores, capsys):
+    """🔴 Objective 2's whole distinction. Blank `wid_for_session` and every dangling row is
+    MANUAL forever: `--apply`'s auto-restamp arm becomes dead code, and a row whose session
+    is alive under a NEW address right now — the one-command fix this ticket exists to
+    surface — reads identically to one whose agent is gone."""
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    assert "REVIVABLE" in out, (
+        "no row was classified REVIVABLE — plan()'s default session resolver is severed"
+    )
+    assert "@7 -> @42" in out, "the REVIVABLE row must name the address it moved to"
+
+
+def test_the_roster_join_supplies_the_relaunch_COMMAND_for_a_manual_row(live_stores, capsys):
+    """🔴 Objective 1's payoff. The snapshot exists so a dangling row can be EXPLAINED:
+    `_classify` reads cwd/name/session_id out of it, and without cwd
+    `Verdict.manual_command()` returns None and every MANUAL row degrades to
+    '(no cwd/session on record)'. Blank the join and the tick's 7-second snapshot is read
+    by nobody."""
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    assert f"cd {CWD_FIVE}" in out and f"claude --resume {SID_DEAD}" in out, (
+        "the MANUAL row lost its relaunch one-liner — plan()'s roster join is severed"
+    )
+
+
+def test_apply_restamps_a_REVIVABLE_row_to_the_new_wid_AND_the_current_epoch(
+        live_stores, tmp_path, capsys):
+    """🔴 Two things at the store: `--apply` acts on REVIVABLE (the arm no end-to-end test
+    had ever reached), and it is handed the RUNNING epoch — re-stamping with a blank one
+    would write a row that is dangling the moment it lands."""
+    chela_dir = tmp_path / "chela"
+
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--apply"])
+
+    rows = json.loads((chela_dir / "session-ids.json").read_text())
+    assert "@42" in rows, "the REVIVABLE row was not re-stamped to its new address"
+    assert rows["@42"]["session_id"] == SID_LIVE
+    assert rows["@42"]["epoch"] == NOW, (
+        "re-stamped under the wrong epoch — a row that is dangling on arrival"
+    )
+    assert "@7" not in rows, "the old address must not survive the re-stamp"
+    assert "REVIVED" in capsys.readouterr().out
+
+
+def test_a_dangling_BINDING_is_still_reported_under_apply(live_stores, capsys):
+    """🔴 The round-2 review made this an explicit condition of accepting that `apply()`
+    stops writing telegram-bindings.json: 'dropping the binding WRITE must not become
+    dropping the binding ROW'. Under --apply this loop is the ONLY surface it appears on —
+    bindings are not in scan_all's orphan list, the dry-run verdict block does not run, and
+    a bindings row is never MANUAL so it is not even in the exit-code count."""
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--apply"])
+
+    out = capsys.readouterr().out
+    assert "telegram.bindings" in out and "@2" in out, (
+        "a dangling binding vanished from --apply's report — silent omission"
+    )
+    assert "NOT APPLIED" in out, "it must say WHY it was not acted on (the daemon owns it)"
+
+
+def test_the_orphan_list_COUNTS_every_source_including_session_ids(live_stores, capsys):
+    """🔴 A count, not a substring. `plan` prints `[session-ids] @5 MANUAL` for the same row
+    either way, so every previous session-ids assertion was satisfiable by the WRONG path.
+    The orphan block's own count is the one thing only `scan_all` produces."""
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    # watches @3 · runs @9 · runs judge @10 · session-ids @5 and @7
+    assert "5 row(s) stamped by a tmux server that is no longer running" in out, (
+        "the orphan list lost a source — its count is the only assertion scan_all alone "
+        f"can satisfy. Got:\n{out}"
+    )
+
+
+def test_the_doctor_fact_compares_against_the_RUNNING_epoch(live_stores):
+    """🔴 The fourth input to the scan, supplied by `_restore_read` rather than by the
+    stores. Hand it a blank epoch and `epoch.is_dangling`'s two-known-halves rule marks
+    EVERY row current: the fact counts 0 forever and `chela doctor` stays green through the
+    next OOM — verbatim the hole this ticket's measured receipt named.
+
+    Round 7 drove `_restore_scan` directly, so this argument was still unobserved."""
+    from chela import runtime_truth
+
+    live_stores.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    obs = runtime_truth._restore_read()
+
+    assert obs.value == 5, (
+        f"the doctor fact must see the dangling rows, got {obs.value} — the running epoch "
+        "never reached the scan"
     )

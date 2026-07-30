@@ -308,7 +308,7 @@ def test_apply_revivable_session_ids_restamps_to_the_new_wid_and_current_epoch(a
     monkeypatch.setattr(sessionids_mod.epoch, "current", lambda: NEW)   # server restarted
 
     v = Verdict("session-ids", "@5", OLD, "REVIVABLE", "sess-sid", "@42", None, "")
-    apply_env["restore"].apply([v], NEW)
+    apply_env["restore"].apply([v])
 
     entries = sessionids_mod.entries()
     assert "@5" not in entries
@@ -324,7 +324,7 @@ def test_apply_manual_session_ids_row_is_archived_and_removed(apply_env, monkeyp
     monkeypatch.setattr(sessionids_mod.epoch, "current", lambda: NEW)
 
     v = Verdict("session-ids", "@5", OLD, "MANUAL", "sess-sid", None, "/proj", "cmx-9")
-    apply_env["restore"].apply([v], NEW)
+    apply_env["restore"].apply([v])
 
     assert "@5" not in sessionids_mod.entries()                 # removed
     archived = roster_mod.window(OLD, "@5")
@@ -342,7 +342,7 @@ def test_apply_revivable_orchestrator_restamps_via_register(apply_env, monkeypat
     monkeypatch.setattr(inbox_mod.epoch, "current", lambda: NEW)
 
     v = Verdict("inbox.orchestrator", "@0", OLD, "REVIVABLE", "orch-sid", "@42", None, "")
-    apply_env["restore"].apply([v], NEW)
+    apply_env["restore"].apply([v])
 
     store = inbox_mod.load()
     assert store["orchestrator"] == "@42"
@@ -359,7 +359,7 @@ def test_apply_manual_orchestrator_is_archived_and_unregistered(apply_env):
         store["orchestrator_name"] = "orch"
 
     v = Verdict("inbox.orchestrator", "@0", OLD, "MANUAL", "orch-sid", None, "/proj", "orch")
-    apply_env["restore"].apply([v], NEW)
+    apply_env["restore"].apply([v])
 
     store = inbox_mod.load()
     assert store["orchestrator"] is None
@@ -386,7 +386,7 @@ def test_apply_never_writes_the_bindings_file(apply_env):
 
     revivable = Verdict("telegram.bindings", "@1", OLD, "REVIVABLE", "sess-sid", "@9", None, "")
     manual = Verdict("telegram.bindings", "@2", OLD, "MANUAL", None, None, "/proj", "")
-    apply_env["restore"].apply([revivable, manual], NEW)
+    apply_env["restore"].apply([revivable, manual])
 
     assert bindings_path.read_bytes() == before_bytes
     assert bindings_path.stat().st_mtime_ns == before_mtime_ns
@@ -398,7 +398,7 @@ def test_apply_bindings_rows_come_back_skipped_not_silently_dropped(apply_env):
     written), never vanish."""
     revivable = Verdict("telegram.bindings", "@1", OLD, "REVIVABLE", "sess-sid", "@9", None, "")
     manual = Verdict("telegram.bindings", "@2", OLD, "MANUAL", None, None, "/proj", "")
-    result = apply_env["restore"].apply([revivable, manual], NEW)
+    result = apply_env["restore"].apply([revivable, manual])
 
     assert result["skipped"] == [revivable, manual]
     assert result["revived"] == []
@@ -413,7 +413,7 @@ def test_apply_returns_revived_and_archived_lists(apply_env, monkeypatch):
 
     revivable = Verdict("inbox.orchestrator", "@0", OLD, "REVIVABLE", "sid", "@9", None, "")
     manual = Verdict("session-ids", "@5", OLD, "MANUAL", "s2", None, "/proj", "")
-    result = apply_env["restore"].apply([revivable, manual], NEW)
+    result = apply_env["restore"].apply([revivable, manual])
     assert result["revived"] == [revivable]
     assert result["archived"] == [manual]
     assert result["skipped"] == []
