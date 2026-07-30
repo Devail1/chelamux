@@ -43,6 +43,7 @@ from chela import (
     okf,
     orchestrator,
     restore,
+    roster,
     rooms,
     scheduler,
     sessionids,
@@ -541,6 +542,13 @@ def cmd_watch(args) -> None:
     orch = result["orchestrator"] or "(unregistered)"
     note = f' — note: "{result["note"]}"' if result["note"] else ""
     print(f"watching {wid}{note}; events -> {orch} when idle")
+    # CMX-195: a registration with no resolved identity looks identical to a healthy one
+    # once it's on disk (orchestrator_session: null) — CMX-82's self-heal is disarmed for
+    # it before it ever runs, and today nothing said so. Surface it the moment it happens.
+    if self_wid and not result.get("session"):
+        print(f"⚠ could not resolve a session identity for {self_wid} — self-heal is "
+              "unavailable for this registration until the next `chela watch`/`register` "
+              "that resolves one (fire a hook, or run a command, first)", file=sys.stderr)
 
 
 def cmd_unwatch(args) -> None:
@@ -1333,6 +1341,13 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
             # here and hand it to both, so a restart reaps the stale ones instead of relaying
             # a stranger's pane into a dead agent's topic.
             now_epoch = epoch.current()
+            # The durable fleet snapshot (CMX-195): same live/agents/now_epoch this tick
+            # already computed, no extra tmux call. Best-effort — a roster write failing
+            # must never take down the reconcile loop it rides on.
+            try:
+                roster.record(live, agents, now_epoch, get_window_cwd_by_id)
+            except Exception:
+                log.exception("chela roster: recording the fleet snapshot failed")
             dispatched = set() if BIND_DISPATCHED else tg.dispatched_window_ids(
                 live_windows=live, now_epoch=now_epoch)
             bindings_changed = tg.reconcile_bindings(
@@ -1674,12 +1689,22 @@ def cmd_doctor(args) -> None:
 
 
 def cmd_restore(args) -> None:
-    """Report every epoch-stamped row a hard tmux death orphaned (see ``chela/restore.py``).
+    """Report (or ``--apply`` to act on) every epoch-stamped row a hard tmux death orphaned
+    (see ``chela/restore.py``).
 
-    Read-only. It names what a dead tmux server left dangling across ``inbox.json``
-    watches, the dispatcher's ``runs`` table, and ``session-ids.json`` — it does not touch
-    any of them, and it never relaunches, spawns, or resumes an agent.
+    Dry-run by default: names what a dead tmux server left dangling across ``inbox.json``
+    watches, the dispatcher's ``runs`` table, ``telegram-bindings.json``, and
+    ``session-ids.json`` — it does not touch any of them, and it never relaunches, spawns,
+    or resumes an agent. ``--apply`` re-stamps rows whose recorded Claude session is alive
+    under a new address (REVIVABLE) and archives-then-removes the rest (MANUAL).
+
+    ⚠️ The roster only helps starting from the NEXT reboot — there is no snapshot of an
+    epoch chela was never running to observe. A run today can still report (and, with
+    ``--apply``, act on) the stale rows already sitting in each store; it cannot enumerate a
+    dead fleet the roster never saw.
     """
+    from chela.telegram.bindings import BindingRegistry
+
     now_epoch = epoch.current()
     store = inbox.load()
     try:
@@ -1688,20 +1713,62 @@ def cmd_restore(args) -> None:
         runs = []
     orphans = restore.scan_all(store["watches"], runs, sessionids.entries(), now_epoch)
 
+    bindings_reg = BindingRegistry.load()
+    bindings = {wid: bindings_reg.epoch_for(wid) for wid in bindings_reg.windows()}
+    verdicts = restore.plan(store, bindings, sessionids.entries(), now_epoch)
+
     if now_epoch is None:
         print("⚠ CANNOT VERIFY — tmux is unreachable right now, so no stamped row can be "
               "proven dangling (or current). This is not a clean bill of health.")
 
-    if not orphans:
+    if not orphans and not verdicts:
         print("restore: nothing orphaned — every stamped row matches the running tmux epoch.")
         return
 
-    print(f"{len(orphans)} row(s) stamped by a tmux server that is no longer running:\n")
-    for o in orphans:
-        print(f"  [{o.store}] {o.wid}  {o.label}  ({epoch.describe(o.stamped_epoch)})")
-    print("\nreport only — chela restore does not act on any of these. Re-register "
-          "(chela watch/register), re-dispatch, or clear each row by hand once you've "
-          "decided what happened to it.")
+    if orphans:
+        print(f"{len(orphans)} row(s) stamped by a tmux server that is no longer running:\n")
+        for o in orphans:
+            print(f"  [{o.store}] {o.wid}  {o.label}  ({epoch.describe(o.stamped_epoch)})")
+        print()
+
+    manual = [v for v in verdicts if v.verdict == "MANUAL"]
+
+    if args.apply:
+        result = restore.apply(verdicts, now_epoch)
+        for v in result["revived"]:
+            print(f"  [{v.store}] {v.wid} -> {v.new_wid}  REVIVED (re-stamped to the "
+                  f"current epoch)")
+        for v in result["archived"]:
+            print(f"  [{v.store}] {v.wid}  ARCHIVED (no live session; recorded under "
+                  f"{epoch.describe(v.stamped_epoch)} in roster.json and removed from its "
+                  f"store)")
+        if not verdicts:
+            print("nothing to apply — no dangling row in a session-stamped store.")
+    else:
+        if verdicts:
+            print(f"{len(verdicts)} classified row(s) (three session-stamped stores: "
+                  "inbox orchestrator, telegram-bindings, session-ids):\n")
+            for v in verdicts:
+                if v.verdict == "REVIVABLE":
+                    print(f"  [{v.store}] {v.wid} -> {v.new_wid}  REVIVABLE "
+                          f"(session {v.session_id} is alive there now)")
+                else:
+                    cmd = v.manual_command()
+                    print(f"  [{v.store}] {v.wid}  MANUAL"
+                          + (f"  — {cmd}" if cmd else " (no cwd/session on record)"))
+            print("\nreport only — chela restore does not act on any of these. Pass --apply "
+                  "to re-stamp REVIVABLE rows and archive MANUAL ones, or act by hand "
+                  "(chela watch/register, re-dispatch, or clear a row yourself).")
+        else:
+            print("report only — chela restore does not act on any of these. Re-register "
+                  "(chela watch/register), re-dispatch, or clear each row by hand once "
+                  "you've decided what happened to it.")
+
+    # Nonzero while anything is MANUAL — even after --apply archives it, the underlying
+    # agent is still orphaned and needs a human; this is what composes into a restart
+    # procedure ("run restore --apply, then check its exit code before declaring done").
+    if manual:
+        sys.exit(1)
 
 
 def cmd_task_finished(args) -> None:
@@ -2368,11 +2435,14 @@ def main() -> None:
         help="Check the running config against $CHELA_DIR/chela.env (exits 1 on a break)",
     )
 
-    # restore — every epoch-stamped row a hard tmux death orphaned (report only)
-    sub.add_parser(
+    # restore — every epoch-stamped row a hard tmux death orphaned
+    p_restore = sub.add_parser(
         "restore",
-        help="Report epoch-dangling rows left by a hard tmux death (inbox/dispatcher/session-ids)",
+        help="Report (or --apply to act on) epoch-dangling rows left by a hard tmux death "
+             "(inbox/telegram-bindings/session-ids); dry-run by default",
     )
+    p_restore.add_argument("--apply", action="store_true",
+                           help="Re-stamp REVIVABLE rows and archive MANUAL ones (default: report only)")
 
     # task-finished — final step in the dispatcher work-item lifecycle
     p_tf = sub.add_parser(

@@ -277,6 +277,40 @@ def test_queue_drains_one_event_per_idle_tick(store_file, windows, sends, monkey
     assert [t for _, t in sends] == ["📥 one", "📥 two"]
 
 
+# --- CMX-195 objective 5: a disarmed identity must be visible in the RESULT --------
+#
+# Measured live 2026-07-30: `orchestrator_session` was `null` because `_identity_of`
+# returned `None` at registration — and `null` looks IDENTICAL to a healthy registration
+# once it's on disk, so nothing said the self-heal CMX-82 depends on was disarmed before
+# it ever ran. These guard the reported result, never the stored (silently-null) field —
+# a caller checking `result["session"]` is what lets `chela watch`/`register` warn a human.
+
+def test_register_return_value_surfaces_a_failed_identity_resolution(store_file, windows):
+    result = inbox.register(ORCH)
+    assert result["ok"] is True
+    assert "session" in result
+    assert result["session"] is None
+
+
+def test_register_return_value_reports_a_resolved_identity_too(store_file, windows, monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: "sid-123")
+    result = inbox.register(ORCH)
+    assert result["session"] == "sid-123"
+
+
+def test_watch_return_value_surfaces_a_failed_identity_resolution(store_file, windows):
+    result = inbox.watch(AGENT, "note", by=ORCH)
+    assert result["ok"] is True
+    assert "session" in result
+    assert result["session"] is None
+
+
+def test_watch_return_value_reports_a_resolved_identity_too(store_file, windows, monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: "sid-123")
+    result = inbox.watch(AGENT, "note", by=ORCH)
+    assert result["session"] == "sid-123"
+
+
 def test_unregister_clears_the_address_only_when_it_names_that_wid(store_file):
     # unregister is the inverse of register (orchestrator teardown uses it). It clears the
     # recorded address so a killed window leaves no dead address behind — but ONLY if the

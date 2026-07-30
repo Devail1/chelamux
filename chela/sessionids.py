@@ -85,6 +85,25 @@ def set_session_id(wid: str, session_id: str) -> None:
     _save(data)
 
 
+def remove(wid: str) -> bool:
+    """Drop ``wid``'s row entirely. True if a row was removed.
+
+    Used by :func:`chela.restore.apply`: a REVIVABLE row is superseded by a fresh row under
+    its new address (the old key would otherwise report as dangling forever), and a MANUAL
+    row is archived into :mod:`chela.roster` first and then dropped here — never the other
+    way round.
+    """
+    w = _norm(wid)
+    if w is None:
+        return False
+    data = _load()
+    if w not in data:
+        return False
+    del data[w]
+    _save(data)
+    return True
+
+
 def entries() -> dict:
     """Every ``wid -> {session_id, epoch}`` row on disk, unfiltered — for reporting
     (:mod:`chela.restore`) only. Unlike :func:`session_id_for` this does NOT drop rows whose

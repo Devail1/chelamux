@@ -2020,6 +2020,59 @@ def _upstream_synced_report(_declared: None, obs: Observation) -> list[Finding]:
     )]
 
 
+# --- fact: rows a hard tmux death orphaned, that nothing else surfaces --------------
+
+def _restore_scan(now: str) -> int:
+    """Seam: the real answer is ``len(chela.restore.scan_all(...))`` over the three live
+    stores (``inbox.json`` watches, the dispatcher's ``runs`` table, ``session-ids.json``).
+    A module-level function, like :func:`_parked_runs` / :func:`_reviewed_prs` above, so the
+    test suite can hand it a fixed count instead of reaching ``dispatcher.DB_PATH`` /
+    ``sessionids``'s own store path — both cached at import time against the real
+    ``~/.chela``, not the fixture's temp one.
+    """
+    from chela import dispatcher, inbox, restore, sessionids
+
+    store = inbox.load()
+    try:
+        runs = dispatcher.list_runs()
+    except Exception:
+        runs = []
+    return len(restore.scan_all(store["watches"], runs, sessionids.entries(), now))
+
+
+def _restore_read() -> Observation:
+    """Every store ``chela restore`` scans, read live — see ``chela/restore.py``.
+
+    ``chela doctor`` was green through the 2026-07-14 OOM ``chela/epoch.py``'s own
+    docstring documents: detection existed, but nothing counted the stamped rows a dead
+    server left behind and put the count somewhere a green doctor run would have to look
+    past. This closes that hole without adding a private check — it reads back the same
+    :func:`chela.restore.scan_all` a human would get from running the CLI.
+    """
+    if _tmux_or_unverifiable() is None:
+        return cannot_verify("tmux is not on PATH, so chela cannot compare a stamped row's "
+                             "epoch against the one running now.")
+    now = epoch.current()
+    if now is None:
+        return cannot_verify("no tmux server is running, so there is no current epoch to "
+                             "compare stamped rows against.")
+    return observed(_restore_scan(now))
+
+
+def _restore_report(_declared: None, obs: Observation) -> list[Finding]:
+    n = obs.value
+    if not n:
+        return [Finding(OK, "no stamped rows from a dead tmux epoch")]
+    return [Finding(
+        WARN, f"{n} stamped row(s) from a dead epoch → `chela restore`",
+        "A hard tmux death (OOM, restart) left these pointing at a server that no longer "
+        "exists — this is the exact condition that stayed invisible through the 2026-07-14 "
+        "OOM `chela/epoch.py`'s own docstring documents. Run `chela restore` to see every "
+        "row and what it means; `chela restore --apply` re-stamps whatever can be revived "
+        "and archives the rest into `roster.json`.",
+    )]
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -2292,6 +2345,18 @@ def facts() -> list[Fact]:
             read_back=_upstream_synced_read,
             report=_upstream_synced_report,
             applies=_upstream_synced_applies,
+        ),
+        Fact(
+            name="restore.dead_epoch_rows",
+            declared_by="nothing — chela never predicts this; a stamped row either "
+                        "matches the running tmux epoch or it doesn't",
+            owned_by="tmux (the running epoch) joined against inbox.json watches, the "
+                     "dispatcher's runs table, and session-ids.json — the same three "
+                     "stores `chela restore` scans",
+            declare=lambda: None,
+            read_back=_restore_read,
+            report=_restore_report,
+            unverifiable_level=WARN,      # same reason as tmux.session
         ),
     ]
 
