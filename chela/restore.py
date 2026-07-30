@@ -37,9 +37,9 @@ Every scanner here is pure — data in, :class:`Orphan` list out — so this tes
 live tmux server or sqlite file, the same shape as
 :func:`chela.telegram.reconcile.dispatched_window_ids`.
 
-**Classify and act — :func:`plan` / :func:`apply`.** The scanners above only REPORT; they
-cannot say whether a dangling row is a one-command fix or needs a human, because they never
-look past the dead address itself. :func:`plan` does: for each dangling row in the three
+**Classify — :func:`plan`.** The scanners above only REPORT; they cannot say whether a
+dangling row is a one-command fix or needs a human, because they never look past the dead
+address itself. :func:`plan` does: for each dangling row in the three
 STAMPED-WITH-A-SESSION stores (``inbox.json``'s orchestrator registration,
 ``telegram-bindings.json``, ``session-ids.json``), it joins the row's dead epoch + wid to
 :mod:`chela.roster`'s snapshot of what that address used to be, and asks
@@ -47,17 +47,18 @@ STAMPED-WITH-A-SESSION stores (``inbox.json``'s orchestrator registration,
 never reimplemented here — whether that session is alive under a new address right now. Two
 outcomes: **REVIVABLE** (the session is live elsewhere — the row just needs its address
 updated) or **MANUAL** (nothing live claims that session — a human decides, with the exact
-``cd <cwd> && CHELA_WID=@N claude --resume <sid>`` one-liner to do it). :func:`apply` is the
-only thing in this module that writes: it re-stamps REVIVABLE rows in place and ARCHIVES
-MANUAL rows into :mod:`chela.roster`'s dead-epoch record before removing them from their
-live store — nothing here is ever destroyed without first being written down. ⛔ EXCEPT
-``telegram-bindings.json``: ``chela-telegram`` owns that file (one in-memory
-``BindingRegistry`` per daemon lifetime, saved from that same object every reconcile tick),
-so a second load-mutate-save here would race it and silently erase whichever side wrote
-last. A ``telegram.bindings`` verdict is still classified and reported by :func:`plan`; it
-is just never acted on by :func:`apply` — it comes back in ``skipped``, and the daemon's own
-reconcile tick reaps it. Neither function ever touches tmux itself: no window is relaunched,
-spawned, resumed, or killed.
+``cd <cwd> && CHELA_WID=@N claude --resume <sid>`` one-liner to do it).
+
+⛔ **NOTHING in this module writes.** It is a report: no store is mutated, and tmux is never
+touched — no window is relaunched, spawned, resumed or killed. The write half (re-stamping
+REVIVABLE rows, archiving MANUAL ones before removal) is a **separate, deliberately deferred
+ticket**; splitting it out is what let the read half ship guarded.
+
+⚠️ When that half is built, ``telegram-bindings.json`` must stay out of it: ``chela-telegram``
+owns that file (one in-memory ``BindingRegistry`` per daemon lifetime, saved from that same
+object every reconcile tick), so a second load-mutate-save races it and silently erases
+whichever side wrote last. Its rows are classified and reported here; the daemon's own
+reconcile tick is what reaps them.
 """
 from __future__ import annotations
 
@@ -215,54 +216,3 @@ def plan(orchestrator: dict, bindings: dict, session_entries: dict,
         if v:
             out.append(v)
     return out
-
-
-def apply(verdicts: list[Verdict]) -> dict:
-    """Act on a :func:`plan`: re-stamp REVIVABLE rows, archive-then-remove MANUAL ones.
-
-    ⛔ ``telegram.bindings`` rows are never written here. ``chela-telegram`` builds ONE
-    :class:`~chela.telegram.bindings.BindingRegistry` at daemon start and calls ``.save()``
-    from that same in-memory object on every reconcile tick — an unlocked whole-file write
-    with no merge and no read-back (see ``chela/sessionids.py``'s module docstring, which
-    already explains why session ids are NOT stored in this file, for the identical reason).
-    A second load-mutate-save here races that daemon: whichever side saves last silently
-    erases the other's write, in either direction. The daemon's own reconcile tick already
-    reaps a dangling binding (``reconcile_bindings``, driven by the epoch it computes every
-    tick), so a ``telegram.bindings`` verdict is classified and reported —
-    it lands in ``skipped``, never in ``revived``/``archived`` — and left for the daemon to
-    act on; nothing here touches ``telegram-bindings.json``.
-
-    No window is relaunched, spawned, resumed, or killed (the ticket's hard boundary; see
-    the module docstring). MANUAL rows in the two stores this function does own are archived
-    into :func:`chela.roster.archive` BEFORE they are removed from their live store, so a row
-    this drops is never lost, only moved.
-    """
-    from chela import inbox, sessionids
-
-    revived: list[Verdict] = []
-    archived: list[Verdict] = []
-    skipped: list[Verdict] = []
-
-    for v in verdicts:
-        if v.store == "telegram.bindings":
-            skipped.append(v)
-            continue
-        if v.verdict == "REVIVABLE":
-            if v.store == "inbox.orchestrator":
-                inbox.register(v.new_wid)
-            elif v.store == "session-ids":
-                sessionids.remove(v.wid)
-                if v.session_id:
-                    sessionids.set_session_id(v.new_wid, v.session_id)
-            revived.append(v)
-        elif v.verdict == "MANUAL":
-            roster.archive(v.stamped_epoch, v.wid,
-                           {"store": v.store, "session_id": v.session_id,
-                            "cwd": v.cwd, "label": v.label})
-            if v.store == "inbox.orchestrator":
-                inbox.unregister(v.wid)
-            elif v.store == "session-ids":
-                sessionids.remove(v.wid)
-            archived.append(v)
-
-    return {"revived": revived, "archived": archived, "skipped": skipped}

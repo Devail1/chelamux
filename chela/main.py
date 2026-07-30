@@ -1689,19 +1689,22 @@ def cmd_doctor(args) -> None:
 
 
 def cmd_restore(args) -> None:
-    """Report (or ``--apply`` to act on) every epoch-stamped row a hard tmux death orphaned
-    (see ``chela/restore.py``).
+    """Report every epoch-stamped row a hard tmux death orphaned (see ``chela/restore.py``).
 
-    Dry-run by default: names what a dead tmux server left dangling across ``inbox.json``
-    watches, the dispatcher's ``runs`` table, ``telegram-bindings.json``, and
-    ``session-ids.json`` — it does not touch any of them, and it never relaunches, spawns,
-    or resumes an agent. ``--apply`` re-stamps rows whose recorded Claude session is alive
-    under a new address (REVIVABLE) and archives-then-removes the rest (MANUAL).
+    **READ-ONLY, always.** It names what a dead tmux server left dangling across
+    ``inbox.json`` watches, the dispatcher's ``runs`` table, ``telegram-bindings.json`` and
+    ``session-ids.json``, and it touches none of them: no store is written, and no agent is
+    relaunched, spawned, resumed or killed. Each row is classified REVIVABLE (its recorded
+    Claude session is alive under a NEW address, so re-registering is a one-command fix) or
+    MANUAL (nothing live runs it), and a MANUAL row carries the exact relaunch command.
+
+    Acting on the report is a separate, deliberately deferred ticket (the write half —
+    re-stamping REVIVABLE rows and archiving MANUAL ones). Until it lands the operator acts
+    by hand: ``chela watch``/``register``, re-dispatch, or clear a row themselves.
 
     ⚠️ The roster only helps starting from the NEXT reboot — there is no snapshot of an
-    epoch chela was never running to observe. A run today can still report (and, with
-    ``--apply``, act on) the stale rows already sitting in each store; it cannot enumerate a
-    dead fleet the roster never saw.
+    epoch chela was never running to observe. A run today still reports the stale rows
+    already sitting in each store; it cannot enumerate a dead fleet the roster never saw.
     """
     from chela.telegram.bindings import BindingRegistry
 
@@ -1733,44 +1736,24 @@ def cmd_restore(args) -> None:
 
     manual = [v for v in verdicts if v.verdict == "MANUAL"]
 
-    if args.apply:
-        result = restore.apply(verdicts)
-        for v in result["revived"]:
-            print(f"  [{v.store}] {v.wid} -> {v.new_wid}  REVIVED (re-stamped to the "
-                  f"current epoch)")
-        for v in result["archived"]:
-            print(f"  [{v.store}] {v.wid}  ARCHIVED (no live session; recorded under "
-                  f"{epoch.describe(v.stamped_epoch)} in roster.json and removed from its "
-                  f"store)")
-        for v in result["skipped"]:
-            print(f"  [{v.store}] {v.wid}  NOT APPLIED — telegram-bindings.json is owned "
-                  f"by the chela-telegram daemon; its own reconcile tick reaps this once it "
-                  f"is running against the current epoch")
-        if not verdicts:
-            print("nothing to apply — no dangling row in a session-stamped store.")
-    else:
-        if verdicts:
-            print(f"{len(verdicts)} classified row(s) (three session-stamped stores: "
-                  "inbox orchestrator, telegram-bindings, session-ids):\n")
-            for v in verdicts:
-                if v.verdict == "REVIVABLE":
-                    print(f"  [{v.store}] {v.wid} -> {v.new_wid}  REVIVABLE "
-                          f"(session {v.session_id} is alive there now)")
-                else:
-                    cmd = v.manual_command()
-                    print(f"  [{v.store}] {v.wid}  MANUAL"
-                          + (f"  — {cmd}" if cmd else " (no cwd/session on record)"))
-            print("\nreport only — chela restore does not act on any of these. Pass --apply "
-                  "to re-stamp REVIVABLE rows and archive MANUAL ones, or act by hand "
-                  "(chela watch/register, re-dispatch, or clear a row yourself).")
-        else:
-            print("report only — chela restore does not act on any of these. Re-register "
-                  "(chela watch/register), re-dispatch, or clear each row by hand once "
-                  "you've decided what happened to it.")
+    if verdicts:
+        print(f"{len(verdicts)} classified row(s) (three session-stamped stores: "
+              "inbox orchestrator, telegram-bindings, session-ids):\n")
+        for v in verdicts:
+            if v.verdict == "REVIVABLE":
+                print(f"  [{v.store}] {v.wid} -> {v.new_wid}  REVIVABLE "
+                      f"(session {v.session_id} is alive there now)")
+            else:
+                cmd = v.manual_command()
+                print(f"  [{v.store}] {v.wid}  MANUAL"
+                      + (f"  — {cmd}" if cmd else " (no cwd/session on record)"))
+    print("\nreport only — chela restore never writes to a store. Act by hand: "
+          "chela watch/register for a REVIVABLE row, re-dispatch, or clear a row "
+          "yourself once you have decided what happened to it.")
 
-    # Nonzero while anything is MANUAL — even after --apply archives it, the underlying
-    # agent is still orphaned and needs a human; this is what composes into a restart
-    # procedure ("run restore --apply, then check its exit code before declaring done").
+    # Nonzero while anything is MANUAL — the agent behind such a row is orphaned and needs
+    # a human. This is what composes into a restart procedure ("run chela restore, then
+    # check its exit code before declaring the box recovered").
     if manual:
         sys.exit(1)
 
@@ -2440,13 +2423,11 @@ def main() -> None:
     )
 
     # restore — every epoch-stamped row a hard tmux death orphaned
-    p_restore = sub.add_parser(
+    sub.add_parser(
         "restore",
-        help="Report (or --apply to act on) epoch-dangling rows left by a hard tmux death "
-             "(inbox/telegram-bindings/session-ids); dry-run by default",
+        help="Report epoch-dangling rows left by a hard tmux death "
+             "(inbox/telegram-bindings/session-ids/dispatcher runs). Read-only.",
     )
-    p_restore.add_argument("--apply", action="store_true",
-                           help="Re-stamp REVIVABLE rows and archive MANUAL ones (default: report only)")
 
     # task-finished — final step in the dispatcher work-item lifecycle
     p_tf = sub.add_parser(

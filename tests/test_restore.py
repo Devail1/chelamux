@@ -6,19 +6,14 @@ The scanner tests are pure — no live tmux, no sqlite, no filesystem. See
 ``chela/restore.py`` for why scanning is report-only (never touches a store, never
 relaunches/spawns/resumes).
 
-``plan``/``apply`` (CMX-195 objectives 2/3) classify + act on the three SESSION-stamped
-stores (inbox orchestrator, telegram-bindings, session-ids): ``_classify``/``plan`` are
-exercised purely (DI'd roster lookup + ``wid_for_session``); ``apply`` is exercised against
-temp files the same way ``tests/test_sessionids.py`` and ``tests/test_inbox.py`` do, since
-it is the one function in this module allowed to write.
+``plan`` (CMX-195 objective 2) classifies the three SESSION-stamped
+stores (inbox orchestrator, telegram-bindings, session-ids). ``_classify``/``plan`` are
+exercised purely (DI'd roster lookup + ``wid_for_session``); nothing in this module writes,
+and ``tests/test_restore_cli.py`` guards that end-to-end on the real store bytes.
 """
 from __future__ import annotations
 
-import importlib
-import os
-from pathlib import Path
 
-import pytest
 
 from chela.restore import (
     Orphan,
@@ -273,147 +268,3 @@ def test_plan_ignores_current_epoch_rows():
 # --------------------------------------------------------------------------
 # apply — the only function in this module that writes; against temp files
 # --------------------------------------------------------------------------
-
-@pytest.fixture()
-def apply_env(tmp_path, monkeypatch):
-    """A temp CHELA_DIR + inbox file + bindings file, so `apply()`'s real writes never
-    touch `~/.chela`. `sessionids`/`roster` cache their store path at import time (like
-    `tests/test_sessionids.py`), so they're reloaded; `inbox`/bindings read their path from
-    an env var on every call and need no reload."""
-    monkeypatch.setenv("CHELA_DIR", str(tmp_path / "chela"))
-    monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "chela" / "inbox.json"))
-    monkeypatch.setenv("CHELA_TELEGRAM_BINDINGS", str(tmp_path / "chela" / "telegram-bindings.json"))
-    monkeypatch.delenv("CHELA_ORCHESTRATOR_WID", raising=False)
-
-    import chela.config as config
-    importlib.reload(config)
-    import chela.sessionids as sessionids_mod
-    importlib.reload(sessionids_mod)
-    import chela.roster as roster_mod
-    importlib.reload(roster_mod)
-    import chela.inbox as inbox_mod
-    monkeypatch.setattr(inbox_mod, "INBOX_ENABLED", True)
-    import chela.restore as restore_mod
-
-    return {"sessionids": sessionids_mod, "roster": roster_mod, "inbox": inbox_mod,
-            "restore": restore_mod}
-
-
-def test_apply_revivable_session_ids_restamps_to_the_new_wid_and_current_epoch(apply_env, monkeypatch):
-    """GUARD: after apply(), the row in the store names @new and the current epoch — never
-    just "apply returned truthy"."""
-    sessionids_mod = apply_env["sessionids"]
-    monkeypatch.setattr(sessionids_mod.epoch, "current", lambda: OLD)
-    sessionids_mod.set_session_id("@5", "sess-sid")
-    monkeypatch.setattr(sessionids_mod.epoch, "current", lambda: NEW)   # server restarted
-
-    v = Verdict("session-ids", "@5", OLD, "REVIVABLE", "sess-sid", "@42", None, "")
-    apply_env["restore"].apply([v])
-
-    entries = sessionids_mod.entries()
-    assert "@5" not in entries
-    assert entries["@42"] == {"session_id": "sess-sid", "epoch": NEW}
-
-
-def test_apply_manual_session_ids_row_is_archived_and_removed(apply_env, monkeypatch):
-    """GUARD: both halves — a row that disappears unarchived is data loss."""
-    sessionids_mod = apply_env["sessionids"]
-    roster_mod = apply_env["roster"]
-    monkeypatch.setattr(sessionids_mod.epoch, "current", lambda: OLD)
-    sessionids_mod.set_session_id("@5", "sess-sid")
-    monkeypatch.setattr(sessionids_mod.epoch, "current", lambda: NEW)
-
-    v = Verdict("session-ids", "@5", OLD, "MANUAL", "sess-sid", None, "/proj", "cmx-9")
-    apply_env["restore"].apply([v])
-
-    assert "@5" not in sessionids_mod.entries()                 # removed
-    archived = roster_mod.window(OLD, "@5")
-    assert archived is not None                                 # ...and archived
-    assert archived["session_id"] == "sess-sid"
-    assert archived["cwd"] == "/proj"
-    assert archived["archived"] is True
-
-
-def test_apply_revivable_orchestrator_restamps_via_register(apply_env, monkeypatch):
-    inbox_mod = apply_env["inbox"]
-    monkeypatch.setattr(inbox_mod.discovery, "get_windows_by_id", lambda: {"@42": "orch"})
-    monkeypatch.setattr(inbox_mod.sessions, "session_of_window",
-                        lambda wid, pane_map=None: "orch-sid")
-    monkeypatch.setattr(inbox_mod.epoch, "current", lambda: NEW)
-
-    v = Verdict("inbox.orchestrator", "@0", OLD, "REVIVABLE", "orch-sid", "@42", None, "")
-    apply_env["restore"].apply([v])
-
-    store = inbox_mod.load()
-    assert store["orchestrator"] == "@42"
-    assert store["orchestrator_epoch"] == NEW
-
-
-def test_apply_manual_orchestrator_is_archived_and_unregistered(apply_env):
-    inbox_mod = apply_env["inbox"]
-    roster_mod = apply_env["roster"]
-    with inbox_mod.locked_store() as store:
-        store["orchestrator"] = "@0"
-        store["orchestrator_epoch"] = OLD
-        store["orchestrator_session"] = "orch-sid"
-        store["orchestrator_name"] = "orch"
-
-    v = Verdict("inbox.orchestrator", "@0", OLD, "MANUAL", "orch-sid", None, "/proj", "orch")
-    apply_env["restore"].apply([v])
-
-    store = inbox_mod.load()
-    assert store["orchestrator"] is None
-    archived = roster_mod.window(OLD, "@0")
-    assert archived["session_id"] == "orch-sid"
-
-
-def test_apply_never_writes_the_bindings_file(apply_env):
-    """GUARD: `chela-telegram` owns `telegram-bindings.json` (one in-memory
-    `BindingRegistry` per daemon lifetime, saved from that same object every reconcile
-    tick) — a second load-mutate-save here races it and silently erases whichever side
-    saves last. Assert on the file's bytes and mtime, not a mock's call count: a spy that
-    records nothing is a wiring bug, not a pass. Corrupting this by restoring the old
-    `BindingRegistry.load()/.save()` calls in `apply()` must turn this RED."""
-    from chela.telegram.bindings import BindingRegistry
-
-    reg = BindingRegistry.load()
-    reg.bind("@1", "1001", epoch=OLD)
-    reg.save()
-
-    bindings_path = Path(os.environ["CHELA_TELEGRAM_BINDINGS"])
-    before_bytes = bindings_path.read_bytes()
-    before_mtime_ns = bindings_path.stat().st_mtime_ns
-
-    revivable = Verdict("telegram.bindings", "@1", OLD, "REVIVABLE", "sess-sid", "@9", None, "")
-    manual = Verdict("telegram.bindings", "@2", OLD, "MANUAL", None, None, "/proj", "")
-    apply_env["restore"].apply([revivable, manual])
-
-    assert bindings_path.read_bytes() == before_bytes
-    assert bindings_path.stat().st_mtime_ns == before_mtime_ns
-
-
-def test_apply_bindings_rows_come_back_skipped_not_silently_dropped(apply_env):
-    """GUARD: dropping the bindings write must not drop the row from the report — it must
-    still surface (as `skipped`, distinct from `revived`/`archived` since nothing was
-    written), never vanish."""
-    revivable = Verdict("telegram.bindings", "@1", OLD, "REVIVABLE", "sess-sid", "@9", None, "")
-    manual = Verdict("telegram.bindings", "@2", OLD, "MANUAL", None, None, "/proj", "")
-    result = apply_env["restore"].apply([revivable, manual])
-
-    assert result["skipped"] == [revivable, manual]
-    assert result["revived"] == []
-    assert result["archived"] == []
-
-
-def test_apply_returns_revived_and_archived_lists(apply_env, monkeypatch):
-    inbox_mod = apply_env["inbox"]
-    monkeypatch.setattr(inbox_mod.discovery, "get_windows_by_id", lambda: {"@9": "x"})
-    monkeypatch.setattr(inbox_mod.sessions, "session_of_window", lambda wid, pane_map=None: "sid")
-    monkeypatch.setattr(inbox_mod.epoch, "current", lambda: NEW)
-
-    revivable = Verdict("inbox.orchestrator", "@0", OLD, "REVIVABLE", "sid", "@9", None, "")
-    manual = Verdict("session-ids", "@5", OLD, "MANUAL", "s2", None, "/proj", "")
-    result = apply_env["restore"].apply([revivable, manual])
-    assert result["revived"] == [revivable]
-    assert result["archived"] == [manual]
-    assert result["skipped"] == []

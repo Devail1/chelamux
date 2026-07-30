@@ -73,7 +73,7 @@ def test_restore_exits_nonzero_while_any_row_is_MANUAL(restore_env, capsys):
     restore_env.setattr(restore_mod, "plan", lambda *a, **k: [_verdict("MANUAL")])
 
     with pytest.raises(SystemExit) as exc:
-        main.cmd_restore(SimpleNamespace(apply=False))
+        main.cmd_restore(SimpleNamespace())
 
     assert exc.value.code == 1, (
         "a MANUAL row means an agent is still orphaned — restore must fail loudly so a "
@@ -82,26 +82,12 @@ def test_restore_exits_nonzero_while_any_row_is_MANUAL(restore_env, capsys):
     assert "MANUAL" in capsys.readouterr().out
 
 
-def test_restore_still_exits_nonzero_after_apply_archived_the_manual_row(restore_env, capsys):
-    """--apply archives the row, but the AGENT behind it is still gone. Still nonzero."""
-    v = _verdict("MANUAL")
-    restore_env.setattr(restore_mod, "plan", lambda *a, **k: [v])
-    restore_env.setattr(restore_mod, "apply",
-                        lambda *a, **k: {"revived": [], "archived": [v], "skipped": []})
-
-    with pytest.raises(SystemExit) as exc:
-        main.cmd_restore(SimpleNamespace(apply=True))
-
-    assert exc.value.code == 1
-    assert "ARCHIVED" in capsys.readouterr().out
-
-
 def test_restore_exits_ZERO_when_every_row_is_REVIVABLE(restore_env, capsys):
     """The counterweight: a guard that only ever demands failure would be satisfied by
     `sys.exit(1)` unconditionally, which would make the command useless."""
     restore_env.setattr(restore_mod, "plan", lambda *a, **k: [_verdict("REVIVABLE")])
 
-    main.cmd_restore(SimpleNamespace(apply=False))     # must NOT raise
+    main.cmd_restore(SimpleNamespace())     # must NOT raise
 
     assert "REVIVABLE" in capsys.readouterr().out
 
@@ -109,7 +95,7 @@ def test_restore_exits_ZERO_when_every_row_is_REVIVABLE(restore_env, capsys):
 def test_restore_exits_ZERO_when_nothing_is_orphaned(restore_env, capsys):
     restore_env.setattr(restore_mod, "plan", lambda *a, **k: [])
 
-    main.cmd_restore(SimpleNamespace(apply=False))     # must NOT raise
+    main.cmd_restore(SimpleNamespace())     # must NOT raise
 
     assert "nothing orphaned" in capsys.readouterr().out
 
@@ -296,7 +282,7 @@ def test_chela_restore_says_CANNOT_VERIFY_when_tmux_cannot_be_asked(live_stores,
 # something printed; the STORE is evidence that the command did its job.
 #
 # The round-2 review already settled this assertion shape for the bindings arm ("assert on
-# the file, not on a mock's call count"). These extend it to the dry run and to --apply.
+# the file, not on a mock's call count"). These extend it to the command as a whole.
 
 def _store_bytes(chela_dir):
     return {p.name: p.read_bytes() for p in sorted(chela_dir.glob("*.json"))}
@@ -306,9 +292,10 @@ def test_a_plain_chela_restore_touches_NOTHING_on_disk(live_stores, tmp_path, ca
     """🔴 The dry-run promise, asserted on bytes. `cmd_restore`'s docstring and the CLI help
     both say "dry-run by default ... it does not touch any of them".
 
-    Flip `--apply`'s default and a plain `chela restore` — the command an operator runs to
-    LOOK — archives and removes rows for real, while printing the same store names and
-    exiting the same 1. Only the files can tell.
+    ⭐ This is now the LOAD-BEARING guard of the whole command: the write half was split out
+    to its own ticket, so read-only is the contract, not a default. Teach any code path here
+    to write and the operator's LOOK silently mutates state, while printing the same store
+    names and exiting the same 1. Only the files can tell.
     """
     chela_dir = tmp_path / "chela"
     before = _store_bytes(chela_dir)
@@ -318,66 +305,14 @@ def test_a_plain_chela_restore_touches_NOTHING_on_disk(live_stores, tmp_path, ca
 
     assert exc.value.code == 1
     assert _store_bytes(chela_dir) == before, (
-        "a dry run wrote to a store — `chela restore` without --apply must be read-only"
+        "chela restore wrote to a store — it is READ-ONLY, with no write mode at all"
     )
     # roster.json is in the glob above, but assert it explicitly: it is the archive
     # destination, so an unchanged roster is the direct evidence nothing was archived.
     assert json.loads((chela_dir / "roster.json").read_text()) == json.loads(
         before["roster.json"]), (
-        "a dry run archived a row into roster.json — nothing may be archived without --apply"
+        "chela restore archived a row into roster.json — it must never write"
     )
-
-
-def test_apply_acts_on_the_plan_it_computed_and_the_session_ids_row_LEAVES_its_store(
-        live_stores, tmp_path, capsys):
-    """🔴 Two cuts, one store-level assertion.
-
-    `plan` must receive `sessionids.entries()` (hand it `{}` and no session-ids row is ever
-    CLASSIFIED, only listed), and `--apply` must be handed the plan it just computed (hand it
-    `[]` and the operator's recovery step is silently a no-op). Both survive any stdout
-    assertion, because the orphan list prints the row either way. Neither survives this: the
-    row must be gone from `session-ids.json` and recorded in `roster.json`.
-    """
-    chela_dir = tmp_path / "chela"
-
-    with pytest.raises(SystemExit) as exc:
-        _drive(["restore", "--apply"])
-
-    assert exc.value.code == 1, "the agent behind an archived MANUAL row is still orphaned"
-
-    remaining = json.loads((chela_dir / "session-ids.json").read_text())
-    assert "@5" not in remaining, (
-        "the dangling session-ids row survived --apply — either plan() never saw "
-        "sessionids.entries(), or apply() was not handed the computed plan"
-    )
-
-    # ⛔ Field-level, not `OLD in json.dumps(...)`: the epoch is the record's KEY, so a
-    # whole-blob substring check passes even when every field inside it is blank.
-    archived = json.loads((chela_dir / "roster.json").read_text())
-    row = archived["epochs"][OLD]["windows"]["@5"]
-    assert row["archived"] is True, "removed-but-unarchived is data loss"
-    assert row["store"] == "session-ids", (
-        "an archived row must record WHICH store it was removed from — without it the "
-        "archive cannot be read back to undo, or even to say what was lost"
-    )
-    assert row["session_id"] == SID_DEAD
-
-
-def test_apply_leaves_a_CURRENT_row_alone(live_stores, tmp_path):
-    """The counterweight: `--apply` that emptied the store unconditionally would satisfy the
-    guard above. A row stamped with the RUNNING epoch is not orphaned and must survive."""
-    chela_dir = tmp_path / "chela"
-    (chela_dir / "session-ids.json").write_text(json.dumps({
-        "@5": {"session_id": "sid-old", "epoch": OLD},
-        "@6": {"session_id": "sid-live", "epoch": NOW},
-    }))
-
-    with pytest.raises(SystemExit):
-        _drive(["restore", "--apply"])
-
-    remaining = json.loads((chela_dir / "session-ids.json").read_text())
-    assert "@6" in remaining, "a row stamped with the CURRENT epoch is not orphaned"
-    assert "@5" not in remaining
 
 
 def test_a_broken_runs_db_does_not_crash_the_report(live_stores, capsys):
@@ -422,29 +357,6 @@ def test_the_dispatcher_runs_table_reaches_the_report_both_halves(live_stores, c
     assert "dispatcher.runs (judge)" in out and "@10" in out, "the JUDGE window half"
 
 
-def test_a_dangling_orchestrator_registration_is_CLASSIFIED_and_apply_clears_it(
-        live_stores, tmp_path):
-    """🔴 Store-level, because stdout cannot tell: `inbox.orchestrator` is the arm `apply`
-    calls `inbox.register`/`unregister` on, and it is the row the live 2026-07-30 defect was
-    ON. Hand `plan` an empty dict and the arm is dead from the CLI — a dangling registration
-    is never classified, and --apply can neither re-stamp nor clear it. `store` is still
-    passed to `scan_all`, so the watches half prints identically and no output changes.
-    """
-    chela_dir = tmp_path / "chela"
-    before = json.loads((chela_dir / "inbox.json").read_text())
-    assert before["orchestrator"] == "@1", "fixture precondition: a dangling registration"
-
-    with pytest.raises(SystemExit):
-        _drive(["restore", "--apply"])
-
-    after = json.loads((chela_dir / "inbox.json").read_text())
-    assert after["orchestrator"] is None, (
-        "a dangling orchestrator registration survived --apply — plan() never saw the "
-        "inbox store, so CMX-82's own row is unreachable from the CLI"
-    )
-    assert after["orchestrator_epoch"] is None
-
-
 def test_the_doctor_fact_reads_the_three_LIVE_stores(live_stores, tmp_path):
     """🔴 `runtime_truth._restore_scan` is the ONLY thing that joins inbox watches + the
     runs table + session-ids for the doctor fact, and every test that touches the fact
@@ -474,7 +386,7 @@ def test_the_doctor_fact_counts_ZERO_when_every_row_is_current(live_stores, tmp_
     )
 
 
-# --- the two DI defaults, and the branches only --apply reaches -------------------------
+# --- the two DI defaults ----------------------------------------------------------------
 #
 # 🔴 GUARDS (CMX-195 round 8). `plan()` has exactly TWO callable defaults — verified by
 # signature scan, not by reading:
@@ -489,9 +401,9 @@ def test_the_doctor_fact_counts_ZERO_when_every_row_is_current(live_stores, tmp_
 def test_a_live_session_is_classified_REVIVABLE_through_plans_DEFAULT_resolver(
         live_stores, capsys):
     """🔴 Objective 2's whole distinction. Blank `wid_for_session` and every dangling row is
-    MANUAL forever: `--apply`'s auto-restamp arm becomes dead code, and a row whose session
-    is alive under a NEW address right now — the one-command fix this ticket exists to
-    surface — reads identically to one whose agent is gone."""
+    MANUAL forever, and a row whose session is alive under a NEW address right now — the
+    one-command fix this ticket exists to surface — reads identically to one whose agent is
+    gone."""
     with pytest.raises(SystemExit):
         _drive(["restore"])
 
@@ -515,42 +427,6 @@ def test_the_roster_join_supplies_the_relaunch_COMMAND_for_a_manual_row(live_sto
     assert f"cd {CWD_FIVE}" in out and f"claude --resume {SID_DEAD}" in out, (
         "the MANUAL row lost its relaunch one-liner — plan()'s roster join is severed"
     )
-
-
-def test_apply_restamps_a_REVIVABLE_row_to_the_new_wid_AND_the_current_epoch(
-        live_stores, tmp_path, capsys):
-    """🔴 Two things at the store: `--apply` acts on REVIVABLE (the arm no end-to-end test
-    had ever reached), and it is handed the RUNNING epoch — re-stamping with a blank one
-    would write a row that is dangling the moment it lands."""
-    chela_dir = tmp_path / "chela"
-
-    with pytest.raises(SystemExit):
-        _drive(["restore", "--apply"])
-
-    rows = json.loads((chela_dir / "session-ids.json").read_text())
-    assert "@42" in rows, "the REVIVABLE row was not re-stamped to its new address"
-    assert rows["@42"]["session_id"] == SID_LIVE
-    assert rows["@42"]["epoch"] == NOW, (
-        "re-stamped under the wrong epoch — a row that is dangling on arrival"
-    )
-    assert "@7" not in rows, "the old address must not survive the re-stamp"
-    assert "REVIVED" in capsys.readouterr().out
-
-
-def test_a_dangling_BINDING_is_still_reported_under_apply(live_stores, capsys):
-    """🔴 The round-2 review made this an explicit condition of accepting that `apply()`
-    stops writing telegram-bindings.json: 'dropping the binding WRITE must not become
-    dropping the binding ROW'. Under --apply this loop is the ONLY surface it appears on —
-    bindings are not in scan_all's orphan list, the dry-run verdict block does not run, and
-    a bindings row is never MANUAL so it is not even in the exit-code count."""
-    with pytest.raises(SystemExit):
-        _drive(["restore", "--apply"])
-
-    out = capsys.readouterr().out
-    assert "telegram.bindings" in out and "@2" in out, (
-        "a dangling binding vanished from --apply's report — silent omission"
-    )
-    assert "NOT APPLIED" in out, "it must say WHY it was not acted on (the daemon owns it)"
 
 
 def test_the_orphan_list_COUNTS_every_source_including_session_ids(live_stores, capsys):
@@ -643,19 +519,6 @@ def test_the_verdict_lines_name_the_session_and_the_address_it_moved_to(live_sto
     assert "@7 -> @42" in line, "the REVIVABLE line lost the address it moved to"
 
 
-def test_apply_lines_name_the_row_they_acted_on(live_stores, capsys):
-    """🔴 Class B for --apply: 'REVIVED'/'ARCHIVED' with no address is an audit trail of
-    nothing — the operator cannot tell which row moved where."""
-    with pytest.raises(SystemExit):
-        _drive(["restore", "--apply"])
-
-    out = capsys.readouterr().out
-    assert "@7 -> @42" in _line_with(out, "REVIVED"), "the REVIVED line lost its addresses"
-    archived = _line_with(out, "ARCHIVED", "[session-ids]")
-    assert "@5" in archived, "the ARCHIVED line lost its address"
-    assert OLD in archived, "the ARCHIVED line lost the epoch it was filed under"
-
-
 def test_the_doctor_facts_OWN_swallow_survives_a_broken_runs_db(live_stores):
     """🔴 CLASS A, member 3. `_restore_scan` wraps `dispatcher.list_runs()` for exactly the
     reason cmd_restore's twin comment gives, and round 5 closed the CLI copy — this one has
@@ -708,7 +571,7 @@ def orphans_but_no_verdicts(live_stores, tmp_path):
 
 def test_orphans_with_no_verdicts_must_never_report_nothing_orphaned(
         orphans_but_no_verdicts, capsys):
-    main.cmd_restore(SimpleNamespace(apply=False))     # no MANUAL row -> exits 0
+    main.cmd_restore(SimpleNamespace())     # no MANUAL row -> exits 0
 
     out = capsys.readouterr().out
     assert "nothing orphaned" not in out, (
@@ -732,6 +595,52 @@ def test_a_genuinely_clean_box_DOES_report_nothing_orphaned(live_stores, tmp_pat
     from chela import dispatcher
     live_stores.setattr(dispatcher, "list_runs", lambda *a, **k: [])
 
-    main.cmd_restore(SimpleNamespace(apply=False))
+    main.cmd_restore(SimpleNamespace())
 
     assert "nothing orphaned" in capsys.readouterr().out
+
+
+def test_the_doctor_finding_TELLS_the_operator_what_to_do(live_stores):
+    """🔴 GUARD (CMX-195): `Finding.detail` is rendered (`runtime_truth.py:108`), and a WARN
+    that names a count but not a remedy makes the operator hunt for one. Blank it and
+    `chela doctor` reports "N stamped row(s) from a dead epoch" with no way to act.
+
+    ⛔ Asserted on the DETAIL text, not merely that a WARN was produced — a Finding with an
+    empty detail still has the right level.
+    """
+    from chela import runtime_truth
+
+    live_stores.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    obs = runtime_truth._restore_read()
+    findings = runtime_truth._restore_report(None, obs)
+
+    assert len(findings) == 1 and findings[0].level == runtime_truth.WARN
+    detail = findings[0].detail or ""
+    assert "chela restore" in detail, "the WARN must name the command that explains the rows"
+    assert "REVIVABLE" in detail and "MANUAL" in detail, (
+        "it must say what the two verdicts mean — a count with no remedy is not actionable"
+    )
+
+
+def test_the_doctor_finding_is_OK_and_quiet_when_nothing_is_orphaned(live_stores):
+    """The counterweight: a report hard-wired to WARN would satisfy the guard above while
+    crying wolf on every healthy box."""
+    from chela import runtime_truth
+
+    findings = runtime_truth._restore_report(None, runtime_truth.observed(0))
+    assert len(findings) == 1 and findings[0].level == runtime_truth.OK
+
+
+def test_the_verdict_block_COUNTS_what_it_classified(live_stores, capsys):
+    """🔴 The twin of round 9's orphan-count guard, on the other block. `plan()` classifies
+    three stores; the count is the only assertion that fails when a source stops reaching
+    it AND the remaining rows still print. Substring checks on a store name cannot see it.
+    """
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    # inbox.orchestrator @1 · telegram.bindings @2 · session-ids @5 and @7
+    assert "4 classified row(s)" in out, (
+        f"the verdict block miscounted what plan() returned. Got:\n{out}"
+    )

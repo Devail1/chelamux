@@ -127,26 +127,3 @@ def window(dead_epoch: str | None, wid: str, *, path: Path | None = None) -> dic
     if not rec:
         return None
     return rec["windows"].get(wid)
-
-
-def archive(dead_epoch: str | None, wid: str, meta: dict, *, path: Path | None = None) -> None:
-    """Fold ``meta`` into the dead epoch's record for ``wid`` before a MANUAL row is dropped
-    from its live store — so a row :func:`chela.restore.apply` removes is never LOST, only
-    moved here. A no-op key (``dead_epoch`` unknown) still needs somewhere to land: it opens
-    an epoch record for it rather than silently discarding the row (see the module docstring
-    on why nothing here is destroyed silently).
-    """
-    key = dead_epoch or "unknown"
-    data = _load(path)
-    epochs = data["epochs"]
-    rec = epochs.get(key)
-    if rec is None:
-        now = time.time()
-        rec = {"first_seen": now, "last_seen": now, "windows": {}}
-        epochs[key] = rec
-    entry = rec["windows"].setdefault(wid, {})
-    entry.update(meta)
-    entry["archived"] = True
-    entry["archived_at"] = time.time()
-    _prune(epochs)
-    _save(data, path)

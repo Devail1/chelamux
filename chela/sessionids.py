@@ -88,7 +88,7 @@ def set_session_id(wid: str, session_id: str) -> None:
 def remove(wid: str) -> bool:
     """Drop ``wid``'s row entirely. True if a row was removed.
 
-    Used by :func:`chela.restore.apply`: a REVIVABLE row is superseded by a fresh row under
+    Used by the (deferred) restore write half: a REVIVABLE row is superseded by a fresh row under
     its new address (the old key would otherwise report as dangling forever), and a MANUAL
     row is archived into :mod:`chela.roster` first and then dropped here — never the other
     way round.

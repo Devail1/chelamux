@@ -125,35 +125,6 @@ def test_interrupted_save_leaves_the_previous_roster_readable(roster, monkeypatc
 # archive() — used by restore.apply() for MANUAL rows
 # --------------------------------------------------------------------------
 
-def test_archive_creates_the_epoch_record_when_it_was_never_seen_live(roster):
-    """A row older than the retention window (or one the reconcile loop never observed
-    live) still needs somewhere to land when it's archived — never silently discarded."""
-    roster.archive(OLD, "@9", {"session_id": "sid-9", "cwd": "/gone"})
-    row = roster.window(OLD, "@9")
-    assert row["session_id"] == "sid-9"
-    assert row["cwd"] == "/gone"
-    assert row["archived"] is True
-
-
-def test_archive_merges_into_an_existing_window_row(roster):
-    roster.record({"@1": "x"}, {"@1"}, OLD, _cwd_for({"@1": "/x"}),
-                  session_for=lambda w: "sid-1")
-    roster.archive(OLD, "@1", {"note": "manual"})
-    row = roster.window(OLD, "@1")
-    assert row["cwd"] == "/x"           # original data preserved
-    assert row["note"] == "manual"      # archive metadata merged in
-    assert row["archived"] is True
-
-
-# 🔴 GUARD (CMX-195): the DEFAULT session_for branch — production's only path.
-#
-# Every test above hands `record` an explicit `session_for`, so the branch that runs on the
-# live box (`sessions.panes()` + `sessions.session_of_window`) is never taken. The judge
-# proved it: replacing that default with `lambda wid: None` left all 2058 tests green,
-# while on the box it silently blanks every recorded `session_id` — and a recorded session
-# id is the SOLE basis for a REVIVABLE verdict, so restore would classify every row MANUAL
-# forever and the auto-rebind arm would be dead code that no test could see.
-
 def test_record_defaults_to_resolving_the_session_from_the_live_panes(roster, monkeypatch):
     from chela import sessions
 

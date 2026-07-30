@@ -2068,8 +2068,8 @@ def _restore_report(_declared: None, obs: Observation) -> list[Finding]:
         "A hard tmux death (OOM, restart) left these pointing at a server that no longer "
         "exists — this is the exact condition that stayed invisible through the 2026-07-14 "
         "OOM `chela/epoch.py`'s own docstring documents. Run `chela restore` to see every "
-        "row and what it means; `chela restore --apply` re-stamps whatever can be revived "
-        "and archives the rest into `roster.json`.",
+        "row, which store it is in, and whether it is REVIVABLE (its session is alive under "
+        "a new address — re-register it) or MANUAL (it carries the exact relaunch command).",
     )]
 
 
