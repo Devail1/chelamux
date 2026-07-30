@@ -644,3 +644,36 @@ def test_the_verdict_block_COUNTS_what_it_classified(live_stores, capsys):
     assert "4 classified row(s)" in out, (
         f"the verdict block miscounted what plan() returned. Got:\n{out}"
     )
+
+
+def test_the_report_STATES_its_own_read_only_contract(live_stores, capsys):
+    """🔴 The closing line is the ONLY place `chela restore` says what it does and does not
+    do, and the only remediation a REVIVABLE row ever gets — the write half is a separate
+    ticket, so "act by hand" IS the instruction. Blank it and the command prints a list of
+    dangling rows and stops, with nothing telling the operator it is safe to run or what to
+    do next."""
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    assert "never writes to a store" in out, "the read-only contract must be stated"
+    assert "chela watch/register" in out, "a REVIVABLE row's remediation must be named"
+
+
+def test_a_MANUAL_row_with_no_roster_join_SAYS_it_has_nothing_on_record(live_stores, capsys):
+    """🔴 `manual_command()` returns None when the roster join found no cwd/session — and
+    the '(no cwd/session on record)' suffix is the ONLY thing separating that row from one
+    whose command was printed. Blank it and the two are indistinguishable: the operator
+    reads a bare `[store] @N  MANUAL` and cannot tell whether a relaunch line was omitted
+    or never existed.
+
+    The bindings row is exactly this case: `telegram-bindings.json` stamps no session of
+    its own, and @2 is absent from the roster.
+    """
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    line = _line_with(capsys.readouterr().out, "[telegram.bindings]", "@2", "MANUAL")
+    assert "no cwd/session on record" in line, (
+        "a MANUAL row with nothing to relaunch from must say so, not go silent"
+    )
