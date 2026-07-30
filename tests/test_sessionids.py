@@ -63,6 +63,18 @@ def test_a_second_spawn_into_the_same_wid_replaces_the_recorded_id(sessionids, m
     assert sessionids.session_id_for("@42") == "second-uuid"
 
 
+def test_entries_returns_dangling_rows_unfiltered(sessionids, monkeypatch):
+    """`entries()` is the reporting escape hatch (chela restore, CMX-195): unlike
+    `session_id_for`, it must NOT withhold a row whose epoch no longer matches — a report
+    that wants to say which rows are dangling needs to see them."""
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    sessionids.set_session_id("@3", "session-abc")
+
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "999-888")
+    assert sessionids.session_id_for("@3") is None          # filtered read: gone
+    assert sessionids.entries() == {"@3": {"session_id": "session-abc", "epoch": "111-222"}}
+
+
 def test_survives_a_concurrent_telegram_bindings_save(sessionids, monkeypatch, tmp_path):
     """The reproduction that broke round 1: chela-telegram's daemon keeps ONE
     long-lived BindingRegistry object and saves it (to a DIFFERENT file) whenever a

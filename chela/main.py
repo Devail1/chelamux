@@ -42,8 +42,10 @@ from chela import (
     notify,
     okf,
     orchestrator,
+    restore,
     rooms,
     scheduler,
+    sessionids,
     update,
     workflow,
 )
@@ -1671,6 +1673,37 @@ def cmd_doctor(args) -> None:
         sys.exit(1)
 
 
+def cmd_restore(args) -> None:
+    """Report every epoch-stamped row a hard tmux death orphaned (see ``chela/restore.py``).
+
+    Read-only. It names what a dead tmux server left dangling across ``inbox.json``
+    watches, the dispatcher's ``runs`` table, and ``session-ids.json`` — it does not touch
+    any of them, and it never relaunches, spawns, or resumes an agent.
+    """
+    now_epoch = epoch.current()
+    store = inbox.load()
+    try:
+        runs = dispatcher.list_runs()
+    except Exception:  # noqa: BLE001 — a DB hiccup must never crash a status report
+        runs = []
+    orphans = restore.scan_all(store["watches"], runs, sessionids.entries(), now_epoch)
+
+    if now_epoch is None:
+        print("⚠ CANNOT VERIFY — tmux is unreachable right now, so no stamped row can be "
+              "proven dangling (or current). This is not a clean bill of health.")
+
+    if not orphans:
+        print("restore: nothing orphaned — every stamped row matches the running tmux epoch.")
+        return
+
+    print(f"{len(orphans)} row(s) stamped by a tmux server that is no longer running:\n")
+    for o in orphans:
+        print(f"  [{o.store}] {o.wid}  {o.label}  ({epoch.describe(o.stamped_epoch)})")
+    print("\nreport only — chela restore does not act on any of these. Re-register "
+          "(chela watch/register), re-dispatch, or clear each row by hand once you've "
+          "decided what happened to it.")
+
+
 def cmd_task_finished(args) -> None:
     """Mark a dispatcher run as awaiting_review and kill its tmux window.
 
@@ -2335,6 +2368,12 @@ def main() -> None:
         help="Check the running config against $CHELA_DIR/chela.env (exits 1 on a break)",
     )
 
+    # restore — every epoch-stamped row a hard tmux death orphaned (report only)
+    sub.add_parser(
+        "restore",
+        help="Report epoch-dangling rows left by a hard tmux death (inbox/dispatcher/session-ids)",
+    )
+
     # task-finished — final step in the dispatcher work-item lifecycle
     p_tf = sub.add_parser(
         "task-finished",
@@ -2395,6 +2434,8 @@ def main() -> None:
             cmd_events(args)
     elif args.command == "doctor":
         cmd_doctor(args)
+    elif args.command == "restore":
+        cmd_restore(args)
     elif args.command == "drive":
         cmd_drive(args)
     elif args.command == "dispatch":

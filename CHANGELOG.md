@@ -12,6 +12,16 @@ history lives in `git log`.
 
 ### Added
 
+- **`chela restore` reports the rows a hard tmux death orphaned.** CMX-82 already
+  self-heals the orchestrator's own address in `inbox.json`, but every other
+  epoch-stamped row chela writes — `inbox.json` watches, the dispatcher's `runs`
+  table (agent + judge window stamps), `session-ids.json` — had no self-initiated
+  check and no report: after a tmux restart they just sit there, correct-looking
+  and permanently unverifiable, invisible unless a human happens to open the right
+  file. `chela restore` scans all three and prints what a dead tmux server left
+  behind. It is read-only bookkeeping — it never touches a store and never
+  relaunches, spawns, or resumes an agent.
+
 - **`chela update` now refreshes the plugin too, not just the server.** A release has
   two halves: the server-side `git pull` + `uv sync` + `pm2 restart`, and the plugin
   every agent loads its hooks from — a separate copy Claude Code made at install time
