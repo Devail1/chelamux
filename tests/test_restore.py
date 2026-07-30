@@ -268,3 +268,39 @@ def test_plan_ignores_current_epoch_rows():
 # --------------------------------------------------------------------------
 # apply — the only function in this module that writes; against temp files
 # --------------------------------------------------------------------------
+
+
+# 🔴 GUARDS (CMX-195 round 14): `manual_command()`'s TWO None arms, independently.
+#
+# The docstring states the invariant verbatim — "None when there isn't enough to build one
+# (no cwd, or no session to resume)" — and it is two conditions, not one. Every earlier
+# None-expecting test had BOTH halves missing (the telegram.bindings row carries neither),
+# so dropping either check alone changed nothing observable. A one-liner built from a row
+# with no cwd would print `cd None && ...`; one with no session, `--resume None`.
+
+def _v(**kw):
+    base = dict(store="session-ids", wid="@1", stamped_epoch=OLD, verdict="MANUAL",
+                session_id="sid-1", new_wid=None, cwd="/home/x", label="l")
+    base.update(kw)
+    return Verdict(**base)
+
+
+def test_manual_command_is_None_without_a_CWD_even_when_the_session_is_known():
+    assert _v(cwd=None).manual_command() is None
+    assert _v(cwd="").manual_command() is None
+
+
+def test_manual_command_is_None_without_a_SESSION_even_when_the_cwd_is_known():
+    assert _v(session_id=None).manual_command() is None
+    assert _v(session_id="").manual_command() is None
+
+
+def test_manual_command_is_built_when_BOTH_halves_are_present():
+    """The counterweight: returning None unconditionally would satisfy both guards above."""
+    cmd = _v(cwd="/home/liav/p", session_id="sid-9").manual_command()
+    assert cmd == "cd /home/liav/p && CHELA_WID=@N claude --resume sid-9"
+
+
+def test_manual_command_is_None_for_a_REVIVABLE_row():
+    """A REVIVABLE row is re-registered, not relaunched — it must never carry the one-liner."""
+    assert _v(verdict="REVIVABLE", new_wid="@9").manual_command() is None

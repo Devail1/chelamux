@@ -733,3 +733,34 @@ def test_both_doctor_titles_NAME_the_condition(live_stores):
     assert "5" in warn.title and "chela restore" in warn.title, (
         f"the WARN line must carry the count and the command, got {warn.title!r}"
     )
+
+
+def test_every_rendered_string_on_the_doctor_FACT_names_its_subject(live_stores):
+    """🔴 GUARD (CMX-195 round 14): the Fact's own rendered fields, enumerated.
+
+    Round 13 closed the reporter's OK and WARN titles; the Fact object carries three MORE
+    strings a human reads — `name`, `declared_by`, and `owned_by` (the last is what the
+    CANNOT VERIFY line renders as "who did not answer"). Blank any of them and doctor prints
+    a row that names no subject, on the one fact whose entire job is to be noticed.
+
+    ⭐ `unverifiable_level` is asserted too, and it is behavioural rather than cosmetic: if
+    an unreadable owner rendered as OK instead of WARN, this fact would go green in exactly
+    the case it exists to catch.
+    """
+    from chela import runtime_truth
+
+    fact = next(f for f in runtime_truth.facts() if f.name == "restore.dead_epoch_rows")
+
+    assert fact.declared_by and "never predicts" in fact.declared_by, (
+        "the declared side must say chela does NOT predict this — it is read-only truth"
+    )
+    assert fact.owned_by and "tmux" in fact.owned_by, (
+        "the owner must be named: a CANNOT VERIFY that does not say who failed to answer "
+        "is unactionable"
+    )
+    for store in ("inbox.json", "runs table", "session-ids.json"):
+        assert store in fact.owned_by, f"the owner must name {store} — it is one of the three"
+    assert fact.unverifiable_level == runtime_truth.WARN, (
+        "an unreadable owner must WARN, never render as a pass — this fact exists precisely "
+        "for the case where nothing could be read"
+    )

@@ -1131,6 +1131,24 @@ def test_the_roster_snapshot_is_stamped_with_the_epoch_the_tick_read(monkeypatch
     assert seen["roster_call"]["now_epoch"] == "999-1785358190"
 
 
+def test_a_swallowed_roster_failure_is_LOGGED(monkeypatch, caplog):
+    """🔴 GUARD (CMX-195 round 14): the swallow's sibling. Round 5 proved the tick SURVIVES
+    a failing roster write; nothing proved the failure leaves a trace. Empty the
+    `log.exception` and the durable snapshot can stop being written — permanently, on a
+    full disk or a bad-permissions CHELA_DIR — with the daemon healthy and no operator
+    signal anywhere. `chela restore` would then report against a roster frozen at whatever
+    it last managed to write, and nothing would say why.
+    """
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="chela.main"):
+        _run_one_tick(monkeypatch, roster_raises=OSError("no space left on device"))
+
+    assert any("roster" in r.message.lower() for r in caplog.records), (
+        f"a swallowed roster failure must be logged. Records: {[r.message for r in caplog.records]}"
+    )
+
+
 def test_a_failing_roster_write_does_not_take_down_the_reconcile_tick(monkeypatch):
     """🔴 GUARD (CMX-195): the roster is a PASSENGER on this tick, never its driver.
 
