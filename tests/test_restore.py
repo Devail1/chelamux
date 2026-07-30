@@ -362,3 +362,65 @@ def test_plan_HANDS_classify_the_session_ids_rows_own_session_id():
         "plan() must pass the session-ids row's OWN session id to _classify — with the "
         "roster carrying none, dropping it makes every such row MANUAL forever"
     )
+
+
+# 🔴 GUARDS (CMX-195 round 19): the session argument at ALL THREE of plan()'s call sites.
+#
+# `_classify(store, wid, stamped, session_id, ...)` resolves `session_id or roster.session_id`,
+# so what each arm PASSES decides which source wins — and the three arms pass three different
+# things on purpose:
+#
+#   inbox.orchestrator -> the store's own `orchestrator_session`
+#   telegram.bindings  -> None, deliberately: that file stamps no session, so the roster
+#                         fallback is the ONLY way such a row can ever be REVIVABLE
+#   session-ids        -> the row's own `session_id`  (guarded round 17)
+#
+# Round 17 closed the third; the judge then filed the second. Closing all three together —
+# the same two-member-class lesson that has now recurred five times.
+
+_ROSTER_SID = {"session_id": "sid-in-the-roster", "cwd": "/home/x"}
+
+
+def _plan_one(**kw):
+    """plan() with a roster that always carries `sid-in-the-roster`, live under @42."""
+    return plan(kw.get("orchestrator", {}), kw.get("bindings", {}),
+                kw.get("entries", {}), NEW,
+                roster_lookup=lambda *a, **k: _ROSTER_SID,
+                wid_for_session=lambda sid: "@42" if sid == "sid-in-the-roster" else None)
+
+
+def test_the_bindings_arm_passes_NO_session_so_the_roster_fallback_supplies_one():
+    """⭐ telegram-bindings.json stamps no session of its own — the roster is not a
+    convenience here, it is the only source. Pass anything truthy in that slot and the
+    `or` short-circuits, the roster is never consulted, and a bindings row can never be
+    REVIVABLE no matter what the snapshot holds."""
+    verdicts = _plan_one(bindings={"@2": OLD})
+
+    assert len(verdicts) == 1
+    assert verdicts[0].session_id == "sid-in-the-roster", (
+        "the bindings arm must pass None so _classify's roster fallback runs"
+    )
+    assert verdicts[0].verdict == "REVIVABLE" and verdicts[0].new_wid == "@42"
+
+
+def test_the_orchestrator_arm_passes_the_stores_OWN_recorded_session():
+    """The inbox row DOES carry its own identity (`orchestrator_session`) — the row CMX-82
+    self-heals from. Drop it and the roster silently stands in, which would make the two
+    sources indistinguishable on the one row whose identity is recorded deliberately."""
+    verdicts = _plan_one(orchestrator={
+        "orchestrator": "@1", "orchestrator_epoch": OLD,
+        "orchestrator_session": "sid-recorded-at-registration",
+    })
+
+    assert len(verdicts) == 1
+    assert verdicts[0].session_id == "sid-recorded-at-registration", (
+        "the orchestrator arm must pass the store's own session, not fall through to the roster"
+    )
+
+
+def test_the_session_ids_arm_passes_the_rows_OWN_session():
+    """The third arm, kept beside its siblings so none can rot alone (round 17's finding)."""
+    verdicts = _plan_one(entries={"@5": {"session_id": "sid-in-the-row", "epoch": OLD}})
+
+    assert len(verdicts) == 1
+    assert verdicts[0].session_id == "sid-in-the-row"
