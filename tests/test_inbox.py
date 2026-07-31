@@ -539,8 +539,10 @@ _LONG_DETAIL = (
 
 def _verdict_run(judge_state=None, **over):
     """A run row sitting in `awaiting_review` with a SETTLED judge verdict."""
+    # `judge_detail` defaults to a long reason but MUST stay overridable — it is nullable
+    # in the schema, and cannot_verify is exactly where a null one shows up.
     return _clean_run(judge_state=judge_state or judge.J_CLEAN,
-                      judge_detail=_LONG_DETAIL, **over)
+                      judge_detail=over.pop("judge_detail", _LONG_DETAIL), **over)
 
 
 def _clean_run(**over):
@@ -1972,3 +1974,64 @@ def test_a_verdict_summary_names_BOTH_the_run_and_its_PR(
     assert run["pr_url"] in summary, (
         f"the {kind} summary does not name the PR it is about. Got: {summary!r}"
     )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+@pytest.mark.parametrize("ci_state", [
+    dispatcher.CI_PENDING, dispatcher.CI_FAILING, dispatcher.CI_NONE, dispatcher.CI_PASSING,
+])
+def test_the_staleness_check_is_INDEPENDENT_of_the_prs_ci_state(
+        ci_state, judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
+    """🔴 GUARD (CMX-197 round 12): a head is a head, whatever CI thinks of it.
+
+    ⚠️ Every judge test on this branch fakes `CIStatus(CI_PASSING, sha)`, so `ci.state` was
+    a fixture CONSTANT across the whole suite — the round-9 blind spot one axis over: not
+    the fixture's cardinality, its UNIFORMITY. Narrowing the head read to
+    `ci.state == CI_PASSING` was therefore invisible to all of them.
+
+    ⭐ And PENDING is not an edge case here, it is the LIKELY one: the superseding push
+    that makes a verdict stale is a brand-new commit whose checks have not finished yet. A
+    check gated on green would go quiet in exactly the situation it exists to catch, and
+    announce "clean and MERGEABLE" about a commit nobody judged.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(ci_state, _SUPERSEDING_SHA))
+
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    assert sends == [], (
+        f"a superseded verdict was announced because CI was {ci_state!r} — the head "
+        "comparison must not depend on what CI thinks of the commit"
+    )
+    assert f"dropping stale {kind}" in caplog.text
+
+
+def test_a_cannot_verify_with_NO_reason_never_types_the_word_None(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 12): `judge_detail` is nullable, and the summary is TYPED.
+
+    `cannot_verify` is precisely the state where the judge could not produce a reason, so a
+    NULL detail is its most likely shape — and `str(None)` is the four-character string
+    "None", which would be typed at the orchestrator's prompt as though it were the
+    explanation. The fixture always carried a detail, so the `or ""` fallback was never
+    exercised.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_CANNOT_VERIFY, judge_detail=None)])
+
+    summary = inbox.load()["queue"][0]["summary"]
+    assert "None" not in summary, (
+        f"the literal string 'None' reached a summary that gets typed at the prompt. "
+        f"Got: {summary!r}"
+    )
+    assert "CANNOT VERIFY" in summary        # ...and the verdict itself still lands
