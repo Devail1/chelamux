@@ -1803,10 +1803,20 @@ def _production_files_changed(
              "--jq", ".files[].filename"],
             cwd=repo_dir, capture_output=True, text=True, errors="replace", timeout=20,
         )
-    except OSError as e:
-        return None, f"gh could not be run ({e})"
     except subprocess.TimeoutExpired:
         return None, "gh timed out reading the compare"
+    except Exception as e:  # noqa: BLE001 — see below; the contract is DEGRADE, never raise
+        # ⛔ Deliberately broad. This function's contract is "(None, detail) on anything
+        # unreadable", and it backs a NUDGE, not a gate: the worst case of swallowing is a
+        # nudge that stays silent, while the worst case of RAISING is an unhandled
+        # exception in `reopen()` — the human-takeover path, which a stuck run depends on.
+        #
+        # Naming individual exception types is what failed here: `except (OSError,
+        # TimeoutExpired)` looked exhaustive and was not. `check=True` (CalledProcessError)
+        # and a malformed argument (ValueError) both escaped it, and neither is reachable
+        # by reading the call — they arrive through a KEYWORD, so the next one added is
+        # invisible again. Catching the behaviour covers every keyword at once.
+        return None, f"gh could not be run ({e})"
     if out.returncode != 0:
         return None, (out.stderr or out.stdout or "gh api compare failed").strip()[:200]
     files = [f for f in (out.stdout or "").splitlines() if f.strip()]

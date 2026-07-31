@@ -662,6 +662,12 @@ def test_an_unmoved_head_is_a_KNOWN_no_change():
     touched, detail = _pfc(base_sha="same", head_sha="same")
     assert touched is False, "an unmoved head is KNOWN to have changed no production code"
     assert "not moved" in detail
+    # ⛔ The range phrase lives at TWO exits — this one and the read-compare's. Round 9
+    # pinned the read-compare copy; its twin here was left, so the same drift ("since the
+    # LAST reopen" — a range the code never measures) could land on the dominant case.
+    assert "since the first reopen" in detail, (
+        f"the unmoved-head detail must name the range it measured too. Got: {detail!r}"
+    )
 
 
 @pytest.mark.parametrize("broken", [
@@ -1118,3 +1124,31 @@ def test_the_nudge_payload_records_the_CANONICAL_task_id_not_what_was_typed(tmp_
         f"the durable record must carry the canonical task id, not the string typed "
         f"({ev['task_id']!r}) — otherwise the event cannot be joined to its run"
     )
+
+
+@pytest.mark.parametrize("boom,label", [
+    (subprocess.CalledProcessError(1, "gh"), "check=True turns a bad exit into a RAISE"),
+    (ValueError("bad argument"), "a malformed call"),
+])
+def test_an_unreadable_compare_DEGRADES_it_never_raises_into_reopen(boom, label, monkeypatch):
+    """🔴 GUARD (CMX-198 round 13): the tri-state's contract is BEHAVIOURAL, not a kwarg list.
+
+    `_production_files_changed` promises `(None, detail)` on anything unreadable. The kwargs
+    guard is a whitelist — it pins the keywords I thought of, and says nothing about the ones
+    I did not. `check=True` is the case: it converts a non-zero exit into CalledProcessError,
+    which `except (OSError, TimeoutExpired)` does NOT catch, so an unreadable compare
+    propagates out and CRASHES the reopen instead of degrading.
+
+    ⚠️ Identical shape to round 10's `errors="strict"` — an exception escaping the handler,
+    reached by a keyword rather than by a code path. Guarding the BEHAVIOUR covers every
+    such keyword at once, including ones nobody has thought of yet.
+    """
+    def _raise(*a, **k):
+        raise boom
+
+    monkeypatch.setattr(dispatcher.subprocess, "run", _raise)
+
+    touched, detail = _pfc()          # must RETURN, not raise
+
+    assert touched is None, f"{label}: an unreadable compare is UNKNOWN, never a guess"
+    assert detail, "…and must say what went wrong"
