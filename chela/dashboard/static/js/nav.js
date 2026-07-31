@@ -510,6 +510,22 @@ function renderSettings(focus) {
             <div class="s-status-list"><div class="s-desc">Loading…</div></div>
         </section>
 
+        <section class="settings-section" id="settings-update">
+            <h4>Update</h4>
+            <div class="s-status-row" id="update-status-row">
+                <span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>Checking…</span>
+                <span class="s-status-detail" id="update-status-detail"></span>
+            </div>
+            <p class="s-desc">Pulls this checkout, re-syncs deps, and restarts every running
+            <code>chela-*</code> PM2 service (including this dashboard) — the same as running
+            <code>chela update</code> from the CLI. A dirty working tree or a branch diverged
+            from its upstream refuses rather than clobbering anything.</p>
+            <div class="s-row">
+                <button class="btn-accent" id="update-apply-btn" onclick="chela.applyUpdate()" disabled>Update now</button>
+            </div>
+            <div id="update-apply-msg" class="s-savemsg"></div>
+        </section>
+
         <section class="settings-section">
             <h4>Projects folder</h4>
             <p class="s-desc">Scanned for git repos to suggest in the <strong>+</strong> launch
@@ -809,15 +825,76 @@ async function _loadSettingsStatus() {
         data = await api('/api/settings');
     } catch (e) {
         host.innerHTML = '<div class="s-desc">Status unavailable.</div>';
+        _renderUpdateStatus(null);
         return;
     }
     const sections = (data && data.sections) || [];
-    if (!sections.length) { host.innerHTML = '<div class="s-desc">No status.</div>'; return; }
-    host.innerHTML = sections.map(sec => `
-        <div class="s-status-group">
-            <div class="s-status-grouphead">${escHtml(sec.title || '')}</div>
-            ${(sec.items || []).map(_statusRowHtml).join('')}
-        </div>`).join('');
+    if (!sections.length) { host.innerHTML = '<div class="s-desc">No status.</div>'; }
+    else {
+        host.innerHTML = sections.map(sec => `
+            <div class="s-status-group">
+                <div class="s-status-grouphead">${escHtml(sec.title || '')}</div>
+                ${(sec.items || []).map(_statusRowHtml).join('')}
+            </div>`).join('');
+    }
+    _renderUpdateStatus(data && data.update);
+}
+
+// The "Update" section — CMX-199. `chela doctor` (repo.upstream_synced) and the daemon's
+// hourly notify edge could both SAY the checkout fell behind; neither gave an operator
+// anywhere to click, which is exactly how five merged PRs sat unpulled for a full day
+// with every chela-* service still serving what it last loaded. This is that control.
+function _renderUpdateStatus(upd) {
+    const row = document.getElementById('update-status-row');
+    const btn = document.getElementById('update-apply-btn');
+    if (!row) return;
+    if (!upd || !upd.ok) {
+        const detail = upd && (upd.error || upd.note) ? escHtml(upd.error || upd.note) : 'unavailable';
+        row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>Unknown</span>
+            <span class="s-status-detail">${detail}</span>`;
+        if (btn) btn.disabled = true;
+        return;
+    }
+    const behind = upd.behind || 0;
+    if (behind > 0) {
+        row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${behind} behind</span>
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — ${behind} commit(s) unpulled; running services are still serving what they last loaded</span>`;
+        if (btn) { btn.disabled = false; btn.textContent = 'Update now'; }
+    } else {
+        row.innerHTML = `<span class="s-status-badge on"><span class="s-status-dot" aria-hidden="true">●</span>Up to date</span>
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull</span>`;
+        if (btn) { btn.disabled = true; btn.textContent = 'Update now'; }
+    }
+}
+
+async function applyUpdate() {
+    const btn = document.getElementById('update-apply-btn');
+    const msg = document.getElementById('update-apply-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    if (!confirm('Pull, re-sync, and restart every running chela-* service (including this dashboard)?')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+    setMsg('', 'Starting…');
+    let resp;
+    try {
+        resp = await api('/api/update/apply', { method: 'POST' });
+    } catch (e) {
+        setMsg('err', 'Request failed — the dashboard may have already restarted; refresh to check.');
+        return;
+    }
+    if (!resp || resp.error || resp.ok === false) {
+        setMsg('err', (resp && resp.error) || 'Update refused.');
+        if (btn) { btn.disabled = false; btn.textContent = 'Update now'; }
+        return;
+    }
+    if (!resp.started) {
+        setMsg('ok', resp.detail || 'Already up to date.');
+        _loadSettingsStatus();
+        return;
+    }
+    setMsg('ok', 'Started — pulling, re-syncing, and restarting services. This dashboard '
+        + 'may briefly disconnect; refresh in a few seconds to see the result.');
+    // The pull may restart THIS process — nothing left to poll from here. Leave the
+    // button disabled rather than re-enabling it against a page that's about to reload.
 }
 
 function _statusRowHtml(it) {
@@ -1294,4 +1371,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshSidebar, renderAgent
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });

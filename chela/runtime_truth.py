@@ -1957,7 +1957,7 @@ def _ago(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h ago"
 
 
-# --- fact: has this checkout's branch diverged from its upstream? --------------------
+# --- fact: is this checkout's branch actually in sync with its upstream? -------------
 #
 # CMX-168 taught ``chela update`` to recover when the upstream history was rewritten
 # (``git filter-repo`` + force-push): back up the pre-rewrite HEAD, then reset onto the
@@ -1969,6 +1969,13 @@ def _ago(seconds: float) -> str:
 # ``chela.update.apply``. ``fetch=False`` keeps this as fresh as the last real fetch
 # (a `chela update --check`, the daemon's periodic notifier) and never a network call —
 # the same trade the `update_available` capability row already makes.
+#
+# CMX-199: this fact used to check ONLY divergence (``ahead > 0``) and print "repo is in
+# sync" the moment that was false — even with the checkout dozens of commits BEHIND. On
+# 2026-07-31, five PRs merged to ``dev`` in one day and none of them ran: the checkout sat
+# 5 commits behind and every `chela-*` PM2 service kept serving whatever it last loaded,
+# with 0 restarts, for hours — and `chela doctor` said "in sync" the whole time. "In sync"
+# now means what it says: no divergence AND nothing to pull.
 
 def _upstream_synced_applies() -> bool:
     from chela import update                        # lazy: doctor must import cheaply
@@ -2004,20 +2011,33 @@ def _upstream_synced_report(_declared: None, obs: Observation) -> list[Finding]:
     status = obs.value
     if status.error:
         return []                                    # e.g. "no upstream configured"
-    if status.ahead == 0:
-        return [Finding(OK, "repo is in sync with its upstream (no local divergence)")]
+    if status.ahead > 0:
+        return [Finding(
+            ERROR,
+            f"repo is {status.ahead} commit(s) AHEAD of its upstream on branch "
+            f"{status.branch!r} — diverged, not fast-forwardable",
+            "This is exactly the shape an upstream history rewrite (e.g. `git filter-repo` + "
+            "force-push) leaves behind — as well as genuine unpushed local commits. `chela "
+            "update` tells the two apart and recovers safely from a real rewrite (backs up "
+            "the pre-rewrite HEAD to a `refs/chela-backup/...` ref, then resets onto the new "
+            "history), or refuses loudly, explaining why, if it is not one. Run `chela "
+            "update` to find out which — doctor only detects the condition; it never "
+            "fetches or resets this repo itself.",
+        )]
+    if status.behind > 0:
+        return [Finding(
+            WARN,
+            f"repo is {status.behind} commit(s) BEHIND its upstream on branch "
+            f"{status.branch!r} — merged work sitting unpulled",
+            "CMX-199: this is the exact shape that let five merged PRs sit inert for a "
+            "full day — the checkout falls behind and every `chela-*` PM2 service keeps "
+            "serving whatever it last loaded, with nothing anywhere saying so. Run `chela "
+            "update` (pulls, `uv sync`s, and restarts every running `chela-*` service in "
+            "one step) or use the dashboard's Update control in the Settings drawer — "
+            "doctor only detects the gap; it never pulls or restarts anything itself.",
+        )]
     return [Finding(
-        ERROR,
-        f"repo is {status.ahead} commit(s) AHEAD of its upstream on branch "
-        f"{status.branch!r} — diverged, not fast-forwardable",
-        "This is exactly the shape an upstream history rewrite (e.g. `git filter-repo` + "
-        "force-push) leaves behind — as well as genuine unpushed local commits. `chela "
-        "update` tells the two apart and recovers safely from a real rewrite (backs up "
-        "the pre-rewrite HEAD to a `refs/chela-backup/...` ref, then resets onto the new "
-        "history), or refuses loudly, explaining why, if it is not one. Run `chela "
-        "update` to find out which — doctor only detects the condition; it never "
-        "fetches or resets this repo itself.",
-    )]
+        OK, "repo is in sync with its upstream (no local divergence, nothing to pull)")]
 
 
 # --- fact: is the RUNNING code the checkout's HEAD, or just the checkout itself? -----
