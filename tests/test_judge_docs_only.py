@@ -113,6 +113,28 @@ def test_docs_only_diff_is_unknown_on_an_empty_diff(tmp_path, repo):
     assert judge._docs_only_diff(wt, "dev") is None
 
 
+def test_docs_only_diff_is_unknown_when_git_diff_itself_fails(tmp_path, repo, monkeypatch):
+    """The ref resolves fine (rev-parse succeeds) but the diff invocation itself errors out.
+
+    This must stay an unknown, not collapse to "yes, docs-only": a resolved ref only proves
+    the base exists, it says nothing about whether the diff between it and HEAD could be
+    computed. Returning ``True`` here would report DOCS-ONLY for a diff nobody actually read.
+    """
+    wt = _detached_worktree(repo, "dev", tmp_path / "wt")
+    _git("fetch", "origin", "dev", cwd=wt)
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and "diff" in cmd:
+            return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="fatal: boom")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(judge.subprocess, "run", fake_run)
+
+    assert judge._docs_only_diff(wt, "dev") is None
+
+
 # --- wired into run_experiments's zero-experiments report ---------------------------------
 
 
