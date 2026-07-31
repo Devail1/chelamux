@@ -730,6 +730,7 @@ def _capture_compare_cmd(sha="h1", files=("tests/test_x.py",)):
             return _gh_view(sha)
         if cmd[:2] == ["gh", "api"]:
             seen["cmd"] = list(cmd)
+            seen["kwargs"] = dict(k)      # ⛔ argv is only HALF the request
             return SimpleNamespace(returncode=0, stdout="\n".join(files), stderr="")
         return _no_gh(cmd, *a, **k)
 
@@ -793,3 +794,77 @@ def test_the_compare_asks_for_FILENAMES(tmp_path):
     assert ".files[].filename" in seen["cmd"], (
         f"the compare must select filenames, got {seen['cmd']!r}"
     )
+
+
+def test_the_compare_is_asked_with_the_KEYWORDS_that_make_its_output_readable(tmp_path):
+    """🔴 GUARD (CMX-198 round 5): argv is only HALF the request.
+
+    ⚠️ Round 4's commit claimed "the REQUEST is now asserted" — it asserted the positional
+    half. `capture_output=False` leaves `out.stdout` as None, `(out.stdout or "")` collapses
+    to an empty file list, and an empty compare reads as "no production change": the nudge
+    then fires UNCONDITIONALLY, on a diff nobody ever received. Same false-nudge failure as
+    `base...base`, through a different door.
+
+    `timeout` matters for the same reason one exit returns None on TimeoutExpired — without
+    it a hung `gh` hangs the reopen itself, and `text=True` is what makes `.splitlines()`
+    meaningful rather than bytes.
+    """
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    kw = seen["kwargs"]
+    assert kw.get("capture_output") is True, (
+        "without capture_output the stdout is None, the file list is empty, and every "
+        "compare reads as 'no production change' — the nudge fires on nothing"
+    )
+    assert kw.get("text") is True, "the classifier splits lines; bytes would never match"
+    assert kw.get("timeout"), "a hung gh must not hang the reopen"
+    assert kw.get("cwd") is not None
+
+
+def test_the_nudge_event_records_BOTH_ends_of_the_range_it_compared(tmp_path):
+    """🔴 The event_log row is the DURABLE record of what was compared — the return value is
+    read once and gone. Collapse `head_sha` onto the base and the record says a commit was
+    compared with itself, which is both false and exactly the corruption (`base...base`)
+    that makes the nudge fire on nothing. All five payload fields asserted, not three."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    ev = event_log.read(types=["reopen_nudge"])["events"][-1]["payload"]
+    assert ev["first_reopen_head_sha"] == "h1"
+    assert ev["head_sha"] == "h3", (
+        f"the record lost the far end of the range it compared: {ev!r}"
+    )
+    assert ev["first_reopen_head_sha"] != ev["head_sha"], (
+        "a range whose two ends are equal is not a range"
+    )
+    assert ev["reopen_count"] == 3
+    assert ev["task_id"] == "abc123" and ev["pr_url"]
+
+
+def test_the_nudge_message_carries_the_EVIDENCE_it_rests_on(tmp_path):
+    """🔴 `diff_detail` is the only part of the operator-facing message derived from the
+    REAL diff — the rest ("N rounds, no production change … merging is a defensible call")
+    is the same confident sentence whatever the compare said.
+
+    ⭐ This is verbatim the condition of round 1's review: *the operator's whole reason to
+    trust the message is that it is derived from a real diff*. Blank the detail and the
+    advice keeps its wording and loses its evidence — which is the one thing that makes it
+    advice rather than a slogan. I wrote that condition and did not guard it.
+    """
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3", files=("tests/test_x.py", "tests/test_y.py"))
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        r = dispatcher.reopen("abc123", "fix 3")
+
+    assert "2 file(s) changed" in r["nudge"], (
+        f"the nudge must carry the diff it rests on. Got: {r['nudge']!r}"
+    )
+    assert "0 under chela/" in r["nudge"]
