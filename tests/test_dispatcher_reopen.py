@@ -956,10 +956,14 @@ def test_the_nudge_carries_its_ADVICE_not_only_its_evidence(tmp_path):
     assert "hardening the proof, not the feature" in nudge, (
         f"the nudge must say what the diff MEANS, not only what it was. Got: {nudge!r}"
     )
-    assert "defensible" in nudge, (
-        "…and that merging is a legitimate call — this is an informed-consent signal, and "
-        "without the permission half it is just a statistic"
+    # ⛔ NOT `"defensible" in nudge` — that passes for "Merging is NOT a defensible call",
+    # the exact inversion of the advice, under a comment claiming it pins the permission.
+    # A keyword survives its own negation; the sentence does not.
+    assert "Merging is a defensible call." in nudge, (
+        f"…and that merging is a legitimate call — this is an informed-consent signal, and "
+        f"an inverted or hedged permission is worse than none. Got: {nudge!r}"
     )
+    assert "not a defensible" not in nudge
     assert "3 rounds" in nudge
     # ⛔ The RANGE clause — what the numbers COVER. Rounds 5 and 6 guarded the parenthetical
     # evidence and the trailing advice; this middle clause was pinned by nothing. "since the
@@ -983,8 +987,11 @@ def test_the_nudge_events_SUMMARY_is_what_a_notification_would_render(tmp_path):
     _drive_to_a_compare(tmp_path)
     seen, run = _capture_compare_cmd(sha="h3")
 
+    # ⛔ Driven by BRANCH NAME, exactly as the payload test is. Round 11 separated `ident`
+    # from `task_id` for the payload and left the SUMMARY — its twin, built from the same
+    # two variables one line apart — still driven by the task id, where they collide.
     with patch.object(dispatcher.subprocess, "run", side_effect=run):
-        r = dispatcher.reopen("abc123", "fix 3")
+        r = dispatcher.reopen("test-1", "fix 3")
 
     ev = event_log.read(types=["reopen_nudge"])["events"][-1]
     summary = ev.get("summary") or ""
