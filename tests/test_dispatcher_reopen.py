@@ -665,12 +665,25 @@ def test_a_gh_failure_is_UNKNOWN_not_a_guessed_no_change(boom, label, monkeypatc
     assert touched is None, f"{label} is UNREADABLE, not evidence of no change"
 
 
-def test_a_nonzero_gh_exit_is_UNKNOWN_not_a_guessed_no_change(monkeypatch):
+@pytest.mark.parametrize("rc,label", [
+    (1, "ordinary failure"),
+    (2, "usage error"),
+    (-9, "killed by SIGKILL — the OOM case, and a NEGATIVE returncode"),
+    (-15, "killed by SIGTERM"),
+])
+def test_a_nonzero_gh_exit_is_UNKNOWN_not_a_guessed_no_change(rc, label, monkeypatch):
+    """⛔ Every unreadable-exit test used returncode=1, so `!= 0` was narrowable to `> 0`
+    and nothing noticed. A `gh` killed by a SIGNAL returns a NEGATIVE code — the OOM case
+    on this very box — and under `> 0` that falls through to parsing an EMPTY stdout, which
+    reads as "no production change" and fires the nudge on a compare that never ran.
+
+    ⚠️ Fixture uniformity again: one returncode value cannot pin a sign test.
+    """
     monkeypatch.setattr(
         dispatcher.subprocess, "run",
-        lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="404 Not Found"))
+        lambda *a, **k: SimpleNamespace(returncode=rc, stdout="", stderr="404 Not Found"))
     touched, detail = _pfc()
-    assert touched is None
+    assert touched is None, f"{label} is UNREADABLE, not evidence of no change"
     assert "404" in detail
 
 
@@ -982,3 +995,54 @@ def test_reopen_returns_the_SPENT_rework_budget_not_the_reopen_count(tmp_path):
     assert r["reopen_count"] == 3
     assert r["rework_count"] != r["reopen_count"], "two different facts, two different numbers"
     assert r["max_reworks"] == dispatcher.max_reworks()
+
+
+def test_the_EVIDENCE_string_names_the_range_it_measured(monkeypatch):
+    """🔴 GUARD (CMX-198 round 9): `diff_detail` carries its OWN copy of the range phrase.
+
+    ⚠️ Round 7 found that `"since the first reopen" in nudge` was satisfied by the
+    parenthetical, and fixed it by anchoring to the TEMPLATE's contiguous clause. That fix
+    is correct — and it left `diff_detail`'s own copy, built in a DIFFERENT function,
+    guarded by nothing. Fixing a wrong-path assertion created the gap.
+
+    The evidence line is what the operator reads to check the advice: "N file(s) changed
+    since the LAST reopen" describes a per-round diff, which is never what was computed and
+    would be non-empty on every round — the opposite of the condition being reported.
+    """
+    monkeypatch.setattr(
+        dispatcher.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="tests/a.py\n", stderr=""))
+    _, detail = _pfc()
+    assert "changed since the first reopen" in detail, (
+        f"the evidence must name the range it measured. Got: {detail!r}"
+    )
+
+
+def test_escalating_a_run_PRESERVES_its_reopen_count(tmp_path):
+    """🔴 GUARD (CMX-198 round 9): the human loop's spent budget stays spent.
+
+    The DDL comment says `reopen_count` is "incremented once per successful reopen(), never
+    touched anywhere else", and `_escalate` — the production path a failing verdict takes
+    back to needs_human — is the only place that could reset it. Reset there and the count
+    restarts every round, never reaches 3, and the nudge NEVER fires: the feature is dead
+    while every counter test still passes.
+
+    ⚠️ This file's own `_escalate_back_to_needs_human` is a TEST helper that mirrors the
+    row, so the production function was never driven. A helper standing in for the code
+    under test cannot guard it.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2,
+             first_reopen_head_sha="h1", status="awaiting_review")
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        dispatcher._escalate(conn, row, "still fails review")
+
+    with dispatcher._db() as conn:
+        after = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+
+    assert after["status"] == "needs_human"
+    assert after["reopen_count"] == 2, (
+        f"escalation reset the human loop's spent budget to {after['reopen_count']!r} — "
+        "the count would never reach the nudge threshold"
+    )
+    assert after["first_reopen_head_sha"] == "h1", "the diff base must survive too"
