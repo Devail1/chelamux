@@ -552,7 +552,13 @@ def test_cmd_reopen_prints_the_reopen_count_and_the_nudge(tmp_path, capsys):
     ):
         main.cmd_reopen(_ReopenArgs())
     out = capsys.readouterr().out
-    assert "reopen #3" in out
+    # ⛔ BOTH halves, with DISTINCT numbers. The fixture row carries rework_count=2 and this
+    # is the 3rd reopen, so a line that renders the reopen count in the rework slot shows
+    # "rework 3/2" — visibly absurd, and previously invisible because only the `reopen #K`
+    # half was asserted. Conflating the two counters is the exact bug this ticket exists to
+    # measure; the operator-facing line is where it would be read.
+    assert "rework 2/2" in out, f"the rework budget must render its OWN count. Got: {out!r}"
+    assert "reopen #3" in out, f"the reopen count must render its own. Got: {out!r}"
     assert "no production change" in out
 
 
@@ -943,3 +949,36 @@ def test_the_nudge_events_SUMMARY_is_what_a_notification_would_render(tmp_path):
     assert "3 rounds" in summary and "no production change" in summary, (
         f"the rendered half must carry the nudge itself, got {summary!r}"
     )
+
+
+def test_reopen_returns_the_SPENT_rework_budget_not_the_reopen_count(tmp_path):
+    """🔴 GUARD (CMX-198 round 8): the separation at the SOURCE, not just in the DB.
+
+    `reopen()`'s return is what `cmd_reopen` renders and what any caller reads. Every
+    `rework_count == 2` assertion in this file reads the DB ROW; the RETURNED value was
+    pinned by nothing, so `"rework_count": new_reopen_count` conflates the two at the exact
+    boundary this ticket exists to keep apart — and the DB stays correct, so the row-based
+    assertions all keep passing.
+
+    The two numbers must DIFFER here or a swap is invisible: the fixture's spent budget is
+    2, this is reopen #3.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2,
+             first_reopen_head_sha="h1")
+
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["tests/test_x.py"]},
+        ),
+    ):
+        r = dispatcher.reopen("abc123", "fix 3")
+
+    assert r["rework_count"] == 2, (
+        f"the returned rework_count must be the AUTOMATIC loop's spent budget, "
+        f"got {r['rework_count']!r}"
+    )
+    assert r["reopen_count"] == 3
+    assert r["rework_count"] != r["reopen_count"], "two different facts, two different numbers"
+    assert r["max_reworks"] == dispatcher.max_reworks()
