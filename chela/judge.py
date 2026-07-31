@@ -971,7 +971,7 @@ def _reprovision_worktree(wf, worktree: Path, sha: str, base_branch: str) -> str
                "re-check it out from"
     try:
         dispatcher.detached_worktree(wf.path.parent, sha, worktree)
-    except (BranchGone, subprocess.CalledProcessError) as e:
+    except (BranchGone, subprocess.CalledProcessError, OSError) as e:
         detail = getattr(e, "stderr", None) or str(e)
         if isinstance(detail, bytes):
             detail = detail.decode(errors="replace")

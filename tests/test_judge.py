@@ -577,15 +577,31 @@ def test_a_judge_run_with_no_worktree_REBUILDS_it_from_pr_head_sha(tmp_path, mon
     that fixed exactly the guard a `blocked` verdict named had NO way back to `clean` short
     of a whole new dispatch round — `judge_run` declared the fix unverifiable because the
     directory was gone. It must instead rebuild its own throwaway checkout at the run's
-    CURRENT `pr_head_sha` and actually re-adjudicate."""
+    CURRENT `pr_head_sha` and actually re-adjudicate.
+
+    ⭐ `judge_sha` is deliberately set to a DIFFERENT, real, resolvable commit — the stale sha
+    the old `blocked` verdict was recorded against, from BEFORE the guard was fixed. If the
+    rebuild ever preferred `judge_sha` over `pr_head_sha` it would check out the pre-fix
+    commit, the FAKE guard there can't catch the mutation, and this would come back BLOCKED
+    instead of CLEAN — so the wrong-sha bug is caught by the verdict itself, not just by
+    inspecting the checkout."""
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
     task_id = "abc123"
-    repo, sha = _git_workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    repo, stale_sha = _git_workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    (repo / "test_guard.py").write_text(REAL_GUARD_TEST)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "fix the guard the blocked verdict named")
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert sha != stale_sha
+
     wt_path = _judge_worktree_path(tmp_path, task_id)
     assert not wt_path.exists()                      # the worktree is GONE, not merely stale
 
     with dispatcher._db() as conn:
-        _run_row(conn, repo, task_id, pr_head_sha=sha)
+        _run_row(conn, repo, task_id, pr_head_sha=sha, judge_sha=stale_sha)
     exp_file = tmp_path / "experiments.json"
     exp_file.write_text(json.dumps({"experiments": [_exp()]}))
 
@@ -595,6 +611,11 @@ def test_a_judge_run_with_no_worktree_REBUILDS_it_from_pr_head_sha(tmp_path, mon
     assert result["state"] == judge.J_CLEAN
     assert result["cannot_verify"] == ""
     assert wt_path.is_dir()                           # it built its OWN throwaway checkout
+    checked_out = subprocess.run(
+        ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert checked_out == sha                         # CURRENT head, never the stale judge_sha
     run = dispatcher.resolve_run(task_id)
     assert run["judge_sha"] == sha                     # stamped — no longer stale
 
