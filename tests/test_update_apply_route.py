@@ -48,6 +48,27 @@ def test_apply_refuses_when_already_up_to_date(client, monkeypatch):
     assert calls == []
 
 
+def test_apply_never_fetches(client, monkeypatch):
+    """`api_update_apply`'s own docstring/comment promise the same 'never a network call'
+    guarantee as `_update_status_payload` (see test_settings_status.py::
+    test_update_payload_never_fetches) — the checkout-behind check that gates whether the
+    route even considers pulling must read only the local remote-tracking ref. Every other
+    test in this file fakes `commits_behind` with a `fetch=True` DEFAULT or `lambda *a,
+    **k:`, both of which accept (and silently discard) whatever value `fetch` is called
+    with, so none of them would catch this route calling `commits_behind(fetch=True)`
+    instead — a `fetch` kwarg with no default is what actually forces the call site to
+    pass one, and recording it is what proves which value it passed."""
+    calls = []
+
+    def fake_commits_behind(repo=None, *, fetch):
+        calls.append(fetch)
+        return update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev")
+
+    monkeypatch.setattr(update, "commits_behind", fake_commits_behind)
+    client.post("/api/update/apply")
+    assert calls == [False]
+
+
 def test_apply_starts_a_background_run_when_behind(client, monkeypatch):
     monkeypatch.setattr(update, "commits_behind",
                         lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
