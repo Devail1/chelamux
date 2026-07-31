@@ -538,6 +538,10 @@ def _verdict_run(judge_state=None, **over):
 def _clean_run(**over):
     return {"task_id": "T1", "title": "x", "status": "awaiting_review",
             "pr_url": "https://github.com/x/y/pull/9", "judge_state": "clean",
+            # ⚠️ `workflow_path` is what `_live_judge_heads` derives `repo_dir` from, and
+            # the fixture never carried one — so repo_dir was silently None in EVERY test,
+            # which is precisely the state that makes `_read_pr_checks` return no sha.
+            "workflow_path": "/repo/chelamux/WORKFLOW.md",
             "judge_sha": _JUDGE_SHA, **over}
 
 
@@ -1524,3 +1528,99 @@ def test_a_FAILED_live_read_does_not_manufacture_staleness(
         "a failed live read was treated as a moved head — an unreadable sha is unknown, "
         "not proof of staleness"
     )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_the_live_head_is_read_against_a_REAL_repo_dir(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 5): `repo_dir` must actually point somewhere.
+
+    `dispatcher._read_pr_checks` returns CI_UNKNOWN with NO sha whenever `repo_dir` is
+    falsy (`dispatcher.py:1459`). Combined with the (correct) rule that an unreadable head
+    is UNKNOWN rather than moved, a blank repo_dir makes every verdict deliver
+    unconditionally — the staleness check silently never runs at all, while every test
+    that fakes `_read_pr_checks` keeps passing because the fake ignores the argument.
+    """
+    seen = {}
+
+    def _capture(pr_url, repo_dir):
+        seen["repo_dir"] = repo_dir
+        return dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA)
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(dispatcher, "_read_pr_checks", _capture)
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    assert seen.get("repo_dir") == "/repo/chelamux", (
+        f"the live head was read with repo_dir={seen.get('repo_dir')!r} — it must be the "
+        "run's own workflow dir; falsy means _read_pr_checks returns no sha at all, so "
+        "nothing is ever compared and every verdict delivers unconditionally"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_verdict_with_NO_judged_sha_is_unknown_not_stale(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 5): the JUDGED half of "staleness needs BOTH halves known".
+
+    Its twin (`..._FAILED_live_read_does_not_manufacture_staleness`) pins the LIVE half. I
+    cited `epoch.is_dangling`'s both-halves doctrine by name in that commit and then guarded
+    only one of the two halves — so dropping `judged_sha and` from the condition turned a
+    verdict carrying no judged commit (a legacy queued event, or a row whose judge_sha was
+    never stamped) into a permanent "stale", silently retiring it.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+
+    inbox.tick({}, runs=[_verdict_run(judge_state, judge_sha=None)])
+
+    assert len(sends) == 1, (
+        "a verdict with no judged sha was dropped as stale — an absent half is UNKNOWN, "
+        "and only two KNOWN halves that differ prove staleness"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_the_judged_sha_comes_from_the_PAYLOAD_not_the_live_row(
+        judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
+    """🔴 GUARD (CMX-197 round 5): the payload is the RECORD; the row is the present.
+
+    ⭐ This is the whole reason `payload['judge_sha']` exists. Re-read the judged sha off
+    the run row and BOTH sides of the comparison come from the same live source, so they
+    can never disagree — the check becomes a no-op that always delivers, restoring exactly
+    the bug this ticket closes, while looking like a working comparison.
+
+    Shape: the verdict is queued for sha A; a new judge then starts on sha B, so the ROW's
+    judge_sha is now B and the live head is B too. Reading the row: B == B, delivered.
+    Reading the payload: A != B, dropped.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_verdict_run(judge_state)])          # queued with judged sha A
+    assert inbox.load()["queue"][0]["payload"]["judge_sha"] == _JUDGE_SHA
+
+    moved_on = _verdict_run(judge_state, judge_sha=_SUPERSEDING_SHA)   # row now says B
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[moved_on])
+
+    assert sends == [], (
+        "the judged sha was re-read off the live row, so both sides came from the same "
+        "source and the comparison could never fail"
+    )
+    assert f"dropping stale {kind}" in caplog.text
