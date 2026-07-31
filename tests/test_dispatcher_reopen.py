@@ -550,8 +550,23 @@ def test_cmd_reopen_prints_the_reopen_count_and_the_nudge(tmp_path, capsys):
             sha="h3", compare_files_by_base={"h1": ["tests/test_x.py"]},
         ),
     ):
-        main.cmd_reopen(_ReopenArgs())
+        captured = {}
+        real_reopen = dispatcher.reopen
+
+        def _spy(*a, **k):
+            captured["result"] = real_reopen(*a, **k)
+            return captured["result"]
+
+        with patch.object(dispatcher, "reopen", _spy):
+            main.cmd_reopen(_ReopenArgs())
     out = capsys.readouterr().out
+    # ⛔ The WHOLE nudge, not fragments: `print("  ⭐ no production change")` — a hardcoded
+    # constant — satisfies every fragment assertion while the real, diff-derived message
+    # never reaches the operator. The CLI print is the ONLY surface the nudge is read on.
+    assert captured["result"]["nudge"] in out, (
+        f"the printed line must carry the FULL nudge reopen() produced, not a fragment a "
+        f"hardcoded string could satisfy. Got: {out!r}"
+    )
     # ⛔ BOTH halves, with DISTINCT numbers. The fixture row carries rework_count=2 and this
     # is the 3rd reopen, so a line that renders the reopen count in the rework slot shows
     # "rework 3/2" — visibly absurd, and previously invisible because only the `reopen #K`
@@ -854,6 +869,15 @@ def test_the_compare_is_asked_with_the_KEYWORDS_that_make_its_output_readable(tm
         f"{kw.get('timeout')!r}"
     )
     assert kw.get("cwd") is not None
+    # ⛔ The one keyword that actually makes the output READABLE, and the one I swept in
+    # round 7, saw survive, and deliberately left — calling it "noise, not a gap". That
+    # judgement weighed the cosmetic consequence (a garbled filename) and missed the
+    # control-flow one: under `errors="strict"` an undecodable byte raises
+    # UnicodeDecodeError, which `except (OSError, TimeoutExpired)` does NOT catch, so it
+    # propagates out of _production_files_changed and CRASHES the reopen itself.
+    assert kw.get("errors") == "replace", (
+        f"a filename byte that will not decode must degrade, not raise, got {kw.get('errors')!r}"
+    )
 
 
 def test_the_nudge_event_records_BOTH_ends_of_the_range_it_compared(tmp_path):
@@ -954,13 +978,16 @@ def test_the_nudge_events_SUMMARY_is_what_a_notification_would_render(tmp_path):
     seen, run = _capture_compare_cmd(sha="h3")
 
     with patch.object(dispatcher.subprocess, "run", side_effect=run):
-        dispatcher.reopen("abc123", "fix 3")
+        r = dispatcher.reopen("abc123", "fix 3")
 
     ev = event_log.read(types=["reopen_nudge"])["events"][-1]
     summary = ev.get("summary") or ""
-    assert "abc123" in summary, f"the rendered half must name the run, got {summary!r}"
-    assert "3 rounds" in summary and "no production change" in summary, (
-        f"the rendered half must carry the nudge itself, got {summary!r}"
+    assert summary.startswith("abc123: "), f"the rendered half must name the run, got {summary!r}"
+    # ⛔ Fragments are satisfiable by a RECONSTRUCTED string that shares them. The summary
+    # must carry the nudge ITSELF — the same text the operator was shown — or the durable
+    # record and the notification can drift apart while both look plausible.
+    assert summary == f"abc123: {r['nudge']}", (
+        f"the summary must BE the nudge, not a paraphrase sharing its words. Got: {summary!r}"
     )
 
 
