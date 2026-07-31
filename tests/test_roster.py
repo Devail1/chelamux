@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import time
 
 import pytest
 
@@ -241,4 +242,201 @@ def test_prune_evicts_the_STALEST_epoch_not_the_lowest_key(roster):
     assert "z" not in kept and "y" not in kept, "the STALEST epochs must be the ones evicted"
     assert "a" in kept, (
         f"the most RECENT epoch was evicted — prune is ranked by key, not last_seen. Kept: {kept}"
+    )
+
+
+# --------------------------------------------------------------------------
+# archive — CMX-196's audit trail for a MANUAL row `chela restore --apply` removed
+# --------------------------------------------------------------------------
+
+def test_archive_appends_the_entry_stamped_with_archived_at(roster):
+    entry = {"store": "session-ids", "wid": "@5", "session_id": "sid-dead",
+              "cwd": "/home/x", "label": "sid-dead", "stamped_epoch": OLD}
+
+    roster.archive(entry)
+
+    data = json.loads(roster._ARCHIVE_STORE.read_text())
+    assert len(data["archived"]) == 1
+    row = data["archived"][0]
+    # The COMPLETE entry — the archive is the only remaining record of a row whose live
+    # store no longer has it, so every field the caller handed over must survive.
+    assert {k: row[k] for k in entry} == entry, (
+        f"the archived entry lost or altered a field: {row!r}"
+    )
+    # ⛔ NOT `"archived_at" in row` — None and 0 are both "in row", and an entry stamped
+    # with either cannot be dated later, which is the one thing archiving is FOR.
+    assert isinstance(row["archived_at"], (int, float)) and row["archived_at"] > 1_700_000_000, (
+        f"archived_at must be a real timestamp, got {row['archived_at']!r}"
+    )
+    assert abs(row["archived_at"] - time.time()) < 60, "archived_at must be NOW, not a constant"
+
+
+def test_archive_never_touches_the_epochs_section(roster):
+    """🔴 The archive lives in its OWN FILE — it must never collide with or overwrite
+    `record`'s epoch-keyed snapshot in `roster.json`, which a later `window()` join still
+    depends on."""
+    roster.record({"@1": "orch"}, {"@1"}, OLD, _cwd_for({"@1": "/home/x"}),
+                  _session_for({"@1": "sid-1"}))
+
+    roster.archive({"store": "session-ids", "wid": "@5", "session_id": "s",
+                     "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    assert roster.window(OLD, "@1") == {"name": "orch", "cwd": "/home/x", "session_id": "sid-1"}
+
+
+def test_archive_writes_a_separate_file_from_roster_json(roster):
+    """🔴 GUARD (round-2 rework): `archive()` and `record()` must never share a file — see
+    the module docstring's "one writer per file" rationale. `roster.json` must not gain an
+    `archived` key, and `roster-archive.json` must not gain an `epochs` key."""
+    roster.record({"@1": "orch"}, {"@1"}, OLD, _cwd_for({"@1": "/home/x"}),
+                  _session_for({"@1": "sid-1"}))
+    roster.archive({"store": "session-ids", "wid": "@5", "session_id": "s",
+                     "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    assert roster._STORE != roster._ARCHIVE_STORE
+    roster_data = json.loads(roster._STORE.read_text())
+    archive_data = json.loads(roster._ARCHIVE_STORE.read_text())
+    assert "archived" not in roster_data, "archive() must not write into roster.json"
+    assert "epochs" not in archive_data, "record() must not write into roster-archive.json"
+
+
+def test_record_never_touches_the_archive_store(roster):
+    """🔴 GUARD (round-2 rework): the daemon's per-tick writer must never touch the archive
+    file, even when it already holds rows — a shared file (or a shared writer) is exactly
+    the hazard the split into two files exists to close."""
+    roster.archive({"store": "session-ids", "wid": "@5", "session_id": "s",
+                     "cwd": None, "label": "", "stamped_epoch": OLD})
+    before = roster._ARCHIVE_STORE.read_bytes()
+
+    roster.record({"@1": "orch"}, {"@1"}, NEW, _cwd_for({"@1": "/home/x"}),
+                  _session_for({"@1": "sid-1"}))
+
+    after = roster._ARCHIVE_STORE.read_bytes()
+    assert after == before, "record() must never touch roster-archive.json"
+
+
+def test_interleaved_archive_and_record_both_survive(roster, monkeypatch):
+    """🔴 GUARD (round-2 rework): simulate the real hazard the review flagged — `archive()`
+    loads its file, a `record()` (the daemon's reconcile tick) completes in between, then
+    `archive()` saves. With two separate files both writes must survive; if archive() and
+    record() were ever merged back into one file, whichever finishes saving last would
+    silently erase the other's write, and this must go red."""
+    roster.record({"@1": "orch"}, {"@1"}, OLD, _cwd_for({"@1": "/home/x"}),
+                  _session_for({"@1": "sid-1"}))
+
+    orig_load_archive = roster._load_archive
+
+    def load_then_interleave_a_record(*a, **kw):
+        data = orig_load_archive(*a, **kw)
+        roster.record({"@2": "cmx-9"}, {"@2"}, NEW, _cwd_for({"@2": "/tmp"}),
+                      _session_for({"@2": "sid-2"}))
+        return data
+
+    monkeypatch.setattr(roster, "_load_archive", load_then_interleave_a_record)
+
+    roster.archive({"store": "session-ids", "wid": "@5", "session_id": "s",
+                     "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    archive_data = json.loads(roster._ARCHIVE_STORE.read_text())
+    assert len(archive_data["archived"]) == 1, "the archive write must survive the interleave"
+    assert roster.window(NEW, "@2") == {"name": "cmx-9", "cwd": "/tmp", "session_id": "sid-2"}, (
+        "the interleaved record() write must survive too"
+    )
+    assert roster.window(OLD, "@1") == {"name": "orch", "cwd": "/home/x", "session_id": "sid-1"}
+
+
+def test_archive_appends_rather_than_overwrites(roster):
+    roster.archive({"store": "session-ids", "wid": "@5", "session_id": "s1",
+                     "cwd": None, "label": "", "stamped_epoch": OLD})
+    roster.archive({"store": "inbox.orchestrator", "wid": "@1", "session_id": "s2",
+                     "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    data = json.loads(roster._ARCHIVE_STORE.read_text())
+    assert [r["wid"] for r in data["archived"]] == ["@5", "@1"], (
+        "a second archive call must append, not replace, the first"
+    )
+
+
+def test_archive_is_bounded_and_evicts_the_oldest_first(roster):
+    """🔴 An unbounded archive would grow forever; the eviction must drop the OLDEST rows,
+    keeping the ones most likely to still matter."""
+    for i in range(roster._MAX_ARCHIVED + 5):
+        roster.archive({"store": "session-ids", "wid": f"@{i}", "session_id": "s",
+                         "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    data = json.loads(roster._ARCHIVE_STORE.read_text())
+    assert len(data["archived"]) == roster._MAX_ARCHIVED
+    assert data["archived"][0]["wid"] == "@5", "the oldest 5 rows must be the ones evicted"
+    assert data["archived"][-1]["wid"] == f"@{roster._MAX_ARCHIVED + 4}"
+
+
+@pytest.mark.parametrize("garbage", ['[]', '"nope"', '{"archived": {}}', '{"archived": 3}',
+                                     'not json at all'])
+def test_a_malformed_archive_store_degrades_to_empty_instead_of_raising(roster, garbage):
+    """🔴 GUARD (round-4): `_load_archive`'s shape check is the twin of `_load`'s, which
+    `test_a_malformed_roster_degrades_to_empty_instead_of_raising` already pins. A file that
+    is valid JSON but the wrong SHAPE would reach `data.setdefault("archived", [])` on a
+    list/str and raise out of `archive()` — which runs inside `chela restore --apply`, AFTER
+    some rows have already been archived-and-removed. A crash there is the one moment this
+    command must survive.
+    """
+    roster._ARCHIVE_STORE.parent.mkdir(parents=True, exist_ok=True)
+    roster._ARCHIVE_STORE.write_text(garbage)
+
+    roster.archive({"store": "session-ids", "wid": "@5", "session_id": "s",
+                    "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    data = json.loads(roster._ARCHIVE_STORE.read_text())
+    assert [r["wid"] for r in data["archived"]] == ["@5"], (
+        "a malformed archive must be replaced, not raise and abort a half-done --apply"
+    )
+
+
+def test_the_archive_bound_survives_a_whole_apply_run(roster):
+    """🔴 GUARD (CMX-196 round 8): the cap must comfortably exceed ONE `--apply` run.
+
+    The archive is the only remaining record of a row `--apply` deleted from its live store,
+    so a sweep must never evict rows archived in the SAME run — the operator would be left
+    with rows gone from both places. A dead tmux server can orphan a row per fleet window
+    plus one per dispatcher run half, so a realistic single run archives tens of rows.
+
+    ⚠️ The existing retention test is written in terms of `_MAX_ARCHIVED` itself, so it
+    passes at ANY cap — including 2. A test parameterised by the value it should pin cannot
+    pin it; this asserts the literal, and then proves the behaviour at a realistic run size.
+    """
+    assert roster._MAX_ARCHIVED >= 100, (
+        f"the archive cap is {roster._MAX_ARCHIVED} — too small to hold one --apply run "
+        "without evicting its own entries"
+    )
+
+    for i in range(100):
+        roster.archive({"store": "session-ids", "wid": f"@{i}", "session_id": f"s{i}",
+                        "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    data = json.loads(roster._ARCHIVE_STORE.read_text())
+    assert len(data["archived"]) == 100, "a single run's archives evicted each other"
+    assert data["archived"][0]["wid"] == "@0", "the FIRST row of the run was swept away"
+
+
+def test_archive_reads_AND_writes_the_path_it_was_given(roster, tmp_path):
+    """🔴 GUARD (CMX-196 round 9): the `path` seam selects BOTH ends.
+
+    `archive`'s docstring calls `path` a test seam pointing at the archive file. If it
+    writes `path` but READS the default, an existing archive at `path` is invisible and the
+    append silently becomes an overwrite — every row previously archived there is gone,
+    which for rows already deleted from their live store is total loss.
+    """
+    other = tmp_path / "elsewhere-archive.json"
+    roster.archive({"store": "session-ids", "wid": "@1", "session_id": "s1",
+                    "cwd": None, "label": "", "stamped_epoch": OLD}, path=other)
+    roster.archive({"store": "session-ids", "wid": "@2", "session_id": "s2",
+                    "cwd": None, "label": "", "stamped_epoch": OLD}, path=other)
+
+    rows = json.loads(other.read_text())["archived"]
+    assert [r["wid"] for r in rows] == ["@1", "@2"], (
+        "the second archive did not READ the first from the given path — an append became "
+        "an overwrite"
+    )
+    assert not roster._ARCHIVE_STORE.exists(), (
+        "a path-scoped archive must not touch the default store either"
     )

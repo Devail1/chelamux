@@ -49,22 +49,31 @@ outcomes: **REVIVABLE** (the session is live elsewhere — the row just needs it
 updated) or **MANUAL** (nothing live claims that session — a human decides, with the exact
 ``cd <cwd> && CHELA_WID=@N claude --resume <sid>`` one-liner to do it).
 
-⛔ **NOTHING in this module writes.** It is a report: no store is mutated, and tmux is never
-touched — no window is relaunched, spawned, resumed or killed. The write half (re-stamping
-REVIVABLE rows, archiving MANUAL ones before removal) is a **separate, deliberately deferred
-ticket**; splitting it out is what let the read half ship guarded.
+⛔ **``scan_*``/``plan`` never write.** Every scanner and :func:`plan` stay pure reports: no
+store is mutated, and tmux is never touched — no window is relaunched, spawned, resumed or
+killed. ``chela restore`` itself stays read-only by default for exactly that reason.
 
-⚠️ When that half is built, ``telegram-bindings.json`` must stay out of it: ``chela-telegram``
-owns that file (one in-memory ``BindingRegistry`` per daemon lifetime, saved from that same
-object every reconcile tick), so a second load-mutate-save races it and silently erases
-whichever side wrote last. Its rows are classified and reported here; the daemon's own
-reconcile tick is what reaps them.
+**The write half — :func:`apply` (CMX-196).** Takes the ``Verdict`` list :func:`plan` already
+computed and acts on it, one row at a time: REVIVABLE re-stamps the row at its new, live
+address; MANUAL archives the row (:func:`chela.roster.archive`, into its own
+``roster-archive.json`` — never ``roster.json`` itself, which the reconcile tick's
+:func:`chela.roster.record` writes unconditionally every tick and would otherwise race) and
+only then removes it from its live store — archive-before-remove so a crash between the two
+steps loses nothing worse than a duplicate archive entry, never a silently vanished row. Only
+called when the CLI is run with ``--apply``; the bare command is still the pure report above.
+
+⚠️ ``telegram-bindings.json`` stays OUT of it, permanently, not just until this ticket:
+``chela-telegram`` owns that file (one in-memory ``BindingRegistry`` per daemon lifetime,
+saved from that same object every reconcile tick), so a second load-mutate-save would race it
+and silently erase whichever side wrote last. Its rows are classified and reported here;
+:func:`apply` reports them too, but never writes to that store — the daemon's own reconcile
+tick is what reaps them.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chela import epoch, roster, sessions
+from chela import epoch, inbox, roster, sessionids, sessions
 
 
 @dataclass(frozen=True)
@@ -215,4 +224,83 @@ def plan(orchestrator: dict, bindings: dict, session_entries: dict,
                       now_epoch, roster_lookup, wid_for_session)
         if v:
             out.append(v)
+    return out
+
+
+# --- apply: act on a Verdict list — the write half (CMX-196) ---------------------------
+
+LEFT_TO_DAEMON = "left-to-daemon"   # telegram.bindings — never written here, see module docs
+REVIVED = "revived"                 # REVIVABLE, re-stamped at its new address
+ARCHIVED = "archived"               # MANUAL, archived then removed from its live store
+RACED = "raced"                     # the row moved on between plan() and apply() — skipped
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    """What :func:`apply` did with one :class:`Verdict`."""
+
+    verdict: Verdict
+    action: str      # LEFT_TO_DAEMON | REVIVED | ARCHIVED | RACED
+    detail: str = ""
+
+
+def _archive_entry(v: Verdict) -> dict:
+    return {"store": v.store, "wid": v.wid, "session_id": v.session_id, "cwd": v.cwd,
+            "label": v.label, "stamped_epoch": v.stamped_epoch}
+
+
+def apply(verdicts: list[Verdict], *,
+          readdress_orchestrator=inbox.readdress,
+          unregister_orchestrator=inbox.unregister_dangling,
+          rekey_session=sessionids.rekey,
+          remove_session=sessionids.remove,
+          archive=roster.archive) -> list[ApplyResult]:
+    """Act on every row :func:`plan` classified — REVIVABLE re-stamped, MANUAL archived then
+    removed. Only called from ``chela restore --apply``; the bare command never calls this.
+
+    ``telegram.bindings`` rows are reported (:class:`ApplyResult` with ``action ==
+    LEFT_TO_DAEMON``) but **never written** — see the module docstring for why: that store
+    belongs to ``chela-telegram``'s own in-memory registry, and a second writer here would
+    race its next reconcile save.
+
+    Every writer is a DI seam (defaults to the real :mod:`chela.inbox` /
+    :mod:`chela.sessionids` / :mod:`chela.roster` calls) so this tests without touching a real
+    store. Each default is itself guarded to no-op — reported as ``RACED`` — if the row has
+    moved on since :func:`plan` computed it, rather than blindly clobbering whatever is there
+    now; see :func:`chela.inbox.readdress` / :func:`chela.inbox.unregister_dangling` /
+    :func:`chela.sessionids.rekey` / :func:`chela.sessionids.remove`.
+
+    MANUAL rows are archived BEFORE they are removed, deliberately: a crash between the two
+    steps then loses nothing worse than a duplicate archive entry, never a silently vanished
+    row with no trace either store still holds.
+    """
+    out: list[ApplyResult] = []
+    for v in verdicts:
+        if v.store == "telegram.bindings":
+            out.append(ApplyResult(v, LEFT_TO_DAEMON,
+                                    "chela-telegram owns telegram-bindings.json; its own "
+                                    "reconcile tick reaps this row"))
+            continue
+
+        if v.verdict == "REVIVABLE":
+            if v.store == "inbox.orchestrator":
+                r = readdress_orchestrator(v.wid, v.stamped_epoch, v.new_wid)
+                ok = bool(r.get("ok"))
+            else:  # session-ids
+                ok = rekey_session(v.wid, v.new_wid, v.session_id, v.stamped_epoch)
+            out.append(ApplyResult(v, REVIVED if ok else RACED,
+                                    f"re-stamped {v.wid} -> {v.new_wid}" if ok else
+                                    "the row moved on before it could be re-stamped"))
+            continue
+
+        # MANUAL — archive first, remove only after the archive write has landed.
+        archive(_archive_entry(v))
+        if v.store == "inbox.orchestrator":
+            r = unregister_orchestrator(v.wid, v.stamped_epoch)
+            ok = bool(r.get("ok"))
+        else:  # session-ids
+            ok = remove_session(v.wid, v.session_id, v.stamped_epoch)
+        out.append(ApplyResult(v, ARCHIVED if ok else RACED,
+                                "" if ok else
+                                "archived, but the row moved on before it could be removed"))
     return out

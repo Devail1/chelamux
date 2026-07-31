@@ -1691,22 +1691,28 @@ def cmd_doctor(args) -> None:
 def cmd_restore(args) -> None:
     """Report every epoch-stamped row a hard tmux death orphaned (see ``chela/restore.py``).
 
-    **READ-ONLY, always.** It names what a dead tmux server left dangling across
+    **READ-ONLY by default.** It names what a dead tmux server left dangling across
     ``inbox.json`` watches, the dispatcher's ``runs`` table, ``telegram-bindings.json`` and
-    ``session-ids.json``, and it touches none of them: no store is written, and no agent is
-    relaunched, spawned, resumed or killed. Each row is classified REVIVABLE (its recorded
-    Claude session is alive under a NEW address, so re-registering is a one-command fix) or
-    MANUAL (nothing live runs it), and a MANUAL row carries the exact relaunch command.
+    ``session-ids.json``. Each row is classified REVIVABLE (its recorded Claude session is
+    alive under a NEW address, so re-registering is a one-command fix) or MANUAL (nothing
+    live runs it), and a MANUAL row carries the exact relaunch command.
 
-    Acting on the report is a separate, deliberately deferred ticket (the write half —
-    re-stamping REVIVABLE rows and archiving MANUAL ones). Until it lands the operator acts
-    by hand: ``chela watch``/``register``, re-dispatch, or clear a row themselves.
+    ``--apply`` (CMX-196) acts on the classification instead of merely printing it: a
+    REVIVABLE row is re-stamped at its new address (``chela.restore.apply`` ->
+    ``chela.inbox.readdress`` / ``chela.sessionids.rekey``); a MANUAL row is archived
+    (``chela.roster.archive``) and only then removed from its live store. Without the flag
+    nothing is written and no agent is relaunched, spawned, resumed or killed — the operator
+    acts by hand: ``chela watch``/``register``, re-dispatch, or clear a row themselves.
+    ``telegram-bindings.json`` is never written either way: that store belongs to
+    ``chela-telegram``'s own in-memory registry, and its own reconcile tick reaps it.
 
     ⚠️ The roster only helps starting from the NEXT reboot — there is no snapshot of an
     epoch chela was never running to observe. A run today still reports the stale rows
     already sitting in each store; it cannot enumerate a dead fleet the roster never saw.
     """
     from chela.telegram.bindings import BindingRegistry
+
+    apply_flag = bool(getattr(args, "apply", False))
 
     now_epoch = epoch.current()
     store = inbox.load()
@@ -1736,24 +1742,40 @@ def cmd_restore(args) -> None:
 
     manual = [v for v in verdicts if v.verdict == "MANUAL"]
 
+    # Applied BEFORE the verdict block prints, so each row's line can carry the outcome —
+    # one per verdict, same order, per restore.apply()'s contract.
+    results = restore.apply(verdicts) if apply_flag and verdicts else []
+
     if verdicts:
         print(f"{len(verdicts)} classified row(s) (three session-stamped stores: "
               "inbox orchestrator, telegram-bindings, session-ids):\n")
-        for v in verdicts:
+        for v, r in zip(verdicts, results or [None] * len(verdicts)):
             if v.verdict == "REVIVABLE":
-                print(f"  [{v.store}] {v.wid} -> {v.new_wid}  REVIVABLE "
-                      f"(session {v.session_id} is alive there now)")
+                line = (f"  [{v.store}] {v.wid} -> {v.new_wid}  REVIVABLE "
+                        f"(session {v.session_id} is alive there now)")
             else:
                 cmd = v.manual_command()
-                print(f"  [{v.store}] {v.wid}  MANUAL"
-                      + (f"  — {cmd}" if cmd else " (no cwd/session on record)"))
-    print("\nreport only — chela restore never writes to a store. Act by hand: "
-          "chela watch/register for a REVIVABLE row, re-dispatch, or clear a row "
-          "yourself once you have decided what happened to it.")
+                line = (f"  [{v.store}] {v.wid}  MANUAL"
+                        + (f"  — {cmd}" if cmd else " (no cwd/session on record)"))
+            if r is not None:
+                line += f"  => {r.action}" + (f" ({r.detail})" if r.detail else "")
+            print(line)
+
+    if apply_flag:
+        print("\nchela restore --apply: REVIVABLE rows above were re-stamped at their new "
+              "address; MANUAL rows were archived to roster-archive.json, then removed. "
+              "telegram-bindings.json rows are left for chela-telegram's own reconcile tick "
+              "to reap — see each row's outcome above.")
+    else:
+        print("\nreport only — chela restore never writes to a store. Act by hand: "
+              "chela watch/register for a REVIVABLE row, re-dispatch, or clear a row "
+              "yourself once you have decided what happened to it.")
 
     # Nonzero while anything is MANUAL — the agent behind such a row is orphaned and needs
     # a human. This is what composes into a restart procedure ("run chela restore, then
-    # check its exit code before declaring the box recovered").
+    # check its exit code before declaring the box recovered"). This holds even after
+    # --apply: archiving a MANUAL row's bookkeeping does not resolve the orphaned agent
+    # itself, which still needs a human to decide what happened to it.
     if manual:
         sys.exit(1)
 
@@ -2423,10 +2445,16 @@ def main() -> None:
     )
 
     # restore — every epoch-stamped row a hard tmux death orphaned
-    sub.add_parser(
+    p_restore = sub.add_parser(
         "restore",
         help="Report epoch-dangling rows left by a hard tmux death "
-             "(inbox/telegram-bindings/session-ids/dispatcher runs). Read-only.",
+             "(inbox/telegram-bindings/session-ids/dispatcher runs). Read-only by default.",
+    )
+    p_restore.add_argument(
+        "--apply", action="store_true",
+        help="Act on the classification: re-stamp REVIVABLE rows at their new address, "
+             "archive-then-remove MANUAL ones. telegram-bindings.json is still never "
+             "written — chela-telegram's own reconcile tick reaps it.",
     )
 
     # task-finished — final step in the dispatcher work-item lifecycle

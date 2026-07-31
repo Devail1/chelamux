@@ -332,6 +332,163 @@ def test_unregister_clears_the_address_only_when_it_names_that_wid(store_file):
     assert inbox.orchestrator_wid(inbox.load()) is None
 
 
+# --- readdress / unregister_dangling — CMX-196's write half for `chela restore --apply` ---
+
+def _assert_address_alarm_cleared(store, who):
+    """🔴 Both writers call `_clear_address_alarm` — "the failure is over" — and a latched
+    alarm is not cosmetic: `address_alarm_pushed` left True SUPPRESSES the push for the next
+    genuine outage, so healing one address silences the report of the next one."""
+    assert store.get("address_alarm") is None, f"{who} left address_alarm latched"
+    assert store.get("address_alarm_since") is None, f"{who} left address_alarm_since latched"
+    assert store.get("address_alarm_pushed") is False, (
+        f"{who} left address_alarm_pushed latched — the NEXT real outage goes unreported"
+    )
+
+
+def _arm_the_address_alarm(store):
+    store["address_alarm"] = "ADDR_GONE"
+    store["address_alarm_since"] = 1.0
+    store["address_alarm_pushed"] = True
+    return store
+
+
+def test_readdress_moves_the_orchestrator_to_its_new_live_address(store_file, windows, monkeypatch):
+    """🔴 `readdress` re-derives the identity fresh rather than trusting the plan's stale
+    session id (the docstring's defense-in-depth claim) — so the stored
+    ``orchestrator_session`` must be the FRESHLY resolved one, never left blank/stale."""
+    # ⛔ wid-DISCRIMINATING: a fake returning the same id for any window cannot tell whether
+    # readdress resolved the NEW address or the dangling OLD one. Resolving the old wid
+    # stores the identity of a window that is gone — the row would look healthy and heal to
+    # nothing.
+    monkeypatch.setattr(inbox.sessions, "session_of_window",
+                        lambda wid, pane_map=None: {ORCH: "sid-fresh-live",
+                                                    "@9": "sid-of-the-DEAD-window"}.get(wid))
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "OLD-epoch"
+    store["orchestrator_session"] = "sid-old"
+    _arm_the_address_alarm(store)          # ...so "the failure is over" is observable
+    inbox.save(store)
+
+    result = inbox.readdress("@9", "OLD-epoch", ORCH)
+
+    assert result["ok"] is True
+    assert result["session"] == "sid-fresh-live"
+    reloaded = inbox.load()
+    assert reloaded["orchestrator"] == ORCH
+    # ⛔ NOT `!= "OLD-epoch"` — None satisfies that, and an UNSTAMPED address is exactly the
+    # unclassifiable row this whole ticket exists to prevent: `is_dangling` needs both halves,
+    # so a null epoch can never be proven stale OR current again.
+    assert reloaded["orchestrator_epoch"] == inbox.epoch.current(), (
+        f"readdress must stamp the CURRENT epoch, got {reloaded['orchestrator_epoch']!r}"
+    )
+    assert reloaded["orchestrator_name"] == "orchestrator"
+    assert reloaded["orchestrator_session"] == "sid-fresh-live", (
+        "readdress must resolve the NEW address's identity, not the dangling old one"
+    )
+    _assert_address_alarm_cleared(reloaded, "readdress")
+
+
+def test_readdress_refuses_an_unknown_window(store_file, windows):
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "OLD-epoch"
+    inbox.save(store)
+
+    result = inbox.readdress("@9", "OLD-epoch", "@999")
+
+    assert result["ok"] is False
+    assert inbox.load()["orchestrator"] == "@9", "a refused readdress must not touch the store"
+
+
+def test_readdress_is_a_noop_when_the_address_has_moved_on(store_file, windows):
+    """🔴 The guard this function exists for: a human already re-registered (or a further
+    restart reissued the old address) since classification ran, and this must not clobber
+    whatever is there now with a plan computed before it happened."""
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "SOMETHING-ELSE"      # not the epoch classification saw
+    store["orchestrator_session"] = "sid-fresh"
+    inbox.save(store)
+
+    before = inbox.load()
+    result = inbox.readdress("@9", "OLD-epoch", ORCH)
+
+    assert result["ok"] is False
+    # The sibling of unregister_dangling's no-op guard, asserted the same way: the WHOLE
+    # store, not the two fields this test happens to have set.
+    assert inbox.load() == before, "a declined readdress must change nothing at all"
+
+
+def test_readdress_is_a_noop_when_a_different_wid_is_registered(store_file, windows):
+    store = inbox.load()
+    store["orchestrator"] = "@2"                        # someone else, entirely
+    store["orchestrator_epoch"] = "OLD-epoch"
+    inbox.save(store)
+
+    result = inbox.readdress("@9", "OLD-epoch", ORCH)
+
+    assert result["ok"] is False
+    assert inbox.load()["orchestrator"] == "@2"
+
+
+def test_unregister_dangling_clears_only_when_both_wid_and_epoch_still_match(store_file):
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "OLD-epoch"
+    store["orchestrator_session"] = "sid-dead"
+    store["orchestrator_name"] = "liavedunix"
+    _arm_the_address_alarm(store)
+    inbox.save(store)
+
+    # right wid, wrong epoch — a further restart reissued @9 to something new; must not clear it
+    before = inbox.load()
+    res = inbox.unregister_dangling("@9", "SOME-OTHER-epoch")
+    assert res["ok"] is False
+    # ⛔ A no-op means NOTHING changed, not just that the address survived. A declined call
+    # that still blanks `orchestrator_session` disarms CMX-82's self-heal for a registration
+    # it just decided it had no right to touch.
+    assert inbox.load() == before, (
+        "a declined unregister_dangling must leave the store byte-for-byte unchanged"
+    )
+
+    # 🔴 right EPOCH, wrong wid — the other half of the compound guard. Its sibling
+    # `readdress` has this case (test_readdress_is_a_noop_when_a_different_wid_is_registered)
+    # and this did not: with the wid half disabled, a stale plan clears whatever registration
+    # happens to carry that epoch, which after a restart is a genuinely live one.
+    before = inbox.load()
+    res = inbox.unregister_dangling("@77", "OLD-epoch")
+    assert res["ok"] is False
+    assert inbox.load() == before, "a different wid must leave the store untouched entirely"
+
+    # right wid AND right epoch — the exact dangling row classification saw
+    res = inbox.unregister_dangling("@9", "OLD-epoch")
+    assert res["ok"] is True
+    # ⛔ The WHOLE registration, not just the address. A null orchestrator still holding a
+    # dead `orchestrator_session`/`_name`/`_epoch` is a half-cleared row: `resolve_heal`
+    # reads that session, and the next registrant inherits a stranger's identity.
+    reloaded = inbox.load()
+    for field in ("orchestrator", "orchestrator_epoch", "orchestrator_session",
+                  "orchestrator_name"):
+        assert reloaded[field] is None, (
+            f"unregister_dangling left {field}={reloaded[field]!r} behind"
+        )
+    _assert_address_alarm_cleared(reloaded, "unregister_dangling")
+
+
+def test_unregister_dangling_is_stricter_than_unregister(store_file):
+    """The counterweight, spelled out: `unregister`'s own wid-only guard WOULD clear this
+    row (it only checks the address), which is exactly why `unregister_dangling` exists as
+    a separate, stricter function rather than a shared code path."""
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "A-NEW-EPOCH"          # NOT the dangling one
+    inbox.save(store)
+
+    assert inbox.unregister_dangling("@9", "OLD-epoch")["ok"] is False
+    assert inbox.orchestrator_wid(inbox.load()) == "@9"
+
+
 # --- anti-self-notify: the loop must not be able to run away -------------------
 
 def test_the_orchestrator_is_never_an_event_source(store_file, windows, sends, monkeypatch):
