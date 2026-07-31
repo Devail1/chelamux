@@ -18,6 +18,9 @@ import re
 import sqlite3
 from unittest.mock import patch
 
+import subprocess
+from types import SimpleNamespace
+
 import pytest
 
 from chela import dispatcher, event_log
@@ -556,3 +559,82 @@ def test_chela_reopen_reaches_the_dispatcher_end_to_end(tmp_path):
     run = dispatcher.resolve_run("abc123")
     assert run["status"] == "awaiting_review"
     assert dispatcher.reviews_of(dict(run))[-1]["body"] == "fixed it"
+
+
+# --- the tri-state PRODUCER: every exit path, with the value it must return --------------
+#
+# 🔴 GUARDS (CMX-198 round 2). The consumer side (`if touched is False`) is pinned. The
+# PRODUCER has SIX exits and each one's tri-state value is a separate decision — three were
+# filed, and the two `gh`-failure siblings were open for exactly the same reason.
+#
+#   base == head          -> False   ⭐ "no change", and the DOMINANT real case
+#   unparsable PR url     -> None    unreadable
+#   gh not runnable       -> None    unreadable
+#   gh timed out          -> None    unreadable
+#   gh non-zero exit      -> None    unreadable
+#   a real compare        -> True/False by whether chela/** appears
+#
+# ⛔ The asymmetry is the whole point: an UNREADABLE diff must say nothing, a READ one that
+# found no production change must say so. Collapse either direction and the nudge either
+# fires on missing data (advice with no evidence) or never fires at all.
+
+def _pfc(**kw):
+    args = {"pr_url": "https://github.com/x/y/pull/9", "repo_dir": "/tmp",
+            "base_sha": "aaa", "head_sha": "bbb"}
+    args.update(kw)
+    return dispatcher._production_files_changed(**args)
+
+
+def test_an_unmoved_head_is_a_KNOWN_no_change():
+    """⭐ The dominant real case: reopening again without committing anything at all. If
+    this returned None the nudge would never fire in the very situation it exists for."""
+    touched, detail = _pfc(base_sha="same", head_sha="same")
+    assert touched is False, "an unmoved head is KNOWN to have changed no production code"
+    assert "not moved" in detail
+
+
+@pytest.mark.parametrize("broken", [
+    pytest.param({"pr_url": "not-a-github-url"}, id="unparsable-url"),
+    pytest.param({"pr_url": None}, id="no-url"),
+])
+def test_an_unreadable_pr_url_is_UNKNOWN_not_a_guessed_no_change(broken):
+    touched, _ = _pfc(**broken)
+    assert touched is None, (
+        "an unparsable PR url is UNREADABLE — guessing False fires the nudge on missing data"
+    )
+
+
+@pytest.mark.parametrize("boom,label", [
+    (OSError("no gh on PATH"), "gh-not-runnable"),
+    (subprocess.TimeoutExpired(cmd="gh", timeout=20), "gh-timeout"),
+])
+def test_a_gh_failure_is_UNKNOWN_not_a_guessed_no_change(boom, label, monkeypatch):
+    """The two exits the judge did not file, open for the same reason as the one it did."""
+    monkeypatch.setattr(dispatcher.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(boom))
+    touched, _ = _pfc()
+    assert touched is None, f"{label} is UNREADABLE, not evidence of no change"
+
+
+def test_a_nonzero_gh_exit_is_UNKNOWN_not_a_guessed_no_change(monkeypatch):
+    monkeypatch.setattr(
+        dispatcher.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="404 Not Found"))
+    touched, detail = _pfc()
+    assert touched is None
+    assert "404" in detail
+
+
+@pytest.mark.parametrize("files,expected", [
+    pytest.param("tests/test_x.py\n", False, id="tests-only"),
+    pytest.param("chela/inbox.py\ntests/test_x.py\n", True, id="production-too"),
+    pytest.param("", False, id="empty-compare"),
+])
+def test_a_READ_compare_classifies_by_whether_chela_changed(files, expected, monkeypatch):
+    """The counterweight to all the None arms: a diff chela COULD read must produce a real
+    True/False, never None — otherwise "say nothing when unsure" degrades into never
+    nudging at all."""
+    monkeypatch.setattr(
+        dispatcher.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout=files, stderr=""))
+    touched, _ = _pfc()
+    assert touched is expected
