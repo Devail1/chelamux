@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import time
 
 import pytest
 
@@ -257,8 +258,17 @@ def test_archive_appends_the_entry_stamped_with_archived_at(roster):
     data = json.loads(roster._ARCHIVE_STORE.read_text())
     assert len(data["archived"]) == 1
     row = data["archived"][0]
-    assert row["wid"] == "@5" and row["session_id"] == "sid-dead"
-    assert "archived_at" in row, "an archived row with no timestamp cannot be dated later"
+    # The COMPLETE entry — the archive is the only remaining record of a row whose live
+    # store no longer has it, so every field the caller handed over must survive.
+    assert {k: row[k] for k in entry} == entry, (
+        f"the archived entry lost or altered a field: {row!r}"
+    )
+    # ⛔ NOT `"archived_at" in row` — None and 0 are both "in row", and an entry stamped
+    # with either cannot be dated later, which is the one thing archiving is FOR.
+    assert isinstance(row["archived_at"], (int, float)) and row["archived_at"] > 1_700_000_000, (
+        f"archived_at must be a real timestamp, got {row['archived_at']!r}"
+    )
+    assert abs(row["archived_at"] - time.time()) < 60, "archived_at must be NOW, not a constant"
 
 
 def test_archive_never_touches_the_epochs_section(roster):
