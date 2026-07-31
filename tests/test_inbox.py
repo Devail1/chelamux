@@ -1906,3 +1906,41 @@ def test_TWO_qualifying_verdicts_are_each_resolved_against_their_OWN_pr(
         f"both verdicts match their OWN head and must deliver; got {len(sends)} — a "
         "verdict was compared against another run's commit, or another run's row was read"
     )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_verdict_summary_names_BOTH_the_run_and_its_PR(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 10): the 2x2 — label AND pr ref, on BOTH kinds.
+
+    The summary is one line arriving at a busy operator's prompt, and it has exactly two
+    handles: `label` (the branch name, what a human recognises) and `ref` (the PR the
+    verdict is ABOUT). Drop either and the notification is unactionable in a different way
+    — no label and you cannot tell WHICH of several in-flight runs settled; no PR ref and
+    you are told something is mergeable with nowhere to go and merge it.
+
+    ⚠️ Both were asserted for `run_review` and for the clean verdict's label only, so each
+    kind had a different half unpinned. Asserting the pair over both kinds is the whole
+    guard — the same shape that has recurred all ticket: cover the matrix, not the cell
+    that was named.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
+
+    run = _verdict_run(judge_state)
+    inbox.tick({}, runs=[run])
+
+    assert len(sends) == 1
+    summary = sends[0][1]
+    assert run["task_id"] in summary, (
+        f"the {kind} summary does not say WHICH run settled — with several in flight, an "
+        f"unlabelled verdict cannot be acted on. Got: {summary!r}"
+    )
+    assert run["pr_url"] in summary, (
+        f"the {kind} summary does not name the PR it is about. Got: {summary!r}"
+    )
