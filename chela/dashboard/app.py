@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, rooms, scheduler, spawn, starter, transcripts, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, rooms, scheduler, spawn, starter, transcripts, update, userconfig
 from chela.dashboard import resources
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -1856,7 +1857,31 @@ def _settings_status() -> dict:
         # sentence.
         "workflow_errors": wf_errors,
         "dispatch_hold": dispatch_hold.as_dict() if dispatch_hold else None,
+        # CMX-199: the checkout falling behind used to be invisible everywhere but a
+        # startup log line and an hourly notify edge — nobody watching the dashboard
+        # (where an operator actually IS, day to day) could tell. `fetch=False` keeps
+        # this exactly as cheap/offline-safe as `_update_available_capability` — as
+        # fresh as the last real `git fetch` chela ran, never a network call from a
+        # `/api/settings` poll.
+        "update": _update_status_payload(),
     }
+
+
+def _update_status_payload() -> dict:
+    """Read-only twin of `capabilities._update_available_capability`, shaped for the
+    Settings drawer's Update section rather than a capabilities-list row. Never fetches;
+    never mutates. `/api/update/apply` is the only route that actually pulls."""
+    try:
+        status = update.commits_behind(fetch=False)
+    except update.NotAGitCheckout as e:
+        return {"ok": False, "git": False, "error": str(e)}
+    if not status.ok:
+        return {"ok": False, "error": status.error}
+    if status.error:
+        # ok=True but carrying a note (no upstream configured) — not a fault, just
+        # nothing this control can act on.
+        return {"ok": True, "behind": 0, "ahead": 0, "branch": status.branch, "note": status.error}
+    return {"ok": True, "behind": status.behind, "ahead": status.ahead, "branch": status.branch}
 
 
 @app.route("/api/settings")
@@ -1869,6 +1894,58 @@ def api_settings():
     the "Work dispatcher" row reads *Blocked*, and ``workflow_errors`` carries
     the parse error per workflow."""
     return jsonify(_settings_status())
+
+
+# CMX-199: `chela doctor` and the hourly notify edge could both SAY the checkout was
+# behind — neither gave an operator anywhere to click. This is that control: the
+# Settings drawer's Update section POSTs here instead of requiring an SSH session and
+# `chela update` typed by hand, which is exactly the extra step that let five merged
+# PRs sit unpulled for a full day (see runtime_truth.repo.upstream_synced).
+#
+# Non-reentrant on purpose: `update.apply()` shells `git pull` / `uv sync` / `pm2
+# restart` in sequence, and a second click mid-run would race the same working tree.
+_update_apply_lock = threading.Lock()
+
+
+@app.route("/api/update/apply", methods=["POST"])
+@require_auth
+def api_update_apply():
+    """Trigger `chela update` from the dashboard. Runs `update.apply()` — same
+    dirty-tree / diverged-branch refusal as the CLI, nothing loosened — in a background
+    thread, because the pull it may do restarts `chela-*` PM2 services INCLUDING this
+    dashboard process; running it inline would race the process's own restart against
+    flushing the HTTP response. Returns immediately once it has confirmed there is
+    something to do; the actual outcome lands in the daemon/dashboard log, not this
+    response.
+    """
+    try:
+        status = update.commits_behind(fetch=False)
+    except update.NotAGitCheckout as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if not status.ok:
+        return jsonify({"ok": False, "error": status.error}), 400
+    if status.behind == 0:
+        return jsonify({"ok": True, "started": False, "detail": "already up to date"})
+
+    if not _update_apply_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "an update is already running"}), 409
+
+    def _run():
+        try:
+            result = update.apply()
+            if not result.ok:
+                log.error("dashboard-triggered update refused at %r — %s",
+                          result.step, result.error)
+            else:
+                restarted = ", ".join(result.restarted) or "no running services"
+                log.warning(
+                    "dashboard-triggered update applied %d commit(s), restarted: %s",
+                    result.behind_before, restarted)
+        finally:
+            _update_apply_lock.release()
+
+    threading.Thread(target=_run, daemon=True, name="dashboard-update-apply").start()
+    return jsonify({"ok": True, "started": True, "behind": status.behind})
 
 
 @app.route("/api/launcher/pin", methods=["POST"])

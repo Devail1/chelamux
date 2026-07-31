@@ -811,6 +811,43 @@ def test_repo_upstream_synced_does_not_apply_to_a_pip_install(monkeypatch):
     assert not runtime_truth.fact("repo.upstream_synced").applies()
 
 
+def test_behind_upstream_is_not_reported_as_in_sync(fleet, monkeypatch):
+    """CMX-199: the false green this fact used to print. A checkout with NO local
+    divergence (ahead == 0) but genuinely behind must never be told "in sync" — that
+    exact lie is what let five merged PRs sit inert, unpulled, for a full day while
+    every `chela-*` service kept serving stale code."""
+    monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
+                        lambda: update.UpdateStatus(ok=True, behind=5, ahead=0, branch="dev"))
+    findings = [f for f in doctor.check() if f.fact == "repo.upstream_synced"]
+    assert findings and findings[0].level == doctor.WARN
+    assert "in sync" not in findings[0].title
+    assert "5 commit(s) BEHIND" in findings[0].title
+    assert "chela update" in findings[0].detail
+
+
+def test_behind_upstream_report_never_calls_reset_or_fetch(fleet, monkeypatch):
+    """Same read-only contract as the diverged case: detecting "behind" must never
+    itself pull or restart anything — that action lives only in `chela.update.apply`."""
+    calls = []
+    monkeypatch.setattr(update, "apply", lambda *a, **k: calls.append("apply"))
+    monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
+                        lambda: update.UpdateStatus(ok=True, behind=5, ahead=0, branch="dev"))
+
+    doctor.check()
+
+    assert calls == [], f"doctor's read path reached a mutating update.* call: {calls}"
+
+
+def test_fully_synced_upstream_reports_ok_and_says_nothing_to_pull(fleet, monkeypatch):
+    """The genuinely healthy case (ahead == 0, behind == 0) still reads green — this fact
+    must not cry wolf on every ordinary "just fetched, nothing changed" tick."""
+    monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
+                        lambda: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
+    findings = [f for f in doctor.check() if f.fact == "repo.upstream_synced"]
+    assert findings and findings[0].level == doctor.OK
+    assert "nothing to pull" in findings[0].title
+
+
 # --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------
 
 def test_restore_dead_epoch_rows_reports_the_count(fleet, monkeypatch):

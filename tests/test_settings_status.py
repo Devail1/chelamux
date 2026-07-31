@@ -193,3 +193,30 @@ def test_a_released_queue_leaves_no_trace_on_the_row(client, monkeypatch, tmp_pa
     data = client.get("/api/settings").get_json()
     assert _items(data)["Work dispatcher"]["state"] != "Held"
     assert data["dispatch_hold"] is None
+
+
+# --- "update" payload: CMX-199, the Settings-drawer twin of doctor's repo.upstream_synced --
+
+def test_update_payload_reports_behind_count(client, monkeypatch):
+    monkeypatch.setattr(dash.update, "commits_behind",
+                        lambda fetch=True: dash.update.UpdateStatus(
+                            ok=True, behind=5, ahead=0, branch="dev"))
+    data = client.get("/api/settings").get_json()
+    assert data["update"] == {"ok": True, "behind": 5, "ahead": 0, "branch": "dev"}
+
+
+def test_update_payload_is_clean_when_up_to_date(client, monkeypatch):
+    monkeypatch.setattr(dash.update, "commits_behind",
+                        lambda fetch=True: dash.update.UpdateStatus(
+                            ok=True, behind=0, ahead=0, branch="dev"))
+    data = client.get("/api/settings").get_json()
+    assert data["update"]["behind"] == 0
+
+
+def test_update_payload_degrades_gracefully_on_a_pip_install(client, monkeypatch):
+    def _boom(fetch=True):
+        raise dash.update.NotAGitCheckout("not a git checkout")
+    monkeypatch.setattr(dash.update, "commits_behind", _boom)
+    data = client.get("/api/settings").get_json()
+    assert data["update"]["ok"] is False
+    assert data["update"]["git"] is False
