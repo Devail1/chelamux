@@ -38,6 +38,11 @@ test('a gate is a gate, a tool call is the firehose, an unknown type is shown', 
     assert.equal(classOf('hook.permission_request'), 'gate');
     assert.equal(classOf('hook.pre_tool_use'), 'tool');
     assert.equal(classOf('run_review'), 'run');
+    // CMX-197: the judge's own verdict on a run sitting in `awaiting_review` — without
+    // these two it falls through to `other`, and the one push that says "this PR is
+    // mergeable" renders as an anonymous `·` outside the Runs filter.
+    assert.equal(classOf('run_judge_clean'), 'run');
+    assert.equal(classOf('run_judge_cannot_verify'), 'run');
     assert.equal(classOf('daemon_start'), 'lifecycle');
     // An inbox that cannot deliver is a GATE: work is stuck until a human acts, and it
     // stayed invisible for a whole outage (CMX-77). `other` would render it as a `·`.
@@ -198,6 +203,21 @@ test('a gone lane holding an UNANSWERED review is NOT buried (CMX-62)', () => {
     assert.equal(group.lanes[0].openReview, true);      // and it wears the badge
     assert.deepEqual(group.buried.map(l => l.wid), ['@8']);   // merged → the graveyard
 });
+
+// 🔴 The comment on `buildLanes`'s guard says "the judge kinds", PLURAL — a daemon
+// restarted mid-judge may see EITHER verdict before the plain `awaiting_review` edge. Both
+// are asserted, in one table, so the pair cannot drift apart: covering only the kind a
+// reviewer happened to name is how the sibling half stays unguarded (CMX-197 round 3).
+for (const kind of ['run_judge_clean', 'run_judge_cannot_verify']) {
+    test(`a ${kind} verdict alone (no run_review) still keeps a gone lane open (CMX-197)`, () => {
+        const events = [ev(kind, '@7', { payload: { task_id: 't-open' } })];
+        const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);
+        const group = splitGone(lanes, ['t-open']);
+        assert.deepEqual(group.lanes.map(l => l.wid), ['@7']);
+        assert.equal(group.lanes[0].openReview, true,
+            `${kind} must keep the lane out of the graveyard`);
+    });
+}
 
 test('the review survives the class filter — turning `run` off must not bury it', () => {
     // The run_review row itself is filtered out of the lane, but the lane still knows it

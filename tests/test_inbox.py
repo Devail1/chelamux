@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from chela import agent_manager, dispatcher, event_log, inbox, sessions, transcripts
+from chela import agent_manager, dispatcher, event_log, inbox, judge, sessions, transcripts
 
 # Captured at collection time, before the `no_transcript_evidence` autouse fixture
 # (below) overwrites `sessions.transcript_for_window` on every test — the CMX-191
@@ -603,6 +603,397 @@ def test_a_run_that_changes_status_fires_again(store_file, windows, sends, monke
 
     assert len(sends) == 2
     assert "FAILED" in sends[1][1]
+
+
+# --- CMX-197: a clean judge verdict used to be structurally unnotifiable --------
+#
+# `judge.judge_run` never moves `status` off `awaiting_review` on a clean (or
+# cannot-verify) verdict — only a BLOCKED one does, through `request_changes`, which
+# already fires `run_changes_requested`. So the plain `run_review` edge (fired once,
+# when the run first reaches `awaiting_review`) was the ONLY thing the orchestrator
+# ever heard, and a judge that settled minutes or hours later said nothing new. Measured
+# live twice (cmx-195, cmx-196): "every guard held" posted to the PR and the orchestrator
+# never woke up for it.
+
+def test_a_clean_judge_verdict_fires_its_own_event(store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    run = {"task_id": "T1", "title": "x", "status": "awaiting_review",
+           "pr_url": "https://github.com/x/y/pull/9"}
+    inbox.tick({}, runs=[run])                     # the plain "awaiting review" edge
+    assert len(sends) == 1
+    assert "awaiting review" in sends[0][1]
+
+    run = {**run, "judge_state": "clean"}
+    inbox.tick({}, runs=[run])                     # the judge settles — a SECOND event
+
+    assert len(sends) == 2
+    assert "guard held" in sends[1][1] and "MERGEABLE" in sends[1][1]
+    assert "pull/9" in sends[1][1]
+
+    # Staying clean across further ticks does not re-announce.
+    inbox.tick({}, runs=[run])
+    assert len(sends) == 2
+
+
+def test_a_cannot_verify_judge_verdict_also_fires(store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    run = {"task_id": "T1", "title": "x", "status": "awaiting_review", "pr_url": None}
+    inbox.tick({}, runs=[run])
+    run = {**run, "judge_state": "cannot_verify", "judge_detail": "no experiments proposed"}
+    inbox.tick({}, runs=[run])
+
+    assert len(sends) == 2
+    assert "CANNOT VERIFY" in sends[1][1]
+    assert "no experiments proposed" in sends[1][1]
+
+
+def test_a_running_judge_does_not_reannounce_or_duplicate(store_file, windows, sends, monkeypatch):
+    # The transient states between "awaiting_review" and a settled verdict (no judge_state
+    # yet, then "running") must be absorbed silently — the run already got its ONE plain
+    # notice, and re-sending it on every judge state sample would be noise.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    base = {"task_id": "T1", "title": "x", "status": "awaiting_review"}
+    inbox.tick({}, runs=[dict(base)])
+    inbox.tick({}, runs=[{**base, "judge_state": "running"}])
+    inbox.tick({}, runs=[{**base, "judge_state": "running"}])
+
+    assert len(sends) == 1                          # only the original "awaiting review"
+
+    inbox.tick({}, runs=[{**base, "judge_state": "clean"}])
+    assert len(sends) == 2                           # the settle IS announced
+
+
+def test_a_verdict_already_clean_on_first_sight_skips_the_generic_notice(
+        store_file, windows, sends, monkeypatch):
+    # A daemon that starts (or restarts) after the judge already settled must not fire
+    # BOTH the generic "awaiting review" and the judge verdict for the same run — the
+    # judge event is strictly more informative, so it wins and is the only one sent.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    run = {"task_id": "T1", "title": "x", "status": "awaiting_review",
+           "judge_state": "clean", "pr_url": "https://github.com/x/y/pull/9"}
+    inbox.tick({}, runs=[run])
+
+    assert len(sends) == 1
+    assert "MERGEABLE" in sends[0][1]
+
+
+@pytest.mark.parametrize("kind", ["run_judge_clean", "run_judge_cannot_verify"])
+@pytest.mark.parametrize("gone_state", ["merged", "closed"])
+def test_a_judge_verdict_event_goes_stale_once_the_run_moves_on(kind, gone_state, store_file):
+    """A queued judge-verdict event is a claim about the PAST — re-checked at delivery
+    (inbox.stale_reason), same as `run_review`. A merged/closed PR, or a run that moved off
+    `awaiting_review` before delivery, must drop it rather than deliver stale work.
+
+    ⚠️ Parametrized over BOTH kinds and BOTH gone-states: this branch is SHARED with
+    `run_review`, so excluding one kind from either sub-check is a one-token change that a
+    single-kind test cannot see — the same both-kinds rule that has now cost three rounds,
+    applied to the last unparametrized site.
+    """
+    event = {"kind": kind, "payload": {"task_id": "T1"}}
+    still_open = [{"task_id": "T1", "status": "awaiting_review", "pr_state": "open"}]
+    assert inbox.stale_reason(event, still_open) is None
+
+    gone = [{"task_id": "T1", "status": "awaiting_review", "pr_state": gone_state}]
+    assert gone_state in (inbox.stale_reason(event, gone) or ""), (
+        f"a {kind} for a {gone_state} PR must be dropped — there is nothing left to review"
+    )
+
+    moved_on = [{"task_id": "T1", "status": "changes_requested", "pr_state": "open"}]
+    assert "changes_requested" in (inbox.stale_reason(event, moved_on) or ""), (
+        f"a {kind} for a run that left awaiting_review must be dropped"
+    )
+
+
+# --- CMX-197 rework: a verdict is only meaningful against the commit it judged --------
+#
+# The status-staleness check above catches a run that moved OFF awaiting_review. It says
+# nothing about a run that stays put while its PR's head moves PAST the judged commit — a
+# rework agent, a human's own fix, or `chela reopen` can all do that, and the queue delay
+# (the whole point of the inbox: hold until the orchestrator is idle) is exactly the
+# window in which it happens. That must not read as "clean and MERGEABLE" about a commit
+# that is no longer the head.
+
+_JUDGE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_SUPERSEDING_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+
+_LONG_DETAIL = (
+    "the suite could not be provisioned: npm ci failed after three attempts, so the two "
+    "real-DOM suites would have SKIPPED silently and every mutation would have looked "
+    "survivable — this string is deliberately longer than the 140-char summary truncation"
+)
+
+
+def _verdict_run(judge_state=None, **over):
+    """A run row sitting in `awaiting_review` with a SETTLED judge verdict."""
+    # `judge_detail` defaults to a long reason but MUST stay overridable — it is nullable
+    # in the schema, and cannot_verify is exactly where a null one shows up.
+    return _clean_run(judge_state=judge_state or judge.J_CLEAN,
+                      judge_detail=over.pop("judge_detail", _LONG_DETAIL), **over)
+
+
+def _clean_run(**over):
+    return {"task_id": "T1", "title": TRACKER_LINE, "status": "awaiting_review",
+            "pr_url": "https://github.com/x/y/pull/9", "judge_state": "clean",
+            "window_id": "@6",
+            # ⚠️ `workflow_path` is what `_live_judge_heads` derives `repo_dir` from, and
+            # the fixture never carried one — so repo_dir was silently None in EVERY test,
+            # which is precisely the state that makes `_read_pr_checks` return no sha.
+            "workflow_path": "/repo/chelamux/WORKFLOW.md",
+            "judge_sha": _JUDGE_SHA, **over}
+
+
+
+# ⭐ CMX-197 round 4 — the rule from round 3, MECHANISED instead of intended.
+#
+# "When two kinds ship together, every site naming one must assert BOTH." I wrote that and
+# then guarded three Python sites with a clean verdict only, so narrowing each of them to
+# `("run_judge_clean",)` sailed through. A shared parametrize is the enforcement: a new
+# judge kind added to this tuple makes every guard below cover it, and no site can quietly
+# be single-kind again.
+JUDGE_KINDS = [
+    pytest.param(judge.J_CLEAN, "run_judge_clean", id="clean"),
+    pytest.param(judge.J_CANNOT_VERIFY, "run_judge_cannot_verify", id="cannot_verify"),
+]
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_judge_verdicts_payload_carries_the_judged_sha(
+        judge_state, kind, store_file, windows, monkeypatch):
+    # The sha must reach the payload at all — a verdict with no judged commit attached
+    # cannot ever be checked against a live head.
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == kind
+    payload = queued[0]["payload"]
+    assert payload["judge_sha"] == _JUDGE_SHA
+    # ⭐ The payload is the RECORD, so the VERDICT itself has to reach it — the kind string
+    # says which of the two fired, but a consumer reading the record (the dashboard, a
+    # replay of the event log) has only this field to learn what the judge concluded.
+    assert payload["judge_state"] == judge_state, (
+        f"the verdict did not reach the payload, got {payload['judge_state']!r}"
+    )
+    # ...and the REASON survives in full. The summary truncates it to 140 chars for the
+    # push; the payload is the durable copy, and a cannot-verify reason is the only thing
+    # telling a human WHY the judge could not answer.
+    assert payload["judge_detail"] == _LONG_DETAIL, (
+        f"the judge detail did not survive into the payload, got {payload['judge_detail']!r}"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_judge_verdict_for_a_superseded_head_is_dropped_not_delivered(
+        judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
+    # The orchestrator is BUSY when the judge settles clean on sha A — the event queues...
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+    assert len(inbox.load()["queue"]) == 1
+    assert sends == []
+
+    # ...and by the time it goes idle, the PR's LIVE head has moved past the judged
+    # commit — the run's own status never changed, so the status-staleness check alone
+    # would wave this straight through and hand the orchestrator "clean and MERGEABLE"
+    # about a commit nobody judged.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    assert sends == []                              # NEVER told the superseded commit is ready
+    assert inbox.load()["queue"] == []              # and the rotted event is retired
+    assert f"dropping stale {kind}" in caplog.text
+    # ⛔ ...NAMING both commits. This drop is silent to the operator — log-only, no event_log
+    # row and no push — so this line is the ONLY forensic record that a verdict was retired.
+    # "PR head moved past the judged commit" without the shas cannot answer the one question
+    # it exists for: WHICH commit was judged, and what is live now.
+    # ⛔ NOT "both shas appear somewhere" — that passes with them swapped, or listed with
+    # no relation. The reason exists to say WHICH commit was judged and WHAT IS LIVE NOW,
+    # so the pair must render in that order, together.
+    assert f"{_JUDGE_SHA[:12]} -> {_SUPERSEDING_SHA[:12]}" in caplog.text, (
+        f"the drop reason must read judged -> live. Got: {caplog.text!r}"
+    )   # loudly — never silently
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_superseded_verdict_is_dropped_even_when_it_NEVER_QUEUES(
+        judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
+    """🔴 GUARD (CMX-197 round 2): the IDLE path — emitted and delivered in ONE tick.
+
+    The staleness test above starts BUSY, so the event sits in the queue and the candidate
+    set can be derived from `queue`. With an IDLE orchestrator there is no such moment: the
+    verdict is emitted and delivered inside the same tick, the queue is empty the whole
+    time, and a candidate set built from `queue` alone is EMPTY — so no live head is
+    fetched, no staleness check runs, and the superseded commit is announced as "clean and
+    MERGEABLE" on its very first appearance.
+
+    ⭐ That is the bug this whole ticket exists to prevent, shipping through the one path a
+    healthy fleet actually takes: an idle orchestrator is the NORMAL case.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[_verdict_run(judge_state)])          # emits AND delivers in this one tick
+
+    assert sends == [], (
+        "a verdict for a superseded head was announced on its first tick — the candidate "
+        "set must include runs ABOUT TO queue a verdict, not only ones already queued"
+    )
+    assert inbox.load()["queue"] == []
+    assert f"dropping stale {kind}" in caplog.text
+    # ⛔ ...NAMING both commits. This drop is silent to the operator — log-only, no event_log
+    # row and no push — so this line is the ONLY forensic record that a verdict was retired.
+    # "PR head moved past the judged commit" without the shas cannot answer the one question
+    # it exists for: WHICH commit was judged, and what is live now.
+    # ⛔ NOT "both shas appear somewhere" — that passes with them swapped, or listed with
+    # no relation. The reason exists to say WHICH commit was judged and WHAT IS LIVE NOW,
+    # so the pair must render in that order, together.
+    assert f"{_JUDGE_SHA[:12]} -> {_SUPERSEDING_SHA[:12]}" in caplog.text, (
+        f"the drop reason must read judged -> live. Got: {caplog.text!r}"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_an_idle_orchestrator_still_gets_a_verdict_whose_head_is_CURRENT(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """The counterweight for the idle path: skipping the fetch entirely would satisfy the
+    guard above by never delivering anything at all."""
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    assert len(sends) == 1
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_PARKED_verdict_is_still_re_checked_once_its_run_row_moves_on(
+        judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
+    """🔴 GUARD (CMX-197 round 3): the QUEUE-derived half of the candidate set.
+
+    `_live_judge_heads` unions two sources — runs about to queue a verdict, and events
+    ALREADY queued. Round 2 guarded the first. The second is the only source once the run
+    row itself stops qualifying, and its docstring promises exactly that: a long-parked
+    verdict "keeps getting re-checked every tick it sits there".
+
+    Realistic shape: the verdict queues behind a busy orchestrator, then a NEW judge starts
+    on a newer head, so the row's `judge_state` goes back to running. The runs-branch now
+    skips it — and if the queue-branch is the thing that is broken, the parked event sails
+    through with no live-head check at all and announces a commit two heads stale.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+    assert len(inbox.load()["queue"]) == 1
+
+    # A new judge is now running on a newer head: the row no longer qualifies via `runs`.
+    moved_on = dict(_verdict_run(judge_state), judge_state=judge.J_RUNNING)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[moved_on])
+
+    assert sends == [], (
+        "a PARKED verdict was delivered without a live-head re-check — the queue-derived "
+        "half of the candidate set is the only source once the run row moves on"
+    )
+    assert f"dropping stale {kind}" in caplog.text
+    # ⛔ ...NAMING both commits. This drop is silent to the operator — log-only, no event_log
+    # row and no push — so this line is the ONLY forensic record that a verdict was retired.
+    # "PR head moved past the judged commit" without the shas cannot answer the one question
+    # it exists for: WHICH commit was judged, and what is live now.
+    # ⛔ NOT "both shas appear somewhere" — that passes with them swapped, or listed with
+    # no relation. The reason exists to say WHICH commit was judged and WHAT IS LIVE NOW,
+    # so the pair must render in that order, together.
+    assert f"{_JUDGE_SHA[:12]} -> {_SUPERSEDING_SHA[:12]}" in caplog.text, (
+        f"the drop reason must read judged -> live. Got: {caplog.text!r}"
+    )
+
+
+def test_a_cannot_verify_verdict_emits_the_kind_the_consumers_key_on(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 3): the EMITTED string for the cannot-verify kind.
+
+    `run_judge_clean`'s emitted kind is asserted; its sibling's was not. The same literal is
+    keyed on by `stale_reason`, the Feed's lane model and the Decisions panel's subscription
+    — so a rename here silently unhooks the verdict from every consumer at once, and each of
+    those consumers' own tests keep passing because they assert their OWN copy of the string.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[dict(_clean_run(), judge_state=judge.J_CANNOT_VERIFY)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "run_judge_cannot_verify", (
+        f"the emitted kind must be the literal every consumer keys on, got {queued[0]['kind']!r}"
+    )
+    assert queued[0]["payload"]["judge_sha"] == _JUDGE_SHA
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_judge_verdict_matching_the_live_head_still_delivers(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    # The counterweight: an unmoved head must still deliver normally, or "drop everything"
+    # would trivially satisfy the guard above too.
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    assert len(sends) == 1
 
 
 # --- attribution: a run event belongs to the agent that produced it -------------
@@ -1333,3 +1724,572 @@ def test_every_event_lands_in_the_durable_log(store_file, windows, sends, monkey
     assert "pull/3" in event["summary"] and "\n" not in event["summary"]
     assert event["payload"]["task_id"] == "T1"
     assert event["payload"]["title"] == "**add** the parser"  # the essay, kept in the payload
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_the_live_head_is_read_for_THIS_runs_own_pr(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 4): the live read must be aimed at this run's OWN PR.
+
+    Every other test fakes `_read_pr_checks` with a lambda that IGNORES its arguments, so
+    passing `None`, a constant, or another run's url is completely invisible to them — the
+    returned sha is whatever the fake decided regardless. Reading the wrong PR's head means
+    comparing this verdict against a commit from a different pull request: it would drop
+    valid verdicts and pass superseded ones, both silently.
+    """
+    seen = {}
+
+    def _capture(pr_url, repo_dir):
+        seen["pr_url"] = pr_url
+        return dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA)
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(dispatcher, "_read_pr_checks", _capture)
+
+    run = _verdict_run(judge_state)
+    inbox.tick({}, runs=[run])
+
+    assert seen.get("pr_url") == run["pr_url"], (
+        f"the live head was read for {seen.get('pr_url')!r}, not this run's own "
+        f"{run['pr_url']!r}"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_FAILED_live_read_does_not_manufacture_staleness(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 4): an unreadable head is UNKNOWN, never "moved".
+
+    `_live_judge_heads`'s docstring commits to this: a task id present in the map but
+    resolving to nothing means the live read FAILED. Treating that as a mismatch would drop
+    a perfectly good verdict on any transient `gh` hiccup — and this event is the only
+    notification the orchestrator gets, so a dropped one is a PR that sits unmerged in
+    silence, which is the exact bug this whole ticket closes.
+
+    ⛔ Same doctrine as `epoch.is_dangling`: staleness needs BOTH halves known.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_UNKNOWN, None))
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    assert len(sends) == 1, (
+        "a failed live read was treated as a moved head — an unreadable sha is unknown, "
+        "not proof of staleness"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_the_live_head_is_read_against_a_REAL_repo_dir(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 5): `repo_dir` must actually point somewhere.
+
+    `dispatcher._read_pr_checks` returns CI_UNKNOWN with NO sha whenever `repo_dir` is
+    falsy (`dispatcher.py:1459`). Combined with the (correct) rule that an unreadable head
+    is UNKNOWN rather than moved, a blank repo_dir makes every verdict deliver
+    unconditionally — the staleness check silently never runs at all, while every test
+    that fakes `_read_pr_checks` keeps passing because the fake ignores the argument.
+    """
+    seen = {}
+
+    def _capture(pr_url, repo_dir):
+        seen["repo_dir"] = repo_dir
+        return dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA)
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(dispatcher, "_read_pr_checks", _capture)
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    assert seen.get("repo_dir") == "/repo/chelamux", (
+        f"the live head was read with repo_dir={seen.get('repo_dir')!r} — it must be the "
+        "run's own workflow dir; falsy means _read_pr_checks returns no sha at all, so "
+        "nothing is ever compared and every verdict delivers unconditionally"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_verdict_with_NO_judged_sha_is_unknown_not_stale(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 5): the JUDGED half of "staleness needs BOTH halves known".
+
+    Its twin (`..._FAILED_live_read_does_not_manufacture_staleness`) pins the LIVE half. I
+    cited `epoch.is_dangling`'s both-halves doctrine by name in that commit and then guarded
+    only one of the two halves — so dropping `judged_sha and` from the condition turned a
+    verdict carrying no judged commit (a legacy queued event, or a row whose judge_sha was
+    never stamped) into a permanent "stale", silently retiring it.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+
+    inbox.tick({}, runs=[_verdict_run(judge_state, judge_sha=None)])
+
+    assert len(sends) == 1, (
+        "a verdict with no judged sha was dropped as stale — an absent half is UNKNOWN, "
+        "and only two KNOWN halves that differ prove staleness"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_the_judged_sha_comes_from_the_PAYLOAD_not_the_live_row(
+        judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
+    """🔴 GUARD (CMX-197 round 5): the payload is the RECORD; the row is the present.
+
+    ⭐ This is the whole reason `payload['judge_sha']` exists. Re-read the judged sha off
+    the run row and BOTH sides of the comparison come from the same live source, so they
+    can never disagree — the check becomes a no-op that always delivers, restoring exactly
+    the bug this ticket closes, while looking like a working comparison.
+
+    Shape: the verdict is queued for sha A; a new judge then starts on sha B, so the ROW's
+    judge_sha is now B and the live head is B too. Reading the row: B == B, delivered.
+    Reading the payload: A != B, dropped.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_verdict_run(judge_state)])          # queued with judged sha A
+    assert inbox.load()["queue"][0]["payload"]["judge_sha"] == _JUDGE_SHA
+
+    moved_on = _verdict_run(judge_state, judge_sha=_SUPERSEDING_SHA)   # row now says B
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[moved_on])
+
+    assert sends == [], (
+        "the judged sha was re-read off the live row, so both sides came from the same "
+        "source and the comparison could never fail"
+    )
+    assert f"dropping stale {kind}" in caplog.text
+    # ⛔ ...NAMING both commits. This drop is silent to the operator — log-only, no event_log
+    # row and no push — so this line is the ONLY forensic record that a verdict was retired.
+    # "PR head moved past the judged commit" without the shas cannot answer the one question
+    # it exists for: WHICH commit was judged, and what is live now.
+    # ⛔ NOT "both shas appear somewhere" — that passes with them swapped, or listed with
+    # no relation. The reason exists to say WHICH commit was judged and WHAT IS LIVE NOW,
+    # so the pair must render in that order, together.
+    assert f"{_JUDGE_SHA[:12]} -> {_SUPERSEDING_SHA[:12]}" in caplog.text, (
+        f"the drop reason must read judged -> live. Got: {caplog.text!r}"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_judge_verdict_is_ATTRIBUTED_to_the_agents_window(
+        judge_state, kind, store_file, windows, monkeypatch):
+    """🔴 GUARD (CMX-197 round 6): the event must carry the run's `wid`.
+
+    This PR's own Feed rule — `buildLanes` keeps a gone lane out of the graveyard for the
+    judge kinds — keys on the event's wid. Emit it with `wid=None` and the verdict is
+    attributed to nobody: the lane it was meant to keep alive falls into the graveyard, and
+    the JS guard added for exactly that behaviour still passes, because it constructs its
+    own event with a wid rather than reading one the inbox produced.
+
+    ⚠️ Producer and consumer each tested against their own copy of the contract — the same
+    shape as round 3's emitted-kind finding.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["wid"] == "@6", (
+        f"the verdict was attributed to {queued[0]['wid']!r}, not the run's own window — "
+        "the Feed's lane rule keys on this"
+    )
+
+
+def test_a_BLOCKED_verdict_never_uses_the_judge_verdict_path(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 6): BLOCKED is already reported, and must not double-fire.
+
+    A blocked verdict sends the run back through `run_changes_requested` — the path that
+    has always worked and is the reason this ticket was scoped to the OTHER two states.
+    Widening the tuple to include `J_BLOCKED` gives the orchestrator two notifications for
+    one event, and the judge-kind one claims a verdict "on a run still sitting in
+    awaiting_review" about a run that is on its way out of it.
+
+    ⛔ Not parametrized: the point IS that this third state is excluded, so it must be
+    named explicitly rather than swept into the both-kinds table.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED)])
+
+    kinds = [e["kind"] for e in inbox.load()["queue"]]
+    assert "run_judge_clean" not in kinds and "run_judge_cannot_verify" not in kinds, (
+        f"a BLOCKED verdict came through the judge-verdict path — it already fires "
+        f"run_changes_requested. Queued: {kinds}"
+    )
+
+
+def test_a_run_ARRIVING_at_awaiting_review_still_gets_the_plain_review_edge(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 7): the edge this ticket is built ON must still fire.
+
+    The dedup mark became `status:judge_state` so a settling verdict re-announces. Its
+    "already announced" test has TWO halves, per the PR's own comment — a fresh task id, OR
+    one arriving at awaiting_review from another status. Collapse it to `bool(prev_mark)`
+    and the second half dies: a run the orchestrator has already seen RUNNING never
+    announces its arrival at review at all.
+
+    ⛔ That is the ORIGINAL notification, working since long before this ticket. Adding a
+    new one must not cost the old one — and no test on this branch drove a status change.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    running = dict(_verdict_run(), status="running", judge_state="")
+    inbox.tick({}, runs=[running])                 # seen once, while it was still running
+    assert [e["kind"] for e in inbox.load()["queue"]] == []
+
+    arrived = dict(_verdict_run(), judge_state="")   # now at awaiting_review, judge not run
+    inbox.tick({}, runs=[arrived])
+
+    assert [e["kind"] for e in inbox.load()["queue"]] == ["run_review"], (
+        "a run arriving at awaiting_review from another status lost its review edge"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+@pytest.mark.parametrize("other_status", ["running", "changes_requested", "done"])
+def test_a_verdict_is_announced_ONLY_while_the_run_SITS_in_awaiting_review(
+        judge_state, kind, other_status, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 7): the status half of the emit condition.
+
+    Every comment and docstring on this feature says the same thing — "the judge's own
+    verdict on a run still SITTING in awaiting_review". Drop the status test and a stale
+    `judge_state` left on a row that has since moved on fires a verdict announcement about
+    a run that is running again, already sent back, or finished: the orchestrator is told a
+    PR is "clean and MERGEABLE" when it is not even under review.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[dict(_verdict_run(judge_state), status=other_status)])
+
+    kinds = [e["kind"] for e in inbox.load()["queue"]]
+    assert kind not in kinds, (
+        f"a {judge_state!r} verdict fired for a run in {other_status!r}. Queued: {kinds}"
+    )
+
+
+def test_the_judge_state_mark_is_scoped_to_awaiting_review_ONLY(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 8): every OTHER status keeps the bare status as its mark.
+
+    Widening `mark` to `f"{status}:{judge_state}"` unconditionally makes the judge's own
+    churn re-announce states that have nothing to do with it: a run parked at needs_human
+    while a judge re-runs goes J_RUNNING → J_CANNOT_VERIFY → …, and each transition mints a
+    NEW mark, so the orchestrator is pinged "NEEDS A HUMAN" again and again for one
+    unchanged situation.
+
+    ⛔ The re-announce is deliberately scoped to `awaiting_review`, where the verdict is the
+    news. Everywhere else the status IS the news and the judge is noise.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    parked = dict(_verdict_run(), status="needs_human", judge_state=judge.J_BLOCKED)
+    inbox.tick({}, runs=[parked])
+    first = [e["kind"] for e in inbox.load()["queue"]]
+    assert first == ["run_needs_human"]
+
+    # the judge re-runs on the same parked row — its state churns, the situation does not
+    for churn in (judge.J_RUNNING, judge.J_CANNOT_VERIFY, judge.J_CLEAN):
+        inbox.tick({}, runs=[dict(parked, judge_state=churn)])
+
+    assert [e["kind"] for e in inbox.load()["queue"]] == first, (
+        "judge churn re-announced a status that never changed — the judge_state half of "
+        "the mark must apply to awaiting_review only"
+    )
+
+
+def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 8): the summary is one line TYPED AT the prompt.
+
+    `_event`'s summary is delivered by typing it into the orchestrator's session
+    (`sanitize_prompt`, CMX-79), so pasting a judge's whole reason — multi-line, arbitrary
+    length, containing whatever a failing suite printed — is a different thing from
+    recording it. The payload is where the full text belongs (guarded in round 7); the
+    summary gets a bounded excerpt.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_CANNOT_VERIFY)])
+
+    summary = inbox.load()["queue"][0]["summary"]
+    assert _LONG_DETAIL[:40] in summary, "an excerpt of the reason must reach the operator"
+    assert _LONG_DETAIL not in summary, (
+        "the WHOLE reason was pasted into a summary that gets typed at the prompt — it "
+        "belongs in the payload, which already carries it in full"
+    )
+    assert len(summary) < len(_LONG_DETAIL) + 200
+
+
+# --- the single-run blind spot -----------------------------------------------------------
+#
+# 🔴 GUARDS (CMX-197 round 9). EVERY judge test on this branch drives exactly ONE run, so
+# code that picks "any" run instead of "this" run is invisible to all of them: with one
+# entry, `d.get(task_id)` and `next(iter(d.values()))` are the same value, and any
+# `if <scope>` collapses to `if True`. The fixture's CARDINALITY was the blind spot —
+# distinct from the earlier ones, where a fixture FIELD was missing.
+
+_OTHER_SHA = "cccccccccccccccccccccccccccccccccccccccc"
+
+
+def _fleet():
+    """Three runs that differ in every dimension the scoping rules read.
+
+    Only `T1` qualifies: awaiting_review AND a settled verdict. `T2` is at
+    awaiting_review with the judge still RUNNING; `T3` has a settled verdict but has
+    already moved on to `running`.
+    """
+    a = _verdict_run(judge.J_CLEAN, task_id="T1",
+                     pr_url="https://github.com/x/y/pull/9", judge_sha=_JUDGE_SHA)
+    b = _verdict_run(judge.J_RUNNING, task_id="T2",
+                     pr_url="https://github.com/x/y/pull/10", judge_sha=_SUPERSEDING_SHA)
+    c = _verdict_run(judge.J_CLEAN, task_id="T3", status="running",
+                     pr_url="https://github.com/x/y/pull/11", judge_sha=_OTHER_SHA)
+    return [a, b, c]
+
+
+def test_only_the_QUALIFYING_run_has_its_head_read(store_file, windows, sends, monkeypatch):
+    """🔴 The candidate set is scoped on BOTH axes — settled verdict AND still sitting in
+    awaiting_review. Unscope either and `gh` is called for runs that need nothing, which the
+    docstring promises against ("a quiet fleet costs zero extra gh calls"); with one run in
+    the fixture, both `if`s collapse to `if True` unnoticed."""
+    asked = []
+
+    def _capture(pr_url, repo_dir):
+        asked.append(pr_url)
+        return dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA)
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(dispatcher, "_read_pr_checks", _capture)
+
+    inbox.tick({}, runs=_fleet())
+
+    assert asked == ["https://github.com/x/y/pull/9"], (
+        f"the live head was read for {asked} — only the run with a SETTLED verdict still "
+        "SITTING in awaiting_review qualifies"
+    )
+
+
+def test_TWO_qualifying_verdicts_are_each_resolved_against_their_OWN_pr(
+        store_file, windows, sends, monkeypatch):
+    """🔴 Both halves of the lookup must be keyed by task_id — the run resolved from the
+    candidate id, and the live sha resolved from the map.
+
+    ⚠️ One qualifying candidate is not enough to see this: with a single entry,
+    `d.get(task_id)` and `next(iter(d.values()))` are the same object, which is why the
+    first version of this test passed under both mutations. TWO runs must qualify, with
+    DIFFERENT heads, so "any" and "this" diverge.
+
+    Both verdicts here match their own head, so both must deliver. Resolve either half by
+    "the first entry" and the second run is compared against the FIRST run's commit —
+    mismatch, dropped, and a perfectly good verdict is silently retired.
+    """
+    a = _verdict_run(judge.J_CLEAN, task_id="T1",
+                     pr_url="https://github.com/x/y/pull/9", judge_sha=_JUDGE_SHA)
+    b = _verdict_run(judge.J_CLEAN, task_id="T2",
+                     pr_url="https://github.com/x/y/pull/10", judge_sha=_SUPERSEDING_SHA)
+    heads = {"https://github.com/x/y/pull/9": _JUDGE_SHA,          # T1 unchanged
+             "https://github.com/x/y/pull/10": _SUPERSEDING_SHA}   # T2 unchanged, DIFFERENT
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, heads[pr_url]))
+
+    inbox.tick({}, runs=[a, b])
+    inbox.tick({}, runs=[a, b])      # the inbox delivers one event per tick — drain both
+
+    assert len(sends) == 2, (
+        f"both verdicts match their OWN head and must deliver; got {len(sends)} — a "
+        "verdict was compared against another run's commit, or another run's row was read"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_verdict_summary_names_BOTH_the_run_and_its_PR(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 10): the 2x2 — label AND pr ref, on BOTH kinds.
+
+    The summary is one line arriving at a busy operator's prompt, and it has exactly two
+    handles: `label` (the branch name, what a human recognises) and `ref` (the PR the
+    verdict is ABOUT). Drop either and the notification is unactionable in a different way
+    — no label and you cannot tell WHICH of several in-flight runs settled; no PR ref and
+    you are told something is mergeable with nowhere to go and merge it.
+
+    ⚠️ Both were asserted for `run_review` and for the clean verdict's label only, so each
+    kind had a different half unpinned. Asserting the pair over both kinds is the whole
+    guard — the same shape that has recurred all ticket: cover the matrix, not the cell
+    that was named.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
+
+    run = _verdict_run(judge_state)
+    inbox.tick({}, runs=[run])
+
+    assert len(sends) == 1
+    summary = sends[0][1]
+    assert run["task_id"] in summary, (
+        f"the {kind} summary does not say WHICH run settled — with several in flight, an "
+        f"unlabelled verdict cannot be acted on. Got: {summary!r}"
+    )
+    assert run["pr_url"] in summary, (
+        f"the {kind} summary does not name the PR it is about. Got: {summary!r}"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+@pytest.mark.parametrize("ci_state", [
+    dispatcher.CI_PENDING, dispatcher.CI_FAILING, dispatcher.CI_NONE, dispatcher.CI_PASSING,
+])
+def test_the_staleness_check_is_INDEPENDENT_of_the_prs_ci_state(
+        ci_state, judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
+    """🔴 GUARD (CMX-197 round 12): a head is a head, whatever CI thinks of it.
+
+    ⚠️ Every judge test on this branch fakes `CIStatus(CI_PASSING, sha)`, so `ci.state` was
+    a fixture CONSTANT across the whole suite — the round-9 blind spot one axis over: not
+    the fixture's cardinality, its UNIFORMITY. Narrowing the head read to
+    `ci.state == CI_PASSING` was therefore invisible to all of them.
+
+    ⭐ And PENDING is not an edge case here, it is the LIKELY one: the superseding push
+    that makes a verdict stale is a brand-new commit whose checks have not finished yet. A
+    check gated on green would go quiet in exactly the situation it exists to catch, and
+    announce "clean and MERGEABLE" about a commit nobody judged.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(ci_state, _SUPERSEDING_SHA))
+
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    assert sends == [], (
+        f"a superseded verdict was announced because CI was {ci_state!r} — the head "
+        "comparison must not depend on what CI thinks of the commit"
+    )
+    assert f"dropping stale {kind}" in caplog.text
+
+
+def test_a_cannot_verify_with_NO_reason_never_types_the_word_None(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 12): `judge_detail` is nullable, and the summary is TYPED.
+
+    `cannot_verify` is precisely the state where the judge could not produce a reason, so a
+    NULL detail is its most likely shape — and `str(None)` is the four-character string
+    "None", which would be typed at the orchestrator's prompt as though it were the
+    explanation. The fixture always carried a detail, so the `or ""` fallback was never
+    exercised.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_CANNOT_VERIFY, judge_detail=None)])
+
+    summary = inbox.load()["queue"][0]["summary"]
+    assert "None" not in summary, (
+        f"the literal string 'None' reached a summary that gets typed at the prompt. "
+        f"Got: {summary!r}"
+    )
+    assert "CANNOT VERIFY" in summary        # ...and the verdict itself still lands
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_verdict_summary_carries_a_SNIPPET_of_the_title_not_the_whole_line(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 14): the bug this repo already ate, on the new kinds.
+
+    `tests/test_inbox.py`'s own section header records it: an event built from the run's
+    `title` — which for a markdown tracker is the WHOLE `- [ ]` line — pushed the entire
+    multi-paragraph task brief at the orchestrator. `_short_title` is the fix, and the
+    summary is TYPED at a prompt, so this is the same class as round 8's excerpt rule.
+
+    ⚠️ Invisible until now for a mundane reason: the judge fixture's title was the single
+    character "x", so `snippet` and `title` rendered identically. It now carries the same
+    TRACKER_LINE the run_review tests use — a fixture VALUE too small to distinguish two
+    behaviours is the same blind spot as a missing field.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    summary = sends[0][1]
+    # ⛔ NOT `TRACKER_LINE not in summary` — my first attempt asserted exactly that and could
+    # never fail: the delivered line is SANITIZED (markdown stripped), so the raw constant is
+    # never a substring of it either way. A guard that cannot fail is the bug this repo
+    # keeps paying for, written into a test FOR that bug.
+    #
+    # The distinguishing fact is the TRUNCATION: `_short_title` cuts on a word boundary and
+    # appends an ellipsis, so the title's TAIL survives only if the whole line was pasted.
+    assert "BEFORE implementing" not in summary, (
+        f"the tail of the tracker line reached the prompt — the summary must be a snippet, "
+        f"with the full title left in the payload. Got: {summary!r}"
+    )
+    # (the snippet strips markdown emphasis, which takes the apostrophe with it)
+    assert "default agent launch mode editable" in summary, (
+        f"a readable snippet of the title must still reach the operator. Got: {summary!r}"
+    )

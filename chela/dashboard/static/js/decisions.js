@@ -90,6 +90,10 @@ let _lastSeenSeq = _loadLastSeen();
 // decisions, not the whole log.
 const DECISION_TYPES = [
     'run_review', 'run_needs_human', 'run_changes_requested', 'run_failed',
+    // CMX-197: the judge's own verdict on a run still sitting in `awaiting_review` —
+    // the one thing that used to be structurally unnotifiable (a BLOCKED verdict
+    // already surfaces via `run_changes_requested` above).
+    'run_judge_clean', 'run_judge_cannot_verify',
     'finished', 'blocked', 'died', 'gone_unknown', 'completed_gone',
     'watch_epoch_lost', 'inbox_undeliverable', 'inbox_self_healed',
 ];
