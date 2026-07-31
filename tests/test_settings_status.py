@@ -222,6 +222,25 @@ def test_update_payload_degrades_gracefully_on_a_pip_install(client, monkeypatch
     assert data["update"]["git"] is False
 
 
+def test_update_payload_carries_the_no_upstream_note(client, monkeypatch):
+    """`commits_behind` can succeed (``ok=True``) while still carrying a reason — no
+    upstream configured for this branch. That state is not a fault, but it is also not a
+    genuinely synced checkout, and `_update_status_payload`'s own note-arm comment says the
+    ``note`` field exists precisely so the drawer can tell the two apart. Judge round 5
+    (PR #260) found dropping the field from the payload left the suite green: nothing
+    asserted its presence, only `behind`/`ahead`/`branch`, which are byte-identical with or
+    without it."""
+    monkeypatch.setattr(dash.update, "commits_behind",
+                        lambda fetch=True: dash.update.UpdateStatus(
+                            ok=True, behind=0, ahead=0, branch="dev",
+                            error="no upstream configured for this branch"))
+    data = client.get("/api/settings").get_json()
+    assert data["update"] == {
+        "ok": True, "behind": 0, "ahead": 0, "branch": "dev",
+        "note": "no upstream configured for this branch",
+    }
+
+
 def test_update_payload_never_fetches(client, monkeypatch):
     """`_update_status_payload`'s own docstring promises `/api/settings` never triggers a
     network `git fetch` — same guarantee, same shape of proof, as
