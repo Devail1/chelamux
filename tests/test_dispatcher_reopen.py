@@ -826,7 +826,14 @@ def test_the_compare_is_asked_with_the_KEYWORDS_that_make_its_output_readable(tm
         "compare reads as 'no production change' — the nudge fires on nothing"
     )
     assert kw.get("text") is True, "the classifier splits lines; bytes would never match"
-    assert kw.get("timeout"), "a hung gh must not hang the reopen"
+    # ⛔ NOT truthiness — `timeout=0.001` is truthy and below gh's spawn cost, so EVERY
+    # compare raises TimeoutExpired, every diff reads UNKNOWN, and the nudge never fires
+    # again. Exactly the truthiness-vs-value error corrected for `pr_url` in the same
+    # commit that left this line alone.
+    assert isinstance(kw.get("timeout"), (int, float)) and kw["timeout"] >= 5, (
+        f"the compare timeout must be large enough for gh to actually run, got "
+        f"{kw.get('timeout')!r}"
+    )
     assert kw.get("cwd") is not None
 
 
@@ -905,6 +912,18 @@ def test_the_nudge_carries_its_ADVICE_not_only_its_evidence(tmp_path):
         "without the permission half it is just a statistic"
     )
     assert "3 rounds" in nudge
+    # ⛔ The RANGE clause — what the numbers COVER. Rounds 5 and 6 guarded the parenthetical
+    # evidence and the trailing advice; this middle clause was pinned by nothing. "since the
+    # LAST reopen" describes a diff the code never computes (the base is the FIRST reopen's
+    # head, deliberately — a per-round diff is always non-empty and would never nudge), so
+    # the message would misdescribe its own evidence.
+    # ⛔ NOT `"since the first reopen" in nudge` — my first attempt asserted exactly that
+    # and PASSED under the mutation, because `diff_detail` embeds the same phrase
+    # ("N file(s) changed since the first reopen, M under chela/"). A wrong-path assertion
+    # written to fix a wrong-path bug. Anchor the CONTIGUOUS clause instead.
+    assert "rounds, no production change since the first reopen (" in nudge, (
+        f"the nudge must say WHAT its numbers cover. Got: {nudge!r}"
+    )
 
 
 def test_the_nudge_events_SUMMARY_is_what_a_notification_would_render(tmp_path):
