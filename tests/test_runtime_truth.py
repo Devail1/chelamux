@@ -147,6 +147,10 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
                         lambda: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
 
+    # restore.dead_epoch_rows: nothing orphaned — every stamped row in this fleet
+    # (the inbox registration above) matches the running epoch.
+    monkeypatch.setattr(runtime_truth, "_restore_scan", lambda now: 0)
+
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
         runtime_truth, "collected_js_suites",
@@ -444,6 +448,13 @@ def _break_upstream_synced(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_restore_dead_epoch(tmp_path, monkeypatch):
+    """A hard tmux death (CMX-195) left 3 stamped rows behind — the shape `chela doctor`
+    stayed green through on 2026-07-14."""
+    monkeypatch.setattr(runtime_truth, "_restore_scan", lambda now: 3)
+    return doctor.WARN
+
+
 CORRUPTIONS = {
     "relay.transcripts": _break_relay_transcripts,
     "env.file": _break_env_file,
@@ -471,6 +482,7 @@ CORRUPTIONS = {
     "fonts.glyph_coverage": _break_fonts_glyph_coverage,
     "repo.upstream_synced": _break_upstream_synced,
     "agents.native_status_feed": _break_native_status_feed,
+    "restore.dead_epoch_rows": _break_restore_dead_epoch,
 }
 
 
@@ -797,6 +809,28 @@ def test_repo_upstream_synced_does_not_apply_to_a_pip_install(monkeypatch):
         update, "repo_root",
         lambda: (_ for _ in ()).throw(update.NotAGitCheckout("not a git checkout")))
     assert not runtime_truth.fact("repo.upstream_synced").applies()
+
+
+# --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------
+
+def test_restore_dead_epoch_rows_reports_the_count(fleet, monkeypatch):
+    _break_restore_dead_epoch(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "restore.dead_epoch_rows"]
+    assert findings and findings[0].level == doctor.WARN
+    assert "3 stamped row(s)" in findings[0].title
+    assert "chela restore" in findings[0].title
+
+
+def test_restore_dead_epoch_rows_silent_when_nothing_orphaned(fleet):
+    findings = [f for f in doctor.check() if f.fact == "restore.dead_epoch_rows"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_restore_dead_epoch_rows_cannot_verify_with_no_tmux_server(fleet, monkeypatch):
+    monkeypatch.setattr(epoch, "current", lambda: None)
+    findings = [f for f in doctor.check() if f.fact == "restore.dead_epoch_rows"]
+    assert findings and all(f.level == doctor.WARN for f in findings)
+    assert "CANNOT VERIFY restore.dead_epoch_rows" in findings[0].title
 
 
 # --- installed_hooks_stale(): `chela update`'s post-update reminder reuses the exact

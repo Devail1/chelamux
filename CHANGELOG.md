@@ -12,6 +12,40 @@ history lives in `git log`.
 
 ### Added
 
+- **`chela restore` reports the rows a hard tmux death orphaned.** CMX-82 already
+  self-heals the orchestrator's own address in `inbox.json`, but every other
+  epoch-stamped row chela writes — `inbox.json` watches, the dispatcher's `runs`
+  table (agent + judge window stamps), `telegram-bindings.json`, `session-ids.json`
+  — had no self-initiated check and no report: after a tmux restart they just sit
+  there, correct-looking and permanently unverifiable, invisible unless a human
+  happens to open the right file. `chela restore` scans all four and prints what a
+  dead tmux server left behind; for the three stores that carry (or, via the new
+  `chela/roster.py` epoch-keyed fleet snapshot, can be joined to) a session id, it
+  also classifies each dangling row REVIVABLE (the recorded Claude session is alive
+  under a new address — `sessions.wid_for_session`, never reimplemented) or MANUAL
+  (nothing live claims it; an exact `cd <cwd> && CHELA_WID=@N claude --resume <sid>`
+  one-liner is printed). It exits nonzero while anything is MANUAL, so it composes
+  into a restart procedure. `chela doctor` now also carries a
+  `restore.dead_epoch_rows` finding, so the count surfaces without a human
+  remembering to run the command by hand.
+
+  ⛔ **Read-only, with no write mode at all.** No store is mutated; no agent is
+  relaunched, spawned, resumed or killed. The write half — re-stamping REVIVABLE
+  rows and archiving MANUAL ones before removal — is deliberately a separate ticket.
+  When it is built, `telegram-bindings.json` must stay out of it: `chela-telegram`
+  owns that file (one in-memory registry per daemon lifetime, saved from that object
+  every reconcile tick, no lock or merge), so a second writer races it and silently
+  erases whichever side saved last. Its rows are reported here and reaped by the
+  daemon's own tick.
+
+  Also fixes the disarmed-identity bug that let this happen in the first place:
+  `chela watch <wid>` now reports (like `chela watch`/`register` already did) when it
+  cannot resolve a session identity at registration, instead of silently storing
+  `orchestrator_session: null` and disarming CMX-82's self-heal before it ever runs.
+  ⚠️ The roster only helps starting from the next reboot — a run today still reports
+  stale rows already in each store, but cannot enumerate an epoch chela was never
+  running to observe.
+
 - **`chela update` now refreshes the plugin too, not just the server.** A release has
   two halves: the server-side `git pull` + `uv sync` + `pm2 restart`, and the plugin
   every agent loads its hooks from — a separate copy Claude Code made at install time

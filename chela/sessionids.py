@@ -85,6 +85,15 @@ def set_session_id(wid: str, session_id: str) -> None:
     _save(data)
 
 
+def entries() -> dict:
+    """Every ``wid -> {session_id, epoch}`` row on disk, unfiltered — for reporting
+    (:mod:`chela.restore`) only. Unlike :func:`session_id_for` this does NOT drop rows whose
+    epoch no longer matches the running tmux server; a report that wants to say which rows
+    are dangling needs to see them, not have them silently withheld.
+    """
+    return _load()
+
+
 def session_id_for(wid: str | int | None) -> str | None:
     """The session id pinned for ``wid``.
 

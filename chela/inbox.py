@@ -445,7 +445,7 @@ def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:
         store["watches"][wid] = {"note": note.strip(), "since": time.time(),
                                  "name": names[wid], "epoch": now}
     return {"ok": True, "wid": wid, "note": note.strip(), "orchestrator": target,
-            "epoch": now}
+            "epoch": now, "session": session}
 
 
 def register(by: str) -> dict:

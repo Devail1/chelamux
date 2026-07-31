@@ -1017,9 +1017,10 @@ class _OneTick:
         self.waited.append(interval)
 
 
-def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=False):
+def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=False,
+                  roster_raises=None, cwds=None):
     """Run ONE tick of the real ``chela.main._reconcile_loop``; return its kwargs."""
-    from chela import discovery, main
+    from chela import discovery, main, roster
     from chela import telegram as tg
 
     live = {"@9": "cmx-73", "@6": "orchestrator"} if live is None else live
@@ -1042,11 +1043,24 @@ def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=
         }
         return False
 
+    # CMX-195: the tick now also writes the durable fleet snapshot. Capture it instead of
+    # letting the real one run — otherwise every test in this section writes a roster into
+    # the operator's live CHELA_DIR as a side effect of driving the loop.
+    def _fake_record(live_windows, agent_ids, now_epoch, cwd_for, *a, **kw):
+        seen["roster_call"] = {"live": live_windows, "agents": agent_ids,
+                               "now_epoch": now_epoch, "cwd_for": cwd_for,
+                               "extra_args": a, "extra_kwargs": kw}
+        if roster_raises is not None:
+            raise roster_raises
+        return None
+
+    monkeypatch.setattr(roster, "record", _fake_record)
     monkeypatch.setattr(tg, "live_agent_windows", lambda: (live, set(live)))
     monkeypatch.setattr(tg, "dispatched_window_ids", _fake_dispatched)
     monkeypatch.setattr(tg, "reconcile_bindings", _fake_reconcile)
     monkeypatch.setattr(tg, "sync_pinned_titles", _fake_sync_pinned_titles)
-    monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: None)
+    monkeypatch.setattr(discovery, "get_window_cwd_by_id",
+                        lambda wid: (cwds or {}).get(wid))
 
     stop = _OneTick()
     main._reconcile_loop(BindingRegistry("777"), _StubTopicApi(), 7, stop)
@@ -1065,6 +1079,104 @@ def test_the_reconcile_loop_actually_wires_the_dispatched_feature(monkeypatch):
     assert kwargs["gate_for"] is tg.blocked_on_human   # ...and NOT pending_gate alone (D1)
     assert kwargs["bind_dispatched"] is False
     assert seen["stop"].waited == [7]
+
+
+def test_the_reconcile_loop_actually_writes_the_roster_snapshot(monkeypatch):
+    """🔴 GUARD (CMX-195): objective 1 is the WRITE, not the module.
+
+    ``chela/roster.py`` is exhaustively tested as a pure function, and every one of those
+    tests passes with the call deleted from ``_reconcile_loop`` — at which point no roster
+    is ever written on this box and ``chela restore`` can never answer the question the
+    ticket exists for ("what did the dead server have?"). The judge proved exactly that by
+    replacing the call site with ``pass`` and watching 2058 tests stay green.
+
+    The tick is the ONLY writer, so this is the only place the invariant can be observed.
+    """
+    seen = _run_one_tick(monkeypatch, cwds={"@9": "/home/liav/projects/thing"})
+    call = seen.get("roster_call")
+    assert call is not None, "the reconcile tick must call roster.record — objective 1"
+    # ...and with the fleet it already has in hand, not a re-derived one.
+    assert call["live"] == {"@9": "cmx-73", "@6": "orchestrator"}
+    assert call["agents"] == {"@9", "@6"}
+    # ⛔ NOT `is not None` — that is what round 6 asserted, and `lambda wid: None` IS not
+    # None, so blanking the resolver at the call site was invisible. `cwd` is half of what
+    # the roster preserves: without it every MANUAL row degrades from the exact
+    # `cd <cwd> && CHELA_WID=@N claude --resume <sid>` one-liner to "(no cwd/session on
+    # record)", which is objective 2's entire operator payload. Assert the VALUE.
+    assert call["cwd_for"]("@9") == "/home/liav/projects/thing", (
+        "the tick must hand roster.record the REAL cwd resolver — a blanked one still "
+        "satisfies an is-not-None check while erasing every relaunch command"
+    )
+    # ⭐ ...and it must pass NO session resolver, so `record`'s own default (guarded in
+    # tests/test_roster.py) is what runs. Round 5 closed the default INSIDE roster.py; a
+    # call site passing an explicit `lambda wid: None` bypasses that guard entirely and
+    # blanks every recorded session_id — which is the sole basis for a REVIVABLE verdict.
+    assert call["extra_args"] == () and call["extra_kwargs"] == {}, (
+        f"the tick must not override record()'s session resolver, got "
+        f"{call['extra_args']} / {call['extra_kwargs']}"
+    )
+
+
+def test_the_roster_snapshot_is_stamped_with_the_epoch_the_tick_read(monkeypatch):
+    """🔴 GUARD (CMX-195): a snapshot keyed on the WRONG epoch is worse than none.
+
+    ``record`` returns None and writes nothing on a falsy epoch, so passing the tick's
+    ``now_epoch`` through is what makes the snapshot joinable later. Hand the loop a known
+    epoch and assert it arrives.
+    """
+    from chela import epoch as epoch_mod
+
+    monkeypatch.setattr(epoch_mod, "current", lambda: "999-1785358190")
+    seen = _run_one_tick(monkeypatch)
+    assert seen["roster_call"]["now_epoch"] == "999-1785358190"
+
+
+def test_a_swallowed_roster_failure_is_LOGGED(monkeypatch, caplog):
+    """🔴 GUARD (CMX-195 round 14): the swallow's sibling. Round 5 proved the tick SURVIVES
+    a failing roster write; nothing proved the failure leaves a trace. Empty the
+    `log.exception` and the durable snapshot can stop being written — permanently, on a
+    full disk or a bad-permissions CHELA_DIR — with the daemon healthy and no operator
+    signal anywhere. `chela restore` would then report against a roster frozen at whatever
+    it last managed to write, and nothing would say why.
+    """
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="chela.main"):
+        _run_one_tick(monkeypatch, roster_raises=OSError("no space left on device"))
+
+    hits = [r for r in caplog.records if "roster" in r.message.lower()]
+    assert hits, (
+        f"a swallowed roster failure must be logged. Records: {[r.message for r in caplog.records]}"
+    )
+    # ⭐ ...WITH its cause. `log.exception` attaches exc_info; `log.error` does not, and the
+    # message alone ("recording the fleet snapshot failed") cannot distinguish a full disk
+    # from a bad CHELA_DIR from a bug — which is the whole reason to log a swallow at all.
+    assert any(r.exc_info for r in hits), (
+        "the log line must carry the traceback (log.exception, not log.error) — a swallow "
+        "that records only that something failed is barely better than silence"
+    )
+    assert any(r.levelname == "ERROR" for r in hits)
+
+
+def test_a_failing_roster_write_does_not_take_down_the_reconcile_tick(monkeypatch):
+    """🔴 GUARD (CMX-195): the roster is a PASSENGER on this tick, never its driver.
+
+    Bindings reaping, the dispatched probe and pinned-title sync all ride behind the roster
+    write. A full disk or a bad-permissions `roster.json` must cost the snapshot and nothing
+    else — narrow that `except Exception` (the judge narrowed it to `ValueError`) and any
+    other failure propagates out, silently killing the whole tick for the live
+    `chela-telegram` daemon.
+
+    ⚠️ The capture stub in `_run_one_tick` never raises, which is precisely why this cut
+    survived round 4. Make the guarded call actually fail, then assert the tick got PAST it.
+    """
+    seen = _run_one_tick(monkeypatch, roster_raises=OSError("no space left on device"))
+
+    assert seen.get("roster_call") is not None, "the roster write must have been attempted"
+    assert "kwargs" in seen, (
+        "the tick must reach reconcile_bindings even when the roster write blew up — "
+        "the snapshot is best-effort, the reconcile is not"
+    )
 
 
 def test_the_reconcile_loop_hands_the_live_fleet_to_the_dispatched_probe(monkeypatch):
