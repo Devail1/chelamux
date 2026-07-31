@@ -1146,14 +1146,21 @@ def _ci_chip(r: dict) -> str:
 
 
 def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:
-    """One line for the status-filtered view: task id, status, CI, age, PR URL, title."""
+    """One line for the status-filtered view: task id, status, CI, age, PR URL, title.
+
+    ``reopen=N`` only appears once a run has actually been reopened (CMX-198) — a run
+    that never left the automatic loop shows nothing extra, so the chip reads as a
+    signal ("a human has been round N times") and not decoration on every row.
+    """
     task_id = r.get("task_id") or "-"
     status = r.get("status") or "-"
     age = _run_age_str(r.get("started_at"), now=now)
     pr = r.get("pr_url") or "-"
     title = (r.get("title") or "")[:50]
+    reopen_n = r.get("reopen_count") or 0
+    reopen_chip = f"reopen={reopen_n}  " if reopen_n else ""
     return (f"  {task_id}  {status:<16}  {_ci_chip(r):<11}  age={age:<5}  "
-            f"{pr:<45}  {title}")
+            f"{reopen_chip}{pr:<45}  {title}")
 
 
 def cmd_dispatch_runs(args) -> None:
@@ -1920,13 +1927,15 @@ def cmd_reopen(args) -> None:
         print(f"reopen: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"🔓 Run {result['task_id']} ({result.get('branch_name') or '?'}) → awaiting_review "
-          f"(rework {result.get('rework_count')}/{result.get('max_reworks')}) — "
-          "back under judge/review/merge.")
+          f"(rework {result.get('rework_count')}/{result.get('max_reworks')}, "
+          f"reopen #{result.get('reopen_count')}) — back under judge/review/merge.")
     if result.get("comment_posted"):
         print(f"  PR comment posted: {result.get('pr_url') or ''}")
     else:
         print(f"  ⚠ PR comment NOT posted ({result.get('comment_detail')}) — the run row is "
               "the authority, so the run is reopened regardless, but nothing landed on the PR.")
+    if result.get("nudge"):
+        print(f"  ⭐ {result['nudge']}")
 
 
 def cmd_escalate(args) -> None:

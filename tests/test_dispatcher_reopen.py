@@ -14,12 +14,13 @@ merge path picks the fixed head up exactly like a fresh PR.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from unittest.mock import patch
 
 import pytest
 
-from chela import dispatcher
+from chela import dispatcher, event_log
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +83,37 @@ def _gh_router(sha="deadbeef0000", comment_ok=True):
             stdout = ""
             stderr = "gh pr comment failed"
         return R()
+    return _run
+
+
+_COMPARE_RE = re.compile(r"compare/([^.]+)\.\.\.([^.]+)")
+
+
+def _gh_router_with_compare(sha="deadbeef0000", compare_files_by_base=None):
+    """Same as `_gh_router`, plus routes `gh api .../compare/{base}...{head}` (the
+    CMX-198 no-production-change diff) — one filename per line, the shape
+    `--jq '.files[].filename'` actually prints.
+
+    Routed by the BASE sha parsed out of the compare path, not a constant answer: a bug
+    that diffs against the WRONG base (the previous round's head instead of the first
+    reopen's — the corrupt-guard target for this whole feature) asks for a base this
+    dict never mapped, and gets back a file that is unambiguously "production changed"
+    (never what a test expects) instead of silently reusing the right answer.
+    """
+    compare_files_by_base = compare_files_by_base or {}
+    def _run(cmd, *a, **k):
+        if "--json" in cmd:
+            return _gh_view(sha)
+        if cmd[:2] == ["gh", "api"]:
+            m = _COMPARE_RE.search(cmd[2])
+            base = m.group(1) if m else None
+            files = compare_files_by_base.get(base, ["chela/UNEXPECTED_BASE.py"])
+            class R:
+                returncode = 0
+                stdout = "\n".join(files)
+                stderr = ""
+            return R()
+        return _no_gh(cmd, *a, **k)
     return _run
 
 
@@ -265,6 +297,178 @@ def test_a_reopened_run_that_fails_review_again_re_escalates_without_burning_a_s
     assert blocked["ok"] is True
     assert blocked["status"] == "changes_requested"
     assert blocked["rework_count"] == 2               # untouched — still at the cap
+
+
+# --- (f) 🔁🛑 CMX-198: `reopen_count` + the no-production-change nudge ------------------
+#
+# `CHELA_MAX_REWORKS` bounds the dispatcher's AUTOMATIC rework loop; it does not bound
+# `reopen`, the human-takeover path — measured on cmx-197, `rework 1/2` printed unchanged
+# across fourteen reopens. These tests pin the counter that makes the loop VISIBLE, and
+# the advisory nudge that fires when a run has been reopened 3+ times with nothing under
+# `chela/` touched since the first reopen.
+
+def _escalate_back_to_needs_human(task_id: str, judge_sha: str) -> None:
+    """Stand in for the dispatcher's own cap-check tick: a reopened run whose fixed head
+    still fails review re-escalates to `needs_human` with a NEW judge_sha (the head the
+    judge just rejected) — never re-derived through `request_changes`/the tick loop here,
+    since those are exercised elsewhere; this test file only needs the resulting row."""
+    with dispatcher._db() as conn:
+        conn.execute(
+            "UPDATE runs SET status='needs_human', judge_sha=? WHERE task_id=?",
+            (judge_sha, task_id),
+        )
+        conn.commit()
+
+
+def test_reopen_count_climbs_independently_of_rework_count(tmp_path):
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h1")):
+        r1 = dispatcher.reopen("abc123", "fix 1")
+    assert r1["ok"] is True and r1["reopen_count"] == 1
+    assert dispatcher.resolve_run("abc123")["rework_count"] == 2
+
+    _escalate_back_to_needs_human("abc123", "h1")
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h2")):
+        r2 = dispatcher.reopen("abc123", "fix 2")
+    assert r2["reopen_count"] == 2
+
+    _escalate_back_to_needs_human("abc123", "h2")
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h3")):
+        r3 = dispatcher.reopen("abc123", "fix 3")
+    assert r3["reopen_count"] == 3
+
+    run = dispatcher.resolve_run("abc123")
+    # the AUTOMATIC counter never moves — reopening still spends no rework budget.
+    assert run["rework_count"] == 2
+    assert run["reopen_count"] == 3
+    # the baseline is the FIRST reopen's head, fixed — not the most recent one.
+    assert run["first_reopen_head_sha"] == "h1"
+
+
+def test_nudge_fires_on_the_third_reopen_when_only_tests_changed(tmp_path):
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h1")):
+        dispatcher.reopen("abc123", "fix 1")
+    _escalate_back_to_needs_human("abc123", "h1")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h2")):
+        dispatcher.reopen("abc123", "fix 2")
+    _escalate_back_to_needs_human("abc123", "h2")
+
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["tests/test_x.py"]},
+        ),
+    ):
+        r3 = dispatcher.reopen("abc123", "fix 3")
+
+    assert r3["ok"] is True
+    assert r3["status"] == "awaiting_review"          # ⛔ the nudge never blocks
+    assert "nudge" in r3
+    assert "3 rounds" in r3["nudge"]
+    assert "no production change" in r3["nudge"]
+
+    events = event_log.read(types=["reopen_nudge"])["events"]
+    assert len(events) == 1
+    assert events[0]["payload"]["task_id"] == "abc123"
+    assert events[0]["payload"]["reopen_count"] == 3
+    assert events[0]["payload"]["first_reopen_head_sha"] == "h1"
+
+
+def test_nudge_does_not_fire_when_production_code_changed(tmp_path):
+    """Same three-reopen shape as above, except round 3's diff touches `chela/` — the
+    nudge must stay silent. ⛔ Corrupt-guard target: comparing against the PREVIOUS head
+    (h2) instead of the FIRST reopen's (h1) would see round 3 alone (chela/dispatcher.py
+    only) and still suppress correctly here — this test alone cannot catch that
+    corruption. `test_nudge_fires_on_the_third_reopen_when_only_tests_changed` is the one
+    that does: a per-round diff against h2 is never empty, so the wrong-base bug makes
+    the nudge STOP firing there instead."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h1")):
+        dispatcher.reopen("abc123", "fix 1")
+    _escalate_back_to_needs_human("abc123", "h1")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h2")):
+        dispatcher.reopen("abc123", "fix 2")
+    _escalate_back_to_needs_human("abc123", "h2")
+
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["chela/dispatcher.py", "tests/test_x.py"]},
+        ),
+    ):
+        r3 = dispatcher.reopen("abc123", "fix 3")
+
+    assert r3["ok"] is True
+    assert "nudge" not in r3
+    assert event_log.read(types=["reopen_nudge"])["events"] == []
+
+
+def test_nudge_is_silent_before_the_third_reopen(tmp_path):
+    """A single reopen — even one that changed nothing but tests — is not evidence of
+    anything; the round-count gate must hold regardless of what the diff would say."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+    gh_calls: list[list[str]] = []
+
+    def _run(cmd, *a, **k):
+        gh_calls.append(cmd)
+        return _gh_router_with_compare(
+            sha="h1", compare_files_by_base={"h1": ["tests/test_x.py"]},
+        )(cmd, *a, **k)
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_run):
+        r1 = dispatcher.reopen("abc123", "fix 1")
+
+    assert r1["ok"] is True and r1["reopen_count"] == 1
+    assert "nudge" not in r1
+    # not even asked — no gh api compare call before the 3rd round.
+    assert not any(c[:2] == ["gh", "api"] for c in gh_calls)
+
+
+def test_a_fresh_run_shows_no_reopen_count_in_the_listing(tmp_path):
+    """Zero reopens ⇒ the CLI listing shows nothing extra — the counterweight against
+    always-on chrome (see `chela.main._format_awaiting_run`)."""
+    from chela import main
+
+    with dispatcher._db() as conn:
+        _row(conn, status="awaiting_review", reopen_count=0)
+    row = dispatcher.resolve_run("abc123")
+    assert "reopen=" not in main._format_awaiting_run(dict(row))
+
+
+def test_a_reopened_runs_listing_shows_its_reopen_count(tmp_path):
+    from chela import main
+
+    with dispatcher._db() as conn:
+        _row(conn, status="awaiting_review", reopen_count=3)
+    row = dispatcher.resolve_run("abc123")
+    assert "reopen=3" in main._format_awaiting_run(dict(row))
+
+
+def test_cmd_reopen_prints_the_reopen_count_and_the_nudge(tmp_path, capsys):
+    from chela import main
+
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2, first_reopen_head_sha="h1")
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["tests/test_x.py"]},
+        ),
+    ):
+        main.cmd_reopen(_ReopenArgs())
+    out = capsys.readouterr().out
+    assert "reopen #3" in out
+    assert "no production change" in out
 
 
 # --- (e) the CLI -------------------------------------------------------------------------
