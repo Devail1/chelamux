@@ -26,6 +26,20 @@ from is a kill *mid-write* (a hard tmux death is exactly the kind of event that 
 the process writing this file). Every save is temp-file-then-``os.replace``, so a reader
 during an interrupted write always sees the complete previous version or the complete new
 one, never a half-written one.
+
+**Why the archive audit trail (CMX-196) lives in its own file, not a key in this one.**
+:func:`record` is called from the telegram daemon's reconcile tick, unconditionally, every
+tick — no save-on-change guard. :func:`archive` is called from ``chela restore --apply``, a
+human-run command, on its own schedule. Atomic ``os.replace`` only guarantees no reader ever
+sees a torn file; it says nothing about two independent load-modify-save round trips against
+the SAME file racing each other — whichever finishes its save last wins, silently discarding
+whatever the other one wrote. That is exactly the hazard this module's own docstring already
+warned about for ``telegram-bindings.json`` (see :mod:`chela.sessionids`'s docstring: "a
+second, single-purpose store the telegram daemon never touches, so a spawn's write can never
+be raced by a reconcile save"). ``roster-archive.json`` is that same fix applied here: one
+writer per file — :func:`record` only ever touches ``roster.json``, :func:`archive` only ever
+touches ``roster-archive.json`` — so the two can never clobber each other no matter how they
+interleave.
 """
 from __future__ import annotations
 
@@ -130,10 +144,27 @@ def window(dead_epoch: str | None, wid: str, *, path: Path | None = None) -> dic
 
 
 # --- archive: the audit trail for a MANUAL row `chela restore --apply` removed ---------
+#
+# Its own file (`roster-archive.json`), deliberately never a key inside `roster.json` — see
+# the module docstring's "one writer per file" rationale. `record()` never reads or writes
+# this file, and `archive()` never reads or writes `_STORE`.
+
+_ARCHIVE_STORE = CHELA_DIR / "roster-archive.json"
 
 # Same shape as `_MAX_EPOCHS` — old enough to keep a useful history without growing forever;
 # this is an audit log a human reads after the fact, not a store anything re-joins against.
 _MAX_ARCHIVED = 200
+
+
+def _load_archive(path: Path | None = None) -> dict:
+    store = path or _ARCHIVE_STORE
+    try:
+        data = json.loads(store.read_text())
+        if not isinstance(data, dict) or not isinstance(data.get("archived"), list):
+            raise ValueError
+    except (OSError, ValueError):
+        data = {"archived": []}
+    return data
 
 
 def archive(entry: dict, *, path: Path | None = None) -> None:
@@ -149,10 +180,14 @@ def archive(entry: dict, *, path: Path | None = None) -> None:
     ⛔ **Additive only.** This never removes the row from its live store — that is the
     caller's job, and ordered to run AFTER this so a crash between the two steps loses
     nothing worse than a duplicate archive entry, never a silently vanished row.
+
+    ``path`` (a test seam) points at the archive file, NOT ``roster.json`` — see the module
+    docstring for why the two must never share a file.
     """
-    data = _load(path)
+    store = path or _ARCHIVE_STORE
+    data = _load_archive(store)
     archived = data.setdefault("archived", [])
     archived.append({**entry, "archived_at": time.time()})
     if len(archived) > _MAX_ARCHIVED:
         del archived[: len(archived) - _MAX_ARCHIVED]
-    _save(data, path)
+    _save(data, store)

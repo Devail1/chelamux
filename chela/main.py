@@ -1763,7 +1763,7 @@ def cmd_restore(args) -> None:
 
     if apply_flag:
         print("\nchela restore --apply: REVIVABLE rows above were re-stamped at their new "
-              "address; MANUAL rows were archived to roster.json, then removed. "
+              "address; MANUAL rows were archived to roster-archive.json, then removed. "
               "telegram-bindings.json rows are left for chela-telegram's own reconcile tick "
               "to reap — see each row's outcome above.")
     else:

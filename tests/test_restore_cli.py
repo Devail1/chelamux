@@ -341,11 +341,17 @@ def test_a_plain_chela_restore_touches_NOTHING_on_disk(live_stores, tmp_path, ca
     assert _store_bytes(chela_dir) == before, (
         "a bare `chela restore` wrote to a store — it must stay read-only without `--apply`"
     )
-    # roster.json is in the glob above, but assert it explicitly: it is the archive
-    # destination, so an unchanged roster is the direct evidence nothing was archived.
+    # roster.json is in the glob above, but assert it explicitly: an unchanged roster is
+    # direct evidence nothing was recorded outside the daemon's own tick.
     assert json.loads((chela_dir / "roster.json").read_text()) == json.loads(
         before["roster.json"]), (
-        "chela restore archived a row into roster.json without --apply"
+        "chela restore wrote to roster.json without --apply"
+    )
+    # roster-archive.json is the archive destination (its own file — see chela/roster.py's
+    # module docstring for why it is never a key inside roster.json); it must not even exist
+    # when nothing has been archived.
+    assert not (chela_dir / "roster-archive.json").exists(), (
+        "chela restore archived a row into roster-archive.json without --apply"
     )
 
 
@@ -382,14 +388,19 @@ def test_chela_restore_apply_re_stamps_REVIVABLE_and_archives_removes_MANUAL(
     assert inbox_store["orchestrator"] is None
     assert inbox_store["orchestrator_epoch"] is None
 
-    # Both MANUAL rows landed in roster.json's archive, in plan()'s own order, BEFORE they
-    # were removed from their live store.
-    archived = json.loads((chela_dir / "roster.json").read_text())["archived"]
+    # Both MANUAL rows landed in roster-archive.json's archive — its own file, never a key
+    # inside roster.json (see chela/roster.py's module docstring) — in plan()'s own order,
+    # BEFORE they were removed from their live store.
+    archived = json.loads((chela_dir / "roster-archive.json").read_text())["archived"]
     assert [(a["store"], a["wid"]) for a in archived] == [
         ("inbox.orchestrator", "@1"), ("session-ids", "@5"),
     ]
     assert archived[0]["session_id"] == SID_ORCH
     assert archived[1]["session_id"] == SID_DEAD and archived[1]["cwd"] == CWD_FIVE
+
+    # roster.json itself must not have gained an "archived" key — archive() never touches it.
+    roster_store = json.loads((chela_dir / "roster.json").read_text())
+    assert "archived" not in roster_store, "archive() wrote into roster.json, not its own file"
 
 
 def test_chela_restore_apply_never_writes_telegram_bindings_json(live_stores, tmp_path):

@@ -597,12 +597,16 @@ def test_apply_still_reports_RACED_after_archiving_when_removal_declines():
     """🔴 The archive already landed (it always does, unconditionally, before removal is
     even attempted) — but the row itself did not move, so the result must say RACED, not
     ARCHIVED, or an operator reading the report would believe the live store is clean."""
-    calls, kit = _writers(remove_session=lambda *a: False)
+    calls, kit = _writers()
+    kit["remove_session"] = lambda wid, sid, stamped: (
+        calls.append(("remove", wid, sid, stamped)), False)[1]
     v = _manual("session-ids")
 
     results = apply([v], **kit)
 
-    assert any(c[0] == "archive" for c in calls), "the archive call must still have happened"
+    assert [c[0] for c in calls] == ["archive", "remove"], (
+        "the archive call must still have happened, and BEFORE the declined removal"
+    )
     assert results[0].action == RACED
 
 

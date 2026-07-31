@@ -55,10 +55,12 @@ killed. ``chela restore`` itself stays read-only by default for exactly that rea
 
 **The write half — :func:`apply` (CMX-196).** Takes the ``Verdict`` list :func:`plan` already
 computed and acts on it, one row at a time: REVIVABLE re-stamps the row at its new, live
-address; MANUAL archives the row (:func:`chela.roster.archive`) and only then removes it from
-its live store — archive-before-remove so a crash between the two steps loses nothing worse
-than a duplicate archive entry, never a silently vanished row. Only called when the CLI is
-run with ``--apply``; the bare command is still the pure report above.
+address; MANUAL archives the row (:func:`chela.roster.archive`, into its own
+``roster-archive.json`` — never ``roster.json`` itself, which the reconcile tick's
+:func:`chela.roster.record` writes unconditionally every tick and would otherwise race) and
+only then removes it from its live store — archive-before-remove so a crash between the two
+steps loses nothing worse than a duplicate archive entry, never a silently vanished row. Only
+called when the CLI is run with ``--apply``; the bare command is still the pure report above.
 
 ⚠️ ``telegram-bindings.json`` stays OUT of it, permanently, not just until this ticket:
 ``chela-telegram`` owns that file (one in-memory ``BindingRegistry`` per daemon lifetime,
