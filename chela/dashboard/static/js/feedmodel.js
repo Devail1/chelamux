@@ -61,6 +61,12 @@ const TYPE_CLASS = {
     // anonymous `·` — and drops it out of the Runs filter, where a run event belongs.
     run_changes_requested: 'run',
     run_needs_human: 'run',
+    // CMX-197: the judge's own verdict on a run that's still sitting in `awaiting_review`
+    // (a BLOCKED verdict already lands as `run_changes_requested` above — this is the
+    // other two: settled clean, or settled cannot-verify). Without this it falls to
+    // `other` and the one push that says "this PR is mergeable" reads as an anonymous `·`.
+    run_judge_clean: 'run',
+    run_judge_cannot_verify: 'run',
     // The inbox cannot reach the orchestrator (CMX-77): its queue is addressed to a window
     // id a dead tmux server issued, or to a session that has exited. It is a `gate` because
     // that is exactly what it is — work is stuck until a HUMAN (or the orchestrator's next
@@ -187,10 +193,15 @@ export function buildLanes(events, agents, classes) {
         const cls = classOf(e.type);
         lane.total += 1;
         lane.lastTs = Math.max(lane.lastTs, e.ts || 0);
-        if (e.type === 'run_review') {
+        if (e.type === 'run_review' || e.type === 'run_judge_clean'
+            || e.type === 'run_judge_cannot_verify') {
             // The TASK id, never the wid: tmux recycles `@72`, a task id is minted once.
             // A review with no task id cannot be matched against the runs, so it is not
             // claimed as open — a legacy row must not pin the graveyard open forever.
+            // The judge kinds are included for the same reason `run_review` is: a daemon
+            // restarted mid-judge sees the verdict BEFORE it ever sees the plain
+            // `awaiting_review` edge (CMX-197), and that lane must stay out of the
+            // graveyard too.
             const tid = ((e.payload || {}).task_id || '').trim();
             if (tid && !lane.reviewTasks.includes(tid)) lane.reviewTasks.push(tid);
         }

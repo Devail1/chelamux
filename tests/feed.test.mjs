@@ -38,6 +38,11 @@ test('a gate is a gate, a tool call is the firehose, an unknown type is shown', 
     assert.equal(classOf('hook.permission_request'), 'gate');
     assert.equal(classOf('hook.pre_tool_use'), 'tool');
     assert.equal(classOf('run_review'), 'run');
+    // CMX-197: the judge's own verdict on a run sitting in `awaiting_review` — without
+    // these two it falls through to `other`, and the one push that says "this PR is
+    // mergeable" renders as an anonymous `·` outside the Runs filter.
+    assert.equal(classOf('run_judge_clean'), 'run');
+    assert.equal(classOf('run_judge_cannot_verify'), 'run');
     assert.equal(classOf('daemon_start'), 'lifecycle');
     // An inbox that cannot deliver is a GATE: work is stuck until a human acts, and it
     // stayed invisible for a whole outage (CMX-77). `other` would render it as a `·`.
@@ -197,6 +202,16 @@ test('a gone lane holding an UNANSWERED review is NOT buried (CMX-62)', () => {
     assert.deepEqual(group.lanes.map(l => l.wid), ['@7']);
     assert.equal(group.lanes[0].openReview, true);      // and it wears the badge
     assert.deepEqual(group.buried.map(l => l.wid), ['@8']);   // merged → the graveyard
+});
+
+test('a judge verdict alone (no run_review) still keeps a gone lane open (CMX-197)', () => {
+    // A daemon restarted mid-judge sees the verdict BEFORE it ever sees the plain
+    // `awaiting_review` edge — that lane must not fall into the graveyard either.
+    const events = [ev('run_judge_clean', '@7', { payload: { task_id: 't-open' } })];
+    const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);
+    const group = splitGone(lanes, ['t-open']);
+    assert.deepEqual(group.lanes.map(l => l.wid), ['@7']);
+    assert.equal(group.lanes[0].openReview, true);
 });
 
 test('the review survives the class filter — turning `run` off must not bury it', () => {

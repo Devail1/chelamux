@@ -414,6 +414,109 @@ def test_a_run_that_changes_status_fires_again(store_file, windows, sends, monke
     assert "FAILED" in sends[1][1]
 
 
+# --- CMX-197: a clean judge verdict used to be structurally unnotifiable --------
+#
+# `judge.judge_run` never moves `status` off `awaiting_review` on a clean (or
+# cannot-verify) verdict — only a BLOCKED one does, through `request_changes`, which
+# already fires `run_changes_requested`. So the plain `run_review` edge (fired once,
+# when the run first reaches `awaiting_review`) was the ONLY thing the orchestrator
+# ever heard, and a judge that settled minutes or hours later said nothing new. Measured
+# live twice (cmx-195, cmx-196): "every guard held" posted to the PR and the orchestrator
+# never woke up for it.
+
+def test_a_clean_judge_verdict_fires_its_own_event(store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    run = {"task_id": "T1", "title": "x", "status": "awaiting_review",
+           "pr_url": "https://github.com/x/y/pull/9"}
+    inbox.tick({}, runs=[run])                     # the plain "awaiting review" edge
+    assert len(sends) == 1
+    assert "awaiting review" in sends[0][1]
+
+    run = {**run, "judge_state": "clean"}
+    inbox.tick({}, runs=[run])                     # the judge settles — a SECOND event
+
+    assert len(sends) == 2
+    assert "guard held" in sends[1][1] and "MERGEABLE" in sends[1][1]
+    assert "pull/9" in sends[1][1]
+
+    # Staying clean across further ticks does not re-announce.
+    inbox.tick({}, runs=[run])
+    assert len(sends) == 2
+
+
+def test_a_cannot_verify_judge_verdict_also_fires(store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    run = {"task_id": "T1", "title": "x", "status": "awaiting_review", "pr_url": None}
+    inbox.tick({}, runs=[run])
+    run = {**run, "judge_state": "cannot_verify", "judge_detail": "no experiments proposed"}
+    inbox.tick({}, runs=[run])
+
+    assert len(sends) == 2
+    assert "CANNOT VERIFY" in sends[1][1]
+    assert "no experiments proposed" in sends[1][1]
+
+
+def test_a_running_judge_does_not_reannounce_or_duplicate(store_file, windows, sends, monkeypatch):
+    # The transient states between "awaiting_review" and a settled verdict (no judge_state
+    # yet, then "running") must be absorbed silently — the run already got its ONE plain
+    # notice, and re-sending it on every judge state sample would be noise.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    base = {"task_id": "T1", "title": "x", "status": "awaiting_review"}
+    inbox.tick({}, runs=[dict(base)])
+    inbox.tick({}, runs=[{**base, "judge_state": "running"}])
+    inbox.tick({}, runs=[{**base, "judge_state": "running"}])
+
+    assert len(sends) == 1                          # only the original "awaiting review"
+
+    inbox.tick({}, runs=[{**base, "judge_state": "clean"}])
+    assert len(sends) == 2                           # the settle IS announced
+
+
+def test_a_verdict_already_clean_on_first_sight_skips_the_generic_notice(
+        store_file, windows, sends, monkeypatch):
+    # A daemon that starts (or restarts) after the judge already settled must not fire
+    # BOTH the generic "awaiting review" and the judge verdict for the same run — the
+    # judge event is strictly more informative, so it wins and is the only one sent.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    run = {"task_id": "T1", "title": "x", "status": "awaiting_review",
+           "judge_state": "clean", "pr_url": "https://github.com/x/y/pull/9"}
+    inbox.tick({}, runs=[run])
+
+    assert len(sends) == 1
+    assert "MERGEABLE" in sends[0][1]
+
+
+def test_a_judge_verdict_event_goes_stale_once_the_run_moves_on(store_file):
+    # A queued judge-verdict event is a claim about the PAST — re-checked at delivery
+    # (inbox.stale_reason), same as `run_review`. A merged/closed PR, or a run that moved
+    # off `awaiting_review` before delivery, must drop it rather than deliver stale work.
+    event = {"kind": "run_judge_clean", "payload": {"task_id": "T1"}}
+    still_open = [{"task_id": "T1", "status": "awaiting_review", "pr_state": "open"}]
+    assert inbox.stale_reason(event, still_open) is None
+
+    merged = [{"task_id": "T1", "status": "awaiting_review", "pr_state": "merged"}]
+    assert "merged" in inbox.stale_reason(event, merged)
+
+    moved_on = [{"task_id": "T1", "status": "changes_requested", "pr_state": "open"}]
+    assert "changes_requested" in inbox.stale_reason(event, moved_on)
+
+
 # --- attribution: a run event belongs to the agent that produced it -------------
 #
 # The Feed groups the log into per-agent LANES, and a lane is only as good as the `wid`

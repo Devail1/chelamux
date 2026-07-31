@@ -118,7 +118,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from chela import agent_manager, discovery, epoch, event_log, messenger, notify, sessions, transcripts
+from chela import agent_manager, discovery, epoch, event_log, judge, messenger, notify, sessions, transcripts
 from chela import config
 from chela.config import INBOX_ENABLED
 from chela.tui_text import sanitize_prompt
@@ -932,9 +932,26 @@ def run_events(runs: list[dict], seen: dict[str, str],
         task_id, status = run.get("task_id"), run.get("status")
         if not task_id:
             continue
-        fresh[task_id] = status
-        if seen.get(task_id) == status:
-            continue                      # already announced at this status
+        # ⛔ CMX-197: a run that reaches `awaiting_review` announces ONCE, on the status
+        # edge — but a CLEAN (or cannot-verify) judge verdict lands on that SAME status:
+        # `judge.judge_run` never moves the row (only a BLOCKED verdict does, through
+        # `request_changes`, which already fires `run_changes_requested` below). Measured
+        # live twice (cmx-195, cmx-196): the judge posted "every guard held" and the
+        # orchestrator never heard about it — it only ever hears about FAILURES, because
+        # only a failure moves `status`. So for `awaiting_review` the dedup mark carries
+        # `judge_state` too: the run re-announces, once, the moment the judge SETTLES
+        # (clean or cannot_verify) — not on every transient `running`/retry sample, which
+        # would just be noise.
+        judge_state = run.get("judge_state") or ""
+        mark = f"{status}:{judge_state}" if status == "awaiting_review" else status
+        prev_mark = seen.get(task_id)
+        # Was the run already SITTING in awaiting_review as of the last mark? (Not just
+        # "is judge_state new" — a fresh task_id, or one arriving straight from a
+        # different status, has never had the plain `run_review` event fire either.)
+        was_already_awaiting_review = (prev_mark or "").split(":", 1)[0] == "awaiting_review"
+        fresh[task_id] = mark
+        if prev_mark == mark:
+            continue                      # already announced at this status (+judge verdict)
         wid = run_wid(run, windows, now_epoch)
         title = run.get("title") or ""
         # The branch is the handle a human recognises ("cmx-38"); the id is the handle
@@ -949,12 +966,37 @@ def run_events(runs: list[dict], seen: dict[str, str],
                    "pr_url": run.get("pr_url"),
                    "pr_state": run.get("pr_state"), "attempt": run.get("attempt"),
                    "started_at": run.get("started_at"), "ended_at": run.get("ended_at")}
-        if status == "awaiting_review":
+        if status == "awaiting_review" and judge_state in (judge.J_CLEAN, judge.J_CANNOT_VERIFY):
+            # The judge settled while `status` sat still. This is the ONLY place either
+            # verdict becomes visible to the orchestrator — `comment_body` already posted
+            # it to the PR, but a PR comment is not a push, and CMX-195/196 both sat mute
+            # for hours until a human happened to look.
+            payload["judge_state"] = judge_state
+            payload["judge_detail"] = run.get("judge_detail")
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            if judge_state == judge.J_CLEAN:
+                out.append(_event(
+                    "run_judge_clean",
+                    f"⚖️ {label} — every guard held, clean and MERGEABLE — {ref}"
+                    f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+            else:
+                detail = str(run.get("judge_detail") or "")[:140]
+                out.append(_event(
+                    "run_judge_cannot_verify",
+                    f"⚖️ {label} — judge CANNOT VERIFY, needs a human look"
+                    f"{': ' + detail if detail else ''} — {ref}"
+                    f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif status == "awaiting_review" and not was_already_awaiting_review:
             pr = run.get("pr_url")
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
             out.append(_event("run_review",
                               f"📥 {label} awaiting review — {ref}"
                               f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        # else: still awaiting_review, and the judge_state moved between two NON-terminal
+        # values (e.g. "" → "running", or one retry's "running" to the next) — silently
+        # absorbed. `fresh[task_id]` is already updated above, so this transition itself
+        # never re-fires.
         elif status == "needs_human":
             # The rework loop gave up (CMX-68): the PR was sent back MAX_REWORKS times and
             # still fails review. This is the one run state a human MUST see — the loop is
@@ -1042,7 +1084,8 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
     that already happened and are left alone.
     """
     kind = event.get("kind")
-    if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested"):
+    if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested",
+                     "run_judge_clean", "run_judge_cannot_verify"):
         return None
     task_id = (event.get("payload") or {}).get("task_id")
     if not task_id:
@@ -1051,11 +1094,13 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
     if run is None:
         return "run row is gone"
     status, pr_state = run.get("status"), run.get("pr_state")
-    if kind == "run_review":
+    if kind in ("run_review", "run_judge_clean", "run_judge_cannot_verify"):
         if status != "awaiting_review":
             # Includes the rework loop's own transition: an `awaiting_review` event that
             # was still queued when the reviewer sent the PR back is a claim about a run
-            # that has moved on, and delivering it would ask for a review twice.
+            # that has moved on, and delivering it would ask for a review twice. A judge
+            # verdict is the same claim ("this PR is sitting in awaiting_review, look at
+            # it") with extra detail, so it rots the same way.
             return f"run is now {status!r}, not awaiting_review"
         if pr_state in ("merged", "closed"):
             # The row can lag the PR by a reconcile tick: pr_state is refreshed before
