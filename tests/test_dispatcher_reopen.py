@@ -543,7 +543,11 @@ def test_cmd_reopen_prints_the_reopen_count_and_the_nudge(tmp_path, capsys):
     from chela import main
 
     with dispatcher._db() as conn:
-        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2, first_reopen_head_sha="h1")
+        # ⛔ rework_count=1 so it DIFFERS from max_reworks (2). With both equal — as the
+        # default fixture has them — rendering `rework_count/rework_count` is invisible,
+        # and the denominator could stop being the budget entirely.
+        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2,
+             first_reopen_head_sha="h1", rework_count=1)
     with patch.object(
         dispatcher.subprocess, "run",
         side_effect=_gh_router_with_compare(
@@ -572,7 +576,9 @@ def test_cmd_reopen_prints_the_reopen_count_and_the_nudge(tmp_path, capsys):
     # "rework 3/2" — visibly absurd, and previously invisible because only the `reopen #K`
     # half was asserted. Conflating the two counters is the exact bug this ticket exists to
     # measure; the operator-facing line is where it would be read.
-    assert "rework 2/2" in out, f"the rework budget must render its OWN count. Got: {out!r}"
+    # Three DISTINCT numbers — spent 1, budget 2, reopen #3 — so no two slots can be
+    # swapped or aliased without the line changing visibly.
+    assert "rework 1/2" in out, f"the rework budget must render its OWN count. Got: {out!r}"
     assert "reopen #3" in out, f"the reopen count must render its own. Got: {out!r}"
     assert "no production change" in out
 
@@ -1073,3 +1079,35 @@ def test_escalating_a_run_PRESERVES_its_reopen_count(tmp_path):
         "the count would never reach the nudge threshold"
     )
     assert after["first_reopen_head_sha"] == "h1", "the diff base must survive too"
+
+
+def test_the_nudge_payload_records_the_CANONICAL_task_id_not_what_was_typed(tmp_path):
+    """🔴 GUARD (CMX-198 round 11): `reopen()` accepts an IDENTIFIER, and records an ID.
+
+    `resolve_run()` resolves "by task id, branch name, or window name" — so the string an
+    operator types is routinely NOT the task id. Every test in this file calls
+    `reopen("abc123")`, which IS the task id, so `ident` and `task_id` are the same value
+    and substituting one for the other cannot be seen.
+
+    ⚠️ A fixture-value COLLISION: two distinct facts that happen to be equal. Driving it by
+    BRANCH NAME separates them. Recording the typed string would make the durable record
+    un-joinable to the runs table — a nudge event nothing can trace back to its run.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2,
+             first_reopen_head_sha="h1")
+
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["tests/test_x.py"]},
+        ),
+    ):
+        r = dispatcher.reopen("test-1", "fix 3")      # ← the BRANCH name, not the task id
+
+    assert r["ok"] is True and r["task_id"] == "abc123"
+    ev = event_log.read(types=["reopen_nudge"])["events"][-1]["payload"]
+    assert ev["task_id"] == "abc123", (
+        f"the durable record must carry the canonical task id, not the string typed "
+        f"({ev['task_id']!r}) — otherwise the event cannot be joined to its run"
+    )
