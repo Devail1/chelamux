@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -707,6 +708,63 @@ def test_services_running_stale_code_flags_a_service_older_than_head(checkout, m
     # service, not the unrelated app, not the stopped one.
     assert status.stale == ["chela-dashboard"]
     assert status.commit_epoch == commit_epoch
+
+
+def test_services_running_stale_code_catches_a_restart_between_authored_and_pulled(
+    upstream, tmp_path, monkeypatch,
+):
+    """A commit is always committed upstream BEFORE it is pulled anywhere else. A naive
+    `pm_uptime > commit_epoch` comparison misses a service that restarts in that ordinary
+    gap (a crash, a memcap kill, a one-service `pm2 restart`) -- it started after the
+    commit's own timestamp, so it reads as fresh, while it is actually still running
+    whatever it loaded before this checkout's `git pull` landed the new files. Reproduced
+    with a REAL clone: the upstream commit's committer date is stamped a day in the past,
+    then cloned right now -- `_current_commit_epoch` alone reports "old" while the code
+    only actually arrived on this machine moments ago.
+    """
+    base_epoch = update._current_commit_epoch(upstream)
+    old_committer_epoch = base_epoch - 86400
+    (upstream / "late.txt").write_text("late\n")
+    subprocess.run(["git", "-C", str(upstream), "add", "late.txt"],
+                    check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(upstream), "commit", "-q", "-m", "late"],
+        check=True, capture_output=True,
+        env={**os.environ, "GIT_COMMITTER_DATE": f"{old_committer_epoch} +0000"},
+    )
+
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(checkout)],
+                    check=True, capture_output=True)
+    _configure(checkout)
+
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch == old_committer_epoch
+
+    # started an hour after the commit was authored upstream, but long before the clone
+    # above (which just happened, in real time) actually pulled it onto this machine --
+    # the pre-pull restart the naive comparison misses.
+    restarted_in_the_gap = (old_committer_epoch + 3600) * 1000
+    # started safely after the real clone time -- the counterweight: a restart that
+    # genuinely postdates the code landing here must NOT be flagged.
+    restarted_after_pull = (base_epoch + 200) * 1000
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-daemon",
+                 "pm2_env": {"status": "online", "pm_uptime": restarted_in_the_gap}},
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": restarted_after_pull}},
+            ]))
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    status = update.services_running_stale_code(checkout)
+
+    assert status.ok is True
+    assert status.stale == ["chela-daemon"]
 
 
 def test_services_running_stale_code_is_empty_when_nothing_is_running(checkout, monkeypatch):
