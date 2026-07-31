@@ -161,4 +161,7 @@ def test_api_empty_when_nothing_to_show(monkeypatch, client):
     monkeypatch.setattr(dash, "DISPATCH_WORKFLOWS", [])
     monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
     data = client.get("/api/dispatcher").get_json()
-    assert data == {"configured": False, "workflows": []}
+    # CMX-206: `dispatch_hold` rides along on every /api/dispatcher response now (the
+    # Board's Pause/Resume button reads its state off this payload) — None here since
+    # no test in this module ever takes the hold.
+    assert data == {"configured": False, "workflows": [], "dispatch_hold": None}
