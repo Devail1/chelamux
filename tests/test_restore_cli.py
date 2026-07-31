@@ -1062,3 +1062,43 @@ def test_apply_prints_each_rows_DETAIL_not_just_its_outcome(live_stores, capsys)
     assert "(re-stamped @7 -> @42)" in revived_line, (
         f"the revived detail must name BOTH addresses. Got: {revived_line!r}"
     )
+
+
+# --- the CLI's own --help: a surface with no coverage at all until now ------------------
+#
+# 🔴 GUARDS (CMX-196 round 9). `--help` is where an operator decides whether a command is
+# safe to run BEFORE running it, and this ticket changed what that answer is. Both strings
+# were edited by this PR precisely because they became wrong; neither was asserted.
+
+def test_restores_help_no_longer_claims_the_command_is_read_only(capsys):
+    """🔴 CMX-195 shipped `chela restore` as "Read-only." — a true, load-bearing promise
+    while there was no write half. This ticket adds one, and the help must say "Read-only by
+    default": an operator who reads the old string and runs --apply gets writes they were
+    told could not happen."""
+    with pytest.raises(SystemExit) as exc:
+        _drive(["--help"])
+    assert exc.value.code == 0
+    # ⚠️ argparse WRAPS help text, so a phrase is split across lines at an arbitrary column.
+    # Collapse whitespace before asserting or the guard depends on the terminal width.
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert "Read-only by default" in out, (
+        f"restore's help must qualify the read-only claim now that --apply writes. Got:\n{out}"
+    )
+
+
+def test_applys_help_states_the_permanent_bindings_exclusion(capsys):
+    """🔴 The exclusion is PERMANENT, not an implementation detail of this ticket:
+    chela-telegram owns telegram-bindings.json and a second writer races its reconcile save,
+    so `--apply` must never write it. `--help` is the only place that contract reaches an
+    operator deciding whether --apply will fix a dangling binding — it will not, and they
+    need to know before they run it and conclude the command is broken."""
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--help"])
+    assert exc.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert "telegram-bindings.json is still never written" in out, (
+        f"--apply's help must state the permanent bindings exclusion. Got:\n{out}"
+    )
+    assert "reconcile tick reaps it" in out, "...and that the daemon handles it instead"

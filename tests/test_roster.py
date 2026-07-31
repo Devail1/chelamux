@@ -416,3 +416,27 @@ def test_the_archive_bound_survives_a_whole_apply_run(roster):
     data = json.loads(roster._ARCHIVE_STORE.read_text())
     assert len(data["archived"]) == 100, "a single run's archives evicted each other"
     assert data["archived"][0]["wid"] == "@0", "the FIRST row of the run was swept away"
+
+
+def test_archive_reads_AND_writes_the_path_it_was_given(roster, tmp_path):
+    """🔴 GUARD (CMX-196 round 9): the `path` seam selects BOTH ends.
+
+    `archive`'s docstring calls `path` a test seam pointing at the archive file. If it
+    writes `path` but READS the default, an existing archive at `path` is invisible and the
+    append silently becomes an overwrite — every row previously archived there is gone,
+    which for rows already deleted from their live store is total loss.
+    """
+    other = tmp_path / "elsewhere-archive.json"
+    roster.archive({"store": "session-ids", "wid": "@1", "session_id": "s1",
+                    "cwd": None, "label": "", "stamped_epoch": OLD}, path=other)
+    roster.archive({"store": "session-ids", "wid": "@2", "session_id": "s2",
+                    "cwd": None, "label": "", "stamped_epoch": OLD}, path=other)
+
+    rows = json.loads(other.read_text())["archived"]
+    assert [r["wid"] for r in rows] == ["@1", "@2"], (
+        "the second archive did not READ the first from the given path — an append became "
+        "an overwrite"
+    )
+    assert not roster._ARCHIVE_STORE.exists(), (
+        "a path-scoped archive must not touch the default store either"
+    )
