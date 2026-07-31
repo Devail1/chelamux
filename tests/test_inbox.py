@@ -502,19 +502,31 @@ def test_a_verdict_already_clean_on_first_sight_skips_the_generic_notice(
     assert "MERGEABLE" in sends[0][1]
 
 
-def test_a_judge_verdict_event_goes_stale_once_the_run_moves_on(store_file):
-    # A queued judge-verdict event is a claim about the PAST — re-checked at delivery
-    # (inbox.stale_reason), same as `run_review`. A merged/closed PR, or a run that moved
-    # off `awaiting_review` before delivery, must drop it rather than deliver stale work.
-    event = {"kind": "run_judge_clean", "payload": {"task_id": "T1"}}
+@pytest.mark.parametrize("kind", ["run_judge_clean", "run_judge_cannot_verify"])
+@pytest.mark.parametrize("gone_state", ["merged", "closed"])
+def test_a_judge_verdict_event_goes_stale_once_the_run_moves_on(kind, gone_state, store_file):
+    """A queued judge-verdict event is a claim about the PAST — re-checked at delivery
+    (inbox.stale_reason), same as `run_review`. A merged/closed PR, or a run that moved off
+    `awaiting_review` before delivery, must drop it rather than deliver stale work.
+
+    ⚠️ Parametrized over BOTH kinds and BOTH gone-states: this branch is SHARED with
+    `run_review`, so excluding one kind from either sub-check is a one-token change that a
+    single-kind test cannot see — the same both-kinds rule that has now cost three rounds,
+    applied to the last unparametrized site.
+    """
+    event = {"kind": kind, "payload": {"task_id": "T1"}}
     still_open = [{"task_id": "T1", "status": "awaiting_review", "pr_state": "open"}]
     assert inbox.stale_reason(event, still_open) is None
 
-    merged = [{"task_id": "T1", "status": "awaiting_review", "pr_state": "merged"}]
-    assert "merged" in inbox.stale_reason(event, merged)
+    gone = [{"task_id": "T1", "status": "awaiting_review", "pr_state": gone_state}]
+    assert gone_state in (inbox.stale_reason(event, gone) or ""), (
+        f"a {kind} for a {gone_state} PR must be dropped — there is nothing left to review"
+    )
 
     moved_on = [{"task_id": "T1", "status": "changes_requested", "pr_state": "open"}]
-    assert "changes_requested" in inbox.stale_reason(event, moved_on)
+    assert "changes_requested" in (inbox.stale_reason(event, moved_on) or ""), (
+        f"a {kind} for a run that left awaiting_review must be dropped"
+    )
 
 
 # --- CMX-197 rework: a verdict is only meaningful against the commit it judged --------
