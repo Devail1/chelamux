@@ -411,11 +411,13 @@ def test_readdress_is_a_noop_when_the_address_has_moved_on(store_file, windows):
     store["orchestrator_session"] = "sid-fresh"
     inbox.save(store)
 
+    before = inbox.load()
     result = inbox.readdress("@9", "OLD-epoch", ORCH)
 
     assert result["ok"] is False
-    reloaded = inbox.load()
-    assert reloaded["orchestrator"] == "@9" and reloaded["orchestrator_session"] == "sid-fresh"
+    # The sibling of unregister_dangling's no-op guard, asserted the same way: the WHOLE
+    # store, not the two fields this test happens to have set.
+    assert inbox.load() == before, "a declined readdress must change nothing at all"
 
 
 def test_readdress_is_a_noop_when_a_different_wid_is_registered(store_file, windows):
@@ -440,17 +442,24 @@ def test_unregister_dangling_clears_only_when_both_wid_and_epoch_still_match(sto
     inbox.save(store)
 
     # right wid, wrong epoch — a further restart reissued @9 to something new; must not clear it
+    before = inbox.load()
     res = inbox.unregister_dangling("@9", "SOME-OTHER-epoch")
     assert res["ok"] is False
-    assert inbox.orchestrator_wid(inbox.load()) == "@9"
+    # ⛔ A no-op means NOTHING changed, not just that the address survived. A declined call
+    # that still blanks `orchestrator_session` disarms CMX-82's self-heal for a registration
+    # it just decided it had no right to touch.
+    assert inbox.load() == before, (
+        "a declined unregister_dangling must leave the store byte-for-byte unchanged"
+    )
 
     # 🔴 right EPOCH, wrong wid — the other half of the compound guard. Its sibling
     # `readdress` has this case (test_readdress_is_a_noop_when_a_different_wid_is_registered)
     # and this did not: with the wid half disabled, a stale plan clears whatever registration
     # happens to carry that epoch, which after a restart is a genuinely live one.
+    before = inbox.load()
     res = inbox.unregister_dangling("@77", "OLD-epoch")
     assert res["ok"] is False
-    assert inbox.orchestrator_wid(inbox.load()) == "@9", "a different wid must not be cleared"
+    assert inbox.load() == before, "a different wid must leave the store untouched entirely"
 
     # right wid AND right epoch — the exact dangling row classification saw
     res = inbox.unregister_dangling("@9", "OLD-epoch")

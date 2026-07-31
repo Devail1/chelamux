@@ -1009,10 +1009,15 @@ def test_apply_must_not_repeat_the_READ_ONLY_claim_it_just_broke(live_stores, ca
     assert "never writes to a store" not in out, (
         f"--apply claimed to be read-only AFTER writing. Got:\n{out}"
     )
-    assert "were re-stamped at their new address" in out, (
-        "--apply must say what it DID instead — the summary is the only record the operator "
-        "gets of a write that already happened"
-    )
+    # Every clause: the summary is the only record the operator gets of a write that already
+    # happened, and it covers THREE dispositions. Dropping any one leaves rows whose fate is
+    # unstated — asserted per clause rather than on the first sentence.
+    for clause in ("were re-stamped at their new address",
+                   "archived to roster-archive.json, then removed",
+                   "left for chela-telegram"):
+        assert clause in out, (
+            f"--apply's summary lost the {clause!r} clause — that disposition goes unstated"
+        )
 
 
 def test_a_dry_run_still_makes_the_read_only_claim(live_stores, capsys):
@@ -1043,7 +1048,10 @@ def test_apply_prints_each_rows_DETAIL_not_just_its_outcome(live_stores, capsys)
     assert "chela-telegram owns" in bindings_line, (
         f"the left-to-daemon row lost its reason. Got: {bindings_line!r}"
     )
+    # ⛔ NOT `"@42" in revived_line` — the row's own `@7 -> @42` prefix contains it, so the
+    # DETAIL could lose the destination and the assertion would still pass. Pin the detail
+    # verbatim: "re-stamped @7" alone does not say where the row went.
     revived_line = _line_with(out, "[session-ids]", "revived")
-    assert "re-stamped" in revived_line and "@42" in revived_line, (
-        f"the revived row lost the detail naming where it moved. Got: {revived_line!r}"
+    assert "(re-stamped @7 -> @42)" in revived_line, (
+        f"the revived detail must name BOTH addresses. Got: {revived_line!r}"
     )
