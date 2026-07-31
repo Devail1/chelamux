@@ -620,6 +620,81 @@ def test_a_judge_run_with_no_worktree_REBUILDS_it_from_pr_head_sha(tmp_path, mon
     assert run["judge_sha"] == sha                     # stamped — no longer stale
 
 
+def test_a_rebuilt_worktree_gets_the_same_base_branch_catch_up_a_fresh_spawn_gets(
+    tmp_path, monkeypatch,
+):
+    """⚖️🕳️ CMX-201/CMX-176 wiring: `_reprovision_worktree` ends by calling the SAME
+    `dispatcher._refresh_judge_worktree` catch-up `_spawn_judge` runs before a FRESH judge
+    ever sees the tree — so a re-run measures the PR exactly as a fresh judge would. Corrupt
+    that call away (``return ""`` instead of calling it) and the rebuild silently keeps the
+    PR branch's STALE tip: a fix that landed on base after the claim would be absent from the
+    baseline, the exact hole CMX-176 was filed to close for a freshly spawned judge.
+
+    ⛔ This needs a REAL `origin` remote. Every OTHER rebuild test in this file builds its
+    repo with `_git_workflow_repo`, which has none — `_refresh_judge_worktree`'s own first
+    line (``git fetch origin`` failing with no remote configured) short-circuits before it
+    can do anything, so a real call is indistinguishable from the corrupted ``return ""`` in
+    every one of those fixtures. This is why they didn't catch it.
+    """
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "dev", str(origin)], check=True, capture_output=True,
+    )
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "clone", str(origin), str(repo)], check=True, capture_output=True)
+    (repo / "guard.py").write_text(GUARD_PY)
+    (repo / "test_guard.py").write_text(REAL_GUARD_TEST)
+    (repo / "app.py").write_text("VALUE = 1\n")
+    (repo / "WORKFLOW.md").write_text(
+        "---\n"
+        "project_key: TEST\n"
+        "tracker:\n  kind: markdown\n  path: TODO.md\n"
+        f"workspace:\n  root: {tmp_path / '.chela' / 'wts'}\n  base_branch: dev\n"
+        f"judge:\n  test_cmd: {json.dumps(TEST_CMD)}\n  suite_timeout_seconds: 120\n"
+        "---\n\ndo the thing: {{task_title}}\n"
+    )
+    (repo / "TODO.md").write_text("- [ ] do a thing\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "seed")
+    _git(repo, "push", "-u", "origin", "dev")
+
+    # The PR branch is cut HERE — before base moves on underneath it.
+    _git(repo, "branch", "pr-1")
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "pr-1"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    # base_branch moves on after the claim — same shape as test_judge_branch_refresh.py.
+    (repo / "app.py").write_text("VALUE = 2\n")
+    _git(repo, "commit", "-am", "fix landed on base after the claim")
+    _git(repo, "push", "origin", "dev")
+
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    assert not wt_path.exists()                      # the worktree is GONE, not merely stale
+
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_CLEAN
+    assert result["cannot_verify"] == ""
+    assert wt_path.is_dir()
+    # ⭐ the property this test exists for: the REBUILT worktree got base's post-claim fix,
+    # the same catch-up a fresh `_spawn_judge` runs. Corrupt the call to `return ""` (skip the
+    # catch-up) and this reads "VALUE = 1\n" — the PR branch's stale tip — instead.
+    assert (wt_path / "app.py").read_text() == "VALUE = 2\n"
+    run = dispatcher.resolve_run(task_id)
+    assert run["judge_sha"] == sha
+
+
 def test_a_rebuilt_worktree_still_blocks_a_guard_that_SURVIVES(tmp_path, monkeypatch):
     """The rebuild path is not a rubber stamp — a guard that still cannot fail sends the PR
     back exactly as it would from a freshly `_spawn_judge`d worktree."""
