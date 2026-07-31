@@ -31,9 +31,13 @@ history lives in `git log`.
 
   ⚡ **`chela restore --apply` now acts on that report.** REVIVABLE rows are
   re-stamped at their new live address (`inbox.readdress`, `sessionids.rekey`);
-  MANUAL rows are archived into `roster.json` — before being removed from their
-  live store, so a crash between the two steps loses nothing worse than a
-  duplicate archive entry, never a silently vanished row. Every writer no-ops
+  MANUAL rows are archived into a new `roster-archive.json` — its own file,
+  deliberately never a key inside `roster.json`, since that store is dumped
+  whole from the reconcile loop's in-memory copy every tick, unlocked and
+  unmerged, so a second writer sharing it would lose silently in both
+  directions. Rows are archived before being removed from their live store, so
+  a crash between the two steps loses nothing worse than a duplicate archive
+  entry, never a silently vanished row. Every writer no-ops
   (reported as `RACED`) if the row has moved on since the report was computed,
   rather than blindly clobbering current state with a stale plan.
   `telegram-bindings.json` stays untouched permanently, not just deferred:
@@ -164,15 +168,21 @@ history lives in `git log`.
   session.** A live behind-count badge plus an "Update now" button run the
   exact same `update.apply()` `chela update` runs (same dirty-tree /
   diverged-branch refusals, nothing loosened), in a background thread so the
-  dashboard's own pm2 restart can't race flushing the HTTP response. A second
-  concurrent run is refused (409) via a module-level lock. (#260)
+  dashboard's own pm2 restart can't race flushing the HTTP response. Refuses
+  outright (409) while a dispatched agent run is `claimed`/`running` — the
+  restart `chela update` triggers would orphan it mid-flight — and separately
+  refuses (409) a second concurrent update via a module-level lock. (#260)
 - **A new `chela doctor` fact for the code actually RUNNING, not just the
   checkout on disk.** A bare `git pull` (bypassing `chela update`) can leave a
   checkout that genuinely reports "in sync" while every `chela-*` PM2 service
   keeps executing whichever process image it last started from. `repo.services_current`
-  compares each running service's own start time against the checked-out HEAD's
-  commit date and WARNs by name on any service that predates it — read-only,
-  never restarts anything itself. (#261)
+  compares each running service's own start time against whichever is later: the
+  checked-out commit's own date, or when that commit actually landed in this
+  checkout. The second half is load-bearing — a commit is always authored before
+  it is pulled, so comparing against the commit date alone silently misses a
+  service that restarted in that ordinary gap, which is exactly the bare-`git
+  pull` scenario this fact exists to catch. WARNs by name on any service that
+  predates the threshold — read-only, never restarts anything itself. (#261)
 
 ### Fixed
 
