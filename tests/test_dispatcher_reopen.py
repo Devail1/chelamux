@@ -708,3 +708,88 @@ def test_only_files_under_chela_count_as_production(files, expected, why, monkey
     touched, _ = dispatcher._production_files_changed(
         "https://github.com/x/y/pull/9", "/tmp", "aaa", "bbb")
     assert touched is expected, why
+
+
+# --- what we ASKED gh, not just what it answered ----------------------------------------
+#
+# 🔴 GUARDS (CMX-198 round 4). `_gh_router_with_compare` returns canned output keyed on the
+# BASE sha and ignores everything else about the command — so the owner, the repo, the HEAD
+# half of the range and the `--jq` selector are asserted by NOTHING. Three separate
+# corruptions of the request survive a suite that only ever inspects the response.
+#
+# ⛔ Same shape as "a stub hides the wiring to what it stubs": a fixture that answers
+# regardless of the question cannot notice the question changing. The fix is to capture the
+# command and assert the REQUEST, which is a different act from asserting the reply.
+
+def _capture_compare_cmd(sha="h1", files=("tests/test_x.py",)):
+    """A router that RECORDS the compare command instead of ignoring it."""
+    seen: dict = {}
+
+    def _run(cmd, *a, **k):
+        if "--json" in cmd:
+            return _gh_view(sha)
+        if cmd[:2] == ["gh", "api"]:
+            seen["cmd"] = list(cmd)
+            return SimpleNamespace(returncode=0, stdout="\n".join(files), stderr="")
+        return _no_gh(cmd, *a, **k)
+
+    return seen, _run
+
+
+def _drive_to_a_compare(tmp_path):
+    """Three reopens, each with its own head, so the 3rd actually issues the compare."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+    for i in (1, 2):
+        with patch.object(dispatcher.subprocess, "run",
+                          side_effect=_gh_router_with_compare(sha=f"h{i}")):
+            dispatcher.reopen("abc123", f"fix {i}")
+        _escalate_back_to_needs_human("abc123", f"h{i}")
+
+
+def test_the_compare_is_asked_of_the_prs_OWN_owner_and_repo(tmp_path):
+    """⛔ `_pr_owner_repo` returns `(owner, repo)` and only its None arms were tested.
+    Swap them and chela asks GitHub about `repos/<repo>/<owner>/…` — a repository that
+    almost certainly does not exist, so every compare 404s, every diff reads UNKNOWN, and
+    the nudge silently never fires again."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    assert "repos/o/r/compare/" in seen["cmd"][2], (
+        f"the compare was asked of the wrong owner/repo: {seen['cmd'][2]!r}"
+    )
+
+
+def test_the_compare_range_spans_first_reopen_to_the_CURRENT_head(tmp_path):
+    """⛔ The router keys only on the BASE, so the HEAD half of `base...head` is pinned by
+    nothing: `base...base` compares a commit with itself, returns an empty file list, and
+    reads as "no production change" — firing the nudge unconditionally, on evidence of
+    nothing."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    assert "compare/h1...h3" in seen["cmd"][2], (
+        f"the compare range must be first-reopen-head ... CURRENT head, got {seen['cmd'][2]!r}"
+    )
+
+
+def test_the_compare_asks_for_FILENAMES(tmp_path):
+    """⛔ The classifier is `f.startswith("chela/")`, which is only meaningful if gh was
+    asked for `.files[].filename`. Ask for `.status` and it compares "modified"/"added"
+    against a path prefix — never matching, so every diff reads as "no production change"
+    and the nudge fires on every third reopen regardless of what changed."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    assert ".files[].filename" in seen["cmd"], (
+        f"the compare must select filenames, got {seen['cmd']!r}"
+    )
