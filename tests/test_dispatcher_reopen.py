@@ -350,6 +350,35 @@ def test_reopen_count_climbs_independently_of_rework_count(tmp_path):
     assert run["first_reopen_head_sha"] == "h1"
 
 
+@pytest.mark.parametrize("rounds", [3, 4, 5])
+def test_nudge_fires_from_the_third_reopen_onward_when_only_tests_changed(rounds, tmp_path):
+    """⛔ The gate is a FLOOR (`>= 3`), not an equality. Narrowed to `== 3` the nudge fires
+    once and then goes SILENT for rounds 4, 5, 6 — exactly when the stall is worst and the
+    advice most warranted. A test that only exercises round 3 cannot tell the two apart.
+
+    (Found by a local mutation sweep over the diff, not by the judge — see the round-3
+    review note. `>= 3` -> `== 3` survived the suite as written.)
+    """
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    for i in range(rounds):
+        sha = f"h{i + 1}"
+        with patch.object(
+            dispatcher.subprocess, "run",
+            side_effect=_gh_router_with_compare(
+                sha=sha, compare_files_by_base={"h1": ["tests/test_x.py"]},
+            ),
+        ):
+            r = dispatcher.reopen("abc123", f"fix {i + 1}")
+        if i + 1 < rounds:
+            _escalate_back_to_needs_human("abc123", sha)
+
+    assert r["ok"] is True and r["status"] == "awaiting_review"
+    assert "nudge" in r, f"the nudge stopped firing at round {rounds} — the gate is a floor"
+    assert f"{rounds} rounds" in r["nudge"]
+
+
 def test_nudge_fires_on_the_third_reopen_when_only_tests_changed(tmp_path):
     with dispatcher._db() as conn:
         _row(conn, judge_sha="j0", pr_head_sha="j0")
@@ -453,24 +482,39 @@ def test_nudge_does_not_fire_when_the_diff_is_unreadable(tmp_path):
     assert event_log.read(types=["reopen_nudge"])["events"] == []
 
 
-def test_nudge_is_silent_before_the_third_reopen(tmp_path):
-    """A single reopen — even one that changed nothing but tests — is not evidence of
-    anything; the round-count gate must hold regardless of what the diff would say."""
+@pytest.mark.parametrize("rounds", [1, 2])
+def test_nudge_is_silent_before_the_third_reopen(rounds, tmp_path):
+    """A reopen or two — even ones that changed nothing but tests — is not evidence of
+    anything; the round-count gate must hold regardless of what the diff would say.
+
+    ⛔ Parametrized to the BOUNDARY. The production comment says "rounds 1-2 are never
+    enough signal", and testing round 1 alone leaves `>= 3` loosenable to `>= 2` in one
+    token: round 1 stays silent either way, so the gap is invisible. A threshold is only
+    pinned by the round on EITHER side of it.
+    """
     with dispatcher._db() as conn:
         _row(conn, judge_sha="j0", pr_head_sha="j0")
     gh_calls: list[list[str]] = []
 
+    head = {"sha": "h1"}
+
     def _run(cmd, *a, **k):
         gh_calls.append(cmd)
+        # ⚠️ each round needs a NEW head: `reopen` refuses a head the judge already saw,
+        # so a fixture that reuses one sha cannot reach round 2 at all.
         return _gh_router_with_compare(
-            sha="h1", compare_files_by_base={"h1": ["tests/test_x.py"]},
+            sha=head["sha"], compare_files_by_base={"h1": ["tests/test_x.py"]},
         )(cmd, *a, **k)
 
-    with patch.object(dispatcher.subprocess, "run", side_effect=_run):
-        r1 = dispatcher.reopen("abc123", "fix 1")
+    for i in range(rounds):
+        head["sha"] = f"h{i + 1}"
+        with patch.object(dispatcher.subprocess, "run", side_effect=_run):
+            r = dispatcher.reopen("abc123", f"fix {i + 1}")
+        if i + 1 < rounds:
+            _escalate_back_to_needs_human("abc123", head["sha"])
 
-    assert r1["ok"] is True and r1["reopen_count"] == 1
-    assert "nudge" not in r1
+    assert r["ok"] is True and r["reopen_count"] == rounds
+    assert "nudge" not in r, f"the nudge fired on round {rounds} — the gate is >= 3"
     # not even asked — no gh api compare call before the 3rd round.
     assert not any(c[:2] == ["gh", "api"] for c in gh_calls)
 
@@ -638,3 +682,29 @@ def test_a_READ_compare_classifies_by_whether_chela_changed(files, expected, mon
         lambda *a, **k: SimpleNamespace(returncode=0, stdout=files, stderr=""))
     touched, _ = _pfc()
     assert touched is expected
+
+
+@pytest.mark.parametrize("files,expected,why", [
+    pytest.param("README.md\n", False, "docs are not production", id="docs-only"),
+    pytest.param("TODO.md\n", False, "the tracker is not production", id="tracker-only"),
+    pytest.param(".github/workflows/ci.yml\n", False, "CI config is not chela/", id="ci-only"),
+    pytest.param("chela/inbox.py\n", True, "chela/ IS production", id="chela"),
+])
+def test_only_files_under_chela_count_as_production(files, expected, why, monkeypatch):
+    """🔴 The classifier is `startswith("chela/") AND NOT startswith("tests/")` — an AND over
+    two INDEPENDENT predicates, so it needs a path that satisfies NEITHER to pin.
+
+    Every fixture until now used only `chela/...` or `tests/...`, and for both of those the
+    `and` and an `or` give the SAME answer — so `and not` -> `or not` survived the whole
+    suite. Under `or`, a docs-only or tracker-only diff reads as a production change and
+    SUPPRESSES the nudge, which is the one direction that fails silently: the operator is
+    never told the loop has stalled.
+
+    (Found by a local mutation sweep over the diff, not by the judge.)
+    """
+    monkeypatch.setattr(
+        dispatcher.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout=files, stderr=""))
+    touched, _ = dispatcher._production_files_changed(
+        "https://github.com/x/y/pull/9", "/tmp", "aaa", "bbb")
+    assert touched is expected, why
