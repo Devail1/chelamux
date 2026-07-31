@@ -2180,8 +2180,8 @@ def reopen(ident: str, reason: str = "") -> dict:
     return result
 
 
-def set_judge_state(task_id: str, state: str, detail: str = "") -> None:
-    """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE.
+def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None) -> None:
+    """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE (besides ``sha``).
 
     The judge's only way to change a run's STATUS is :func:`request_changes` — the one
     carrier, shared with the CI gate and with a human reviewer. This column is a report, not
@@ -2189,12 +2189,25 @@ def set_judge_state(task_id: str, state: str, detail: str = "") -> None:
     ``awaiting_review``, where the orchestrator will find it. ``cannot_verify`` is the same
     non-answer the CI gate's ``unknown`` is, and it is recorded rather than swallowed
     precisely because an unknown that goes quiet is indistinguishable from a pass.
+
+    ``sha``, when given, also stamps ``judge_sha`` — for the ONE caller that judges a commit
+    without having gone through ``_spawn_judge`` first (a re-run that rebuilt its own reaped
+    worktree, CMX-201): that caller's judgment would otherwise leave ``judge_sha`` pointing at
+    a stale commit, and the per-sha trigger would immediately re-spawn a redundant judge on
+    the very sha this call just verified. Every normal caller passes nothing and this column
+    is untouched, exactly as before.
     """
     with _db() as conn:
-        conn.execute(
-            "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
-            (state, (detail or "")[:2000], task_id),
-        )
+        if sha:
+            conn.execute(
+                "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=? WHERE task_id=?",
+                (state, (detail or "")[:2000], sha, task_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
+                (state, (detail or "")[:2000], task_id),
+            )
         conn.commit()
 
 

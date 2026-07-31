@@ -951,6 +951,35 @@ def load_experiments(path: str | Path) -> tuple[dict, str]:
     return raw, ""
 
 
+def _reprovision_worktree(wf, worktree: Path, sha: str, base_branch: str) -> str:
+    """Rebuild a REAPED judge worktree at ``sha`` — the run's CURRENT head, never the sha a
+    stale verdict was recorded against. Returns ``""`` on success, else why it could not.
+
+    ⚖️🕳️ CMX-201: ``_cleanup`` reaps the throwaway worktree the moment a verdict publishes
+    (CMX-164), so a PR that fixes exactly the guard a `blocked` verdict named has no way back
+    to `clean` short of a whole new dispatch round — the only thing that could re-check it
+    was gone. This is the same throwaway detached checkout ``_spawn_judge`` makes
+    (:func:`chela.worktree.detached_worktree`, idempotent, never the run's own branch
+    worktree), followed by the same base-branch catch-up ``_spawn_judge`` runs before a judge
+    ever sees the tree (CMX-176) — so a re-run measures the PR exactly as a fresh judge would.
+    """
+    from chela import dispatcher
+    from chela.worktree import BranchGone
+
+    if not sha:
+        return f"the judge worktree {worktree} is gone and this run has no pr_head_sha to " \
+               "re-check it out from"
+    try:
+        dispatcher.detached_worktree(wf.path.parent, sha, worktree)
+    except (BranchGone, subprocess.CalledProcessError, OSError) as e:
+        detail = getattr(e, "stderr", None) or str(e)
+        if isinstance(detail, bytes):
+            detail = detail.decode(errors="replace")
+        return (f"the judge worktree {worktree} is gone and could not be rebuilt at "
+                f"{sha[:12]}: {str(detail).strip()[:300]}")
+    return dispatcher._refresh_judge_worktree(wf.path.parent, worktree, base_branch)
+
+
 def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True) -> dict:
     """Execute the judge's experiments and PUBLISH the verdict. The judge agent's last step.
 
@@ -995,19 +1024,34 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     # leak the directory forever. `finally`, not a happy-path call at the bottom.
     try:
         raw, err = load_experiments(experiments_path)
+        base_branch = wf.get("workspace", "base_branch", default="master")
+        base_branch = base_branch if isinstance(base_branch, str) else ""
+        reprovisioned = False
         if err:
             report = Report(cannot_verify=err)
         elif not test_cmd:
             report = Report(cannot_verify="this workflow sets no `judge.test_cmd` — there is no "
                                           "suite to run a mutation against")
         elif not worktree.is_dir():
-            report = Report(cannot_verify=f"the judge worktree {worktree} is gone")
+            stale = _reprovision_worktree(wf, worktree, run.get("pr_head_sha") or "", base_branch)
+            if stale:
+                report = Report(cannot_verify=stale)
+            else:
+                reprovisioned = True
+                report = run_experiments(
+                    worktree, test_cmd, raw, timeout=judge_suite_timeout(wf),
+                    base_branch=base_branch,
+                )
         else:
-            base_branch = wf.get("workspace", "base_branch", default="master")
             report = run_experiments(
                 worktree, test_cmd, raw, timeout=judge_suite_timeout(wf),
-                base_branch=base_branch if isinstance(base_branch, str) else "",
+                base_branch=base_branch,
             )
+        # A worktree this call rebuilt was checked out at the run's CURRENT head — stamp
+        # `judge_sha` to match so the DB record of what was judged is never stale, and the
+        # automatic per-sha trigger does not immediately re-spawn a redundant judge on the
+        # very commit this call just verified.
+        judged_sha = run.get("pr_head_sha") if reprovisioned else None
 
         blocking = report.blocking
         result = {"ok": True, "task_id": task_id, "state": report.state,
@@ -1031,6 +1075,7 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                 dispatcher.set_judge_state(
                     task_id, J_BLOCKED,
                     "; ".join(f"{o.experiment.guard}: SURVIVED" for o in blocking)[:500],
+                    sha=judged_sha,
                 )
                 log.warning("judge: %s SENT BACK — %d guard(s) survived corruption",
                             task_id, len(blocking))
@@ -1040,6 +1085,7 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
             dispatcher._post_pr_comment(pr_url, repo_dir, body)
             dispatcher.set_judge_state(
                 task_id, report.state, report.cannot_verify or "every guard held",
+                sha=judged_sha,
             )
             log.info("judge: %s → %s (%d experiment(s))", task_id, report.state,
                      len(report.outcomes))
