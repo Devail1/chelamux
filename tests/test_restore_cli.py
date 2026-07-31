@@ -990,3 +990,37 @@ def test_verdicts_with_no_orphans_must_not_print_an_empty_ORPHAN_header(
         f"the orphan block printed a header with nothing to list. Got:\n{out}"
     )
     assert "never writes to a store" in out
+
+
+def test_apply_must_not_repeat_the_READ_ONLY_claim_it_just_broke(live_stores, capsys):
+    """🔴 GUARD (CMX-196 round 4): `--apply` writes, so it must NOT print the dry run's
+    "report only — chela restore never writes to a store".
+
+    That line was the read-only CONTRACT while CMX-195 shipped without a write half; CMX-196
+    made it conditional. Neutralise the `if apply_flag:` branch and `--apply` archives rows,
+    removes them from their live store, and then tells the operator it never writes — the
+    report contradicting what the command just did, on the one surface a human uses to
+    decide whether the box is recovered.
+    """
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--apply"])
+
+    out = capsys.readouterr().out
+    assert "never writes to a store" not in out, (
+        f"--apply claimed to be read-only AFTER writing. Got:\n{out}"
+    )
+    assert "were re-stamped at their new address" in out, (
+        "--apply must say what it DID instead — the summary is the only record the operator "
+        "gets of a write that already happened"
+    )
+
+
+def test_a_dry_run_still_makes_the_read_only_claim(live_stores, capsys):
+    """The counterweight: dropping the line entirely would satisfy the guard above while
+    removing the contract from the command an operator runs to LOOK."""
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    assert "never writes to a store" in out
+    assert "were re-stamped at their new address" not in out

@@ -368,3 +368,25 @@ def test_archive_is_bounded_and_evicts_the_oldest_first(roster):
     assert len(data["archived"]) == roster._MAX_ARCHIVED
     assert data["archived"][0]["wid"] == "@5", "the oldest 5 rows must be the ones evicted"
     assert data["archived"][-1]["wid"] == f"@{roster._MAX_ARCHIVED + 4}"
+
+
+@pytest.mark.parametrize("garbage", ['[]', '"nope"', '{"archived": {}}', '{"archived": 3}',
+                                     'not json at all'])
+def test_a_malformed_archive_store_degrades_to_empty_instead_of_raising(roster, garbage):
+    """🔴 GUARD (round-4): `_load_archive`'s shape check is the twin of `_load`'s, which
+    `test_a_malformed_roster_degrades_to_empty_instead_of_raising` already pins. A file that
+    is valid JSON but the wrong SHAPE would reach `data.setdefault("archived", [])` on a
+    list/str and raise out of `archive()` — which runs inside `chela restore --apply`, AFTER
+    some rows have already been archived-and-removed. A crash there is the one moment this
+    command must survive.
+    """
+    roster._ARCHIVE_STORE.parent.mkdir(parents=True, exist_ok=True)
+    roster._ARCHIVE_STORE.write_text(garbage)
+
+    roster.archive({"store": "session-ids", "wid": "@5", "session_id": "s",
+                    "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    data = json.loads(roster._ARCHIVE_STORE.read_text())
+    assert [r["wid"] for r in data["archived"]] == ["@5"], (
+        "a malformed archive must be replaced, not raise and abort a half-done --apply"
+    )

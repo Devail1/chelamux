@@ -356,7 +356,13 @@ def test_readdress_moves_the_orchestrator_to_its_new_live_address(store_file, wi
     """🔴 `readdress` re-derives the identity fresh rather than trusting the plan's stale
     session id (the docstring's defense-in-depth claim) — so the stored
     ``orchestrator_session`` must be the FRESHLY resolved one, never left blank/stale."""
-    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: "sid-fresh-live")
+    # ⛔ wid-DISCRIMINATING: a fake returning the same id for any window cannot tell whether
+    # readdress resolved the NEW address or the dangling OLD one. Resolving the old wid
+    # stores the identity of a window that is gone — the row would look healthy and heal to
+    # nothing.
+    monkeypatch.setattr(inbox.sessions, "session_of_window",
+                        lambda wid, pane_map=None: {ORCH: "sid-fresh-live",
+                                                    "@9": "sid-of-the-DEAD-window"}.get(wid))
     store = inbox.load()
     store["orchestrator"] = "@9"
     store["orchestrator_epoch"] = "OLD-epoch"
@@ -377,7 +383,9 @@ def test_readdress_moves_the_orchestrator_to_its_new_live_address(store_file, wi
         f"readdress must stamp the CURRENT epoch, got {reloaded['orchestrator_epoch']!r}"
     )
     assert reloaded["orchestrator_name"] == "orchestrator"
-    assert reloaded["orchestrator_session"] == "sid-fresh-live"
+    assert reloaded["orchestrator_session"] == "sid-fresh-live", (
+        "readdress must resolve the NEW address's identity, not the dangling old one"
+    )
     _assert_address_alarm_cleared(reloaded, "readdress")
 
 
@@ -435,6 +443,14 @@ def test_unregister_dangling_clears_only_when_both_wid_and_epoch_still_match(sto
     res = inbox.unregister_dangling("@9", "SOME-OTHER-epoch")
     assert res["ok"] is False
     assert inbox.orchestrator_wid(inbox.load()) == "@9"
+
+    # 🔴 right EPOCH, wrong wid — the other half of the compound guard. Its sibling
+    # `readdress` has this case (test_readdress_is_a_noop_when_a_different_wid_is_registered)
+    # and this did not: with the wid half disabled, a stale plan clears whatever registration
+    # happens to carry that epoch, which after a restart is a genuinely live one.
+    res = inbox.unregister_dangling("@77", "OLD-epoch")
+    assert res["ok"] is False
+    assert inbox.orchestrator_wid(inbox.load()) == "@9", "a different wid must not be cleared"
 
     # right wid AND right epoch — the exact dangling row classification saw
     res = inbox.unregister_dangling("@9", "OLD-epoch")
