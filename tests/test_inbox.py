@@ -538,6 +538,7 @@ def _verdict_run(judge_state=None, **over):
 def _clean_run(**over):
     return {"task_id": "T1", "title": "x", "status": "awaiting_review",
             "pr_url": "https://github.com/x/y/pull/9", "judge_state": "clean",
+            "window_id": "@6",
             # ⚠️ `workflow_path` is what `_live_judge_heads` derives `repo_dir` from, and
             # the fixture never carried one — so repo_dir was silently None in EVERY test,
             # which is precisely the state that makes `_read_pr_checks` return no sha.
@@ -1624,3 +1625,59 @@ def test_the_judged_sha_comes_from_the_PAYLOAD_not_the_live_row(
         "source and the comparison could never fail"
     )
     assert f"dropping stale {kind}" in caplog.text
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_judge_verdict_is_ATTRIBUTED_to_the_agents_window(
+        judge_state, kind, store_file, windows, monkeypatch):
+    """🔴 GUARD (CMX-197 round 6): the event must carry the run's `wid`.
+
+    This PR's own Feed rule — `buildLanes` keeps a gone lane out of the graveyard for the
+    judge kinds — keys on the event's wid. Emit it with `wid=None` and the verdict is
+    attributed to nobody: the lane it was meant to keep alive falls into the graveyard, and
+    the JS guard added for exactly that behaviour still passes, because it constructs its
+    own event with a wid rather than reading one the inbox produced.
+
+    ⚠️ Producer and consumer each tested against their own copy of the contract — the same
+    shape as round 3's emitted-kind finding.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["wid"] == "@6", (
+        f"the verdict was attributed to {queued[0]['wid']!r}, not the run's own window — "
+        "the Feed's lane rule keys on this"
+    )
+
+
+def test_a_BLOCKED_verdict_never_uses_the_judge_verdict_path(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 6): BLOCKED is already reported, and must not double-fire.
+
+    A blocked verdict sends the run back through `run_changes_requested` — the path that
+    has always worked and is the reason this ticket was scoped to the OTHER two states.
+    Widening the tuple to include `J_BLOCKED` gives the orchestrator two notifications for
+    one event, and the judge-kind one claims a verdict "on a run still sitting in
+    awaiting_review" about a run that is on its way out of it.
+
+    ⛔ Not parametrized: the point IS that this third state is excluded, so it must be
+    named explicitly rather than swept into the both-kinds table.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED)])
+
+    kinds = [e["kind"] for e in inbox.load()["queue"]]
+    assert "run_judge_clean" not in kinds and "run_judge_cannot_verify" not in kinds, (
+        f"a BLOCKED verdict came through the judge-verdict path — it already fires "
+        f"run_changes_requested. Queued: {kinds}"
+    )
