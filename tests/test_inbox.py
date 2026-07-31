@@ -558,7 +558,7 @@ def _verdict_run(judge_state=None, **over):
 
 
 def _clean_run(**over):
-    return {"task_id": "T1", "title": "x", "status": "awaiting_review",
+    return {"task_id": "T1", "title": TRACKER_LINE, "status": "awaiting_review",
             "pr_url": "https://github.com/x/y/pull/9", "judge_state": "clean",
             "window_id": "@6",
             # ⚠️ `workflow_path` is what `_live_judge_heads` derives `repo_dir` from, and
@@ -642,8 +642,11 @@ def test_a_judge_verdict_for_a_superseded_head_is_dropped_not_delivered(
     # row and no push — so this line is the ONLY forensic record that a verdict was retired.
     # "PR head moved past the judged commit" without the shas cannot answer the one question
     # it exists for: WHICH commit was judged, and what is live now.
-    assert _JUDGE_SHA[:12] in caplog.text and _SUPERSEDING_SHA[:12] in caplog.text, (
-        f"the drop reason must name the judged and live shas. Got: {caplog.text!r}"
+    # ⛔ NOT "both shas appear somewhere" — that passes with them swapped, or listed with
+    # no relation. The reason exists to say WHICH commit was judged and WHAT IS LIVE NOW,
+    # so the pair must render in that order, together.
+    assert f"{_JUDGE_SHA[:12]} -> {_SUPERSEDING_SHA[:12]}" in caplog.text, (
+        f"the drop reason must read judged -> live. Got: {caplog.text!r}"
     )   # loudly — never silently
 
 
@@ -683,8 +686,11 @@ def test_a_superseded_verdict_is_dropped_even_when_it_NEVER_QUEUES(
     # row and no push — so this line is the ONLY forensic record that a verdict was retired.
     # "PR head moved past the judged commit" without the shas cannot answer the one question
     # it exists for: WHICH commit was judged, and what is live now.
-    assert _JUDGE_SHA[:12] in caplog.text and _SUPERSEDING_SHA[:12] in caplog.text, (
-        f"the drop reason must name the judged and live shas. Got: {caplog.text!r}"
+    # ⛔ NOT "both shas appear somewhere" — that passes with them swapped, or listed with
+    # no relation. The reason exists to say WHICH commit was judged and WHAT IS LIVE NOW,
+    # so the pair must render in that order, together.
+    assert f"{_JUDGE_SHA[:12]} -> {_SUPERSEDING_SHA[:12]}" in caplog.text, (
+        f"the drop reason must read judged -> live. Got: {caplog.text!r}"
     )
 
 
@@ -747,8 +753,11 @@ def test_a_PARKED_verdict_is_still_re_checked_once_its_run_row_moves_on(
     # row and no push — so this line is the ONLY forensic record that a verdict was retired.
     # "PR head moved past the judged commit" without the shas cannot answer the one question
     # it exists for: WHICH commit was judged, and what is live now.
-    assert _JUDGE_SHA[:12] in caplog.text and _SUPERSEDING_SHA[:12] in caplog.text, (
-        f"the drop reason must name the judged and live shas. Got: {caplog.text!r}"
+    # ⛔ NOT "both shas appear somewhere" — that passes with them swapped, or listed with
+    # no relation. The reason exists to say WHICH commit was judged and WHAT IS LIVE NOW,
+    # so the pair must render in that order, together.
+    assert f"{_JUDGE_SHA[:12]} -> {_SUPERSEDING_SHA[:12]}" in caplog.text, (
+        f"the drop reason must read judged -> live. Got: {caplog.text!r}"
     )
 
 
@@ -1685,8 +1694,11 @@ def test_the_judged_sha_comes_from_the_PAYLOAD_not_the_live_row(
     # row and no push — so this line is the ONLY forensic record that a verdict was retired.
     # "PR head moved past the judged commit" without the shas cannot answer the one question
     # it exists for: WHICH commit was judged, and what is live now.
-    assert _JUDGE_SHA[:12] in caplog.text and _SUPERSEDING_SHA[:12] in caplog.text, (
-        f"the drop reason must name the judged and live shas. Got: {caplog.text!r}"
+    # ⛔ NOT "both shas appear somewhere" — that passes with them swapped, or listed with
+    # no relation. The reason exists to say WHICH commit was judged and WHAT IS LIVE NOW,
+    # so the pair must render in that order, together.
+    assert f"{_JUDGE_SHA[:12]} -> {_SUPERSEDING_SHA[:12]}" in caplog.text, (
+        f"the drop reason must read judged -> live. Got: {caplog.text!r}"
     )
 
 
@@ -2047,3 +2059,46 @@ def test_a_cannot_verify_with_NO_reason_never_types_the_word_None(
         f"Got: {summary!r}"
     )
     assert "CANNOT VERIFY" in summary        # ...and the verdict itself still lands
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_verdict_summary_carries_a_SNIPPET_of_the_title_not_the_whole_line(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 14): the bug this repo already ate, on the new kinds.
+
+    `tests/test_inbox.py`'s own section header records it: an event built from the run's
+    `title` — which for a markdown tracker is the WHOLE `- [ ]` line — pushed the entire
+    multi-paragraph task brief at the orchestrator. `_short_title` is the fix, and the
+    summary is TYPED at a prompt, so this is the same class as round 8's excerpt rule.
+
+    ⚠️ Invisible until now for a mundane reason: the judge fixture's title was the single
+    character "x", so `snippet` and `title` rendered identically. It now carries the same
+    TRACKER_LINE the run_review tests use — a fixture VALUE too small to distinguish two
+    behaviours is the same blind spot as a missing field.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    summary = sends[0][1]
+    # ⛔ NOT `TRACKER_LINE not in summary` — my first attempt asserted exactly that and could
+    # never fail: the delivered line is SANITIZED (markdown stripped), so the raw constant is
+    # never a substring of it either way. A guard that cannot fail is the bug this repo
+    # keeps paying for, written into a test FOR that bug.
+    #
+    # The distinguishing fact is the TRUNCATION: `_short_title` cuts on a word boundary and
+    # appends an ellipsis, so the title's TAIL survives only if the whole line was pasted.
+    assert "BEFORE implementing" not in summary, (
+        f"the tail of the tracker line reached the prompt — the summary must be a snippet, "
+        f"with the full title left in the payload. Got: {summary!r}"
+    )
+    # (the snippet strips markdown emphasis, which takes the apostrophe with it)
+    assert "default agent launch mode editable" in summary, (
+        f"a readable snippet of the title must still reach the operator. Got: {summary!r}"
+    )
