@@ -553,6 +553,9 @@ def test_apply_reports_RACED_when_the_readdress_writer_declines():
     results = apply([v], **kit)
 
     assert results[0].action == RACED
+    # ⭐ ...and WHY. Blank, `=> raced` on a REVIVABLE row is indistinguishable from a
+    # bug: nothing was written and nothing says the row simply moved on since plan().
+    assert results[0].detail == "the row moved on before it could be re-stamped"
 
 
 def test_apply_reports_RACED_when_the_rekey_writer_declines():
@@ -562,6 +565,9 @@ def test_apply_reports_RACED_when_the_rekey_writer_declines():
     results = apply([v], **kit)
 
     assert results[0].action == RACED
+    # ⭐ ...and WHY. Blank, `=> raced` on a REVIVABLE row is indistinguishable from a
+    # bug: nothing was written and nothing says the row simply moved on since plan().
+    assert results[0].detail == "the row moved on before it could be re-stamped"
 
 
 def test_apply_archives_the_inbox_orchestrator_arm_THEN_unregisters():
@@ -608,6 +614,10 @@ def test_apply_still_reports_RACED_after_archiving_when_removal_declines():
         "the archive call must still have happened, and BEFORE the declined removal"
     )
     assert results[0].action == RACED
+    # ⭐ ...and the detail must say the archive DID land. Blank, `=> raced` on a MANUAL row
+    # is indistinguishable from one where nothing was preserved at all, and the operator
+    # cannot tell whether the row still has a trace anywhere.
+    assert results[0].detail == "archived, but the row moved on before it could be removed"
 
 
 def test_apply_reports_RACED_when_the_orchestrator_UNREGISTER_declines():
@@ -638,6 +648,7 @@ def test_apply_reports_RACED_when_the_orchestrator_UNREGISTER_declines():
     assert results[0].action == RACED, (
         "a declined unregister leaves the row registered — ARCHIVED would be a lie"
     )
+    assert results[0].detail == "archived, but the row moved on before it could be removed"
 
 
 def test_apply_processes_every_verdict_in_order_one_result_each():
@@ -667,3 +678,23 @@ def test_apply_defaults_wire_to_the_real_inbox_sessionids_roster_modules():
     assert sig.parameters["rekey_session"].default is sessionids.rekey
     assert sig.parameters["remove_session"].default is sessionids.remove
     assert sig.parameters["archive"].default is roster.archive
+
+
+def test_the_four_outcome_words_are_the_operators_vocabulary():
+    """🔴 GUARD (CMX-196 round 6): pin all FOUR outcome literals in one place.
+
+    `--apply` prints these verbatim (`=> revived`, `=> archived`, ...), and three of them
+    are pinned only INCIDENTALLY, by the CLI end-to-end asserting those literals. RACED is
+    not, because the e2e fixture cannot produce a raced row: it needs the store to move
+    between `plan()` and `apply()`, which a single-process test never does.
+
+    ⚠️ Same fixture-data lesson as CMX-195: an outcome the fixture cannot REACH is unpinned
+    no matter how thoroughly the other branches are asserted. Pinning the vocabulary here
+    covers the one the e2e structurally cannot.
+    """
+    assert (LEFT_TO_DAEMON, REVIVED, ARCHIVED, RACED) == (
+        "left-to-daemon", "revived", "archived", "raced")
+    assert len({LEFT_TO_DAEMON, REVIVED, ARCHIVED, RACED}) == 4, (
+        "the four outcomes must stay DISTINGUISHABLE — two that render the same word are "
+        "one word as far as the operator is concerned"
+    )
