@@ -220,3 +220,21 @@ def test_update_payload_degrades_gracefully_on_a_pip_install(client, monkeypatch
     data = client.get("/api/settings").get_json()
     assert data["update"]["ok"] is False
     assert data["update"]["git"] is False
+
+
+def test_update_payload_never_fetches(client, monkeypatch):
+    """`_update_status_payload`'s own docstring promises `/api/settings` never triggers a
+    network `git fetch` — same guarantee, same shape of proof, as
+    test_runtime_truth.py::test_upstream_synced_status_never_fetches. Every other test in
+    this section monkeypatches `commits_behind` as `lambda fetch=True: ...`, which accepts
+    (and silently discards) whatever value `fetch` is called with, so none of them would
+    catch this route calling `commits_behind(fetch=True)` instead."""
+    calls = []
+
+    def fake_commits_behind(repo=None, *, fetch=True):
+        calls.append(fetch)
+        return dash.update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev")
+
+    monkeypatch.setattr(dash.update, "commits_behind", fake_commits_behind)
+    client.get("/api/settings")
+    assert calls == [False]
