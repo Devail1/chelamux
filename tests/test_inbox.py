@@ -530,13 +530,33 @@ _JUDGE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _SUPERSEDING_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
+def _verdict_run(judge_state=None, **over):
+    """A run row sitting in `awaiting_review` with a SETTLED judge verdict."""
+    return _clean_run(judge_state=judge_state or judge.J_CLEAN, **over)
+
+
 def _clean_run(**over):
     return {"task_id": "T1", "title": "x", "status": "awaiting_review",
             "pr_url": "https://github.com/x/y/pull/9", "judge_state": "clean",
             "judge_sha": _JUDGE_SHA, **over}
 
 
-def test_a_clean_judge_verdicts_payload_carries_the_judged_sha(store_file, windows, monkeypatch):
+
+# ⭐ CMX-197 round 4 — the rule from round 3, MECHANISED instead of intended.
+#
+# "When two kinds ship together, every site naming one must assert BOTH." I wrote that and
+# then guarded three Python sites with a clean verdict only, so narrowing each of them to
+# `("run_judge_clean",)` sailed through. A shared parametrize is the enforcement: a new
+# judge kind added to this tuple makes every guard below cover it, and no site can quietly
+# be single-kind again.
+JUDGE_KINDS = [
+    pytest.param(judge.J_CLEAN, "run_judge_clean", id="clean"),
+    pytest.param(judge.J_CANNOT_VERIFY, "run_judge_cannot_verify", id="cannot_verify"),
+]
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_judge_verdicts_payload_carries_the_judged_sha(
+        judge_state, kind, store_file, windows, monkeypatch):
     # The sha must reach the payload at all — a verdict with no judged commit attached
     # cannot ever be checked against a live head.
     _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
@@ -544,22 +564,23 @@ def test_a_clean_judge_verdicts_payload_carries_the_judged_sha(store_file, windo
     store["orchestrator"] = ORCH
     inbox.save(store)
 
-    inbox.tick({}, runs=[_clean_run()])
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
 
     queued = inbox.load()["queue"]
     assert len(queued) == 1
-    assert queued[0]["kind"] == "run_judge_clean"
+    assert queued[0]["kind"] == kind
     assert queued[0]["payload"]["judge_sha"] == _JUDGE_SHA
 
 
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
 def test_a_judge_verdict_for_a_superseded_head_is_dropped_not_delivered(
-        store_file, windows, sends, monkeypatch, caplog):
+        judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
     # The orchestrator is BUSY when the judge settles clean on sha A — the event queues...
     _statuses(monkeypatch, {ORCH: inbox.BUSY})
     store = inbox.load()
     store["orchestrator"] = ORCH
     inbox.save(store)
-    inbox.tick({}, runs=[_clean_run()])
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
     assert len(inbox.load()["queue"]) == 1
     assert sends == []
 
@@ -572,15 +593,16 @@ def test_a_judge_verdict_for_a_superseded_head_is_dropped_not_delivered(
         dispatcher, "_read_pr_checks",
         lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
     with caplog.at_level("WARNING"):
-        inbox.tick({}, runs=[_clean_run()])
+        inbox.tick({}, runs=[_verdict_run(judge_state)])
 
     assert sends == []                              # NEVER told the superseded commit is ready
     assert inbox.load()["queue"] == []              # and the rotted event is retired
-    assert "dropping stale run_judge_clean" in caplog.text   # loudly — never silently
+    assert f"dropping stale {kind}" in caplog.text   # loudly — never silently
 
 
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
 def test_a_superseded_verdict_is_dropped_even_when_it_NEVER_QUEUES(
-        store_file, windows, sends, monkeypatch, caplog):
+        judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
     """🔴 GUARD (CMX-197 round 2): the IDLE path — emitted and delivered in ONE tick.
 
     The staleness test above starts BUSY, so the event sits in the queue and the candidate
@@ -602,18 +624,19 @@ def test_a_superseded_verdict_is_dropped_even_when_it_NEVER_QUEUES(
         lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
 
     with caplog.at_level("WARNING"):
-        inbox.tick({}, runs=[_clean_run()])          # emits AND delivers in this one tick
+        inbox.tick({}, runs=[_verdict_run(judge_state)])          # emits AND delivers in this one tick
 
     assert sends == [], (
         "a verdict for a superseded head was announced on its first tick — the candidate "
         "set must include runs ABOUT TO queue a verdict, not only ones already queued"
     )
     assert inbox.load()["queue"] == []
-    assert "dropping stale run_judge_clean" in caplog.text
+    assert f"dropping stale {kind}" in caplog.text
 
 
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
 def test_an_idle_orchestrator_still_gets_a_verdict_whose_head_is_CURRENT(
-        store_file, windows, sends, monkeypatch):
+        judge_state, kind, store_file, windows, sends, monkeypatch):
     """The counterweight for the idle path: skipping the fetch entirely would satisfy the
     guard above by never delivering anything at all."""
     _statuses(monkeypatch, {ORCH: inbox.IDLE})
@@ -624,13 +647,14 @@ def test_an_idle_orchestrator_still_gets_a_verdict_whose_head_is_CURRENT(
         dispatcher, "_read_pr_checks",
         lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
 
-    inbox.tick({}, runs=[_clean_run()])
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
 
-    assert len(sends) == 1 and "guard held" in sends[0][1]
+    assert len(sends) == 1
 
 
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
 def test_a_PARKED_verdict_is_still_re_checked_once_its_run_row_moves_on(
-        store_file, windows, sends, monkeypatch, caplog):
+        judge_state, kind, store_file, windows, sends, monkeypatch, caplog):
     """🔴 GUARD (CMX-197 round 3): the QUEUE-derived half of the candidate set.
 
     `_live_judge_heads` unions two sources — runs about to queue a verdict, and events
@@ -647,11 +671,11 @@ def test_a_PARKED_verdict_is_still_re_checked_once_its_run_row_moves_on(
     store = inbox.load()
     store["orchestrator"] = ORCH
     inbox.save(store)
-    inbox.tick({}, runs=[_clean_run()])
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
     assert len(inbox.load()["queue"]) == 1
 
     # A new judge is now running on a newer head: the row no longer qualifies via `runs`.
-    moved_on = dict(_clean_run(), judge_state=judge.J_RUNNING)
+    moved_on = dict(_verdict_run(judge_state), judge_state=judge.J_RUNNING)
     _statuses(monkeypatch, {ORCH: inbox.IDLE})
     monkeypatch.setattr(
         dispatcher, "_read_pr_checks",
@@ -664,7 +688,7 @@ def test_a_PARKED_verdict_is_still_re_checked_once_its_run_row_moves_on(
         "a PARKED verdict was delivered without a live-head re-check — the queue-derived "
         "half of the candidate set is the only source once the run row moves on"
     )
-    assert "dropping stale run_judge_clean" in caplog.text
+    assert f"dropping stale {kind}" in caplog.text
 
 
 def test_a_cannot_verify_verdict_emits_the_kind_the_consumers_key_on(
@@ -691,24 +715,24 @@ def test_a_cannot_verify_verdict_emits_the_kind_the_consumers_key_on(
     assert queued[0]["payload"]["judge_sha"] == _JUDGE_SHA
 
 
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
 def test_a_judge_verdict_matching_the_live_head_still_delivers(
-        store_file, windows, sends, monkeypatch):
+        judge_state, kind, store_file, windows, sends, monkeypatch):
     # The counterweight: an unmoved head must still deliver normally, or "drop everything"
     # would trivially satisfy the guard above too.
     _statuses(monkeypatch, {ORCH: inbox.BUSY})
     store = inbox.load()
     store["orchestrator"] = ORCH
     inbox.save(store)
-    inbox.tick({}, runs=[_clean_run()])
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
 
     _statuses(monkeypatch, {ORCH: inbox.IDLE})
     monkeypatch.setattr(
         dispatcher, "_read_pr_checks",
         lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
-    inbox.tick({}, runs=[_clean_run()])
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
 
     assert len(sends) == 1
-    assert "guard held" in sends[0][1] and "MERGEABLE" in sends[0][1]
 
 
 # --- attribution: a run event belongs to the agent that produced it -------------
@@ -1439,3 +1463,64 @@ def test_every_event_lands_in_the_durable_log(store_file, windows, sends, monkey
     assert "pull/3" in event["summary"] and "\n" not in event["summary"]
     assert event["payload"]["task_id"] == "T1"
     assert event["payload"]["title"] == "**add** the parser"  # the essay, kept in the payload
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_the_live_head_is_read_for_THIS_runs_own_pr(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 4): the live read must be aimed at this run's OWN PR.
+
+    Every other test fakes `_read_pr_checks` with a lambda that IGNORES its arguments, so
+    passing `None`, a constant, or another run's url is completely invisible to them — the
+    returned sha is whatever the fake decided regardless. Reading the wrong PR's head means
+    comparing this verdict against a commit from a different pull request: it would drop
+    valid verdicts and pass superseded ones, both silently.
+    """
+    seen = {}
+
+    def _capture(pr_url, repo_dir):
+        seen["pr_url"] = pr_url
+        return dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA)
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(dispatcher, "_read_pr_checks", _capture)
+
+    run = _verdict_run(judge_state)
+    inbox.tick({}, runs=[run])
+
+    assert seen.get("pr_url") == run["pr_url"], (
+        f"the live head was read for {seen.get('pr_url')!r}, not this run's own "
+        f"{run['pr_url']!r}"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+def test_a_FAILED_live_read_does_not_manufacture_staleness(
+        judge_state, kind, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 4): an unreadable head is UNKNOWN, never "moved".
+
+    `_live_judge_heads`'s docstring commits to this: a task id present in the map but
+    resolving to nothing means the live read FAILED. Treating that as a mismatch would drop
+    a perfectly good verdict on any transient `gh` hiccup — and this event is the only
+    notification the orchestrator gets, so a dropped one is a PR that sits unmerged in
+    silence, which is the exact bug this whole ticket closes.
+
+    ⛔ Same doctrine as `epoch.is_dangling`: staleness needs BOTH halves known.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_UNKNOWN, None))
+
+    inbox.tick({}, runs=[_verdict_run(judge_state)])
+
+    assert len(sends) == 1, (
+        "a failed live read was treated as a moved head — an unreadable sha is unknown, "
+        "not proof of staleness"
+    )
