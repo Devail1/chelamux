@@ -797,6 +797,25 @@ def test_upstream_synced_status_never_fetches(monkeypatch):
     assert calls == [False]
 
 
+def test_services_current_status_calls_the_real_detector(monkeypatch):
+    """The rest of this suite monkeypatches `_services_current_status` itself, which
+    proves the fact's report/read logic but nothing about whether that seam is actually
+    wired to `update.services_running_stale_code` — a stub returning a fixed all-clear
+    `ServiceFreshness` in its place would pass every one of those tests unnoticed. This
+    one patches `update.services_running_stale_code` instead and calls the seam
+    function directly, so it fails if the wiring is ever severed."""
+    calls = []
+
+    def fake_services_running_stale_code(*args, **kwargs):
+        calls.append((args, kwargs))
+        return update.ServiceFreshness(ok=True, stale=["chela-dashboard"], commit_epoch=1000)
+
+    monkeypatch.setattr(update, "services_running_stale_code", fake_services_running_stale_code)
+    status = runtime_truth._services_current_status()
+    assert calls == [((), {})]
+    assert status.stale == ["chela-dashboard"]
+
+
 def test_upstream_synced_is_silent_when_no_upstream_is_configured(fleet, monkeypatch):
     """A branch with nothing to compare against (never pushed) is not a bug — just
     nothing to report, same as `commits_behind`'s own `ok=True, error=...` contract."""
