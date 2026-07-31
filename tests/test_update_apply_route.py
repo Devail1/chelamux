@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from chela import update
+from chela import dispatcher, update
 from chela.dashboard import app as dash
 
 
@@ -70,6 +70,46 @@ def test_apply_starts_a_background_run_when_behind(client, monkeypatch):
     # the request thread, which is the entire point (apply() can restart this process).
     assert started.wait(timeout=2), "update.apply() was never invoked"
     finished.set()
+
+
+def test_apply_refuses_while_a_dispatched_run_is_in_flight(client, monkeypatch):
+    """The brief's guard: a dispatched agent run (claimed/running), not a second click of
+    this same route — those are separate hazards with separate tests."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    monkeypatch.setattr(dispatcher, "list_runs",
+                        lambda: [{"task_id": "cmx-199-abc12", "status": "running"}])
+    calls = []
+    monkeypatch.setattr(update, "apply", lambda *a, **k: calls.append("apply"))
+
+    resp = client.post("/api/update/apply")
+
+    assert resp.status_code == 409
+    data = resp.get_json()
+    assert data["ok"] is False
+    assert "cmx-199-abc12" in data["error"]
+    # Never queued, never applied — apply() must not run now or later.
+    time.sleep(0.05)
+    assert calls == []
+
+
+def test_apply_proceeds_when_no_dispatched_run_is_active(client, monkeypatch):
+    """Counterweight to the guard above: a run table that's empty or all-terminal must
+    not make the route refuse unconditionally."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    monkeypatch.setattr(dispatcher, "list_runs",
+                        lambda: [{"task_id": "cmx-198-old1", "status": "done"},
+                                 {"task_id": "cmx-197-old2", "status": "failed"}])
+    started = threading.Event()
+    monkeypatch.setattr(update, "apply", lambda: (started.set(), update.ApplyResult(
+        ok=True, step="done", behind_before=3))[1])
+
+    resp = client.post("/api/update/apply")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["started"] is True
+    assert started.wait(timeout=2), "update.apply() was never invoked"
 
 
 def test_apply_refuses_a_second_run_while_one_is_in_flight(client, monkeypatch):

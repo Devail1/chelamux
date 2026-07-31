@@ -1917,6 +1917,9 @@ def api_update_apply():
     flushing the HTTP response. Returns immediately once it has confirmed there is
     something to do; the actual outcome lands in the daemon/dashboard log, not this
     response.
+
+    Refuses outright — no queueing — while any dispatched run is `claimed`/`running`:
+    the restart this triggers would orphan it mid-flight.
     """
     try:
         status = update.commits_behind(fetch=False)
@@ -1926,6 +1929,18 @@ def api_update_apply():
         return jsonify({"ok": False, "error": status.error}), 400
     if status.behind == 0:
         return jsonify({"ok": True, "started": False, "detail": "already up to date"})
+
+    # CMX-199 rework: `chela update` restarts chela-daemon, and a mid-run restart
+    # orphans any dispatched agent it interrupts — a hazard entirely separate from the
+    # apply-vs-apply race the lock below guards. Refuse outright rather than queue: a
+    # deferred update that fires when the run ends is a restart nobody is watching for.
+    in_flight = [r["task_id"] for r in dispatcher.list_runs()
+                 if r.get("status") in dispatcher.ACTIVE_STATUSES]
+    if in_flight:
+        return jsonify({
+            "ok": False,
+            "error": f"a dispatched run is in flight: {', '.join(in_flight)}",
+        }), 409
 
     if not _update_apply_lock.acquire(blocking=False):
         return jsonify({"ok": False, "error": "an update is already running"}), 409
