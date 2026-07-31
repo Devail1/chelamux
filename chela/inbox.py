@@ -973,6 +973,12 @@ def run_events(runs: list[dict], seen: dict[str, str],
             # for hours until a human happened to look.
             payload["judge_state"] = judge_state
             payload["judge_detail"] = run.get("judge_detail")
+            # ⛔ CMX-197 review: a verdict is only meaningful against the commit it judged.
+            # This event can sit in the queue for a while behind a busy orchestrator, and
+            # the head can move in the meantime (a rework agent, a human's own push, a
+            # `chela reopen`) — see `stale_reason`'s live-head check, which re-checks this
+            # AT DELIVERY, not here.
+            payload["judge_sha"] = run.get("judge_sha")
             pr = run.get("pr_url")
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
             if judge_state == judge.J_CLEAN:
@@ -1068,7 +1074,8 @@ def status_snapshot() -> dict[str, str]:
     return agent_manager.status_by_wid()
 
 
-def stale_reason(event: dict, runs: list[dict]) -> str | None:
+def stale_reason(event: dict, runs: list[dict],
+                 live_heads: dict[str, str] | None = None) -> str | None:
     """Why this queued event is no longer TRUE — or None if it still is.
 
     A queued event is a claim about the past. Delivery is deferred until the
@@ -1082,12 +1089,31 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
     already fetched: no network, no DB read, no I/O of any kind, so this stays safe to
     call inside the store lock. Window events (finished/died/blocked) assert something
     that already happened and are left alone.
+
+    ``live_heads`` is the one exception to "no I/O here" — it is a ``{task_id: sha}`` map
+    the CALLER fetched live from GitHub (:func:`_live_judge_heads`), OUTSIDE this lock,
+    the same way ``runs``/``windows``/``statuses`` are: slow work happens before
+    :func:`locked_store` is entered, never inside it. A judge verdict
+    (``run_judge_clean``/``run_judge_cannot_verify``) is a claim about a SPECIFIC commit,
+    not just about the run's status — ``request_changes``/``merge`` never touch ``status``
+    on a clean verdict, so a push that supersedes the judged commit rots the verdict
+    while the status-based checks above stay silent (CMX-197 review: "clean and
+    MERGEABLE" about a commit that may no longer be the head — the merge gate itself
+    (``dispatcher.py`` ``reopen``'s new-commit gate) already treats an unrefreshed
+    cached sha as untrustworthy for exactly this reason). ``live_heads`` defaults to
+    ``None`` (not "empty dict") so a caller that never fetched it — a unit test exercising
+    only the status-staleness path — leaves this check completely inert, rather than
+    having every judge event read as unverifiable and drop. A task id that IS present in
+    a supplied map but resolves to nothing (the live read failed) is treated the same
+    way: best-effort, like every other GitHub read in this codebase — it does not itself
+    manufacture staleness, it only catches an ACTUAL, OBSERVED mismatch.
     """
     kind = event.get("kind")
     if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested",
                      "run_judge_clean", "run_judge_cannot_verify"):
         return None
-    task_id = (event.get("payload") or {}).get("task_id")
+    payload = event.get("payload") or {}
+    task_id = payload.get("task_id")
     if not task_id:
         return None                        # legacy/unstructured event — deliver it
     run = next((r for r in runs if r.get("task_id") == task_id), None)
@@ -1106,6 +1132,12 @@ def stale_reason(event: dict, runs: list[dict]) -> str | None:
             # The row can lag the PR by a reconcile tick: pr_state is refreshed before
             # awaiting_review → done. A merged PR is not awaiting review either way.
             return f"PR is {pr_state}"
+        if kind in ("run_judge_clean", "run_judge_cannot_verify") and live_heads is not None:
+            judged_sha = payload.get("judge_sha")
+            live_sha = live_heads.get(task_id)
+            if judged_sha and live_sha and live_sha != judged_sha:
+                return (f"PR head moved past the judged commit ({judged_sha[:12]} -> "
+                        f"{live_sha[:12]}) — the verdict no longer applies to the current head")
     elif kind == "run_failed" and status != "failed":
         return f"run is now {status!r}, not failed"
     elif kind == "run_needs_human":
@@ -1236,7 +1268,8 @@ def raise_alarms(alarms: list[dict]) -> None:
 def deliver(store: dict, statuses: dict[str, str],
             runs: list[dict] | None = None,
             now_epoch: str | None = None,
-            alarms: list[dict] | None = None) -> list[dict]:
+            alarms: list[dict] | None = None,
+            live_heads: dict[str, str] | None = None) -> list[dict]:
     """Push queued events into the orchestrator — ONLY if its window is ``idle``.
 
     The gate is a strict equality against ``idle``. ``waiting`` must never be written
@@ -1263,7 +1296,11 @@ def deliver(store: dict, statuses: dict[str, str],
     Every event is re-validated against the CURRENT runs (:func:`stale_reason`) on its
     way out; one that has rotted in the queue is dropped and LOGGED — never silently,
     or a real event lost to a bug becomes undebuggable. Only the event's ``summary``
-    is pushed: the payload is the record, not the notification.
+    is pushed: the payload is the record, not the notification. ``live_heads`` is passed
+    straight through to :func:`stale_reason` — it was fetched live from GitHub by the
+    caller BEFORE this lock was taken (:func:`_live_judge_heads`), so a judge verdict
+    whose PR has since moved past the commit it judged is caught here too, not just a
+    verdict whose run status moved on.
 
     Returns the events actually delivered (each exactly once — a delivered event is
     popped from the durable queue before we return, so no tick can re-send it).
@@ -1287,7 +1324,7 @@ def deliver(store: dict, statuses: dict[str, str],
     sent: list[dict] = []
     while store["queue"] and len(sent) < MAX_DELIVERIES_PER_TICK:
         event = store["queue"][0]
-        stale = stale_reason(event, runs)
+        stale = stale_reason(event, runs, live_heads)
         if stale:
             store["queue"].pop(0)
             log.warning("inbox: dropping stale %s (%s) — %s", event.get("kind"),
@@ -1390,6 +1427,57 @@ def _announce_heal(old: str | None, wid: str, session: str) -> None:
         {"old": old, "wid": wid, "session": session}, wid=wid, session_id=session)
 
 
+def _live_judge_heads(runs: list[dict], queue: list[dict]) -> dict[str, str]:
+    """``{task_id: live head sha}`` for every judge verdict that could still need delivering.
+
+    ⛔ CMX-197 review: a queued ``run_judge_clean``/``run_judge_cannot_verify`` event is a
+    claim about a SPECIFIC commit, and the queue can sit behind a busy orchestrator for a
+    while — long enough for a rework agent, a human's own push, or a ``chela reopen`` to
+    move the PR's head past the one the judge actually looked at. Reading GitHub is the
+    only way to know that happened, so it is done HERE — outside :func:`locked_store`,
+    the same way ``runs``/``windows``/``statuses`` are (:func:`tick`'s own rule: slow work
+    never happens inside that lock) — and via :func:`chela.dispatcher._read_pr_checks`,
+    the SAME live read the merge gate's own new-commit guard uses (``dispatcher.reopen``),
+    never the row's own ``pr_head_sha``/``judge_sha`` columns: those are exactly the
+    caches whose staleness is the bug this closes.
+
+    Scoped to two sets of runs, so a quiet fleet costs zero extra ``gh`` calls and a run
+    whose verdict already delivered costs nothing forever after: runs a judge event is
+    ALREADY QUEUED for (``queue``, so a long-parked event keeps getting re-checked every
+    tick it sits there), union runs whose ``awaiting_review`` + settled ``judge_state``
+    is about to freshly queue ONE this very tick (mirrors :func:`run_events`'s own dedup
+    ``mark``, so a first-tick delivery is checked too, not just a re-delivery).
+    """
+    from chela import dispatcher
+    candidates = {
+        (e.get("payload") or {}).get("task_id")
+        for e in queue
+        if e.get("kind") in ("run_judge_clean", "run_judge_cannot_verify")
+    }
+    for run in runs:
+        task_id = run.get("task_id")
+        if not task_id or run.get("status") != "awaiting_review":
+            continue
+        judge_state = run.get("judge_state") or ""
+        if judge_state in (judge.J_CLEAN, judge.J_CANNOT_VERIFY):
+            candidates.add(task_id)
+    candidates.discard(None)
+    if not candidates:
+        return {}
+    runs_by_id = {r.get("task_id"): r for r in runs}
+    heads: dict[str, str] = {}
+    for task_id in candidates:
+        run = runs_by_id.get(task_id)
+        if run is None:
+            continue
+        wf_path = run.get("workflow_path")
+        repo_dir = str(Path(wf_path).parent) if wf_path else None
+        ci = dispatcher._read_pr_checks(run.get("pr_url"), repo_dir)
+        if ci.head_sha:
+            heads[task_id] = ci.head_sha
+    return heads
+
+
 def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]:
     """One daemon pass: scan for events, queue them, deliver what the gate allows.
 
@@ -1418,7 +1506,13 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # session exited and came back under a new `@N`), re-resolve it from the session's identity
     # instead of holding the queue until a human re-runs `chela watch` (CMX-82). Resolved OUTSIDE
     # the lock — it reads tmux + /proc — and applied under it, where the address is re-checked.
-    heal = resolve_heal(load(), statuses, now_epoch)
+    pre_store = load()
+    heal = resolve_heal(pre_store, statuses, now_epoch)
+    # The live GitHub head of every judge verdict that could still need delivering —
+    # also read OUTSIDE the lock (`gh` is slow), also before this tick's own new events
+    # are computed, since a verdict about to be freshly queued needs the same check as
+    # one that has been sitting in the queue for ticks (see `_live_judge_heads`).
+    live_heads = _live_judge_heads(runs, pre_store.get("queue", []))
     alarms: list[dict] = []                # raised inside the lock, published outside it
 
     with locked_store() as store:
@@ -1445,9 +1539,10 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
             log.info("inbox: %s %s (%s)", "resolved" if event.get("silent") else "queued",
                      event["kind"], event.get("wid") or "run")
 
-        # `runs` is the snapshot fetched above, outside the lock — re-validating against
-        # it is a list scan, so the critical section stays as short as it was.
-        deliver(store, statuses, runs, now_epoch=now_epoch, alarms=alarms)
+        # `runs` and `live_heads` are both fetched above, outside the lock — re-validating
+        # against them is a dict/list scan, so the critical section stays as short as it was.
+        deliver(store, statuses, runs, now_epoch=now_epoch, alarms=alarms,
+               live_heads=live_heads)
 
     # A self-heal is announced once, OUTSIDE the lock (an event_log append is another file's
     # I/O): the address just recovered from a renumbering, and the held queue — delivered above

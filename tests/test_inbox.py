@@ -517,6 +517,88 @@ def test_a_judge_verdict_event_goes_stale_once_the_run_moves_on(store_file):
     assert "changes_requested" in inbox.stale_reason(event, moved_on)
 
 
+# --- CMX-197 rework: a verdict is only meaningful against the commit it judged --------
+#
+# The status-staleness check above catches a run that moved OFF awaiting_review. It says
+# nothing about a run that stays put while its PR's head moves PAST the judged commit — a
+# rework agent, a human's own fix, or `chela reopen` can all do that, and the queue delay
+# (the whole point of the inbox: hold until the orchestrator is idle) is exactly the
+# window in which it happens. That must not read as "clean and MERGEABLE" about a commit
+# that is no longer the head.
+
+_JUDGE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_SUPERSEDING_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+
+def _clean_run(**over):
+    return {"task_id": "T1", "title": "x", "status": "awaiting_review",
+            "pr_url": "https://github.com/x/y/pull/9", "judge_state": "clean",
+            "judge_sha": _JUDGE_SHA, **over}
+
+
+def test_a_clean_judge_verdicts_payload_carries_the_judged_sha(store_file, windows, monkeypatch):
+    # The sha must reach the payload at all — a verdict with no judged commit attached
+    # cannot ever be checked against a live head.
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_clean_run()])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "run_judge_clean"
+    assert queued[0]["payload"]["judge_sha"] == _JUDGE_SHA
+
+
+def test_a_judge_verdict_for_a_superseded_head_is_dropped_not_delivered(
+        store_file, windows, sends, monkeypatch, caplog):
+    # The orchestrator is BUSY when the judge settles clean on sha A — the event queues...
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_clean_run()])
+    assert len(inbox.load()["queue"]) == 1
+    assert sends == []
+
+    # ...and by the time it goes idle, the PR's LIVE head has moved past the judged
+    # commit — the run's own status never changed, so the status-staleness check alone
+    # would wave this straight through and hand the orchestrator "clean and MERGEABLE"
+    # about a commit nobody judged.
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[_clean_run()])
+
+    assert sends == []                              # NEVER told the superseded commit is ready
+    assert inbox.load()["queue"] == []              # and the rotted event is retired
+    assert "dropping stale run_judge_clean" in caplog.text   # loudly — never silently
+
+
+def test_a_judge_verdict_matching_the_live_head_still_delivers(
+        store_file, windows, sends, monkeypatch):
+    # The counterweight: an unmoved head must still deliver normally, or "drop everything"
+    # would trivially satisfy the guard above too.
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_clean_run()])
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
+    inbox.tick({}, runs=[_clean_run()])
+
+    assert len(sends) == 1
+    assert "guard held" in sends[0][1] and "MERGEABLE" in sends[0][1]
+
+
 # --- attribution: a run event belongs to the agent that produced it -------------
 #
 # The Feed groups the log into per-agent LANES, and a lane is only as good as the `wid`
