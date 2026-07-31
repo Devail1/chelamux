@@ -644,6 +644,50 @@ def _diagnose_red_baseline(
             "This branch's own commits are what turned the suite red")
 
 
+_PROSE_SUFFIXES = {".md", ".mdx", ".rst", ".txt"}
+_PROSE_BASENAMES = {"LICENSE", "NOTICE", "CHANGELOG", "AUTHORS", "CODEOWNERS"}
+
+
+def _is_prose_path(name: str) -> bool:
+    p = Path(name)
+    return p.suffix.lower() in _PROSE_SUFFIXES or p.name in _PROSE_BASENAMES
+
+
+def _docs_only_diff(worktree: Path, base_branch: str) -> bool | None:
+    """Whether EVERY file this PR touches (vs ``base_branch``) is prose, not code.
+
+    ⚖️📄 CMX-205. A docs-only PR has no guard for a mutation to corrupt — ``cannot_verify``
+    on it is STRUCTURAL (there was nothing to check), not a finding (something went wrong).
+    Before this, both cases wrote the same "the judge proposed NO experiments" sentence, so a
+    human reading it could not tell "this PR is prose, act on it" from "this PR has code and
+    the judge inexplicably wrote nothing" apart — the routine, expected case and the one
+    worth investigating looked identical, which is exactly how a bypass stops being read.
+
+    Returns ``None`` — an unknown, never read as yes or no — when it cannot tell: no
+    ``base_branch``, an unresolvable ref, a git failure, or an empty diff.
+    """
+    if not base_branch:
+        return None
+    ref = f"origin/{base_branch}"
+    resolved = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True, errors="replace",
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return None
+    base_sha = resolved.stdout.strip()
+    diff = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--name-only", f"{base_sha}...HEAD"],
+        capture_output=True, text=True, errors="replace",
+    )
+    if diff.returncode != 0:
+        return None
+    files = [f for f in diff.stdout.splitlines() if f.strip()]
+    if not files:
+        return None
+    return all(_is_prose_path(f) for f in files)
+
+
 def run_experiments(
     worktree: Path,
     test_cmd: str,
@@ -672,10 +716,15 @@ def run_experiments(
       predates the PR) or green (this branch's own doing) — see
       :func:`_diagnose_red_baseline`;
     * **no experiments at all** — nothing was checked. That is not a clean bill of health.
+      ⚖️📄 CMX-205: given ``base_branch``, the report says WHETHER this is because the PR is
+      DOCS-ONLY (structurally nothing to mutate — see :func:`_docs_only_diff`) or because the
+      judge saw code and proposed nothing anyway (worth investigating) — the two used to read
+      as the same unknown.
 
-    ``base_branch`` is optional and used ONLY to diagnose a red baseline (never to change
-    whether the run is ``cannot_verify``, and never touched if the baseline is green) — pass
-    "" (the default) when it is not known, and the report says so instead of guessing.
+    ``base_branch`` is optional and used to diagnose a red baseline and a docs-only diff
+    (never to change whether the run is ``cannot_verify``, and never touched when neither
+    diagnosis applies) — pass "" (the default) when it is not known, and the report says so
+    instead of guessing.
     """
     report = Report()
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -690,11 +739,21 @@ def run_experiments(
         return report
 
     if not isinstance(items, list) or not items:
-        report.cannot_verify = (
-            "the judge proposed NO experiments — nothing was corrupted, so nothing was "
-            "proven. ⛔ Unknown is never a pass: this is not a clean bill of health, it is "
-            "an unreviewed PR."
-        )
+        if _docs_only_diff(worktree, base_branch):
+            report.cannot_verify = (
+                "the judge proposed NO experiments, AND this PR is DOCS-ONLY (every file it "
+                f"changes vs `origin/{base_branch}` is prose, not code) — there is "
+                "structurally no guard here for a mutation to corrupt. ⛔ This `cannot_verify` "
+                "is not a finding about the PR, the judge, or the suite: it still blocks "
+                "AUTONOMOUS merge (unknown ≠ safe), but it needs a human's read of the prose "
+                "itself, not a rework round."
+            )
+        else:
+            report.cannot_verify = (
+                "the judge proposed NO experiments — nothing was corrupted, so nothing was "
+                "proven. ⛔ Unknown is never a pass: this is not a clean bill of health, it is "
+                "an unreviewed PR."
+            )
         return report
 
     if len(items) > MAX_EXPERIMENTS:
