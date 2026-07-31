@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from chela import agent_manager, dispatcher, event_log, inbox, sessions, transcripts
+from chela import agent_manager, dispatcher, event_log, inbox, judge, sessions, transcripts
 
 # Captured at collection time, before the `no_transcript_evidence` autouse fixture
 # (below) overwrites `sessions.transcript_for_window` on every test — the CMX-191
@@ -627,6 +627,68 @@ def test_an_idle_orchestrator_still_gets_a_verdict_whose_head_is_CURRENT(
     inbox.tick({}, runs=[_clean_run()])
 
     assert len(sends) == 1 and "guard held" in sends[0][1]
+
+
+def test_a_PARKED_verdict_is_still_re_checked_once_its_run_row_moves_on(
+        store_file, windows, sends, monkeypatch, caplog):
+    """🔴 GUARD (CMX-197 round 3): the QUEUE-derived half of the candidate set.
+
+    `_live_judge_heads` unions two sources — runs about to queue a verdict, and events
+    ALREADY queued. Round 2 guarded the first. The second is the only source once the run
+    row itself stops qualifying, and its docstring promises exactly that: a long-parked
+    verdict "keeps getting re-checked every tick it sits there".
+
+    Realistic shape: the verdict queues behind a busy orchestrator, then a NEW judge starts
+    on a newer head, so the row's `judge_state` goes back to running. The runs-branch now
+    skips it — and if the queue-branch is the thing that is broken, the parked event sails
+    through with no live-head check at all and announces a commit two heads stale.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    inbox.tick({}, runs=[_clean_run()])
+    assert len(inbox.load()["queue"]) == 1
+
+    # A new judge is now running on a newer head: the row no longer qualifies via `runs`.
+    moved_on = dict(_clean_run(), judge_state=judge.J_RUNNING)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[moved_on])
+
+    assert sends == [], (
+        "a PARKED verdict was delivered without a live-head re-check — the queue-derived "
+        "half of the candidate set is the only source once the run row moves on"
+    )
+    assert "dropping stale run_judge_clean" in caplog.text
+
+
+def test_a_cannot_verify_verdict_emits_the_kind_the_consumers_key_on(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 3): the EMITTED string for the cannot-verify kind.
+
+    `run_judge_clean`'s emitted kind is asserted; its sibling's was not. The same literal is
+    keyed on by `stale_reason`, the Feed's lane model and the Decisions panel's subscription
+    — so a rename here silently unhooks the verdict from every consumer at once, and each of
+    those consumers' own tests keep passing because they assert their OWN copy of the string.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[dict(_clean_run(), judge_state=judge.J_CANNOT_VERIFY)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "run_judge_cannot_verify", (
+        f"the emitted kind must be the literal every consumer keys on, got {queued[0]['kind']!r}"
+    )
+    assert queued[0]["payload"]["judge_sha"] == _JUDGE_SHA
 
 
 def test_a_judge_verdict_matching_the_live_head_still_delivers(

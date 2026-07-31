@@ -204,15 +204,20 @@ test('a gone lane holding an UNANSWERED review is NOT buried (CMX-62)', () => {
     assert.deepEqual(group.buried.map(l => l.wid), ['@8']);   // merged → the graveyard
 });
 
-test('a judge verdict alone (no run_review) still keeps a gone lane open (CMX-197)', () => {
-    // A daemon restarted mid-judge sees the verdict BEFORE it ever sees the plain
-    // `awaiting_review` edge — that lane must not fall into the graveyard either.
-    const events = [ev('run_judge_clean', '@7', { payload: { task_id: 't-open' } })];
-    const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);
-    const group = splitGone(lanes, ['t-open']);
-    assert.deepEqual(group.lanes.map(l => l.wid), ['@7']);
-    assert.equal(group.lanes[0].openReview, true);
-});
+// 🔴 The comment on `buildLanes`'s guard says "the judge kinds", PLURAL — a daemon
+// restarted mid-judge may see EITHER verdict before the plain `awaiting_review` edge. Both
+// are asserted, in one table, so the pair cannot drift apart: covering only the kind a
+// reviewer happened to name is how the sibling half stays unguarded (CMX-197 round 3).
+for (const kind of ['run_judge_clean', 'run_judge_cannot_verify']) {
+    test(`a ${kind} verdict alone (no run_review) still keeps a gone lane open (CMX-197)`, () => {
+        const events = [ev(kind, '@7', { payload: { task_id: 't-open' } })];
+        const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);
+        const group = splitGone(lanes, ['t-open']);
+        assert.deepEqual(group.lanes.map(l => l.wid), ['@7']);
+        assert.equal(group.lanes[0].openReview, true,
+            `${kind} must keep the lane out of the graveyard`);
+    });
+}
 
 test('the review survives the class filter — turning `run` off must not bury it', () => {
     // The run_review row itself is filtered out of the lane, but the lane still knows it
