@@ -477,3 +477,22 @@ test('clicking a click-through row closes the popover itself, since the dismisse
         'opening a ticket from a row must close the decisions popover itself — the row click never reaches ' +
         'document (it is inside #decisions-menu), so nothing else will close it');
 });
+
+
+// 🔴 GUARD (CMX-197 round 2): the panel must SUBSCRIBE to the judge kinds.
+//
+// `DECISION_TYPES` is what the scoped /api/log fetch asks for (`qs.append('type', t)`), so
+// a kind missing from it is a kind the Decisions panel never receives — no matter how
+// correctly the inbox emits it. Rename either entry and the verdict this whole ticket
+// exists to surface silently stops reaching the one panel built to show decisions.
+test('🔴 GUARD: the decisions panel subscribes to both judge verdict kinds', () => {
+    assert.ok(decisions.DECISION_TYPES.includes('run_judge_clean'),
+        `run_judge_clean must be subscribed, got: ${decisions.DECISION_TYPES.join(',')}`);
+    assert.ok(decisions.DECISION_TYPES.includes('run_judge_cannot_verify'),
+        `run_judge_cannot_verify must be subscribed, got: ${decisions.DECISION_TYPES.join(',')}`);
+    // ...and the kinds that already worked are still there — this ticket must not trade
+    // one silent verdict for another.
+    for (const t of ['run_review', 'run_changes_requested', 'run_needs_human']) {
+        assert.ok(decisions.DECISION_TYPES.includes(t), `${t} lost its subscription`);
+    }
+});

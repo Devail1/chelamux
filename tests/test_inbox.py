@@ -579,6 +579,56 @@ def test_a_judge_verdict_for_a_superseded_head_is_dropped_not_delivered(
     assert "dropping stale run_judge_clean" in caplog.text   # loudly — never silently
 
 
+def test_a_superseded_verdict_is_dropped_even_when_it_NEVER_QUEUES(
+        store_file, windows, sends, monkeypatch, caplog):
+    """🔴 GUARD (CMX-197 round 2): the IDLE path — emitted and delivered in ONE tick.
+
+    The staleness test above starts BUSY, so the event sits in the queue and the candidate
+    set can be derived from `queue`. With an IDLE orchestrator there is no such moment: the
+    verdict is emitted and delivered inside the same tick, the queue is empty the whole
+    time, and a candidate set built from `queue` alone is EMPTY — so no live head is
+    fetched, no staleness check runs, and the superseded commit is announced as "clean and
+    MERGEABLE" on its very first appearance.
+
+    ⭐ That is the bug this whole ticket exists to prevent, shipping through the one path a
+    healthy fleet actually takes: an idle orchestrator is the NORMAL case.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _SUPERSEDING_SHA))
+
+    with caplog.at_level("WARNING"):
+        inbox.tick({}, runs=[_clean_run()])          # emits AND delivers in this one tick
+
+    assert sends == [], (
+        "a verdict for a superseded head was announced on its first tick — the candidate "
+        "set must include runs ABOUT TO queue a verdict, not only ones already queued"
+    )
+    assert inbox.load()["queue"] == []
+    assert "dropping stale run_judge_clean" in caplog.text
+
+
+def test_an_idle_orchestrator_still_gets_a_verdict_whose_head_is_CURRENT(
+        store_file, windows, sends, monkeypatch):
+    """The counterweight for the idle path: skipping the fetch entirely would satisfy the
+    guard above by never delivering anything at all."""
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA))
+
+    inbox.tick({}, runs=[_clean_run()])
+
+    assert len(sends) == 1 and "guard held" in sends[0][1]
+
+
 def test_a_judge_verdict_matching_the_live_head_still_delivers(
         store_file, windows, sends, monkeypatch):
     # The counterweight: an unmoved head must still deliver normally, or "drop everything"
