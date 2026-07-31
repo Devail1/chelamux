@@ -16,9 +16,14 @@ from __future__ import annotations
 
 
 from chela.restore import (
+    ARCHIVED,
+    LEFT_TO_DAEMON,
+    RACED,
+    REVIVED,
     Orphan,
     Verdict,
     _classify,
+    apply,
     plan,
     scan_all,
     scan_runs,
@@ -464,3 +469,167 @@ def test_an_absent_task_id_still_identifies_the_row_as_unknown():
     assert all(o.label.startswith("?") for o in orphans), (
         f"a row with no task id must say so, got {[o.label for o in orphans]}"
     )
+
+
+# --------------------------------------------------------------------------
+# apply — the write half (CMX-196): REVIVABLE re-stamped, MANUAL archived-then-removed
+# --------------------------------------------------------------------------
+
+def _writers(**overrides):
+    """A DI kit for `apply()` recording every call it makes, in order — `calls` is the
+    single source of truth every ordering/skip guard below reads."""
+    calls = []
+    kit = {
+        "readdress_orchestrator": lambda wid, stamped, new: (
+            calls.append(("readdress", wid, stamped, new)), {"ok": True})[1],
+        "unregister_orchestrator": lambda wid, stamped: (
+            calls.append(("unregister", wid, stamped)), {"ok": True})[1],
+        "rekey_session": lambda wid, new, sid, stamped: (
+            calls.append(("rekey", wid, new, sid, stamped)), True)[1],
+        "remove_session": lambda wid, sid, stamped: (
+            calls.append(("remove", wid, sid, stamped)), True)[1],
+        "archive": lambda entry: calls.append(("archive", entry)),
+    }
+    kit.update(overrides)
+    return calls, kit
+
+
+def _revivable(store, wid="@1", new_wid="@42"):
+    return Verdict(store=store, wid=wid, stamped_epoch=OLD, verdict="REVIVABLE",
+                   session_id="sid-live", new_wid=new_wid, cwd="/home/x", label="l")
+
+
+def _manual(store, wid="@1"):
+    return Verdict(store=store, wid=wid, stamped_epoch=OLD, verdict="MANUAL",
+                   session_id="sid-dead", new_wid=None, cwd="/home/x", label="l")
+
+
+def test_apply_skips_telegram_bindings_entirely_never_writing_anything():
+    calls, kit = _writers()
+    v = _revivable("telegram.bindings")
+
+    results = apply([v], **kit)
+
+    assert calls == [], "telegram-bindings.json must NEVER be written by apply()"
+    assert len(results) == 1 and results[0].action == LEFT_TO_DAEMON
+
+
+def test_apply_skips_a_MANUAL_telegram_bindings_row_too():
+    """The counterweight: the skip must not be conditioned on the verdict, only the store —
+    a MANUAL bindings row must be just as untouched as a REVIVABLE one."""
+    calls, kit = _writers()
+    v = _manual("telegram.bindings")
+
+    results = apply([v], **kit)
+
+    assert calls == []
+    assert results[0].action == LEFT_TO_DAEMON
+
+
+def test_apply_revives_the_inbox_orchestrator_arm_via_readdress():
+    calls, kit = _writers()
+    v = _revivable("inbox.orchestrator", wid="@1", new_wid="@42")
+
+    results = apply([v], **kit)
+
+    assert calls == [("readdress", "@1", OLD, "@42")]
+    assert results[0].action == REVIVED
+
+
+def test_apply_revives_the_session_ids_arm_via_rekey():
+    calls, kit = _writers()
+    v = _revivable("session-ids", wid="@5", new_wid="@42")
+
+    results = apply([v], **kit)
+
+    assert calls == [("rekey", "@5", "@42", "sid-live", OLD)]
+    assert results[0].action == REVIVED
+
+
+def test_apply_reports_RACED_when_the_readdress_writer_declines():
+    calls, kit = _writers(readdress_orchestrator=lambda *a: {"ok": False})
+    v = _revivable("inbox.orchestrator")
+
+    results = apply([v], **kit)
+
+    assert results[0].action == RACED
+
+
+def test_apply_reports_RACED_when_the_rekey_writer_declines():
+    calls, kit = _writers(rekey_session=lambda *a: False)
+    v = _revivable("session-ids")
+
+    results = apply([v], **kit)
+
+    assert results[0].action == RACED
+
+
+def test_apply_archives_the_inbox_orchestrator_arm_THEN_unregisters():
+    calls, kit = _writers()
+    v = _manual("inbox.orchestrator", wid="@1")
+
+    results = apply([v], **kit)
+
+    assert [c[0] for c in calls] == ["archive", "unregister"], (
+        "archive must land BEFORE the row is removed — reversed, a crash in between loses "
+        "the row with no trace"
+    )
+    archive_entry = calls[0][1]
+    assert archive_entry == {"store": "inbox.orchestrator", "wid": "@1",
+                              "session_id": "sid-dead", "cwd": "/home/x",
+                              "label": "l", "stamped_epoch": OLD}
+    assert calls[1] == ("unregister", "@1", OLD)
+    assert results[0].action == ARCHIVED
+
+
+def test_apply_archives_the_session_ids_arm_THEN_removes():
+    calls, kit = _writers()
+    v = _manual("session-ids", wid="@5")
+
+    results = apply([v], **kit)
+
+    assert [c[0] for c in calls] == ["archive", "remove"]
+    assert calls[1] == ("remove", "@5", "sid-dead", OLD)
+    assert results[0].action == ARCHIVED
+
+
+def test_apply_still_reports_RACED_after_archiving_when_removal_declines():
+    """🔴 The archive already landed (it always does, unconditionally, before removal is
+    even attempted) — but the row itself did not move, so the result must say RACED, not
+    ARCHIVED, or an operator reading the report would believe the live store is clean."""
+    calls, kit = _writers(remove_session=lambda *a: False)
+    v = _manual("session-ids")
+
+    results = apply([v], **kit)
+
+    assert any(c[0] == "archive" for c in calls), "the archive call must still have happened"
+    assert results[0].action == RACED
+
+
+def test_apply_processes_every_verdict_in_order_one_result_each():
+    calls, kit = _writers()
+    verdicts = [_revivable("inbox.orchestrator", wid="@1"),
+                _manual("session-ids", wid="@5"),
+                _revivable("telegram.bindings", wid="@2")]
+
+    results = apply(verdicts, **kit)
+
+    assert len(results) == 3
+    assert [r.verdict for r in results] == verdicts
+    assert [r.action for r in results] == [REVIVED, ARCHIVED, LEFT_TO_DAEMON]
+
+
+def test_apply_defaults_wire_to_the_real_inbox_sessionids_roster_modules():
+    """🔴 GUARD (signature scan, same shape as round 8's `plan()` DI-default guard): with
+    NO kwargs passed, `apply()`'s defaults must be the real production writers — the
+    ones `chela restore --apply` actually calls — not a silently-inert no-op."""
+    import inspect
+
+    sig = inspect.signature(apply)
+    from chela import inbox, roster, sessionids
+
+    assert sig.parameters["readdress_orchestrator"].default is inbox.readdress
+    assert sig.parameters["unregister_orchestrator"].default is inbox.unregister_dangling
+    assert sig.parameters["rekey_session"].default is sessionids.rekey
+    assert sig.parameters["remove_session"].default is sessionids.remove
+    assert sig.parameters["archive"].default is roster.archive

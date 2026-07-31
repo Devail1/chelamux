@@ -493,6 +493,61 @@ def unregister(wid: str) -> dict:
     return {"ok": True, "wid": wid}
 
 
+def readdress(old_wid: str, old_epoch: str | None, new_wid: str) -> dict:
+    """Move the orchestrator's registered address from a dangling ``old_wid`` to ``new_wid``.
+
+    CMX-196's applied form of a REVIVABLE row's remedy — ``chela restore`` says the
+    orchestrator's recorded session is alive under ``new_wid`` right now
+    (:func:`chela.restore.plan`), and this does the ``chela watch``-from-there a human would
+    otherwise run by hand: re-resolves the identity fresh (never trusts the plan's session id
+    — defense in depth, the same reason :func:`register` always re-derives it) and stamps the
+    current epoch.
+
+    ⛔ Guarded, atomically, inside the same lock as the write: a no-op unless the recorded
+    address is STILL exactly ``old_wid`` issued by ``old_epoch``. A human may have
+    re-registered in the meantime, or a further restart may have reissued ``old_wid`` to a
+    genuinely different session — either way that registration is not the one classification
+    saw, and must not be clobbered by a plan computed before it happened.
+    """
+    names = discovery.get_windows_by_id()
+    if new_wid not in names:
+        return {"ok": False, "error": f"no such window: {new_wid}"}
+    now = epoch.current()
+    session = _identity_of(new_wid)
+    with locked_store() as store:
+        if store.get("orchestrator") != old_wid or store.get("orchestrator_epoch") != old_epoch:
+            return {"ok": False, "error": "orchestrator address moved on since classification"}
+        store["orchestrator"] = new_wid
+        store["orchestrator_epoch"] = now
+        store["orchestrator_session"] = session
+        store["orchestrator_name"] = names.get(new_wid)
+        _clear_address_alarm(store)
+    return {"ok": True, "orchestrator": new_wid, "epoch": now, "session": session}
+
+
+def unregister_dangling(wid: str, stamped_epoch: str | None) -> dict:
+    """:func:`unregister`'s epoch-guarded twin — CMX-196's applied form of a MANUAL row's
+    archive-then-remove.
+
+    ``unregister`` only checks the address, which is enough for teardown (a window clearing
+    its OWN just-registered address). This is used against a row a *stale* classification
+    named, potentially long after it was computed, so the address alone is not enough: a
+    further tmux restart can reissue ``wid``'s number to a completely different, genuinely
+    live registration, and matching on the number alone would clear that instead of the
+    archived dangling one. A no-op (nothing cleared) unless the recorded epoch is STILL
+    exactly the dead one classification saw.
+    """
+    with locked_store() as store:
+        if store.get("orchestrator") != wid or store.get("orchestrator_epoch") != stamped_epoch:
+            return {"ok": False, "wid": wid}
+        store["orchestrator"] = None
+        store["orchestrator_epoch"] = None
+        store["orchestrator_session"] = None
+        store["orchestrator_name"] = None
+        _clear_address_alarm(store)
+    return {"ok": True, "wid": wid}
+
+
 def unwatch(wid: str) -> dict:
     with locked_store() as store:
         existed = store["watches"].pop(wid, None) is not None

@@ -332,6 +332,95 @@ def test_unregister_clears_the_address_only_when_it_names_that_wid(store_file):
     assert inbox.orchestrator_wid(inbox.load()) is None
 
 
+# --- readdress / unregister_dangling — CMX-196's write half for `chela restore --apply` ---
+
+def test_readdress_moves_the_orchestrator_to_its_new_live_address(store_file, windows):
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "OLD-epoch"
+    store["orchestrator_session"] = "sid-old"
+    inbox.save(store)
+
+    result = inbox.readdress("@9", "OLD-epoch", ORCH)
+
+    assert result["ok"] is True
+    reloaded = inbox.load()
+    assert reloaded["orchestrator"] == ORCH
+    assert reloaded["orchestrator_epoch"] != "OLD-epoch"
+    assert reloaded["orchestrator_name"] == "orchestrator"
+
+
+def test_readdress_refuses_an_unknown_window(store_file, windows):
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "OLD-epoch"
+    inbox.save(store)
+
+    result = inbox.readdress("@9", "OLD-epoch", "@999")
+
+    assert result["ok"] is False
+    assert inbox.load()["orchestrator"] == "@9", "a refused readdress must not touch the store"
+
+
+def test_readdress_is_a_noop_when_the_address_has_moved_on(store_file, windows):
+    """🔴 The guard this function exists for: a human already re-registered (or a further
+    restart reissued the old address) since classification ran, and this must not clobber
+    whatever is there now with a plan computed before it happened."""
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "SOMETHING-ELSE"      # not the epoch classification saw
+    store["orchestrator_session"] = "sid-fresh"
+    inbox.save(store)
+
+    result = inbox.readdress("@9", "OLD-epoch", ORCH)
+
+    assert result["ok"] is False
+    reloaded = inbox.load()
+    assert reloaded["orchestrator"] == "@9" and reloaded["orchestrator_session"] == "sid-fresh"
+
+
+def test_readdress_is_a_noop_when_a_different_wid_is_registered(store_file, windows):
+    store = inbox.load()
+    store["orchestrator"] = "@2"                        # someone else, entirely
+    store["orchestrator_epoch"] = "OLD-epoch"
+    inbox.save(store)
+
+    result = inbox.readdress("@9", "OLD-epoch", ORCH)
+
+    assert result["ok"] is False
+    assert inbox.load()["orchestrator"] == "@2"
+
+
+def test_unregister_dangling_clears_only_when_both_wid_and_epoch_still_match(store_file):
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "OLD-epoch"
+    inbox.save(store)
+
+    # right wid, wrong epoch — a further restart reissued @9 to something new; must not clear it
+    res = inbox.unregister_dangling("@9", "SOME-OTHER-epoch")
+    assert res["ok"] is False
+    assert inbox.orchestrator_wid(inbox.load()) == "@9"
+
+    # right wid AND right epoch — the exact dangling row classification saw
+    res = inbox.unregister_dangling("@9", "OLD-epoch")
+    assert res["ok"] is True
+    assert inbox.orchestrator_wid(inbox.load()) is None
+
+
+def test_unregister_dangling_is_stricter_than_unregister(store_file):
+    """The counterweight, spelled out: `unregister`'s own wid-only guard WOULD clear this
+    row (it only checks the address), which is exactly why `unregister_dangling` exists as
+    a separate, stricter function rather than a shared code path."""
+    store = inbox.load()
+    store["orchestrator"] = "@9"
+    store["orchestrator_epoch"] = "A-NEW-EPOCH"          # NOT the dangling one
+    inbox.save(store)
+
+    assert inbox.unregister_dangling("@9", "OLD-epoch")["ok"] is False
+    assert inbox.orchestrator_wid(inbox.load()) == "@9"
+
+
 # --- anti-self-notify: the loop must not be able to run away -------------------
 
 def test_the_orchestrator_is_never_an_event_source(store_file, windows, sends, monkeypatch):

@@ -127,3 +127,32 @@ def window(dead_epoch: str | None, wid: str, *, path: Path | None = None) -> dic
     if not rec:
         return None
     return rec["windows"].get(wid)
+
+
+# --- archive: the audit trail for a MANUAL row `chela restore --apply` removed ---------
+
+# Same shape as `_MAX_EPOCHS` — old enough to keep a useful history without growing forever;
+# this is an audit log a human reads after the fact, not a store anything re-joins against.
+_MAX_ARCHIVED = 200
+
+
+def archive(entry: dict, *, path: Path | None = None) -> None:
+    """Record one row `chela restore --apply` archived-then-removed from its live store.
+
+    ``entry`` is caller-shaped (``store``/``wid``/``session_id``/``cwd``/``label``/
+    ``stamped_epoch`` — see :class:`chela.restore.Verdict`); this only stamps
+    ``archived_at`` and persists it. Appended to a flat list, not keyed by epoch like
+    :func:`record`: the whole point of archiving a MANUAL row is that its live store no
+    longer has it, so a later lookup has no epoch to join against — the list itself is the
+    only remaining record.
+
+    ⛔ **Additive only.** This never removes the row from its live store — that is the
+    caller's job, and ordered to run AFTER this so a crash between the two steps loses
+    nothing worse than a duplicate archive entry, never a silently vanished row.
+    """
+    data = _load(path)
+    archived = data.setdefault("archived", [])
+    archived.append({**entry, "archived_at": time.time()})
+    if len(archived) > _MAX_ARCHIVED:
+        del archived[: len(archived) - _MAX_ARCHIVED]
+    _save(data, path)

@@ -242,3 +242,57 @@ def test_prune_evicts_the_STALEST_epoch_not_the_lowest_key(roster):
     assert "a" in kept, (
         f"the most RECENT epoch was evicted — prune is ranked by key, not last_seen. Kept: {kept}"
     )
+
+
+# --------------------------------------------------------------------------
+# archive — CMX-196's audit trail for a MANUAL row `chela restore --apply` removed
+# --------------------------------------------------------------------------
+
+def test_archive_appends_the_entry_stamped_with_archived_at(roster):
+    entry = {"store": "session-ids", "wid": "@5", "session_id": "sid-dead",
+              "cwd": "/home/x", "label": "sid-dead", "stamped_epoch": OLD}
+
+    roster.archive(entry)
+
+    data = json.loads(roster._STORE.read_text())
+    assert len(data["archived"]) == 1
+    row = data["archived"][0]
+    assert row["wid"] == "@5" and row["session_id"] == "sid-dead"
+    assert "archived_at" in row, "an archived row with no timestamp cannot be dated later"
+
+
+def test_archive_never_touches_the_epochs_section(roster):
+    """🔴 The archive is additive, on its OWN key — it must never collide with or overwrite
+    `record`'s epoch-keyed snapshot, which a later `window()` join still depends on."""
+    roster.record({"@1": "orch"}, {"@1"}, OLD, _cwd_for({"@1": "/home/x"}),
+                  _session_for({"@1": "sid-1"}))
+
+    roster.archive({"store": "session-ids", "wid": "@5", "session_id": "s",
+                     "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    assert roster.window(OLD, "@1") == {"name": "orch", "cwd": "/home/x", "session_id": "sid-1"}
+
+
+def test_archive_appends_rather_than_overwrites(roster):
+    roster.archive({"store": "session-ids", "wid": "@5", "session_id": "s1",
+                     "cwd": None, "label": "", "stamped_epoch": OLD})
+    roster.archive({"store": "inbox.orchestrator", "wid": "@1", "session_id": "s2",
+                     "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    data = json.loads(roster._STORE.read_text())
+    assert [r["wid"] for r in data["archived"]] == ["@5", "@1"], (
+        "a second archive call must append, not replace, the first"
+    )
+
+
+def test_archive_is_bounded_and_evicts_the_oldest_first(roster):
+    """🔴 An unbounded archive would grow forever; the eviction must drop the OLDEST rows,
+    keeping the ones most likely to still matter."""
+    for i in range(roster._MAX_ARCHIVED + 5):
+        roster.archive({"store": "session-ids", "wid": f"@{i}", "session_id": "s",
+                         "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    data = json.loads(roster._STORE.read_text())
+    assert len(data["archived"]) == roster._MAX_ARCHIVED
+    assert data["archived"][0]["wid"] == "@5", "the oldest 5 rows must be the ones evicted"
+    assert data["archived"][-1]["wid"] == f"@{roster._MAX_ARCHIVED + 4}"

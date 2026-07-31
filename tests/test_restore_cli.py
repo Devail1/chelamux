@@ -324,12 +324,12 @@ def _store_bytes(chela_dir):
 
 def test_a_plain_chela_restore_touches_NOTHING_on_disk(live_stores, tmp_path, capsys):
     """🔴 The dry-run promise, asserted on bytes. `cmd_restore`'s docstring and the CLI help
-    both say "dry-run by default ... it does not touch any of them".
+    both say "read-only by default ... it does not touch any of them" without `--apply`.
 
-    ⭐ This is now the LOAD-BEARING guard of the whole command: the write half was split out
-    to its own ticket, so read-only is the contract, not a default. Teach any code path here
-    to write and the operator's LOOK silently mutates state, while printing the same store
-    names and exiting the same 1. Only the files can tell.
+    ⭐ This is the LOAD-BEARING guard of the bare command: `--apply` is opt-in (CMX-196), so
+    read-only remains the DEFAULT. Teach the no-flag path to write and the operator's LOOK
+    silently mutates state, while printing the same store names and exiting the same 1. Only
+    the files can tell.
     """
     chela_dir = tmp_path / "chela"
     before = _store_bytes(chela_dir)
@@ -339,14 +339,98 @@ def test_a_plain_chela_restore_touches_NOTHING_on_disk(live_stores, tmp_path, ca
 
     assert exc.value.code == 1
     assert _store_bytes(chela_dir) == before, (
-        "chela restore wrote to a store — it is READ-ONLY, with no write mode at all"
+        "a bare `chela restore` wrote to a store — it must stay read-only without `--apply`"
     )
     # roster.json is in the glob above, but assert it explicitly: it is the archive
     # destination, so an unchanged roster is the direct evidence nothing was archived.
     assert json.loads((chela_dir / "roster.json").read_text()) == json.loads(
         before["roster.json"]), (
-        "chela restore archived a row into roster.json — it must never write"
+        "chela restore archived a row into roster.json without --apply"
     )
+
+
+# --- END-TO-END, `--apply` (CMX-196 write half) -------------------------------------------
+
+def test_chela_restore_apply_re_stamps_REVIVABLE_and_archives_removes_MANUAL(
+        live_stores, tmp_path, capsys):
+    """The real dispatch, real stores, `--apply` end to end. `live_stores` seeds exactly one
+    REVIVABLE row (session-ids `@7`, alive under `@42`) and three MANUAL ones (inbox
+    orchestrator `@1`, telegram.bindings `@2`, session-ids `@5`) — see the fixture docstring.
+    """
+    chela_dir = tmp_path / "chela"
+
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--apply"])
+
+    assert exc.value.code == 1, (
+        "a MANUAL row must still fail the command even after --apply archived it — the "
+        "orphaned agent behind it is still unresolved, only the bookkeeping is cleaned up"
+    )
+    out = capsys.readouterr().out
+    assert "=> revived" in out and "=> archived" in out and "=> left-to-daemon" in out
+
+    # REVIVABLE: session-ids @7 (SID_LIVE) re-stamped to its live address @42.
+    session_ids = json.loads((chela_dir / "session-ids.json").read_text())
+    assert "@7" not in session_ids, "the dangling address must not survive the re-stamp"
+    assert session_ids["@42"] == {"session_id": SID_LIVE, "epoch": NOW}
+
+    # MANUAL: session-ids @5 (SID_DEAD) archived, then removed.
+    assert "@5" not in session_ids
+
+    # MANUAL: inbox orchestrator @1 archived, then unregistered.
+    inbox_store = json.loads((chela_dir / "inbox.json").read_text())
+    assert inbox_store["orchestrator"] is None
+    assert inbox_store["orchestrator_epoch"] is None
+
+    # Both MANUAL rows landed in roster.json's archive, in plan()'s own order, BEFORE they
+    # were removed from their live store.
+    archived = json.loads((chela_dir / "roster.json").read_text())["archived"]
+    assert [(a["store"], a["wid"]) for a in archived] == [
+        ("inbox.orchestrator", "@1"), ("session-ids", "@5"),
+    ]
+    assert archived[0]["session_id"] == SID_ORCH
+    assert archived[1]["session_id"] == SID_DEAD and archived[1]["cwd"] == CWD_FIVE
+
+
+def test_chela_restore_apply_never_writes_telegram_bindings_json(live_stores, tmp_path):
+    """🔴 The permanent exclusion, asserted on bytes — not just semantics. A `telegram.bindings`
+    row is classified MANUAL here (`@2` carries no session of its own and is absent from the
+    roster), so it is exactly the case that would tempt an archive-then-remove into touching
+    the wrong store. `chela-telegram` owns this file exclusively; a second writer here would
+    race its next reconcile save and silently erase whichever side wrote last."""
+    chela_dir = tmp_path / "chela"
+    before = (chela_dir / "telegram-bindings.json").read_bytes()
+
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--apply"])
+
+    assert (chela_dir / "telegram-bindings.json").read_bytes() == before, (
+        "apply() wrote to telegram-bindings.json — that store belongs to chela-telegram alone"
+    )
+
+
+def test_chela_restore_apply_reports_the_bindings_row_as_left_to_the_daemon(live_stores, capsys):
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--apply"])
+
+    line = _line_with(capsys.readouterr().out, "[telegram.bindings]", "@2")
+    assert "left-to-daemon" in line, (
+        "the bindings row's outcome must say it was left alone, not silently omitted"
+    )
+
+
+def test_chela_restore_without_apply_never_calls_the_write_half(live_stores, monkeypatch):
+    """The counterweight to the byte-level guards above: without --apply the write functions
+    must never even be CALLED, not merely leave the files looking unchanged by coincidence."""
+    from chela import restore as restore_mod
+
+    called = []
+    monkeypatch.setattr(restore_mod, "apply", lambda *a, **k: called.append(1))
+
+    with pytest.raises(SystemExit):
+        main.cmd_restore(SimpleNamespace())
+
+    assert called == [], "cmd_restore called restore.apply() without --apply being set"
 
 
 def test_a_broken_runs_db_does_not_crash_the_report(live_stores, capsys):

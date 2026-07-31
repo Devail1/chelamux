@@ -75,6 +75,85 @@ def test_entries_returns_dangling_rows_unfiltered(sessionids, monkeypatch):
     assert sessionids.entries() == {"@3": {"session_id": "session-abc", "epoch": "111-222"}}
 
 
+# --------------------------------------------------------------------------
+# rekey / remove — CMX-196's write half for `chela restore --apply`
+# --------------------------------------------------------------------------
+
+def test_rekey_moves_the_row_and_re_stamps_the_current_epoch(sessionids, monkeypatch):
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    sessionids.set_session_id("@5", "sid-live")
+
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "999-888")   # tmux restarted
+    ok = sessionids.rekey("@5", "@42", "sid-live", "111-222")
+
+    assert ok is True
+    assert sessionids.entries() == {"@42": {"session_id": "sid-live", "epoch": "999-888"}}
+
+
+def test_rekey_is_a_noop_when_the_session_id_no_longer_matches(sessionids, monkeypatch):
+    """🔴 A row that moved on since classification (a further write changed its session id)
+    must not be blindly relocated on the strength of a stale plan."""
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    sessionids.set_session_id("@5", "sid-current")
+
+    ok = sessionids.rekey("@5", "@42", "sid-stale-from-an-old-plan", "111-222")
+
+    assert ok is False
+    assert sessionids.entries() == {"@5": {"session_id": "sid-current", "epoch": "111-222"}}
+
+
+def test_rekey_is_a_noop_when_the_epoch_no_longer_matches(sessionids, monkeypatch):
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    sessionids.set_session_id("@5", "sid-live")
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "999-888")
+    sessionids.set_session_id("@5", "sid-live")   # re-stamped by a fresh write, new epoch
+
+    ok = sessionids.rekey("@5", "@42", "sid-live", "111-222")   # stale plan's OLD epoch
+
+    assert ok is False
+
+
+def test_rekey_is_a_noop_when_the_row_is_already_gone(sessionids, monkeypatch):
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    assert sessionids.rekey("@5", "@42", "sid-live", "111-222") is False
+
+
+def test_remove_deletes_a_matching_row(sessionids, monkeypatch):
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    sessionids.set_session_id("@5", "sid-dead")
+
+    ok = sessionids.remove("@5", "sid-dead", "111-222")
+
+    assert ok is True
+    assert sessionids.entries() == {}
+
+
+def test_remove_is_a_noop_when_the_session_id_no_longer_matches(sessionids, monkeypatch):
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    sessionids.set_session_id("@5", "sid-current")
+
+    ok = sessionids.remove("@5", "sid-stale", "111-222")
+
+    assert ok is False
+    assert sessionids.entries() == {"@5": {"session_id": "sid-current", "epoch": "111-222"}}
+
+
+def test_remove_is_a_noop_when_the_row_is_already_gone(sessionids, monkeypatch):
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    assert sessionids.remove("@5", "sid-dead", "111-222") is False
+
+
+def test_remove_without_expected_values_deletes_unconditionally(sessionids, monkeypatch):
+    """The archive-then-remove caller (`chela.restore.apply`) always knows the expected
+    values, but `remove`'s bare form (no expectations passed) must still work as a plain
+    delete — the counterweight to the two guards above."""
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    sessionids.set_session_id("@5", "sid-dead")
+
+    assert sessionids.remove("@5") is True
+    assert sessionids.entries() == {}
+
+
 def test_survives_a_concurrent_telegram_bindings_save(sessionids, monkeypatch, tmp_path):
     """The reproduction that broke round 1: chela-telegram's daemon keeps ONE
     long-lived BindingRegistry object and saves it (to a DIFFERENT file) whenever a
