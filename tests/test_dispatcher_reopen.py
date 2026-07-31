@@ -791,8 +791,13 @@ def test_the_compare_asks_for_FILENAMES(tmp_path):
     with patch.object(dispatcher.subprocess, "run", side_effect=run):
         dispatcher.reopen("abc123", "fix 3")
 
-    assert ".files[].filename" in seen["cmd"], (
-        f"the compare must select filenames, got {seen['cmd']!r}"
+    cmd = seen["cmd"]
+    # ⛔ NOT `".files[].filename" in cmd` — that passes with the flag swapped to
+    # `--template`, which gh interprets completely differently. Assert ADJACENCY: the
+    # selector must be the argument OF `--jq`.
+    assert "--jq" in cmd, f"the selector must be carried by --jq, got {cmd!r}"
+    assert cmd[cmd.index("--jq") + 1] == ".files[].filename", (
+        f"--jq must carry the filename selector, got {cmd!r}"
     )
 
 
@@ -845,7 +850,13 @@ def test_the_nudge_event_records_BOTH_ends_of_the_range_it_compared(tmp_path):
         "a range whose two ends are equal is not a range"
     )
     assert ev["reopen_count"] == 3
-    assert ev["task_id"] == "abc123" and ev["pr_url"]
+    assert ev["task_id"] == "abc123"
+    # ⛔ NOT `and ev["pr_url"]` — truthiness passes for ANY url, including another run's.
+    # Round 5's commit claimed "all five payload fields asserted"; this one was asserted
+    # only to exist.
+    assert ev["pr_url"] == "https://github.com/o/r/pull/80", (
+        f"the durable record must name THIS run's PR, got {ev['pr_url']!r}"
+    )
 
 
 def test_the_nudge_message_carries_the_EVIDENCE_it_rests_on(tmp_path):
@@ -868,3 +879,48 @@ def test_the_nudge_message_carries_the_EVIDENCE_it_rests_on(tmp_path):
         f"the nudge must carry the diff it rests on. Got: {r['nudge']!r}"
     )
     assert "0 under chela/" in r["nudge"]
+
+
+def test_the_nudge_carries_its_ADVICE_not_only_its_evidence(tmp_path):
+    """🔴 GUARD (CMX-198 round 6): round 5 pinned the EVIDENCE and left the ADVICE bare.
+
+    The docstring calls this "an informed-consent signal that the judge may be hardening its
+    own proof rather than fixing the feature". Strip everything but the parenthetical and
+    the operator receives a diff summary — "(3 file(s) changed, 0 under chela/)" — with no
+    interpretation at all, which is data, not consent. The whole point of the feature is the
+    sentence that tells a human what the data MEANS and that acting on it is legitimate.
+    """
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        r = dispatcher.reopen("abc123", "fix 3")
+
+    nudge = r["nudge"]
+    assert "hardening the proof, not the feature" in nudge, (
+        f"the nudge must say what the diff MEANS, not only what it was. Got: {nudge!r}"
+    )
+    assert "defensible" in nudge, (
+        "…and that merging is a legitimate call — this is an informed-consent signal, and "
+        "without the permission half it is just a statistic"
+    )
+    assert "3 rounds" in nudge
+
+
+def test_the_nudge_events_SUMMARY_is_what_a_notification_would_render(tmp_path):
+    """🔴 An event has two halves: the payload a filter queries, and the SUMMARY a
+    notification renders (`chela/event_log.py`). Round 5 asserted the payload exhaustively
+    and never looked at the summary — blank it and the durable record still contains every
+    field while anything that DISPLAYS the event shows an empty line."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    ev = event_log.read(types=["reopen_nudge"])["events"][-1]
+    summary = ev.get("summary") or ""
+    assert "abc123" in summary, f"the rendered half must name the run, got {summary!r}"
+    assert "3 rounds" in summary and "no production change" in summary, (
+        f"the rendered half must carry the nudge itself, got {summary!r}"
+    )
