@@ -1816,3 +1816,93 @@ def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
         "belongs in the payload, which already carries it in full"
     )
     assert len(summary) < len(_LONG_DETAIL) + 200
+
+
+# --- the single-run blind spot -----------------------------------------------------------
+#
+# 🔴 GUARDS (CMX-197 round 9). EVERY judge test on this branch drives exactly ONE run, so
+# code that picks "any" run instead of "this" run is invisible to all of them: with one
+# entry, `d.get(task_id)` and `next(iter(d.values()))` are the same value, and any
+# `if <scope>` collapses to `if True`. The fixture's CARDINALITY was the blind spot —
+# distinct from the earlier ones, where a fixture FIELD was missing.
+
+_OTHER_SHA = "cccccccccccccccccccccccccccccccccccccccc"
+
+
+def _fleet():
+    """Three runs that differ in every dimension the scoping rules read.
+
+    Only `T1` qualifies: awaiting_review AND a settled verdict. `T2` is at
+    awaiting_review with the judge still RUNNING; `T3` has a settled verdict but has
+    already moved on to `running`.
+    """
+    a = _verdict_run(judge.J_CLEAN, task_id="T1",
+                     pr_url="https://github.com/x/y/pull/9", judge_sha=_JUDGE_SHA)
+    b = _verdict_run(judge.J_RUNNING, task_id="T2",
+                     pr_url="https://github.com/x/y/pull/10", judge_sha=_SUPERSEDING_SHA)
+    c = _verdict_run(judge.J_CLEAN, task_id="T3", status="running",
+                     pr_url="https://github.com/x/y/pull/11", judge_sha=_OTHER_SHA)
+    return [a, b, c]
+
+
+def test_only_the_QUALIFYING_run_has_its_head_read(store_file, windows, sends, monkeypatch):
+    """🔴 The candidate set is scoped on BOTH axes — settled verdict AND still sitting in
+    awaiting_review. Unscope either and `gh` is called for runs that need nothing, which the
+    docstring promises against ("a quiet fleet costs zero extra gh calls"); with one run in
+    the fixture, both `if`s collapse to `if True` unnoticed."""
+    asked = []
+
+    def _capture(pr_url, repo_dir):
+        asked.append(pr_url)
+        return dispatcher.CIStatus(dispatcher.CI_PASSING, _JUDGE_SHA)
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(dispatcher, "_read_pr_checks", _capture)
+
+    inbox.tick({}, runs=_fleet())
+
+    assert asked == ["https://github.com/x/y/pull/9"], (
+        f"the live head was read for {asked} — only the run with a SETTLED verdict still "
+        "SITTING in awaiting_review qualifies"
+    )
+
+
+def test_TWO_qualifying_verdicts_are_each_resolved_against_their_OWN_pr(
+        store_file, windows, sends, monkeypatch):
+    """🔴 Both halves of the lookup must be keyed by task_id — the run resolved from the
+    candidate id, and the live sha resolved from the map.
+
+    ⚠️ One qualifying candidate is not enough to see this: with a single entry,
+    `d.get(task_id)` and `next(iter(d.values()))` are the same object, which is why the
+    first version of this test passed under both mutations. TWO runs must qualify, with
+    DIFFERENT heads, so "any" and "this" diverge.
+
+    Both verdicts here match their own head, so both must deliver. Resolve either half by
+    "the first entry" and the second run is compared against the FIRST run's commit —
+    mismatch, dropped, and a perfectly good verdict is silently retired.
+    """
+    a = _verdict_run(judge.J_CLEAN, task_id="T1",
+                     pr_url="https://github.com/x/y/pull/9", judge_sha=_JUDGE_SHA)
+    b = _verdict_run(judge.J_CLEAN, task_id="T2",
+                     pr_url="https://github.com/x/y/pull/10", judge_sha=_SUPERSEDING_SHA)
+    heads = {"https://github.com/x/y/pull/9": _JUDGE_SHA,          # T1 unchanged
+             "https://github.com/x/y/pull/10": _SUPERSEDING_SHA}   # T2 unchanged, DIFFERENT
+
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+    monkeypatch.setattr(
+        dispatcher, "_read_pr_checks",
+        lambda pr_url, repo_dir: dispatcher.CIStatus(dispatcher.CI_PASSING, heads[pr_url]))
+
+    inbox.tick({}, runs=[a, b])
+    inbox.tick({}, runs=[a, b])      # the inbox delivers one event per tick — drain both
+
+    assert len(sends) == 2, (
+        f"both verdicts match their OWN head and must deliver; got {len(sends)} — a "
+        "verdict was compared against another run's commit, or another run's row was read"
+    )
