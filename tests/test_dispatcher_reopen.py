@@ -412,6 +412,44 @@ def test_nudge_does_not_fire_when_production_code_changed(tmp_path):
     assert event_log.read(types=["reopen_nudge"])["events"] == []
 
 
+def test_nudge_does_not_fire_when_the_diff_is_unreadable(tmp_path):
+    """Same three-reopen shape again, except round 3's `gh api compare` call itself fails
+    (a `gh` hiccup, a network blip, a compare API 500) — `_production_files_changed`
+    returns `(None, ...)`, the UNKNOWN arm of the tri-state, and it must stay just as
+    silent as the KNOWN-changed arm. ⛔ Corrupt-guard target: widening `if touched is
+    False` to `if touched is not True` fires the nudge on exactly this case, and every
+    other test in this file still passes under that mutation — this is the one that
+    catches it."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h1")):
+        dispatcher.reopen("abc123", "fix 1")
+    _escalate_back_to_needs_human("abc123", "h1")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h2")):
+        dispatcher.reopen("abc123", "fix 2")
+    _escalate_back_to_needs_human("abc123", "h2")
+
+    def _run(cmd, *a, **k):
+        if "--json" in cmd:
+            return _gh_view("h3")
+        if cmd[:2] == ["gh", "api"]:
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = "gh api compare failed"
+            return R()
+        return _no_gh(cmd, *a, **k)
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_run):
+        r3 = dispatcher.reopen("abc123", "fix 3")
+
+    assert r3["ok"] is True
+    assert "nudge" not in r3
+    assert event_log.read(types=["reopen_nudge"])["events"] == []
+
+
 def test_nudge_is_silent_before_the_third_reopen(tmp_path):
     """A single reopen — even one that changed nothing but tests — is not evidence of
     anything; the round-count gate must hold regardless of what the diff would say."""
