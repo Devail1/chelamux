@@ -761,6 +761,41 @@ def test_a_missing_worktree_at_an_unresolvable_sha_is_CANNOT_VERIFY_not_a_crash(
     assert run["judge_sha"] is None
 
 
+def test_a_rebuild_that_hits_an_OSError_is_CANNOT_VERIFY_not_a_crash(tmp_path, monkeypatch):
+    """`_reprovision_worktree`'s except clause was widened to `(BranchGone,
+    CalledProcessError, OSError)` on review (CMX-201 PR #262, round 1: 'a reaped parent
+    directory, a full disk... would escape as a crash rather than the cannot_verify this
+    function exists to produce') and shipped with NO test — both the round-3 and final
+    judge rounds flagged it as a production change nothing holds in place. `OSError` is not
+    a subclass of `CalledProcessError`, so dropping it back out of the tuple is silent: the
+    fixture never made `detached_worktree` raise anything but `CalledProcessError`
+    (test_a_missing_worktree_at_an_unresolvable_sha...) or nothing at all."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo, sha = _git_workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    assert not _judge_worktree_path(tmp_path, task_id).exists()
+
+    def _boom(*a, **k):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(dispatcher, "detached_worktree", _boom)
+
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_CANNOT_VERIFY
+    assert "could not be rebuilt" in result["cannot_verify"]
+    assert "no space left on device" in result["cannot_verify"]
+    run = dispatcher.resolve_run(task_id)
+    assert run["judge_sha"] is None                   # nothing was rebuilt, nothing is stamped
+    assert not _judge_worktree_path(tmp_path, task_id).exists()
+
+
 def test_the_judge_never_shells_out_to_a_merge(tmp_path):
     """A belt-and-braces guard on the one thing the judge must never do."""
     calls: list[list] = []

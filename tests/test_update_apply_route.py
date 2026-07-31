@@ -153,6 +153,70 @@ def test_apply_reports_dirty_tree_refusal_without_pulling(client, monkeypatch):
     assert done.wait(timeout=2)
 
 
+def test_apply_refusal_is_logged_not_reported_as_a_success(client, monkeypatch, caplog):
+    """The log line is the ONLY place a refused `update.apply()` outcome ever surfaces — the
+    route already replied `started: True` before apply() ran (see the test above). Judge
+    round 5 (PR #260) found `if not result.ok:` corrupted to `if False and not result.ok:`
+    left the suite green: nothing pinned that the refusal path logs at all, only that
+    `apply()` ran."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=1, ahead=0, branch="dev"))
+    done = threading.Event()
+
+    def fake_apply():
+        done.set()
+        return update.ApplyResult(ok=False, step="dirty-check", error="working tree has uncommitted changes")
+
+    monkeypatch.setattr(update, "apply", fake_apply)
+
+    with caplog.at_level("ERROR", logger=dash.log.name):
+        client.post("/api/update/apply")
+        assert done.wait(timeout=2)
+        time.sleep(0.05)   # the log call happens in the background thread, after the response
+
+    refusals = [r for r in caplog.records if "refused" in r.message]
+    assert refusals, "a refused update.apply() was never logged as a refusal"
+    assert "dirty-check" in refusals[0].message
+    assert "working tree has uncommitted changes" in refusals[0].message
+    # Counterweight: the success path must NOT also log as a refusal (else the assertion
+    # above would pass for any log call regardless of outcome).
+    successes = [r for r in caplog.records if "applied" in r.message]
+    assert not successes
+
+
+def test_apply_lock_is_released_once_the_run_finishes(client, monkeypatch):
+    """`_update_apply_lock` is non-reentrant on purpose — a second click mid-run would race
+    the same working tree — but it must be RELEASED once that run ends, or the control
+    becomes one-shot for the life of the process. Judge round 5 (PR #260) found
+    `_update_apply_lock.release()` corrupted to `pass` left the suite green: the only
+    existing in-flight test (`test_apply_refuses_a_second_run_while_one_is_in_flight`)
+    never lets the first run actually FINISH before posting again."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=1, ahead=0, branch="dev"))
+    entered = threading.Event()
+
+    def fake_apply():
+        entered.set()
+        return update.ApplyResult(ok=True, step="done", behind_before=1)
+
+    monkeypatch.setattr(update, "apply", fake_apply)
+
+    first = client.post("/api/update/apply")
+    assert first.get_json()["started"] is True
+    assert entered.wait(timeout=2), "update.apply() was never invoked"
+
+    # `_run`'s `finally` releases the lock immediately after apply() returns (fake_apply
+    # above does no work of its own) — poll rather than guess a fixed sleep.
+    deadline = time.monotonic() + 2
+    while dash._update_apply_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not dash._update_apply_lock.locked(), "the background run never released the lock"
+
+    second = client.post("/api/update/apply")
+    assert second.status_code == 200, "the lock was never handed back after the first run ended"
+    assert second.get_json()["started"] is True
+
+
 def test_apply_degrades_gracefully_on_a_pip_install(client, monkeypatch):
     def _boom(fetch=True):
         raise update.NotAGitCheckout("not a git checkout")

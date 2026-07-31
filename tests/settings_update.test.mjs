@@ -32,6 +32,7 @@ const BODY = `
 let updatePayload;
 let applyPayload = {};
 let fetchCalls = [];
+let settingsShouldFail = false;
 
 function flush() {
     return new Promise(resolve => setTimeout(resolve, 0));
@@ -53,6 +54,9 @@ before(async () => {
     });
     globalThis.fetch = (url, opts) => {
         fetchCalls.push({ url: String(url), opts: opts || null });
+        if (String(url).endsWith('/api/settings') && settingsShouldFail) {
+            return Promise.reject(new Error('network down'));
+        }
         const body = String(url).endsWith('/api/settings')
             ? { sections: [], update: updatePayload }
             : applyPayload;
@@ -71,6 +75,7 @@ beforeEach(() => {
     document.getElementById('settings-drawer').classList.remove('open');
     applyPayload = {};
     fetchCalls = [];
+    settingsShouldFail = false;
 });
 
 async function openWith(update) {
@@ -175,4 +180,66 @@ test('a started update reports success, not a refusal', async () => {
     // survives (it did, the first time I wrote this test).
     assert.match(msg.className, /\bok\b/, 'a started update is styled as an error');
     assert.doesNotMatch(msg.className, /\berr\b/);
+});
+
+// --- 6. 🔴 A NOT-STARTED response must never be announced as a fleet-wide restart ---
+//
+// Judge round 5 (PR #260) corrupted `if (!resp.started) {` to `if (false && !resp.started) {`
+// and the suite stayed green: nothing drives applyUpdate() with `started: false` (the
+// backend's "already up to date" arm — see test_apply_refuses_when_already_up_to_date).
+// Falling through to the started-branch text would tell the operator a restart is underway
+// when nothing was ever kicked off.
+
+test('a not-started response reports its detail, not a started-restart message', async () => {
+    await openWith({ ok: true, behind: 3, ahead: 0, branch: 'dev' });
+    globalThis.confirm = () => true;
+    applyPayload = { ok: true, started: false, detail: 'already up to date' };
+
+    await window.chela.applyUpdate();
+    await flush();
+
+    const msg = document.getElementById('update-apply-msg');
+    assert.match(msg.textContent, /already up to date/i,
+        'a not-started response never surfaced its detail');
+    assert.doesNotMatch(msg.textContent, /Started/,
+        'a not-started response was announced as a fleet-wide restart');
+});
+
+// --- 7. 🔴 DECLINING THE CONFIRM DIALOG MUST ABORT BEFORE THE POST -----------------
+//
+// Judge round 6 (PR #260) corrupted the `if (!confirm(...)) return;` gate to
+// `if (false && !confirm(...)) return;` and the suite stayed green: both existing
+// applyUpdate() tests stub `globalThis.confirm = () => true`, so the gate is assumed and
+// never exercised in its refusing direction. A fleet-wide restart must not fire from a
+// single accidental click.
+
+test('declining the confirm dialog aborts before any POST', async () => {
+    await openWith({ ok: true, behind: 3, ahead: 0, branch: 'dev' });
+    globalThis.confirm = () => false;
+
+    await window.chela.applyUpdate();
+    await flush();
+
+    const post = fetchCalls.find(c => c.url.endsWith('/api/update/apply'));
+    assert.equal(post, undefined, 'declining confirm() still POSTed to /api/update/apply');
+});
+
+// --- 8. 🔴 A FAILED /api/settings POLL MUST RE-RENDER THE ROW AS UNKNOWN -----------
+//
+// Judge round 5 (PR #260) corrupted the catch arm's `_renderUpdateStatus(null);` to
+// `void 0;` and the suite stayed green: nothing ever made the mocked `/api/settings` fetch
+// reject, so the row was left sitting on its initial "Checking…" badge forever instead of
+// being told the poll failed.
+
+test('a failed /api/settings poll re-renders the Update row as Unknown', async () => {
+    settingsShouldFail = true;
+    updatePayload = { ok: true, behind: 3, ahead: 0, branch: 'dev' };
+    window.chela.toggleSettings();
+    await flush();
+
+    const btn = document.getElementById('update-apply-btn');
+    const row = document.getElementById('update-status-row');
+    assert.match(row.textContent, /Unknown/,
+        'a failed /api/settings poll left the row on its stale/initial state');
+    assert.equal(btn.disabled, true);
 });
