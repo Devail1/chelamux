@@ -30,6 +30,8 @@ const BODY = `
 </aside>`;
 
 let updatePayload;
+let applyPayload = {};
+let fetchCalls = [];
 
 function flush() {
     return new Promise(resolve => setTimeout(resolve, 0));
@@ -49,10 +51,11 @@ before(async () => {
         media: q, matches: false,
         addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
     });
-    globalThis.fetch = (url) => {
+    globalThis.fetch = (url, opts) => {
+        fetchCalls.push({ url: String(url), opts: opts || null });
         const body = String(url).endsWith('/api/settings')
             ? { sections: [], update: updatePayload }
-            : {};
+            : applyPayload;
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
     };
     globalThis.window.chela = globalThis.window.chela || {};
@@ -66,6 +69,8 @@ beforeEach(() => {
     // Each test opens the drawer fresh — toggleSettings() only calls renderSettings()
     // when it transitions closed→open, so start from a known-closed state.
     document.getElementById('settings-drawer').classList.remove('open');
+    applyPayload = {};
+    fetchCalls = [];
 });
 
 async function openWith(update) {
@@ -104,4 +109,70 @@ test('an unreadable checkout (git=false) reports Unknown and keeps the button di
     const row = document.getElementById('update-status-row');
     assert.equal(btn.disabled, true);
     assert.match(row.textContent, /Unknown/);
+});
+
+
+// --- 3. 🔴 THE BUTTON IS WIRED TO applyUpdate() ------------------------------------
+//
+// The judge corrupted `onclick="chela.applyUpdate()"` to `onclick="void 0"` and the whole
+// suite stayed green: every assertion above reads `btn.disabled` and `row.textContent` —
+// how the control LOOKS, never that it DOES anything. An unwired button renders perfectly.
+// Same shape as tests/shortcuts.test.mjs:90, which pins its overlay's onclick attribute.
+
+test('the Update button is wired to applyUpdate() — not just rendered', async () => {
+    await openWith({ ok: true, behind: 3, ahead: 0, branch: 'dev' });
+
+    const btn = document.getElementById('update-apply-btn');
+    assert.match(btn.getAttribute('onclick') || '', /chela\.applyUpdate\(\)/,
+        'the Update button renders but is not wired to chela.applyUpdate()');
+});
+
+// --- 4. 🔴 A REFUSAL REACHES THE OPERATOR, NAMING WHY ------------------------------
+//
+// The backend guard asserts the 409 body NAMES the in-flight dispatched task ids
+// (tests/test_update_apply_route.py::test_apply_refuses_while_a_dispatched_run_is_in_flight).
+// That is worth nothing if the drawer swallows it: the judge corrupted
+// `setMsg('err', (resp && resp.error) || 'Update refused.')` to `setMsg('err', '')` and the
+// suite stayed green. This drives the real applyUpdate() and asserts the reason lands in
+// the DOM — and, in passing, that the POST goes where it claims to.
+
+test('a refused update surfaces the reason, naming the in-flight task', async () => {
+    await openWith({ ok: true, behind: 3, ahead: 0, branch: 'dev' });
+    globalThis.confirm = () => true;
+    applyPayload = { ok: false, error: 'a dispatched run is in flight: cmx-199-abc12' };
+
+    await window.chela.applyUpdate();
+    await flush();
+
+    const msg = document.getElementById('update-apply-msg');
+    assert.match(msg.textContent, /cmx-199-abc12/,
+        'the refusal reason never reached the operator — the drawer swallowed it');
+    const post = fetchCalls.find(c => c.url.endsWith('/api/update/apply'));
+    assert.ok(post, 'applyUpdate() never POSTed to /api/update/apply');
+    assert.equal(post.opts && post.opts.method, 'POST');
+    const btn = document.getElementById('update-apply-btn');
+    assert.equal(btn.disabled, false, 'a refused update must re-enable the button to retry');
+});
+
+// --- 5. 🔴 COUNTERWEIGHT — a STARTED update must not render as a refusal ------------
+//
+// Without this, `setMsg('err', ...)` on every path would satisfy the test above.
+
+test('a started update reports success, not a refusal', async () => {
+    await openWith({ ok: true, behind: 3, ahead: 0, branch: 'dev' });
+    globalThis.confirm = () => true;
+    applyPayload = { ok: true, started: true };
+
+    await window.chela.applyUpdate();
+    await flush();
+
+    const msg = document.getElementById('update-apply-msg');
+    assert.match(msg.textContent, /Started/, 'a started update did not report as started');
+    assert.doesNotMatch(msg.textContent, /refused/i);
+    // ⛔ The TEXT alone is not the property: setMsg carries the outcome in the class, so
+    // `setMsg('ok', …)` -> `setMsg('err', …)` leaves this message word-for-word identical
+    // while styling a successful update as a failure. Assert the class, or that mutation
+    // survives (it did, the first time I wrote this test).
+    assert.match(msg.className, /\bok\b/, 'a started update is styled as an error');
+    assert.doesNotMatch(msg.className, /\berr\b/);
 });
