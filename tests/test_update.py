@@ -671,6 +671,63 @@ def test_commits_behind_reports_no_upstream_without_erroring(tmp_path):
     assert "upstream" in status.error
 
 
+
+# --- services_running_stale_code (CMX-200) --------------------------------------------
+#
+# `commits_behind` above is a fact about the CHECKOUT. A bare `git pull` (bypassing
+# `chela update`, which pulls AND restarts together) can leave the checkout fully in
+# sync while a running PM2 service keeps executing the process image from its own last
+# start. This compares each service's `pm_uptime` against the checked-out commit's fixed
+# committer date instead — read-only, same as `commits_behind`.
+
+def test_services_running_stale_code_flags_a_service_older_than_head(checkout, monkeypatch):
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch is not None
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                {"name": "chela-daemon",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch + 100) * 1000}},
+                {"name": "unrelated-app",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                {"name": "chela-telegram",
+                 "pm2_env": {"status": "stopped", "pm_uptime": (commit_epoch - 100) * 1000}},
+            ]))
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    status = update.services_running_stale_code(checkout)
+
+    assert status.ok is True
+    # started BEFORE HEAD's commit date, online, and chela-owned — not the newer
+    # service, not the unrelated app, not the stopped one.
+    assert status.stale == ["chela-dashboard"]
+    assert status.commit_epoch == commit_epoch
+
+
+def test_services_running_stale_code_is_empty_when_nothing_is_running(checkout, monkeypatch):
+    monkeypatch.setattr(update, "_sh", lambda *a, **k: _FakeCP(stdout="[]"))
+
+    status = update.services_running_stale_code(checkout)
+
+    assert status.ok is True
+    assert status.stale == []
+
+
+def test_services_running_stale_code_reports_error_when_git_log_fails(tmp_path):
+    not_a_repo = tmp_path / "not-a-repo"
+    (not_a_repo / ".git").mkdir(parents=True)   # passes repo_root()'s own check, not real git
+
+    status = update.services_running_stale_code(not_a_repo)
+
+    assert status.ok is False
+    assert status.error
+
+
 def test_cli_check_flag_never_calls_apply(checkout, upstream, monkeypatch):
     _commit(upstream, "new.txt", "new\n")
     monkeypatch.setattr(update, "repo_root", lambda: checkout)

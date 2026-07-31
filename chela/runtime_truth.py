@@ -2020,6 +2020,56 @@ def _upstream_synced_report(_declared: None, obs: Observation) -> list[Finding]:
     )]
 
 
+# --- fact: is the RUNNING code the checkout's HEAD, or just the checkout itself? -----
+#
+# ``repo.upstream_synced`` above is a fact about the CHECKOUT — whether the files on disk
+# match the branch's upstream. It says nothing about whether the `chela-*` PM2 services
+# actually serving traffic have loaded those files. `chela update` pulls and restarts in
+# one step, so the gap only opens when someone bypasses it — a bare `git pull` run by
+# hand. That leaves the checkout genuinely in sync (`ahead == behind == 0`) while every
+# running service keeps executing the process image from its OWN last start, unaware
+# anything on disk changed. This fact catches that: it compares each online service's PM2
+# start time against the checked-out commit's own (fixed) committer date. Like
+# `repo.upstream_synced`, it only ever reads — the `pm2 restart` action lives in
+# `chela.update.apply`.
+
+def _services_current_status():
+    """Seam: the real answer is ``chela.update.services_running_stale_code()``; the test
+    suite hands this a fixed status instead of shelling out to git/pm2."""
+    from chela import update                        # lazy: doctor must import cheaply
+
+    return update.services_running_stale_code()
+
+
+def _services_current_read() -> Observation:
+    from chela import update                        # lazy: doctor must import cheaply
+
+    try:
+        status = _services_current_status()
+    except update.NotAGitCheckout as e:
+        return cannot_verify(str(e))
+    if not status.ok:
+        return cannot_verify(status.error or "git log failed")
+    return observed(status)
+
+
+def _services_current_report(_declared: None, obs: Observation) -> list[Finding]:
+    status = obs.value
+    if not status.stale:
+        return [Finding(
+            OK, "running chela-* services match the checked-out code (or none are up)")]
+    names = ", ".join(status.stale)
+    return [Finding(
+        WARN,
+        f"{len(status.stale)} running service(s) predate the checked-out code: {names}",
+        "These PM2 services started before the commit now checked out existed, so they "
+        "cannot be running it — the checkout itself may report as fully in sync while "
+        "this is true, since a bare `git pull` (bypassing `chela update`, which pulls AND "
+        f"restarts together) never restarts anything. `pm2 restart {names}` (or `chela "
+        "update`, idempotent when there's nothing left to pull) picks up the new code.",
+    )]
+
+
 # --- fact: rows a hard tmux death orphaned, that nothing else surfaces --------------
 
 def _restore_scan(now: str) -> int:
@@ -2345,6 +2395,18 @@ def facts() -> list[Fact]:
             read_back=_upstream_synced_read,
             report=_upstream_synced_report,
             applies=_upstream_synced_applies,
+        ),
+        Fact(
+            name="repo.services_current",
+            declared_by="nothing — chela never records this; a running service either "
+                        "started after the code it's running was committed, or it didn't",
+            owned_by="PM2 (`pm_uptime` — each online chela-* service's own last-start "
+                     "time) compared against git's committer date for the checked-out "
+                     "HEAD",
+            declare=lambda: None,
+            read_back=_services_current_read,
+            report=_services_current_report,
+            applies=_upstream_synced_applies,     # same "is this a git checkout" gate
         ),
         Fact(
             name="restore.dead_epoch_rows",
