@@ -1048,6 +1048,13 @@ def test_apply_prints_each_rows_DETAIL_not_just_its_outcome(live_stores, capsys)
     assert "chela-telegram owns" in bindings_line, (
         f"the left-to-daemon row lost its reason. Got: {bindings_line!r}"
     )
+    # ⭐ ...and that it WILL be reaped, i.e. no operator action is needed. Naming the owner
+    # alone reads as "someone else's problem, unresolved"; the row is in fact self-healing,
+    # and an operator who does not know that goes looking for a manual fix that does not
+    # exist — on the one disposition with no next step.
+    assert "reconcile tick reaps this row" in bindings_line, (
+        f"the left-to-daemon detail must say the row is self-healing. Got: {bindings_line!r}"
+    )
     # ⛔ NOT `"@42" in revived_line` — the row's own `@7 -> @42` prefix contains it, so the
     # DETAIL could lose the destination and the assertion would still pass. Pin the detail
     # verbatim: "re-stamped @7" alone does not say where the row went.

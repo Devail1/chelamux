@@ -390,3 +390,29 @@ def test_a_malformed_archive_store_degrades_to_empty_instead_of_raising(roster, 
     assert [r["wid"] for r in data["archived"]] == ["@5"], (
         "a malformed archive must be replaced, not raise and abort a half-done --apply"
     )
+
+
+def test_the_archive_bound_survives_a_whole_apply_run(roster):
+    """🔴 GUARD (CMX-196 round 8): the cap must comfortably exceed ONE `--apply` run.
+
+    The archive is the only remaining record of a row `--apply` deleted from its live store,
+    so a sweep must never evict rows archived in the SAME run — the operator would be left
+    with rows gone from both places. A dead tmux server can orphan a row per fleet window
+    plus one per dispatcher run half, so a realistic single run archives tens of rows.
+
+    ⚠️ The existing retention test is written in terms of `_MAX_ARCHIVED` itself, so it
+    passes at ANY cap — including 2. A test parameterised by the value it should pin cannot
+    pin it; this asserts the literal, and then proves the behaviour at a realistic run size.
+    """
+    assert roster._MAX_ARCHIVED >= 100, (
+        f"the archive cap is {roster._MAX_ARCHIVED} — too small to hold one --apply run "
+        "without evicting its own entries"
+    )
+
+    for i in range(100):
+        roster.archive({"store": "session-ids", "wid": f"@{i}", "session_id": f"s{i}",
+                        "cwd": None, "label": "", "stamped_epoch": OLD})
+
+    data = json.loads(roster._ARCHIVE_STORE.read_text())
+    assert len(data["archived"]) == 100, "a single run's archives evicted each other"
+    assert data["archived"][0]["wid"] == "@0", "the FIRST row of the run was swept away"
