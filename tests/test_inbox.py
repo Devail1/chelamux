@@ -334,7 +334,11 @@ def test_unregister_clears_the_address_only_when_it_names_that_wid(store_file):
 
 # --- readdress / unregister_dangling — CMX-196's write half for `chela restore --apply` ---
 
-def test_readdress_moves_the_orchestrator_to_its_new_live_address(store_file, windows):
+def test_readdress_moves_the_orchestrator_to_its_new_live_address(store_file, windows, monkeypatch):
+    """🔴 `readdress` re-derives the identity fresh rather than trusting the plan's stale
+    session id (the docstring's defense-in-depth claim) — so the stored
+    ``orchestrator_session`` must be the FRESHLY resolved one, never left blank/stale."""
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: "sid-fresh-live")
     store = inbox.load()
     store["orchestrator"] = "@9"
     store["orchestrator_epoch"] = "OLD-epoch"
@@ -344,10 +348,12 @@ def test_readdress_moves_the_orchestrator_to_its_new_live_address(store_file, wi
     result = inbox.readdress("@9", "OLD-epoch", ORCH)
 
     assert result["ok"] is True
+    assert result["session"] == "sid-fresh-live"
     reloaded = inbox.load()
     assert reloaded["orchestrator"] == ORCH
     assert reloaded["orchestrator_epoch"] != "OLD-epoch"
     assert reloaded["orchestrator_name"] == "orchestrator"
+    assert reloaded["orchestrator_session"] == "sid-fresh-live"
 
 
 def test_readdress_refuses_an_unknown_window(store_file, windows):

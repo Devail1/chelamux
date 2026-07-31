@@ -138,6 +138,20 @@ def test_remove_is_a_noop_when_the_session_id_no_longer_matches(sessionids, monk
     assert sessionids.entries() == {"@5": {"session_id": "sid-current", "epoch": "111-222"}}
 
 
+def test_remove_is_a_noop_when_the_epoch_no_longer_matches(sessionids, monkeypatch):
+    """🔴 `remove`'s sibling to `rekey`'s epoch guard — the half the docstring leans on: 'a
+    further tmux restart can reissue the address to a genuinely different, live row'."""
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    sessionids.set_session_id("@5", "sid-dead")
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "999-888")
+    sessionids.set_session_id("@5", "sid-dead")   # re-stamped by a fresh write, new epoch
+
+    ok = sessionids.remove("@5", "sid-dead", "111-222")   # stale plan's OLD epoch
+
+    assert ok is False
+    assert sessionids.entries() == {"@5": {"session_id": "sid-dead", "epoch": "999-888"}}
+
+
 def test_remove_is_a_noop_when_the_row_is_already_gone(sessionids, monkeypatch):
     monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
     assert sessionids.remove("@5", "sid-dead", "111-222") is False
