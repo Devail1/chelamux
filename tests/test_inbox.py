@@ -623,7 +623,14 @@ def test_a_judge_verdict_for_a_superseded_head_is_dropped_not_delivered(
 
     assert sends == []                              # NEVER told the superseded commit is ready
     assert inbox.load()["queue"] == []              # and the rotted event is retired
-    assert f"dropping stale {kind}" in caplog.text   # loudly — never silently
+    assert f"dropping stale {kind}" in caplog.text
+    # ⛔ ...NAMING both commits. This drop is silent to the operator — log-only, no event_log
+    # row and no push — so this line is the ONLY forensic record that a verdict was retired.
+    # "PR head moved past the judged commit" without the shas cannot answer the one question
+    # it exists for: WHICH commit was judged, and what is live now.
+    assert _JUDGE_SHA[:12] in caplog.text and _SUPERSEDING_SHA[:12] in caplog.text, (
+        f"the drop reason must name the judged and live shas. Got: {caplog.text!r}"
+    )   # loudly — never silently
 
 
 @pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
@@ -658,6 +665,13 @@ def test_a_superseded_verdict_is_dropped_even_when_it_NEVER_QUEUES(
     )
     assert inbox.load()["queue"] == []
     assert f"dropping stale {kind}" in caplog.text
+    # ⛔ ...NAMING both commits. This drop is silent to the operator — log-only, no event_log
+    # row and no push — so this line is the ONLY forensic record that a verdict was retired.
+    # "PR head moved past the judged commit" without the shas cannot answer the one question
+    # it exists for: WHICH commit was judged, and what is live now.
+    assert _JUDGE_SHA[:12] in caplog.text and _SUPERSEDING_SHA[:12] in caplog.text, (
+        f"the drop reason must name the judged and live shas. Got: {caplog.text!r}"
+    )
 
 
 @pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
@@ -715,6 +729,13 @@ def test_a_PARKED_verdict_is_still_re_checked_once_its_run_row_moves_on(
         "half of the candidate set is the only source once the run row moves on"
     )
     assert f"dropping stale {kind}" in caplog.text
+    # ⛔ ...NAMING both commits. This drop is silent to the operator — log-only, no event_log
+    # row and no push — so this line is the ONLY forensic record that a verdict was retired.
+    # "PR head moved past the judged commit" without the shas cannot answer the one question
+    # it exists for: WHICH commit was judged, and what is live now.
+    assert _JUDGE_SHA[:12] in caplog.text and _SUPERSEDING_SHA[:12] in caplog.text, (
+        f"the drop reason must name the judged and live shas. Got: {caplog.text!r}"
+    )
 
 
 def test_a_cannot_verify_verdict_emits_the_kind_the_consumers_key_on(
@@ -1646,6 +1667,13 @@ def test_the_judged_sha_comes_from_the_PAYLOAD_not_the_live_row(
         "source and the comparison could never fail"
     )
     assert f"dropping stale {kind}" in caplog.text
+    # ⛔ ...NAMING both commits. This drop is silent to the operator — log-only, no event_log
+    # row and no push — so this line is the ONLY forensic record that a verdict was retired.
+    # "PR head moved past the judged commit" without the shas cannot answer the one question
+    # it exists for: WHICH commit was judged, and what is live now.
+    assert _JUDGE_SHA[:12] in caplog.text and _SUPERSEDING_SHA[:12] in caplog.text, (
+        f"the drop reason must name the judged and live shas. Got: {caplog.text!r}"
+    )
 
 
 @pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
