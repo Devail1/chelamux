@@ -530,9 +530,17 @@ _JUDGE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _SUPERSEDING_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
+_LONG_DETAIL = (
+    "the suite could not be provisioned: npm ci failed after three attempts, so the two "
+    "real-DOM suites would have SKIPPED silently and every mutation would have looked "
+    "survivable — this string is deliberately longer than the 140-char summary truncation"
+)
+
+
 def _verdict_run(judge_state=None, **over):
     """A run row sitting in `awaiting_review` with a SETTLED judge verdict."""
-    return _clean_run(judge_state=judge_state or judge.J_CLEAN, **over)
+    return _clean_run(judge_state=judge_state or judge.J_CLEAN,
+                      judge_detail=_LONG_DETAIL, **over)
 
 
 def _clean_run(**over):
@@ -574,7 +582,20 @@ def test_a_judge_verdicts_payload_carries_the_judged_sha(
     queued = inbox.load()["queue"]
     assert len(queued) == 1
     assert queued[0]["kind"] == kind
-    assert queued[0]["payload"]["judge_sha"] == _JUDGE_SHA
+    payload = queued[0]["payload"]
+    assert payload["judge_sha"] == _JUDGE_SHA
+    # ⭐ The payload is the RECORD, so the VERDICT itself has to reach it — the kind string
+    # says which of the two fired, but a consumer reading the record (the dashboard, a
+    # replay of the event log) has only this field to learn what the judge concluded.
+    assert payload["judge_state"] == judge_state, (
+        f"the verdict did not reach the payload, got {payload['judge_state']!r}"
+    )
+    # ...and the REASON survives in full. The summary truncates it to 140 chars for the
+    # push; the payload is the durable copy, and a cannot-verify reason is the only thing
+    # telling a human WHY the judge could not answer.
+    assert payload["judge_detail"] == _LONG_DETAIL, (
+        f"the judge detail did not survive into the payload, got {payload['judge_detail']!r}"
+    )
 
 
 @pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
@@ -1680,4 +1701,59 @@ def test_a_BLOCKED_verdict_never_uses_the_judge_verdict_path(
     assert "run_judge_clean" not in kinds and "run_judge_cannot_verify" not in kinds, (
         f"a BLOCKED verdict came through the judge-verdict path — it already fires "
         f"run_changes_requested. Queued: {kinds}"
+    )
+
+
+def test_a_run_ARRIVING_at_awaiting_review_still_gets_the_plain_review_edge(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 7): the edge this ticket is built ON must still fire.
+
+    The dedup mark became `status:judge_state` so a settling verdict re-announces. Its
+    "already announced" test has TWO halves, per the PR's own comment — a fresh task id, OR
+    one arriving at awaiting_review from another status. Collapse it to `bool(prev_mark)`
+    and the second half dies: a run the orchestrator has already seen RUNNING never
+    announces its arrival at review at all.
+
+    ⛔ That is the ORIGINAL notification, working since long before this ticket. Adding a
+    new one must not cost the old one — and no test on this branch drove a status change.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    running = dict(_verdict_run(), status="running", judge_state="")
+    inbox.tick({}, runs=[running])                 # seen once, while it was still running
+    assert [e["kind"] for e in inbox.load()["queue"]] == []
+
+    arrived = dict(_verdict_run(), judge_state="")   # now at awaiting_review, judge not run
+    inbox.tick({}, runs=[arrived])
+
+    assert [e["kind"] for e in inbox.load()["queue"]] == ["run_review"], (
+        "a run arriving at awaiting_review from another status lost its review edge"
+    )
+
+
+@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
+@pytest.mark.parametrize("other_status", ["running", "changes_requested", "done"])
+def test_a_verdict_is_announced_ONLY_while_the_run_SITS_in_awaiting_review(
+        judge_state, kind, other_status, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 7): the status half of the emit condition.
+
+    Every comment and docstring on this feature says the same thing — "the judge's own
+    verdict on a run still SITTING in awaiting_review". Drop the status test and a stale
+    `judge_state` left on a row that has since moved on fires a verdict announcement about
+    a run that is running again, already sent back, or finished: the orchestrator is told a
+    PR is "clean and MERGEABLE" when it is not even under review.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[dict(_verdict_run(judge_state), status=other_status)])
+
+    kinds = [e["kind"] for e in inbox.load()["queue"]]
+    assert kind not in kinds, (
+        f"a {judge_state!r} verdict fired for a run in {other_status!r}. Queued: {kinds}"
     )
