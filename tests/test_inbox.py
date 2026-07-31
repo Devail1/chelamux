@@ -1757,3 +1757,62 @@ def test_a_verdict_is_announced_ONLY_while_the_run_SITS_in_awaiting_review(
     assert kind not in kinds, (
         f"a {judge_state!r} verdict fired for a run in {other_status!r}. Queued: {kinds}"
     )
+
+
+def test_the_judge_state_mark_is_scoped_to_awaiting_review_ONLY(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 8): every OTHER status keeps the bare status as its mark.
+
+    Widening `mark` to `f"{status}:{judge_state}"` unconditionally makes the judge's own
+    churn re-announce states that have nothing to do with it: a run parked at needs_human
+    while a judge re-runs goes J_RUNNING → J_CANNOT_VERIFY → …, and each transition mints a
+    NEW mark, so the orchestrator is pinged "NEEDS A HUMAN" again and again for one
+    unchanged situation.
+
+    ⛔ The re-announce is deliberately scoped to `awaiting_review`, where the verdict is the
+    news. Everywhere else the status IS the news and the judge is noise.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    parked = dict(_verdict_run(), status="needs_human", judge_state=judge.J_BLOCKED)
+    inbox.tick({}, runs=[parked])
+    first = [e["kind"] for e in inbox.load()["queue"]]
+    assert first == ["run_needs_human"]
+
+    # the judge re-runs on the same parked row — its state churns, the situation does not
+    for churn in (judge.J_RUNNING, judge.J_CANNOT_VERIFY, judge.J_CLEAN):
+        inbox.tick({}, runs=[dict(parked, judge_state=churn)])
+
+    assert [e["kind"] for e in inbox.load()["queue"]] == first, (
+        "judge churn re-announced a status that never changed — the judge_state half of "
+        "the mark must apply to awaiting_review only"
+    )
+
+
+def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 8): the summary is one line TYPED AT the prompt.
+
+    `_event`'s summary is delivered by typing it into the orchestrator's session
+    (`sanitize_prompt`, CMX-79), so pasting a judge's whole reason — multi-line, arbitrary
+    length, containing whatever a failing suite printed — is a different thing from
+    recording it. The payload is where the full text belongs (guarded in round 7); the
+    summary gets a bounded excerpt.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_CANNOT_VERIFY)])
+
+    summary = inbox.load()["queue"][0]["summary"]
+    assert _LONG_DETAIL[:40] in summary, "an excerpt of the reason must reach the operator"
+    assert _LONG_DETAIL not in summary, (
+        "the WHOLE reason was pasted into a summary that gets typed at the prompt — it "
+        "belongs in the payload, which already carries it in full"
+    )
+    assert len(summary) < len(_LONG_DETAIL) + 200
