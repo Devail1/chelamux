@@ -1024,3 +1024,26 @@ def test_a_dry_run_still_makes_the_read_only_claim(live_stores, capsys):
     out = capsys.readouterr().out
     assert "never writes to a store" in out
     assert "were re-stamped at their new address" not in out
+
+
+def test_apply_prints_each_rows_DETAIL_not_just_its_outcome(live_stores, capsys):
+    """🔴 GUARD (CMX-196 round 5): `ApplyResult.detail` is the per-row explanation `--apply`
+    prints beside each outcome, and it is the only place the report says WHY.
+
+    Drop it and every row still shows an action verb while the reasons vanish: a
+    `left-to-daemon` row stops saying chela-telegram owns that file, so an operator reads it
+    as an unexplained skip; a RACED row stops saying it was archived first, so they cannot
+    tell whether anything was preserved before the write declined.
+    """
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--apply"])
+
+    out = capsys.readouterr().out
+    bindings_line = _line_with(out, "[telegram.bindings]", "left-to-daemon")
+    assert "chela-telegram owns" in bindings_line, (
+        f"the left-to-daemon row lost its reason. Got: {bindings_line!r}"
+    )
+    revived_line = _line_with(out, "[session-ids]", "revived")
+    assert "re-stamped" in revived_line and "@42" in revived_line, (
+        f"the revived row lost the detail naming where it moved. Got: {revived_line!r}"
+    )

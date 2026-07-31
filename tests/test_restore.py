@@ -610,6 +610,36 @@ def test_apply_still_reports_RACED_after_archiving_when_removal_declines():
     assert results[0].action == RACED
 
 
+def test_apply_reports_RACED_when_the_orchestrator_UNREGISTER_declines():
+    """🔴 GUARD (round 5): the FOURTH writer's declines path — the last member of a
+    four-writer class where the other three were covered.
+
+        readdress          -> REVIVED / RACED   ✓
+        rekey              -> REVIVED / RACED   ✓
+        remove_session     -> ARCHIVED / RACED  ✓
+        unregister_dangling-> ARCHIVED / ???    ← this
+
+    `unregister_dangling` declines when the registration moved on since classification (a
+    human re-registered, or a further restart reissued the wid). The archive already landed
+    — unconditionally, before removal is attempted — but the row is STILL REGISTERED, so
+    reporting ARCHIVED tells the operator the inbox is clean when it is not, on the one row
+    the whole decisions inbox routes through.
+    """
+    calls, kit = _writers()
+    kit["unregister_orchestrator"] = lambda wid, stamped: (
+        calls.append(("unregister", wid, stamped)), {"ok": False, "wid": wid})[1]
+    v = _manual("inbox.orchestrator", wid="@1")
+
+    results = apply([v], **kit)
+
+    assert [c[0] for c in calls] == ["archive", "unregister"], (
+        "the archive must still have happened, and BEFORE the declined unregister"
+    )
+    assert results[0].action == RACED, (
+        "a declined unregister leaves the row registered — ARCHIVED would be a lie"
+    )
+
+
 def test_apply_processes_every_verdict_in_order_one_result_each():
     calls, kit = _writers()
     verdicts = [_revivable("inbox.orchestrator", wid="@1"),
