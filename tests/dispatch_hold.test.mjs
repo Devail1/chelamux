@@ -10,7 +10,13 @@
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
+const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
 
 const BODY = `
 <div class="panel" id="panel-work">
@@ -113,10 +119,37 @@ test('an unheld queue shows Pause dispatch with no hint', async () => {
 });
 
 // --- 3. 🔴 THE BUTTON IS WIRED TO toggleDispatchHold() -----------------------------
+//
+// The DOM check below reads `document`, which only ever saw the BODY fixture above —
+// asserting the fixture's own copy of the onclick would pass even if the SHIPPED
+// index.html never wired the button at all. So this also greps the REAL template file
+// (HTML, read straight off disk — same readFileSync approach as tests/topbarmenu.test.mjs
+// and tests/sidebar.test.mjs) to pin the markup that actually ships.
 
 test('the Pause/Resume button is wired to chela.toggleDispatchHold() — not just rendered', () => {
     const btn = document.getElementById('dispatch-hold-btn');
     assert.match(btn.getAttribute('onclick') || '', /chela\.toggleDispatchHold\(\)/);
+});
+
+test('the shipped index.html actually wires #dispatch-hold-btn to chela.toggleDispatchHold()', () => {
+    const m = HTML.match(/<button class="btn-accent" id="dispatch-hold-btn"[\s\S]*?<\/button>/);
+    assert.ok(m, '#dispatch-hold-btn is missing from chela/dashboard/templates/index.html');
+    assert.match(m[0], /onclick="chela\.toggleDispatchHold\(\)"/,
+        'the shipped template\'s #dispatch-hold-btn onclick does not call chela.toggleDispatchHold()');
+});
+
+// --- 3b. 🔴 toggleDispatchHold IS REACHABLE FROM window.chela ---------------------
+//
+// index.html's inline onclick calls `chela.toggleDispatchHold()` against the global
+// window.chela namespace — it does not import the work.js module. Every test above
+// drives toggleDispatchHold via the MODULE EXPORT, so a work.js that stopped
+// registering it onto window.chela would leave every test above green while a real
+// click in the shipped dashboard threw "chela.toggleDispatchHold is not a function"
+// (cf. tests/cost.test.mjs's window.chela.setCostWindow pin, same failure mode).
+
+test('toggleDispatchHold is reachable via window.chela — the entry point index.html\'s onclick actually calls', () => {
+    assert.equal(typeof window.chela.toggleDispatchHold, 'function',
+        'window.chela.toggleDispatchHold must be registered; index.html\'s onclick="chela.toggleDispatchHold()" is the only production entry point for the button');
 });
 
 // --- 4. 🔴 PAUSING PROMPTS A CONFIRM DIALOG, AND DECLINING ABORTS BEFORE THE POST --

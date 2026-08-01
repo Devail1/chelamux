@@ -10,6 +10,9 @@ onto the exact same `chela.hold` file the CLI's `--pause`/`--resume` write, plus
 
 from __future__ import annotations
 
+import json
+import time
+
 import pytest
 
 from chela import hold
@@ -36,6 +39,24 @@ def test_pause_takes_a_hold_the_cli_would_also_see(client):
     # SAME hold, not a parallel one.
     held = hold.active()
     assert held is not None and held.reason == "batch merge"
+    # `by` names WHICH front door took the hold — the whole point of the field is
+    # telling the next person to look at the dashboard, not their own terminal.
+    assert held.by == "dashboard"
+    assert data["dispatch_hold"]["by"] == "dashboard"
+
+
+def test_pause_honours_a_valid_custom_ttl(client):
+    """A parseable `ttl` must actually be used — not silently swapped for the 30m
+    default. The expiry is the safety property (chela/hold.py: "it cannot strand the
+    fleet"), so an accepted-but-ignored ttl would be just as wrong as a rejected one."""
+    resp = client.post("/api/dispatcher/pause", json={"ttl": "2h"})
+
+    assert resp.status_code == 200
+    held = hold.active()
+    assert held is not None
+    # Pinned well clear of DEFAULT_TTL_SECONDS (30m) so a hardcoded default cannot pass.
+    assert held.remaining() > hold.DEFAULT_TTL_SECONDS + 60
+    assert held.remaining() <= 2 * 60 * 60 + 5
 
 
 def test_pause_defaults_reason_and_ttl_when_none_given(client):
@@ -95,6 +116,28 @@ def test_dispatcher_payload_carries_the_hold_for_the_board_button(client, monkey
 
     client.post("/api/dispatcher/resume")
     assert client.get("/api/dispatcher").get_json()["dispatch_hold"] is None
+
+
+def test_an_expired_hold_reads_as_unheld_on_the_dispatcher_payload(client, monkeypatch):
+    """`/api/dispatcher` must report the hold currently IN FORCE, not merely whatever
+    hold file happens to be on disk. `hold.read()` returns an expired hold same as a
+    live one; only `hold.active()` filters it out — and "a hold can never strand the
+    fleet" (chela/hold.py's module docstring) is the whole reason the Board's button is
+    safe to ship. An expired hold must render as "Pause dispatch", not "Resume dispatch"
+    forever."""
+    _no_repo_workflow(monkeypatch)
+    client.post("/api/dispatcher/pause", json={"reason": "stale"})
+    assert client.get("/api/dispatcher").get_json()["dispatch_hold"] is not None
+
+    # Back-date the hold file directly, past its own expiry — no sleeping required.
+    data = json.loads(hold.path().read_text(encoding="utf-8"))
+    data["expires_at"] = time.time() - 1
+    hold.path().write_text(json.dumps(data), encoding="utf-8")
+    assert hold.read() is not None, "read() should still see the stale file"
+
+    resp = client.get("/api/dispatcher")
+
+    assert resp.get_json()["dispatch_hold"] is None
 
 
 def test_pause_does_not_touch_the_task_queue(client, monkeypatch):
