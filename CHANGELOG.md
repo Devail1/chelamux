@@ -10,6 +10,18 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-02
+
+Honest self-reporting, and the operator controls that act on it.
+
+`chela doctor` could report a checkout "in sync with its upstream" while it sat
+commits behind and every `chela-*` service kept serving code it had loaded days
+earlier — the exact shape that let five merged PRs run inert for a full day. This
+release makes that condition visible from two independent angles (the checkout
+against its upstream, and the RUNNING services against the checkout), gives the
+dashboard controls to act on it without an SSH session, and closes the gaps that
+let the judge's own verdicts go stale.
+
 ### Added
 
 - **`chela restore` reports the rows a hard tmux death orphaned.** CMX-82 already
