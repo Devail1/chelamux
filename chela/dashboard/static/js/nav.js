@@ -404,12 +404,92 @@ async function refreshSidebar() {
     } catch (e) {
         // transient — keep the last render; the next tick retries.
     }
+    // Awaited (its own try/catch is inside refreshRecentSessions): a caller that
+    // awaits refreshSidebar() — resumeSession() does, to know when it's safe to
+    // re-read the section — must see BOTH halves settled, not just the agent list.
+    await refreshRecentSessions();
 }
 
 // The WORK badges used to be a THIRD independent poller of /api/dispatcher, right
 // here — fetching the same payload the Dispatch and Kanban views were each already
 // fetching on their own timers. They are now filled by work.js's single poll (the
 // slots themselves are declared on the Work view in views.js).
+
+// --- Recent (dead) sessions — one-click resume (CMX-208) --------------------
+// A UI over `chela restore`'s already-tested classification (chela/restore.py): a
+// Claude session a hard tmux death (or `wsl --shutdown`) orphaned, with enough on
+// record (cwd + session id) to relaunch via /api/restore/resume. Terminals-gated
+// (resuming spawns a window, same as the "+" launcher) and hidden entirely when
+// there is nothing to resume — a rare recovery affordance, not a permanent fixture.
+
+function _recentRowHtml(r) {
+    const label = r.label || r.cwd || r.wid;
+    const key = `${r.store} ${r.wid}`;
+    return `<div class="agent-row recent-row" data-key="${attrEsc(key)}">
+        <span class="ar-type recent" title="dead session — needs a human to resume">&#8635;</span>
+        <div class="ar-main">
+            <div class="ar-top"><span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span></div>
+            <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(r.cwd || '')}</span></div>
+        </div>
+        <button class="btn-accent recent-resume" title="Resume this session"
+                data-store="${attrEsc(r.store)}" data-wid="${attrEsc(r.wid)}"
+                data-session="${attrEsc(r.session_id || '')}" data-epoch="${attrEsc(r.stamped_epoch || '')}"
+                onclick="event.stopPropagation(); chela.resumeSession(this)">Resume</button>
+    </div>`;
+}
+
+function renderRecentSessions(rows) {
+    const section = document.getElementById('side-recent-section');
+    const host = document.getElementById('side-recent');
+    const count = document.getElementById('hdr-recent');
+    if (!section || !host) return;
+    const list = rows || [];
+    if (count) count.textContent = String(list.length);
+    if (!list.length) {
+        section.hidden = true;
+        host.innerHTML = '';
+        return;
+    }
+    section.hidden = false;
+    host.innerHTML = list.map(_recentRowHtml).join('');
+}
+
+async function refreshRecentSessions() {
+    if (!TERMINALS_ON) return;
+    try {
+        renderRecentSessions(await api('/api/restore'));
+    } catch (e) {
+        // transient — keep the last render; the next tick retries.
+    }
+}
+
+// Resume button click: spawn `claude --resume <session>` in the row's recorded cwd
+// (server-side, /api/restore/resume — the exact same window-open path the "+" launch
+// menu and Telegram's /new use). The row disables itself immediately so a slow spawn
+// can't be double-clicked into two windows for the same dead session.
+async function resumeSession(btn) {
+    if (!btn || btn.disabled) return;
+    const { store, wid, session, epoch: stampedEpoch } = btn.dataset;
+    btn.disabled = true;
+    const prevText = btn.textContent;
+    btn.textContent = 'Resuming…';
+    let res = null;
+    try {
+        res = await api('/api/restore/resume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ store, wid, session_id: session, stamped_epoch: stampedEpoch || null }),
+        });
+    } catch (e) { /* res stays null — handled below */ }
+    if (!res || res.error || res.ok === false) {
+        btn.disabled = false;
+        btn.textContent = prevText;
+        alert((res && res.error) || 'Could not resume this session — it may have changed since the list was loaded.');
+        refreshRecentSessions();
+        return;
+    }
+    await refreshSidebar();   // re-fetches both the live agent list and Recent sessions
+}
 
 // --- Agent detail view -----------------------------------------------------
 
@@ -1367,8 +1447,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { closeShortcuts, openPalette, openShortcuts, refreshSidebar, renderAgentDetail, renderNav, renderSidebarAgents, selectView, updateCtxCache };
+export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });

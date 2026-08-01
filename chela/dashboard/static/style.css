@@ -2925,6 +2925,19 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .ar-type.claude { color: #56B4E9; background: color-mix(in srgb, #56B4E9 16%, transparent); }
 .ar-type.shell  { color: #009E73; background: color-mix(in srgb, #009E73 18%, transparent); }
 .ar-type.server { color: #E69F00; background: color-mix(in srgb, #E69F00 16%, transparent); }
+/* Recent (dead) sessions — CMX-208. Not one of the type-cue Okabe-Ito tints above
+   (claude/shell/server): this row is not a live window at all, so it reads as
+   dimmed/inert rather than typed. */
+.ar-type.recent { color: var(--text-dim); }
+
+.recent-row { align-items: flex-start; gap: 8px; cursor: default; }
+.recent-row:hover { background: none; }
+.recent-resume {
+    flex: 0 0 auto; align-self: center; padding: 3px 9px; font-size: 10px;
+    opacity: 0.85; transition: opacity 0.12s;
+}
+.recent-row:hover .recent-resume { opacity: 1; }
+.recent-resume:disabled { opacity: 0.5; cursor: default; }
 
 .ar-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .ar-top { display: flex; align-items: center; gap: 6px; }
@@ -2974,7 +2987,8 @@ input[type="text"]:focus, textarea:focus, select:focus {
     body.sidebar-collapsed .group-head,
     body.sidebar-collapsed .triage-head,
     body.sidebar-collapsed .agent-row .ar-main,
-    body.sidebar-collapsed .agent-row .agent-pin { display: none; }
+    body.sidebar-collapsed .agent-row .agent-pin,
+    body.sidebar-collapsed .agent-row .recent-resume { display: none; }
 
     /* The section heads are gone, so a rule stands in for the section break. */
     body.sidebar-collapsed .side-section { margin-bottom: 10px; }
