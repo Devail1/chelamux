@@ -122,3 +122,20 @@ def test_the_summary_says_expired_out_loud(chela_dir):
     held = hold.take(reason="r", ttl_seconds=60)
     assert "expires in" in held.summary()
     assert "EXPIRED" in held.summary(now=time.time() + 120)
+
+
+@pytest.mark.parametrize("ttl_seconds,rendered,other", [
+    (hold.DEFAULT_TTL_SECONDS, "30m", "2h00m"),
+    (2 * 60 * 60, "2h00m", "30m"),
+])
+def test_the_summary_renders_the_actual_ttl_not_a_hardcoded_one(chela_dir, ttl_seconds, rendered, other):
+    # The countdown is how an operator confirms "a hold can never strand the fleet" is
+    # true for THIS hold, not decoration. Asserting only that "expires in" appears would
+    # be satisfied by a hardcoded string too, so pin the RENDERED VALUE across more than
+    # one TTL — a constant cannot pass both parametrizations.
+    held = hold.take(reason="r", ttl_seconds=ttl_seconds)
+    # Pinned to created_at: remaining() is exactly ttl_seconds, so the assertion cannot
+    # flake on how many milliseconds elapsed between take() and summary().
+    summary = held.summary(now=held.created_at)
+    assert rendered in summary
+    assert other not in summary
