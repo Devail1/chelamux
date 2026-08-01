@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, rooms, scheduler, spawn, starter, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, transcripts, update, userconfig
 from chela.dashboard import resources
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -1560,6 +1560,158 @@ def api_agents_spawn():
             log.warning("launcher.record_recent failed for %s", result.cwd, exc_info=True)
 
     return jsonify({"ok": True, "name": result.name, "cwd": result.cwd})
+
+
+# ---------------------------------------------------------------------------
+# API: Restore (CMX-208) — the sidebar's "Recent sessions" one-click resume
+#
+# A thin UI over machinery CMX-195/196 already built and tested: `chela restore`
+# classifies every epoch-stamped row a hard tmux death (or a `wsl --shutdown`) left
+# dangling as REVIVABLE (already alive under a new address — nothing to do here) or
+# MANUAL (nothing live claims the session; a human decides). These two routes expose
+# the MANUAL half — the ones `chela restore` prints as a `cd <cwd> && CHELA_WID=@N
+# claude --resume <sid>` one-liner for a human to run by hand — as a list + a button.
+# ---------------------------------------------------------------------------
+
+def _restore_verdicts() -> list[restore.Verdict]:
+    """Every classified row, gathered exactly like ``chela restore`` (main.py's
+    ``cmd_restore``) does: the same three session-stamped stores, joined through the
+    same :func:`chela.restore.plan`. Kept separate from ``cmd_restore`` itself (some
+    duplication) rather than importing ``chela.main`` here, which pulls in argparse/CLI
+    wiring the dashboard process has no business loading.
+    """
+    from chela.telegram.bindings import BindingRegistry
+
+    now_epoch = epoch.current()
+    store = inbox.load()
+    bindings_reg = BindingRegistry.load()
+    bindings = {wid: bindings_reg.epoch_for(wid) for wid in bindings_reg.windows()}
+    return restore.plan(store, bindings, sessionids.entries(), now_epoch)
+
+
+def _dispatcher_owned_wid_epochs() -> set[tuple[str, str | None]]:
+    """``(wid, stamped_epoch)`` pairs the DISPATCHER's own ``runs`` rows claim — a run's
+    own window, or its judge's. This is the SAME fact :func:`chela.restore.scan_runs`
+    and :func:`chela.telegram.reconcile.dispatched_window_ids` read off the ``runs``
+    table (``window_id``/``window_epoch``, ``judge_window_id``/``judge_window_epoch`` —
+    recorded at spawn, the only lossless moment).
+
+    ⛔ Never a name or path guess. A row's ``window_id``/``judge_window_id`` is stamped
+    at spawn under the epoch that was live then — the SAME (wid, epoch) pair a dangling
+    ``session-ids.json``/``telegram-bindings.json`` row is stamped with for that very
+    window (both come from the one physical spawn). Joining on that pair is therefore
+    exact, unlike a ``cmx-*``/``judge-*`` name prefix or a ``~/.chela/worktrees/`` path
+    check: a human is free to name a session ``cmx-999`` or work outside that directory,
+    and must not be swept up by a convention that merely happens to look similar.
+    """
+    owned: set[tuple[str, str | None]] = set()
+    for row in dispatcher.list_runs():
+        wid = row.get("window_id")
+        if wid:
+            owned.add((wid, row.get("window_epoch")))
+        jwid = row.get("judge_window_id")
+        if jwid:
+            owned.add((jwid, row.get("judge_window_epoch")))
+    return owned
+
+
+def _shape_restore_row(v: restore.Verdict, *, resumable: bool) -> dict:
+    shaped = {"store": v.store, "wid": v.wid, "cwd": v.cwd, "label": v.label,
+              "stamped_epoch": v.stamped_epoch}
+    if resumable:
+        shaped["session_id"] = v.session_id
+    return shaped
+
+
+@app.route("/api/restore")
+@require_auth
+def api_restore():
+    """Resumable MANUAL rows — a dead Claude session with enough on record (cwd +
+    session id) to relaunch. REVIVABLE rows are left out: that session is already
+    alive under a different address, which is ``chela restore --apply``'s job (a
+    re-stamp), not a resume — showing it here as "resumable" would be a lie.
+
+    Dispatcher-owned rows (``_dispatcher_owned_wid_epochs``) are split into
+    ``dispatcher_rows`` instead of ``rows``: that worktree is still the dispatcher's —
+    a judge worktree is reaped on verdict publication, an agent's on run completion —
+    and resuming into it races that lifecycle the same way a second writer on
+    ``roster.json``/``telegram-bindings.json`` already has three times before. They are
+    never resumable, only *shown* (hidden by default; the sidebar's toggle reveals them
+    with no Resume affordance) — ``session_id`` is left off their shape since there is
+    no action for the client to build with it.
+    """
+    _require_terminals()
+    owned = _dispatcher_owned_wid_epochs()
+    candidates = [v for v in _restore_verdicts() if v.verdict == "MANUAL" and v.manual_command()]
+    rows, dispatcher_rows = [], []
+    for v in candidates:
+        if (v.wid, v.stamped_epoch) in owned:
+            dispatcher_rows.append(_shape_restore_row(v, resumable=False))
+        else:
+            rows.append(_shape_restore_row(v, resumable=True))
+    return jsonify({"rows": rows, "dispatcher_rows": dispatcher_rows, "hidden": len(dispatcher_rows)})
+
+
+@app.route("/api/restore/resume", methods=["POST"])
+@require_auth
+def api_restore_resume():
+    """One-click resume for a single MANUAL row from ``/api/restore``.
+
+    Body identifies the row (``store``/``wid``/``session_id``/``stamped_epoch`` — the
+    exact fields ``/api/restore`` returned for it). Re-classified against a FRESH
+    :func:`chela.restore.plan` before acting rather than trusted from the request —
+    the same "moved on since" guard :func:`chela.restore.apply`'s writers already
+    enforce one layer down — so a row a further restart or a concurrent resume has
+    already handled is refused (409), never acted on blind.
+
+    On a match: spawn ``claude --resume <session>`` in the row's recorded cwd via
+    :func:`chela.spawn.spawn_window` (the SAME window-open path the launcher and the
+    Telegram ``/new`` bridge use — see that module), record the resumed session id at
+    the new window, then hand the row to :func:`chela.restore.apply` so its now-stale
+    bookkeeping is archived and removed exactly the way ``chela restore --apply``
+    would for it — the spawn already IS the resume ``apply`` couldn't do on its own.
+    """
+    _require_terminals()
+    body = request.get_json(silent=True) or {}
+    want_store = (body.get("store") or "").strip()
+    want_wid = (body.get("wid") or "").strip()
+    want_session = (body.get("session_id") or "").strip()
+    want_epoch = body.get("stamped_epoch")
+    if not (want_store and want_wid and want_session):
+        return jsonify({"ok": False, "error": "store, wid and session_id are required"}), 400
+
+    verdict = next((v for v in _restore_verdicts()
+                     if v.store == want_store and v.wid == want_wid
+                     and v.verdict == "MANUAL" and v.session_id == want_session
+                     and v.stamped_epoch == want_epoch), None)
+    if verdict is None or not verdict.manual_command():
+        return jsonify({"ok": False,
+                        "error": "this row no longer matches — refresh and retry"}), 409
+
+    if (verdict.wid, verdict.stamped_epoch) in _dispatcher_owned_wid_epochs():
+        return jsonify({"ok": False,
+                        "error": "this session is dispatcher-owned — its worktree is still "
+                                 "the dispatcher's and resuming it would race that lifecycle; "
+                                 "not a manual recovery target"}), 409
+
+    result = spawn.spawn_window(verdict.cwd, command=f"claude --resume {verdict.session_id}")
+    if not result.ok:
+        status = 400 if (result.error or "").startswith("no such directory") else 500
+        return jsonify({"ok": False, "error": result.error}), status
+
+    if result.wid:
+        try:
+            sessionids.set_session_id(result.wid, verdict.session_id)
+        except Exception:  # noqa: BLE001 — a record failure must never fail the resume itself
+            log.warning("resume: failed to record session id for %s", result.wid, exc_info=True)
+
+    try:
+        restore.apply([verdict])
+    except Exception:  # noqa: BLE001 — the resume already succeeded; cleanup is best-effort
+        log.warning("resume: apply() cleanup failed for %s %s", verdict.store, verdict.wid,
+                    exc_info=True)
+
+    return jsonify({"ok": True, "name": result.name, "cwd": result.cwd, "wid": result.wid})
 
 
 # ---------------------------------------------------------------------------
