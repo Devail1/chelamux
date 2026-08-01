@@ -83,6 +83,55 @@ function _renderWorkBadges(data) {
     if (prEl) prEl.textContent = prs + ' PR';
 }
 
+// CMX-206: `chela dispatch --pause` stops new claims — genuinely operational, but until
+// now reachable only over SSH. This renders the button's state off `dispatch_hold` in
+// the SAME /api/dispatcher payload the board already polls (no second endpoint), and
+// stays hidden until the first poll lands so it never flashes "Pause" over a queue that
+// is actually held.
+function _renderDispatchHold(data) {
+    const btn = document.getElementById('dispatch-hold-btn');
+    const hint = document.getElementById('dispatch-hold-hint');
+    if (!btn || !data) return;
+    btn.style.display = '';
+    const held = data.dispatch_hold;
+    if (held) {
+        btn.textContent = 'Resume dispatch';
+        btn.classList.add('btn-warn');
+        btn.classList.remove('btn-accent');
+        if (hint) hint.textContent = held.summary || 'Dispatch is paused.';
+    } else {
+        btn.textContent = 'Pause dispatch';
+        btn.classList.add('btn-accent');
+        btn.classList.remove('btn-warn');
+        if (hint) hint.textContent = '';
+    }
+}
+
+// Pause takes the hold (30m default TTL, same as the CLI's --pause with no --ttl);
+// resume releases it unconditionally. Reads current state off `_lastData` — the same
+// payload the button was just rendered from — rather than a fresh fetch, so there's no
+// race between "what the button shows" and "what it acts on".
+async function toggleDispatchHold() {
+    const btn = document.getElementById('dispatch-hold-btn');
+    const held = _lastData && _lastData.dispatch_hold;
+    if (!held && !confirm('Pause dispatch — no new task will be claimed until you resume?')) {
+        return;
+    }
+    if (btn) btn.disabled = true;
+    try {
+        const path = held ? '/api/dispatcher/resume' : '/api/dispatcher/pause';
+        const resp = await api(path, { method: 'POST' });
+        if (!resp || resp.ok === false) {
+            alert((resp && resp.error) || 'That failed — dispatch state is unchanged.');
+        }
+    } catch (e) {
+        alert('Request failed — dispatch state is unchanged.');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+    await pollWork();
+}
+
 function _applySegment() {
     $$('#panel-work .work-pane').forEach(p => p.classList.toggle('active', p.dataset.seg === _segment));
     $$('#work-seg .work-seg-btn').forEach(b => {
@@ -120,6 +169,8 @@ async function pollWork() {
     _lastData = data;
     _readAwaiting(data);                // the Feed reads this — see awaitingReviewIds()
     _renderWorkBadges(data);            // sidebar — visible from every view
+    _renderDispatchHold(data);          // Pause/Resume button — lives in the Work toolbar,
+                                         // always in the DOM regardless of the active tab
     if (currentTab !== 'work') return;  // nothing else on screen to draw
     _applySegment();
     _renderWorkPanes(data);
@@ -159,8 +210,8 @@ async function postWorkDelete(payload) {
 
 
 // --- Stage 0: ES-module exports ---
-export { pollWork, postWorkDelete, startWorkPoll, workBadgeCounts };
+export { pollWork, postWorkDelete, startWorkPoll, toggleDispatchHold, workBadgeCounts };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { setWorkSegment });
+Object.assign(window.chela, { setWorkSegment, toggleDispatchHold });

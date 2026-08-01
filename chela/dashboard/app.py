@@ -3039,6 +3039,53 @@ def api_dispatcher():
         # gates its empty state on this, so run-only discovery must flip it on.
         "configured": bool(workflows_payload),
         "workflows": workflows_payload,
+        # CMX-206: the Board's Pause/Resume button reads its state off THIS payload
+        # (the poll `work.js` already runs every 30s) rather than a second fetch of
+        # `/api/settings` — see `hold.active()` for what makes a hold current.
+        "dispatch_hold": (hold.active().as_dict() if hold.active() else None),
+    })
+
+
+# CMX-206: `chela dispatch --pause` is genuinely operational — it is what stops new
+# claims before a batch of merges — but until now the only way to reach it was SSH +
+# the CLI, same friction the Update control (CMX-199) removed for `chela update`. This
+# is that control for the hold: POST to take it, POST to release it, both wrapping
+# `chela.hold` exactly as the CLI does (see `cmd_dispatch_hold`) — no new hold semantics,
+# just a second front door onto the same file.
+@app.route("/api/dispatcher/pause", methods=["POST"])
+@require_auth
+def api_dispatcher_pause():
+    """Take the dispatch hold — no task is claimed until it is released.
+
+    Re-taking (posting again while already held) extends the expiry, same as the CLI —
+    `hold.take` always overwrites. Reconciliation is untouched: a merged PR still frees
+    its slot (see `chela.hold`'s module docstring for why that split matters).
+    """
+    data = request.get_json(silent=True) or {}
+    reason = (data.get("reason") or "dashboard").strip()
+    ttl_raw = data.get("ttl")
+    try:
+        ttl = hold.parse_ttl(ttl_raw) if ttl_raw else hold.DEFAULT_TTL_SECONDS
+    except ValueError as e:
+        return jsonify({"ok": False, "error": f"ttl: {e}"}), 400
+    try:
+        held = hold.take(reason=reason, ttl_seconds=ttl, by="dashboard")
+    except OSError as e:
+        # A hold the daemon will never see is worse than none — the caller would believe
+        # dispatch is paused when it is not. Fail loudly, same as the CLI.
+        return jsonify({"ok": False, "error": f"could not take the hold: {e}"}), 500
+    return jsonify({"ok": True, "dispatch_hold": held.as_dict()})
+
+
+@app.route("/api/dispatcher/resume", methods=["POST"])
+@require_auth
+def api_dispatcher_resume():
+    """Release the dispatch hold. Idempotent — releasing when nothing is held is not an
+    error, so a stale/duplicate click never surfaces as a failure."""
+    released = hold.release()
+    return jsonify({
+        "ok": True,
+        "released": released.as_dict() if released else None,
     })
 
 

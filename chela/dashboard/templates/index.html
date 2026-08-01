@@ -182,6 +182,12 @@
                   onclick="chela.setWorkSegment('schedules')">Schedules</button>
         </div>
         <button class="btn-accent" onclick="chela.openInitRepo()">+ Init a repo</button>
+        <!-- CMX-206: `chela dispatch --pause` from the dashboard — no task is claimed
+             until Resume. Hidden until the first /api/dispatcher poll lands (see
+             _renderDispatchHold in work.js), so it never flashes the wrong state. -->
+        <button class="btn-accent" id="dispatch-hold-btn" style="display:none;"
+                onclick="chela.toggleDispatchHold()"></button>
+        <span class="work-toolbar-hint" id="dispatch-hold-hint"></span>
         <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
       </div>
 
