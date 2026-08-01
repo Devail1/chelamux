@@ -85,6 +85,65 @@ def set_session_id(wid: str, session_id: str) -> None:
     _save(data)
 
 
+def entries() -> dict:
+    """Every ``wid -> {session_id, epoch}`` row on disk, unfiltered — for reporting
+    (:mod:`chela.restore`) only. Unlike :func:`session_id_for` this does NOT drop rows whose
+    epoch no longer matches the running tmux server; a report that wants to say which rows
+    are dangling needs to see them, not have them silently withheld.
+    """
+    return _load()
+
+
+def rekey(old_wid: str, new_wid: str, expected_session_id: str, expected_epoch: str | None) -> bool:
+    """Move a REVIVABLE row from its dangling ``old_wid`` to where it is alive now.
+
+    CMX-196's applied form of ``chela restore``'s REVIVABLE remedy: the session recorded at
+    ``old_wid`` is confirmed alive under ``new_wid`` (:func:`chela.restore.plan` already did
+    that work — this does not re-verify it), so the row is re-stamped with the CURRENT epoch
+    at its new address instead of a human re-running ``chela watch`` by hand.
+
+    ``False`` (no-op, nothing written) unless the row at ``old_wid`` STILL matches exactly
+    what classification saw — same session id, same dead epoch. A no-op here means the row
+    moved on since (a further restart reissued it, or a concurrent writer already handled
+    it), and the classification computed a moment earlier is no longer proof of anything.
+    """
+    w = _norm(old_wid)
+    if w is None:
+        return False
+    data = _load()
+    entry = data.get(w)
+    if not entry or entry.get("session_id") != expected_session_id or entry.get("epoch") != expected_epoch:
+        return False
+    del data[w]
+    data[_norm(new_wid)] = {"session_id": expected_session_id, "epoch": epoch.current()}
+    _save(data)
+    return True
+
+
+def remove(wid: str, expected_session_id: str | None = None,
+           expected_epoch: str | None = None) -> bool:
+    """Delete a MANUAL row after it has been archived (:func:`chela.roster.archive`).
+
+    ``False`` (no-op) if the row is already gone, or if it no longer matches what
+    classification saw — same guard as :func:`rekey`, for the same reason: a row that moved
+    on is not the row a stale plan classified, and must not be deleted on its authority.
+    """
+    w = _norm(wid)
+    if w is None:
+        return False
+    data = _load()
+    entry = data.get(w)
+    if not entry:
+        return False
+    if expected_session_id is not None and entry.get("session_id") != expected_session_id:
+        return False
+    if expected_epoch is not None and entry.get("epoch") != expected_epoch:
+        return False
+    del data[w]
+    _save(data)
+    return True
+
+
 def session_id_for(wid: str | int | None) -> str | None:
     """The session id pinned for ``wid``.
 

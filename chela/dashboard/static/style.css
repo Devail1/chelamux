@@ -2925,6 +2925,30 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .ar-type.claude { color: #56B4E9; background: color-mix(in srgb, #56B4E9 16%, transparent); }
 .ar-type.shell  { color: #009E73; background: color-mix(in srgb, #009E73 18%, transparent); }
 .ar-type.server { color: #E69F00; background: color-mix(in srgb, #E69F00 16%, transparent); }
+/* Recent (dead) sessions — CMX-208. Not one of the type-cue Okabe-Ito tints above
+   (claude/shell/server): this row is not a live window at all, so it reads as
+   dimmed/inert rather than typed. */
+.ar-type.recent { color: var(--text-dim); }
+
+.recent-row { align-items: flex-start; gap: 8px; cursor: default; }
+.recent-row:hover { background: none; }
+.recent-resume {
+    flex: 0 0 auto; align-self: center; padding: 3px 9px; font-size: 10px;
+    opacity: 0.85; transition: opacity 0.12s;
+}
+.recent-row:hover .recent-resume { opacity: 1; }
+.recent-resume:disabled { opacity: 0.5; cursor: default; }
+
+/* Dispatcher-owned rows (CMX-208 rework) never carry a .recent-resume button, hidden
+   or revealed — see nav.js's _dispatcherRowHtml. Dimmed further than a resumable row:
+   it is shown as a fact, not an affordance. */
+.recent-row-dispatcher { opacity: 0.6; }
+.recent-toggle-dispatcher {
+    display: block; width: 100%; margin-top: 4px; padding: 4px 8px;
+    background: none; border: none; text-align: left; cursor: pointer;
+    font-size: 10px; color: var(--text-dim);
+}
+.recent-toggle-dispatcher:hover { color: var(--text); text-decoration: underline; }
 
 .ar-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .ar-top { display: flex; align-items: center; gap: 6px; }
@@ -2974,7 +2998,8 @@ input[type="text"]:focus, textarea:focus, select:focus {
     body.sidebar-collapsed .group-head,
     body.sidebar-collapsed .triage-head,
     body.sidebar-collapsed .agent-row .ar-main,
-    body.sidebar-collapsed .agent-row .agent-pin { display: none; }
+    body.sidebar-collapsed .agent-row .agent-pin,
+    body.sidebar-collapsed .agent-row .recent-resume { display: none; }
 
     /* The section heads are gone, so a rule stands in for the section break. */
     body.sidebar-collapsed .side-section { margin-bottom: 10px; }
@@ -3757,6 +3782,20 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .decisions-chip-who { color: var(--text); font-weight: 600; }
 .decisions-chip-queued { color: var(--text-dim); }
 .decisions-chip-why { color: var(--text-dim); width: 100%; }
+/* The dangling/gone re-register control (decisions.js's _reregisterHtml) —
+   the fix for an address self-heal cannot reach (a reboot, not a renumbering:
+   chela/inbox.py's resolve_heal only covers the latter). Deliberately NOT a
+   dismiss: it stays on screen until the address is actually fixed, one click
+   away, rather than offering to hide a real undeliverable-queue condition. */
+.decisions-chip-reregister { display: flex; align-items: center; gap: 6px; width: 100%; }
+.decisions-chip-rereg-select { flex: 1 1 auto; min-width: 0; font-size: 11px; }
+.decisions-chip-rereg-btn { flex: 0 0 auto; font-size: 11px; padding: 3px 8px;
+    border-radius: 6px; border: 1px solid var(--ok-vermillion); background: transparent;
+    color: var(--ok-vermillion); cursor: pointer; }
+.decisions-chip-rereg-btn:hover { background: var(--ok-vermillion); color: var(--bg); }
+.decisions-chip-rereg-btn:disabled { opacity: 0.5; cursor: default; background: transparent;
+    color: var(--ok-vermillion); }
+.decisions-chip-rereg-empty { color: var(--text-dim); font-style: italic; width: 100%; }
 /* CMX-178: the search box that filters the list below (decisions.js's
    setDecisionsQuery). Full-width, same input styling as everywhere else in
    the app (input[type="text"] above) — just spaced to sit under the chip. */

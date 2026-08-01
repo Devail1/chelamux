@@ -179,6 +179,92 @@ def test_a_stubbed_subprocess_cannot_invent_a_pid(no_proc, monkeypatch):
     assert sessions._sh_children(999999) == []
 
 
+def test_sh_children_beyond_the_cap_keeps_the_most_recent(no_proc, monkeypatch):
+    """``_MAX_CHILDREN`` truncates a busy pid's children — `pgrep -P` lists them oldest
+    first, so slicing the FRONT keeps stale siblings and drops the one this call exists
+    to find: whichever process was spawned last (a nested subprocess-heavy test suite, or
+    on a real box, a fleet of long-lived agent panes, both leave many older children
+    around a busy pid)."""
+    first = 1000
+    last = first + sessions._MAX_CHILDREN + 5
+    fake = "\n".join(str(p) for p in range(first, last + 1)) + "\n"
+    monkeypatch.setattr(sessions, "_sh", lambda argv: fake)
+
+    kids = sessions._sh_children(1)
+
+    assert len(kids) == sessions._MAX_CHILDREN
+    assert kids[-1] == last                 # most recently spawned: kept
+    assert first not in kids                # oldest sibling: dropped, not the target
+
+
+def test_proc_children_beyond_the_cap_keeps_the_most_recent(tmp_path, monkeypatch):
+    """The /proc path ('.../children' is also oldest-first) must truncate the same way."""
+    pid = 4242
+    d = tmp_path / "proc" / str(pid) / "task" / str(pid)
+    d.mkdir(parents=True)
+    first = 1000
+    last = first + sessions._MAX_CHILDREN + 5
+    (d / "children").write_text(" ".join(str(p) for p in range(first, last + 1)) + " ")
+    monkeypatch.setattr(sessions, "PROC", tmp_path / "proc")
+
+    kids = sessions._children(pid)
+
+    assert len(kids) == sessions._MAX_CHILDREN
+    assert kids[-1] == last
+    assert first not in kids
+
+
+def test_sh_children_beyond_the_cap_warns_out_loud(no_proc, monkeypatch, caplog):
+    """Truncating a busy pid's children is a fact a caller needs, not just a fact this
+    module keeps to itself — a downstream ``None`` (e.g. ``_claude_pid``) reads exactly
+    like "no such child" whether the answer is genuine or just this cap, so the ONE place
+    that knows which one it was must say so out loud (follow-up to CMX-210)."""
+    first = 1000
+    last = first + sessions._MAX_CHILDREN + 5
+    fake = "\n".join(str(p) for p in range(first, last + 1)) + "\n"
+    monkeypatch.setattr(sessions, "_sh", lambda argv: fake)
+
+    with caplog.at_level("WARNING", logger="chela.sessions"):
+        sessions._sh_children(4242)
+
+    assert len(caplog.records) == 1
+    msg = caplog.records[0].getMessage()
+    assert "4242" in msg
+    assert str(sessions._MAX_CHILDREN) in msg
+    assert "6" in msg  # dropped count: (last - first + 1) - _MAX_CHILDREN == 6
+
+
+def test_proc_children_beyond_the_cap_warns_out_loud(tmp_path, monkeypatch, caplog):
+    """Same visibility requirement via the /proc path."""
+    pid = 4242
+    d = tmp_path / "proc" / str(pid) / "task" / str(pid)
+    d.mkdir(parents=True)
+    first = 1000
+    last = first + sessions._MAX_CHILDREN + 5
+    (d / "children").write_text(" ".join(str(p) for p in range(first, last + 1)) + " ")
+    monkeypatch.setattr(sessions, "PROC", tmp_path / "proc")
+
+    with caplog.at_level("WARNING", logger="chela.sessions"):
+        sessions._children(pid)
+
+    assert len(caplog.records) == 1
+    assert str(pid) in caplog.records[0].getMessage()
+
+
+def test_children_within_the_cap_stays_silent(no_proc, monkeypatch, caplog):
+    """The cap not being hit is NOT news — a warning on every call would flood the logs
+    the first time it fires for real and bury the signal this test's sibling exists to
+    surface."""
+    fake = "\n".join(str(p) for p in range(1000, 1000 + sessions._MAX_CHILDREN)) + "\n"
+    monkeypatch.setattr(sessions, "_sh", lambda argv: fake)
+
+    with caplog.at_level("WARNING", logger="chela.sessions"):
+        kids = sessions._sh_children(1)
+
+    assert len(kids) == sessions._MAX_CHILDREN
+    assert caplog.records == []
+
+
 def test_a_missing_tool_is_just_an_unknown_fact(no_proc, monkeypatch):
     """No ``/proc`` AND no tools (a stripped container) degrades to the documented
     "fact unavailable" — never an exception on the hook path."""

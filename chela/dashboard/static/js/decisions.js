@@ -55,13 +55,15 @@
 //      last_error — see chela/inbox.py), but visibly marked partial rather
 //      than rendering "No brief recorded" as if the run genuinely had none.
 // ---------------------------------------------------------------------------
-import { $, api, escHtml } from './util.js';
+import { $, _agentsCache, api, escHtml, setAgentsCache } from './util.js';
 import { CLASSES, classOf, drainLog } from './feedmodel.js';
 import {
     filterDecisionEvents, findDispatcherRun, formatUnreadCount, itemFromDecisionPayload,
     maxSeq, partialItemFromDecisionPayload, seedLastSeen, unreadCount, unreadUrgency,
 } from './decisionsmodel.js';
-import { onOrchestratorChange, orchestratorState, refreshOrchestratorStatus } from './orchestrator.js';
+import {
+    onOrchestratorChange, orchestratorState, orchestratorSubscribe, refreshOrchestratorStatus,
+} from './orchestrator.js';
 
 const LAST_SEEN_KEY = 'chela.decisions.lastSeen';
 
@@ -88,6 +90,10 @@ let _lastSeenSeq = _loadLastSeen();
 // decisions, not the whole log.
 const DECISION_TYPES = [
     'run_review', 'run_needs_human', 'run_changes_requested', 'run_failed',
+    // CMX-197: the judge's own verdict on a run still sitting in `awaiting_review` —
+    // the one thing that used to be structurally unnotifiable (a BLOCKED verdict
+    // already surfaces via `run_changes_requested` above).
+    'run_judge_clean', 'run_judge_cannot_verify',
     'finished', 'blocked', 'died', 'gone_unknown', 'completed_gone',
     'watch_epoch_lost', 'inbox_undeliverable', 'inbox_self_healed',
 ];
@@ -136,7 +142,7 @@ async function _refreshLog(reset = false) {
     } finally {
         _inflight = false;
     }
-    _render();
+    await _render();
 }
 
 // The one-time page-load seed (main.js) — a fresh read of both the owner and
@@ -170,6 +176,76 @@ const CHIP_META = {
     unstamped: { glyph: '◐', word: 'unverified', cls: 'warn' },
 };
 
+// A dangling/gone address has no self-heal path left (chela/inbox.py's
+// resolve_heal only re-resolves a RENUMBERED window — after a reboot the old
+// session is simply gone, so nothing left in the process can fix this). The
+// only way out was, until now, a HUMAN typing `chela watch` in a shell. This
+// is that same fix — `chela.inbox.register` via /api/orchestrator/subscribe
+// (orchestratorSubscribe, already used by the per-pane "⊙ Orchestrator"
+// toggle in terminals.js) — reachable from the chip itself, so the fix is one
+// click away from the exact place that reports the problem. Deliberately NOT
+// a dismiss: there is no way to suppress this chip without either building
+// persistent state (which the NEXT dangling address would then also hide
+// behind — the fail-open shape this repo keeps paying for) or actually fixing
+// the address, which is what this does instead.
+const RECOVERABLE_STATES = new Set(['dangling', 'gone']);
+
+// True from the moment a take-over is fired until it settles. Module-level, not
+// just a DOM property, because the chip re-renders underneath an in-flight
+// request — see reregisterOrchestrator below.
+let _reregisterInFlight = false;
+
+// Only a window with a LIVE Claude session can usefully hold the role — the
+// inbox writes prompt text into it (chela/inbox.py::deliver). `chela/
+// dashboard/app.py`'s /api/agents stamps this as `claude_running`; a bare
+// shell window would just accumulate the queue behind a second dead address.
+function _reregisterCandidates() {
+    return (_agentsCache || [])
+        .filter(a => a && a.window_id && a.claude_running)
+        .slice()
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))
+            || String(a.window_id).localeCompare(String(b.window_id)));
+}
+
+// _reregisterCandidates() above reads _agentsCache but never populates it —
+// sse.js:32 blanks the cache on ANY window spawn/kill and only refetches
+// while the agents/terminals tab is active, so on any other tab an empty
+// cache silently persists until the next refresh() tick (REFRESH_MS=30000).
+// An empty cache is indistinguishable from "no live sessions", which is
+// exactly the wrong lie for the control meant to recover a dead address to
+// tell. Same pattern as terminals.js:1503 (renderTerminals): only refetch
+// when the state is actually recoverable AND the cache is empty — never a
+// second poller, just an opportunistic fill on the render path that's about
+// to need it. Folded straight into _render (below) rather than pulled into
+// its own always-async helper: `await someAsyncFn()` yields a microtask tick
+// even when that function's body never itself awaits anything, which would
+// silently make _render's DOM update land a tick late for EVERY render, not
+// just the recoverable-and-empty one — and setDecisionsQuery/_markSeen's
+// callers rely on _render finishing synchronously when there's nothing to
+// fetch. Awaiting only inside the `if` keeps that guarantee: no branch taken
+// means no await reached means the rest of _render still runs to completion
+// before this call returns, exactly as before this fix.
+
+function _reregisterHtml(s) {
+    if (!RECOVERABLE_STATES.has(s.state)) return '';
+    const candidates = _reregisterCandidates();
+    if (!candidates.length) {
+        return '<div class="decisions-chip-reregister">'
+            + '<span class="decisions-chip-rereg-empty">no live Claude session to re-register — open one, then retry</span>'
+            + '</div>';
+    }
+    const options = candidates.map(a =>
+        `<option value="${escHtml(a.window_id)}">${escHtml(a.name || a.window_id)} (${escHtml(a.window_id)})</option>`
+    ).join('');
+    return `<div class="decisions-chip-reregister">
+        <select class="decisions-chip-rereg-select" id="decisions-reregister-wid"
+                aria-label="Session to re-register as orchestrator"
+                title="The live session that should receive the decisions inbox">${options}</select>
+        <button type="button" class="decisions-chip-rereg-btn" onclick="chela.reregisterOrchestrator()"${_reregisterInFlight ? ' disabled' : ''}
+                title="Register the selected session as the orchestrator — the same take-over &#39;chela watch&#39; does from a shell">↻ Re-register</button>
+    </div>`;
+}
+
 function _chipHtml() {
     const s = orchestratorState();
     const meta = CHIP_META[s.state] || CHIP_META.unregistered;
@@ -181,7 +257,45 @@ function _chipHtml() {
         <span class="decisions-chip-who">${who}</span>
         ${queued}
         ${why}
+        ${_reregisterHtml(s)}
     </div>`;
+}
+
+// Wired to the chip's "↻ Re-register" button (only rendered while the address
+// is dangling/gone — see _reregisterHtml). Takes over the single orchestrator
+// slot with whatever live session the dropdown names; orchestratorSubscribe
+// applies the result to the shared status and fires onOrchestratorChange,
+// which is what actually repaints this chip back to `ok` — this function
+// itself only re-renders to reflect a disabled-button/failed-click state,
+// never assumes success.
+async function reregisterOrchestrator() {
+    // ⭐ The in-flight state lives HERE, not only on the DOM node. Disabling the
+    // captured button is not enough: the address is still dangling during the
+    // request, so any render in that window (log frame / tick / keystroke)
+    // replaces the disabled button with a fresh ENABLED one and the `finally`
+    // then clears a flag on a node already detached from the document. The
+    // invariant this protects is "one atomic take-over per click", so it has to
+    // hold against a re-render — hence a module-level flag that both this
+    // re-entry check and _reregisterHtml's `disabled` attribute read.
+    if (_reregisterInFlight) return;
+    const sel = $('#decisions-reregister-wid');
+    const wid = sel && sel.value;
+    if (!wid) return;
+    _reregisterInFlight = true;
+    const btn = document.querySelector('.decisions-chip-rereg-btn');
+    if (btn) btn.disabled = true;
+    try {
+        const result = await orchestratorSubscribe(wid);
+        if (!result || !result.ok) {
+            console.error('re-register failed', result && result.error);
+        }
+    } finally {
+        _reregisterInFlight = false;
+        // Re-query rather than reuse `btn` — a render during the flight may have
+        // replaced it, and re-enabling a detached node leaves the live one dead.
+        const live = document.querySelector('.decisions-chip-rereg-btn');
+        if (live) live.disabled = false;
+    }
 }
 
 function _ts(e) {
@@ -306,11 +420,38 @@ function _markSeen() {
     _renderBadge();
 }
 
-function _render() {
+async function _render() {
+    const _s = orchestratorState();
+    if (RECOVERABLE_STATES.has(_s.state) && !(_agentsCache && _agentsCache.length)) {
+        try {
+            setAgentsCache(await api('/api/agents'));
+        } catch (e) { /* transient — the picker just stays on the empty state until the next render */ }
+    }
     _renderDot();
     _renderBadge();
     const chip = $('#decisions-chip');
-    if (chip) chip.innerHTML = _chipHtml();
+    if (chip) {
+        // ⭐ Preserve the operator's pick across the innerHTML swap. Rebuilding
+        // the chip rebuilds the <select>, which resets it to options[0] — and
+        // while the address is dangling this chip re-renders CONSTANTLY (an SSE
+        // log frame, the 30 s tick, every keystroke in the search box). Without
+        // this, the live sequence is: operator picks the second session, a log
+        // frame lands, the picker silently snaps back to the first, they click,
+        // and the inbox goes to the WRONG session. That is the same harm the
+        // handler-side `sel.value` guard was written to prevent, reached by a
+        // different route — and it bites hardest in the case this control
+        // exists for, two same-named windows differing only by tmux id.
+        // Restored only when the pick is still a live candidate: a session that
+        // vanished between renders must fall back to the default, never carry a
+        // stale wid into the POST.
+        const prior = $('#decisions-reregister-wid');
+        const keep = prior && prior.value;
+        chip.innerHTML = _chipHtml();
+        if (keep) {
+            const sel = $('#decisions-reregister-wid');
+            if (sel && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+        }
+    }
     const host = $('#decisions-list');
     if (!host) return;
     if (!_events.length) {
@@ -390,9 +531,11 @@ function hideDecisionsMenu() {
 // --- Stage 0: ES-module exports ---
 export {
     DECISION_TYPES, enterDecisions, hideDecisionsMenu, onDecisionsLogDelta,
-    openDecisionsMenu, openDecisionTicket, setDecisionsQuery, tickDecisions,
+    openDecisionsMenu, openDecisionTicket, reregisterOrchestrator, setDecisionsQuery, tickDecisions,
 };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { hideDecisionsMenu, openDecisionsMenu, openDecisionTicket, setDecisionsQuery });
+Object.assign(window.chela, {
+    hideDecisionsMenu, openDecisionsMenu, openDecisionTicket, reregisterOrchestrator, setDecisionsQuery,
+});

@@ -14,12 +14,16 @@ merge path picks the fixed head up exactly like a fresh PR.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from unittest.mock import patch
 
+import subprocess
+from types import SimpleNamespace
+
 import pytest
 
-from chela import dispatcher
+from chela import dispatcher, event_log
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +86,37 @@ def _gh_router(sha="deadbeef0000", comment_ok=True):
             stdout = ""
             stderr = "gh pr comment failed"
         return R()
+    return _run
+
+
+_COMPARE_RE = re.compile(r"compare/([^.]+)\.\.\.([^.]+)")
+
+
+def _gh_router_with_compare(sha="deadbeef0000", compare_files_by_base=None):
+    """Same as `_gh_router`, plus routes `gh api .../compare/{base}...{head}` (the
+    CMX-198 no-production-change diff) — one filename per line, the shape
+    `--jq '.files[].filename'` actually prints.
+
+    Routed by the BASE sha parsed out of the compare path, not a constant answer: a bug
+    that diffs against the WRONG base (the previous round's head instead of the first
+    reopen's — the corrupt-guard target for this whole feature) asks for a base this
+    dict never mapped, and gets back a file that is unambiguously "production changed"
+    (never what a test expects) instead of silently reusing the right answer.
+    """
+    compare_files_by_base = compare_files_by_base or {}
+    def _run(cmd, *a, **k):
+        if "--json" in cmd:
+            return _gh_view(sha)
+        if cmd[:2] == ["gh", "api"]:
+            m = _COMPARE_RE.search(cmd[2])
+            base = m.group(1) if m else None
+            files = compare_files_by_base.get(base, ["chela/UNEXPECTED_BASE.py"])
+            class R:
+                returncode = 0
+                stdout = "\n".join(files)
+                stderr = ""
+            return R()
+        return _no_gh(cmd, *a, **k)
     return _run
 
 
@@ -267,6 +302,287 @@ def test_a_reopened_run_that_fails_review_again_re_escalates_without_burning_a_s
     assert blocked["rework_count"] == 2               # untouched — still at the cap
 
 
+# --- (f) 🔁🛑 CMX-198: `reopen_count` + the no-production-change nudge ------------------
+#
+# `CHELA_MAX_REWORKS` bounds the dispatcher's AUTOMATIC rework loop; it does not bound
+# `reopen`, the human-takeover path — measured on cmx-197, `rework 1/2` printed unchanged
+# across fourteen reopens. These tests pin the counter that makes the loop VISIBLE, and
+# the advisory nudge that fires when a run has been reopened 3+ times with nothing under
+# `chela/` touched since the first reopen.
+
+def _escalate_back_to_needs_human(task_id: str, judge_sha: str) -> None:
+    """Stand in for the dispatcher's own cap-check tick: a reopened run whose fixed head
+    still fails review re-escalates to `needs_human` with a NEW judge_sha (the head the
+    judge just rejected) — never re-derived through `request_changes`/the tick loop here,
+    since those are exercised elsewhere; this test file only needs the resulting row."""
+    with dispatcher._db() as conn:
+        conn.execute(
+            "UPDATE runs SET status='needs_human', judge_sha=? WHERE task_id=?",
+            (judge_sha, task_id),
+        )
+        conn.commit()
+
+
+def test_reopen_count_climbs_independently_of_rework_count(tmp_path):
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h1")):
+        r1 = dispatcher.reopen("abc123", "fix 1")
+    assert r1["ok"] is True and r1["reopen_count"] == 1
+    assert dispatcher.resolve_run("abc123")["rework_count"] == 2
+
+    _escalate_back_to_needs_human("abc123", "h1")
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h2")):
+        r2 = dispatcher.reopen("abc123", "fix 2")
+    assert r2["reopen_count"] == 2
+
+    _escalate_back_to_needs_human("abc123", "h2")
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h3")):
+        r3 = dispatcher.reopen("abc123", "fix 3")
+    assert r3["reopen_count"] == 3
+
+    run = dispatcher.resolve_run("abc123")
+    # the AUTOMATIC counter never moves — reopening still spends no rework budget.
+    assert run["rework_count"] == 2
+    assert run["reopen_count"] == 3
+    # the baseline is the FIRST reopen's head, fixed — not the most recent one.
+    assert run["first_reopen_head_sha"] == "h1"
+
+
+@pytest.mark.parametrize("rounds", [3, 4, 5])
+def test_nudge_fires_from_the_third_reopen_onward_when_only_tests_changed(rounds, tmp_path):
+    """⛔ The gate is a FLOOR (`>= 3`), not an equality. Narrowed to `== 3` the nudge fires
+    once and then goes SILENT for rounds 4, 5, 6 — exactly when the stall is worst and the
+    advice most warranted. A test that only exercises round 3 cannot tell the two apart.
+
+    (Found by a local mutation sweep over the diff, not by the judge — see the round-3
+    review note. `>= 3` -> `== 3` survived the suite as written.)
+    """
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    for i in range(rounds):
+        sha = f"h{i + 1}"
+        with patch.object(
+            dispatcher.subprocess, "run",
+            side_effect=_gh_router_with_compare(
+                sha=sha, compare_files_by_base={"h1": ["tests/test_x.py"]},
+            ),
+        ):
+            r = dispatcher.reopen("abc123", f"fix {i + 1}")
+        if i + 1 < rounds:
+            _escalate_back_to_needs_human("abc123", sha)
+
+    assert r["ok"] is True and r["status"] == "awaiting_review"
+    assert "nudge" in r, f"the nudge stopped firing at round {rounds} — the gate is a floor"
+    assert f"{rounds} rounds" in r["nudge"]
+
+
+def test_nudge_fires_on_the_third_reopen_when_only_tests_changed(tmp_path):
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h1")):
+        dispatcher.reopen("abc123", "fix 1")
+    _escalate_back_to_needs_human("abc123", "h1")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h2")):
+        dispatcher.reopen("abc123", "fix 2")
+    _escalate_back_to_needs_human("abc123", "h2")
+
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["tests/test_x.py"]},
+        ),
+    ):
+        r3 = dispatcher.reopen("abc123", "fix 3")
+
+    assert r3["ok"] is True
+    assert r3["status"] == "awaiting_review"          # ⛔ the nudge never blocks
+    assert "nudge" in r3
+    assert "3 rounds" in r3["nudge"]
+    assert "no production change" in r3["nudge"]
+
+    events = event_log.read(types=["reopen_nudge"])["events"]
+    assert len(events) == 1
+    assert events[0]["payload"]["task_id"] == "abc123"
+    assert events[0]["payload"]["reopen_count"] == 3
+    assert events[0]["payload"]["first_reopen_head_sha"] == "h1"
+
+
+def test_nudge_does_not_fire_when_production_code_changed(tmp_path):
+    """Same three-reopen shape as above, except round 3's diff touches `chela/` — the
+    nudge must stay silent. ⛔ Corrupt-guard target: comparing against the PREVIOUS head
+    (h2) instead of the FIRST reopen's (h1) would see round 3 alone (chela/dispatcher.py
+    only) and still suppress correctly here — this test alone cannot catch that
+    corruption. `test_nudge_fires_on_the_third_reopen_when_only_tests_changed` is the one
+    that does: a per-round diff against h2 is never empty, so the wrong-base bug makes
+    the nudge STOP firing there instead."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h1")):
+        dispatcher.reopen("abc123", "fix 1")
+    _escalate_back_to_needs_human("abc123", "h1")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h2")):
+        dispatcher.reopen("abc123", "fix 2")
+    _escalate_back_to_needs_human("abc123", "h2")
+
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["chela/dispatcher.py", "tests/test_x.py"]},
+        ),
+    ):
+        r3 = dispatcher.reopen("abc123", "fix 3")
+
+    assert r3["ok"] is True
+    assert "nudge" not in r3
+    assert event_log.read(types=["reopen_nudge"])["events"] == []
+
+
+def test_nudge_does_not_fire_when_the_diff_is_unreadable(tmp_path):
+    """Same three-reopen shape again, except round 3's `gh api compare` call itself fails
+    (a `gh` hiccup, a network blip, a compare API 500) — `_production_files_changed`
+    returns `(None, ...)`, the UNKNOWN arm of the tri-state, and it must stay just as
+    silent as the KNOWN-changed arm. ⛔ Corrupt-guard target: widening `if touched is
+    False` to `if touched is not True` fires the nudge on exactly this case, and every
+    other test in this file still passes under that mutation — this is the one that
+    catches it."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h1")):
+        dispatcher.reopen("abc123", "fix 1")
+    _escalate_back_to_needs_human("abc123", "h1")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router_with_compare(sha="h2")):
+        dispatcher.reopen("abc123", "fix 2")
+    _escalate_back_to_needs_human("abc123", "h2")
+
+    def _run(cmd, *a, **k):
+        if "--json" in cmd:
+            return _gh_view("h3")
+        if cmd[:2] == ["gh", "api"]:
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = "gh api compare failed"
+            return R()
+        return _no_gh(cmd, *a, **k)
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_run):
+        r3 = dispatcher.reopen("abc123", "fix 3")
+
+    assert r3["ok"] is True
+    assert "nudge" not in r3
+    assert event_log.read(types=["reopen_nudge"])["events"] == []
+
+
+@pytest.mark.parametrize("rounds", [1, 2])
+def test_nudge_is_silent_before_the_third_reopen(rounds, tmp_path):
+    """A reopen or two — even ones that changed nothing but tests — is not evidence of
+    anything; the round-count gate must hold regardless of what the diff would say.
+
+    ⛔ Parametrized to the BOUNDARY. The production comment says "rounds 1-2 are never
+    enough signal", and testing round 1 alone leaves `>= 3` loosenable to `>= 2` in one
+    token: round 1 stays silent either way, so the gap is invisible. A threshold is only
+    pinned by the round on EITHER side of it.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+    gh_calls: list[list[str]] = []
+
+    head = {"sha": "h1"}
+
+    def _run(cmd, *a, **k):
+        gh_calls.append(cmd)
+        # ⚠️ each round needs a NEW head: `reopen` refuses a head the judge already saw,
+        # so a fixture that reuses one sha cannot reach round 2 at all.
+        return _gh_router_with_compare(
+            sha=head["sha"], compare_files_by_base={"h1": ["tests/test_x.py"]},
+        )(cmd, *a, **k)
+
+    for i in range(rounds):
+        head["sha"] = f"h{i + 1}"
+        with patch.object(dispatcher.subprocess, "run", side_effect=_run):
+            r = dispatcher.reopen("abc123", f"fix {i + 1}")
+        if i + 1 < rounds:
+            _escalate_back_to_needs_human("abc123", head["sha"])
+
+    assert r["ok"] is True and r["reopen_count"] == rounds
+    assert "nudge" not in r, f"the nudge fired on round {rounds} — the gate is >= 3"
+    # not even asked — no gh api compare call before the 3rd round.
+    assert not any(c[:2] == ["gh", "api"] for c in gh_calls)
+
+
+def test_a_fresh_run_shows_no_reopen_count_in_the_listing(tmp_path):
+    """Zero reopens ⇒ the CLI listing shows nothing extra — the counterweight against
+    always-on chrome (see `chela.main._format_awaiting_run`)."""
+    from chela import main
+
+    with dispatcher._db() as conn:
+        _row(conn, status="awaiting_review", reopen_count=0)
+    row = dispatcher.resolve_run("abc123")
+    assert "reopen=" not in main._format_awaiting_run(dict(row))
+
+
+def test_a_reopened_runs_listing_shows_its_reopen_count(tmp_path):
+    from chela import main
+
+    with dispatcher._db() as conn:
+        _row(conn, status="awaiting_review", reopen_count=3)
+    row = dispatcher.resolve_run("abc123")
+    assert "reopen=3" in main._format_awaiting_run(dict(row))
+
+
+def test_cmd_reopen_prints_the_reopen_count_and_the_nudge(tmp_path, capsys):
+    from chela import main
+
+    with dispatcher._db() as conn:
+        # ⛔ rework_count=1 so it DIFFERS from max_reworks (2). With both equal — as the
+        # default fixture has them — rendering `rework_count/rework_count` is invisible,
+        # and the denominator could stop being the budget entirely.
+        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2,
+             first_reopen_head_sha="h1", rework_count=1)
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["tests/test_x.py"]},
+        ),
+    ):
+        captured = {}
+        real_reopen = dispatcher.reopen
+
+        def _spy(*a, **k):
+            captured["result"] = real_reopen(*a, **k)
+            return captured["result"]
+
+        with patch.object(dispatcher, "reopen", _spy):
+            main.cmd_reopen(_ReopenArgs())
+    out = capsys.readouterr().out
+    # ⛔ The WHOLE nudge, not fragments: `print("  ⭐ no production change")` — a hardcoded
+    # constant — satisfies every fragment assertion while the real, diff-derived message
+    # never reaches the operator. The CLI print is the ONLY surface the nudge is read on.
+    assert captured["result"]["nudge"] in out, (
+        f"the printed line must carry the FULL nudge reopen() produced, not a fragment a "
+        f"hardcoded string could satisfy. Got: {out!r}"
+    )
+    # ⛔ BOTH halves, with DISTINCT numbers. The fixture row carries rework_count=2 and this
+    # is the 3rd reopen, so a line that renders the reopen count in the rework slot shows
+    # "rework 3/2" — visibly absurd, and previously invisible because only the `reopen #K`
+    # half was asserted. Conflating the two counters is the exact bug this ticket exists to
+    # measure; the operator-facing line is where it would be read.
+    # Three DISTINCT numbers — spent 1, budget 2, reopen #3 — so no two slots can be
+    # swapped or aliased without the line changing visibly.
+    assert "rework 1/2" in out, f"the rework budget must render its OWN count. Got: {out!r}"
+    assert "reopen #3" in out, f"the reopen count must render its own. Got: {out!r}"
+    assert "no production change" in out
+
+
 # --- (e) the CLI -------------------------------------------------------------------------
 
 class _ReopenArgs:
@@ -314,3 +630,525 @@ def test_chela_reopen_reaches_the_dispatcher_end_to_end(tmp_path):
     run = dispatcher.resolve_run("abc123")
     assert run["status"] == "awaiting_review"
     assert dispatcher.reviews_of(dict(run))[-1]["body"] == "fixed it"
+
+
+# --- the tri-state PRODUCER: every exit path, with the value it must return --------------
+#
+# 🔴 GUARDS (CMX-198 round 2). The consumer side (`if touched is False`) is pinned. The
+# PRODUCER has SIX exits and each one's tri-state value is a separate decision — three were
+# filed, and the two `gh`-failure siblings were open for exactly the same reason.
+#
+#   base == head          -> False   ⭐ "no change", and the DOMINANT real case
+#   unparsable PR url     -> None    unreadable
+#   gh not runnable       -> None    unreadable
+#   gh timed out          -> None    unreadable
+#   gh non-zero exit      -> None    unreadable
+#   a real compare        -> True/False by whether chela/** appears
+#
+# ⛔ The asymmetry is the whole point: an UNREADABLE diff must say nothing, a READ one that
+# found no production change must say so. Collapse either direction and the nudge either
+# fires on missing data (advice with no evidence) or never fires at all.
+
+def _pfc(**kw):
+    args = {"pr_url": "https://github.com/x/y/pull/9", "repo_dir": "/tmp",
+            "base_sha": "aaa", "head_sha": "bbb"}
+    args.update(kw)
+    return dispatcher._production_files_changed(**args)
+
+
+def test_an_unmoved_head_is_a_KNOWN_no_change():
+    """⭐ The dominant real case: reopening again without committing anything at all. If
+    this returned None the nudge would never fire in the very situation it exists for."""
+    touched, detail = _pfc(base_sha="same", head_sha="same")
+    assert touched is False, "an unmoved head is KNOWN to have changed no production code"
+    assert "not moved" in detail
+    # ⛔ The range phrase lives at TWO exits — this one and the read-compare's. Round 9
+    # pinned the read-compare copy; its twin here was left, so the same drift ("since the
+    # LAST reopen" — a range the code never measures) could land on the dominant case.
+    assert "since the first reopen" in detail, (
+        f"the unmoved-head detail must name the range it measured too. Got: {detail!r}"
+    )
+
+
+@pytest.mark.parametrize("broken", [
+    pytest.param({"pr_url": "not-a-github-url"}, id="unparsable-url"),
+    pytest.param({"pr_url": None}, id="no-url"),
+])
+def test_an_unreadable_pr_url_is_UNKNOWN_not_a_guessed_no_change(broken):
+    touched, _ = _pfc(**broken)
+    assert touched is None, (
+        "an unparsable PR url is UNREADABLE — guessing False fires the nudge on missing data"
+    )
+
+
+@pytest.mark.parametrize("boom,label", [
+    (OSError("no gh on PATH"), "gh-not-runnable"),
+    (subprocess.TimeoutExpired(cmd="gh", timeout=20), "gh-timeout"),
+])
+def test_a_gh_failure_is_UNKNOWN_not_a_guessed_no_change(boom, label, monkeypatch):
+    """The two exits the judge did not file, open for the same reason as the one it did."""
+    monkeypatch.setattr(dispatcher.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(boom))
+    touched, _ = _pfc()
+    assert touched is None, f"{label} is UNREADABLE, not evidence of no change"
+
+
+@pytest.mark.parametrize("rc,label", [
+    (1, "ordinary failure"),
+    (2, "usage error"),
+    (-9, "killed by SIGKILL — the OOM case, and a NEGATIVE returncode"),
+    (-15, "killed by SIGTERM"),
+])
+def test_a_nonzero_gh_exit_is_UNKNOWN_not_a_guessed_no_change(rc, label, monkeypatch):
+    """⛔ Every unreadable-exit test used returncode=1, so `!= 0` was narrowable to `> 0`
+    and nothing noticed. A `gh` killed by a SIGNAL returns a NEGATIVE code — the OOM case
+    on this very box — and under `> 0` that falls through to parsing an EMPTY stdout, which
+    reads as "no production change" and fires the nudge on a compare that never ran.
+
+    ⚠️ Fixture uniformity again: one returncode value cannot pin a sign test.
+    """
+    monkeypatch.setattr(
+        dispatcher.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=rc, stdout="", stderr="404 Not Found"))
+    touched, detail = _pfc()
+    assert touched is None, f"{label} is UNREADABLE, not evidence of no change"
+    assert "404" in detail
+
+
+@pytest.mark.parametrize("files,expected", [
+    pytest.param("tests/test_x.py\n", False, id="tests-only"),
+    pytest.param("chela/inbox.py\ntests/test_x.py\n", True, id="production-too"),
+    pytest.param("", False, id="empty-compare"),
+])
+def test_a_READ_compare_classifies_by_whether_chela_changed(files, expected, monkeypatch):
+    """The counterweight to all the None arms: a diff chela COULD read must produce a real
+    True/False, never None — otherwise "say nothing when unsure" degrades into never
+    nudging at all."""
+    monkeypatch.setattr(
+        dispatcher.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout=files, stderr=""))
+    touched, _ = _pfc()
+    assert touched is expected
+
+
+@pytest.mark.parametrize("files,expected,why", [
+    pytest.param("README.md\n", False, "docs are not production", id="docs-only"),
+    pytest.param("TODO.md\n", False, "the tracker is not production", id="tracker-only"),
+    pytest.param(".github/workflows/ci.yml\n", False, "CI config is not chela/", id="ci-only"),
+    pytest.param("chela/inbox.py\n", True, "chela/ IS production", id="chela"),
+])
+def test_only_files_under_chela_count_as_production(files, expected, why, monkeypatch):
+    """🔴 The classifier is `startswith("chela/") AND NOT startswith("tests/")` — an AND over
+    two INDEPENDENT predicates, so it needs a path that satisfies NEITHER to pin.
+
+    Every fixture until now used only `chela/...` or `tests/...`, and for both of those the
+    `and` and an `or` give the SAME answer — so `and not` -> `or not` survived the whole
+    suite. Under `or`, a docs-only or tracker-only diff reads as a production change and
+    SUPPRESSES the nudge, which is the one direction that fails silently: the operator is
+    never told the loop has stalled.
+
+    (Found by a local mutation sweep over the diff, not by the judge.)
+    """
+    monkeypatch.setattr(
+        dispatcher.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout=files, stderr=""))
+    touched, _ = dispatcher._production_files_changed(
+        "https://github.com/x/y/pull/9", "/tmp", "aaa", "bbb")
+    assert touched is expected, why
+
+
+# --- what we ASKED gh, not just what it answered ----------------------------------------
+#
+# 🔴 GUARDS (CMX-198 round 4). `_gh_router_with_compare` returns canned output keyed on the
+# BASE sha and ignores everything else about the command — so the owner, the repo, the HEAD
+# half of the range and the `--jq` selector are asserted by NOTHING. Three separate
+# corruptions of the request survive a suite that only ever inspects the response.
+#
+# ⛔ Same shape as "a stub hides the wiring to what it stubs": a fixture that answers
+# regardless of the question cannot notice the question changing. The fix is to capture the
+# command and assert the REQUEST, which is a different act from asserting the reply.
+
+def _capture_compare_cmd(sha="h1", files=("tests/test_x.py",)):
+    """A router that RECORDS the compare command instead of ignoring it."""
+    seen: dict = {}
+
+    def _run(cmd, *a, **k):
+        if "--json" in cmd:
+            return _gh_view(sha)
+        if cmd[:2] == ["gh", "api"]:
+            seen["cmd"] = list(cmd)
+            seen["kwargs"] = dict(k)      # ⛔ argv is only HALF the request
+            return SimpleNamespace(returncode=0, stdout="\n".join(files), stderr="")
+        return _no_gh(cmd, *a, **k)
+
+    return seen, _run
+
+
+def _drive_to_a_compare(tmp_path):
+    """Three reopens, each with its own head, so the 3rd actually issues the compare."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0")
+    for i in (1, 2):
+        with patch.object(dispatcher.subprocess, "run",
+                          side_effect=_gh_router_with_compare(sha=f"h{i}")):
+            dispatcher.reopen("abc123", f"fix {i}")
+        _escalate_back_to_needs_human("abc123", f"h{i}")
+
+
+def test_the_compare_is_asked_of_the_prs_OWN_owner_and_repo(tmp_path):
+    """⛔ `_pr_owner_repo` returns `(owner, repo)` and only its None arms were tested.
+    Swap them and chela asks GitHub about `repos/<repo>/<owner>/…` — a repository that
+    almost certainly does not exist, so every compare 404s, every diff reads UNKNOWN, and
+    the nudge silently never fires again."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    assert "repos/o/r/compare/" in seen["cmd"][2], (
+        f"the compare was asked of the wrong owner/repo: {seen['cmd'][2]!r}"
+    )
+
+
+def test_the_compare_range_spans_first_reopen_to_the_CURRENT_head(tmp_path):
+    """⛔ The router keys only on the BASE, so the HEAD half of `base...head` is pinned by
+    nothing: `base...base` compares a commit with itself, returns an empty file list, and
+    reads as "no production change" — firing the nudge unconditionally, on evidence of
+    nothing."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    assert "compare/h1...h3" in seen["cmd"][2], (
+        f"the compare range must be first-reopen-head ... CURRENT head, got {seen['cmd'][2]!r}"
+    )
+
+
+def test_the_compare_asks_for_FILENAMES(tmp_path):
+    """⛔ The classifier is `f.startswith("chela/")`, which is only meaningful if gh was
+    asked for `.files[].filename`. Ask for `.status` and it compares "modified"/"added"
+    against a path prefix — never matching, so every diff reads as "no production change"
+    and the nudge fires on every third reopen regardless of what changed."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    cmd = seen["cmd"]
+    # ⛔ NOT `".files[].filename" in cmd` — that passes with the flag swapped to
+    # `--template`, which gh interprets completely differently. Assert ADJACENCY: the
+    # selector must be the argument OF `--jq`.
+    assert "--jq" in cmd, f"the selector must be carried by --jq, got {cmd!r}"
+    assert cmd[cmd.index("--jq") + 1] == ".files[].filename", (
+        f"--jq must carry the filename selector, got {cmd!r}"
+    )
+
+
+def test_the_compare_is_asked_with_the_KEYWORDS_that_make_its_output_readable(tmp_path):
+    """🔴 GUARD (CMX-198 round 5): argv is only HALF the request.
+
+    ⚠️ Round 4's commit claimed "the REQUEST is now asserted" — it asserted the positional
+    half. `capture_output=False` leaves `out.stdout` as None, `(out.stdout or "")` collapses
+    to an empty file list, and an empty compare reads as "no production change": the nudge
+    then fires UNCONDITIONALLY, on a diff nobody ever received. Same false-nudge failure as
+    `base...base`, through a different door.
+
+    `timeout` matters for the same reason one exit returns None on TimeoutExpired — without
+    it a hung `gh` hangs the reopen itself, and `text=True` is what makes `.splitlines()`
+    meaningful rather than bytes.
+    """
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    kw = seen["kwargs"]
+    assert kw.get("capture_output") is True, (
+        "without capture_output the stdout is None, the file list is empty, and every "
+        "compare reads as 'no production change' — the nudge fires on nothing"
+    )
+    assert kw.get("text") is True, "the classifier splits lines; bytes would never match"
+    # ⛔ NOT truthiness — `timeout=0.001` is truthy and below gh's spawn cost, so EVERY
+    # compare raises TimeoutExpired, every diff reads UNKNOWN, and the nudge never fires
+    # again. Exactly the truthiness-vs-value error corrected for `pr_url` in the same
+    # commit that left this line alone.
+    assert isinstance(kw.get("timeout"), (int, float)) and kw["timeout"] >= 5, (
+        f"the compare timeout must be large enough for gh to actually run, got "
+        f"{kw.get('timeout')!r}"
+    )
+    assert kw.get("cwd") is not None
+    # ⛔ The one keyword that actually makes the output READABLE, and the one I swept in
+    # round 7, saw survive, and deliberately left — calling it "noise, not a gap". That
+    # judgement weighed the cosmetic consequence (a garbled filename) and missed the
+    # control-flow one: under `errors="strict"` an undecodable byte raises
+    # UnicodeDecodeError, which `except (OSError, TimeoutExpired)` does NOT catch, so it
+    # propagates out of _production_files_changed and CRASHES the reopen itself.
+    assert kw.get("errors") == "replace", (
+        f"a filename byte that will not decode must degrade, not raise, got {kw.get('errors')!r}"
+    )
+
+
+def test_the_nudge_event_records_BOTH_ends_of_the_range_it_compared(tmp_path):
+    """🔴 The event_log row is the DURABLE record of what was compared — the return value is
+    read once and gone. Collapse `head_sha` onto the base and the record says a commit was
+    compared with itself, which is both false and exactly the corruption (`base...base`)
+    that makes the nudge fire on nothing. All five payload fields asserted, not three."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        dispatcher.reopen("abc123", "fix 3")
+
+    ev = event_log.read(types=["reopen_nudge"])["events"][-1]["payload"]
+    assert ev["first_reopen_head_sha"] == "h1"
+    assert ev["head_sha"] == "h3", (
+        f"the record lost the far end of the range it compared: {ev!r}"
+    )
+    assert ev["first_reopen_head_sha"] != ev["head_sha"], (
+        "a range whose two ends are equal is not a range"
+    )
+    assert ev["reopen_count"] == 3
+    assert ev["task_id"] == "abc123"
+    # ⛔ NOT `and ev["pr_url"]` — truthiness passes for ANY url, including another run's.
+    # Round 5's commit claimed "all five payload fields asserted"; this one was asserted
+    # only to exist.
+    assert ev["pr_url"] == "https://github.com/o/r/pull/80", (
+        f"the durable record must name THIS run's PR, got {ev['pr_url']!r}"
+    )
+
+
+def test_the_nudge_message_carries_the_EVIDENCE_it_rests_on(tmp_path):
+    """🔴 `diff_detail` is the only part of the operator-facing message derived from the
+    REAL diff — the rest ("N rounds, no production change … merging is a defensible call")
+    is the same confident sentence whatever the compare said.
+
+    ⭐ This is verbatim the condition of round 1's review: *the operator's whole reason to
+    trust the message is that it is derived from a real diff*. Blank the detail and the
+    advice keeps its wording and loses its evidence — which is the one thing that makes it
+    advice rather than a slogan. I wrote that condition and did not guard it.
+    """
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3", files=("tests/test_x.py", "tests/test_y.py"))
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        r = dispatcher.reopen("abc123", "fix 3")
+
+    assert "2 file(s) changed" in r["nudge"], (
+        f"the nudge must carry the diff it rests on. Got: {r['nudge']!r}"
+    )
+    assert "0 under chela/" in r["nudge"]
+
+
+def test_the_nudge_carries_its_ADVICE_not_only_its_evidence(tmp_path):
+    """🔴 GUARD (CMX-198 round 6): round 5 pinned the EVIDENCE and left the ADVICE bare.
+
+    The docstring calls this "an informed-consent signal that the judge may be hardening its
+    own proof rather than fixing the feature". Strip everything but the parenthetical and
+    the operator receives a diff summary — "(3 file(s) changed, 0 under chela/)" — with no
+    interpretation at all, which is data, not consent. The whole point of the feature is the
+    sentence that tells a human what the data MEANS and that acting on it is legitimate.
+    """
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        r = dispatcher.reopen("abc123", "fix 3")
+
+    nudge = r["nudge"]
+    assert "hardening the proof, not the feature" in nudge, (
+        f"the nudge must say what the diff MEANS, not only what it was. Got: {nudge!r}"
+    )
+    # ⛔ NOT `"defensible" in nudge` — that passes for "Merging is NOT a defensible call",
+    # the exact inversion of the advice, under a comment claiming it pins the permission.
+    # A keyword survives its own negation; the sentence does not.
+    assert "Merging is a defensible call." in nudge, (
+        f"…and that merging is a legitimate call — this is an informed-consent signal, and "
+        f"an inverted or hedged permission is worse than none. Got: {nudge!r}"
+    )
+    assert "not a defensible" not in nudge
+    assert "3 rounds" in nudge
+    # ⛔ The RANGE clause — what the numbers COVER. Rounds 5 and 6 guarded the parenthetical
+    # evidence and the trailing advice; this middle clause was pinned by nothing. "since the
+    # LAST reopen" describes a diff the code never computes (the base is the FIRST reopen's
+    # head, deliberately — a per-round diff is always non-empty and would never nudge), so
+    # the message would misdescribe its own evidence.
+    # ⛔ NOT `"since the first reopen" in nudge` — my first attempt asserted exactly that
+    # and PASSED under the mutation, because `diff_detail` embeds the same phrase
+    # ("N file(s) changed since the first reopen, M under chela/"). A wrong-path assertion
+    # written to fix a wrong-path bug. Anchor the CONTIGUOUS clause instead.
+    assert "rounds, no production change since the first reopen (" in nudge, (
+        f"the nudge must say WHAT its numbers cover. Got: {nudge!r}"
+    )
+
+
+def test_the_nudge_events_SUMMARY_is_what_a_notification_would_render(tmp_path):
+    """🔴 An event has two halves: the payload a filter queries, and the SUMMARY a
+    notification renders (`chela/event_log.py`). Round 5 asserted the payload exhaustively
+    and never looked at the summary — blank it and the durable record still contains every
+    field while anything that DISPLAYS the event shows an empty line."""
+    _drive_to_a_compare(tmp_path)
+    seen, run = _capture_compare_cmd(sha="h3")
+
+    # ⛔ Driven by BRANCH NAME, exactly as the payload test is. Round 11 separated `ident`
+    # from `task_id` for the payload and left the SUMMARY — its twin, built from the same
+    # two variables one line apart — still driven by the task id, where they collide.
+    with patch.object(dispatcher.subprocess, "run", side_effect=run):
+        r = dispatcher.reopen("test-1", "fix 3")
+
+    ev = event_log.read(types=["reopen_nudge"])["events"][-1]
+    summary = ev.get("summary") or ""
+    assert summary.startswith("abc123: "), f"the rendered half must name the run, got {summary!r}"
+    # ⛔ Fragments are satisfiable by a RECONSTRUCTED string that shares them. The summary
+    # must carry the nudge ITSELF — the same text the operator was shown — or the durable
+    # record and the notification can drift apart while both look plausible.
+    assert summary == f"abc123: {r['nudge']}", (
+        f"the summary must BE the nudge, not a paraphrase sharing its words. Got: {summary!r}"
+    )
+
+
+def test_reopen_returns_the_SPENT_rework_budget_not_the_reopen_count(tmp_path):
+    """🔴 GUARD (CMX-198 round 8): the separation at the SOURCE, not just in the DB.
+
+    `reopen()`'s return is what `cmd_reopen` renders and what any caller reads. Every
+    `rework_count == 2` assertion in this file reads the DB ROW; the RETURNED value was
+    pinned by nothing, so `"rework_count": new_reopen_count` conflates the two at the exact
+    boundary this ticket exists to keep apart — and the DB stays correct, so the row-based
+    assertions all keep passing.
+
+    The two numbers must DIFFER here or a swap is invisible: the fixture's spent budget is
+    2, this is reopen #3.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2,
+             first_reopen_head_sha="h1")
+
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["tests/test_x.py"]},
+        ),
+    ):
+        r = dispatcher.reopen("abc123", "fix 3")
+
+    assert r["rework_count"] == 2, (
+        f"the returned rework_count must be the AUTOMATIC loop's spent budget, "
+        f"got {r['rework_count']!r}"
+    )
+    assert r["reopen_count"] == 3
+    assert r["rework_count"] != r["reopen_count"], "two different facts, two different numbers"
+    assert r["max_reworks"] == dispatcher.max_reworks()
+
+
+def test_the_EVIDENCE_string_names_the_range_it_measured(monkeypatch):
+    """🔴 GUARD (CMX-198 round 9): `diff_detail` carries its OWN copy of the range phrase.
+
+    ⚠️ Round 7 found that `"since the first reopen" in nudge` was satisfied by the
+    parenthetical, and fixed it by anchoring to the TEMPLATE's contiguous clause. That fix
+    is correct — and it left `diff_detail`'s own copy, built in a DIFFERENT function,
+    guarded by nothing. Fixing a wrong-path assertion created the gap.
+
+    The evidence line is what the operator reads to check the advice: "N file(s) changed
+    since the LAST reopen" describes a per-round diff, which is never what was computed and
+    would be non-empty on every round — the opposite of the condition being reported.
+    """
+    monkeypatch.setattr(
+        dispatcher.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="tests/a.py\n", stderr=""))
+    _, detail = _pfc()
+    assert "changed since the first reopen" in detail, (
+        f"the evidence must name the range it measured. Got: {detail!r}"
+    )
+
+
+def test_escalating_a_run_PRESERVES_its_reopen_count(tmp_path):
+    """🔴 GUARD (CMX-198 round 9): the human loop's spent budget stays spent.
+
+    The DDL comment says `reopen_count` is "incremented once per successful reopen(), never
+    touched anywhere else", and `_escalate` — the production path a failing verdict takes
+    back to needs_human — is the only place that could reset it. Reset there and the count
+    restarts every round, never reaches 3, and the nudge NEVER fires: the feature is dead
+    while every counter test still passes.
+
+    ⚠️ This file's own `_escalate_back_to_needs_human` is a TEST helper that mirrors the
+    row, so the production function was never driven. A helper standing in for the code
+    under test cannot guard it.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2,
+             first_reopen_head_sha="h1", status="awaiting_review")
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        dispatcher._escalate(conn, row, "still fails review")
+
+    with dispatcher._db() as conn:
+        after = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+
+    assert after["status"] == "needs_human"
+    assert after["reopen_count"] == 2, (
+        f"escalation reset the human loop's spent budget to {after['reopen_count']!r} — "
+        "the count would never reach the nudge threshold"
+    )
+    assert after["first_reopen_head_sha"] == "h1", "the diff base must survive too"
+
+
+def test_the_nudge_payload_records_the_CANONICAL_task_id_not_what_was_typed(tmp_path):
+    """🔴 GUARD (CMX-198 round 11): `reopen()` accepts an IDENTIFIER, and records an ID.
+
+    `resolve_run()` resolves "by task id, branch name, or window name" — so the string an
+    operator types is routinely NOT the task id. Every test in this file calls
+    `reopen("abc123")`, which IS the task id, so `ident` and `task_id` are the same value
+    and substituting one for the other cannot be seen.
+
+    ⚠️ A fixture-value COLLISION: two distinct facts that happen to be equal. Driving it by
+    BRANCH NAME separates them. Recording the typed string would make the durable record
+    un-joinable to the runs table — a nudge event nothing can trace back to its run.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2,
+             first_reopen_head_sha="h1")
+
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=_gh_router_with_compare(
+            sha="h3", compare_files_by_base={"h1": ["tests/test_x.py"]},
+        ),
+    ):
+        r = dispatcher.reopen("test-1", "fix 3")      # ← the BRANCH name, not the task id
+
+    assert r["ok"] is True and r["task_id"] == "abc123"
+    ev = event_log.read(types=["reopen_nudge"])["events"][-1]["payload"]
+    assert ev["task_id"] == "abc123", (
+        f"the durable record must carry the canonical task id, not the string typed "
+        f"({ev['task_id']!r}) — otherwise the event cannot be joined to its run"
+    )
+
+
+@pytest.mark.parametrize("boom,label", [
+    (subprocess.CalledProcessError(1, "gh"), "check=True turns a bad exit into a RAISE"),
+    (ValueError("bad argument"), "a malformed call"),
+])
+def test_an_unreadable_compare_DEGRADES_it_never_raises_into_reopen(boom, label, monkeypatch):
+    """🔴 GUARD (CMX-198 round 13): the tri-state's contract is BEHAVIOURAL, not a kwarg list.
+
+    `_production_files_changed` promises `(None, detail)` on anything unreadable. The kwargs
+    guard is a whitelist — it pins the keywords I thought of, and says nothing about the ones
+    I did not. `check=True` is the case: it converts a non-zero exit into CalledProcessError,
+    which `except (OSError, TimeoutExpired)` does NOT catch, so an unreadable compare
+    propagates out and CRASHES the reopen instead of degrading.
+
+    ⚠️ Identical shape to round 10's `errors="strict"` — an exception escaping the handler,
+    reached by a keyword rather than by a code path. Guarding the BEHAVIOUR covers every
+    such keyword at once, including ones nobody has thought of yet.
+    """
+    def _raise(*a, **k):
+        raise boom
+
+    monkeypatch.setattr(dispatcher.subprocess, "run", _raise)
+
+    touched, detail = _pfc()          # must RETURN, not raise
+
+    assert touched is None, f"{label}: an unreadable compare is UNKNOWN, never a guess"
+    assert detail, "…and must say what went wrong"

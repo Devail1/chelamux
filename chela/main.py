@@ -42,8 +42,11 @@ from chela import (
     notify,
     okf,
     orchestrator,
+    restore,
+    roster,
     rooms,
     scheduler,
+    sessionids,
     update,
     workflow,
 )
@@ -539,6 +542,13 @@ def cmd_watch(args) -> None:
     orch = result["orchestrator"] or "(unregistered)"
     note = f' — note: "{result["note"]}"' if result["note"] else ""
     print(f"watching {wid}{note}; events -> {orch} when idle")
+    # CMX-195: a registration with no resolved identity looks identical to a healthy one
+    # once it's on disk (orchestrator_session: null) — CMX-82's self-heal is disarmed for
+    # it before it ever runs, and today nothing said so. Surface it the moment it happens.
+    if self_wid and not result.get("session"):
+        print(f"⚠ could not resolve a session identity for {self_wid} — self-heal is "
+              "unavailable for this registration until the next `chela watch`/`register` "
+              "that resolves one (fire a hook, or run a command, first)", file=sys.stderr)
 
 
 def cmd_unwatch(args) -> None:
@@ -1146,14 +1156,21 @@ def _ci_chip(r: dict) -> str:
 
 
 def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:
-    """One line for the status-filtered view: task id, status, CI, age, PR URL, title."""
+    """One line for the status-filtered view: task id, status, CI, age, PR URL, title.
+
+    ``reopen=N`` only appears once a run has actually been reopened (CMX-198) — a run
+    that never left the automatic loop shows nothing extra, so the chip reads as a
+    signal ("a human has been round N times") and not decoration on every row.
+    """
     task_id = r.get("task_id") or "-"
     status = r.get("status") or "-"
     age = _run_age_str(r.get("started_at"), now=now)
     pr = r.get("pr_url") or "-"
     title = (r.get("title") or "")[:50]
+    reopen_n = r.get("reopen_count") or 0
+    reopen_chip = f"reopen={reopen_n}  " if reopen_n else ""
     return (f"  {task_id}  {status:<16}  {_ci_chip(r):<11}  age={age:<5}  "
-            f"{pr:<45}  {title}")
+            f"{reopen_chip}{pr:<45}  {title}")
 
 
 def cmd_dispatch_runs(args) -> None:
@@ -1331,6 +1348,13 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
             # here and hand it to both, so a restart reaps the stale ones instead of relaying
             # a stranger's pane into a dead agent's topic.
             now_epoch = epoch.current()
+            # The durable fleet snapshot (CMX-195): same live/agents/now_epoch this tick
+            # already computed, no extra tmux call. Best-effort — a roster write failing
+            # must never take down the reconcile loop it rides on.
+            try:
+                roster.record(live, agents, now_epoch, get_window_cwd_by_id)
+            except Exception:
+                log.exception("chela roster: recording the fleet snapshot failed")
             dispatched = set() if BIND_DISPATCHED else tg.dispatched_window_ids(
                 live_windows=live, now_epoch=now_epoch)
             bindings_changed = tg.reconcile_bindings(
@@ -1671,6 +1695,98 @@ def cmd_doctor(args) -> None:
         sys.exit(1)
 
 
+def cmd_restore(args) -> None:
+    """Report every epoch-stamped row a hard tmux death orphaned (see ``chela/restore.py``).
+
+    **READ-ONLY by default.** It names what a dead tmux server left dangling across
+    ``inbox.json`` watches, the dispatcher's ``runs`` table, ``telegram-bindings.json`` and
+    ``session-ids.json``. Each row is classified REVIVABLE (its recorded Claude session is
+    alive under a NEW address, so re-registering is a one-command fix) or MANUAL (nothing
+    live runs it), and a MANUAL row carries the exact relaunch command.
+
+    ``--apply`` (CMX-196) acts on the classification instead of merely printing it: a
+    REVIVABLE row is re-stamped at its new address (``chela.restore.apply`` ->
+    ``chela.inbox.readdress`` / ``chela.sessionids.rekey``); a MANUAL row is archived
+    (``chela.roster.archive``) and only then removed from its live store. Without the flag
+    nothing is written and no agent is relaunched, spawned, resumed or killed — the operator
+    acts by hand: ``chela watch``/``register``, re-dispatch, or clear a row themselves.
+    ``telegram-bindings.json`` is never written either way: that store belongs to
+    ``chela-telegram``'s own in-memory registry, and its own reconcile tick reaps it.
+
+    ⚠️ The roster only helps starting from the NEXT reboot — there is no snapshot of an
+    epoch chela was never running to observe. A run today still reports the stale rows
+    already sitting in each store; it cannot enumerate a dead fleet the roster never saw.
+    """
+    from chela.telegram.bindings import BindingRegistry
+
+    apply_flag = bool(getattr(args, "apply", False))
+
+    now_epoch = epoch.current()
+    store = inbox.load()
+    try:
+        runs = dispatcher.list_runs()
+    except Exception:  # noqa: BLE001 — a DB hiccup must never crash a status report
+        runs = []
+    orphans = restore.scan_all(store["watches"], runs, sessionids.entries(), now_epoch)
+
+    bindings_reg = BindingRegistry.load()
+    bindings = {wid: bindings_reg.epoch_for(wid) for wid in bindings_reg.windows()}
+    verdicts = restore.plan(store, bindings, sessionids.entries(), now_epoch)
+
+    if now_epoch is None:
+        print("⚠ CANNOT VERIFY — tmux is unreachable right now, so no stamped row can be "
+              "proven dangling (or current). This is not a clean bill of health.")
+
+    if not orphans and not verdicts:
+        print("restore: nothing orphaned — every stamped row matches the running tmux epoch.")
+        return
+
+    if orphans:
+        print(f"{len(orphans)} row(s) stamped by a tmux server that is no longer running:\n")
+        for o in orphans:
+            print(f"  [{o.store}] {o.wid}  {o.label}  ({epoch.describe(o.stamped_epoch)})")
+        print()
+
+    manual = [v for v in verdicts if v.verdict == "MANUAL"]
+
+    # Applied BEFORE the verdict block prints, so each row's line can carry the outcome —
+    # one per verdict, same order, per restore.apply()'s contract.
+    results = restore.apply(verdicts) if apply_flag and verdicts else []
+
+    if verdicts:
+        print(f"{len(verdicts)} classified row(s) (three session-stamped stores: "
+              "inbox orchestrator, telegram-bindings, session-ids):\n")
+        for v, r in zip(verdicts, results or [None] * len(verdicts)):
+            if v.verdict == "REVIVABLE":
+                line = (f"  [{v.store}] {v.wid} -> {v.new_wid}  REVIVABLE "
+                        f"(session {v.session_id} is alive there now)")
+            else:
+                cmd = v.manual_command()
+                line = (f"  [{v.store}] {v.wid}  MANUAL"
+                        + (f"  — {cmd}" if cmd else " (no cwd/session on record)"))
+            if r is not None:
+                line += f"  => {r.action}" + (f" ({r.detail})" if r.detail else "")
+            print(line)
+
+    if apply_flag:
+        print("\nchela restore --apply: REVIVABLE rows above were re-stamped at their new "
+              "address; MANUAL rows were archived to roster-archive.json, then removed. "
+              "telegram-bindings.json rows are left for chela-telegram's own reconcile tick "
+              "to reap — see each row's outcome above.")
+    else:
+        print("\nreport only — chela restore never writes to a store. Act by hand: "
+              "chela watch/register for a REVIVABLE row, re-dispatch, or clear a row "
+              "yourself once you have decided what happened to it.")
+
+    # Nonzero while anything is MANUAL — the agent behind such a row is orphaned and needs
+    # a human. This is what composes into a restart procedure ("run chela restore, then
+    # check its exit code before declaring the box recovered"). This holds even after
+    # --apply: archiving a MANUAL row's bookkeeping does not resolve the orphaned agent
+    # itself, which still needs a human to decide what happened to it.
+    if manual:
+        sys.exit(1)
+
+
 def cmd_task_finished(args) -> None:
     """Mark a dispatcher run as awaiting_review and kill its tmux window.
 
@@ -1920,13 +2036,15 @@ def cmd_reopen(args) -> None:
         print(f"reopen: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"🔓 Run {result['task_id']} ({result.get('branch_name') or '?'}) → awaiting_review "
-          f"(rework {result.get('rework_count')}/{result.get('max_reworks')}) — "
-          "back under judge/review/merge.")
+          f"(rework {result.get('rework_count')}/{result.get('max_reworks')}, "
+          f"reopen #{result.get('reopen_count')}) — back under judge/review/merge.")
     if result.get("comment_posted"):
         print(f"  PR comment posted: {result.get('pr_url') or ''}")
     else:
         print(f"  ⚠ PR comment NOT posted ({result.get('comment_detail')}) — the run row is "
               "the authority, so the run is reopened regardless, but nothing landed on the PR.")
+    if result.get("nudge"):
+        print(f"  ⭐ {result['nudge']}")
 
 
 def cmd_escalate(args) -> None:
@@ -2335,6 +2453,19 @@ def main() -> None:
         help="Check the running config against $CHELA_DIR/chela.env (exits 1 on a break)",
     )
 
+    # restore — every epoch-stamped row a hard tmux death orphaned
+    p_restore = sub.add_parser(
+        "restore",
+        help="Report epoch-dangling rows left by a hard tmux death "
+             "(inbox/telegram-bindings/session-ids/dispatcher runs). Read-only by default.",
+    )
+    p_restore.add_argument(
+        "--apply", action="store_true",
+        help="Act on the classification: re-stamp REVIVABLE rows at their new address, "
+             "archive-then-remove MANUAL ones. telegram-bindings.json is still never "
+             "written — chela-telegram's own reconcile tick reaps it.",
+    )
+
     # task-finished — final step in the dispatcher work-item lifecycle
     p_tf = sub.add_parser(
         "task-finished",
@@ -2395,6 +2526,8 @@ def main() -> None:
             cmd_events(args)
     elif args.command == "doctor":
         cmd_doctor(args)
+    elif args.command == "restore":
+        cmd_restore(args)
     elif args.command == "drive":
         cmd_drive(args)
     elif args.command == "dispatch":

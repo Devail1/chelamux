@@ -161,10 +161,11 @@ def commits_behind(repo: Path | None = None, *, fetch: bool = True) -> UpdateSta
     )
 
 
-def _running_pm2_services(repo: Path) -> list[str]:
-    """Every currently-online PM2 process named ``chela-*``. Empty (never an error) if
-    PM2 isn't installed or nothing is running — a dev checkout run by hand has no
-    services to restart, and that's a normal, not exceptional, outcome.
+def _online_chela_services(repo: Path) -> list[dict]:
+    """Every currently-online PM2 process named ``chela-*``, as its raw ``name`` +
+    ``pm2_env`` fields. Empty (never an error) if PM2 isn't installed or nothing is
+    running — a dev checkout run by hand has no services to restart, and that's a
+    normal, not exceptional, outcome.
     """
     cp = _sh(["pm2", "jlist"], cwd=repo)
     if cp is None or cp.returncode != 0 or not cp.stdout.strip():
@@ -173,12 +174,108 @@ def _running_pm2_services(repo: Path) -> list[str]:
         procs = json.loads(cp.stdout)
     except ValueError:
         return []
-    return sorted(
-        p.get("name", "") for p in procs
+    return [
+        {"name": p.get("name", ""), "pm2_env": p.get("pm2_env") or {}}
+        for p in procs
         if isinstance(p, dict)
         and str(p.get("name", "")).startswith("chela-")
         and (p.get("pm2_env") or {}).get("status") == "online"
+    ]
+
+
+def _running_pm2_services(repo: Path) -> list[str]:
+    """Every currently-online PM2 process named ``chela-*``. See
+    :func:`_online_chela_services` for the empty-is-normal contract.
+    """
+    return sorted(p["name"] for p in _online_chela_services(repo))
+
+
+@dataclass(frozen=True)
+class ServiceFreshness:
+    """Whether the ``chela-*`` PM2 services running RIGHT NOW were started before the
+    commit the checkout is sitting on right now existed — see :func:`services_running_stale_code`.
+    """
+
+    ok: bool
+    stale: list[str] = field(default_factory=list)
+    commit_epoch: int = 0
+    error: str = ""
+
+
+def _current_commit_epoch(repo: Path) -> int | None:
+    """The committer-date (unix epoch seconds) of the checkout's current HEAD.
+
+    A fixed property of the commit object itself, authored wherever the commit was first
+    made — which is exactly why it is NOT, by itself, safe to compare a service's PM2
+    start time against (see :func:`services_running_stale_code`): a commit is always
+    committed before it is pulled, so this alone cannot tell "running old code" apart from
+    "restarted in the ordinary gap between upstream authoring it and this box pulling it".
+    """
+    cp = _git(repo, "log", "-1", "--format=%ct")
+    if not _git_ok(cp):
+        return None
+    try:
+        return int(_git_out(cp))
+    except ValueError:
+        return None
+
+
+def _checkout_arrival_epoch(repo: Path) -> int | None:
+    """When HEAD's current commit actually landed in THIS checkout's working tree —
+    the mtime of the reflog entry its last update (a pull, checkout, reset, or commit)
+    wrote. Unlike :func:`_current_commit_epoch`'s committer date, this is pinned to this
+    clone: it can't predate the moment the files actually arrived on disk here, which is
+    what makes it the correct half of the comparison in
+    :func:`services_running_stale_code`. ``None`` if it can't be determined (reflogs are
+    disabled, or the path is unreadable) rather than a hard failure — the commit's own
+    date, on its own, is still a valid (if weaker) floor.
+    """
+    cp = _git(repo, "rev-parse", "--git-path", "logs/HEAD")
+    if not _git_ok(cp):
+        return None
+    # `--git-path` is relative to `repo` (not the caller's cwd) for a plain checkout, but
+    # already absolute for a worktree — `Path.__truediv__` does the right thing for both:
+    # joining onto an absolute right-hand side just returns that absolute path.
+    try:
+        return int((repo / _git_out(cp)).stat().st_mtime)
+    except OSError:
+        return None
+
+
+def services_running_stale_code(repo: Path | None = None) -> ServiceFreshness:
+    """Which running ``chela-*`` PM2 services predate the code now checked out.
+
+    ``chela update`` pulls and restarts in the same step, and the ``repo.upstream_synced``
+    doctor fact now catches a checkout that has simply fallen behind (CMX-199). Neither
+    catches the residual gap this closes: an operator running a bare ``git pull`` by hand
+    (bypassing ``chela update`` entirely) leaves the checkout genuinely in sync with its
+    upstream — ``ahead == behind == 0`` — while every ``chela-*`` PM2 service just keeps
+    running the process image it loaded at its OWN last start, oblivious to the new files
+    on disk. ``repo.upstream_synced`` is a fact about the CHECKOUT; this is a fact about
+    the RUNNING CODE, and a checkout can be perfectly "in sync" while every service
+    serving traffic is still the old build.
+
+    Compares each online service's PM2 ``pm_uptime`` (its own last-start timestamp, in
+    epoch milliseconds) against the LATER of :func:`_current_commit_epoch` (when the
+    commit was authored) and :func:`_checkout_arrival_epoch` (when it actually landed
+    here): a service that started before either cannot possibly be running it, and a
+    commit is always authored before it is pulled — using the commit date alone would miss
+    a service that restarted in that ordinary gap, which is exactly the bare-`git pull`
+    scenario this fact exists to catch. Never restarts anything itself — read-only,
+    exactly like :func:`commits_behind`.
+    """
+    repo = repo or repo_root()
+    commit_epoch = _current_commit_epoch(repo)
+    if commit_epoch is None:
+        return ServiceFreshness(ok=False, error="git log failed")
+    arrival_epoch = _checkout_arrival_epoch(repo)
+    threshold_epoch = max(commit_epoch, arrival_epoch) if arrival_epoch is not None else commit_epoch
+    stale = sorted(
+        svc["name"] for svc in _online_chela_services(repo)
+        if isinstance(svc["pm2_env"].get("pm_uptime"), (int, float))
+        and svc["pm2_env"]["pm_uptime"] / 1000 < threshold_epoch
     )
+    return ServiceFreshness(ok=True, stale=stale, commit_epoch=commit_epoch)
 
 
 def _plugin_marketplaces() -> list[str]:

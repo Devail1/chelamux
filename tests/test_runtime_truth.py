@@ -147,6 +147,14 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
                         lambda: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
 
+    # repo.services_current: no chela-* PM2 service predates the checked-out code.
+    monkeypatch.setattr(runtime_truth, "_services_current_status",
+                        lambda: update.ServiceFreshness(ok=True, stale=[], commit_epoch=1000))
+
+    # restore.dead_epoch_rows: nothing orphaned — every stamped row in this fleet
+    # (the inbox registration above) matches the running epoch.
+    monkeypatch.setattr(runtime_truth, "_restore_scan", lambda now: 0)
+
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
         runtime_truth, "collected_js_suites",
@@ -444,6 +452,22 @@ def _break_upstream_synced(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_restore_dead_epoch(tmp_path, monkeypatch):
+    """A hard tmux death (CMX-195) left 3 stamped rows behind — the shape `chela doctor`
+    stayed green through on 2026-07-14."""
+    monkeypatch.setattr(runtime_truth, "_restore_scan", lambda now: 3)
+    return doctor.WARN
+
+
+def _break_services_current(tmp_path, monkeypatch):
+    """A bare `git pull` (bypassing `chela update`) landed new code chela-dashboard never
+    restarted onto — the checkout is fine, the running service is not (CMX-200)."""
+    monkeypatch.setattr(
+        runtime_truth, "_services_current_status",
+        lambda: update.ServiceFreshness(ok=True, stale=["chela-dashboard"], commit_epoch=1000))
+    return doctor.WARN
+
+
 CORRUPTIONS = {
     "relay.transcripts": _break_relay_transcripts,
     "env.file": _break_env_file,
@@ -470,7 +494,9 @@ CORRUPTIONS = {
     "windows.resolvable": _break_windows_resolvable,
     "fonts.glyph_coverage": _break_fonts_glyph_coverage,
     "repo.upstream_synced": _break_upstream_synced,
+    "repo.services_current": _break_services_current,
     "agents.native_status_feed": _break_native_status_feed,
+    "restore.dead_epoch_rows": _break_restore_dead_epoch,
 }
 
 
@@ -771,6 +797,25 @@ def test_upstream_synced_status_never_fetches(monkeypatch):
     assert calls == [False]
 
 
+def test_services_current_status_calls_the_real_detector(monkeypatch):
+    """The rest of this suite monkeypatches `_services_current_status` itself, which
+    proves the fact's report/read logic but nothing about whether that seam is actually
+    wired to `update.services_running_stale_code` — a stub returning a fixed all-clear
+    `ServiceFreshness` in its place would pass every one of those tests unnoticed. This
+    one patches `update.services_running_stale_code` instead and calls the seam
+    function directly, so it fails if the wiring is ever severed."""
+    calls = []
+
+    def fake_services_running_stale_code(*args, **kwargs):
+        calls.append((args, kwargs))
+        return update.ServiceFreshness(ok=True, stale=["chela-dashboard"], commit_epoch=1000)
+
+    monkeypatch.setattr(update, "services_running_stale_code", fake_services_running_stale_code)
+    status = runtime_truth._services_current_status()
+    assert calls == [((), {})]
+    assert status.stale == ["chela-dashboard"]
+
+
 def test_upstream_synced_is_silent_when_no_upstream_is_configured(fleet, monkeypatch):
     """A branch with nothing to compare against (never pushed) is not a bug — just
     nothing to report, same as `commits_behind`'s own `ok=True, error=...` contract."""
@@ -797,6 +842,122 @@ def test_repo_upstream_synced_does_not_apply_to_a_pip_install(monkeypatch):
         update, "repo_root",
         lambda: (_ for _ in ()).throw(update.NotAGitCheckout("not a git checkout")))
     assert not runtime_truth.fact("repo.upstream_synced").applies()
+
+
+def test_behind_upstream_is_not_reported_as_in_sync(fleet, monkeypatch):
+    """CMX-199: the false green this fact used to print. A checkout with NO local
+    divergence (ahead == 0) but genuinely behind must never be told "in sync" — that
+    exact lie is what let five merged PRs sit inert, unpulled, for a full day while
+    every `chela-*` service kept serving stale code."""
+    monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
+                        lambda: update.UpdateStatus(ok=True, behind=5, ahead=0, branch="dev"))
+    findings = [f for f in doctor.check() if f.fact == "repo.upstream_synced"]
+    assert findings and findings[0].level == doctor.WARN
+    assert "in sync" not in findings[0].title
+    assert "5 commit(s) BEHIND" in findings[0].title
+    assert "chela update" in findings[0].detail
+
+
+def test_behind_upstream_report_never_calls_reset_or_fetch(fleet, monkeypatch):
+    """Same read-only contract as the diverged case: detecting "behind" must never
+    itself pull or restart anything — that action lives only in `chela.update.apply`."""
+    calls = []
+    monkeypatch.setattr(update, "apply", lambda *a, **k: calls.append("apply"))
+    monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
+                        lambda: update.UpdateStatus(ok=True, behind=5, ahead=0, branch="dev"))
+
+    doctor.check()
+
+    assert calls == [], f"doctor's read path reached a mutating update.* call: {calls}"
+
+
+def test_fully_synced_upstream_reports_ok_and_says_nothing_to_pull(fleet, monkeypatch):
+    """The genuinely healthy case (ahead == 0, behind == 0) still reads green — this fact
+    must not cry wolf on every ordinary "just fetched, nothing changed" tick."""
+    monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
+                        lambda: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
+    findings = [f for f in doctor.check() if f.fact == "repo.upstream_synced"]
+    assert findings and findings[0].level == doctor.OK
+    assert "nothing to pull" in findings[0].title
+
+# --- repo.services_current: the checkout can be "in sync" while the RUNNING code isn't --
+#
+# CMX-200: `repo.upstream_synced` only ever asks whether the checkout matches its
+# upstream. A bare `git pull` (bypassing `chela update`, which pulls AND restarts
+# together) leaves the checkout fully in sync while every `chela-*` PM2 service keeps
+# running the process image from its own last start. This fact catches THAT gap — never
+# restarts anything itself.
+
+def test_stale_service_is_named_and_pointed_at_the_fix(fleet, monkeypatch):
+    _break_services_current(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "repo.services_current"]
+    assert findings and findings[0].level == doctor.WARN
+    assert "chela-dashboard" in findings[0].title
+    assert "pm2 restart chela-dashboard" in findings[0].detail
+    assert "chela update" in findings[0].detail
+
+
+def test_services_current_report_never_restarts_anything(fleet, monkeypatch):
+    """Read-only, same contract as repo.upstream_synced: `pm2 restart` / `update.apply`
+    must never be reachable from doctor's read path."""
+    calls = []
+    monkeypatch.setattr(update, "apply", lambda *a, **k: calls.append("apply"))
+    monkeypatch.setattr(
+        update, "_sh", lambda *a, **k: calls.append("_sh") or (_ for _ in ()).throw(
+            AssertionError("doctor's read path must never shell out to pm2 restart")))
+    _break_services_current(fleet, monkeypatch)
+
+    doctor.check()
+
+    assert calls == [], f"doctor's read path reached a mutating call: {calls}"
+
+
+def test_no_stale_services_is_a_single_ok_finding(fleet):
+    findings = [f for f in doctor.check() if f.fact == "repo.services_current"]
+    assert findings == [runtime_truth.Finding(
+        doctor.OK, "running chela-* services match the checked-out code (or none are up)",
+        fact="repo.services_current")]
+
+
+def test_services_current_cannot_verify_when_git_log_fails(fleet, monkeypatch):
+    """`git log` failing is the owner not answering — CANNOT VERIFY, never green."""
+    monkeypatch.setattr(
+        runtime_truth, "_services_current_status",
+        lambda: update.ServiceFreshness(ok=False, error="git log failed"))
+    findings = [f for f in doctor.check() if f.fact == "repo.services_current"]
+    assert findings and all(f.level == doctor.ERROR for f in findings)
+    assert "CANNOT VERIFY repo.services_current" in findings[0].title
+
+
+def test_repo_services_current_does_not_apply_to_a_pip_install(monkeypatch):
+    """A pip install has no `.git` — there is no committed HEAD to compare a service's
+    start time against."""
+    monkeypatch.setattr(
+        update, "repo_root",
+        lambda: (_ for _ in ()).throw(update.NotAGitCheckout("not a git checkout")))
+    assert not runtime_truth.fact("repo.services_current").applies()
+
+
+# --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------
+
+def test_restore_dead_epoch_rows_reports_the_count(fleet, monkeypatch):
+    _break_restore_dead_epoch(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "restore.dead_epoch_rows"]
+    assert findings and findings[0].level == doctor.WARN
+    assert "3 stamped row(s)" in findings[0].title
+    assert "chela restore" in findings[0].title
+
+
+def test_restore_dead_epoch_rows_silent_when_nothing_orphaned(fleet):
+    findings = [f for f in doctor.check() if f.fact == "restore.dead_epoch_rows"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_restore_dead_epoch_rows_cannot_verify_with_no_tmux_server(fleet, monkeypatch):
+    monkeypatch.setattr(epoch, "current", lambda: None)
+    findings = [f for f in doctor.check() if f.fact == "restore.dead_epoch_rows"]
+    assert findings and all(f.level == doctor.WARN for f in findings)
+    assert "CANNOT VERIFY restore.dead_epoch_rows" in findings[0].title
 
 
 # --- installed_hooks_stale(): `chela update`'s post-update reminder reuses the exact

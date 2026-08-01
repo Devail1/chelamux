@@ -10,7 +10,64 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-02
+
+Honest self-reporting, and the operator controls that act on it.
+
+`chela doctor` could report a checkout "in sync with its upstream" while it sat
+commits behind and every `chela-*` service kept serving code it had loaded days
+earlier — the exact shape that let five merged PRs run inert for a full day. This
+release makes that condition visible from two independent angles (the checkout
+against its upstream, and the RUNNING services against the checkout), gives the
+dashboard controls to act on it without an SSH session, and closes the gaps that
+let the judge's own verdicts go stale.
+
 ### Added
+
+- **`chela restore` reports the rows a hard tmux death orphaned.** CMX-82 already
+  self-heals the orchestrator's own address in `inbox.json`, but every other
+  epoch-stamped row chela writes — `inbox.json` watches, the dispatcher's `runs`
+  table (agent + judge window stamps), `telegram-bindings.json`, `session-ids.json`
+  — had no self-initiated check and no report: after a tmux restart they just sit
+  there, correct-looking and permanently unverifiable, invisible unless a human
+  happens to open the right file. `chela restore` scans all four and prints what a
+  dead tmux server left behind; for the three stores that carry (or, via the new
+  `chela/roster.py` epoch-keyed fleet snapshot, can be joined to) a session id, it
+  also classifies each dangling row REVIVABLE (the recorded Claude session is alive
+  under a new address — `sessions.wid_for_session`, never reimplemented) or MANUAL
+  (nothing live claims it; an exact `cd <cwd> && CHELA_WID=@N claude --resume <sid>`
+  one-liner is printed). It exits nonzero while anything is MANUAL, so it composes
+  into a restart procedure. `chela doctor` now also carries a
+  `restore.dead_epoch_rows` finding, so the count surfaces without a human
+  remembering to run the command by hand. (#256)
+
+  ⚡ **`chela restore --apply` now acts on that report.** REVIVABLE rows are
+  re-stamped at their new live address (`inbox.readdress`, `sessionids.rekey`);
+  MANUAL rows are archived into a new `roster-archive.json` — its own file,
+  deliberately never a key inside `roster.json`, since that store is dumped
+  whole from the reconcile loop's in-memory copy every tick, unlocked and
+  unmerged, so a second writer sharing it would lose silently in both
+  directions. Rows are archived before being removed from their live store, so
+  a crash between the two steps loses nothing worse than a duplicate archive
+  entry, never a silently vanished row. Every writer no-ops
+  (reported as `RACED`) if the row has moved on since the report was computed,
+  rather than blindly clobbering current state with a stale plan.
+  `telegram-bindings.json` stays untouched permanently, not just deferred:
+  `chela-telegram` owns that file through its own in-memory registry, saved from
+  that object every reconcile tick with no lock or merge, so a second writer
+  would race its next save; those rows are still classified and reported, just
+  left for the daemon's own reconcile tick to reap. The bare `chela restore` (no
+  flag) stays read-only by default, and exit-code semantics are unchanged:
+  nonzero while any row is MANUAL, even after `--apply` archived it, since the
+  underlying orphaned agent still needs a human to look at it. (#257)
+
+  Also fixes the disarmed-identity bug that let this happen in the first place:
+  `chela watch <wid>` now reports (like `chela watch`/`register` already did) when it
+  cannot resolve a session identity at registration, instead of silently storing
+  `orchestrator_session: null` and disarming CMX-82's self-heal before it ever runs.
+  ⚠️ The roster only helps starting from the next reboot — a run today still reports
+  stale rows already in each store, but cannot enumerate an epoch chela was never
+  running to observe.
 
 - **`chela update` now refreshes the plugin too, not just the server.** A release has
   two halves: the server-side `git pull` + `uv sync` + `pm2 restart`, and the plugin
@@ -104,6 +161,70 @@ history lives in `git log`.
   the event-log plugin (`chela plugin`) is strongly recommended — it unlocks
   lossless blocked-agent gates on Telegram, zero-keystroke answers, and the live
   Feed — and the statusLine hook is reframed as recommended for exact usage numbers.
+
+### Added
+
+- **`chela reopen` now tracks how many times a run has bounced back to a human,
+  and nudges when nothing production-facing changed since the first bounce.**
+  `CHELA_MAX_REWORKS` bounds only the dispatcher's *automatic* rework loop — the
+  human-takeover `reopen` path was deliberately left unbounded. A new
+  `reopen_count` column (surfaced as a `reopen=N` chip in `chela dispatch-runs`)
+  and `first_reopen_head_sha` (the fixed baseline every later reopen is diffed
+  against, not the previous round's head) let the 3rd-and-later reopen carry a
+  `nudge` when a live GitHub compare shows nothing under `chela/` changed since
+  that baseline. Informed consent, not a gate — the reopen still succeeds
+  either way. Measured live: three tickets in one day burned 47 judge rounds
+  between them, with one running 12 straight tests-only rounds before anyone
+  noticed production had frozen. (#259)
+- **The dashboard Settings drawer can pull and restart the fleet without an SSH
+  session.** A live behind-count badge plus an "Update now" button run the
+  exact same `update.apply()` `chela update` runs (same dirty-tree /
+  diverged-branch refusals, nothing loosened), in a background thread so the
+  dashboard's own pm2 restart can't race flushing the HTTP response. Refuses
+  outright (409) while a dispatched agent run is `claimed`/`running` — the
+  restart `chela update` triggers would orphan it mid-flight — and separately
+  refuses (409) a second concurrent update via a module-level lock. (#260)
+- **A new `chela doctor` fact for the code actually RUNNING, not just the
+  checkout on disk.** A bare `git pull` (bypassing `chela update`) can leave a
+  checkout that genuinely reports "in sync" while every `chela-*` PM2 service
+  keeps executing whichever process image it last started from. `repo.services_current`
+  compares each running service's own start time against whichever is later: the
+  checked-out commit's own date, or when that commit actually landed in this
+  checkout. The second half is load-bearing — a commit is always authored before
+  it is pulled, so comparing against the commit date alone silently misses a
+  service that restarted in that ordinary gap, which is exactly the bare-`git
+  pull` scenario this fact exists to catch. WARNs by name on any service that
+  predates the threshold — read-only, never restarts anything itself. (#261)
+
+### Fixed
+
+- **A clean judge verdict never woke the orchestrator up.** `judge.judge_run`
+  only moved a run's `status` off `awaiting_review` on a BLOCKED verdict, so
+  `inbox.run_events`' dedupe (keyed on `status` alone) never re-fired past the
+  run's original "PR opened" announcement — a clean or `cannot_verify` verdict
+  produced no event at all. Measured live twice: the judge posted "every guard
+  held" on both cmx-195 and cmx-196, and a human had to notice the silence and
+  merge by hand each time. `run_events` now dedupes on `status + judge_state`,
+  so a run re-announces once, the moment the judge actually settles, via two
+  new event kinds (`run_judge_clean`, `run_judge_cannot_verify`) wired into
+  staleness and the dashboard feed the same way `run_review` already is. (#258)
+- **`chela doctor` called a checkout "in sync" while it sat 5 commits behind.**
+  `repo.upstream_synced` only ever checked `ahead > 0` (local divergence /
+  history rewrite); a checkout that was simply stale — never pulled — read as
+  fully healthy. Five PRs merged to `dev` in one day and every `chela-*` PM2
+  service kept running the old code with 0 restarts, green the whole time. The
+  fact now WARNs on `behind > 0` too, pointing at `chela update` or the new
+  dashboard control above. (#260)
+- **A judge re-run after its worktree was reaped refused to verify, instead of
+  just rebuilding it.** The throwaway judge worktree is reaped the moment a
+  verdict publishes, but `chela judge run <run> --experiments <file>` — the
+  documented manual re-verification path — required that worktree to still
+  exist, so re-running the judge against a since-fixed PR dead-ended in "the
+  judge worktree is gone" short of a full agent re-spawn. `judge_run` now
+  rebuilds a missing worktree at the run's current `pr_head_sha`, re-runs the
+  same base-branch catch-up a fresh judge gets, and re-stamps `judge_sha` to
+  the sha it just verified — never a guess, never a crash on an unresolvable
+  or missing sha. (#262)
 
 ## [0.2.0] — 2026-07-23
 

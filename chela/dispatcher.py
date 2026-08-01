@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from chela import critic, epoch, hold, judge
+from chela import critic, epoch, event_log, hold, judge
 from chela.config import (
     CHELA_DIR,
     DISPATCH_TICK_INTERVAL,
@@ -146,6 +146,7 @@ _WORK_LINE_RE = re.compile(
 )
 
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:[/?#]|$)")
+_PR_REPO_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/\d+")
 
 # --- CI: the one signal that needs no judgment -------------------------------
 #
@@ -1046,6 +1047,20 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # column back. A pre-migration row simply reads NULL — the modal degrades to
         # "no brief recorded", never a crash.
         ("brief", "ALTER TABLE runs ADD COLUMN brief TEXT"),
+        # 🔁🛑 CMX-198. `CHELA_MAX_REWORKS` bounds the dispatcher's AUTOMATIC rework loop —
+        # it does NOT bound `reopen` (deliberately: the human-takeover path must never
+        # refuse). Measured 2026-07-31: cmx-197 was reopened 14 times, `rework_count`
+        # printing `1/2` on every single one, because nothing counted the human's OWN
+        # loop. `reopen_count` is that counter — incremented once per successful
+        # `reopen()`, never touched anywhere else (mirrors `rework_count`'s "spent budget
+        # stays spent" discipline, just for the human loop instead of the agent's).
+        # `first_reopen_head_sha` is the PR's head commit at the FIRST reopen — the fixed
+        # baseline the no-production-change nudge diffs every later reopen's head
+        # against. It is set once (on `reopen_count` 0→1) and never overwritten, so the
+        # comparison always spans the FULL reopen history, not just the latest round (a
+        # per-round diff is trivially non-empty and would never fire).
+        ("reopen_count", "ALTER TABLE runs ADD COLUMN reopen_count INTEGER DEFAULT 0"),
+        ("first_reopen_head_sha", "ALTER TABLE runs ADD COLUMN first_reopen_head_sha TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -1756,6 +1771,62 @@ def _pr_number(pr_url: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+def _pr_owner_repo(pr_url: str | None) -> tuple[str, str] | None:
+    m = _PR_REPO_RE.search(str(pr_url or ""))
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _production_files_changed(
+    pr_url: str | None, repo_dir: str | None, base_sha: str, head_sha: str,
+) -> tuple[bool | None, str]:
+    """Did anything under ``chela/**`` (excluding ``tests/**``) change between two commits?
+
+    Reads GitHub's own compare, live — the same "never trust a local checkout" discipline
+    as :func:`_read_pr_checks`: ``repo_dir`` is wherever the dispatcher happens to be
+    running from, not guaranteed to have fetched these exact objects, so this asks GitHub
+    instead of running ``git diff`` on disk.
+
+    Returns ``(None, detail)`` on anything unreadable — no ``gh``, no network, an
+    unparsable PR url. This backs a NUDGE, not a gate: an unknown here must say nothing,
+    never guess "no change" (which would fire the nudge on missing data) or "changed"
+    (which would silently suppress a nudge that should have fired).
+    """
+    if base_sha == head_sha:
+        return False, "the head has not moved since the first reopen"
+    owner_repo = _pr_owner_repo(pr_url)
+    if not owner_repo:
+        return None, "could not parse an owner/repo out of the PR url"
+    owner, repo = owner_repo
+    try:
+        out = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}/compare/{base_sha}...{head_sha}",
+             "--jq", ".files[].filename"],
+            cwd=repo_dir, capture_output=True, text=True, errors="replace", timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "gh timed out reading the compare"
+    except Exception as e:  # noqa: BLE001 — see below; the contract is DEGRADE, never raise
+        # ⛔ Deliberately broad. This function's contract is "(None, detail) on anything
+        # unreadable", and it backs a NUDGE, not a gate: the worst case of swallowing is a
+        # nudge that stays silent, while the worst case of RAISING is an unhandled
+        # exception in `reopen()` — the human-takeover path, which a stuck run depends on.
+        #
+        # Naming individual exception types is what failed here: `except (OSError,
+        # TimeoutExpired)` looked exhaustive and was not. `check=True` (CalledProcessError)
+        # and a malformed argument (ValueError) both escaped it, and neither is reachable
+        # by reading the call — they arrive through a KEYWORD, so the next one added is
+        # invisible again. Catching the behaviour covers every keyword at once.
+        return None, f"gh could not be run ({e})"
+    if out.returncode != 0:
+        return None, (out.stderr or out.stdout or "gh api compare failed").strip()[:200]
+    files = [f for f in (out.stdout or "").splitlines() if f.strip()]
+    production = [f for f in files if f.startswith("chela/") and not f.startswith("tests/")]
+    return (
+        len(production) > 0,
+        f"{len(files)} file(s) changed since the first reopen, {len(production)} under chela/",
+    )
+
+
 def _post_pr_comment(pr_url: str | None, repo_dir: str | None, body: str) -> tuple[bool, str]:
     """Post the verdict on the PR — with ``gh pr comment``, NEVER ``gh pr review``.
 
@@ -1975,6 +2046,15 @@ def reopen(ident: str, reason: str = "") -> dict:
     its OLD failing verdict — and the dispatcher judges once per head commit, so the judge
     would never re-run to catch it. That stale, already-rejected head would then be
     reachable by ``review --approve`` → ``merge``: the "reopen the same failing code" hole.
+
+    🔁🛑 CMX-198. ``reopen_count`` is bumped every successful call — the counter
+    ``CHELA_MAX_REWORKS`` does NOT cover, because this is the human-takeover path, not the
+    dispatcher's automatic one. Past the 3rd reopen, if nothing under ``chela/`` has
+    changed since the FIRST reopen (a diff of the two head shas, read live from GitHub —
+    see :func:`_production_files_changed`), the return carries a ``nudge``: an
+    informed-consent signal that the judge may be hardening its own proof rather than
+    fixing the feature, not a refusal. It never blocks; a human who really is still fixing
+    something gets the same ``ok: True`` either way.
     """
     run = resolve_run(ident)
     if run is None:
@@ -2018,6 +2098,16 @@ def reopen(ident: str, reason: str = "") -> dict:
     reviews = reviews_of(run)
     note = (reason or "").strip() or "reopened for review — a human fixed the branch"
     reviews.append({"round": len(reviews) + 1, "at": _now(), "body": note, "verdict": "reopened"})
+
+    # 🔁🛑 CMX-198. `reopen_count` is THIS loop's counter — separate from `rework_count`
+    # (the dispatcher's automatic one) on purpose; conflating them is the exact bug this
+    # exists to fix. `first_reopen_head_sha` is set ONCE, on the 0→1 transition, and never
+    # touched again: it is the fixed baseline every later reopen's head gets diffed
+    # against, so the no-production-change check always spans the WHOLE reopen history.
+    prior_reopen_count = run.get("reopen_count") or 0
+    new_reopen_count = prior_reopen_count + 1
+    first_reopen_sha = run.get("first_reopen_head_sha") or ci.head_sha
+
     with _db() as conn:
         # Same COMPARE-AND-SWAP discipline as request_changes: the row must still be the
         # needs_human row this call read, or a concurrent reconcile (a human merged the
@@ -2025,8 +2115,9 @@ def reopen(ident: str, reason: str = "") -> dict:
         # resurrected out of `done`.
         cur = conn.execute(
             "UPDATE runs SET status='awaiting_review', review_history=?, last_error=NULL, "
-            "pr_head_sha=? WHERE task_id=? AND status='needs_human'",
-            (json.dumps(reviews), ci.head_sha, task_id),
+            "pr_head_sha=?, reopen_count=?, first_reopen_head_sha=? "
+            "WHERE task_id=? AND status='needs_human'",
+            (json.dumps(reviews), ci.head_sha, new_reopen_count, first_reopen_sha, task_id),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -2052,17 +2143,45 @@ def reopen(ident: str, reason: str = "") -> dict:
     if not posted:
         log.warning("reopen: %s is awaiting_review again, but the PR comment did not post "
                     "(%s)", task_id, detail)
-    log.info("reopen: %s (needs_human) → awaiting_review", task_id)
-    return {
+    log.info("reopen: %s (needs_human) → awaiting_review (reopen %d)", task_id, new_reopen_count)
+
+    # ⭐ THE NUDGE. Advisory only — see the docstring. Only worth asking GitHub about past
+    # the 3rd reopen (rounds 1-2 are never enough signal, and every round below that would
+    # be an extra `gh api` call for nothing).
+    nudge = None
+    if new_reopen_count >= 3 and first_reopen_sha:
+        touched, diff_detail = _production_files_changed(
+            run.get("pr_url"), repo_dir, first_reopen_sha, ci.head_sha,
+        )
+        if touched is False:
+            nudge = (
+                f"{new_reopen_count} rounds, no production change since the first reopen "
+                f"({diff_detail}) — the judge is hardening the proof, not the feature. "
+                "Merging is a defensible call."
+            )
+            event_log.append(
+                "reopen_nudge", f"{task_id}: {nudge}",
+                payload={
+                    "task_id": task_id, "pr_url": run.get("pr_url"),
+                    "reopen_count": new_reopen_count,
+                    "first_reopen_head_sha": first_reopen_sha, "head_sha": ci.head_sha,
+                },
+            )
+
+    result = {
         "ok": True, "task_id": task_id, "status": "awaiting_review",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "rework_count": run.get("rework_count") or 0, "max_reworks": max_reworks(),
+        "reopen_count": new_reopen_count,
         "comment_posted": posted, "comment_detail": detail,
     }
+    if nudge:
+        result["nudge"] = nudge
+    return result
 
 
-def set_judge_state(task_id: str, state: str, detail: str = "") -> None:
-    """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE.
+def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None) -> None:
+    """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE (besides ``sha``).
 
     The judge's only way to change a run's STATUS is :func:`request_changes` — the one
     carrier, shared with the CI gate and with a human reviewer. This column is a report, not
@@ -2070,12 +2189,25 @@ def set_judge_state(task_id: str, state: str, detail: str = "") -> None:
     ``awaiting_review``, where the orchestrator will find it. ``cannot_verify`` is the same
     non-answer the CI gate's ``unknown`` is, and it is recorded rather than swallowed
     precisely because an unknown that goes quiet is indistinguishable from a pass.
+
+    ``sha``, when given, also stamps ``judge_sha`` — for the ONE caller that judges a commit
+    without having gone through ``_spawn_judge`` first (a re-run that rebuilt its own reaped
+    worktree, CMX-201): that caller's judgment would otherwise leave ``judge_sha`` pointing at
+    a stale commit, and the per-sha trigger would immediately re-spawn a redundant judge on
+    the very sha this call just verified. Every normal caller passes nothing and this column
+    is untouched, exactly as before.
     """
     with _db() as conn:
-        conn.execute(
-            "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
-            (state, (detail or "")[:2000], task_id),
-        )
+        if sha:
+            conn.execute(
+                "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=? WHERE task_id=?",
+                (state, (detail or "")[:2000], sha, task_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
+                (state, (detail or "")[:2000], task_id),
+            )
         conn.commit()
 
 

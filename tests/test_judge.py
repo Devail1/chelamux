@@ -546,6 +546,256 @@ def test_a_judge_run_that_RAISES_still_reaps_its_worktree(tmp_path, monkeypatch)
     assert not wt_path.exists()
 
 
+# --- (h.5) THE RE-RUN (CMX-201): a REAPED worktree is rebuilt, not declared unverifiable ---
+
+def _git_workflow_repo(tmp_path: Path, task_id: str, guard_test: str) -> tuple[Path, str]:
+    """A real git repo that is BOTH the workflow repo and the source `detached_worktree`
+    checks the judge's throwaway worktree out from. Deliberately does NOT pre-provision
+    ``.chela/wts/judge-{task_id}`` — that directory must not exist yet."""
+    repo = tmp_path / "repo"
+    _project(repo, guard_test=guard_test)
+    (repo / "WORKFLOW.md").write_text(
+        "---\n"
+        "project_key: TEST\n"
+        "tracker:\n  kind: markdown\n  path: TODO.md\n"
+        f"workspace:\n  root: {tmp_path / '.chela' / 'wts'}\n  base_branch: dev\n"
+        f"judge:\n  test_cmd: {json.dumps(TEST_CMD)}\n  suite_timeout_seconds: 120\n"
+        "---\n\ndo the thing: {{task_title}}\n"
+    )
+    (repo / "TODO.md").write_text("- [ ] do a thing\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "workflow files")
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    return repo, sha
+
+
+def test_a_judge_run_with_no_worktree_REBUILDS_it_from_pr_head_sha(tmp_path, monkeypatch):
+    """⚖️🕳️ CMX-201: a published verdict reaps its worktree (CMX-164). Before this, a PR
+    that fixed exactly the guard a `blocked` verdict named had NO way back to `clean` short
+    of a whole new dispatch round — `judge_run` declared the fix unverifiable because the
+    directory was gone. It must instead rebuild its own throwaway checkout at the run's
+    CURRENT `pr_head_sha` and actually re-adjudicate.
+
+    ⭐ `judge_sha` is deliberately set to a DIFFERENT, real, resolvable commit — the stale sha
+    the old `blocked` verdict was recorded against, from BEFORE the guard was fixed. If the
+    rebuild ever preferred `judge_sha` over `pr_head_sha` it would check out the pre-fix
+    commit, the FAKE guard there can't catch the mutation, and this would come back BLOCKED
+    instead of CLEAN — so the wrong-sha bug is caught by the verdict itself, not just by
+    inspecting the checkout."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo, stale_sha = _git_workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    (repo / "test_guard.py").write_text(REAL_GUARD_TEST)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "fix the guard the blocked verdict named")
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert sha != stale_sha
+
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    assert not wt_path.exists()                      # the worktree is GONE, not merely stale
+
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=sha, judge_sha=stale_sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_CLEAN
+    assert result["cannot_verify"] == ""
+    assert wt_path.is_dir()                           # it built its OWN throwaway checkout
+    checked_out = subprocess.run(
+        ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert checked_out == sha                         # CURRENT head, never the stale judge_sha
+    run = dispatcher.resolve_run(task_id)
+    assert run["judge_sha"] == sha                     # stamped — no longer stale
+
+
+def test_a_rebuilt_worktree_gets_the_same_base_branch_catch_up_a_fresh_spawn_gets(
+    tmp_path, monkeypatch,
+):
+    """⚖️🕳️ CMX-201/CMX-176 wiring: `_reprovision_worktree` ends by calling the SAME
+    `dispatcher._refresh_judge_worktree` catch-up `_spawn_judge` runs before a FRESH judge
+    ever sees the tree — so a re-run measures the PR exactly as a fresh judge would. Corrupt
+    that call away (``return ""`` instead of calling it) and the rebuild silently keeps the
+    PR branch's STALE tip: a fix that landed on base after the claim would be absent from the
+    baseline, the exact hole CMX-176 was filed to close for a freshly spawned judge.
+
+    ⛔ This needs a REAL `origin` remote. Every OTHER rebuild test in this file builds its
+    repo with `_git_workflow_repo`, which has none — `_refresh_judge_worktree`'s own first
+    line (``git fetch origin`` failing with no remote configured) short-circuits before it
+    can do anything, so a real call is indistinguishable from the corrupted ``return ""`` in
+    every one of those fixtures. This is why they didn't catch it.
+    """
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "dev", str(origin)], check=True, capture_output=True,
+    )
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "clone", str(origin), str(repo)], check=True, capture_output=True)
+    (repo / "guard.py").write_text(GUARD_PY)
+    (repo / "test_guard.py").write_text(REAL_GUARD_TEST)
+    (repo / "app.py").write_text("VALUE = 1\n")
+    (repo / "WORKFLOW.md").write_text(
+        "---\n"
+        "project_key: TEST\n"
+        "tracker:\n  kind: markdown\n  path: TODO.md\n"
+        f"workspace:\n  root: {tmp_path / '.chela' / 'wts'}\n  base_branch: dev\n"
+        f"judge:\n  test_cmd: {json.dumps(TEST_CMD)}\n  suite_timeout_seconds: 120\n"
+        "---\n\ndo the thing: {{task_title}}\n"
+    )
+    (repo / "TODO.md").write_text("- [ ] do a thing\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "seed")
+    _git(repo, "push", "-u", "origin", "dev")
+
+    # The PR branch is cut HERE — before base moves on underneath it.
+    _git(repo, "branch", "pr-1")
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "pr-1"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    # base_branch moves on after the claim — same shape as test_judge_branch_refresh.py.
+    (repo / "app.py").write_text("VALUE = 2\n")
+    _git(repo, "commit", "-am", "fix landed on base after the claim")
+    _git(repo, "push", "origin", "dev")
+
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    assert not wt_path.exists()                      # the worktree is GONE, not merely stale
+
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_CLEAN
+    assert result["cannot_verify"] == ""
+    assert wt_path.is_dir()
+    # ⭐ the property this test exists for: the REBUILT worktree got base's post-claim fix,
+    # the same catch-up a fresh `_spawn_judge` runs. Corrupt the call to `return ""` (skip the
+    # catch-up) and this reads "VALUE = 1\n" — the PR branch's stale tip — instead.
+    assert (wt_path / "app.py").read_text() == "VALUE = 2\n"
+    run = dispatcher.resolve_run(task_id)
+    assert run["judge_sha"] == sha
+
+
+def test_a_rebuilt_worktree_still_blocks_a_guard_that_SURVIVES(tmp_path, monkeypatch):
+    """The rebuild path is not a rubber stamp — a guard that still cannot fail sends the PR
+    back exactly as it would from a freshly `_spawn_judge`d worktree."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo, sha = _git_workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    assert not _judge_worktree_path(tmp_path, task_id).exists()
+
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "changes_requested"
+    assert run["judge_sha"] == sha
+
+
+def test_a_missing_worktree_with_no_pr_head_sha_is_still_CANNOT_VERIFY(tmp_path, monkeypatch):
+    """Nothing to rebuild FROM — this must stay an honest unknown, never a guess."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo, _sha = _git_workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    assert not _judge_worktree_path(tmp_path, task_id).exists()
+
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=None)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_CANNOT_VERIFY
+    assert "no pr_head_sha" in result["cannot_verify"]
+    run = dispatcher.resolve_run(task_id)
+    assert run["judge_sha"] is None                   # nothing was rebuilt, nothing is stamped
+
+
+def test_a_missing_worktree_at_an_unresolvable_sha_is_CANNOT_VERIFY_not_a_crash(tmp_path, monkeypatch):
+    """`pr_head_sha` pointing nowhere in the repo (a force-push race, a bad row) must fail
+    LOUD and named — never raise out of `judge_run`, never be silently treated as clean."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo, _sha = _git_workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    assert not _judge_worktree_path(tmp_path, task_id).exists()
+
+    bogus_sha = "f" * 40
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=bogus_sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_CANNOT_VERIFY
+    assert "could not be rebuilt" in result["cannot_verify"]
+    run = dispatcher.resolve_run(task_id)
+    assert run["judge_sha"] is None
+
+
+def test_a_rebuild_that_hits_an_OSError_is_CANNOT_VERIFY_not_a_crash(tmp_path, monkeypatch):
+    """`_reprovision_worktree`'s except clause was widened to `(BranchGone,
+    CalledProcessError, OSError)` on review (CMX-201 PR #262, round 1: 'a reaped parent
+    directory, a full disk... would escape as a crash rather than the cannot_verify this
+    function exists to produce') and shipped with NO test — both the round-3 and final
+    judge rounds flagged it as a production change nothing holds in place. `OSError` is not
+    a subclass of `CalledProcessError`, so dropping it back out of the tuple is silent: the
+    fixture never made `detached_worktree` raise anything but `CalledProcessError`
+    (test_a_missing_worktree_at_an_unresolvable_sha...) or nothing at all."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo, sha = _git_workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    assert not _judge_worktree_path(tmp_path, task_id).exists()
+
+    def _boom(*a, **k):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(dispatcher, "detached_worktree", _boom)
+
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_CANNOT_VERIFY
+    assert "could not be rebuilt" in result["cannot_verify"]
+    assert "no space left on device" in result["cannot_verify"]
+    run = dispatcher.resolve_run(task_id)
+    assert run["judge_sha"] is None                   # nothing was rebuilt, nothing is stamped
+    assert not _judge_worktree_path(tmp_path, task_id).exists()
+
+
 def test_the_judge_never_shells_out_to_a_merge(tmp_path):
     """A belt-and-braces guard on the one thing the judge must never do."""
     calls: list[list] = []

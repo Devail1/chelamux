@@ -1957,7 +1957,7 @@ def _ago(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h ago"
 
 
-# --- fact: has this checkout's branch diverged from its upstream? --------------------
+# --- fact: is this checkout's branch actually in sync with its upstream? -------------
 #
 # CMX-168 taught ``chela update`` to recover when the upstream history was rewritten
 # (``git filter-repo`` + force-push): back up the pre-rewrite HEAD, then reset onto the
@@ -1969,6 +1969,13 @@ def _ago(seconds: float) -> str:
 # ``chela.update.apply``. ``fetch=False`` keeps this as fresh as the last real fetch
 # (a `chela update --check`, the daemon's periodic notifier) and never a network call —
 # the same trade the `update_available` capability row already makes.
+#
+# CMX-199: this fact used to check ONLY divergence (``ahead > 0``) and print "repo is in
+# sync" the moment that was false — even with the checkout dozens of commits BEHIND. On
+# 2026-07-31, five PRs merged to ``dev`` in one day and none of them ran: the checkout sat
+# 5 commits behind and every `chela-*` PM2 service kept serving whatever it last loaded,
+# with 0 restarts, for hours — and `chela doctor` said "in sync" the whole time. "In sync"
+# now means what it says: no divergence AND nothing to pull.
 
 def _upstream_synced_applies() -> bool:
     from chela import update                        # lazy: doctor must import cheaply
@@ -2004,19 +2011,135 @@ def _upstream_synced_report(_declared: None, obs: Observation) -> list[Finding]:
     status = obs.value
     if status.error:
         return []                                    # e.g. "no upstream configured"
-    if status.ahead == 0:
-        return [Finding(OK, "repo is in sync with its upstream (no local divergence)")]
+    if status.ahead > 0:
+        return [Finding(
+            ERROR,
+            f"repo is {status.ahead} commit(s) AHEAD of its upstream on branch "
+            f"{status.branch!r} — diverged, not fast-forwardable",
+            "This is exactly the shape an upstream history rewrite (e.g. `git filter-repo` + "
+            "force-push) leaves behind — as well as genuine unpushed local commits. `chela "
+            "update` tells the two apart and recovers safely from a real rewrite (backs up "
+            "the pre-rewrite HEAD to a `refs/chela-backup/...` ref, then resets onto the new "
+            "history), or refuses loudly, explaining why, if it is not one. Run `chela "
+            "update` to find out which — doctor only detects the condition; it never "
+            "fetches or resets this repo itself.",
+        )]
+    if status.behind > 0:
+        return [Finding(
+            WARN,
+            f"repo is {status.behind} commit(s) BEHIND its upstream on branch "
+            f"{status.branch!r} — merged work sitting unpulled",
+            "CMX-199: this is the exact shape that let five merged PRs sit inert for a "
+            "full day — the checkout falls behind and every `chela-*` PM2 service keeps "
+            "serving whatever it last loaded, with nothing anywhere saying so. Run `chela "
+            "update` (pulls, `uv sync`s, and restarts every running `chela-*` service in "
+            "one step) or use the dashboard's Update control in the Settings drawer — "
+            "doctor only detects the gap; it never pulls or restarts anything itself.",
+        )]
     return [Finding(
-        ERROR,
-        f"repo is {status.ahead} commit(s) AHEAD of its upstream on branch "
-        f"{status.branch!r} — diverged, not fast-forwardable",
-        "This is exactly the shape an upstream history rewrite (e.g. `git filter-repo` + "
-        "force-push) leaves behind — as well as genuine unpushed local commits. `chela "
-        "update` tells the two apart and recovers safely from a real rewrite (backs up "
-        "the pre-rewrite HEAD to a `refs/chela-backup/...` ref, then resets onto the new "
-        "history), or refuses loudly, explaining why, if it is not one. Run `chela "
-        "update` to find out which — doctor only detects the condition; it never "
-        "fetches or resets this repo itself.",
+        OK, "repo is in sync with its upstream (no local divergence, nothing to pull)")]
+
+
+# --- fact: is the RUNNING code the checkout's HEAD, or just the checkout itself? -----
+#
+# ``repo.upstream_synced`` above is a fact about the CHECKOUT — whether the files on disk
+# match the branch's upstream. It says nothing about whether the `chela-*` PM2 services
+# actually serving traffic have loaded those files. `chela update` pulls and restarts in
+# one step, so the gap only opens when someone bypasses it — a bare `git pull` run by
+# hand. That leaves the checkout genuinely in sync (`ahead == behind == 0`) while every
+# running service keeps executing the process image from its OWN last start, unaware
+# anything on disk changed. This fact catches that: it compares each online service's PM2
+# start time against the checked-out commit's own (fixed) committer date. Like
+# `repo.upstream_synced`, it only ever reads — the `pm2 restart` action lives in
+# `chela.update.apply`.
+
+def _services_current_status():
+    """Seam: the real answer is ``chela.update.services_running_stale_code()``; the test
+    suite hands this a fixed status instead of shelling out to git/pm2."""
+    from chela import update                        # lazy: doctor must import cheaply
+
+    return update.services_running_stale_code()
+
+
+def _services_current_read() -> Observation:
+    from chela import update                        # lazy: doctor must import cheaply
+
+    try:
+        status = _services_current_status()
+    except update.NotAGitCheckout as e:
+        return cannot_verify(str(e))
+    if not status.ok:
+        return cannot_verify(status.error or "git log failed")
+    return observed(status)
+
+
+def _services_current_report(_declared: None, obs: Observation) -> list[Finding]:
+    status = obs.value
+    if not status.stale:
+        return [Finding(
+            OK, "running chela-* services match the checked-out code (or none are up)")]
+    names = ", ".join(status.stale)
+    return [Finding(
+        WARN,
+        f"{len(status.stale)} running service(s) predate the checked-out code: {names}",
+        "These PM2 services started before the commit now checked out existed, so they "
+        "cannot be running it — the checkout itself may report as fully in sync while "
+        "this is true, since a bare `git pull` (bypassing `chela update`, which pulls AND "
+        f"restarts together) never restarts anything. `pm2 restart {names}` (or `chela "
+        "update`, idempotent when there's nothing left to pull) picks up the new code.",
+    )]
+
+
+# --- fact: rows a hard tmux death orphaned, that nothing else surfaces --------------
+
+def _restore_scan(now: str) -> int:
+    """Seam: the real answer is ``len(chela.restore.scan_all(...))`` over the three live
+    stores (``inbox.json`` watches, the dispatcher's ``runs`` table, ``session-ids.json``).
+    A module-level function, like :func:`_parked_runs` / :func:`_reviewed_prs` above, so the
+    test suite can hand it a fixed count instead of reaching ``dispatcher.DB_PATH`` /
+    ``sessionids``'s own store path — both cached at import time against the real
+    ``~/.chela``, not the fixture's temp one.
+    """
+    from chela import dispatcher, inbox, restore, sessionids
+
+    store = inbox.load()
+    try:
+        runs = dispatcher.list_runs()
+    except Exception:
+        runs = []
+    return len(restore.scan_all(store["watches"], runs, sessionids.entries(), now))
+
+
+def _restore_read() -> Observation:
+    """Every store ``chela restore`` scans, read live — see ``chela/restore.py``.
+
+    ``chela doctor`` was green through the 2026-07-14 OOM ``chela/epoch.py``'s own
+    docstring documents: detection existed, but nothing counted the stamped rows a dead
+    server left behind and put the count somewhere a green doctor run would have to look
+    past. This closes that hole without adding a private check — it reads back the same
+    :func:`chela.restore.scan_all` a human would get from running the CLI.
+    """
+    if _tmux_or_unverifiable() is None:
+        return cannot_verify("tmux is not on PATH, so chela cannot compare a stamped row's "
+                             "epoch against the one running now.")
+    now = epoch.current()
+    if now is None:
+        return cannot_verify("no tmux server is running, so there is no current epoch to "
+                             "compare stamped rows against.")
+    return observed(_restore_scan(now))
+
+
+def _restore_report(_declared: None, obs: Observation) -> list[Finding]:
+    n = obs.value
+    if not n:
+        return [Finding(OK, "no stamped rows from a dead tmux epoch")]
+    return [Finding(
+        WARN, f"{n} stamped row(s) from a dead epoch → `chela restore`",
+        "A hard tmux death (OOM, restart) left these pointing at a server that no longer "
+        "exists — this is the exact condition that stayed invisible through the 2026-07-14 "
+        "OOM `chela/epoch.py`'s own docstring documents. Run `chela restore` to see every "
+        "row, which store it is in, and whether it is REVIVABLE (its session is alive under "
+        "a new address — re-register it) or MANUAL (it carries the exact relaunch command).",
     )]
 
 
@@ -2292,6 +2415,30 @@ def facts() -> list[Fact]:
             read_back=_upstream_synced_read,
             report=_upstream_synced_report,
             applies=_upstream_synced_applies,
+        ),
+        Fact(
+            name="repo.services_current",
+            declared_by="nothing — chela never records this; a running service either "
+                        "started after the code it's running was committed, or it didn't",
+            owned_by="PM2 (`pm_uptime` — each online chela-* service's own last-start "
+                     "time) compared against git's committer date for the checked-out "
+                     "HEAD",
+            declare=lambda: None,
+            read_back=_services_current_read,
+            report=_services_current_report,
+            applies=_upstream_synced_applies,     # same "is this a git checkout" gate
+        ),
+        Fact(
+            name="restore.dead_epoch_rows",
+            declared_by="nothing — chela never predicts this; a stamped row either "
+                        "matches the running tmux epoch or it doesn't",
+            owned_by="tmux (the running epoch) joined against inbox.json watches, the "
+                     "dispatcher's runs table, and session-ids.json — the same three "
+                     "stores `chela restore` scans",
+            declare=lambda: None,
+            read_back=_restore_read,
+            report=_restore_report,
+            unverifiable_level=WARN,      # same reason as tmux.session
         ),
     ]
 
