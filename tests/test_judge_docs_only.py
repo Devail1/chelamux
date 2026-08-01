@@ -197,3 +197,63 @@ def test_zero_experiments_on_a_code_touching_pr_keeps_the_generic_message(tmp_pa
     assert report.state == judge.J_CANNOT_VERIFY
     assert "DOCS-ONLY" not in report.cannot_verify
     assert "NO experiments" in report.cannot_verify
+
+
+# --- ⛔ THE PRODUCTION CALL SITES PASS base_branch ----------------------------------
+#
+# ⚖️📄 CMX-205 round 4, a WIRING finding. `judge_run` reaches `run_experiments` down TWO
+# paths — the CMX-201 one taken when a reaped worktree must be rebuilt first, and the
+# normal one taken when it is already there. Dropping `base_branch=base_branch` from
+# either leaves the whole suite green, and the consequence is not cosmetic:
+# `_docs_only_diff` diffs against `origin/<base_branch>`, so with no base it returns None,
+# the docs-only branch never fires, and this feature goes silently inert while still
+# reporting success.
+#
+# ⛔ BOTH call sites, in one test, by running the judge TWICE against the same run: the
+# first call finds no worktree and rebuilds (branch A), the second finds the one the first
+# left behind (branch B). The judge corrupted only the `else:` branch — a guard pinning
+# just that one would leave its sibling, six lines up and identical, free to lose the
+# kwarg. That asymmetry has been the source of repeated findings in this repo.
+
+def test_judge_run_hands_run_experiments_the_real_base_branch(tmp_path, monkeypatch):
+    import json as _json
+    from unittest.mock import patch
+    from chela import dispatcher
+    import chela.judge as judge_mod
+    from tests.test_judge import _git_workflow_repo, _run_row, REAL_GUARD_TEST
+
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "basebranchwiring"
+    # ⛔ _git_workflow_repo deliberately does NOT pre-provision the judge worktree, so the
+    # FIRST judge_run takes the CMX-201 rebuild branch. The second finds the worktree that
+    # first call left behind (cleanup=False) and takes the normal branch. One test, both
+    # call sites — which is the whole point, since the judge only corrupted the second.
+    repo, head_sha = _git_workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=head_sha)
+
+    seen: list[object] = []
+    real = judge_mod.run_experiments
+
+    def spy(worktree, test_cmd, raw, *, timeout=None, base_branch=None):
+        # ⛔ Record the VALUE, not that a call happened: the defect is a kwarg quietly
+        # defaulting to "", which a call-count spy cannot tell from a real base branch.
+        seen.append(base_branch)
+        return real(worktree, test_cmd, raw, timeout=timeout, base_branch=base_branch)
+
+    monkeypatch.setattr(judge_mod, "run_experiments", spy)
+
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(_json.dumps({"experiments": []}))
+    with patch.object(dispatcher, "_post_pr_comment", side_effect=lambda u, d, b: (True, "")):
+        judge_mod.judge_run(task_id, exp_file, cleanup=False)   # branch A: worktree reaped
+        judge_mod.judge_run(task_id, exp_file, cleanup=False)   # branch B: worktree present
+
+    assert len(seen) == 2, (
+        f"expected BOTH run_experiments call sites to be exercised, saw {len(seen)} — "
+        "if this drops to 1 the sibling branch is silently no longer covered"
+    )
+    assert all(b for b in seen), (
+        f"judge_run passed a falsy base_branch {seen!r} — `_docs_only_diff` diffs against "
+        "origin/<base_branch>, so an empty base makes the docs-only diagnosis silently inert"
+    )
