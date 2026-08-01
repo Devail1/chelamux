@@ -69,6 +69,30 @@ def test_pause_defaults_reason_and_ttl_when_none_given(client):
     assert held.remaining() <= hold.DEFAULT_TTL_SECONDS + 1
 
 
+def test_pause_returns_500_and_ok_false_when_the_hold_cannot_be_written(client, monkeypatch):
+    """CMX-213: the route's own comment promises "a hold the daemon will never see is
+    worse than none — fail loudly, same as the CLI" — but nothing ever exercised the
+    `except OSError` branch. Without this, a refactor that swallowed the exception and
+    returned `ok: True` on a hold that was never actually written to disk would leave
+    every other test in this file green while the operator believes dispatch is paused
+    when it is not."""
+
+    def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(hold, "take", _boom)
+
+    resp = client.post("/api/dispatcher/pause", json={"reason": "batch merge"})
+
+    assert resp.status_code == 500
+    data = resp.get_json()
+    assert data["ok"] is False
+    assert "could not take the hold" in data["error"]
+    assert "disk full" in data["error"]
+    # No hold was actually written — the failure must be real, not just reported.
+    assert hold.active() is None
+
+
 def test_pause_rejects_an_unparseable_ttl_without_taking_a_hold(client):
     resp = client.post("/api/dispatcher/pause", json={"ttl": "not-a-duration"})
 
