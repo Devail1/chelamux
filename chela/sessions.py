@@ -243,6 +243,28 @@ def _comm(pid: int) -> str:
     return os.path.basename(_first_line(_sh(["ps", "-o", "comm=", "-p", str(pid)])))
 
 
+def _cap_children(pid: int, kids: list[int]) -> list[int]:
+    """Keep the newest ``_MAX_CHILDREN`` (CMX-210 — both sources list oldest-first), and
+    if that actually cut anything, say so OUT LOUD.
+
+    A caller downstream of this (:func:`_claude_pid`, and past it every ``claude_pid is
+    None`` check in the codebase) cannot tell "this pid genuinely has no such child" from
+    "this pid has more than _MAX_CHILDREN and the one you wanted may have been among the
+    dropped" — those are different facts, and only the first one means the process is
+    gone. Ordering (CMX-210) makes the miss rarer; it does not make it distinguishable.
+    A WARNING here is the only signal that a `None` answer downstream might actually be
+    this cap, not a dead process — silent truncation reads as a confident answer when
+    it is really "didn't fully check" (this is what cmx-210 left unfixed).
+    """
+    if len(kids) > _MAX_CHILDREN:
+        log.warning(
+            "pid %d has %d children — _MAX_CHILDREN=%d kept the newest, dropped %d of "
+            "the oldest; a miss below this may be that cap, not a genuinely absent child",
+            pid, len(kids), _MAX_CHILDREN, len(kids) - _MAX_CHILDREN,
+        )
+    return kids[-_MAX_CHILDREN:]
+
+
 def _children(pid: int) -> list[int]:
     """Direct children of ``pid`` — straight from /proc, else ``pgrep -P``."""
     try:
@@ -255,7 +277,7 @@ def _children(pid: int) -> list[int]:
             out.append(int(token))
         except ValueError:
             continue
-    return out[-_MAX_CHILDREN:]
+    return _cap_children(pid, out)
 
 
 def _sh_children(pid: int) -> list[int]:
@@ -272,12 +294,7 @@ def _sh_children(pid: int) -> list[int]:
         token = line.strip()
         if token.isdigit():
             kids.append(int(token))
-    # Both sources list children oldest-first (spawn order). Keeping the FIRST
-    # _MAX_CHILDREN under a busy pid — a nested subprocess-heavy test suite,
-    # or on a real box, a fleet of long-lived agent panes — silently drops
-    # the one this call is actually FOR: the process just spawned. Keep the
-    # most recent ones instead.
-    return kids[-_MAX_CHILDREN:]
+    return _cap_children(pid, kids)
 
 
 def _cmdline_argv(pid: int) -> list[str]:
