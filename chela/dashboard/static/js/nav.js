@@ -985,10 +985,20 @@ function _renderUpdateStatus(upd) {
         return;
     }
     const behind = upd.behind || 0;
+    const stale = upd.stale_services || [];
     if (behind > 0) {
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${behind} behind</span>
             <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — ${behind} commit(s) unpulled; running services are still serving what they last loaded</span>`;
         if (btn) { btn.disabled = false; btn.textContent = 'Update now'; }
+    } else if (stale.length) {
+        // The checkout itself is fully synced (nothing to pull) — but a bare `git pull`
+        // run by hand, bypassing this control, can leave running services on the OLD
+        // code with nothing left for "Update now" to fix (`apply()` only restarts on an
+        // actual pull). Reporting "Up to date" here would repeat the exact gap `chela
+        // doctor`'s `repo.services_current` fact exists to catch (2026-08-02).
+        row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${stale.length} stale</span>
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull, but ${escHtml(stale.join(', '))} predate this code (probably a bare \`git pull\` bypassing this control) — restart with \`pm2 restart ${escHtml(stale.join(' '))}\`</span>`;
+        if (btn) { btn.disabled = true; btn.textContent = 'Update now'; }
     } else {
         row.innerHTML = `<span class="s-status-badge on"><span class="s-status-dot" aria-hidden="true">●</span>Up to date</span>
             <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull</span>`;

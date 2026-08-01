@@ -116,6 +116,39 @@ test('an unreadable checkout (git=false) reports Unknown and keeps the button di
     assert.match(row.textContent, /Unknown/);
 });
 
+// --- CMX-212: nothing to pull, but running services predate the checked-out code --
+//
+// Measured live 2026-08-02: the card said "UP TO DATE" while `chela doctor` reported
+// running `chela-*` services predating the checkout (a bare `git pull` never restarts
+// anything). `behind: 0` alone must not render "Up to date" once `stale_services` is
+// non-empty.
+
+test('nothing to pull but stale services never renders as "Up to date"', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev',
+        stale_services: ['chela-daemon', 'chela-dashboard'] });
+
+    const btn = document.getElementById('update-apply-btn');
+    const row = document.getElementById('update-status-row');
+    assert.doesNotMatch(row.textContent, /Up to date/,
+        'a checkout with stale running services still rendered as "Up to date"');
+    assert.match(row.textContent, /chela-daemon/, 'the stale service names never reached the row');
+    assert.match(row.textContent, /chela-dashboard/);
+    assert.equal(btn.disabled, true,
+        '"Update now" cannot fix a bare-pull staleness gap (apply() only restarts on an actual pull)');
+});
+
+// --- Counterweight — no stale services still renders "Up to date" -------------------
+//
+// Without this, always treating `stale_services` as non-empty (or ignoring it and always
+// warning) would also satisfy the test above.
+
+test('nothing to pull and no stale services still renders "Up to date"', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: [] });
+
+    const row = document.getElementById('update-status-row');
+    assert.match(row.textContent, /Up to date/);
+});
+
 
 // --- 3. 🔴 THE BUTTON IS WIRED TO applyUpdate() ------------------------------------
 //

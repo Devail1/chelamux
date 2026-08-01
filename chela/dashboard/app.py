@@ -2019,6 +2019,20 @@ def _settings_status() -> dict:
     }
 
 
+def _stale_service_names() -> list[str]:
+    """Which running `chela-*` PM2 services predate the checked-out commit — see
+    `update.services_running_stale_code`. `commits_behind` answers "is the CHECKOUT in
+    sync"; this answers "is the RUNNING CODE the checkout" — a bare `git pull` (bypassing
+    `chela update`, which pulls AND restarts together) leaves the former true while the
+    latter is false, and `chela doctor` already reports exactly that gap (`repo.services_current`)
+    while this card said "UP TO DATE" about it (2026-08-02). Best-effort: an unreadable
+    result degrades to "no known-stale services" rather than failing the whole payload
+    over a fact this route doesn't otherwise depend on.
+    """
+    freshness = update.services_running_stale_code()
+    return freshness.stale if freshness.ok else []
+
+
 def _update_status_payload() -> dict:
     """Read-only twin of `capabilities._update_available_capability`, shaped for the
     Settings drawer's Update section rather than a capabilities-list row. Never fetches;
@@ -2029,11 +2043,14 @@ def _update_status_payload() -> dict:
         return {"ok": False, "git": False, "error": str(e)}
     if not status.ok:
         return {"ok": False, "error": status.error}
+    stale = _stale_service_names()
     if status.error:
         # ok=True but carrying a note (no upstream configured) — not a fault, just
         # nothing this control can act on.
-        return {"ok": True, "behind": 0, "ahead": 0, "branch": status.branch, "note": status.error}
-    return {"ok": True, "behind": status.behind, "ahead": status.ahead, "branch": status.branch}
+        return {"ok": True, "behind": 0, "ahead": 0, "branch": status.branch,
+                "note": status.error, "stale_services": stale}
+    return {"ok": True, "behind": status.behind, "ahead": status.ahead, "branch": status.branch,
+            "stale_services": stale}
 
 
 @app.route("/api/settings")
