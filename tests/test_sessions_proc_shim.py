@@ -179,6 +179,41 @@ def test_a_stubbed_subprocess_cannot_invent_a_pid(no_proc, monkeypatch):
     assert sessions._sh_children(999999) == []
 
 
+def test_sh_children_beyond_the_cap_keeps_the_most_recent(no_proc, monkeypatch):
+    """``_MAX_CHILDREN`` truncates a busy pid's children — `pgrep -P` lists them oldest
+    first, so slicing the FRONT keeps stale siblings and drops the one this call exists
+    to find: whichever process was spawned last (a nested subprocess-heavy test suite, or
+    on a real box, a fleet of long-lived agent panes, both leave many older children
+    around a busy pid)."""
+    first = 1000
+    last = first + sessions._MAX_CHILDREN + 5
+    fake = "\n".join(str(p) for p in range(first, last + 1)) + "\n"
+    monkeypatch.setattr(sessions, "_sh", lambda argv: fake)
+
+    kids = sessions._sh_children(1)
+
+    assert len(kids) == sessions._MAX_CHILDREN
+    assert kids[-1] == last                 # most recently spawned: kept
+    assert first not in kids                # oldest sibling: dropped, not the target
+
+
+def test_proc_children_beyond_the_cap_keeps_the_most_recent(tmp_path, monkeypatch):
+    """The /proc path ('.../children' is also oldest-first) must truncate the same way."""
+    pid = 4242
+    d = tmp_path / "proc" / str(pid) / "task" / str(pid)
+    d.mkdir(parents=True)
+    first = 1000
+    last = first + sessions._MAX_CHILDREN + 5
+    (d / "children").write_text(" ".join(str(p) for p in range(first, last + 1)) + " ")
+    monkeypatch.setattr(sessions, "PROC", tmp_path / "proc")
+
+    kids = sessions._children(pid)
+
+    assert len(kids) == sessions._MAX_CHILDREN
+    assert kids[-1] == last
+    assert first not in kids
+
+
 def test_a_missing_tool_is_just_an_unknown_fact(no_proc, monkeypatch):
     """No ``/proc`` AND no tools (a stripped container) degrades to the documented
     "fact unavailable" — never an exception on the hook path."""
