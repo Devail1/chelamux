@@ -242,3 +242,75 @@ test('a successful pause does not alert', async () => {
 
     assert.equal(alertCalled, false, 'a successful pause alerted the operator');
 });
+
+// --- 5. 🔴 THE HINT ELEMENT EXISTS ON THE SHIPPED PAGE ----------------------------
+//
+// ⏯️ CMX-206 round 3, a WIRING finding. `renderDispatchHold` reads
+// `getElementById('dispatch-hold-hint')` and every write is guarded by `if (hint)` — so
+// deleting the element from index.html does not throw, does not warn, and does not fail
+// a single test: the button keeps working and the operator silently loses WHO holds the
+// queue, WHY, and the expiry countdown. That summary is the reason a pause button is
+// safe to ship rather than alarming, and "a hold can never strand the fleet" is only
+// verifiable if the countdown is on the page.
+//
+// ⛔ Test 3 greps the real template for the BUTTON only. The BODY fixture at the top of
+// this file has its own copy of both elements, so every DOM assertion above passes
+// against the fixture whether or not the shipped page carries them.
+
+test('the shipped index.html carries #dispatch-hold-hint, not just the button', () => {
+    assert.match(HTML, /id="dispatch-hold-hint"/,
+        '#dispatch-hold-hint is missing from chela/dashboard/templates/index.html — '
+        + 'renderDispatchHold no-ops via `if (hint)`, so the operator loses the holder, '
+        + 'the reason and the expiry countdown with the suite still green');
+});
+
+// --- 6. 🔴 THE PAUSE BUTTON IS VISIBLE ON AN UNHELD QUEUE --------------------------
+//
+// The state an operator is in EVERY time they go to pause. Test 1 asserts
+// `btn.style.display !== 'none'` for the HELD case; test 2 (its declared counterweight)
+// checks only textContent and the empty hint, so the unheld half of that same assertion
+// was uncovered — the button ships hidden (`style="display:none;"` in the template) and
+// is revealed by JS, so "never reveal it" would have passed.
+
+test('an unheld queue leaves the Pause button VISIBLE, not hidden', async () => {
+    dispatchPayload = { configured: false, workflows: [], dispatch_hold: null };
+    await pollWork();
+
+    const btn = document.getElementById('dispatch-hold-btn');
+    assert.notEqual(btn.style.display, 'none',
+        'the Pause button stayed hidden on an unheld queue — the one state every pause starts from');
+});
+
+// --- 7. 🔴 THE CONTROL RE-ENABLES ITSELF, INCLUDING ON THE ERROR PATH --------------
+//
+// `toggleDispatchHold` disables the button, then re-enables it in a `finally` — put
+// there deliberately so it survives a throwing request. Nothing asserted either half: a
+// Pause that never re-enables leaves Resume unclickable and the only way back is waiting
+// out the TTL. ⛔ Both arms, because a `finally` is exactly the construct a refactor
+// turns back into a happy-path line.
+
+test('the button re-enables after a SUCCESSFUL request', async () => {
+    dispatchPayload = { configured: false, workflows: [], dispatch_hold: null };
+    await pollWork();
+    pauseResponse = { ok: true, dispatch_hold: { reason: 'x', by: 'dashboard', summary: 'held' } };
+
+    await window.chela.toggleDispatchHold();
+
+    assert.equal(document.getElementById('dispatch-hold-btn').disabled, false,
+        'the control stayed disabled after a successful request');
+});
+
+test('the button re-enables even when the request THROWS', async () => {
+    dispatchPayload = { configured: false, workflows: [], dispatch_hold: null };
+    await pollWork();
+    const boom = () => { throw new Error('network down'); };
+    const saved = globalThis.fetch;
+    globalThis.fetch = boom;
+    try {
+        await window.chela.toggleDispatchHold();
+    } catch { /* the handler may rethrow; the finally must still have run */ }
+    globalThis.fetch = saved;
+
+    assert.equal(document.getElementById('dispatch-hold-btn').disabled, false,
+        'a throwing request left the control disabled — Resume is then unclickable until the TTL expires');
+});
