@@ -11,6 +11,13 @@ These tests stub ``chela.restore.plan`` directly (already thoroughly unit-tested
 NEW and needs a guard is the HTTP-layer wiring: what gets fetched, filtered, shaped into
 JSON, and what the resume action actually does (spawn + record + cleanup, in that order,
 and NOT ahead of a confirmed re-match).
+
+A second seam these tests stub — ``chela.dispatcher.list_runs`` — is what tells
+``_dispatcher_owned_wid_epochs`` which ``(wid, stamped_epoch)`` pairs belong to the
+dispatcher's own runs (an agent's window, or its judge's). That is the ONLY thing that
+may hide a row or refuse its resume: a row whose ``label`` merely *looks* like a
+dispatcher convention (``cmx-*``/``judge-*``) but has no matching ``runs`` row must stay
+resumable — see ``test_a_row_named_like_a_dispatcher_convention_but_unowned_stays_resumable``.
 """
 from __future__ import annotations
 
@@ -23,6 +30,8 @@ from chela.dashboard import app as dash
 OLD = "786-1784045825"
 SID_DEAD = "bbbbbbbb-1111-2222-3333-444444444444"
 CWD = "/home/liav/projects/five"
+JUDGE_CWD = "/home/liav/.chela/worktrees/chelamux/judge-cmx-206"
+JUDGE_SID = "cccccccc-1111-2222-3333-444444444444"
 
 
 @pytest.fixture
@@ -49,6 +58,14 @@ def restore_sources(monkeypatch):
                         classmethod(lambda cls, *a, **k: bindings_mod.BindingRegistry("1")))
 
 
+@pytest.fixture(autouse=True)
+def no_dispatcher_runs(monkeypatch):
+    """No dispatcher runs by default — every existing (pre-CMX-208-rework) test keeps
+    seeing an all-resumable, un-filtered list. Tests of the dispatcher-owned guard
+    override this explicitly."""
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
+
+
 def _manual(store="session-ids", wid="@5", session_id=SID_DEAD, cwd=CWD, label="five",
             stamped_epoch=OLD):
     return restore_mod.Verdict(store=store, wid=wid, stamped_epoch=stamped_epoch,
@@ -71,9 +88,10 @@ def test_lists_a_resumable_MANUAL_row(client, monkeypatch):
     resp = client.get("/api/restore")
 
     assert resp.status_code == 200
-    rows = resp.get_json()
-    assert rows == [{"store": "session-ids", "wid": "@5", "session_id": SID_DEAD,
-                     "cwd": CWD, "label": "five", "stamped_epoch": OLD}]
+    data = resp.get_json()
+    assert data == {"rows": [{"store": "session-ids", "wid": "@5", "session_id": SID_DEAD,
+                              "cwd": CWD, "label": "five", "stamped_epoch": OLD}],
+                    "dispatcher_rows": [], "hidden": 0}
 
 
 def test_REVIVABLE_rows_never_appear_in_the_resume_list(client, monkeypatch):
@@ -82,9 +100,9 @@ def test_REVIVABLE_rows_never_appear_in_the_resume_list(client, monkeypatch):
     already running, doubling it."""
     monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_revivable()])
 
-    rows = client.get("/api/restore").get_json()
+    data = client.get("/api/restore").get_json()
 
-    assert rows == []
+    assert data["rows"] == []
 
 
 def test_a_MANUAL_row_with_no_manual_command_is_excluded(client, monkeypatch):
@@ -92,9 +110,9 @@ def test_a_MANUAL_row_with_no_manual_command_is_excluded(client, monkeypatch):
     button for it would be a dead click."""
     monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual(cwd=None)])
 
-    rows = client.get("/api/restore").get_json()
+    data = client.get("/api/restore").get_json()
 
-    assert rows == []
+    assert data["rows"] == []
 
 
 def test_nothing_orphaned_is_an_empty_list_not_an_error(client, monkeypatch):
@@ -103,7 +121,7 @@ def test_nothing_orphaned_is_an_empty_list_not_an_error(client, monkeypatch):
     resp = client.get("/api/restore")
 
     assert resp.status_code == 200
-    assert resp.get_json() == []
+    assert resp.get_json() == {"rows": [], "dispatcher_rows": [], "hidden": 0}
 
 
 def test_gated_on_terminals_enabled(client, monkeypatch):
@@ -111,6 +129,102 @@ def test_gated_on_terminals_enabled(client, monkeypatch):
     monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual()])
 
     assert client.get("/api/restore").status_code == 404
+
+
+# --------------------------------------------------------------------------
+# GET /api/restore — dispatcher-owned rows (rework: CMX-208 round 1 shipped this
+# without any dispatcher filter at all — a judge/agent row with a FULL cwd+session
+# on record, exactly what the roster now populates, would classify MANUAL and get a
+# live Resume button the moment its epoch died).
+# --------------------------------------------------------------------------
+
+def _judge_row_manual():
+    """The shape the PR review measured live from ~/.chela/roster.json: a judge
+    window with a session id AND a cwd — the exact row that must never be
+    resumable."""
+    return _manual(store="session-ids", wid="@138", session_id=JUDGE_SID,
+                   cwd=JUDGE_CWD, label="judge-cmx-206", stamped_epoch=OLD)
+
+
+def test_a_dispatcher_owned_row_via_the_runs_own_window_is_hidden_not_resumable(client, monkeypatch):
+    """🔴 GUARD: a run's OWN window (runs.window_id/window_epoch) matching the
+    dangling row's (wid, stamped_epoch) must exclude it from `rows` and count it in
+    `hidden` — never a name/path guess, a fact off the runs table."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_row_manual()])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [
+        {"task_id": "cmx-206", "window_id": "@138", "window_epoch": OLD,
+         "judge_window_id": None, "judge_window_epoch": None},
+    ])
+
+    data = client.get("/api/restore").get_json()
+
+    assert data["rows"] == []
+    assert data["hidden"] == 1
+    assert data["dispatcher_rows"] == [{"store": "session-ids", "wid": "@138", "cwd": JUDGE_CWD,
+                                        "label": "judge-cmx-206", "stamped_epoch": OLD}]
+    assert "session_id" not in data["dispatcher_rows"][0], (
+        "a dispatcher-owned row has no resume affordance — it must not even carry the "
+        "session id a resume request would need"
+    )
+
+
+def test_a_dispatcher_owned_row_via_the_JUDGE_window_is_hidden_too(client, monkeypatch):
+    """The same guard through the OTHER half of a run row: the judge's own
+    (judge_window_id, judge_window_epoch) pair — this is the exact live shape from the
+    PR review (`@138 judge-cmx-206`, a judge window, not the run's own agent
+    window)."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_row_manual()])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [
+        {"task_id": "cmx-206", "window_id": "@77", "window_epoch": OLD,
+         "judge_window_id": "@138", "judge_window_epoch": OLD},
+    ])
+
+    data = client.get("/api/restore").get_json()
+
+    assert data["rows"] == []
+    assert data["hidden"] == 1
+
+
+def test_a_row_named_like_a_dispatcher_convention_but_unowned_stays_resumable(client, monkeypatch):
+    """🔴 GUARD (the load-bearing counterweight): a HUMAN session named ``cmx-999``,
+    with a cwd OUTSIDE ``~/.chela/worktrees/``, must stay listed and resumable — the
+    dispatcher's ``runs`` table has no row claiming its (wid, epoch), so a filter that
+    corrupted to a name/path convention (``cmx-*``/``worktrees/``) would wrongly sweep
+    it up. Only the runs-table fact may exclude a row."""
+    human_row = _manual(store="session-ids", wid="@200", session_id="human-sid",
+                        cwd="/home/liav/scratch/whatever", label="cmx-999",
+                        stamped_epoch=OLD)
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [human_row])
+    # A real dispatcher run exists, but at a DIFFERENT (wid, epoch) — it must not
+    # incidentally swallow the human's row.
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [
+        {"task_id": "cmx-206", "window_id": "@138", "window_epoch": OLD,
+         "judge_window_id": None, "judge_window_epoch": None},
+    ])
+
+    data = client.get("/api/restore").get_json()
+
+    assert data["rows"] == [{"store": "session-ids", "wid": "@200", "session_id": "human-sid",
+                             "cwd": "/home/liav/scratch/whatever", "label": "cmx-999",
+                             "stamped_epoch": OLD}]
+    assert data["dispatcher_rows"] == []
+    assert data["hidden"] == 0
+
+
+def test_a_dispatcher_row_at_a_different_epoch_no_longer_owns_the_wid(client, monkeypatch):
+    """tmux hands ``@N`` out fresh after a restart — a stale runs-table stamp under an
+    OLDER epoch must not claim a row stamped under a different one."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_row_manual()])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [
+        {"task_id": "cmx-206", "window_id": None, "window_epoch": None,
+         "judge_window_id": "@138", "judge_window_epoch": "some-other-epoch"},
+    ])
+
+    data = client.get("/api/restore").get_json()
+
+    assert data["rows"] == [{"store": "session-ids", "wid": "@138", "session_id": JUDGE_SID,
+                             "cwd": JUDGE_CWD, "label": "judge-cmx-206", "stamped_epoch": OLD}]
+    assert data["dispatcher_rows"] == []
 
 
 # --------------------------------------------------------------------------
@@ -158,6 +272,29 @@ def test_resume_refuses_when_the_epoch_no_longer_matches(client, monkeypatch):
                    stamped_epoch=OLD)
 
     assert resp.status_code == 409
+
+
+def test_resume_refuses_a_dispatcher_owned_row(client, monkeypatch):
+    """🔴 GUARD: even if a dispatcher-owned row's identity somehow reaches the client
+    (a stale cache, a hand-built request), the resume route must independently REFUSE
+    it — never trust that a row absent from `rows` implies the client can't ask for it
+    anyway. spawn_window must never be called."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_row_manual()])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [
+        {"task_id": "cmx-206", "window_id": "@77", "window_epoch": OLD,
+         "judge_window_id": "@138", "judge_window_epoch": OLD},
+    ])
+    spawned = []
+    monkeypatch.setattr(dash.spawn, "spawn_window", lambda *a, **k: spawned.append(1))
+
+    resp = _resume(client, store="session-ids", wid="@138", session_id=JUDGE_SID,
+                   stamped_epoch=OLD)
+
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert body["ok"] is False
+    assert "dispatcher" in body["error"].lower()
+    assert spawned == [], "a dispatcher-owned row must never reach spawn_window"
 
 
 def test_resume_happy_path_spawns_records_and_cleans_up(client, monkeypatch):

@@ -38,7 +38,14 @@ const ROW = {
     cwd: '/home/liav/projects/five', label: 'five', stamped_epoch: '786-1784045825',
 };
 
-let RECENT = [];               // what GET /api/restore answers with
+// A dispatcher-owned row (CMX-208 rework) — never carries session_id, and must never
+// render a Resume button, hidden or revealed.
+const DISPATCHER_ROW = {
+    store: 'session-ids', wid: '@138', cwd: '/home/liav/.chela/worktrees/chelamux/judge-cmx-206',
+    label: 'judge-cmx-206', stamped_epoch: '786-1784045825',
+};
+
+let RECENT = { rows: [], dispatcher_rows: [], hidden: 0 };   // what GET /api/restore answers with
 let RESUME_OK = true;          // what POST /api/restore/resume answers with
 let RESUME_CALLS = [];         // every resume request body, in order
 
@@ -88,7 +95,7 @@ before(async () => {
 });
 
 beforeEach(() => {
-    RECENT = [];
+    RECENT = { rows: [], dispatcher_rows: [], hidden: 0 };
     RESUME_OK = true;
     RESUME_CALLS = [];
     document.getElementById('side-recent-section').hidden = true;
@@ -136,7 +143,7 @@ test('an untrusted label is ESCAPED, never parsed as markup', () => {
 // --- refresh: the live fetch, end to end ------------------------------------------
 
 test('refreshRecentSessions pulls /api/restore and paints the result', async () => {
-    RECENT = [ROW];
+    RECENT = { rows: [ROW], dispatcher_rows: [], hidden: 0 };
     await nav.refreshRecentSessions();
     assert.equal(document.getElementById('side-recent-section').hidden, false);
     assert.equal(document.querySelectorAll('#side-recent .recent-row').length, 1);
@@ -145,11 +152,11 @@ test('refreshRecentSessions pulls /api/restore and paints the result', async () 
 // --- resume: the button actually posts, and the row survives its own failure -----
 
 test('clicking Resume POSTs the row identity and re-renders on success', async () => {
-    RECENT = [ROW];
+    RECENT = { rows: [ROW], dispatcher_rows: [], hidden: 0 };
     nav.renderRecentSessions([ROW]);
     const btn = document.querySelector('#side-recent .recent-resume');
 
-    RECENT = [];   // the next GET (post-resume refresh) reports nothing left to resume
+    RECENT = { rows: [], dispatcher_rows: [], hidden: 0 };   // the next GET (post-resume refresh) reports nothing left to resume
     await window.chela.resumeSession(btn);
 
     assert.equal(RESUME_CALLS.length, 1, 'the click must POST exactly one resume request');
@@ -183,4 +190,58 @@ test('a double-click cannot fire the request twice — the button disables itsel
 
     assert.equal(RESUME_CALLS.length, 1,
         'a click while the button is already disabled must be a no-op, not a second POST');
+});
+
+// --- dispatcher-owned rows: hidden by default, no resume affordance ever ---------
+//
+// CMX-208 shipped with no dispatcher-owned filter at all — round 1's review measured
+// a live judge window (session id + cwd on record) that would classify MANUAL and get
+// a Resume button the moment its epoch died. /api/restore now splits those into their
+// own `dispatcher_rows` array; nav.js must render them behind a toggle, hidden by
+// default, and NEVER with a Resume button — checked here by asserting the button's
+// absence, not merely that the row itself is hidden.
+
+test('dispatcher-owned rows are hidden by default, with a visible count', () => {
+    nav.renderRecentSessions({ rows: [ROW], dispatcher_rows: [DISPATCHER_ROW], hidden: 1 });
+
+    assert.equal(document.querySelectorAll('#side-recent .recent-row-dispatcher').length, 0,
+        'a dispatcher-owned row must not render until the toggle is used');
+    const toggle = document.querySelector('#side-recent .recent-toggle-dispatcher');
+    assert.ok(toggle, 'no toggle rendered for the hidden dispatcher rows');
+    assert.match(toggle.textContent, /1 dispatcher session/);
+});
+
+test('the toggle reveals dispatcher rows with NO resume affordance, and hides them again', () => {
+    nav.renderRecentSessions({ rows: [ROW], dispatcher_rows: [DISPATCHER_ROW], hidden: 1 });
+
+    window.chela.toggleDispatcherSessions();
+
+    const revealed = document.querySelector('#side-recent .recent-row-dispatcher');
+    assert.ok(revealed, 'toggling must reveal the dispatcher row');
+    assert.equal(revealed.querySelector('.agent-row-name').textContent, DISPATCHER_ROW.label);
+    assert.equal(revealed.querySelector('.recent-resume'), null,
+        'a revealed dispatcher row must carry NO resume button — non-resumable in either state');
+    // The resumable row (ROW) must still have ITS button — the toggle only affects
+    // the dispatcher set, never the resumable one.
+    assert.ok(document.querySelector('#side-recent .recent-row:not(.recent-row-dispatcher) .recent-resume'));
+
+    window.chela.toggleDispatcherSessions();   // back to hidden, leaving module state clean
+
+    assert.equal(document.querySelectorAll('#side-recent .recent-row-dispatcher').length, 0,
+        'toggling again must hide the dispatcher rows');
+});
+
+test('a dispatcher row with no matching resumable rows still shows the section (for the toggle)', () => {
+    nav.renderRecentSessions({ rows: [], dispatcher_rows: [DISPATCHER_ROW], hidden: 1 });
+
+    assert.equal(document.getElementById('side-recent-section').hidden, false,
+        'the section must stay visible so the toggle to reveal dispatcher rows is reachable');
+    assert.equal(document.getElementById('hdr-recent').textContent, '0',
+        'the resumable-row count badge counts only resumable rows');
+});
+
+test('a bare array (legacy shape) renders with no dispatcher toggle at all', () => {
+    nav.renderRecentSessions([ROW]);
+
+    assert.equal(document.querySelector('#side-recent .recent-toggle-dispatcher'), null);
 });

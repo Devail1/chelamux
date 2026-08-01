@@ -424,7 +424,7 @@ async function refreshSidebar() {
 
 function _recentRowHtml(r) {
     const label = r.label || r.cwd || r.wid;
-    const key = `${r.store} ${r.wid}`;
+    const key = `${r.store} ${r.wid}`;
     return `<div class="agent-row recent-row" data-key="${attrEsc(key)}">
         <span class="ar-type recent" title="dead session — needs a human to resume">&#8635;</span>
         <div class="ar-main">
@@ -438,20 +438,69 @@ function _recentRowHtml(r) {
     </div>`;
 }
 
-function renderRecentSessions(rows) {
+// A dispatcher-owned row (its worktree/window is still the dispatcher's — see
+// app.py's _dispatcher_owned_wid_epochs) never gets a Resume button, hidden or
+// revealed: resuming it would race the dispatcher's own worktree reap/completion,
+// the same single-writer hazard roster.json/telegram-bindings.json have already hit
+// (three times). It is shown ONLY as a fact, behind the toggle below.
+function _dispatcherRowHtml(r) {
+    const label = r.label || r.cwd || r.wid;
+    return `<div class="agent-row recent-row recent-row-dispatcher"
+                title="dispatcher-owned — resuming it would race the dispatcher's own worktree lifecycle">
+        <span class="ar-type recent" title="dispatcher-owned session">&#8635;</span>
+        <div class="ar-main">
+            <div class="ar-top"><span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span></div>
+            <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(r.cwd || '')}</span></div>
+        </div>
+    </div>`;
+}
+
+let _recentPayload = { rows: [], dispatcher_rows: [], hidden: 0 };
+let _recentDispatcherRevealed = false;
+
+// Accepts either the /api/restore object shape ({rows, dispatcher_rows, hidden}) or
+// a bare array (tests, and any future caller that only has resumable rows in hand) —
+// a bare array is treated as "no dispatcher rows to show".
+function renderRecentSessions(data) {
+    _recentPayload = Array.isArray(data)
+        ? { rows: data, dispatcher_rows: [], hidden: 0 }
+        : (data || { rows: [], dispatcher_rows: [], hidden: 0 });
+    _paintRecentSessions();
+}
+
+function _paintRecentSessions() {
     const section = document.getElementById('side-recent-section');
     const host = document.getElementById('side-recent');
     const count = document.getElementById('hdr-recent');
     if (!section || !host) return;
-    const list = rows || [];
-    if (count) count.textContent = String(list.length);
-    if (!list.length) {
+
+    const rows = _recentPayload.rows || [];
+    const dispatcherRows = _recentPayload.dispatcher_rows || [];
+    if (count) count.textContent = String(rows.length);
+
+    if (!rows.length && !dispatcherRows.length) {
         section.hidden = true;
         host.innerHTML = '';
         return;
     }
     section.hidden = false;
-    host.innerHTML = list.map(_recentRowHtml).join('');
+
+    let html = rows.map(_recentRowHtml).join('');
+    if (dispatcherRows.length) {
+        const n = dispatcherRows.length;
+        const verb = _recentDispatcherRevealed ? 'Hide' : 'Show';
+        html += `<button class="recent-toggle-dispatcher" onclick="chela.toggleDispatcherSessions()">`
+            + `${verb} ${n} dispatcher session${n === 1 ? '' : 's'} hidden</button>`;
+        if (_recentDispatcherRevealed) {
+            html += dispatcherRows.map(_dispatcherRowHtml).join('');
+        }
+    }
+    host.innerHTML = html;
+}
+
+function toggleDispatcherSessions() {
+    _recentDispatcherRevealed = !_recentDispatcherRevealed;
+    _paintRecentSessions();
 }
 
 async function refreshRecentSessions() {
@@ -1451,4 +1500,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });

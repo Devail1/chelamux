@@ -1589,6 +1589,40 @@ def _restore_verdicts() -> list[restore.Verdict]:
     return restore.plan(store, bindings, sessionids.entries(), now_epoch)
 
 
+def _dispatcher_owned_wid_epochs() -> set[tuple[str, str | None]]:
+    """``(wid, stamped_epoch)`` pairs the DISPATCHER's own ``runs`` rows claim — a run's
+    own window, or its judge's. This is the SAME fact :func:`chela.restore.scan_runs`
+    and :func:`chela.telegram.reconcile.dispatched_window_ids` read off the ``runs``
+    table (``window_id``/``window_epoch``, ``judge_window_id``/``judge_window_epoch`` —
+    recorded at spawn, the only lossless moment).
+
+    ⛔ Never a name or path guess. A row's ``window_id``/``judge_window_id`` is stamped
+    at spawn under the epoch that was live then — the SAME (wid, epoch) pair a dangling
+    ``session-ids.json``/``telegram-bindings.json`` row is stamped with for that very
+    window (both come from the one physical spawn). Joining on that pair is therefore
+    exact, unlike a ``cmx-*``/``judge-*`` name prefix or a ``~/.chela/worktrees/`` path
+    check: a human is free to name a session ``cmx-999`` or work outside that directory,
+    and must not be swept up by a convention that merely happens to look similar.
+    """
+    owned: set[tuple[str, str | None]] = set()
+    for row in dispatcher.list_runs():
+        wid = row.get("window_id")
+        if wid:
+            owned.add((wid, row.get("window_epoch")))
+        jwid = row.get("judge_window_id")
+        if jwid:
+            owned.add((jwid, row.get("judge_window_epoch")))
+    return owned
+
+
+def _shape_restore_row(v: restore.Verdict, *, resumable: bool) -> dict:
+    shaped = {"store": v.store, "wid": v.wid, "cwd": v.cwd, "label": v.label,
+              "stamped_epoch": v.stamped_epoch}
+    if resumable:
+        shaped["session_id"] = v.session_id
+    return shaped
+
+
 @app.route("/api/restore")
 @require_auth
 def api_restore():
@@ -1596,13 +1630,26 @@ def api_restore():
     session id) to relaunch. REVIVABLE rows are left out: that session is already
     alive under a different address, which is ``chela restore --apply``'s job (a
     re-stamp), not a resume — showing it here as "resumable" would be a lie.
+
+    Dispatcher-owned rows (``_dispatcher_owned_wid_epochs``) are split into
+    ``dispatcher_rows`` instead of ``rows``: that worktree is still the dispatcher's —
+    a judge worktree is reaped on verdict publication, an agent's on run completion —
+    and resuming into it races that lifecycle the same way a second writer on
+    ``roster.json``/``telegram-bindings.json`` already has three times before. They are
+    never resumable, only *shown* (hidden by default; the sidebar's toggle reveals them
+    with no Resume affordance) — ``session_id`` is left off their shape since there is
+    no action for the client to build with it.
     """
     _require_terminals()
-    rows = [v for v in _restore_verdicts() if v.verdict == "MANUAL" and v.manual_command()]
-    return jsonify([{
-        "store": v.store, "wid": v.wid, "session_id": v.session_id, "cwd": v.cwd,
-        "label": v.label, "stamped_epoch": v.stamped_epoch,
-    } for v in rows])
+    owned = _dispatcher_owned_wid_epochs()
+    candidates = [v for v in _restore_verdicts() if v.verdict == "MANUAL" and v.manual_command()]
+    rows, dispatcher_rows = [], []
+    for v in candidates:
+        if (v.wid, v.stamped_epoch) in owned:
+            dispatcher_rows.append(_shape_restore_row(v, resumable=False))
+        else:
+            rows.append(_shape_restore_row(v, resumable=True))
+    return jsonify({"rows": rows, "dispatcher_rows": dispatcher_rows, "hidden": len(dispatcher_rows)})
 
 
 @app.route("/api/restore/resume", methods=["POST"])
@@ -1640,6 +1687,12 @@ def api_restore_resume():
     if verdict is None or not verdict.manual_command():
         return jsonify({"ok": False,
                         "error": "this row no longer matches — refresh and retry"}), 409
+
+    if (verdict.wid, verdict.stamped_epoch) in _dispatcher_owned_wid_epochs():
+        return jsonify({"ok": False,
+                        "error": "this session is dispatcher-owned — its worktree is still "
+                                 "the dispatcher's and resuming it would race that lifecycle; "
+                                 "not a manual recovery target"}), 409
 
     result = spawn.spawn_window(verdict.cwd, command=f"claude --resume {verdict.session_id}")
     if not result.ok:
