@@ -250,12 +250,12 @@ def _children(pid: int) -> list[int]:
     except OSError:
         return _sh_children(pid)
     out = []
-    for token in raw.split()[:_MAX_CHILDREN]:
+    for token in raw.split():
         try:
             out.append(int(token))
         except ValueError:
             continue
-    return out
+    return out[-_MAX_CHILDREN:]
 
 
 def _sh_children(pid: int) -> list[int]:
@@ -268,11 +268,16 @@ def _sh_children(pid: int) -> list[int]:
     """
     out = _sh(["pgrep", "-P", str(pid)])
     kids: list[int] = []
-    for line in (out or "").splitlines()[:_MAX_CHILDREN]:
+    for line in (out or "").splitlines():
         token = line.strip()
         if token.isdigit():
             kids.append(int(token))
-    return kids
+    # Both sources list children oldest-first (spawn order). Keeping the FIRST
+    # _MAX_CHILDREN under a busy pid — a nested subprocess-heavy test suite,
+    # or on a real box, a fleet of long-lived agent panes — silently drops
+    # the one this call is actually FOR: the process just spawned. Keep the
+    # most recent ones instead.
+    return kids[-_MAX_CHILDREN:]
 
 
 def _cmdline_argv(pid: int) -> list[str]:
