@@ -19,7 +19,7 @@ import sys
 
 import pytest
 
-from chela import config, dispatcher, doctor, hooks, runtime_truth
+from chela import config, dispatcher, doctor, hooks, runtime_truth, update
 
 
 @pytest.fixture
@@ -254,6 +254,15 @@ def test_doctor_is_quiet_when_everything_agrees(chela_dir, monkeypatch):
     # where `claude` is not on PATH (correctly; see runtime_truth._native_status_probe's
     # docstring). Stub the seam, the same idiom cmx-167 used for `_gh_auth_status`.
     monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.1s"))
+    # repo.upstream_synced (CMX-199) reads the REAL checkout this suite happens to be
+    # running in — `chela.update.repo_root()` is derived from `chela/update.py`'s own file
+    # location, not from anything this fixture controls. A developer worktree with unpushed
+    # local commits is genuinely `[ahead N]` of its upstream, which is exactly the ERROR shape
+    # this fact reports — so this test flaked on ANY unpushed checkout (CI's checkout is
+    # always in sync, so this was invisible there). Stub the seam, same idiom as
+    # `test_runtime_truth.py`'s uses of this exact monkeypatch.
+    monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
+                        lambda: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
     hooks.render_plugin(chela_dir / "plugin", port=5005)
     _install_plugin(hooks.hooks_spec(5005))
     assert _levels(doctor.check(), doctor.ERROR) == []
