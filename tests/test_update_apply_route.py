@@ -292,6 +292,8 @@ def test_a_readable_checkout_still_succeeds(client, monkeypatch, surface):
     """Counterweight — without it, 'always refuse' satisfies the guard above."""
     monkeypatch.setattr(update, "commits_behind",
                         lambda *a, **k: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
+    monkeypatch.setattr(update, "services_running_stale_code",
+                        lambda *a, **k: update.ServiceFreshness(ok=True, stale=[]))
 
     if surface == "payload":
         data = dash._update_status_payload()
