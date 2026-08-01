@@ -314,3 +314,64 @@ test('the button re-enables even when the request THROWS', async () => {
     assert.equal(document.getElementById('dispatch-hold-btn').disabled, false,
         'a throwing request left the control disabled — Resume is then unclickable until the TTL expires');
 });
+
+// --- 9. 🔴 CMX-213 — A THROWING REQUEST ALERTS THE OPERATOR, NOT A SILENT FAILURE --
+//
+// work.js's `catch (e) { alert('Request failed...') }` was read as correct at CMX-206
+// merge time but never PROVEN: the test above only checked the button re-enables on a
+// throw, not that the operator is told. Without this, deleting the catch's `alert(...)`
+// call entirely — leaving dispatch state unchanged but silent — would leave every
+// existing test green while an operator believes their click did something.
+
+test('a throwing request alerts the operator', async () => {
+    dispatchPayload = { configured: false, workflows: [], dispatch_hold: null };
+    await pollWork();
+    globalThis.confirm = () => true;
+    const boom = () => { throw new Error('network down'); };
+    const saved = globalThis.fetch;
+    globalThis.fetch = boom;
+    let alertMsg = null;
+    globalThis.alert = m => { alertMsg = m; };
+
+    await window.chela.toggleDispatchHold();
+
+    globalThis.fetch = saved;
+    assert.match(alertMsg || '', /failed/i,
+        'a throwing request never alerted the operator — dispatch state may be wrong and silent');
+});
+
+// --- 10. 🔴 CMX-213 — THE BUTTON IS ACTUALLY DISABLED WHILE THE REQUEST IS IN FLIGHT -
+//
+// work.js sets `btn.disabled = true` before the `await api(...)` call — read as correct
+// at CMX-206 merge time, but no test ever observed the button mid-request; the existing
+// pair above only checks the state AFTER the promise settles, which a dropped
+// `btn.disabled = true` line would still pass. `toggleDispatchHold` runs synchronously
+// up to its first `await`, so the disabled flag must already be set the instant the
+// call returns its (still-pending) promise — before the in-flight fetch ever resolves.
+
+test('the button is disabled the instant a request goes in flight, before it resolves', async () => {
+    dispatchPayload = { configured: false, workflows: [], dispatch_hold: null };
+    await pollWork();
+    globalThis.confirm = () => true;
+    let resolveFirstFetch;
+    let first = true;
+    globalThis.fetch = () => {
+        if (first) {
+            first = false;
+            return new Promise(resolve => { resolveFirstFetch = resolve; });
+        }
+        // toggleDispatchHold's trailing pollWork() fires a second fetch — resolve it
+        // immediately so it doesn't leave this test's promise hanging forever.
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(dispatchPayload) });
+    };
+    const btn = document.getElementById('dispatch-hold-btn');
+    assert.equal(btn.disabled, false, 'the button started disabled — the in-flight check would be vacuous');
+
+    const pending = window.chela.toggleDispatchHold();
+
+    assert.equal(btn.disabled, true,
+        'the button was not disabled while its request was still in flight');
+
+    resolveFirstFetch({ ok: true, status: 200, json: () => Promise.resolve(pauseResponse) });
+    await pending;
+});
