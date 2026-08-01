@@ -65,6 +65,37 @@ def _prep_worktree(repo: Path, branch: str, tmp_path: Path) -> Path:
     return wt
 
 
+# --- _is_prose_path: the classifier table --------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [
+    "LICENSE",
+    "NOTICE",
+    "AUTHORS",
+    "CODEOWNERS",
+    "docs/LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "notes.mdx",
+    "notes.rst",
+    "notes.txt",
+    "README.MD",
+])
+def test_is_prose_path_true_for_prose(name):
+    assert judge._is_prose_path(name) is True
+
+
+@pytest.mark.parametrize("name", [
+    "test_suite.py",
+    "chela/judge.py",
+    "index.js",
+    "Makefile",
+    "LICENSE.py",
+])
+def test_is_prose_path_false_for_code(name):
+    assert judge._is_prose_path(name) is False
+
+
 # --- _docs_only_diff: the pure git mechanics ----------------------------------------------
 
 
