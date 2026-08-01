@@ -80,9 +80,13 @@
     </div>
   </header>
 
-  <!-- Left sidebar: Navigate (views) · Sessions (live agents). TWO sections, no
-       filter chips. Favorites/Recent are LAUNCH affordances, not navigation — they
-       live in the "+" launch menu (#new-menu) now, not in a third section here. -->
+  <!-- Left sidebar: Navigate (views) · Sessions (live agents) · Recent sessions
+       (dead-but-resumable, CMX-208 — hidden when empty). No filter chips.
+       Favorites/Recent DIRECTORIES are LAUNCH affordances, not navigation — they
+       live in the "+" launch menu (#new-menu), not a sidebar section. Recent
+       SESSIONS below is a different thing entirely: resuming a specific prior
+       Claude conversation (session id), not opening a fresh window in a familiar
+       directory — see chela/restore.py. -->
   <aside class="sidebar">
 
     <!-- Primary navigation. NOT written here: nav.js renders these rows from the
@@ -106,6 +110,21 @@
       <div class="side-list" id="sidebar-agents">
         <div class="side-empty">No agents</div>
       </div>
+    </section>
+
+    <!-- Recent (dead) sessions — CMX-208. A UI over `chela restore`'s already-tested
+         classification (chela/restore.py): a Claude session a hard tmux death (or
+         `wsl --shutdown`) orphaned, with enough on record (cwd + session id) to
+         relaunch. Hidden entirely when there is nothing to resume — this is a
+         rare-but-important recovery affordance, not a permanent fixture like
+         Navigate/Sessions above, so nav.js's renderRecentSessions toggles `hidden`
+         rather than always reserving the space. -->
+    <section class="side-section" id="side-recent-section" hidden>
+      <div class="side-head">
+        <span class="side-title">Recent sessions</span>
+        <span class="side-count" id="hdr-recent">0</span>
+      </div>
+      <div class="side-list" id="side-recent"></div>
     </section>
 
   </aside>
