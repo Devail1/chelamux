@@ -359,6 +359,8 @@ measured numbers, and why a per-job cap does *not* protect the machine:
 | `chela dispatch --pause [--reason R] [--ttl 30m]` / `--resume` / `--hold-status` | **Hold the queue** while you reorder the tracker: claims stop, reconciliation continues, and the hold self-releases at its expiry |
 | `chela dispatch-runs [--awaiting]` | List dispatcher runs; `--awaiting` shows everything parked in review (awaiting review, sent back, needs a human) |
 | `chela review <run\|branch> --request-changes --body-file -` | **Fail a PR and send it back**: the run re-enters its *own* worktree and branch, with your verdict as the prompt. `--approve` records a pass and merges nothing |
+| `chela reopen <run> [--reason R]` | 🔓 Put a `needs_human` run back into `awaiting_review` after **you** fixed and pushed, so judge/review/merge re-verify it. Nudges (never blocks) from the 3rd reopen on if nothing under `chela/` changed since the first |
+| `chela restore [--apply]` | Report epoch-dangling rows a hard tmux death orphaned (inbox / telegram-bindings / session-ids / dispatcher runs). Read-only by default; `--apply` re-stamps REVIVABLE rows at their new address and archives-then-removes MANUAL ones |
 | `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
 | `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux (by window id `@32` or name; non-zero exit if not delivered) |
 | `chela broadcast <text>` | Message every other live agent |
@@ -657,6 +659,7 @@ literal Escape.
 | `GET /api/dispatcher` | Open tasks + active/awaiting/recent runs per workflow |
 | `POST /api/dispatcher/runs/<id>/merge` · `/merge-all` | Squash-merge PRs + clean up |
 | `POST /api/agents/{start,stop,restart,msg,broadcast,trigger}` | Agent controls |
+| `POST /api/update/apply` | Run the same `chela update` pull-and-restart from the Settings drawer's "Update now" button — refuses on a dirty/diverged tree; 409 while a dispatched agent run is in flight (the restart would orphan it) or if an update is already running |
 | `GET /api/events` | Server-Sent Events stream (reactive UI accelerator) |
 
 ---
