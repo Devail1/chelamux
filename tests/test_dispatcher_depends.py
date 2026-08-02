@@ -380,3 +380,49 @@ def test_the_payload_reports_a_SATISFIED_dependency_as_unblocked(repo, monkeypat
     assert task["unmet_depends"] == []
     assert task["blocked"] is False
     assert task["unresolved_depends"] == []
+
+
+OUTSIDE_WORKFLOW = """---
+project_key: TST
+tracker:
+  kind: markdown
+  path: {tracker}
+workspace:
+  root: {root}
+  base_branch: dev
+concurrency:
+  max: 2
+---
+do {{{{task_title}}}}
+"""
+
+
+def test_the_gate_applies_when_the_tracker_lives_OUTSIDE_the_repo(repo, spawns, tmp_path):
+    """The fourth and last `_ready` call site: `Path(tracker).relative_to(repo)` raises
+    ValueError when the tracker is not under the workflow's own directory, so the origin
+    read is impossible and `_claim_order` bails to the on-disk queue immediately.
+
+    Found by enumerating every `_ready` call site rather than only the ones already
+    reported — three fallbacks were guarded and this one still reverted to `return
+    on_disk` with the whole suite green. A gate is only as good as its least-tested
+    branch, and "which branches call it" is a question the code answers exactly.
+    """
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    tracker = outside / "TODO.md"
+    (repo / "WORKFLOW.md").write_text(
+        OUTSIDE_WORKFLOW.format(tracker=tracker, root=tmp_path / "state" / "worktrees")
+    )
+    tracker.write_text(
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+        "- [ ] prerequisite task\n"
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "push", "-qu", "origin", "dev"],
+                   check=True, capture_output=True)
+
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert summary["dispatched"] == 1
+    assert spawns.titles == ["prerequisite task"]
