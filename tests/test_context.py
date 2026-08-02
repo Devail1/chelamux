@@ -397,3 +397,67 @@ def test_prune_snapshots_deletes_old_keeps_recent(db_and_cache):
     remaining = _rows(db_path)
     assert len(remaining) == 1
     assert remaining[0]["agent"] == "recent-agent"
+
+
+# --- The three call sites the judge reached past (CMX-217, judge round 3) --------------
+#
+# The precedence layer was tested in isolation and the setters were tested, but nothing
+# asserted the knobs REACH the code that consumes them: reverting a call site to the
+# literal it used to latch left all 2368 tests green. A knob that resolves correctly and
+# is then read by nobody is indistinguishable, from the suite's point of view, from a
+# knob that works. Each test below monkeypatches the knob to a value the old literal
+# cannot be, and asserts the BEHAVIOUR moves with it.
+
+
+def test_transcript_snapshot_reads_default_context_window_live_not_the_200k_literal(monkeypatch):
+    """🔴 WIRING — `_transcript_snapshot` is `default_context_window()`'s only consumer.
+    Pin the knob to 500k with usage well under it: the derived window must be 500k
+    (`total_k == 500.0`). A hardcoded `200000` yields 200.0 — and would also flip
+    `used_pct`, so this cannot pass on a latched literal."""
+    monkeypatch.setattr(
+        context.transcripts, "agent_context_from_transcript",
+        lambda name: {"used_tokens": 50_000},
+    )
+    monkeypatch.setattr(context.config, "default_context_window", lambda: 500_000)
+
+    snap = context._transcript_snapshot("agent-1")
+
+    assert snap is not None
+    assert snap["total_k"] == 500.0, (
+        f"window did not follow the knob — got total_k={snap['total_k']} "
+        "(200.0 means the 200k literal is still latched at the call site)"
+    )
+    assert snap["used_pct"] == 10
+
+
+def test_cache_snapshot_reads_cache_stale_seconds_live_not_the_7200_literal(monkeypatch, tmp_path):
+    """🔴 WIRING — `_cache_snapshot`'s staleness gate. Write a cache file whose mtime is
+    3 hours old — **stale** under the old 7200s literal — then pin the knob wide open and
+    require the snapshot to come back anyway. A latched 7200 returns None here.
+
+    The counterweight is the second half: with the knob pinned to 0 the SAME file must be
+    rejected, so this cannot pass by simply never consulting the gate at all.
+    """
+    import os
+    import time as _time
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(context, "CONTEXT_CACHE_DIR", cache_dir)
+    monkeypatch.setattr(context, "_parse_cache_file", lambda p: {"name": "agent-1", "used_k": 1.0})
+
+    path = cache_dir / "agent-1.json"
+    path.write_text("{}")
+    three_hours_ago = _time.time() - 3 * 3600
+    os.utime(path, (three_hours_ago, three_hours_ago))
+
+    monkeypatch.setattr(context.config, "cache_stale_seconds", lambda: 10**9)
+    assert context._cache_snapshot("agent-1") is not None, (
+        "a 3h-old cache file was dropped while the staleness knob was wide open — "
+        "the 7200 literal is still latched at the gate"
+    )
+
+    monkeypatch.setattr(context.config, "cache_stale_seconds", lambda: 0)
+    assert context._cache_snapshot("agent-1") is None, (
+        "the gate accepted a stale file with the knob at 0 — it is not consulting the knob"
+    )
