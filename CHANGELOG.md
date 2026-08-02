@@ -10,6 +10,23 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **chelamux now tags its releases.** `0.2.0` and `0.3.0` were shipped without a
+  `git tag`, so `git tag` read empty and the GitHub repo sidebar said "No releases
+  published" even though two releases were live. `v0.2.0` and `v0.3.0` are now
+  tagged retroactively (at the commits that set `pyproject.toml`'s version to each),
+  with a GitHub Release per tag whose body is the matching section of this file,
+  pasted in verbatim — see "Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Changed
+
+- **`chela.__version__` is now derived, not a second hardcoded literal.**
+  `chela/__init__.py` previously hardcoded its own copy of the version string
+  alongside `pyproject.toml`'s — two facts that could (and did) drift. It now reads
+  the installed package's own metadata (`importlib.metadata.version("chelamux")`),
+  so `pyproject.toml` is the only place the number is written. (CMX-214)
+
 ## [0.3.0] — 2026-08-02
 
 Honest self-reporting, and the operator controls that act on it.
@@ -276,6 +293,12 @@ macOS-onboarding and fleet-safety push.
 
 ---
 
-chelamux does not tag releases yet; `0.2.0` is the current `pyproject` version and
-this entry covers the public-launch arc. Add a new entry per user-facing PR
-(see [CONTRIBUTING.md](CONTRIBUTING.md)).
+This file is the source of the release notes, not a copy of them: each `git tag`
+(`vX.Y.Z`) points at the commit that bumped `pyproject.toml`'s `version`, and its
+GitHub Release body is the matching section above, pasted in verbatim — see
+"Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md) for the exact steps. Add a new
+entry under `## [Unreleased]` per user-facing PR; it becomes a numbered section,
+and a tag + release, the next time `chelamux` cuts one.
+
+[0.3.0]: https://github.com/Devail1/chelamux/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Devail1/chelamux/releases/tag/v0.2.0

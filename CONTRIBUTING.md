@@ -76,6 +76,25 @@ its own corruption. Write guards that would catch you.
   version** — Claude Code keys plugin updates on the version, so a hook change without a
   bump ships stale hooks to every adopter.
 
+## Releasing (maintainer-only)
+
+The [CHANGELOG](CHANGELOG.md) is the single source of a release's notes — a tag's
+GitHub Release body is that release's CHANGELOG section, pasted in verbatim, never
+hand-authored a second time. `pyproject.toml`'s `version` field is the only place
+the release number itself is written; `chela.__version__` derives from it at
+runtime (`importlib.metadata`, see `chela/__init__.py`), so there is nothing else
+to keep in sync.
+
+To cut a release, on `main` after a `dev → main` promotion:
+
+1. Turn `## [Unreleased]` into `## [X.Y.Z] — YYYY-MM-DD` in `CHANGELOG.md`.
+2. Bump `version` in `pyproject.toml` to match `X.Y.Z`.
+3. Commit both together (`Release X.Y.Z — <one-line theme>`).
+4. `git tag -a vX.Y.Z -m "X.Y.Z — <one-line theme>" && git push origin vX.Y.Z`
+5. `gh release create vX.Y.Z --title vX.Y.Z --notes-file -` piping in that
+   CHANGELOG section's body (heading excluded) — so the release notes and the
+   changelog can never drift apart.
+
 ## How the dispatcher builds tasks (optional context)
 
 If you're curious how chela develops itself: the daemon reads unchecked `- [ ]` items
