@@ -18,6 +18,14 @@ history lives in `git log`.
   tagged retroactively (at the commits that set `pyproject.toml`'s version to each),
   with a GitHub Release per tag whose body is the matching section of this file,
   pasted in verbatim — see "Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md).
+- **`.github/workflows/release.yml`.** A tag push (`vX.Y.Z`, the deliberate human
+  act "Releasing" in `CONTRIBUTING.md` still describes) now builds that tag's
+  GitHub Release automatically: `chela.release_notes` (a real, unit-tested Python
+  module — `tests/test_release_notes.py` — not inline shell in the workflow YAML)
+  extracts the matching `CHANGELOG.md` section and hands it to `gh release create
+  --notes-file`. CI still never creates or pushes a tag itself. A `workflow_dispatch`
+  input (`dry_run`, default `true`) lets the extraction be exercised against an
+  already-tagged version, like `v0.3.0`, without publishing anything.
 
 ### Changed
 
@@ -26,6 +34,12 @@ history lives in `git log`.
   alongside `pyproject.toml`'s — two facts that could (and did) drift. It now reads
   the installed package's own metadata (`importlib.metadata.version("chelamux")`),
   so `pyproject.toml` is the only place the number is written. (CMX-214)
+- **`tests/test_version.py` now also guards `pyproject.toml`'s version against
+  `CHANGELOG.md`'s newest dated release heading**, not just against the installed
+  package's own metadata. That first guard alone can't fail in CI — `uv sync`
+  reinstalls from `pyproject.toml` before every run, so the two values it compares
+  are structurally always equal there. The new guard catches the real drift: a
+  version bump with no matching CHANGELOG entry, or vice versa. (CMX-214)
 
 ## [0.3.0] — 2026-08-02
 
