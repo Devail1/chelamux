@@ -76,6 +76,32 @@ its own corruption. Write guards that would catch you.
   version** — Claude Code keys plugin updates on the version, so a hook change without a
   bump ships stale hooks to every adopter.
 
+## Releasing (maintainer-only)
+
+The [CHANGELOG](CHANGELOG.md) is the single source of a release's notes — a tag's
+GitHub Release body is that release's CHANGELOG section, pasted in verbatim, never
+hand-authored a second time. `pyproject.toml`'s `version` field is the only place
+the release number itself is written; `chela.__version__` derives from it at
+runtime (`importlib.metadata`, see `chela/__init__.py`), so there is nothing else
+to keep in sync.
+
+To cut a release, on `main` after a `dev → main` promotion:
+
+1. Turn `## [Unreleased]` into `## [X.Y.Z] — YYYY-MM-DD` in `CHANGELOG.md`.
+2. Bump `version` in `pyproject.toml` to match `X.Y.Z`.
+3. Commit both together (`Release X.Y.Z — <one-line theme>`).
+4. `git tag -a vX.Y.Z -m "X.Y.Z — <one-line theme>" && git push origin vX.Y.Z`
+
+Pushing the tag is the deliberate act and it's where the human part ends: CI never
+tags anything itself, but that push triggers `.github/workflows/release.yml`, which
+extracts `vX.Y.Z`'s CHANGELOG section with `chela.release_notes` (unit-tested in
+`tests/test_release_notes.py`, not inline shell) and runs the `gh release create`
+step above for you. To dry-run that extraction against a version that's already
+tagged — e.g. to sanity-check a CHANGELOG edit before cutting the next release —
+trigger the workflow manually (`gh workflow run release.yml -f version=X.Y.Z`); its
+`dry_run` input defaults to `true`, so a manual run only prints the notes and never
+calls `gh release create`.
+
 ## How the dispatcher builds tasks (optional context)
 
 If you're curious how chela develops itself: the daemon reads unchecked `- [ ]` items
