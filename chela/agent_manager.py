@@ -144,12 +144,12 @@ def is_claude_running(window_id: str) -> bool:
 # with no gap in 83 consecutive hours, and nobody noticed because nothing but a log line
 # said so. Give real headroom above the measured worst case — the default MUST stay >= 45s
 # (tests/test_agent_manager_status_cache.py guards this floor directly).
-_STATUS_CMD_TIMEOUT = config.STATUS_CMD_TIMEOUT_S
+_STATUS_CMD_TIMEOUT = config.status_cmd_timeout_s()
 # How long a successful refresh is trusted before :func:`start_background_refresh` asks
 # again. This is NOT how long a request blocks — session_status_map() without force=True
 # only ever reads the cache; the periodic background thread is what pays the subprocess
 # cost, off the request path (see start_background_refresh's docstring).
-_STATUS_TTL = config.STATUS_TTL_S
+_STATUS_TTL = config.status_ttl_s()
 # A single timeout can be a blip (a slow disk, a contended box) and is not worth raising
 # one's voice over — but a feed that has been down this long is a REGRESSION, and the
 # ordinary per-call WARNING (routine, and easy to lose in a flood of identical lines, which

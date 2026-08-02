@@ -177,7 +177,7 @@ def test_the_daemon_loop_calls_prune_snapshots_when_due(monkeypatch):
         "cmd_run did NOT call context.prune_snapshots when the prune interval was due — "
         "retention is unwired and can be reverted with the suite green"
     )
-    assert calls[0] == main.CONTEXT_SNAPSHOT_RETENTION_DAYS
+    assert calls[0] == main.config.context_snapshot_retention_days()
 
 
 # --- cadence PERSISTENCE across ticks: the single-tick tests above prove the loop calls -----

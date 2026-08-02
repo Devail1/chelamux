@@ -14,8 +14,8 @@ from typing import NamedTuple
 from chela import critic, epoch, event_log, hold, judge
 from chela.config import (
     CHELA_DIR,
-    DISPATCH_TICK_INTERVAL,
     TMUX_SESSION,
+    dispatch_tick_interval,
     human_size,
     judge_max_unknown_retries,
     max_reworks,
@@ -2362,11 +2362,12 @@ def poll_interval(workflow_path: str | Path, default: float | None = None) -> fl
     """The effective seconds between ticks for this workflow.
 
     Reads `polling.interval_ms` from the (hot-reloaded) front matter, falling
-    back to ``default`` / ``CHELA_DISPATCH_TICK_INTERVAL``. Called from the
-    daemon loop on every pass so an edited interval takes effect without a
-    restart; it is stat-gated, so an unchanged file costs one ``stat``.
+    back to ``default`` / :func:`chela.config.dispatch_tick_interval` (itself a
+    Timing-tab, dashboard-writable knob — CMX-217). Called from the daemon loop
+    on every pass so an edited interval takes effect without a restart; it is
+    stat-gated, so an unchanged file costs one ``stat``.
     """
-    base = DISPATCH_TICK_INTERVAL if default is None else default
+    base = dispatch_tick_interval() if default is None else default
     return poll_interval_seconds(load_workflow_cached(workflow_path).workflow, base)
 
 

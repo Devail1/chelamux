@@ -10,21 +10,21 @@ Agents' Claude Code status-line scripts cache JSON to
 
 import json
 import logging
-import os
 import sqlite3
 import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from chela import transcripts
-from chela.config import CHELA_DIR, CONTEXT_CACHE_DIR, CACHE_STALE_SECONDS
+from chela import config, transcripts
+from chela.config import CHELA_DIR, CONTEXT_CACHE_DIR
 
 # Context-window size (tokens) assumed when deriving usage from the transcript
 # (the fallback): the transcript records token counts but not the window size.
 # The statusLine payload, when installed, carries the exact size and overrides
 # this. Default 200k; bumped to 1M automatically when observed usage exceeds it.
-DEFAULT_CONTEXT_WINDOW = int(os.environ.get("CHELA_DEFAULT_CONTEXT_WINDOW", "200000"))
+# A Timing-tab knob (CMX-217) — see config.default_context_window(); read per
+# call below, not latched here.
 
 log = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ def capture_all() -> list[dict]:
 
             # Skip stale files (agent likely dead or restarted)
             mtime = cache_file.stat().st_mtime
-            if now_ts - mtime > CACHE_STALE_SECONDS:
+            if now_ts - mtime > config.cache_stale_seconds():
                 continue
 
             # Stamp ts from the file's mtime (when the agent actually wrote it),
@@ -255,7 +255,7 @@ def _cache_snapshot(agent_name: str) -> dict | None:
         mtime = path.stat().st_mtime
     except OSError:
         return None
-    if time.time() - mtime > CACHE_STALE_SECONDS:
+    if time.time() - mtime > config.cache_stale_seconds():
         return None
     snap = _parse_cache_file(path)
     if not snap:
@@ -279,7 +279,7 @@ def _transcript_snapshot(agent_name: str) -> dict | None:
     if not u or not u.get("used_tokens"):
         return None
     used = u["used_tokens"]
-    window = DEFAULT_CONTEXT_WINDOW
+    window = config.default_context_window()
     if used > window and used <= 1_000_000:
         window = 1_000_000
     total_k = round(window / 1000, 1)

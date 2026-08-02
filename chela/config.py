@@ -24,6 +24,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 # Where chela keeps its own state (scheduler.db, dispatcher runs, context cache).
 CHELA_DIR = Path(os.environ.get("CHELA_DIR", Path.home() / ".chela"))
@@ -96,6 +97,208 @@ ENV_FILE: Path | None = env_file_path()
 # At import, before anything below reads os.environ — so a plain `chela status` in a bare
 # shell is configured identically to the PM2 daemon, with nothing exported by hand.
 ENV_FILE_VARS: dict[str, str] = load_env_file(ENV_FILE)
+
+# --- dashboard-writable settings: the precedence layer (CMX-217) ------------
+#
+# Until this, exactly THREE knobs were dashboard-writable — projects_dir, the
+# dispatcher's agent permission mode, agent model — each hand-wired at its own read
+# site (chela/launcher.py, chela/dispatcher.py) with its own copy of the same
+# precedence: userconfig.json (what a human set from Settings) beats the env var
+# (already env-file-merged into os.environ by load_env_file above) beats a built-in
+# default. This is that precedence, generalised, so the next ~40 knobs
+# (docs/SETTINGS_UI_INVENTORY.md, CMX-207) are one registry entry each instead of a
+# hand-rolled reader apiece.
+def dashboard_setting(key: str, env: str, default, cast=str):
+    """One dashboard-writable knob, resolved with a fixed precedence (highest first):
+
+      1. ``key`` in ``~/.chela/config.json`` (chela.userconfig) — what the
+         dashboard wrote;
+      2. ``env`` in ``os.environ`` (itself already env-file-merged — a real
+         export always wins over ``chela.env``, see :func:`load_env_file`);
+      3. ``default``.
+
+    A value that fails ``cast`` (a hand-edited config.json, an env var typo) is
+    treated as absent and falls through to the next level — never raises, and
+    never takes a caller down over a bad value. Read per call, never latched: an
+    operator (or the dashboard, live) can change these on an already-running
+    process, same rule ``max_reworks()`` / ``judge_max_unknown_retries()`` below
+    already follow for their own single knob.
+
+    The ``userconfig`` import stays lazy (inside the call, not at module scope):
+    ``chela.userconfig`` imports ``chela.config`` for ``CHELA_DIR``, and a
+    module-level import back the other way would be circular.
+    """
+    try:
+        from chela import userconfig
+        raw = userconfig.get(key)
+    except Exception:      # unreadable/corrupt config.json — fail closed to env/default
+        raw = None
+    if raw not in (None, ""):
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            pass
+    raw = os.environ.get(env)
+    if raw not in (None, ""):
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+class TimingKnob(NamedTuple):
+    """One row of the Timing tab — CMX-217's proof group ("Daemon loop intervals",
+    docs/SETTINGS_UI_INVENTORY.md's strongest tab candidate: every member here is
+    already read per call, nothing latched at import, nothing trust-boundary-
+    adjacent)."""
+    key: str        # ~/.chela/config.json key
+    env: str        # CHELA_* env var name
+    default: object
+    cast: type
+    label: str
+    unit: str
+
+
+TIMING_KNOBS: tuple[TimingKnob, ...] = (
+    TimingKnob("scheduler_poll_interval_seconds", "CHELA_SCHEDULER_POLL_INTERVAL",
+               30, int, "Daemon tick", "s"),
+    TimingKnob("capture_interval_seconds", "CHELA_CAPTURE_INTERVAL_SECONDS",
+               300, int, "Context-snapshot capture cadence", "s"),
+    TimingKnob("cache_stale_seconds", "CHELA_CACHE_STALE_SECONDS",
+               7200, int, "Stale statusLine cache cutoff", "s"),
+    TimingKnob("context_retention_days", "CHELA_CONTEXT_RETENTION_DAYS",
+               30, int, "Context-snapshot retention", "d"),
+    TimingKnob("dispatch_tick_interval_seconds", "CHELA_DISPATCH_TICK_INTERVAL",
+               60, int, "Dispatcher tick (workflow default)", "s"),
+    TimingKnob("status_cmd_timeout_seconds", "CHELA_STATUS_CMD_TIMEOUT_S",
+               45.0, float, "Status-feed subprocess timeout", "s"),
+    TimingKnob("status_ttl_seconds", "CHELA_STATUS_TTL_S",
+               30.0, float, "Status-feed cache TTL", "s"),
+    TimingKnob("doctor_check_interval_seconds", "CHELA_DOCTOR_CHECK_INTERVAL",
+               3600, int, "Doctor self-audit cadence", "s"),
+    TimingKnob("default_context_window", "CHELA_DEFAULT_CONTEXT_WINDOW",
+               200000, int, "Fallback context-window size", "tokens"),
+)
+
+_TIMING_BY_KEY = {k.key: k for k in TIMING_KNOBS}
+
+
+def timing_value(key: str):
+    """The effective value of one Timing knob, by its ``config.json`` key."""
+    knob = _TIMING_BY_KEY[key]
+    return dashboard_setting(knob.key, knob.env, knob.default, cast=knob.cast)
+
+
+def timing_snapshot() -> list[dict]:
+    """Every Timing knob's stored + effective value, for the Settings API."""
+    try:
+        from chela import userconfig
+        stored_raw = {k.key: userconfig.get(k.key) for k in TIMING_KNOBS}
+    except Exception:
+        stored_raw = {}
+    out = []
+    for k in TIMING_KNOBS:
+        stored = stored_raw.get(k.key)
+        out.append({
+            "key": k.key, "env": k.env, "label": k.label, "unit": k.unit,
+            "default": k.default,
+            "stored": stored if stored not in (None, "") else "",
+            "effective": dashboard_setting(k.key, k.env, k.default, cast=k.cast),
+        })
+    return out
+
+
+def validate_timing(key: str, raw: str) -> tuple[str | None, object]:
+    """Pure validation for one Timing knob — no write. Returns ``(error, value)``:
+    on success ``error`` is ``None`` and ``value`` is either the cast+bounds-
+    checked number, or ``None`` to mean "clear back to env/default" (``raw`` was
+    empty); on failure ``error`` names what's wrong and ``value`` is ``None``.
+
+    Split from :func:`apply_timing` so a multi-key POST (``/api/config/timing``)
+    can validate every key first and apply none of them if any fails — a batch
+    write must not silently persist the keys that happened to come first in the
+    dict and reject only the ones after, which is what a validate-and-write-per-
+    key loop would do.
+    """
+    knob = _TIMING_BY_KEY.get(key)
+    if knob is None:
+        return f"unknown timing setting: {key}", None
+    raw = (raw or "").strip()
+    if raw == "":
+        return None, None
+    try:
+        value = knob.cast(raw)
+    except (TypeError, ValueError):
+        return f"{knob.label} must be a number", None
+    if value <= 0:
+        return f"{knob.label} must be greater than zero", None
+    return None, value
+
+
+def apply_timing(key: str, value) -> None:
+    """Persist one ALREADY-VALIDATED Timing value (see :func:`validate_timing`).
+    ``value=None`` clears the key back to its env var / built-in default."""
+    from chela import userconfig
+    userconfig.set_(_TIMING_BY_KEY[key].key, value)
+
+
+def set_timing(key: str, raw: str) -> str | None:
+    """Validate and persist one Timing knob from the dashboard in one call —
+    the single-key convenience wrapper around :func:`validate_timing` +
+    :func:`apply_timing`. ``raw`` is the posted string; empty clears it back to
+    env/default. Returns an error message, or ``None`` on success — the API
+    layer turns that into 400 vs 200, the same fail-closed shape
+    ``agent_permission_mode``/``agent_model`` use. A multi-key batch write
+    should call ``validate_timing``/``apply_timing`` directly instead, so it can
+    validate the whole batch before applying any of it."""
+    err, value = validate_timing(key, raw)
+    if err:
+        return err
+    apply_timing(key, value)
+    return None
+
+
+# The individual named readers below are what the rest of chela calls day to day —
+# the registry above exists so the API/UI layer (chela/dashboard/app.py) can iterate
+# once instead of hand-wiring nine near-identical read sites, the exact gap CMX-217
+# closes. Each still reads per call, never latched, exactly like the constants they
+# replace used to promise in their own comments.
+def scheduler_poll_interval() -> int:
+    return timing_value("scheduler_poll_interval_seconds")
+
+
+def capture_interval_seconds() -> int:
+    return timing_value("capture_interval_seconds")
+
+
+def cache_stale_seconds() -> int:
+    return timing_value("cache_stale_seconds")
+
+
+def context_snapshot_retention_days() -> int:
+    return timing_value("context_retention_days")
+
+
+def dispatch_tick_interval() -> int:
+    return timing_value("dispatch_tick_interval_seconds")
+
+
+def status_cmd_timeout_s() -> float:
+    return timing_value("status_cmd_timeout_seconds")
+
+
+def status_ttl_s() -> float:
+    return timing_value("status_ttl_seconds")
+
+
+def doctor_check_interval() -> int:
+    return timing_value("doctor_check_interval_seconds")
+
+
+def default_context_window() -> int:
+    return timing_value("default_context_window")
+
 
 # The tmux session chela orchestrates. Each agent lives in its own window of
 # this session, and the window name IS the agent's display name. Override with
@@ -245,24 +448,19 @@ def live_dashboard_port() -> int:
 # Context-window status-line cache, written by scripts/cache-statusline.sh after
 # each assistant turn. The daemon reads these to track per-agent context usage.
 CONTEXT_CACHE_DIR = CHELA_DIR / "context"
-CACHE_STALE_SECONDS = int(os.environ.get("CHELA_CACHE_STALE_SECONDS", "7200"))  # skip files older than 2h
+# CACHE_STALE_SECONDS (skip files older than 2h — see cache_stale_seconds() above),
+# CAPTURE_INTERVAL_SECONDS (context_snapshot capture cadence — the foundation the
+# Cost tab's Today/7d/30d windows sum over — see capture_interval_seconds()) and
+# CONTEXT_SNAPSHOT_RETENTION_DAYS (see context_snapshot_retention_days()) are now
+# Timing-tab knobs (CMX-217) — dashboard_setting()-backed functions defined above,
+# not module constants; an always-on daemon would otherwise grow scheduler.db
+# without bound if retention were ever disabled entirely.
 
-# Cost history: how often the daemon calls `context.capture_all()` to accrue
-# `context_snapshots` rows — the foundation the Cost tab's Today/7d/30d windows sum
-# over. Cheap (one row per live statusLine cache file), so a 5-minute default is
-# plenty of resolution without writing on every daemon tick.
-CAPTURE_INTERVAL_SECONDS = int(os.environ.get("CHELA_CAPTURE_INTERVAL_SECONDS", "300"))
-# How long accrued snapshots are kept before `context.prune_snapshots` deletes them —
-# an always-on daemon would otherwise grow scheduler.db without bound.
-CONTEXT_SNAPSHOT_RETENTION_DAYS = int(os.environ.get("CHELA_CONTEXT_RETENTION_DAYS", "30"))
-
-# Daemon loop intervals (seconds).
-SCHEDULER_POLL_INTERVAL = int(os.environ.get("CHELA_SCHEDULER_POLL_INTERVAL", "30"))
-
-# Work-item dispatcher inside the daemon. Colon-separated list of WORKFLOW.md
-# paths (~ and $VAR are expanded). Empty = dispatcher off in the daemon; the
-# `chela dispatch <workflow>` CLI still works regardless.
-DISPATCH_TICK_INTERVAL = int(os.environ.get("CHELA_DISPATCH_TICK_INTERVAL", "60"))
+# Daemon loop intervals (seconds): SCHEDULER_POLL_INTERVAL (see
+# scheduler_poll_interval() above) and DISPATCH_TICK_INTERVAL (the work-item
+# dispatcher's fallback cadence when a workflow doesn't set its own — see
+# dispatch_tick_interval() above) are likewise Timing-tab knobs now. Colon-separated
+# DISPATCH_WORKFLOWS below is unrelated (which workflows run, not how often).
 
 # CMX-179: `claude agents --json` (the native busy/idle status feed) cold-starts ~12s and
 # warm-starts 17-18s on measured hardware (chela/agent_manager.py's diagnostic comment has
@@ -270,12 +468,10 @@ DISPATCH_TICK_INTERVAL = int(os.environ.get("CHELA_DISPATCH_TICK_INTERVAL", "60"
 # floor times out on EVERY call, silently: this shipped as 10.0s from 2026-07-14 to
 # 2026-07-26 and produced 17,411 identical timeout WARNINGs (~250/hour) before anyone
 # noticed. Give real headroom above the measured worst case — do not "tidy" this back down.
-STATUS_CMD_TIMEOUT_S = float(os.environ.get("CHELA_STATUS_CMD_TIMEOUT_S", "45.0"))
-# How long the background refresher (agent_manager.start_background_refresh) trusts a
-# successful fetch before asking again. Deliberately NOT how long a request blocks — an
-# ordinary request only ever reads the cache; only this periodic thread pays the subprocess
-# cost, off the request path.
-STATUS_TTL_S = float(os.environ.get("CHELA_STATUS_TTL_S", "30.0"))
+# Both STATUS_CMD_TIMEOUT_S and STATUS_TTL_S are now Timing-tab knobs (CMX-217) — see
+# status_cmd_timeout_s() / status_ttl_s() above. agent_manager.py resolves them once at
+# import (same as it always latched these two), so a dashboard write there needs that
+# process restarted — everything else on the Timing tab is read per call.
 
 
 def max_reworks() -> int:
@@ -421,8 +617,8 @@ NOTIFY_INTERVAL = int(os.environ.get("CHELA_NOTIFY_INTERVAL", "20"))
 # (12-18s on its own — CMX-179). At the 300s this shipped with, that is a ~10% permanent
 # duty cycle of subprocess churn on every install, forever, to re-derive a set that is
 # edge-triggered and so almost always unchanged. Raise the cadence only with a fresh
-# measurement of what an audit costs on the box in question.
-DOCTOR_CHECK_INTERVAL = int(os.environ.get("CHELA_DOCTOR_CHECK_INTERVAL", "3600"))
+# measurement of what an audit costs on the box in question. Now a Timing-tab knob
+# (CMX-217) — see doctor_check_interval() above.
 
 # Outbound Telegram relay: post every tool_use/tool_result event as its own
 # message (🔧 Bash / ✅ Bash result). That's a firehose on a phone, so it is OFF

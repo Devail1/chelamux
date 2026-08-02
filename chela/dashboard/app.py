@@ -1812,6 +1812,44 @@ def api_config():
     })
 
 
+@app.route("/api/config/timing", methods=["GET", "POST"])
+@require_auth
+def api_config_timing():
+    """The Timing tab (CMX-217): the "Daemon loop intervals" knob group, made
+    dashboard-writable through the general precedence layer
+    (``chela.config.dashboard_setting`` / ``chela.config.TIMING_KNOBS``) rather
+    than a one-off wiring per knob — the same shape ``/api/config`` already uses
+    for ``projects_dir`` / ``agent_permission_mode`` / ``agent_model``, generalised
+    to a registry instead of three hand-written fields.
+
+    GET reports every knob's stored value (empty if unset), its env-var/built-in
+    fallback default, and the effective (winning) value. POST ``{key: value, ...}``
+    sets one or more by their ``config.json`` key; an empty string clears a key
+    back to its env var / built-in default. Every value is validated server-side
+    (must parse as the knob's numeric type and be greater than zero) — the UI's
+    ``<input>`` is a convenience, not the gate, exactly like the permission-mode
+    and model enums above. The whole POST is ATOMIC: every key is validated
+    before any is applied, so one bad field in a multi-field save rejects 400
+    and leaves every stored value — including the other, valid fields in the
+    same request — untouched, rather than partially applying the batch.
+    """
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        errors: dict[str, str] = {}
+        parsed: dict[str, object] = {}
+        for key, raw in data.items():
+            err, value = config.validate_timing(key, "" if raw is None else str(raw))
+            if err:
+                errors[key] = err
+            else:
+                parsed[key] = value
+        if errors:
+            return jsonify({"error": "invalid timing setting(s)", "errors": errors}), 400
+        for key, value in parsed.items():
+            config.apply_timing(key, value)
+    return jsonify({"knobs": config.timing_snapshot()})
+
+
 def _notify_host(url: str) -> str:
     """Host of the notify URL for display — never the path/query, which for a
     Telegram sendMessage URL carries the bot token. Status surface, not secrets."""
@@ -1940,7 +1978,7 @@ def _settings_status() -> dict:
         n_wf = len(config.DISPATCH_WORKFLOWS)
     dispatch_on = n_wf > 0 and not wf_errors
     dispatch_state = f"{n_wf} workflow{'' if n_wf == 1 else 's'}" if n_wf else "Off"
-    dispatch_detail = (f"every {config.DISPATCH_TICK_INTERVAL}s · auto-discovered" if n_wf
+    dispatch_detail = (f"every {config.dispatch_tick_interval()}s · auto-discovered" if n_wf
                        else "no workflows yet — run `chela dispatch`")
     if wf_errors:
         dispatch_state = "Blocked"
@@ -1984,9 +2022,9 @@ def _settings_status() -> dict:
 
     try:
         n_tasks = len(scheduler.list_tasks())
-        sched_detail = f"every {config.SCHEDULER_POLL_INTERVAL}s · {n_tasks} task{'' if n_tasks == 1 else 's'}"
+        sched_detail = f"every {config.scheduler_poll_interval()}s · {n_tasks} task{'' if n_tasks == 1 else 's'}"
     except Exception:
-        sched_detail = f"every {config.SCHEDULER_POLL_INTERVAL}s"
+        sched_detail = f"every {config.scheduler_poll_interval()}s"
 
     features = [
         {"label": "Terminal wall", "on": config.TERMINALS_ENABLED,
@@ -4115,7 +4153,7 @@ def main():
     _start_notifier()
     # CMX-179 objective 2: keep the native busy/idle status cache warm off the request
     # path — this is the process that actually serves /api/agents, so it is the one that
-    # must pay the (up to config.STATUS_CMD_TIMEOUT_S) subprocess cost, on its own timer,
+    # must pay the (up to config.status_cmd_timeout_s()) subprocess cost, on its own timer,
     # instead of an inbound request paying it inline.
     agent_manager.start_background_refresh()
     collab.start()  # P3: publish running agents as presence peers (to shared viewers)

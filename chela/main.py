@@ -53,18 +53,15 @@ from chela import (
 from chela.personas import autolaunch, lease
 from chela.config import (
     BIND_DISPATCHED,
-    CAPTURE_INTERVAL_SECONDS,
-    CONTEXT_SNAPSHOT_RETENTION_DAYS,
-    SCHEDULER_POLL_INTERVAL,
     DISPATCH_WORKFLOWS,
-    DOCTOR_CHECK_INTERVAL,
     NOTIFY_INTERVAL,
     SHOW_TOOL_CALLS,
     STATUS_LINE,
 )
 
 # Cost history (CMX-94): how often the daemon prunes context_snapshots — coarser
-# than CAPTURE_INTERVAL_SECONDS on purpose, since retention is measured in days.
+# than config.capture_interval_seconds() on purpose, since retention is measured
+# in days.
 PRUNE_INTERVAL_SECONDS = 86400
 
 # Self-update notifier (CMX-142 part 1): how often the daemon fetches upstream to check
@@ -149,7 +146,7 @@ def _due(last: float, now: float, interval: float) -> bool:
 
 
 def maintenance_tick(last_capture: float, now: float,
-                      interval: float = CAPTURE_INTERVAL_SECONDS) -> float:
+                      interval: float | None = None) -> float:
     """Capture context snapshots when due; a no-op otherwise.
 
     Cost-history accrual (CMX-94): `context.capture_all()` writes one
@@ -159,9 +156,15 @@ def maintenance_tick(last_capture: float, now: float,
     every daemon pass) rather than a `chela/scheduler.py` task — that scheduler
     sends prompts to tmux windows; capture is an internal Python call.
 
+    `interval` defaults to `config.capture_interval_seconds()` — resolved HERE,
+    per call, not bound into a default parameter at import — so a Settings write
+    (CMX-217) changes the cadence on the next tick, no restart.
+
     Returns the timestamp to remember as `last_capture` for the next call: `now`
     if capture ran this call, otherwise `last_capture` unchanged.
     """
+    if interval is None:
+        interval = config.capture_interval_seconds()
     if not _due(last_capture, now, interval):
         return last_capture
     try:
@@ -174,7 +177,7 @@ def maintenance_tick(last_capture: float, now: float,
 def cmd_run(args) -> None:
     """Run the daemon loop: scheduler tick every pass, dispatcher on its own cadence."""
     log.info("chela daemon starting (session=%s, poll=%ds)",
-             config.current_session(), SCHEDULER_POLL_INTERVAL)
+             config.current_session(), config.scheduler_poll_interval())
     scheduler.init()  # open the WAL scheduler DB + init schema once, before ticking
     # A new epoch for the event log's cursors. `seq` keeps counting (it is the log's
     # identity), but anything that happened while the daemon was down never reached the
@@ -262,10 +265,11 @@ def cmd_run(args) -> None:
             if _due(last_prune, now, PRUNE_INTERVAL_SECONDS):
                 last_prune = now
                 try:
-                    deleted = context.prune_snapshots(CONTEXT_SNAPSHOT_RETENTION_DAYS)
+                    retention_days = config.context_snapshot_retention_days()
+                    deleted = context.prune_snapshots(retention_days)
                     if deleted:
                         log.info("Pruned %d stale context snapshot(s) (older than %dd)",
-                                  deleted, CONTEXT_SNAPSHOT_RETENTION_DAYS)
+                                  deleted, retention_days)
                 except Exception:
                     log.exception("Context snapshot prune failed")
 
@@ -337,7 +341,7 @@ def cmd_run(args) -> None:
             # on a bounded cadence and pushes every ERROR finding, edge-triggered like the
             # needs-input check above. Logs regardless of notify being configured, so the
             # daemon log itself is a surface even with no push channel set up.
-            if now - last_doctor_check >= DOCTOR_CHECK_INTERVAL:
+            if now - last_doctor_check >= config.doctor_check_interval():
                 try:
                     doctor_red_seen = doctor.check_and_notify(doctor_red_seen)
                 except Exception:
@@ -406,7 +410,7 @@ def cmd_run(args) -> None:
                 log.exception("Room pending-delivery flush failed")
         except Exception:
             log.exception("Error in daemon loop")
-        stop.wait(SCHEDULER_POLL_INTERVAL)
+        stop.wait(config.scheduler_poll_interval())
 
     capabilities.clear()   # nothing is providing these any more; don't let doctor say so
     stop.log_exit()

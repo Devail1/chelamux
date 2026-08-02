@@ -699,6 +699,20 @@ function renderSettings(focus) {
             setting.</p>
         </section>
 
+        <section class="settings-section" id="settings-timing">
+            <h4>Timing</h4>
+            <p class="s-desc">Daemon and dispatcher cadences. Blank a field to fall back to
+            its <code>CHELA_*</code> env var (or the built-in default, shown as its
+            placeholder) — takes effect on the <strong>next tick</strong>, no restart, except
+            the status-feed timeout/TTL pair, which the dashboard/daemon process reads once
+            at startup.</p>
+            <div id="timing-rows" class="s-timing-rows"><div class="s-desc">Loading…</div></div>
+            <div class="s-row">
+                <button class="btn-accent" onclick="chela.saveTiming()">Save</button>
+            </div>
+            <div id="timing-msg" class="s-savemsg"></div>
+        </section>
+
         <section class="settings-section">
             <h4>Needs-input notifications</h4>
             <p class="s-desc">Fires a one-shot ping when an agent's pane enters
@@ -803,6 +817,7 @@ function renderSettings(focus) {
     _loadCollabSetting();
     _loadAgentModeSetting();
     _loadAgentModelSetting();
+    _loadTimingSettings();
     _loadSettingsStatus();
 }
 
@@ -1100,6 +1115,67 @@ async function saveProjectsDir() {
     setMsg('ok', 'Saved · scanning ' + ((cfg && cfg.projects_dir_effective) || inp.value.trim()));
     // Refresh the launch menu so new suggestions appear right away.
     if (typeof refreshLauncher === 'function') refreshLauncher();
+}
+
+// Timing tab (CMX-217): the Daemon-loop-intervals knob group, the first proof
+// of the general dashboard-setting precedence layer (chela.config.dashboard_setting
+// / TIMING_KNOBS). One row per knob — stored value in the field, the effective
+// (env/default-resolved) value as its placeholder, same idiom as projects-dir
+// above — and a single Save button that POSTs every row in one batch, which
+// /api/config/timing validates atomically (all-or-nothing) before applying any.
+function _renderTimingRows(knobs) {
+    const box = document.getElementById('timing-rows');
+    if (!box) return;
+    box.innerHTML = (knobs || []).map(k => `
+        <div class="s-row">
+            <span class="s-rowlabel">${escHtml(k.label)}</span>
+            <input class="s-input s-timing-input" type="number" step="any"
+                   data-timing-key="${attrEsc(k.key)}"
+                   placeholder="${attrEsc(String(k.default))}"
+                   value="${k.stored !== '' && k.stored !== undefined ? attrEsc(String(k.stored)) : ''}">
+            <span class="s-rowunit">${escHtml(k.unit || '')}</span>
+        </div>`).join('');
+}
+
+async function _loadTimingSettings() {
+    const box = document.getElementById('timing-rows');
+    if (!box) return;
+    let body;
+    try {
+        body = await api('/api/config/timing');
+    } catch (e) { box.innerHTML = '<div class="s-desc">(unavailable)</div>'; return; }
+    if (!body || !body.knobs) { box.innerHTML = '<div class="s-desc">(unavailable)</div>'; return; }
+    _renderTimingRows(body.knobs);
+}
+
+async function saveTiming() {
+    const msg = document.getElementById('timing-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    const inputs = document.querySelectorAll('#timing-rows .s-timing-input');
+    const payload = {};
+    inputs.forEach(inp => { payload[inp.dataset.timingKey] = inp.value.trim(); });
+    setMsg('', 'Saving…');
+    let body;
+    try {
+        body = await api('/api/config/timing', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    } catch (e) { setMsg('err', 'Save failed — nothing changed.'); return; }
+    // api() resolves on a 4xx too (the rejection arrives as a body, not a throw) —
+    // the whole batch is atomic server-side, so an error here means NONE of the
+    // fields changed, not just the bad one.
+    if (!body || body.error) {
+        const detail = body && body.errors
+            ? Object.entries(body.errors).map(([k, v]) => k + ': ' + v).join('; ')
+            : 'rejected';
+        setMsg('err', 'Nothing saved — ' + detail);
+        _loadTimingSettings();     // re-show what's actually stored
+        return;
+    }
+    setMsg('ok', 'Saved.');
+    _renderTimingRows(body.knobs);
 }
 
 const THEME_LABELS = {
@@ -1510,4 +1586,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveProjectsDir, saveTiming, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
