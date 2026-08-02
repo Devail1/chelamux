@@ -8,6 +8,13 @@ name: Release
 # CHANGELOG.md's matching section, extracted by the tested `chela.release_notes`
 # module (never inline sed/awk here), so the notes can't drift from what the tag
 # actually documents or be hand-retyped a second time.
+#
+# `--verify-tag` on the publish step is load-bearing, not decoration: `gh release
+# create v<X>` CREATES the tag at the default branch when `v<X>` doesn't already
+# exist, so without it this workflow could tag on the `workflow_dispatch` path
+# (dry_run=false, CHANGELOG section promoted, tag not yet pushed) — exactly the
+# "CI never tags" boundary this header claims. `tests/test_release_workflow.py`
+# guards every invariant in this file; corrupt one and it goes red.
 on:
   push:
     tags:
@@ -64,5 +71,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "v${{ steps.version.outputs.value }}" \
+            --verify-tag \
             --title "v${{ steps.version.outputs.value }}" \
             --notes-file notes.md
