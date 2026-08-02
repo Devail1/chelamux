@@ -63,6 +63,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -515,6 +516,55 @@ def _unresolvable(worktree: Path, names: list[str]) -> list[str]:
     return [n for n in names if not (worktree / "node_modules" / Path(n)).is_dir()]
 
 
+def _venv_python(worktree: Path) -> Path:
+    """Where a ``uv``-managed ``.venv`` puts its interpreter, platform-appropriate."""
+    if os.name == "nt":
+        return worktree / ".venv" / "Scripts" / "python.exe"
+    return worktree / ".venv" / "bin" / "python"
+
+
+def _provision_python_env(worktree: Path, timeout: float = 600.0) -> str:
+    """Make the judge worktree able to RUN a uv-managed Python suite. "" if it can already, or
+    there is no ``pyproject.toml`` to provision for; the reason if it cannot be provisioned.
+
+    ⛔ CMX-218. This module used to assume ``uv run`` re-syncs a missing ``.venv`` on its own,
+    so nothing here provisioned Python at all — only a claim, never checked. It is false:
+    live 2026-08-02 on cmx-217, a judge worktree with no ``.venv`` made
+    ``uv run pytest`` exit 2 (``No such file or directory``) *before collecting a single
+    test*, and a single ``uv sync`` — not a retry, not a wait — was the actual fix. Mirrors
+    ``declared_npm_packages`` / the npm half below: provision in the JUDGED tree, because
+    ``hooks.before_run`` in WORKFLOW.md builds worktrees out of the DAEMON's OLD copy, never
+    the PR's (see the npm docstring below for the full argument).
+
+    ``--all-extras``, matching ``hooks.before_run`` exactly: a bare ``uv sync`` (or the
+    auto-sync a fresh ``uv run`` performs) drops every extra, and dashboard/telegram tests
+    false-fail on a default-only sync (the CMX-21 trap).
+    """
+    if not (worktree / "pyproject.toml").is_file():
+        return ""                       # not a uv-managed Python project — nothing to provision
+    exe = _venv_python(worktree)
+    if exe.is_file():
+        return ""
+    if not shutil.which("uv"):
+        return (f"{worktree}/.venv is missing a Python interpreter and `uv` is not on this "
+                "machine's PATH, so the judge could not provision it either")
+    try:
+        out = subprocess.run(
+            ["uv", "sync", "--all-extras", "--quiet"],
+            cwd=str(worktree), capture_output=True, text=True, errors="replace", timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"`uv sync` did not finish in {timeout:.0f}s in {worktree}"
+    if out.returncode != 0:
+        why = _last_meaningful_line((out.stdout or "") + (out.stderr or ""))
+        return f"`uv sync` failed in {worktree} (exit {out.returncode}{': ' + why if why else ''})"
+    if not exe.is_file():
+        return (f"`uv sync` exited 0 in {worktree} but {exe} is STILL missing — the suite that "
+                "needs it cannot run")
+    log.info("judge: python env provisioned in %s (uv sync created .venv)", worktree)
+    return ""
+
+
 def provision_suite_env(worktree: Path, timeout: float = 600.0) -> str:
     """Make the judge worktree able to RUN the suite. "" if it can; the reason if it cannot.
 
@@ -527,11 +577,15 @@ def provision_suite_env(worktree: Path, timeout: float = 600.0) -> str:
     reports CANNOT VERIFY on itself. A config fix cannot fix the thing that runs before the
     config is merged; only code in the judged tree can, and this is it.
 
-    Python never exposed this because ``uv run`` re-syncs the venv on every invocation — the
-    hook's ``uv sync`` is a speed-up, not a load-bearing step. Node has no equivalent:
-    ``npm ci`` runs once or never. This IS that equivalent, and it belongs here, in the code
-    the judge worktree executes, rather than in a hook the judged commit cannot reach.
+    ⛔ CMX-218: this used to assume Python did not need this treatment, because ``uv run``
+    "re-syncs the venv on every invocation." That is false — see
+    :func:`_provision_python_env`, called first, below — and Python gets the exact same
+    provision-in-the-judged-tree treatment npm already had.
     """
+    python_problem = _provision_python_env(worktree, timeout)
+    if python_problem:
+        return python_problem
+
     names = declared_npm_packages(worktree)
     if not names:
         return ""                       # no npm deps declared — nothing to provision
@@ -630,13 +684,55 @@ def _diagnose_red_baseline(
             capture_output=True, text=True, errors="replace",
         )
         if restore.returncode != 0:
+            # ⛔ CMX-218: name what git actually said, not just that the checkout failed — the
+            # next thing a caller does is treat this worktree as the PR's own HEAD, and if
+            # that is wrong, "could not restore" with no detail sends a human to re-derive
+            # from scratch what git already reported once, on this line, and threw away.
             log.error("judge: could not restore worktree %s to %s after the base_branch "
-                      "diagnostic", worktree, orig_sha)
+                      "diagnostic (git exited %d: %s)", worktree, orig_sha, restore.returncode,
+                      (restore.stderr or "").strip()[:200])
 
     if not base_result.ok:
         return (f"the judge tried `{test_cmd}` against `{ref}` alone and it would not even run "
                 f"({base_result.detail}) — treat this as a problem with the judge's own "
                 "environment, not a verdict on this PR")
+    # ⛔ `ok` only means the subprocess RETURNED — a shell that exits nonzero before a single
+    # test is collected (a missing `.venv`, an unresolved dependency, an import blow-up) looks
+    # identical to a real failure: `ok=True`, exit code nonzero. The tell is the counts —
+    # 0 passed, 0 failed means nothing EVER RAN. Observed live 2026-08-02 on cmx-217:
+    # the judge worktree had no `.venv`, `uv run pytest` exited 2 with "No such file or
+    # directory", and this function reported "RED ON BASE TOO" — sending the operator to fix
+    # `dev`, which was green the whole time. A `uv sync` in the judge's worktree was the actual
+    # fix; nothing about base_branch needed touching.
+    if base_result.exit_code != 0 and base_result.ran == 0:
+        why = base_result.detail or _last_meaningful_line(base_result.tail)
+        if base_result.errors == 0:
+            return (f"the judge tried `{test_cmd}` against `{ref}` alone and it exited "
+                    f"{base_result.exit_code} without running OR erroring a single test (0 "
+                    f"passed, 0 failed, 0 errors{': ' + why if why else ''}) — that is the "
+                    "judge's OWN worktree failing to even START the suite on this checkout, not "
+                    "a real base_branch failure. Treat this as a problem with the judge's "
+                    "environment (e.g. a missing `.venv`/dependency), not a verdict on "
+                    "base_branch or this PR")
+        # ⛔ CMX-218 rework round: `ran == 0` with `errors > 0` is NOT the same clean signal
+        # as the all-zeros case above. It could still be the judge's own environment, one
+        # layer further into collection — reviewer hit exactly this LIVE: a clone missing
+        # `--extra dashboard` produced 40 passed, 45 errors on a full suite; move the
+        # broken import into a shared conftest/fixture and it collapses to 0 passed, 0
+        # failed, N errors, indistinguishable by count from a GENUINE syntax error already
+        # committed on base_branch — which really would be base_branch's problem. Nothing
+        # here can tell those two apart from the counts alone, so unlike the all-zeros
+        # case, this does NOT claim either "the judge's box" or "RED ON BASE TOO" — an
+        # unresolved guess dressed as a fact is worse than an honest unknown.
+        return (f"the judge tried `{test_cmd}` against `{ref}` alone and it exited "
+                f"{base_result.exit_code} without a single test passing or failing, but "
+                f"{base_result.errors} error(s) came out of collection ({_suite_line(base_result)}"
+                f"{': ' + why if why else ''}) — this could be the judge's OWN worktree failing "
+                "to start the suite one layer further into collection (a missing extra or "
+                "dependency breaking a shared import), or a genuine collection-time break "
+                "already on base_branch itself, and the counts alone cannot tell those apart. "
+                "Treat this as UNRESOLVED — not a verdict on base_branch, this PR, or the "
+                "judge's environment")
     if not base_result.green:
         return (f"⛔ RED ON BASE TOO — `{ref}` alone ({_suite_line(base_result)}) is ALSO red. "
                 "This failure predates the PR: it needs a fix on base_branch, not rework here")
@@ -828,12 +924,29 @@ def run_experiments(
         finally:
             # ⛔ ALWAYS. The next experiment's baseline is this file, unmutated.
             restored = True
+            restore_detail = ""
             if applied and original is not None:
                 try:
                     path.write_text(original)
-                    restored = path.read_text() == original
-                except OSError:
+                except OSError as e:
+                    # ⛔ CMX-218: the write itself raised — say what it raised. This is what
+                    # was actually observed, not a guess at why (permissions, a vanished
+                    # parent dir, disk full all raise OSError and all read differently here).
                     restored = False
+                    restore_detail = f"writing the original content back raised: {e}"
+                else:
+                    readback = path.read_text()
+                    restored = readback == original
+                    if not restored:
+                        # ⛔ The write did not raise, but what is on disk now is neither the
+                        # mutation nor the original — something else touched this file between
+                        # the write and the read-back. Report the observed sizes, not a cause;
+                        # a cause here would be invented.
+                        restore_detail = (
+                            f"the write did not raise, but reading {path} back afterward got "
+                            f"{len(readback)} chars where the original was {len(original)} — "
+                            "something else may have written to this file concurrently"
+                        )
         if not restored:
             # ⛔ THE ARTIFACT IS NOW CONTAMINATED. Every experiment after this one would run
             # against a file still carrying the last mutation, so its "the suite went green"
@@ -846,9 +959,11 @@ def run_experiments(
             report.cannot_verify = (
                 f"{exp.file} could NOT be restored after its mutation — the judge worktree is "
                 "contaminated and every measurement after this point would be about code "
-                "nobody wrote. ⛔ Nothing was blocked and nothing was cleared."
+                f"nobody wrote{': ' + restore_detail if restore_detail else ''}. ⛔ Nothing was "
+                "blocked and nothing was cleared."
             )
-            log.error("judge: could not restore %s — abandoning the whole report", path)
+            log.error("judge: could not restore %s — abandoning the whole report (%s)", path,
+                      restore_detail or "no further detail")
             break
 
     return report

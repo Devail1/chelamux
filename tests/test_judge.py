@@ -310,7 +310,35 @@ def test_a_file_that_cannot_be_RESTORED_takes_the_whole_report_down(tmp_path):
     assert report.blocking == []                     # ⛔ a SURVIVED finding, and it BLOCKS NOTHING
     assert report.state == judge.J_CANNOT_VERIFY
     assert "could NOT be restored" in report.cannot_verify
+    # ⛔ CMX-218 rework round: the message is the deliverable here too — a mismatch after a
+    # write that did NOT raise must say what was actually observed (sizes), not just that
+    # restoration failed, or the next reader re-derives by hand what this line already knew.
+    assert "did not raise" in report.cannot_verify
+    assert "afterward got" in report.cannot_verify
     assert len(report.outcomes) == 1                 # it stopped rather than measure a phantom
+
+
+def test_a_restore_write_that_RAISES_names_what_it_raised(tmp_path):
+    """⛔ CMX-218 rework round. The OTHER way a restore can fail — the write itself raises
+    (permissions, a vanished parent dir, disk full) — must be told apart from a silent
+    mismatch: the exception text IS the cause, and it is thrown away if not carried into the
+    report."""
+    root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
+    real_write = Path.write_text
+    calls = {"n": 0}
+
+    def flaky_write(self, data, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 2:                          # the RESTORE of the first experiment
+            raise OSError("no space left on device")
+        return real_write(self, data, *a, **k)
+
+    with patch.object(Path, "write_text", flaky_write):
+        report = _run(root, _exp(), _exp(guard="a second guard, never measured"))
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert "could NOT be restored" in report.cannot_verify
+    assert "no space left on device" in report.cannot_verify
 
 
 def test_a_cannot_verify_report_blocks_nothing_whatever_its_findings_say(tmp_path):
