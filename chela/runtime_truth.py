@@ -1173,6 +1173,14 @@ def _workflows_read() -> Observation:
         if tracker is not None and not Path(tracker).exists():
             states.append({"path": path, "state": "no_tracker", "tracker": tracker})
             continue
+        # A source that parsed but REFUSES to yield work (gh_issues with no
+        # `require_label`). Without this the queue simply reads empty, which is
+        # indistinguishable from "nothing to do" — the exact silent-stall shape
+        # `repo.services_current` exists to prevent elsewhere.
+        config_error = getattr(source, "config_error", None)
+        if config_error:
+            states.append({"path": path, "state": "refusing", "detail": config_error})
+            continue
         states.append({"path": path, "state": "ok", "tracker": tracker,
                        "project": wf.project_key})
     return observed(states)
@@ -1196,6 +1204,10 @@ def _workflows_report(declared: list[Path], obs: Observation) -> list[Finding]:
             ))
         elif state == "no_source":
             out.append(Finding(ERROR, f"{path.name}: unusable tracker", found["detail"]))
+        elif state == "refusing":
+            out.append(Finding(
+                ERROR, f"{path.name}: tracker is refusing to claim work", found["detail"],
+            ))
         elif state == "no_tracker":
             out.append(Finding(
                 ERROR, f"{path.name}: tracker {found['tracker']} does not exist",

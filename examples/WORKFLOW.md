@@ -16,6 +16,15 @@ project_key: PROJ
 
 tracker:
   kind: markdown          # markdown TODO.md (also: gh_issues)
+  # ⛔ For `kind: gh_issues`, `require_label:` is REQUIRED and is a SECURITY control.
+  # Every task the tracker yields becomes an autonomously dispatched agent running on
+  # YOUR machine with YOUR gh credentials, so without a gate anyone who can open an
+  # issue on the repo can run code here. Applying a label needs write access — that is
+  # what makes it a gate, and why it is a label rather than a naming convention.
+  #   require_label: ready-for-agent
+  #   trusted_authors: [your-login]   # optional defence in depth
+  # Unset fails CLOSED and loudly (no work claimed, an ERROR from `chela doctor`);
+  # `require_label: false` opts out deliberately.
   path: TODO.md           # relative to this file
 
 # Optional. Opts into a git-visible, append-only ledger of EVERY dispatched run
