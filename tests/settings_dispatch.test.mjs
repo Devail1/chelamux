@@ -126,6 +126,10 @@ test('opening Settings loads and renders the Dispatch knobs', async () => {
 // over. This is property #4 of settings_timing.test.mjs, for the identical code.
 
 test('Save excludes an env-overridden (disabled) row from the POST body', async () => {
+    // Opens its own drawer: sharing the previous test's DOM made this test's result
+    // depend on that one having run first, so a failure here could mean either "Save
+    // re-posts a disabled row" or "the tab never rendered". Independent tests name
+    // their own cause.
     await openDrawer();
 
     const envRow = document.querySelector('.s-dispatch-input[data-dispatch-key="merge_base"]');
