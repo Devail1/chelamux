@@ -232,6 +232,40 @@ def test_the_worktree_tip_already_being_base_is_named_not_mistaken_for_a_PR_regr
     assert "red on base_branch itself" in cause
 
 
+def test_restore_failure_is_logged_with_the_git_detail(tmp_path, repo, origin, monkeypatch, caplog):
+    """⛔ CMX-218 mutation-round finding. If the checkout back to the PR's own HEAD (the
+    ``finally`` block) fails, this log line is the ONLY record of why — the next thing a
+    caller does is treat this worktree as the PR's own HEAD. "could not restore" with no
+    detail sends a human to re-derive from scratch what git already reported once, on this
+    line, and threw away. Pin the exit code AND the stderr text, not just the bare fact that
+    restoring failed."""
+    _branch_from_head(repo, "pr-1")
+    _commit_on(repo, "pr-1", FAILING_TEST, "the PR breaks its own suite")
+    wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
+    _git("fetch", "origin", "dev", cwd=wt)
+    orig_sha = _git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+
+    real_run = judge.subprocess.run
+    restore_cmd = ["git", "-C", str(wt), "checkout", "--quiet", "--detach", orig_sha]
+
+    def _fake_run(cmd, *args, **kwargs):
+        if cmd == restore_cmd:
+            return subprocess.CompletedProcess(
+                cmd, 128, stdout="", stderr="fatal: unable to restore worktree, on purpose\n",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(judge.subprocess, "run", _fake_run)
+
+    with caplog.at_level("ERROR", logger="chela.judge"):
+        judge._diagnose_red_baseline(wt, TEST_CMD, "dev", 60)
+
+    [record] = [r for r in caplog.records if "could not restore worktree" in r.getMessage()]
+    msg = record.getMessage()
+    assert "128" in msg
+    assert "fatal: unable to restore worktree, on purpose" in msg
+
+
 # --- wired into run_experiments: the cause lands in `cannot_verify` ----------------------
 
 

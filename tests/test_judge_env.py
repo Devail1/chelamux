@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -222,6 +223,29 @@ def test_provision_python_reports_missing_uv_on_path(tmp_path, monkeypatch):
     assert ".venv" in problem
     assert "uv" in problem
     assert str(tmp_path) in problem
+
+
+def test_provision_python_sync_uses_all_extras(tmp_path, monkeypatch):
+    """⛔ CMX-218 mutation-round finding: `test_provision_python_syncs_a_missing_venv` below
+    exercises a pyproject with NO extras declared at all, so it cannot tell `uv sync
+    --all-extras` apart from a bare `uv sync` — the judge fed a mutant that dropped
+    `--all-extras` and the whole suite stayed green. The docstring's entire claim is that
+    `--all-extras` is what makes this match `hooks.before_run` and avoid the CMX-21 trap
+    (dashboard/telegram tests false-failing on a default-only sync); pin the argv directly."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "t"\n')
+    monkeypatch.setattr(judge.shutil, "which", lambda _name: "/usr/bin/uv")
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(judge.subprocess, "run", _fake_run)
+
+    judge._provision_python_env(tmp_path)
+
+    assert len(calls) == 1
+    assert calls[0] == ["uv", "sync", "--all-extras", "--quiet"]
 
 
 def test_provision_python_syncs_a_missing_venv(tmp_path):
