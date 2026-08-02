@@ -29,6 +29,17 @@ history lives in `git log`.
 
 ### Changed
 
+- **The Settings dashboard no longer outranks an operator's exported `CHELA_*`
+  env vars.** Every dashboard-writable knob (the new "Timing" tab's nine, plus
+  `projects_dir`) now resolves env var > `config.json` (what the dashboard
+  wrote) > built-in default — previously `config.json` won, which meant a
+  value clicked in a browser (the dashboard binds loopback with no auth) could
+  silently override a value an operator had explicitly exported. Anyone
+  relying on the old order — setting both `CHELA_PROJECTS_DIR` and a dashboard
+  `projects_dir` and expecting the dashboard value to win — now gets the env
+  value instead. A knob whose env var is set now also reports that in the
+  Timing tab (`source: "env"`) and disables the field rather than offering an
+  edit the env value would silently discard. (CMX-217)
 - **`chela.__version__` is now derived, not a second hardcoded literal.**
   `chela/__init__.py` previously hardcoded its own copy of the version string
   alongside `pyproject.toml`'s — two facts that could (and did) drift. It now reads

@@ -103,18 +103,50 @@ ENV_FILE_VARS: dict[str, str] = load_env_file(ENV_FILE)
 # Until this, exactly THREE knobs were dashboard-writable — projects_dir, the
 # dispatcher's agent permission mode, agent model — each hand-wired at its own read
 # site (chela/launcher.py, chela/dispatcher.py) with its own copy of the same
-# precedence: userconfig.json (what a human set from Settings) beats the env var
-# (already env-file-merged into os.environ by load_env_file above) beats a built-in
-# default. This is that precedence, generalised, so the next ~40 knobs
-# (docs/SETTINGS_UI_INVENTORY.md, CMX-207) are one registry entry each instead of a
-# hand-rolled reader apiece.
+# precedence: the env var (already env-file-merged into os.environ by
+# load_env_file above) beats userconfig.json (what a human set from Settings)
+# beats a built-in default. This is that precedence, generalised, so the next
+# ~40 knobs (docs/SETTINGS_UI_INVENTORY.md, CMX-207) are one registry entry each
+# instead of a hand-rolled reader apiece.
+#
+# DECIDED (Liav, 08-02) — ENV WINS, not the dashboard. The dashboard binds
+# loopback with no auth; a JSON file a browser wrote must never be able to
+# silently override an operator's explicit ``export CHELA_…``. This module's
+# own header already says the environment is the single source of truth — a
+# knob that let a dashboard click outrank it would contradict that on the spot.
+def _resolve_dashboard_setting(key: str, env: str, default, cast):
+    """Resolve one dashboard-writable knob to ``(value, source)``. ``source`` is
+    whichever level actually supplied the winning value — ``"env"``,
+    ``"dashboard"``, or ``"default"`` — not merely whichever is present: a
+    value that fails ``cast`` at a level falls through, and the source
+    reported is the level that actually won.
+    """
+    raw = os.environ.get(env)
+    if raw not in (None, ""):
+        try:
+            return cast(raw), "env"
+        except (TypeError, ValueError):
+            pass
+    try:
+        from chela import userconfig
+        raw = userconfig.get(key)
+    except Exception:      # unreadable/corrupt config.json — fail closed to default
+        raw = None
+    if raw not in (None, ""):
+        try:
+            return cast(raw), "dashboard"
+        except (TypeError, ValueError):
+            pass
+    return default, "default"
+
+
 def dashboard_setting(key: str, env: str, default, cast=str):
     """One dashboard-writable knob, resolved with a fixed precedence (highest first):
 
-      1. ``key`` in ``~/.chela/config.json`` (chela.userconfig) — what the
-         dashboard wrote;
-      2. ``env`` in ``os.environ`` (itself already env-file-merged — a real
+      1. ``env`` in ``os.environ`` (itself already env-file-merged — a real
          export always wins over ``chela.env``, see :func:`load_env_file`);
+      2. ``key`` in ``~/.chela/config.json`` (chela.userconfig) — what the
+         dashboard wrote;
       3. ``default``.
 
     A value that fails ``cast`` (a hand-edited config.json, an env var typo) is
@@ -128,23 +160,7 @@ def dashboard_setting(key: str, env: str, default, cast=str):
     ``chela.userconfig`` imports ``chela.config`` for ``CHELA_DIR``, and a
     module-level import back the other way would be circular.
     """
-    try:
-        from chela import userconfig
-        raw = userconfig.get(key)
-    except Exception:      # unreadable/corrupt config.json — fail closed to env/default
-        raw = None
-    if raw not in (None, ""):
-        try:
-            return cast(raw)
-        except (TypeError, ValueError):
-            pass
-    raw = os.environ.get(env)
-    if raw not in (None, ""):
-        try:
-            return cast(raw)
-        except (TypeError, ValueError):
-            pass
-    return default
+    return _resolve_dashboard_setting(key, env, default, cast)[0]
 
 
 class TimingKnob(NamedTuple):
@@ -158,6 +174,9 @@ class TimingKnob(NamedTuple):
     cast: type
     label: str
     unit: str
+    floor: object = None            # reject a save below this — None = no floor
+    restart_required: bool = False  # resolved once at import elsewhere; a save
+                                     # here needs that process restarted to take effect
 
 
 TIMING_KNOBS: tuple[TimingKnob, ...] = (
@@ -171,10 +190,16 @@ TIMING_KNOBS: tuple[TimingKnob, ...] = (
                30, int, "Context-snapshot retention", "d"),
     TimingKnob("dispatch_tick_interval_seconds", "CHELA_DISPATCH_TICK_INTERVAL",
                60, int, "Dispatcher tick (workflow default)", "s"),
+    # CMX-179: `claude agents --json` warm-starts 17-18s on measured hardware (see
+    # agent_manager.py's diagnostic comment) — a value below that floor times out on
+    # EVERY call, silently, which is the exact regression CMX-179 fixed. The 45.0s
+    # default already IS that floor, so the dashboard must not let a value below it
+    # through (docs/SETTINGS_UI_INVENTORY.md: "do not tune below measured cold-start").
     TimingKnob("status_cmd_timeout_seconds", "CHELA_STATUS_CMD_TIMEOUT_S",
-               45.0, float, "Status-feed subprocess timeout", "s"),
+               45.0, float, "Status-feed subprocess timeout", "s",
+               floor=45.0, restart_required=True),
     TimingKnob("status_ttl_seconds", "CHELA_STATUS_TTL_S",
-               30.0, float, "Status-feed cache TTL", "s"),
+               30.0, float, "Status-feed cache TTL", "s", restart_required=True),
     TimingKnob("doctor_check_interval_seconds", "CHELA_DOCTOR_CHECK_INTERVAL",
                3600, int, "Doctor self-audit cadence", "s"),
     TimingKnob("default_context_window", "CHELA_DEFAULT_CONTEXT_WINDOW",
@@ -191,7 +216,13 @@ def timing_value(key: str):
 
 
 def timing_snapshot() -> list[dict]:
-    """Every Timing knob's stored + effective value, for the Settings API."""
+    """Every Timing knob's stored + effective value, for the Settings API.
+
+    ``source`` says which level actually won — ``"env"``, ``"dashboard"``, or
+    ``"default"`` — so the UI can disable/annotate a row whose env var is set
+    rather than offer an editable field that silently discards the user's
+    input (env always wins, see :func:`dashboard_setting`).
+    """
     try:
         from chela import userconfig
         stored_raw = {k.key: userconfig.get(k.key) for k in TIMING_KNOBS}
@@ -200,11 +231,14 @@ def timing_snapshot() -> list[dict]:
     out = []
     for k in TIMING_KNOBS:
         stored = stored_raw.get(k.key)
+        effective, source = _resolve_dashboard_setting(k.key, k.env, k.default, k.cast)
         out.append({
             "key": k.key, "env": k.env, "label": k.label, "unit": k.unit,
             "default": k.default,
             "stored": stored if stored not in (None, "") else "",
-            "effective": dashboard_setting(k.key, k.env, k.default, cast=k.cast),
+            "effective": effective,
+            "source": source,
+            "restart_required": k.restart_required,
         })
     return out
 
@@ -233,6 +267,9 @@ def validate_timing(key: str, raw: str) -> tuple[str | None, object]:
         return f"{knob.label} must be a number", None
     if value <= 0:
         return f"{knob.label} must be greater than zero", None
+    if knob.floor is not None and value < knob.floor:
+        return (f"{knob.label} must be at least {knob.floor:g}{knob.unit} "
+                f"(CMX-179: below the measured cold-start floor)"), None
     return None, value
 
 

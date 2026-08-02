@@ -704,8 +704,9 @@ function renderSettings(focus) {
             <p class="s-desc">Daemon and dispatcher cadences. Blank a field to fall back to
             its <code>CHELA_*</code> env var (or the built-in default, shown as its
             placeholder) — takes effect on the <strong>next tick</strong>, no restart, except
-            the status-feed timeout/TTL pair, which the dashboard/daemon process reads once
-            at startup.</p>
+            the status-feed timeout/TTL pair (marked below), which the dashboard/daemon
+            process reads once at startup. A knob whose env var is currently set is disabled
+            here — <strong>env always wins</strong>, so an edit would be silently discarded.</p>
             <div id="timing-rows" class="s-timing-rows"><div class="s-desc">Loading…</div></div>
             <div class="s-row">
                 <button class="btn-accent" onclick="chela.saveTiming()">Save</button>
@@ -1119,22 +1120,42 @@ async function saveProjectsDir() {
 
 // Timing tab (CMX-217): the Daemon-loop-intervals knob group, the first proof
 // of the general dashboard-setting precedence layer (chela.config.dashboard_setting
-// / TIMING_KNOBS). One row per knob — stored value in the field, the effective
-// (env/default-resolved) value as its placeholder, same idiom as projects-dir
-// above — and a single Save button that POSTs every row in one batch, which
-// /api/config/timing validates atomically (all-or-nothing) before applying any.
+// / TIMING_KNOBS — env wins over the dashboard). One row per knob — stored value
+// in the field, the effective (env/default-resolved) value as its placeholder,
+// same idiom as projects-dir above — and a single Save button that POSTs every
+// row in one batch, which /api/config/timing validates atomically (all-or-nothing)
+// before applying any.
+//
+// A knob whose env var is currently winning (`k.source === 'env'`) renders its
+// field DISABLED, showing the effective value rather than an editable one — env
+// always wins server-side, so an editable field here would silently discard
+// whatever the user typed. `saveTiming()` below excludes disabled fields from
+// the POST for the same reason: without that, every Save would re-persist the
+// env value into config.json as a "dashboard" value nobody chose, which would
+// then surface the moment the env var was later unset.
 function _renderTimingRows(knobs) {
     const box = document.getElementById('timing-rows');
     if (!box) return;
-    box.innerHTML = (knobs || []).map(k => `
-        <div class="s-row">
-            <span class="s-rowlabel">${escHtml(k.label)}</span>
-            <input class="s-input s-timing-input" type="number" step="any"
+    box.innerHTML = (knobs || []).map(k => {
+        const isEnv = k.source === 'env';
+        const badges =
+            (isEnv ? ` <span class="s-badge on" title="Set by ${attrEsc(k.env)} — env wins over the dashboard.">env</span>` : '') +
+            (k.restart_required ? ' <span class="s-badge off" title="Takes effect after a daemon/dashboard restart, not the next tick.">restart</span>' : '');
+        const input = isEnv
+            ? `<input class="s-input s-timing-input" type="number" step="any"
+                   data-timing-key="${attrEsc(k.key)}" value="${attrEsc(String(k.effective))}" disabled
+                   title="Overridden by ${attrEsc(k.env)} — dashboard edits are ignored while it's set.">`
+            : `<input class="s-input s-timing-input" type="number" step="any"
                    data-timing-key="${attrEsc(k.key)}"
                    placeholder="${attrEsc(String(k.default))}"
-                   value="${k.stored !== '' && k.stored !== undefined ? attrEsc(String(k.stored)) : ''}">
+                   value="${k.stored !== '' && k.stored !== undefined ? attrEsc(String(k.stored)) : ''}">`;
+        return `
+        <div class="s-row">
+            <span class="s-rowlabel">${escHtml(k.label)}${badges}</span>
+            ${input}
             <span class="s-rowunit">${escHtml(k.unit || '')}</span>
-        </div>`).join('');
+        </div>`;
+    }).join('');
 }
 
 async function _loadTimingSettings() {
@@ -1153,7 +1174,9 @@ async function saveTiming() {
     const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
     const inputs = document.querySelectorAll('#timing-rows .s-timing-input');
     const payload = {};
-    inputs.forEach(inp => { payload[inp.dataset.timingKey] = inp.value.trim(); });
+    // Disabled = env-overridden (see _renderTimingRows) — never post those, or
+    // every Save would re-persist the env value into config.json unasked.
+    inputs.forEach(inp => { if (!inp.disabled) payload[inp.dataset.timingKey] = inp.value.trim(); });
     setMsg('', 'Saving…');
     let body;
     try {

@@ -4,7 +4,7 @@
 // what `renderSettings`/`_loadTimingSettings`/`saveTiming` actually produce in
 // the DOM, not a source grep.
 //
-// Three properties:
+// Five properties:
 //
 //   1. 🔴 THE DRAWER RENDERS EVERY KNOB THE SERVER REPORTS, stored value in the
 //      field and the built-in default as its placeholder. Drop the render loop
@@ -14,6 +14,14 @@
 //      a field — this fails on the exact shape the request body must have.
 //   3. 🔴 A SERVER-SIDE REJECTION (400, atomic batch) SURFACES THE FIELD ERROR
 //      AND RE-LOADS what's actually stored — it must not claim "Saved."
+//   4. 🔴 A KNOB WITH `source: "env"` RENDERS ITS FIELD DISABLED (env wins server-
+//      side — an editable field here would silently discard whatever the user
+//      typed) AND SAVE EXCLUDES IT FROM THE POST BODY (else Save would
+//      re-persist the env value into config.json as an unasked-for dashboard
+//      value). Asserting only the editable case cannot catch either regression.
+//   5. 🔴 A KNOB WITH `restart_required: true` ANNOTATES ITS ROW — the tab must
+//      not imply a restart-latched knob takes effect on the next tick like the
+//      rest of the group.
 //
 // Run: node --test tests/settings_timing.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
@@ -29,11 +37,17 @@ const BODY = `
 
 const KNOBS = [
     { key: 'scheduler_poll_interval_seconds', env: 'CHELA_SCHEDULER_POLL_INTERVAL',
-      label: 'Daemon tick', unit: 's', default: 30, stored: '', effective: 30 },
+      label: 'Daemon tick', unit: 's', default: 30, stored: '', effective: 30,
+      source: 'default', restart_required: false },
     { key: 'capture_interval_seconds', env: 'CHELA_CAPTURE_INTERVAL_SECONDS',
-      label: 'Context-snapshot capture cadence', unit: 's', default: 300, stored: '', effective: 300 },
+      label: 'Context-snapshot capture cadence', unit: 's', default: 300, stored: '', effective: 300,
+      source: 'default', restart_required: false },
     { key: 'doctor_check_interval_seconds', env: 'CHELA_DOCTOR_CHECK_INTERVAL',
-      label: 'Doctor self-audit cadence', unit: 's', default: 3600, stored: 1800, effective: 1800 },
+      label: 'Doctor self-audit cadence', unit: 's', default: 3600, stored: 1800, effective: 1800,
+      source: 'dashboard', restart_required: false },
+    { key: 'status_cmd_timeout_seconds', env: 'CHELA_STATUS_CMD_TIMEOUT_S',
+      label: 'Status-feed subprocess timeout', unit: 's', default: 45.0, stored: '', effective: 60.0,
+      source: 'env', restart_required: true },
 ];
 
 let timingGetPayload;
@@ -136,6 +150,8 @@ test('Save posts every field, keyed correctly, and reports success', async () =>
     const sent = JSON.parse(post.opts.body);
     assert.equal(sent.scheduler_poll_interval_seconds, '45');
     assert.equal(sent.doctor_check_interval_seconds, '1800', 'an unedited field was dropped from the batch');
+    assert.ok(!('status_cmd_timeout_seconds' in sent),
+        'an env-overridden (disabled) field was posted — Save would re-persist the env value');
 
     const msg = document.getElementById('timing-msg');
     assert.match(msg.textContent, /Saved/);
@@ -160,4 +176,28 @@ test('a rejected save shows the field error and does not say Saved', async () =>
     assert.doesNotMatch(msg.textContent, /^Saved/);
     assert.match(msg.textContent, /Daemon tick must be a number/);
     assert.ok(msg.className.includes('err'));
+});
+
+// --- 4. 🔴 an env-overridden knob renders disabled, annotated, not editable ---
+
+test('a knob with source "env" renders its field disabled and annotated', async () => {
+    await openDrawer();
+
+    const input = document.querySelector('#timing-rows [data-timing-key="status_cmd_timeout_seconds"]');
+    assert.ok(input, 'env-overridden knob did not get a row at all');
+    assert.equal(input.disabled, true, 'an env-overridden field must not be editable');
+    assert.equal(input.value, '60', 'a disabled field should show the effective (env) value');
+
+    const row = document.getElementById('timing-rows');
+    assert.match(row.textContent, /env/, 'no annotation marks the row as env-overridden');
+});
+
+// --- 5. 🔴 a restart-required knob annotates its row -------------------------
+
+test('a knob with restart_required renders a restart annotation', async () => {
+    await openDrawer();
+
+    const row = document.getElementById('timing-rows');
+    assert.match(row.textContent, /restart/i,
+        'the status-feed timeout/TTL pair needs a restart but the tab does not say so');
 });

@@ -30,13 +30,16 @@ _MAX_RECENT = 12
 
 # Base dir scanned for "add a favorite" suggestions (immediate git-repo subdirs).
 # Resolved fresh each call (not cached at import) so the Settings drawer can
-# change it at runtime without a restart. Precedence: the GUI-set value in
-# config.json, then the CHELA_PROJECTS_DIR env var, then ~/projects. No personal
-# paths are baked in, so a fresh public install suggests nothing surprising.
+# change it at runtime without a restart. Precedence: the CHELA_PROJECTS_DIR env
+# var, then the GUI-set value in config.json, then ~/projects (CMX-217: env wins
+# — the same order every other dashboard-writable knob now follows, via
+# chela.config.dashboard_setting; a value the dashboard wrote must never
+# silently outrank an operator's explicit export). No personal paths are baked
+# in, so a fresh public install suggests nothing surprising.
 def _projects_dir() -> Path:
     from chela import userconfig
-    val = (userconfig.get("projects_dir")
-           or os.environ.get("CHELA_PROJECTS_DIR")
+    val = (os.environ.get("CHELA_PROJECTS_DIR")
+           or userconfig.get("projects_dir")
            or str(Path.home() / "projects"))
     return Path(os.path.expanduser(val))
 

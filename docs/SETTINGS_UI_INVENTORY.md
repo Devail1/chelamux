@@ -100,11 +100,14 @@ and a mutability class:
 
 **✅ Done.** These were the strongest tab candidate (all `hot`, no trust-boundary
 concerns, no validation beyond "is it a number") — CMX-217 built the general
-dashboard-setting precedence layer (`chela.config.dashboard_setting()`: userconfig.json
-beats the env var beats the built-in default, same rule the pre-existing `projects_dir`
-/ `agent_permission_mode` / `agent_model` controls already used, generalised into a
-registry — `chela.config.TIMING_KNOBS`) and proved it end to end on this exact group: a
-"Timing" section in the Settings drawer, backed by `GET`/`POST /api/config/timing`.
+dashboard-setting precedence layer (`chela.config.dashboard_setting()`: the env var
+beats userconfig.json beats the built-in default — the dashboard binds loopback with no
+auth, so a value it wrote must never silently outrank an operator's explicit `export
+CHELA_…`, same rule `projects_dir` / `agent_permission_mode` / `agent_model` now follow,
+generalised into a registry — `chela.config.TIMING_KNOBS`) and proved it end to end on
+this exact group: a "Timing" section in the Settings drawer, backed by `GET`/`POST
+/api/config/timing`. A knob whose env var is set reports `source: "env"` and the drawer
+disables that row rather than offering an edit the env value would silently override.
 
 Because each is now read via `config.dashboard_setting()` (the env-var name is a runtime
 argument, not a literal `os.environ.get("CHELA_…")` call), they no longer show up in the
@@ -117,7 +120,8 @@ reads: `CHELA_SCHEDULER_POLL_INTERVAL` (daemon tick, s, default `30`),
 `CHELA_CONTEXT_RETENTION_DAYS` (snapshot pruning window, days, default `30`),
 `CHELA_DISPATCH_TICK_INTERVAL` (dispatcher tick fallback, s, default `60`),
 `CHELA_STATUS_CMD_TIMEOUT_S` (`claude agents --json` timeout, s, default `45.0` — see
-CMX-179, do not tune below measured cold-start), `CHELA_STATUS_TTL_S` (status-cache TTL,
+CMX-179; the dashboard write path rejects anything below `45.0`, the measured
+cold-start floor), `CHELA_STATUS_TTL_S` (status-cache TTL,
 s, default `30.0`), `CHELA_DOCTOR_CHECK_INTERVAL` (self-audit cadence, s, default
 `3600`), `CHELA_DEFAULT_CONTEXT_WINDOW` (fallback context-window size, tokens, default
 `200000`).
