@@ -13,12 +13,39 @@ import re
 import sys
 from pathlib import Path
 
-# `## [X.Y.Z] — YYYY-MM-DD` or `## [Unreleased]` — see CHANGELOG.md.
-_HEADING = re.compile(r"(?m)^## \[(?P<version>[^\]]+)\](?:\s*—.*)?$")
+# `## [X.Y.Z] — YYYY-MM-DD` or `## [Unreleased]` — see CHANGELOG.md. The suffix
+# is captured whole (not restricted to a separator) so a heading is never
+# invisible to this parser; `_iter_headings` below is what actually validates
+# the separator and raises loudly on one it doesn't recognise.
+_HEADING = re.compile(r"(?m)^## \[(?P<version>[^\]]+)\](?P<suffix>.*)$")
+
+# Keep a Changelog (which CHANGELOG.md cites) dates headings with an ASCII
+# hyphen; this file's own headings use an em dash. Accept both, plus an en
+# dash and no date at all (e.g. `## [Unreleased]`).
+_KNOWN_SEPARATOR = re.compile(r"^(?:\s*[-–—].*)?$")
 
 
 class ReleaseNotFoundError(ValueError):
     """No matching `## [version]` section exists in the changelog."""
+
+
+class UnrecognisedHeadingError(ValueError):
+    """A `## [version]` heading's suffix uses a separator this parser doesn't know."""
+
+
+def _iter_headings(changelog_text: str):
+    """Yield every `## [version]` heading match, raising loudly instead of
+    silently dropping one whose suffix uses a separator we don't recognise.
+    """
+    for match in _HEADING.finditer(changelog_text):
+        suffix = match.group("suffix")
+        if not _KNOWN_SEPARATOR.match(suffix):
+            raise UnrecognisedHeadingError(
+                f"heading '## [{match.group('version')}]{suffix}' uses a "
+                "separator this parser doesn't recognise (expected '-', "
+                "'–', '—', or nothing after the version)"
+            )
+        yield match
 
 
 def extract_release_notes(changelog_text: str, version: str) -> str:
@@ -28,7 +55,7 @@ def extract_release_notes(changelog_text: str, version: str) -> str:
     the `---` rule that separates release sections from this file's trailing
     process note (see the bottom of CHANGELOG.md).
     """
-    headings = list(_HEADING.finditer(changelog_text))
+    headings = list(_iter_headings(changelog_text))
     start = next((m for m in headings if m.group("version") == version), None)
     if start is None:
         raise ReleaseNotFoundError(f"no '## [{version}]' section in this changelog")
@@ -48,7 +75,7 @@ def latest_released_version(changelog_text: str) -> str:
     Sections are newest-first by this changelog's own convention (Keep a
     Changelog), so the first non-`Unreleased` heading found is the latest release.
     """
-    for match in _HEADING.finditer(changelog_text):
+    for match in _iter_headings(changelog_text):
         version = match.group("version")
         if version != "Unreleased":
             return version

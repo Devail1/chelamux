@@ -13,6 +13,7 @@ import pytest
 
 from chela.release_notes import (
     ReleaseNotFoundError,
+    UnrecognisedHeadingError,
     extract_release_notes,
     latest_released_version,
 )
@@ -77,6 +78,47 @@ def test_latest_released_version_skips_unreleased():
 def test_latest_released_version_requires_a_dated_section():
     with pytest.raises(ReleaseNotFoundError):
         latest_released_version("## [Unreleased]\n\n- nothing shipped yet\n")
+
+
+# Keep a Changelog — the spec CHANGELOG.md itself links to — dates headings
+# with a plain ASCII hyphen (`## [1.0.0] - 2017-06-20`), not this project's
+# em dash. A contributor following that spec must still parse correctly.
+_HYPHEN_SAMPLE = """\
+# Changelog
+
+## [Unreleased]
+
+- some unreleased line
+
+## [2.0.0] - 2026-02-02
+
+### Added
+
+- second release body
+
+## [1.0.0] - 2026-01-01
+
+### Added
+
+- first release body
+"""
+
+
+def test_extracts_body_of_a_hyphen_dated_heading():
+    notes = extract_release_notes(_HYPHEN_SAMPLE, "2.0.0")
+    assert notes == "### Added\n\n- second release body\n"
+
+
+def test_latest_released_version_finds_a_hyphen_dated_newest_release():
+    assert latest_released_version(_HYPHEN_SAMPLE) == "2.0.0"
+
+
+def test_heading_with_unrecognised_separator_raises_instead_of_vanishing():
+    corrupted = _HYPHEN_SAMPLE.replace("## [2.0.0] - 2026-02-02", "## [2.0.0] (final)")
+    with pytest.raises(UnrecognisedHeadingError):
+        extract_release_notes(corrupted, "1.0.0")
+    with pytest.raises(UnrecognisedHeadingError):
+        latest_released_version(corrupted)
 
 
 def test_real_changelog_0_3_0_section_does_not_leak_0_2_0():
