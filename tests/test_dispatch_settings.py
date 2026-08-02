@@ -494,3 +494,49 @@ def test_post_rejects_an_unknown_key(mods, client):
     resp = client.post("/api/config/dispatch", json={"not_a_real_knob": "5"})
     assert resp.status_code == 400
     assert "not_a_real_knob" in resp.get_json()["errors"]
+
+
+# --- WIRING: the two gate knobs must reach chela.gateanswer ---------------------
+#
+# The judge reached past both: no test imported `gateanswer`, so the knobs could be
+# registered, validated, persisted and rendered while the module that consumes them
+# still read its own literal. "Registered" is not "wired".
+
+
+def test_gate_wait_seconds_reaches_gateanswer_wait_budget(mods):
+    """🔴 A dashboard-written `gate_wait_seconds` must change what `wait_budget()`
+    returns. ⚠️ The value is CLAMPED to `max(1.0, GATE_TIMEOUT - 5.0)`, so pick one
+    comfortably under the ceiling — a value above it would be clamped and the test
+    would pass for the wrong reason (it would read the ceiling, not the knob)."""
+    config, userconfig = mods
+    from chela import gateanswer
+
+    from chela.hooks import GATE_TIMEOUT
+    ceiling = max(1.0, GATE_TIMEOUT - 5.0)
+    wanted = max(1.0, ceiling - 3.0)
+    assert wanted < ceiling, "pick a value the clamp cannot mask"
+
+    assert config.set_dispatch("gate_wait_seconds", str(wanted)) is None
+    assert gateanswer.wait_budget() == wanted
+
+
+def test_gate_max_waits_reaches_gateanswer_max_waits(mods):
+    """🔴 Same for `gate_max_waits`. 7 is arbitrary but must not equal the default,
+    or a literal read would pass."""
+    config, userconfig = mods
+    from chela import gateanswer
+
+    assert 7 != gateanswer.DEFAULT_MAX_WAITS, "pick a value that is not the default"
+    assert config.set_dispatch("gate_max_waits", "7") is None
+    assert gateanswer.max_waits() == 7
+
+
+def test_gate_knobs_fall_back_to_their_defaults_when_nothing_is_stored(mods):
+    """⭐ COUNTERWEIGHT for both of the above: with nothing written, the module's own
+    defaults still apply. Without this, an implementation that always returned the
+    dashboard value — or always returned the knob regardless of storage — passes."""
+    config, userconfig = mods
+    from chela import gateanswer
+
+    assert gateanswer.max_waits() == gateanswer.DEFAULT_MAX_WAITS
+    assert gateanswer.wait_budget() > 0
