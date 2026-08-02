@@ -307,12 +307,9 @@ macOS-onboarding and fleet-safety push.
 
 ---
 
-This file is the source of the release notes, not a copy of them: each `git tag`
-(`vX.Y.Z`) points at the commit that bumped `pyproject.toml`'s `version`, and its
-GitHub Release body is the matching section above, pasted in verbatim — see
-"Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md) for the exact steps. Add a new
-entry under `## [Unreleased]` per user-facing PR; it becomes a numbered section,
-and a tag + release, the next time `chelamux` cuts one.
+Add an entry under `## [Unreleased]` per user-facing PR. It becomes a numbered
+section — and a tag, and a GitHub Release built from it — the next time chelamux
+cuts one; see "Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 [0.3.0]: https://github.com/Devail1/chelamux/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Devail1/chelamux/releases/tag/v0.2.0
