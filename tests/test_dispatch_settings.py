@@ -56,6 +56,36 @@ def _stored(config) -> dict:
         return {}
 
 
+def _restore_latched_modules(monkeypatch, config, userconfig, contract=None):
+    """Undo this test's env/CHELA_DIR overrides and reload the shared latched
+    modules back to their pristine (no env, no userconfig) state.
+
+    ``importlib.reload`` mutates the ACTUAL module object in ``sys.modules`` —
+    every other test file's ``from chela import config`` (or ``contract``) sees
+    that SAME object — so a test proving "restart picks up the new value" by
+    reloading it must put it back, or the value it left behind
+    (``JUDGE_ENABLED=False``, ``AUTONOMOUS_BASE="release-train"``…) leaks into
+    every later test in this pytest-xdist worker: order-dependent, and
+    invisible on a machine where the files happen to land on different
+    workers (exactly how this shipped green locally and red in CI).
+
+    Reload order matters and is NOT ``config, userconfig`` — it is
+    ``config, userconfig, config`` (``contract`` last, if given):
+    ``userconfig._PATH`` is latched from ``config.CHELA_DIR`` at ITS import, so
+    it must reload AFTER config's env-driven ``CHELA_DIR`` is current; but
+    config's OWN ``JUDGE_ENABLED``/``CRITIC_ENABLED``/``DISPATCH_WORKFLOWS`` read
+    back through ``userconfig`` (``config.dashboard_setting`` calls
+    ``userconfig.get``), so config must reload a SECOND time, after userconfig
+    is already fresh, or it latches the stale userconfig's leftover values.
+    """
+    monkeypatch.undo()
+    importlib.reload(config)
+    importlib.reload(userconfig)
+    importlib.reload(config)
+    if contract is not None:
+        importlib.reload(contract)
+
+
 # --- the registry itself -----------------------------------------------------
 
 def test_registry_has_exactly_the_nine_settings_inventory_knobs(mods):
@@ -280,6 +310,9 @@ def test_judge_and_critic_enabled_are_latched_not_live(tmp_path, monkeypatch):
     importlib.reload(config)
     assert config.JUDGE_ENABLED is False          # the "restart" picks it up
 
+    _restore_latched_modules(monkeypatch, config, userconfig)
+    assert config.JUDGE_ENABLED is True
+
 
 def test_dispatch_workflows_is_latched_not_live(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_DIR", str(tmp_path / "chela"))
@@ -298,6 +331,9 @@ def test_dispatch_workflows_is_latched_not_live(tmp_path, monkeypatch):
 
     importlib.reload(config)
     assert config.DISPATCH_WORKFLOWS == [wf.resolve()]
+
+    _restore_latched_modules(monkeypatch, config, userconfig)
+    assert config.DISPATCH_WORKFLOWS == []
 
 
 def test_autonomous_base_reads_through_the_dispatch_registry(tmp_path, monkeypatch):
@@ -322,6 +358,9 @@ def test_autonomous_base_reads_through_the_dispatch_registry(tmp_path, monkeypat
     monkeypatch.setenv("CHELA_MERGE_BASE", "release-train")
     importlib.reload(contract)
     assert contract.AUTONOMOUS_BASE == "release-train"   # env still wins
+
+    _restore_latched_modules(monkeypatch, config, userconfig, contract)
+    assert contract.AUTONOMOUS_BASE == "dev"
 
 
 # --- the write path (POST /api/config/dispatch) --------------------------------
