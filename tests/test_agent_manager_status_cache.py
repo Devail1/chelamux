@@ -181,6 +181,22 @@ def test_a_pid_whose_proc_start_time_cannot_be_read_is_absent_from_started_by_pi
     assert 1339280 not in m["started_by_pid"]
 
 
+def test_started_for_pid_never_spawns_a_subprocess(monkeypatch):
+    """Same budget guard as `session_and_cwd_for_pid` (CMX-184/CMX-219):
+    `sessions.resolve_window` runs on the hook path with an agent BLOCKED on it, and
+    `started_for_pid` is documented as a pure cache read — it must never itself trigger
+    `claude agents --json`, cold cache or not."""
+    calls = []
+
+    def boom(cmd, **kw):
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd, 1)
+    monkeypatch.setattr(agent_manager.subprocess, "run", boom)
+
+    assert agent_manager.started_for_pid(1339280) is None
+    assert calls == [], "started_for_pid must never spawn a subprocess"
+
+
 def test_session_and_cwd_for_pid_reads_the_captured_map(monkeypatch):
     run, _n = _counting_run(_WITH_SESSION)
     monkeypatch.setattr(agent_manager.subprocess, "run", run)
