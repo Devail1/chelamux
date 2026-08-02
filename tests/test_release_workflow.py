@@ -76,12 +76,19 @@ def test_notes_are_never_built_by_inline_sed_or_awk(steps):
 
 
 def test_a_dispatch_dry_run_publishes_nothing(steps):
-    """Invariant 2 — corrupt to `if: always()` (the judge's mutation) and this reddens."""
+    """Invariant 2 — corrupt to `if: always()` (the judge's mutation) and this reddens.
+
+    Pinned to the EXACT condition, not to "mentions workflow_dispatch and dry_run".
+    The weaker form is satisfied by `inputs.dry_run == true` — an inversion that
+    publishes on exactly the runs meant to publish nothing, while still naming both
+    terms. A guard that a semantic inversion survives is checking spelling.
+    """
     publish = _step_running(steps, "gh release create")
-    condition = publish.get("if", "")
-    assert "workflow_dispatch" in condition and "dry_run" in condition, (
-        f"the publish step's `if:` is {condition!r} — it must stay conditioned on the "
-        "workflow_dispatch/dry_run pair, or a dry run publishes a real release"
+    expected = "github.event_name != 'workflow_dispatch' || inputs.dry_run == false"
+    assert publish.get("if", "") == expected, (
+        f"the publish step's `if:` is {publish.get('if')!r}, expected {expected!r} — "
+        "it must stay conditioned on the workflow_dispatch/dry_run pair, or a dry run "
+        "publishes a real release"
     )
 
 
@@ -112,8 +119,18 @@ def test_ci_never_pushes_a_tag_itself(steps):
 
 
 def test_the_job_skips_cleanly_on_a_fork(job):
-    """Invariant 4 — a fork must not fail red trying to publish someone else's release."""
-    assert "github.repository ==" in job.get("if", "")
+    """Invariant 4 — a fork must not fail red trying to publish someone else's release.
+
+    ⛔ Asserts the repository this compares AGAINST, not merely that a comparison
+    exists. The first version of this test checked `"github.repository ==" in ...`,
+    and the judge killed it by pointing the guard at `Devail1/chelamux-does-not-exist`
+    — a one-word edit that makes the release job never run ANYWHERE while leaving the
+    assertion perfectly green. Presence is not a value.
+    """
+    assert job.get("if", "") == "github.repository == 'Devail1/chelamux'", (
+        f"the job's `if:` is {job.get('if')!r} — it must gate on this repository "
+        "exactly; a comparison against any other name silently disables releases"
+    )
 
 
 def test_the_workflow_reacts_to_tags_it_did_not_create(workflow):
