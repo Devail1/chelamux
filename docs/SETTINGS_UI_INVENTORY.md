@@ -12,10 +12,13 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**58** — every literal `CHELA_*` name a Python module in `chela/` reads straight off
-`os.environ`. `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs
-this scan and diffs it against the table below on every `pytest` run, so the count can't go
-stale the way the README config table twice has (CMX-…, see `docs/CONFIG.md` history).
+**49** (was 58 — CMX-217 wired the 9-strong "Daemon loop intervals" group below through
+`chela.config.dashboard_setting()`, its precedence layer, so those 9 are no longer a
+*literal* `os.environ.get("CHELA_…")` call site — see "Wired (CMX-217)" under Group 2) —
+every literal `CHELA_*` name a Python module in `chela/` reads straight off `os.environ`.
+`tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
+diffs it against the table below on every `pytest` run, so the count can't go stale the way
+the README config table twice has (CMX-…, see `docs/CONFIG.md` history).
 
 The Settings drawer (`chela/dashboard/static/js/nav.js`) writes exactly **two** of them
 back to a server-side store: `chela.saveProjectsDir()` → `CHELA_PROJECTS_DIR` and
@@ -93,19 +96,40 @@ and a mutability class:
 | `CHELA_ENV_FILE` | `$CHELA_DIR/chela.env` | Which file *is* the config. Empty disables the file entirely. |
 | `CHELA_TMUX_SESSION` | `chela` | The tmux session orchestrated. Auto-derives from the caller's own pane if unset — a UI toggle would fight that fallback. |
 
-### 2. Daemon loop intervals (9) — `hot`, the strongest tab candidate
+### 2. Daemon loop intervals (9) — WIRED (CMX-217), the Timing tab
 
-| Variable | Default | Notes |
-|---|---|---|
-| `CHELA_SCHEDULER_POLL_INTERVAL` | `30` | Daemon tick (s) |
-| `CHELA_CAPTURE_INTERVAL_SECONDS` | `300` | Context-snapshot cadence (s) |
-| `CHELA_CACHE_STALE_SECONDS` | `7200` | Skip statusLine caches older than this |
-| `CHELA_CONTEXT_RETENTION_DAYS` | `30` | Snapshot pruning window (days) |
-| `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick inside the daemon (s) |
-| `CHELA_STATUS_CMD_TIMEOUT_S` | `45.0` | `claude agents --json` timeout — see CMX-179, do not tune below measured cold-start |
-| `CHELA_STATUS_TTL_S` | `30.0` | How long the status cache is trusted between refreshes |
-| `CHELA_DOCTOR_CHECK_INTERVAL` | `3600` | How often the daemon self-runs `chela doctor` and pushes ERRORs |
-| `CHELA_DEFAULT_CONTEXT_WINDOW` | `200000` | Fallback context-window size assumption |
+**✅ Done.** These were the strongest tab candidate (all `hot`, no trust-boundary
+concerns, no validation beyond "is it a number") — CMX-217 built the general
+dashboard-setting precedence layer (`chela.config.dashboard_setting()`: the env var
+beats userconfig.json beats the built-in default — the dashboard binds loopback with no
+auth, so a value it wrote must never silently outrank an operator's explicit `export
+CHELA_…`, same rule `projects_dir` / `agent_permission_mode` / `agent_model` now follow,
+generalised into a registry — `chela.config.TIMING_KNOBS`) and proved it end to end on
+this exact group: a "Timing" section in the Settings drawer, backed by `GET`/`POST
+/api/config/timing`. A knob whose env var is set reports `source: "env"` and the drawer
+disables that row rather than offering an edit the env value would silently override.
+
+Because each is now read via `config.dashboard_setting()` (the env-var name is a runtime
+argument, not a literal `os.environ.get("CHELA_…")` call), they no longer show up in the
+raw-reads scan above — they are still real, settable env vars (unset falls through to
+them exactly as before), just no longer *only* reachable that way. Not a table row here
+on purpose, so `test_inventory_matches_env_reads` doesn't expect them back as literal
+reads: `CHELA_SCHEDULER_POLL_INTERVAL` (daemon tick, s, default `30`),
+`CHELA_CAPTURE_INTERVAL_SECONDS` (context-snapshot cadence, s, default `300`),
+`CHELA_CACHE_STALE_SECONDS` (skip statusLine caches older than this, s, default `7200`),
+`CHELA_CONTEXT_RETENTION_DAYS` (snapshot pruning window, days, default `30`),
+`CHELA_DISPATCH_TICK_INTERVAL` (dispatcher tick fallback, s, default `60`),
+`CHELA_STATUS_CMD_TIMEOUT_S` (`claude agents --json` timeout, s, default `45.0` — see
+CMX-179; the dashboard write path rejects anything below `45.0`, the measured
+cold-start floor), `CHELA_STATUS_TTL_S` (status-cache TTL,
+s, default `30.0`), `CHELA_DOCTOR_CHECK_INTERVAL` (self-audit cadence, s, default
+`3600`), `CHELA_DEFAULT_CONTEXT_WINDOW` (fallback context-window size, tokens, default
+`200000`).
+
+Two of the nine (`CHELA_STATUS_CMD_TIMEOUT_S` / `CHELA_STATUS_TTL_S`) are resolved once
+at `chela/agent_manager.py` import, same as they always were — a dashboard write to
+either needs that process restarted; the other seven are read per call and take effect
+on the next tick/request with no restart.
 
 ### 3. Dispatch / judge / critic policy (9) — `hot`, second-strongest tab candidate
 
@@ -226,7 +250,7 @@ readout:
 
 | Candidate tab | Writable knobs | Today |
 |---|---|---|
-| Daemon intervals | 9 | 0 |
+| Daemon intervals (Timing) | 9 | **9** (CMX-217) |
 | Dispatch / judge / critic | 9 | 0 |
 | Notifications | ~6 of 9 | 0 |
 | Telegram | 3 of 4 | 0 |
@@ -242,3 +266,11 @@ into checkboxes would be quietly loosening a trust boundary `userconfig.py` was 
 protect. A tabbed modal is the right container for the ~40; it should render the other ~18
 as read-only facts (extending the existing Connections & Status pattern) rather than skip
 them or make them editable.
+
+**CMX-217 (this ticket)** built the precedence layer the whole ~40 count depends on
+(`chela.config.dashboard_setting()` + a per-tab knob registry, e.g.
+`chela.config.TIMING_KNOBS`) and proved it on the cheapest group — Daemon intervals,
+renamed "Timing" in the UI. The other ~31 (Dispatch/judge/critic, Notifications,
+Telegram, Terminal wall, Collaboration, the remaining Launcher knobs) are now each a
+registry entry + an API route + a drawer section away, not a new precedence design —
+that was the actual gap this doc originally measured.

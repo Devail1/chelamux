@@ -1,5 +1,6 @@
 """Tests for the dashboard-editable user config + the launcher's projects-dir
-resolution precedence (config.json > CHELA_PROJECTS_DIR env > ~/projects).
+resolution precedence (CMX-217: CHELA_PROJECTS_DIR env > config.json > ~/projects
+— env wins, same order every dashboard-writable knob now follows).
 
 Everything runs against a temp CHELA_DIR so no real ~/.chela state is touched.
 """
@@ -39,20 +40,20 @@ def test_missing_file_reads_empty(mods):
     assert userconfig._load() == {}
 
 
-def test_projects_dir_precedence(mods, monkeypatch):
+def test_projects_dir_precedence_env_beats_config_beats_default(mods, monkeypatch):
     config, userconfig, launcher = mods
 
     # Default when nothing is set.
     assert launcher._projects_dir().name == "projects"
 
-    # Env beats default.
-    monkeypatch.setenv("CHELA_PROJECTS_DIR", "/tmp/env-projects")
-    assert str(launcher._projects_dir()) == "/tmp/env-projects"
-
-    # Config beats env.
+    # Config beats default when env is unset.
     userconfig.set_("projects_dir", "/tmp/cfg-projects")
     assert str(launcher._projects_dir()) == "/tmp/cfg-projects"
 
-    # Clearing config falls back to env again.
-    userconfig.set_("projects_dir", "")
+    # Env beats config.
+    monkeypatch.setenv("CHELA_PROJECTS_DIR", "/tmp/env-projects")
     assert str(launcher._projects_dir()) == "/tmp/env-projects"
+
+    # Clearing env falls back to config again.
+    monkeypatch.delenv("CHELA_PROJECTS_DIR", raising=False)
+    assert str(launcher._projects_dir()) == "/tmp/cfg-projects"

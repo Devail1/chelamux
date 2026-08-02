@@ -3210,6 +3210,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .s-savemsg:empty { display: none; }
 .s-savemsg.ok { color: var(--green); }
 .s-savemsg.err { color: var(--red); }
+/* Timing tab (CMX-217): one label + numeric input + unit per knob, narrower than
+   the free-text .s-input rows above since every value here is a short number. */
+.s-timing-rows .s-input { flex: 0 1 90px; text-align: right; }
+.s-timing-rows .s-input:disabled { opacity: 0.55; cursor: not-allowed; }
+.s-rowunit { color: var(--text-dim); font-size: 11px; min-width: 44px; }
 .s-badge {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
     padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);

@@ -123,7 +123,7 @@ def effective() -> list[Capability]:
         label="Work dispatcher",
         on=bool(workflows),
         detail=(f"{n} workflow{'' if n == 1 else 's'}, every "
-                f"{config.DISPATCH_TICK_INTERVAL}s: {names}" if workflows else
+                f"{config.dispatch_tick_interval()}s: {names}" if workflows else
                 "CHELA_DISPATCH_WORKFLOWS is empty — NO task will ever be claimed from a "
                 "tracker"),
         fix=dispatch_fix,
@@ -148,12 +148,12 @@ def effective() -> list[Capability]:
     return [
         Capability(
             key="scheduler", label="Scheduler", on=True,
-            detail=f"polling every {config.SCHEDULER_POLL_INTERVAL}s",
+            detail=f"polling every {config.scheduler_poll_interval()}s",
         ),
         Capability(
             key="capture", label="Cost history capture", on=True,
-            detail=(f"context_snapshots every {config.CAPTURE_INTERVAL_SECONDS}s, "
-                    f"{config.CONTEXT_SNAPSHOT_RETENTION_DAYS}d retention"),
+            detail=(f"context_snapshots every {config.capture_interval_seconds()}s, "
+                    f"{config.context_snapshot_retention_days()}d retention"),
         ),
         dispatch,
         reconcile,
