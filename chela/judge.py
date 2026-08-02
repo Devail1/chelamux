@@ -637,6 +637,22 @@ def _diagnose_red_baseline(
         return (f"the judge tried `{test_cmd}` against `{ref}` alone and it would not even run "
                 f"({base_result.detail}) — treat this as a problem with the judge's own "
                 "environment, not a verdict on this PR")
+    # ⛔ `ok` only means the subprocess RETURNED — a shell that exits nonzero before a single
+    # test is collected (a missing `.venv`, an unresolved dependency, an import blow-up) looks
+    # identical to a real failure: `ok=True`, exit code nonzero. The tell is the counts —
+    # 0 passed, 0 failed, 0 errors means nothing EVER RAN. Observed live 2026-08-02 on cmx-217:
+    # the judge worktree had no `.venv`, `uv run pytest` exited 2 with "No such file or
+    # directory", and this function reported "RED ON BASE TOO" — sending the operator to fix
+    # `dev`, which was green the whole time. A `uv sync` in the judge's worktree was the actual
+    # fix; nothing about base_branch needed touching.
+    if base_result.exit_code != 0 and base_result.ran == 0 and base_result.errors == 0:
+        why = base_result.detail or _last_meaningful_line(base_result.tail)
+        return (f"the judge tried `{test_cmd}` against `{ref}` alone and it exited "
+                f"{base_result.exit_code} without running OR erroring a single test (0 passed, "
+                f"0 failed, 0 errors{': ' + why if why else ''}) — that is the judge's OWN "
+                "worktree failing to even START the suite on this checkout, not a real "
+                "base_branch failure. Treat this as a problem with the judge's environment "
+                "(e.g. a missing `.venv`/dependency), not a verdict on base_branch or this PR")
     if not base_result.green:
         return (f"⛔ RED ON BASE TOO — `{ref}` alone ({_suite_line(base_result)}) is ALSO red. "
                 "This failure predates the PR: it needs a fix on base_branch, not rework here")

@@ -128,6 +128,38 @@ def test_red_only_on_this_branch_is_named_when_base_is_green(tmp_path, repo, ori
     assert head == _git("rev-parse", "pr-1", cwd=repo).stdout.strip()
 
 
+def test_red_on_base_is_not_claimed_when_base_never_actually_ran(tmp_path, repo, origin):
+    """⛔ CMX-218. ``ok`` only means the subprocess RETURNED — not that a single test ran. A
+    ``test_cmd`` that exits nonzero before pytest is ever invoked (a missing ``.venv``, in the
+    incident this pins) must not be read as "base_branch is red": that is the judge's own
+    worktree failing to even start the suite, and blaming base_branch sends the operator to
+    fix a branch that was never broken. Live 2026-08-02 on cmx-217: the judge worktree had no
+    ``.venv``, ``uv run pytest`` exited 2 with "No such file or directory", and the old code
+    reported "RED ON BASE TOO" — ``origin/dev`` was green the whole time."""
+    _commit_on(repo, "dev", FAILING_TEST, "irrelevant — the broken command below never runs it")
+    _push(repo, "dev")
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "unrelated.txt").write_text("noise\n")
+    _git("add", "unrelated.txt", cwd=repo)
+    _git("commit", "-m", "an unrelated PR commit", cwd=repo)
+    wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
+    _git("fetch", "origin", "dev", cwd=wt)
+
+    # Stands in for "no .venv" — a command that exits nonzero WITHOUT ever collecting a test,
+    # on every checkout, so any "RED ON BASE TOO" the function still emits proves it decided
+    # from the exit code alone, not from whether the suite actually ran.
+    broken_cmd = f'"{sys.executable}" -c "import sys; sys.exit(2)"'
+
+    cause = judge._diagnose_red_baseline(wt, broken_cmd, "dev", 60)
+
+    assert "RED ON BASE TOO" not in cause
+    assert "judge's OWN worktree" in cause
+    assert "0 passed, 0 failed, 0 errors" in cause
+    head = _git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+    assert head == _git("rev-parse", "pr-1", cwd=repo).stdout.strip()
+
+
 def test_no_base_branch_known_says_so_rather_than_guessing(tmp_path, repo):
     _branch_from_head(repo, "pr-1")
     wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
