@@ -442,42 +442,91 @@ def _claim_order(wf: WorkflowDef, source, on_disk: list[Task]) -> list[Task]:
     not vanish from a local-only checkout — but they never outrank what was actually
     pushed. Tasks ``origin`` has already STRUCK are dropped, even if this checkout has not
     pulled the strike yet.
+
+    Whatever order comes out of the above is then run through :func:`_ready`, which drops
+    any task whose declared ``depends`` (the markdown tracker's blocking edges, see
+    :mod:`chela.sources.markdown`) are not yet all struck done — a task that has not merged
+    yet cannot be the base a same-day follow-up forks its worktree from.
     """
     tasks_from_text = getattr(source, "tasks_from_text", None)
     closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
     tracker = getattr(source, "path", None)
     if tasks_from_text is None or closed_ids_from_text is None or tracker is None:
-        return on_disk
+        return _ready(on_disk, set())
 
     repo = wf.path.parent
     base = wf.get("workspace", "base_branch", default="master")
     try:
         rel = str(Path(tracker).relative_to(repo))
     except ValueError:
-        return on_disk
+        return _ready(on_disk, _local_closed_ids(closed_ids_from_text, tracker))
     if not _git_out(_git(repo, "remote")):
-        return on_disk
+        return _ready(on_disk, _local_closed_ids(closed_ids_from_text, tracker))
     if not _git_ok(_git(repo, "fetch", "origin", base, timeout=GIT_NET_TIMEOUT_SECONDS)):
         log.warning(
             "claim: could not fetch origin/%s — claiming from the on-disk tracker, which "
             "may be stale", base,
         )
-        return on_disk
+        return _ready(on_disk, _local_closed_ids(closed_ids_from_text, tracker))
     show = _git(repo, "show", f"FETCH_HEAD:{rel}")
     if not _git_ok(show):
         log.warning("claim: %s is not on origin/%s — claiming from the on-disk tracker", rel, base)
-        return on_disk
+        return _ready(on_disk, _local_closed_ids(closed_ids_from_text, tracker))
 
     text = show.stdout
     remote_tasks = tasks_from_text(text)
-    known = {t.id for t in remote_tasks} | closed_ids_from_text(text)
+    closed_ids = closed_ids_from_text(text)
+    known = {t.id for t in remote_tasks} | closed_ids
     unpushed = [t for t in on_disk if t.id not in known]
     if unpushed:
         log.debug(
             "claim: %d task(s) on disk are not on origin/%s yet; queued after the pushed ones",
             len(unpushed), base,
         )
-    return remote_tasks + unpushed
+    return _ready(remote_tasks + unpushed, closed_ids)
+
+
+def _local_closed_ids(closed_ids_from_text, tracker: Path) -> set[str]:
+    """`closed_ids_from_text` applied to the LOCAL on-disk tracker — the best a claim
+    that could not read ``origin`` (no remote, a failed fetch, a tracker not yet
+    pushed) can still do for :func:`_ready`. Never raises: a tracker that has gone
+    missing out from under a running dispatcher degrades to "nothing is closed",
+    same as the rest of this function's offline fallbacks.
+    """
+    try:
+        text = Path(tracker).read_text()
+    except OSError:
+        return set()
+    return closed_ids_from_text(text)
+
+
+def _ready(tasks: list[Task], closed_ids: set[str]) -> list[Task]:
+    """Drop tasks whose declared dependencies (``Task.depends`` — the markdown
+    tracker's ``<!-- depends: ... -->`` marker) have not merged yet.
+
+    A dependency counts as satisfied ONLY once its own task is struck ``[x]`` in
+    the tracker — an id that is merely open (claimed, running, still queued) or
+    not recognised at all (a stale reference: a typo, a retitled or deleted
+    task) both fail CLOSED. The alternative — treating an unresolved reference as
+    satisfied — would let one bad edit in the tracker silently defeat the entire
+    feature; a permanently blocked task at least stays visible in the queue and
+    fails loud, which is exactly the frontier this exists to enforce: a task with
+    an unmet dependency is not the next thing to claim, full stop, regardless of
+    its position in the file. A held-back task is logged, not silently skipped —
+    a dependency that can never be satisfied (the typo case) should be visible in
+    the daemon's own logs, not just an absence from the queue nobody can explain.
+    """
+    ready = []
+    for t in tasks:
+        unmet = set(t.depends) - closed_ids
+        if unmet:
+            log.debug(
+                "claim: task %s (%s) held back — depends on %d task(s) not yet merged: %s",
+                t.id, t.title, len(unmet), ", ".join(sorted(unmet)),
+            )
+            continue
+        ready.append(t)
+    return ready
 
 
 def _tracker_is_versioned(repo: Path, rel: str) -> bool:
