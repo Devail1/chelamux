@@ -737,3 +737,36 @@ def test_the_pane_map_resolves_a_wrapped_claude_end_to_end(tmp_path, monkeypatch
     assert pane.claude_pid == 16154
     assert pane.resumed == SID
     assert pane.launched_in == str(home)
+
+
+@pytest.mark.parametrize("gap", [0.001, 0.5, 1.0, 60.0, 3600.0, 86400.0])
+def test_native_status_feed_refuses_ANY_start_time_disagreement_however_small(
+        projects, monkeypatch, gap):
+    """🔴 The cross-check must be EXACT identity, never a tolerance.
+
+    Both sides are the same quantity read by the same `proc_started()` on the same pid, so
+    they either match bit-for-bit or the pid was recycled. The existing negative test uses a
+    99999s gap — far outside any plausible tolerance window — so it cannot tell `==` from
+    "close enough": re-introduce a 24h tolerance and it still passes, while a recycled pid
+    whose new process forked within a day of the dead one (most pids on a live box) gets
+    declared the same process and its stale-cwd mismatch is TRUSTED. That is precisely the
+    recycling hole tier 3 exists to close.
+
+    Small gaps are the whole point of this parametrisation; 86400 is included so a
+    "tolerance of exactly one day" is caught too.
+    """
+    live = _transcript(projects, "/home/u/repo", SID)
+    now = time.time()
+    _panes(monkeypatch, sessions.Pane(
+        wid="@5", path="/home/u/repo", command="claude", claude_pid=42,
+        launched_in="/home/u/repo", started=now))
+    _native(monkeypatch, {42: (SID, "/home/u/a-dead-process-used-to-live-here")})
+    _native_started(monkeypatch, {42: now - gap})
+
+    res = sessions.resolve_window("@5")
+
+    assert res.source == "cwd", (
+        f"a {gap}s start-time disagreement was treated as the same process — the check has "
+        "a tolerance window, and a recycled pid that forked within it would be trusted"
+    )
+    assert res.path == live
