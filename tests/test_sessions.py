@@ -367,6 +367,26 @@ def test_native_status_feed_refuses_when_cwd_is_unknown(projects, monkeypatch):
     assert res.path == live
 
 
+def test_native_status_feed_refuses_when_both_start_times_are_unknown(projects, monkeypatch):
+    """The recycling guard's own bound, made explicit: unreadable on BOTH sides must not
+    read as agreement. ``pane.started`` is None (the pane's own process could not be read)
+    AND the feed's cached ``/proc`` start time is also unknown — Python's ``None == None``
+    is True, so a same-process check that drops the ``is not None`` guards would treat two
+    unknowns as a match and wrongly trust a stale cwd. Must still refuse tier 3 and fall
+    through to the cwd tier, exactly like a cwd mismatch with no start-time evidence at
+    all."""
+    live = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@5", path="/home/u/repo", command="claude", claude_pid=42,
+        launched_in="/home/u/repo", started=None))
+    _native(monkeypatch, {42: (SID, None)})   # the feed's cwd for this pid is ALSO unknown
+    _native_started(monkeypatch, {})          # ...and so is its cached /proc start time
+
+    res = sessions.resolve_window("@5")
+    assert res.source == "cwd"
+    assert res.path == live
+
+
 def test_cmdline_still_wins_over_the_native_status_feed(projects, monkeypatch):
     """Tier ordering: --resume off the pane's own command line is stronger evidence than
     the native feed (it belongs to that pane BY CONSTRUCTION), so it must still win even
