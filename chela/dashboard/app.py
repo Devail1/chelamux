@@ -2976,8 +2976,27 @@ def api_dispatcher():
                 project_key = wf.project_key
                 source = get_source(wf)
                 open_tasks = source.list_open_tasks()
-                entry["open_tasks"] = [
-                    {
+                # Same closed-ids-from-the-tracker read `dispatcher._local_closed_ids`
+                # uses for the offline claim fallback — reused here (not re-derived)
+                # so a task's blocked state in the payload always agrees with what
+                # `dispatcher._ready` would actually do with it. `known_ids` is every
+                # id that could legitimately be named (every open task here, plus
+                # every closed one) — a `depends` reference outside that set can
+                # never resolve (see `dispatcher._ready`'s docstring).
+                closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
+                tracker = getattr(source, "path", None)
+                closed_ids = (
+                    dispatcher._local_closed_ids(closed_ids_from_text, tracker)
+                    if closed_ids_from_text is not None and tracker is not None
+                    else set()
+                )
+                known_ids = {t.id for t in open_tasks} | closed_ids
+                entry["open_tasks"] = []
+                for t in open_tasks:
+                    if t.id in in_flight_ids:
+                        continue
+                    unmet = sorted(set(t.depends) - closed_ids)
+                    entry["open_tasks"].append({
                         "id": t.id,
                         "title": t.title,
                         "file": t.file,
@@ -2992,10 +3011,21 @@ def api_dispatcher():
                         # one-line task or a source with no notion of a continuation
                         # (gh_issues). The task-detail modal prefers this over `raw`.
                         "body": t.body,
-                    }
-                    for t in open_tasks
-                    if t.id not in in_flight_ids
-                ]
+                        # True when this task has a `depends:` reference not yet
+                        # struck done — kept in sync with `dispatcher._ready`, the
+                        # claim-time gate, so a card the dispatcher would refuse to
+                        # claim never renders identically to a takeable one.
+                        "blocked": bool(unmet),
+                        # The ids of the still-unmet `depends` references (empty for
+                        # an unblocked task or one with no `depends:` marker at all).
+                        "unmet_depends": unmet,
+                        # The subset of `unmet_depends` that name no task at all —
+                        # open or closed — anywhere in this tracker: a typo, or a
+                        # retitled/deleted dependency. These can never resolve on
+                        # their own; see `dispatcher._ready`.
+                        "unresolved_depends": sorted(set(unmet) - known_ids),
+                    })
+
                 backlog_path = (wf.path.parent / "BACKLOG.md").resolve()
                 entry["backlog_items"] = [
                     {"section": item.section, "text": item.text, "file": str(backlog_path)}

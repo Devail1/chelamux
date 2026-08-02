@@ -10,6 +10,7 @@ from chela.workflow import WorkflowDef
 OPEN_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+?)\s*$")
 DONE_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(.+?)\s*$")
 BLOCKED_RE = re.compile(r"<!--\s*blocked", re.IGNORECASE)
+DEPENDS_RE = re.compile(r"<!--\s*depends:\s*(.+?)\s*-->", re.IGNORECASE)
 
 
 class MarkdownSource:
@@ -51,6 +52,7 @@ class MarkdownSource:
                 line_number=i,
                 raw=raw,
                 body=_task_body(title, lines, i),
+                depends=_resolve_depends(self.path.name, title),
             ))
         return tasks
 
@@ -174,6 +176,38 @@ def _task_body(title: str, lines: list[str], bullet_line_no: int) -> str | None:
     if not dedented:
         return None
     return f"{title}\n\n{dedented}"
+
+
+def _parse_depends(raw: str) -> tuple[str, ...]:
+    """Split a `depends:` marker's payload into the titles it names.
+
+    `;`-separated (not `,` — a title is prose and commonly contains one), each
+    optionally wrapped in matching quotes so a title that itself ends in `;`
+    remains expressible. Blank segments (a trailing `;`, `<!-- depends: -->`
+    written with nothing in it) are dropped rather than yielding an empty-string
+    dependency nothing can ever satisfy.
+    """
+    titles = []
+    for part in raw.split(";"):
+        part = part.strip()
+        if len(part) >= 2 and part[0] == part[-1] and part[0] in "\"'":
+            part = part[1:-1].strip()
+        if part:
+            titles.append(part)
+    return tuple(titles)
+
+
+def _resolve_depends(filename: str, title: str) -> tuple[str, ...]:
+    """The ids of the tasks `title` declares via a `<!-- depends: ... -->` marker —
+    a dependency is named by the OTHER bullet's title text, hashed the same way
+    :func:`_title_id` hashes any task's identity, so it resolves to that task's
+    real id regardless of where in the file it lives or what order the two are
+    claimed in.
+    """
+    m = DEPENDS_RE.search(title)
+    if not m:
+        return ()
+    return tuple(_title_id(filename, t) for t in _parse_depends(m.group(1)))
 
 
 def _title_id(filename: str, title: str) -> str:
