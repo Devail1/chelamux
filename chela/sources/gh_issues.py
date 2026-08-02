@@ -22,18 +22,38 @@ class GhIssuesSource:
 
     Duck-typed identically to MarkdownSource: __init__(wf) + list_open_tasks().
     Config (workflow front matter, `tracker:` block):
-        kind:          gh_issues
-        repo:          owner/name   (optional — defaults to the repo the
-                       WORKFLOW.md lives in, resolved at first use)
-        blocked_label: blocked      (optional — issues carrying this label are
-                       skipped, mirroring the markdown source's <!-- blocked
-                       marker)
+        kind:                gh_issues
+        repo:                owner/name   (optional — defaults to the repo the
+                             WORKFLOW.md lives in, resolved at first use)
+        blocked_label:       blocked      (optional — issues carrying this
+                             label are skipped, mirroring the markdown
+                             source's <!-- blocked marker)
+        allowed_associations: [OWNER, MEMBER, COLLABORATOR]  (optional —
+                             overrides the default trust gate below)
+
+    Trust gate (load-bearing — do not remove): on a public repo, anyone can
+    open an issue, and this class turns every issue it returns into a
+    dispatchable agent run. Without a gate, an anonymous issue is remote code
+    execution against the operator's machine. So by default only issues
+    authored by someone GitHub reports as OWNER, MEMBER, or COLLABORATOR
+    (i.e. someone with at least write access to the repo) are eligible;
+    everyone else's issues (CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE, ...)
+    are silently dropped, same as a blocked-label issue.
     """
+
+    DEFAULT_ALLOWED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
     def __init__(self, wf: WorkflowDef):
         self.workflow_path = wf.path
         self._repo_cfg = wf.get("tracker", "repo")
         self.blocked_label = wf.get("tracker", "blocked_label", default="blocked")
+        associations_cfg = wf.get("tracker", "allowed_associations")
+        if associations_cfg:
+            self.allowed_associations = frozenset(
+                str(a).upper() for a in associations_cfg
+            )
+        else:
+            self.allowed_associations = self.DEFAULT_ALLOWED_ASSOCIATIONS
         self._repo: str | None = None
 
     def _resolve_repo(self) -> str | None:
@@ -84,7 +104,8 @@ class GhIssuesSource:
             out = subprocess.run(
                 [
                     "gh", "issue", "list", "--repo", repo, "--state", "open",
-                    "--json", "number,title,url,labels", "--limit", "200",
+                    "--json", "number,title,url,labels,authorAssociation",
+                    "--limit", "200",
                 ],
                 capture_output=True, text=True, timeout=30,
             )
@@ -115,6 +136,13 @@ class GhIssuesSource:
                 for lbl in issue.get("labels") or []
             }
             if self.blocked_label and self.blocked_label in labels:
+                continue
+            association = str(issue.get("authorAssociation") or "").upper()
+            if association not in self.allowed_associations:
+                log.info(
+                    "gh_issues: skipping %s#%d — author association %r not in allow-list",
+                    repo, number, association,
+                )
                 continue
             title = (issue.get("title") or "").strip()
             tasks.append(Task(
