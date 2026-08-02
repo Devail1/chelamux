@@ -1177,6 +1177,9 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         return {"ok": False, "error": f"no run matches {ident!r}"}
     task_id = run["task_id"]
     wf_path = run.get("workflow_path")
+    # ⚖️🕳️ CMX-221: the token that proves THIS call still owns the judge slot when it
+    # reaches `_cleanup` — see that function for why a stale call must never act on it.
+    judge_epoch = run.get("judge_window_epoch")
     try:
         wf = workflow.load_workflow(wf_path) if wf_path else None
     except Exception as e:            # a WORKFLOW.md that stopped parsing mid-judgment
@@ -1267,18 +1270,40 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         return result
     finally:
         if cleanup:
-            _cleanup(wf, task_id, run.get("branch_name") or "")
+            _cleanup(wf, task_id, run.get("branch_name") or "", judge_epoch)
 
 
-def _cleanup(wf, task_id: str, branch: str) -> None:
+def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:
     """Drop the throwaway worktree, then kill the judge's own tmux window. Best-effort.
 
     Ordered: the run row is already written, so anything that fails here costs a directory,
     never a verdict. The window is killed LAST because killing it kills this process.
+
+    ⚖️🕳️ CMX-221: guarded by the SAME `judge_window_epoch` CAS that `_launch_agent` stamps
+    on every judge spawn (CMX-97's judge-window identity fix). The judge worktree is keyed
+    only by `task_id` (see `judge_worktree_path`), so if the watchdog ever declares THIS
+    call's judge dead on a stale read (a slow-but-alive judge past `JUDGE_TIMEOUT_SECONDS`,
+    or a `live_windows` snapshot that missed it) and respawns a replacement while this call
+    is still mid-flight, both calls land on the identical directory and the identical window
+    name. Whichever `_cleanup` runs first would delete the other's live workspace out from
+    under it — three misreports traced to exactly this in one evening (2026-08-02). So this
+    re-reads the run row RIGHT NOW and only acts if `judge_window_epoch` still matches what
+    this call was launched under; a mismatch means a newer judge already took the slot, and
+    the stale call does nothing — no worktree removal, no window kill — leaving both to
+    whoever actually owns them now.
     """
+    from chela import dispatcher as _dispatcher
     from chela.dispatcher import _kill_windows_named
     from chela.worktree import remove_worktree
 
+    current = _dispatcher.resolve_run(task_id)
+    still_owns = current is not None and current.get("judge_window_epoch") == judge_epoch
+    if not still_owns:
+        log.warning(
+            "judge: %s: a newer judge now owns this task (judge_window_epoch changed under "
+            "us) — skipping cleanup so its worktree and window are left alone", task_id,
+        )
+        return
     try:
         remove_worktree(wf.path.parent, judge_worktree_path(wf, task_id))
     except Exception:

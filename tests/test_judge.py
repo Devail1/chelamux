@@ -574,6 +574,47 @@ def test_a_judge_run_that_RAISES_still_reaps_its_worktree(tmp_path, monkeypatch)
     assert not wt_path.exists()
 
 
+def test_a_stale_judge_never_deletes_the_worktree_a_newer_judge_now_owns(tmp_path, monkeypatch):
+    """⚖️🕳️ CMX-221: `judge_worktree_path` is keyed only by `task_id` — two judge calls for
+    the same task land on the identical directory and window name. If the watchdog ever
+    declares a slow-but-alive judge dead and respawns a replacement while the first call is
+    still mid-flight (bumping `judge_window_epoch`, the same CAS `_launch_agent` stamps on
+    every spawn), the first call's `_cleanup` must NOT delete the replacement's live
+    worktree, and must NOT kill its window, just because it finishes first.
+
+    Simulated by bumping `judge_window_epoch` partway through this call's `run_experiments`
+    — exactly what a real respawn does while this call is off running the suite."""
+    killed = []
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: killed.append(name))
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_window_epoch="epoch-A")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    assert wt_path.is_dir()
+
+    real_run_experiments = judge.run_experiments
+
+    def _respawn_mid_flight(*a, **kw):
+        with dispatcher._db() as conn:
+            conn.execute(
+                "UPDATE runs SET judge_window_epoch=? WHERE task_id=?", ("epoch-B", task_id),
+            )
+            conn.commit()
+        return real_run_experiments(*a, **kw)
+
+    monkeypatch.setattr(judge, "run_experiments", _respawn_mid_flight)
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert result["state"] == judge.J_CLEAN
+    assert wt_path.is_dir()          # ⛔ NOT reaped — a newer judge owns the slot now
+    assert killed == []              # ⛔ its window was not killed either
+
+
 # --- (h.5) THE RE-RUN (CMX-201): a REAPED worktree is rebuilt, not declared unverifiable ---
 
 def _git_workflow_repo(tmp_path: Path, task_id: str, guard_test: str) -> tuple[Path, str]:
