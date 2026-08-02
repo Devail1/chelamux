@@ -166,6 +166,12 @@ def test_the_daemon_loop_calls_prune_snapshots_when_due(monkeypatch):
     the very first pass — and proves prune is actually invoked from the loop."""
     _run_one_daemon_tick(monkeypatch)
 
+    # A distinctive, non-default value: the built-in default (30) would make
+    # `retention_days = 30` (a hardcoded literal instead of the config read) pass this
+    # assertion too, since it would equal both the real call-site's mutated value AND
+    # `main.config.context_snapshot_retention_days()`'s own (unmonkeypatched) default.
+    monkeypatch.setattr(main.config, "context_snapshot_retention_days", lambda: 12345)
+
     calls = []
     monkeypatch.setattr(main.context, "prune_snapshots", lambda days: calls.append(days) or 0)
     # Keep maintenance_tick a no-op so this test isolates the prune call-site only.
@@ -177,7 +183,10 @@ def test_the_daemon_loop_calls_prune_snapshots_when_due(monkeypatch):
         "cmd_run did NOT call context.prune_snapshots when the prune interval was due — "
         "retention is unwired and can be reverted with the suite green"
     )
-    assert calls[0] == main.config.context_snapshot_retention_days()
+    assert calls[0] == 12345, (
+        "cmd_run did not pass config.context_snapshot_retention_days()'s live value through "
+        f"to prune_snapshots — got {calls[0]!r}, suggesting a hardcoded literal took its place"
+    )
 
 
 # --- cadence PERSISTENCE across ticks: the single-tick tests above prove the loop calls -----
@@ -303,6 +312,63 @@ def test_the_default_capture_interval_binds_the_real_gate(monkeypatch):
         "CAPTURE_INTERVAL_SECONDS default is not binding the cadence gate (severing it to 0.0 "
         f"makes capture run on every daemon pass instead of on the interval); got "
         f"{captured.call_count} calls"
+    )
+
+
+def test_maintenance_tick_reads_capture_interval_seconds_live_not_a_literal(monkeypatch):
+    """🔴 WIRING — the above test only proves the default ISN'T 0.0; it can't tell
+    ``interval = config.capture_interval_seconds()`` (a live read) apart from a hardcoded
+    ``interval = 300`` (the same number, latched), since production's own default is 300.
+    Monkeypatch the knob to a value the real epoch can't have reached yet (capture never due)
+    and prove capture_all does NOT fire — a hardcoded 300 would still be due (today is far past
+    300s since ``last_capture=0.0``) and call it anyway."""
+    _run_one_daemon_tick(monkeypatch)
+    monkeypatch.setattr(main.config, "capture_interval_seconds", lambda: 10**11)
+    monkeypatch.setattr(main.context, "prune_snapshots", lambda days: 0)
+
+    captured = Mock()
+    monkeypatch.setattr(context, "capture_all", captured)
+
+    main.cmd_run(SimpleNamespace())
+
+    captured.assert_not_called()
+
+
+def test_the_daemon_loop_sleeps_for_the_configured_poll_interval(monkeypatch):
+    """🔴 WIRING — the loop's own tick cadence (``stop.wait(...)`` at the bottom of the
+    ``while`` loop) must read ``config.scheduler_poll_interval()`` per pass, not a hardcoded
+    ``30`` (the knob's own built-in default, which is exactly why a hardcoded literal here
+    would otherwise be indistinguishable from a live read). No other test in this module
+    inspects what's actually passed to ``stop.wait`` — every one of them stubs it out to stop
+    after N ticks regardless of the argument. Monkeypatch the knob to a distinctive value and
+    capture what the loop actually hands to ``stop.wait``."""
+    monkeypatch.setattr(main.GracefulShutdown, "install", lambda self: self)
+    monkeypatch.setattr(main.scheduler, "init", lambda: None)
+    monkeypatch.setattr(main.scheduler, "tick", lambda: 0)
+    monkeypatch.setattr(main.agent_manager, "reconcile_window_names", lambda: [])
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: False)
+    monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+    monkeypatch.setattr(main.inbox, "enabled", lambda: False)
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "maintenance_tick", lambda last_capture, now: last_capture)
+    monkeypatch.setattr(main.context, "prune_snapshots", lambda days: 0)
+    monkeypatch.setattr(main.config, "scheduler_poll_interval", lambda: 12345)
+
+    waited = []
+
+    def stop_after_one(self, seconds):
+        waited.append(seconds)
+        self._event.set()
+        return True
+
+    monkeypatch.setattr(main.GracefulShutdown, "wait", stop_after_one)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert waited == [12345], (
+        "cmd_run's daemon loop did not pass the live config.scheduler_poll_interval() through "
+        f"to stop.wait — got {waited}, suggesting a hardcoded literal took its place"
     )
 
 

@@ -86,6 +86,25 @@ def test_every_named_reader_has_a_registry_entry(mods):
         knob = next(k for k in config.TIMING_KNOBS if k.key == key)
         assert reader() == knob.default == config.timing_value(key)
 
+    # scheduler_poll_interval_seconds and context_retention_days both default to 30 — so
+    # comparing a reader only against ITS OWN default can't tell a correctly-wired reader
+    # from one silently wired to a DIFFERENT knob that happens to share that default (e.g.
+    # context_snapshot_retention_days() reading the scheduler-poll knob instead of its own).
+    # Store a distinct, per-knob value for every knob at once, then assert each named reader
+    # returns exactly its own knob's stored value — a reader wired to the wrong knob would
+    # return someone else's distinct value here instead.
+    _, userconfig = mods
+    distinct = {}
+    for i, key in enumerate(readers):
+        knob = next(k for k in config.TIMING_KNOBS if k.key == key)
+        distinct[key] = knob.cast(knob.default + 1000 + i)
+        userconfig.set_(key, distinct[key])
+    for key, reader in readers.items():
+        assert reader() == distinct[key], (
+            f"{reader.__name__}() did not return {key}'s own stored value "
+            f"({distinct[key]!r}) — got {reader()!r}, suggesting it reads a different knob"
+        )
+
 
 # --- GUARD 1: precedence is env > userconfig > default -----------------------
 
