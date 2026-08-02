@@ -1850,6 +1850,46 @@ def api_config_timing():
     return jsonify({"knobs": config.timing_snapshot()})
 
 
+@app.route("/api/config/dispatch", methods=["GET", "POST"])
+@require_auth
+def api_config_dispatch():
+    """The Dispatch tab (CMX-220): docs/SETTINGS_UI_INVENTORY.md's second group
+    ("Dispatch / judge / critic policy"), on the same precedence layer as
+    ``/api/config/timing`` — ``chela.config.dashboard_setting`` /
+    ``chela.config.DISPATCH_KNOBS``. Unlike Timing, this group mixes kinds
+    (bool/text/size, not just positive numbers), each knob's ``kind`` says how
+    to validate and render it.
+
+    Four of the nine (``restart_required: true`` in the snapshot) are latched at
+    another module's import (the judge/critic kill switches, the dispatcher's
+    workflow list, the autonomous merge base) — a save here persists immediately
+    but only takes effect the next time the daemon/dashboard restarts, exactly
+    like the Timing tab's status-feed timeout/TTL pair. The other five are read
+    per call and take effect on the next tick.
+
+    Same atomic-batch / fail-closed shape as ``/api/config/timing``: every key
+    is validated before any is applied, and an unknown key or a value that
+    fails its knob's validation (a non-numeric field, an unsafe branch name for
+    ``merge_base``, ...) rejects the WHOLE request 400, leaving every stored
+    value untouched.
+    """
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        errors: dict[str, str] = {}
+        parsed: dict[str, object] = {}
+        for key, raw in data.items():
+            err, value = config.validate_dispatch(key, "" if raw is None else str(raw))
+            if err:
+                errors[key] = err
+            else:
+                parsed[key] = value
+        if errors:
+            return jsonify({"error": "invalid dispatch setting(s)", "errors": errors}), 400
+        for key, value in parsed.items():
+            config.apply_dispatch(key, value)
+    return jsonify({"knobs": config.dispatch_snapshot()})
+
+
 def _notify_host(url: str) -> str:
     """Host of the notify URL for display — never the path/query, which for a
     Telegram sendMessage URL carries the bot token. Status surface, not secrets."""
