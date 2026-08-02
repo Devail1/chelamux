@@ -706,6 +706,36 @@ def test_a_stale_judge_lock_is_taken_over_not_wedged_forever(tmp_path, monkeypat
     assert not lock_path.exists()        # this call released its OWN (new) claim when done
 
 
+def test_judge_lock_owner_alive_rejects_a_recycled_pid_with_a_stale_start_time():
+    """⚖️🕳️ CMX-221 round 2 mutation kill: the judge found `_judge_lock_owner_alive`'s
+    `return abs(live_started - started) < 1.0` collapsible to `return True` with the whole
+    suite still green — every other test only ever hands it a pid that is either the calling
+    process itself (so `started` trivially matches) or one that's truly dead (so it falls
+    into the `os.kill` branch, never reaching the comparison at all). Neither shape exercises
+    the comparison the mutation deleted.
+
+    This pins it directly: a REAL, currently-live process, but with a recorded `started` that
+    does not match its actual `/proc` start time — the exact shape of CMX-219's pid-recycling
+    bug (the old owner that claimed this pid died; a new, unrelated process now holds it). The
+    pid existing is not enough — identity must be proven by start time, or the claim must be
+    refused as belonging to someone else."""
+    from chela import sessions
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+    try:
+        live_started = sessions.proc_started(proc.pid)
+        assert live_started is not None
+
+        recycled = {"pid": proc.pid, "started": live_started - 100.0}
+        assert judge._judge_lock_owner_alive(recycled) is False   # ⛔ different owner, same pid
+
+        genuine = {"pid": proc.pid, "started": live_started}
+        assert judge._judge_lock_owner_alive(genuine) is True     # ⭐ COUNTERWEIGHT: real match
+    finally:
+        proc.kill()
+        proc.wait()
+
+
 # --- (h.5) THE RE-RUN (CMX-201): a REAPED worktree is rebuilt, not declared unverifiable ---
 
 def _git_workflow_repo(tmp_path: Path, task_id: str, guard_test: str) -> tuple[Path, str]:
