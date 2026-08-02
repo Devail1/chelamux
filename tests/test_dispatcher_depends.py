@@ -278,3 +278,105 @@ def test_open_tasks_payload_carries_blocked_state_and_unmet_depends(monkeypatch,
     assert stuck["blocked"] is True
     assert stuck["unresolved_depends"] == stuck["unmet_depends"]
     assert stuck["unresolved_depends"] != []
+
+
+# --- The three paths the judge found unguarded (CMX-215, judge round 3) ----------------
+#
+# `_ready` is called from FOUR places in `_claim_order` — the origin-fetch success path
+# and three fallbacks. Only the first had a test, so reverting any fallback to the pre-PR
+# `return on_disk` left the whole suite green while the gate silently stopped applying.
+# The first of these is not a corner case: it is the path chelamux itself runs on.
+
+
+def _seed_local_only(repo: Path, text: str) -> None:
+    """A tracker that is GITIGNORED and never pushed — chelamux's own arrangement.
+
+    `git show FETCH_HEAD:TODO.md` therefore always fails, so `_claim_order` takes the
+    "not on origin" fallback on EVERY tick. Something must still be on `origin/dev` or
+    the fetch itself fails and we would be exercising a different branch by accident.
+    """
+    (repo / ".gitignore").write_text("TODO.md\n")
+    subprocess.run(["git", "-C", str(repo), "add", "WORKFLOW.md", ".gitignore"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed (tracker gitignored)"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "push", "-qu", "origin", "dev"],
+                   check=True, capture_output=True)
+    (repo / "TODO.md").write_text(text)
+
+
+def test_the_gate_applies_when_the_tracker_is_not_on_origin(repo, spawns):
+    """⭐ THE LIVE PATH. chelamux's TODO.md is gitignored, so this fallback — not the
+    origin-fetch path — is what actually runs in production. Reverting it to
+    `return on_disk` means the dependency gate never applies on the real deployment."""
+    _seed_local_only(
+        repo,
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+        "- [ ] prerequisite task\n",
+    )
+
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert summary["dispatched"] == 1
+    assert spawns.titles == ["prerequisite task"]
+
+
+def test_the_gate_applies_when_the_tracker_IS_on_origin_too(repo, spawns):
+    """COUNTERWEIGHT to the above: proves the local-only test above is exercising the
+    FALLBACK and not simply passing because the gate works everywhere for free — this
+    one takes the origin-fetch path with the identical tracker contents."""
+    _seed(
+        repo,
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+        "- [ ] prerequisite task\n",
+    )
+
+    dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert spawns.titles == ["prerequisite task"]
+
+
+def test_the_gate_applies_when_the_fetch_itself_fails(repo, spawns):
+    """A transient network failure must not silently disable the gate for that tick.
+    The remote is renamed to a path that does not exist, so `git fetch` fails while
+    `git remote` still lists one — the exact shape of an offline daemon."""
+    _seed(
+        repo,
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+        "- [ ] prerequisite task\n",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "set-url", "origin", str(repo / "nope.git")],
+        check=True, capture_output=True,
+    )
+
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert summary["dispatched"] == 1
+    assert spawns.titles == ["prerequisite task"]
+
+
+def test_the_payload_reports_a_SATISFIED_dependency_as_unblocked(repo, monkeypatch):
+    """⭐ COUNTERWEIGHT for the dashboard payload. Every existing payload case is either
+    blocked or has no `depends:` at all, so dropping `- closed_ids` from the `unmet`
+    computation left them all green — while every task with a dependency would report
+    blocked FOREVER and the board's "waiting on" badge would never clear."""
+    from chela.dashboard import app as dash
+
+    monkeypatch.setattr(dash, "_repo_root_workflow", lambda: None)
+    _seed(
+        repo,
+        "- [x] prerequisite task\n"
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n',
+    )
+    wf_path = (repo / "WORKFLOW.md").resolve()
+    monkeypatch.setattr(dash, "DISPATCH_WORKFLOWS", [wf_path])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
+
+    resp = dash.app.test_client().get("/api/dispatcher")
+    task = _find(resp.get_json()["workflows"][0]["open_tasks"], "follow-up task")
+
+    # It DECLARES a dependency — so this is not vacuous the way a no-`depends:` task is.
+    assert task["unmet_depends"] == []
+    assert task["blocked"] is False
+    assert task["unresolved_depends"] == []
