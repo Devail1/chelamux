@@ -86,6 +86,26 @@ def _restore_latched_modules(monkeypatch, config, userconfig, contract=None):
         importlib.reload(contract)
 
 
+@pytest.fixture(autouse=True)
+def _restore_latched_modules_after_every_test(monkeypatch):
+    """The unconditional counterpart to ``_restore_latched_modules`` above:
+    runs at teardown for EVERY test in this file, whether the test passed,
+    failed, or raised partway through — a fixture finalizer still runs on
+    failure, a trailing statement inside the test body does not. Without this,
+    a reloading test (below) that fails its OWN assertion never reaches its
+    restore call, and the stale ``chela.config``/``chela.contract`` module
+    objects it left behind leak into every later test in this pytest-xdist
+    worker — exactly the cross-file leak ``test_automerge.py`` caught by
+    scheduling accident, not by design.
+    ⚖️ Corrupt (delete this fixture) →
+    ``test_latched_modules_are_pristine_after_the_reloading_tests`` goes RED."""
+    yield
+    import chela.config as config
+    import chela.userconfig as userconfig
+    import chela.contract as contract
+    _restore_latched_modules(monkeypatch, config, userconfig, contract)
+
+
 # --- the registry itself -----------------------------------------------------
 
 def test_registry_has_exactly_the_nine_settings_inventory_knobs(mods):
@@ -310,9 +330,6 @@ def test_judge_and_critic_enabled_are_latched_not_live(tmp_path, monkeypatch):
     importlib.reload(config)
     assert config.JUDGE_ENABLED is False          # the "restart" picks it up
 
-    _restore_latched_modules(monkeypatch, config, userconfig)
-    assert config.JUDGE_ENABLED is True
-
 
 def test_dispatch_workflows_is_latched_not_live(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_DIR", str(tmp_path / "chela"))
@@ -331,9 +348,6 @@ def test_dispatch_workflows_is_latched_not_live(tmp_path, monkeypatch):
 
     importlib.reload(config)
     assert config.DISPATCH_WORKFLOWS == [wf.resolve()]
-
-    _restore_latched_modules(monkeypatch, config, userconfig)
-    assert config.DISPATCH_WORKFLOWS == []
 
 
 def test_autonomous_base_reads_through_the_dispatch_registry(tmp_path, monkeypatch):
@@ -359,7 +373,24 @@ def test_autonomous_base_reads_through_the_dispatch_registry(tmp_path, monkeypat
     importlib.reload(contract)
     assert contract.AUTONOMOUS_BASE == "release-train"   # env still wins
 
-    _restore_latched_modules(monkeypatch, config, userconfig, contract)
+
+def test_latched_modules_are_pristine_after_the_reloading_tests():
+    """The unconditional guard for ``_restore_latched_modules_after_every_test``:
+    the three tests above each reload ``chela.config``/``chela.userconfig``/
+    ``chela.contract`` against a throwaway ``CHELA_DIR`` and leave one of them
+    latched onto a non-default value (``JUDGE_ENABLED=False``,
+    ``DISPATCH_WORKFLOWS`` non-empty, ``AUTONOMOUS_BASE="release-train"``) as
+    their very last act before the autouse fixture's teardown runs. If that
+    fixture didn't run — or didn't run unconditionally — one of those values
+    would still be latched here, since ``--dist loadfile`` keeps this whole
+    file in one worker and pytest runs it top-to-bottom.
+    ⚖️ Corrupt (delete ``_restore_latched_modules_after_every_test``) → this
+    goes RED on the ``AUTONOMOUS_BASE`` assertion (the last reloading test's
+    leak survives; the first two are hidden by the module-level ``mods``
+    fixture reloading config again before the write-path tests below run)."""
+    import chela.config as config
+    import chela.contract as contract
+    assert config.JUDGE_ENABLED is True
     assert contract.AUTONOMOUS_BASE == "dev"
 
 
