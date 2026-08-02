@@ -189,6 +189,58 @@ def test_provision_names_the_package_and_the_cwd_when_it_cannot_install(tmp_path
     assert str(tmp_path) in problem
 
 
+def test_provision_python_is_a_no_op_when_there_is_no_pyproject(tmp_path):
+    """No pyproject.toml (a pure-JS or docs repo) — the judge must not go looking for a
+    Python venv at all."""
+    assert judge._provision_python_env(tmp_path) == ""
+
+
+def test_provision_python_is_a_no_op_when_the_venv_already_works(tmp_path, monkeypatch):
+    """⭐ COUNTERWEIGHT. A worktree that already HAS a working `.venv` must return "" without
+    ever shelling out — otherwise a judge that ALWAYS runs `uv sync` (and always reports a
+    problem if that happens to fail for unrelated reasons) would pass this file's other guards
+    just as easily as the real, conditional fix."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "t"\n')
+    exe = judge._venv_python(tmp_path)
+    exe.parent.mkdir(parents=True)
+    exe.write_text("#!/usr/bin/env python\n")
+    monkeypatch.setattr(judge.subprocess, "run", lambda *a, **k: pytest.fail(
+        "uv sync was invoked against a worktree that already has a working .venv"))
+
+    assert judge._provision_python_env(tmp_path) == ""
+    assert judge.provision_suite_env(tmp_path) == ""
+
+
+def test_provision_python_reports_missing_uv_on_path(tmp_path, monkeypatch):
+    """No `.venv`, and no `uv` to build one with — an honest unknown, not a crash and not a
+    silent "" that sends the baseline in to fail for want of a cause."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "t"\n')
+    monkeypatch.setattr(judge.shutil, "which", lambda _name: None)
+
+    problem = judge._provision_python_env(tmp_path)
+
+    assert ".venv" in problem
+    assert "uv" in problem
+    assert str(tmp_path) in problem
+
+
+def test_provision_python_syncs_a_missing_venv(tmp_path):
+    """⛔ CMX-218, the real thing. Offline-safe: a minimal pyproject.toml with no third-party
+    dependencies, so `uv sync` needs nothing but the interpreter `uv` already manages — the
+    exact incident this closes was a judge worktree with no `.venv` at all."""
+    if not shutil.which("uv"):
+        pytest.skip("uv is not installed")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "t"\nversion = "0.0.0"\nrequires-python = ">=3.11"\n'
+    )
+    assert not judge._venv_python(tmp_path).is_file()
+
+    problem = judge.provision_suite_env(tmp_path)
+
+    assert problem == "", f"provisioning failed: {problem}"
+    assert judge._venv_python(tmp_path).is_file()
+
+
 def test_an_unprovisionable_worktree_is_an_environment_unknown_not_a_red_suite(tmp_path, monkeypatch):
     """CANNOT VERIFY, and the report must blame the BOX, not the PR. The suite is never even
     run: a baseline nobody could provision measures nothing about the code."""

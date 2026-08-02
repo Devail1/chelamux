@@ -160,6 +160,41 @@ def test_red_on_base_is_not_claimed_when_base_never_actually_ran(tmp_path, repo,
     assert head == _git("rev-parse", "pr-1", cwd=repo).stdout.strip()
 
 
+def test_ran_zero_but_errors_nonzero_is_unresolved_not_a_verdict(tmp_path, repo, origin):
+    """⛔ CMX-218 rework round. ``ran == 0`` with ``errors == 0`` (the test above) is a clean
+    "nothing ever started" signal, but ``ran == 0`` with ``errors > 0`` is one layer further
+    in — reviewer hit this LIVE: a clone missing ``--extra dashboard`` produced 40 passed, 45
+    errors on a full run; move the broken import into a shared conftest/fixture and the same
+    failure collapses to 0 passed, 0 failed, N errors. That is INDISTINGUISHABLE BY COUNT from
+    a genuine syntax error already committed on ``base_branch`` — a real base_branch problem.
+    Neither "RED ON BASE TOO" nor "the judge's OWN worktree" may be claimed here; the honest
+    answer is UNRESOLVED."""
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "unrelated.txt").write_text("noise\n")
+    _git("add", "unrelated.txt", cwd=repo)
+    _git("commit", "-m", "an unrelated PR commit", cwd=repo)
+    wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
+    _git("fetch", "origin", "dev", cwd=wt)
+
+    # Fabricates the exact shape `run_suite`'s counters look for — 0 passed, 0 failed, a
+    # nonzero `errors` — on every checkout, without needing a real pytest collection error to
+    # reproduce it: any verdict this function still reaches proves it decided from the counts
+    # alone, not from anything about `base_branch` or this PR.
+    broken_cmd = f'"{sys.executable}" -c "print(\'2 errors in 0.01s\'); exit(2)"'
+
+    cause = judge._diagnose_red_baseline(wt, broken_cmd, "dev", 60)
+
+    assert "RED ON BASE TOO" not in cause
+    # The all-zeros case (test above) is allowed to CLAIM the judge's own environment; this
+    # one may only ever say it is a POSSIBILITY, never the definitive "even START" verdict.
+    assert "even START" not in cause
+    assert "UNRESOLVED" in cause
+    assert "2 error(s)" in cause
+    head = _git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+    assert head == _git("rev-parse", "pr-1", cwd=repo).stdout.strip()
+
+
 def test_no_base_branch_known_says_so_rather_than_guessing(tmp_path, repo):
     _branch_from_head(repo, "pr-1")
     wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
