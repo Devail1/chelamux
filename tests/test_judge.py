@@ -1357,3 +1357,30 @@ def test_a_judge_that_is_still_working_is_left_alone(tmp_path):
     assert summary["judge_lost"] == 0
     assert dispatcher.resolve_run("abc123")["judge_state"] == judge.J_RUNNING
     assert summary["judged"] == 0                   # …and only one judge at a time
+
+
+@pytest.mark.parametrize("delta,expect_alive", [
+    (0.0, True),        # the same process, same reader
+    (0.4, True),        # /proc wrote .97, the `ps` fallback read .00 — same process
+    (0.99, True),       # the widest the fallback's whole-second resolution can produce
+    (1.5, False),       # beyond it: a different process wearing the same pid
+    (100.0, False),
+])
+def test_the_judge_lock_start_time_window_is_exactly_the_fallbacks_resolution(delta, expect_alive):
+    """🔴 Pins the 1.0s window at BOTH edges. The existing recycled-pid test uses a 100s
+    delta, so it proves the comparison exists but cannot tell `< 1.0` from `< 3600` — the
+    VALUE-SIZE blindness CMX-219's judge flagged on exactly this kind of check.
+
+    The bound is not arbitrary and must not drift in either direction:
+      * WIDER re-opens CMX-219's hole — a recycled pid whose new process started close to
+        the dead one's start time would read as the same process.
+      * NARROWER (e.g. exact equality, the "obvious" CMX-219 fix) breaks the `ps` fallback:
+        `/proc` reports sub-second, `ps -o lstart=` reports whole seconds, so the same
+        untouched process legitimately differs by up to one second across the two readers.
+    """
+    from unittest.mock import patch
+    from chela import sessions
+
+    base = 1785703040.97
+    with patch.object(sessions, "proc_started", lambda pid: base):
+        assert judge._judge_lock_owner_alive({"pid": 4242, "started": base - delta}) is expect_alive

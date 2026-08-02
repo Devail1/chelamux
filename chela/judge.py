@@ -1311,6 +1311,17 @@ def _judge_lock_owner_alive(lock: dict) -> bool:
     (where an unproven match must NOT be trusted as "same process"), here the fallback still
     needs SOME answer, so it degrades to the weaker "does the pid exist at all" signal rather
     than declaring the claim permanently unrefusable.
+
+    ⛔ THE 1.0s WINDOW IS LOAD-BEARING — do NOT "fix" it to exact equality. CMX-219 rules
+    out a tolerance for ITS comparison, and applying that lesson here would look right and
+    break this: the two sides can come from DIFFERENT sources. :func:`sessions.proc_started`
+    reads ``/proc`` with sub-second precision (…040.97) but falls back to
+    :func:`sessions._sh_started`, which parses ``ps -o lstart=`` — an absolute timestamp with
+    **whole-second** resolution (…040.00). A lock written while ``/proc`` was readable and
+    re-read through the fallback therefore differs by up to one second on a process that
+    never moved. CMX-219's comparison is safe at exact equality because both of its sides
+    come from the same reader on the same call path; this one is not. The window is the
+    fallback's resolution — one second — and nothing wider.
     """
     pid = lock.get("pid")
     if not isinstance(pid, int):
