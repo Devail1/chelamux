@@ -170,6 +170,14 @@ _status_cache: dict = {
     # start time for the same pid by up to 113 days in either direction on a live box —
     # see chela/sessions.py's module docstring, tier 3.)
     "session_by_pid": {},
+    # started_by_pid: CMX-219 — NOT the feed's `startedAt` (rejected above for exactly the
+    # reason in that comment). This is chela's OWN `/proc` read of the pid's fork time,
+    # taken at this same refresh, alongside `cwd_by_pid`. `cwd` alone cannot tell a
+    # recycled pid apart from a live, un-recycled session that legitimately `cd`ed (the
+    # feed's cached cwd just goes stale for up to one refresh cycle) — a pid's start time
+    # is the second, independent witness chela.sessions' tier 3 cross-checks a cwd
+    # disagreement against before refusing.
+    "started_by_pid": {},
     # down_since: wall-clock time of the FIRST failure in the current outage episode, or
     # None while healthy. escalated: whether this episode already fired its one ERROR log
     # (so a long outage does not re-log ERROR on every failed poll).
@@ -210,6 +218,20 @@ def session_and_cwd_for_pid(pid: int | None) -> tuple[str | None, str | None]:
         return None, None
     return (_status_cache["session_by_pid"].get(pid),
             _status_cache["cwd_by_pid"].get(pid))
+
+
+def started_for_pid(pid: int | None) -> float | None:
+    """The pid's own ``/proc`` start time, as read by THIS refresh's own call to
+    :func:`chela.sessions.proc_started` — CMX-219, tier 3's second bound.
+
+    A pure cache read, same contract as :func:`session_and_cwd_for_pid`: never itself
+    refreshes the cache or spawns a subprocess. ``None`` for an unknown/absent pid, a cold
+    cache, or a host whose ``/proc`` (or ``ps`` fallback) could not be read for that pid at
+    refresh time — unknown is not a pass, same as everywhere else in this tier.
+    """
+    if pid is None:
+        return None
+    return _status_cache["started_by_pid"].get(pid)
 
 
 def native_status_health() -> dict:
@@ -353,8 +375,13 @@ def _refresh_status_locked() -> tuple[bool, str]:
     Returns ``(ok, detail)`` — ``detail`` is a human-readable outcome for callers (like
     :func:`probe_native_status_feed`) that report it further, not just log it.
     """
+    # lazy: sessions.py lazily imports us back for its own tier-3 read, so this stays the
+    # same one-way-at-a-time discipline rather than a hard top-level cycle.
+    from chela import sessions
+
     by_pid, by_cwd, cwd_by_pid = {}, {}, {}
     session_by_pid = {}
+    started_by_pid = {}
     cwd_statuses: dict[str, list] = {}
     try:
         r = subprocess.run(
@@ -373,6 +400,12 @@ def _refresh_status_locked() -> tuple[bool, str]:
                         cwd_by_pid[pid] = cwd
                     if isinstance(sid, str) and sid:
                         session_by_pid[pid] = sid
+                    # A single /proc read per live pid — no extra subprocess, same "one
+                    # tmux call and nothing else" budget chela.sessions' module docstring
+                    # holds tier 3 to (see its Cost note).
+                    started = sessions.proc_started(pid)
+                    if started is not None:
+                        started_by_pid[pid] = started
                 if cwd:
                     cwd_statuses.setdefault(cwd, []).append(st)
             # A cwd is not a session id (docs/AGENT_IDENTITY.md) — every live pid
@@ -388,7 +421,7 @@ def _refresh_status_locked() -> tuple[bool, str]:
             _note_recovery()
             _status_cache.update(
                 ts=time.time(), by_pid=by_pid, by_cwd=by_cwd, cwd_by_pid=cwd_by_pid,
-                session_by_pid=session_by_pid,
+                session_by_pid=session_by_pid, started_by_pid=started_by_pid,
             )
             return True, "ok"
         detail = f"exited {r.returncode}"

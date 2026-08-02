@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from chela import agent_manager
+from chela import agent_manager, sessions
 
 
 class _Clock:
@@ -32,7 +32,7 @@ class _Clock:
 
 
 _RESET = dict(
-    ts=0.0, by_pid={}, by_cwd={}, cwd_by_pid={}, session_by_pid={},
+    ts=0.0, by_pid={}, by_cwd={}, cwd_by_pid={}, session_by_pid={}, started_by_pid={},
     down_since=None, escalated=False, last_success_ts=0.0, last_warning_ts=0.0,
 )
 
@@ -42,6 +42,16 @@ def _reset_status_cache():
     agent_manager._status_cache.update(**_RESET)
     yield
     agent_manager._status_cache.update(**_RESET)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_proc_started(monkeypatch):
+    """CMX-219: `_refresh_status_locked` now calls `sessions.proc_started` per live pid.
+    None of the pids in this suite's canned payloads are real processes, so without this a
+    fast-path /proc miss falls to the `ps` subprocess fallback on every refresh — a real,
+    unstubbed subprocess call this suite otherwise takes pains to avoid. A test that wants
+    started_by_pid populated overrides this explicitly."""
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: None)
 
 
 def _counting_run(payload="[]", returncode=0, counter=None):
@@ -120,7 +130,71 @@ def test_refresh_captures_sessionid_per_pid(monkeypatch):
     assert m["session_by_pid"] == {1339280: "aaef8ff8-9b43-4416-a745-825a694e031a"}
     # cwd_by_pid already existed pre-CMX-184; session_and_cwd_for_pid reads both maps.
     assert m["cwd_by_pid"] == {1339280: "/home/liavedunix"}
-    assert "started_by_pid" not in m
+    # The feed's own `startedAt` (in the payload above) is still not captured — see the
+    # comment on _status_cache's `started_by_pid` key. Absent a real /proc read (stubbed to
+    # None for this pid by the autouse fixture), started_by_pid stays empty.
+    assert m["started_by_pid"] == {}
+
+
+# --- started_by_pid (CMX-219) --------------------------------------------------
+# `chela.sessions` tier 3 needs a SECOND witness — independent of the feed's own cwd —
+# to tell "this pid legitimately cd'ed" apart from "this pid was recycled". A pid's own
+# /proc start time, read by this same refresh, is that witness (not the feed's
+# `startedAt`, which is the session's start time and disagrees with /proc's process fork
+# time by up to 113 days — see the `session_by_pid` comment above).
+
+def test_refresh_captures_started_time_per_pid(monkeypatch):
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: 1785074373.8 if pid == 1339280 else None)
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert m["started_by_pid"] == {1339280: 1785074373.8}
+
+
+def test_started_for_pid_reads_the_captured_map(monkeypatch):
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: 1785074373.8 if pid == 1339280 else None)
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+    agent_manager.session_status_map()
+
+    assert agent_manager.started_for_pid(1339280) == 1785074373.8
+
+
+def test_started_for_pid_is_none_for_an_unknown_or_absent_pid(monkeypatch):
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: 1785074373.8 if pid == 1339280 else None)
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+    agent_manager.session_status_map()
+
+    assert agent_manager.started_for_pid(99999) is None
+    assert agent_manager.started_for_pid(None) is None
+
+
+def test_a_pid_whose_proc_start_time_cannot_be_read_is_absent_from_started_by_pid(monkeypatch):
+    """A dead-between-listing-and-read pid, or a host without /proc and no `ps` on PATH —
+    unknown is not a pass; the pid simply carries no entry, same as `cwd_by_pid` does."""
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert 1339280 not in m["started_by_pid"]
+
+
+def test_started_for_pid_never_spawns_a_subprocess(monkeypatch):
+    """Same budget guard as `session_and_cwd_for_pid` (CMX-184/CMX-219):
+    `sessions.resolve_window` runs on the hook path with an agent BLOCKED on it, and
+    `started_for_pid` is documented as a pure cache read — it must never itself trigger
+    `claude agents --json`, cold cache or not."""
+    calls = []
+
+    def boom(cmd, **kw):
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd, 1)
+    monkeypatch.setattr(agent_manager.subprocess, "run", boom)
+
+    assert agent_manager.started_for_pid(1339280) is None
+    assert calls == [], "started_for_pid must never spawn a subprocess"
 
 
 def test_session_and_cwd_for_pid_reads_the_captured_map(monkeypatch):
@@ -629,3 +703,46 @@ def test_background_refresh_keeps_the_cache_warm_without_any_request(monkeypatch
         stop.set()
         t.join(timeout=2.0)
         assert not t.is_alive(), "stop_event must actually stop the loop"
+
+
+def test_started_for_pid_returns_the_CACHED_value_not_a_live_proc_read(monkeypatch):
+    """🔴 The two existing guards cannot tell a cache read from a live one.
+
+    `..._reads_the_captured_map` leaves its `sessions.proc_started` stub installed, so a
+    live read returns the very same number the cache holds and the assertion passes either
+    way. `..._never_spawns_a_subprocess` only watches `agent_manager.subprocess`, and a
+    live `/proc` read spawns nothing at all when `/proc` is readable.
+
+    This one moves the live answer AFTER the refresh: the cache holds the value captured at
+    refresh time, so `started_for_pid` must keep returning that, not the new one.
+
+    ⛔ Why it matters beyond tidiness: `resolve_window` compares this against
+    `pane.started`, which `sessions._load_panes` obtained from the SAME `proc_started()` on
+    the SAME pid. A live read therefore makes `same_process` True for EVERY live pid, and
+    every cwd mismatch is trusted — the recycling guard silently becomes a no-op.
+    """
+    at_refresh = 1785074373.8
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: at_refresh if pid == 1339280 else None)
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+    agent_manager.session_status_map()
+
+    # The pid is recycled: /proc would now answer with a different process's start time.
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: 9999999999.0)
+
+    assert agent_manager.started_for_pid(1339280) == at_refresh, (
+        "started_for_pid returned the LIVE /proc value, not the one captured at refresh — "
+        "that makes same_process true for every live pid and defeats the recycling guard"
+    )
+
+
+def test_started_for_pid_never_calls_proc_started_at_all(monkeypatch):
+    """The budget half, pinned on the function itself rather than on `subprocess`:
+    `proc_started` falls back to a `ps` subprocess when `/proc` is unreadable, and
+    `resolve_window` runs on the hook path with an agent BLOCKED on it."""
+    calls = []
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: calls.append(pid))
+
+    agent_manager.started_for_pid(1339280)
+
+    assert calls == [], "started_for_pid must read the cache, never call proc_started"
