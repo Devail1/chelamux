@@ -615,6 +615,97 @@ def test_a_stale_judge_never_deletes_the_worktree_a_newer_judge_now_owns(tmp_pat
     assert killed == []              # ⛔ its window was not killed either
 
 
+def test_a_second_judge_for_the_same_task_refuses_while_the_first_is_still_running(
+    tmp_path, monkeypatch,
+):
+    """⚖️🕳️ CMX-221 round 2: OBJECTIVE 1 asked for EXCLUSIVE execution — a second judge for
+    the same task must REFUSE to start, not just skip cleanup once it's done. The collision
+    the ticket names explicitly: a dispatcher-launched judge (which stamps
+    `judge_window_epoch` at spawn) is still running when an operator's bare `chela judge run`
+    targets the same task — the CLI path never stamps that column, it only reads it, so both
+    calls carry the identical epoch and the cleanup-only CAS above cannot see this at all.
+
+    Simulated the same way as the epoch test above: a nested `judge_run` call, fired from
+    inside the first call's `run_experiments`, stands in for the concurrent CLI invocation —
+    pytest is single-threaded, so this is the only way to get one call genuinely mid-flight
+    while a second one starts."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_window_epoch="epoch-A")  # dispatcher-launched
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+
+    real_run_experiments = judge.run_experiments
+    nested = {}
+
+    def _cli_alongside_dispatched(*a, **kw):
+        with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+            nested["result"] = judge.judge_run(task_id, exp_file, cleanup=True)
+        assert wt_path.is_dir()          # ⛔ the refused call must not have touched it
+        return real_run_experiments(*a, **kw)
+
+    monkeypatch.setattr(judge, "run_experiments", _cli_alongside_dispatched)
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert nested["result"]["ok"] is False
+    assert "already running" in nested["result"]["error"]
+    assert result["state"] == judge.J_CLEAN      # the FIRST call still completes normally
+    assert not wt_path.exists()                  # …and reaps its own worktree as usual
+
+
+def test_no_live_claim_the_judge_starts_and_claims_normally(tmp_path, monkeypatch):
+    """⭐ COUNTERWEIGHT to the refusal test above — an "always refuse" bug would pass that
+    test trivially. With no pre-existing claim, `judge_run` must proceed exactly as before,
+    and release its own claim when it finishes so nothing leaks for the next run."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    lock_path = wt_path.parent / f".{wt_path.name}.judgelock"
+    assert not lock_path.exists()
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert result["ok"] is True
+    assert result["state"] == judge.J_CLEAN
+    assert not lock_path.exists()   # released when the call finished — nothing leaked
+
+
+def test_a_stale_judge_lock_is_taken_over_not_wedged_forever(tmp_path, monkeypatch):
+    """⭐ COUNTERWEIGHT — a claim whose owner is provably gone must be TAKEN OVER, never
+    treated as permanently exclusive. A judge that crashed mid-run (and so never reached its
+    own release) must not wedge every future attempt at this task's judge slot forever."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    lock_path = wt_path.parent / f".{wt_path.name}.judgelock"
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()                      # reaped: this pid is now provably gone
+    lock_path.write_text(json.dumps({"pid": dead.pid, "started": 1.0, "task_id": task_id}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert result["ok"] is True          # ⛔ NOT wedged — the dead claim was taken over
+    assert result["state"] == judge.J_CLEAN
+    assert not lock_path.exists()        # this call released its OWN (new) claim when done
+
+
 # --- (h.5) THE RE-RUN (CMX-201): a REAPED worktree is rebuilt, not declared unverifiable ---
 
 def _git_workflow_repo(tmp_path: Path, task_id: str, guard_test: str) -> tuple[Path, str]:
