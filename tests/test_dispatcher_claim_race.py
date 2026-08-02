@@ -199,6 +199,54 @@ def test_no_remote_falls_back_to_the_on_disk_queue(tmp_path, monkeypatch, spawns
     assert spawns.titles == ["first item"]
 
 
+def test_no_remote_still_holds_back_an_unmet_dependency(tmp_path, monkeypatch, spawns):
+    # The offline fallback re-reads the LOCAL tracker for `_ready` (CMX-215) — it must
+    # not skip that gate just because there is no origin to fetch from. "follow-up"
+    # ranks first positionally; without the gate it would be the one claimed.
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(config, "CHELA_DIR", state)
+    monkeypatch.setattr(dispatcher, "CHELA_DIR", state)
+    monkeypatch.setattr(dispatcher, "DB_PATH", state / "scheduler.db")
+    solo = tmp_path / "solo"
+    solo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "dev", str(solo)], check=True)
+    (solo / "WORKFLOW.md").write_text(WORKFLOW.format(root=state / "worktrees"))
+    (solo / "TODO.md").write_text(
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+        "- [ ] prerequisite task\n"
+    )
+
+    dispatcher.tick(solo / "WORKFLOW.md")
+
+    assert spawns.titles == ["prerequisite task"]
+
+
+def test_no_remote_unblocks_a_dependency_struck_in_the_local_tracker(tmp_path, monkeypatch, spawns):
+    # The other half of the same gate: `_local_closed_ids` must actually read the
+    # LOCAL tracker's struck `[x]` lines, not just always report "nothing is closed" —
+    # otherwise an offline dispatcher could never satisfy a dependency at all.
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(config, "CHELA_DIR", state)
+    monkeypatch.setattr(dispatcher, "CHELA_DIR", state)
+    monkeypatch.setattr(dispatcher, "DB_PATH", state / "scheduler.db")
+    solo = tmp_path / "solo"
+    solo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "dev", str(solo)], check=True)
+    (solo / "WORKFLOW.md").write_text(WORKFLOW.format(root=state / "worktrees"))
+    (solo / "TODO.md").write_text(
+        "- [x] prerequisite task\n"
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+    )
+
+    summary = dispatcher.tick(solo / "WORKFLOW.md")
+
+    assert summary["dispatched"] == 1
+    assert len(spawns.titles) == 1
+    assert spawns.titles[0].startswith("follow-up task")
+
+
 # --- the queue hold ---------------------------------------------------------
 
 
