@@ -337,6 +337,186 @@ def default_context_window() -> int:
     return timing_value("default_context_window")
 
 
+# --- Dispatch tab (CMX-220) ---------------------------------------------------
+#
+# docs/SETTINGS_UI_INVENTORY.md's second group ("Dispatch / judge / critic
+# policy") — TIMING_KNOBS' proof of the precedence layer generalised past
+# "every knob is a plain positive number." Four of these nine (marked
+# restart_required below) are latched at some OTHER module's import — the
+# fleet-wide judge/critic kill switches, which workflows the dispatcher claims
+# from, and the autonomous merge base — so a dashboard write to one of those
+# needs the daemon/dashboard restarted to take effect, exactly like
+# status_cmd_timeout_seconds/status_ttl_seconds above; the other five are read
+# per call like the rest of TIMING_KNOBS.
+def _cast_bool(raw) -> bool:
+    """Same convention ``JUDGE_ENABLED``/``CRITIC_ENABLED`` always parsed with:
+    only an explicit falsy value turns a default-true switch off. The UI drives
+    this from a select, not free text, so there is no "invalid boolean" a human
+    can type here — this never raises."""
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() not in ("false", "0", "no", "off", "")
+
+
+_BRANCH_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+def _check_branch_name(value: str) -> str | None:
+    """Defense in depth for ``merge_base`` — ``chela.contract``'s own live
+    FORBIDDEN_BASES/NEVER-line check is what actually keeps an autonomous merge
+    off ``main`` regardless of this value (CMX-220 does not touch that gate —
+    this only restricts what the DASHBOARD may write, never what a human can
+    still export by hand). A value with no legitimate use as a branch name —
+    empty, whitespace, a leading ``-`` a git/gh subprocess could read as a
+    flag, or ``..`` — is rejected before it is even stored."""
+    if not value or not _BRANCH_SAFE.fullmatch(value) or ".." in value:
+        return ("must be a plain branch name (letters, digits, ., _, -, / — "
+                "no leading '-', no spaces, no '..')")
+    return None
+
+
+def _cast_size(raw) -> int:
+    """Bytes, accepting either an already-numeric stored value (``userconfig``)
+    or a K/M/G/T-suffixed string (an env var, or what the dashboard posts) —
+    see :func:`_parse_size_bytes`, defined below this point but only ever
+    called from here, at call time, well after the module has finished
+    importing. Raises on anything negative or unparseable so the caller
+    (:func:`_resolve_dashboard_setting`) falls through to the next precedence
+    level, never crashes."""
+    if isinstance(raw, bool):
+        raise ValueError("not a size")
+    if isinstance(raw, (int, float)):
+        n = int(raw)
+        if n < 0:
+            raise ValueError("negative size")
+        return n
+    parsed = _parse_size_bytes(str(raw))
+    if parsed is None or parsed < 0:
+        raise ValueError(f"invalid size: {raw!r}")
+    return parsed
+
+
+class DispatchKnob(NamedTuple):
+    """One row of the Dispatch tab. Unlike :class:`TimingKnob` (every member a
+    plain positive number), this group mixes shapes — booleans, free text, a
+    K/M/G/T size — so ``kind`` picks the cast/validation rule and which control
+    the UI renders (``_renderDispatchRows`` in nav.js), rather than assuming a
+    numeric ``<input>`` for everything."""
+    key: str            # ~/.chela/config.json key
+    env: str             # CHELA_* env var name
+    default: object
+    cast: type
+    label: str
+    unit: str = ""
+    kind: str = "number"        # "number" | "bool" | "text" | "size"
+    floor: object = None        # reject a number/size below this — None = 0
+    restart_required: bool = False   # latched at some module's import; a save
+                                      # here needs that process restarted
+    check: object = None        # optional value -> str|None extra validator
+
+
+DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
+    DispatchKnob("dispatch_workflows", "CHELA_DISPATCH_WORKFLOWS", "", str,
+                 "Dispatch workflows (colon-separated WORKFLOW.md paths)",
+                 kind="text", restart_required=True),
+    DispatchKnob("max_reworks", "CHELA_MAX_REWORKS", 2, int,
+                 "Max reworks before escalation", floor=0),
+    DispatchKnob("judge_enabled", "CHELA_JUDGE", True, _cast_bool,
+                 "Judge (adversarial review)", kind="bool", restart_required=True),
+    DispatchKnob("judge_max_unknown_retries", "CHELA_JUDGE_MAX_UNKNOWN_RETRIES", 2, int,
+                 "Judge cannot-verify retries", floor=0),
+    DispatchKnob("critic_enabled", "CHELA_CRITIC", True, _cast_bool,
+                 "Critic (pre-dispatch review)", kind="bool", restart_required=True),
+    DispatchKnob("worktree_disk_budget_bytes", "CHELA_WORKTREE_DISK_BUDGET", 0, _cast_size,
+                 "Worktree disk budget", unit="bytes", kind="size"),
+    DispatchKnob("merge_base", "CHELA_MERGE_BASE", "dev", str,
+                 "Autonomous merge base branch", kind="text", restart_required=True,
+                 check=_check_branch_name),
+    DispatchKnob("gate_wait_seconds", "CHELA_GATE_WAIT_S", 90.0, float,
+                 "Gate wait budget (human tap)", unit="s", floor=0),
+    DispatchKnob("gate_max_waits", "CHELA_GATE_MAX_WAITS", 8, int,
+                 "Concurrent gate-wait slots", floor=1),
+)
+
+_DISPATCH_BY_KEY = {k.key: k for k in DISPATCH_KNOBS}
+
+
+def dispatch_value(key: str):
+    """The effective value of one Dispatch-tab knob, by its ``config.json`` key."""
+    knob = _DISPATCH_BY_KEY[key]
+    return dashboard_setting(knob.key, knob.env, knob.default, cast=knob.cast)
+
+
+def dispatch_snapshot() -> list[dict]:
+    """Every Dispatch knob's stored + effective value, for the Settings API — same
+    shape as :func:`timing_snapshot`, plus ``kind`` so the UI knows which control
+    to render."""
+    try:
+        from chela import userconfig
+        stored_raw = {k.key: userconfig.get(k.key) for k in DISPATCH_KNOBS}
+    except Exception:
+        stored_raw = {}
+    out = []
+    for k in DISPATCH_KNOBS:
+        stored = stored_raw.get(k.key)
+        effective, source = _resolve_dashboard_setting(k.key, k.env, k.default, k.cast)
+        out.append({
+            "key": k.key, "env": k.env, "label": k.label, "unit": k.unit,
+            "kind": k.kind, "default": k.default,
+            "stored": stored if stored not in (None, "") else "",
+            "effective": effective,
+            "source": source,
+            "restart_required": k.restart_required,
+        })
+    return out
+
+
+def validate_dispatch(key: str, raw: str) -> tuple[str | None, object]:
+    """Pure validation for one Dispatch knob — no write, same split-from-apply
+    shape as :func:`validate_timing` so a multi-key POST validates the whole
+    batch before applying any of it."""
+    knob = _DISPATCH_BY_KEY.get(key)
+    if knob is None:
+        return f"unknown dispatch setting: {key}", None
+    raw = "" if raw is None else str(raw).strip()
+    if raw == "":
+        return None, None
+    if knob.kind == "bool":
+        return None, _cast_bool(raw)
+    if knob.kind == "text":
+        if knob.check is not None:
+            err = knob.check(raw)
+            if err:
+                return f"{knob.label} {err}", None
+        return None, raw
+    try:
+        value = knob.cast(raw)
+    except (TypeError, ValueError):
+        what = "a byte count (K/M/G/T-suffixed OK)" if knob.kind == "size" else "a number"
+        return f"{knob.label} must be {what}", None
+    floor = 0 if knob.floor is None else knob.floor
+    if value < floor:
+        return f"{knob.label} must be at least {floor}{knob.unit}", None
+    return None, value
+
+
+def apply_dispatch(key: str, value) -> None:
+    """Persist one ALREADY-VALIDATED Dispatch value. ``value=None`` clears the
+    key back to its env var / built-in default."""
+    from chela import userconfig
+    userconfig.set_(_DISPATCH_BY_KEY[key].key, value)
+
+
+def set_dispatch(key: str, raw: str) -> str | None:
+    """Validate and persist one Dispatch knob in one call. Returns an error
+    message, or ``None`` on success."""
+    err, value = validate_dispatch(key, raw)
+    if err:
+        return err
+    apply_dispatch(key, value)
+    return None
+
+
 # The tmux session chela orchestrates. Each agent lives in its own window of
 # this session, and the window name IS the agent's display name. Override with
 # CHELA_TMUX_SESSION; defaults to "chela".
@@ -520,12 +700,9 @@ def max_reworks() -> int:
 
     Read per call, never latched at import: it is a policy knob an operator turns on a
     daemon that is already running, and a garbage value must degrade to the default
-    rather than crash the tick.
+    rather than crash the tick. A Dispatch-tab knob (CMX-220) — see DISPATCH_KNOBS above.
     """
-    try:
-        return max(0, int(os.environ.get("CHELA_MAX_REWORKS", "2")))
-    except ValueError:
-        return 2
+    return max(0, dispatch_value("max_reworks"))
 
 
 def judge_max_unknown_retries() -> int:
@@ -542,29 +719,26 @@ def judge_max_unknown_retries() -> int:
     the first cannot-verify is final.
 
     Read per call, never latched at import: a policy knob an operator turns on a running
-    daemon, and a garbage value degrades to the default rather than crashing the tick.
+    daemon, and a garbage value degrades to the default rather than crashing the tick. A
+    Dispatch-tab knob (CMX-220) — see DISPATCH_KNOBS above.
     """
-    try:
-        return max(0, int(os.environ.get("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")))
-    except ValueError:
-        return 2
+    return max(0, dispatch_value("judge_max_unknown_retries"))
 # ⚖️ The judge (see chela.judge) — the adversarial pass on a PR that reached
 # awaiting_review. The fleet-wide kill switch; a workflow turns it off for itself with
 # `judge: {enabled: false}`, and it is off anyway for any workflow with no `judge.test_cmd`
 # (there is nothing to run a mutation against). It spawns one extra agent per PR head, so
 # an operator who wants that stopped needs one env var, not an edit to every WORKFLOW.md.
-JUDGE_ENABLED = os.environ.get("CHELA_JUDGE", "true").strip().lower() not in (
-    "false", "0", "no", "off",
-)
+# A Dispatch-tab knob (CMX-220), restart_required — this is a module constant, latched at
+# THIS import, same as STATUS_CMD_TIMEOUT_S/STATUS_TTL_S promise for agent_manager.py.
+JUDGE_ENABLED = dispatch_value("judge_enabled")
 
 # 🧑‍⚖️ The critic (see chela.critic) — the persona pattern's third instance: an ADVISORY
 # brief-review at the moment a task is picked for dispatch ("plan review is the new linter").
 # The fleet-wide kill switch; a workflow turns it off for itself with `critic: {enabled:
 # false}`. Unlike the judge it is advisory-only (it never blocks/delays/changes a dispatch)
-# and needs no `test_cmd`, so it defaults ON — "on" costs nothing it can get wrong.
-CRITIC_ENABLED = os.environ.get("CHELA_CRITIC", "true").strip().lower() not in (
-    "false", "0", "no", "off",
-)
+# and needs no `test_cmd`, so it defaults ON — "on" costs nothing it can get wrong. A
+# Dispatch-tab knob (CMX-220), restart_required — same latched-constant shape as JUDGE_ENABLED.
+CRITIC_ENABLED = dispatch_value("critic_enabled")
 
 # 🎭🤖 The orchestrator auto-launch (see chela.personas.autolaunch) — the persona pattern's
 # harness instance: chela launches the embedded orchestrator persona itself, inbox-woken and
@@ -626,7 +800,9 @@ AUTO_UPDATE_ENABLED = os.environ.get("CHELA_AUTO_UPDATE", "false").strip().lower
     "true", "1", "yes", "on",
 )
 
-_dispatch_raw = os.environ.get("CHELA_DISPATCH_WORKFLOWS", "")
+# A Dispatch-tab knob (CMX-220), restart_required — same latched-constant shape as
+# JUDGE_ENABLED/CRITIC_ENABLED above.
+_dispatch_raw = dispatch_value("dispatch_workflows")
 DISPATCH_WORKFLOWS = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()
     for p in _dispatch_raw.split(":") if p.strip()
@@ -792,13 +968,9 @@ def worktree_disk_budget_bytes() -> int:
     garbage value degrades to the safe default rather than crashing the tick.
 
     Read per call, never latched at import: a policy knob an operator turns on a daemon
-    that is already running.
+    that is already running. A Dispatch-tab knob (CMX-220) — see DISPATCH_KNOBS above.
     """
-    raw = os.environ.get("CHELA_WORKTREE_DISK_BUDGET", "").strip()
-    if not raw:
-        return 0
-    parsed = _parse_size_bytes(raw)
-    return parsed if parsed and parsed > 0 else 0
+    return dispatch_value("worktree_disk_budget_bytes")
 
 
 def human_size(n: int) -> str:

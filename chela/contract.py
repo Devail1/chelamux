@@ -63,7 +63,13 @@ log = logging.getLogger("chela.contract")
 # branch is named differently — but the FORBIDDEN set below is absolute and the env alone can
 # never widen it: only a per-workflow COMMITTED ``base_branch`` can (see ``_declared_base_branch``
 # and the NEVER-line handling in :func:`merge`), and only for that workflow's own runs.
-AUTONOMOUS_BASE = os.environ.get("CHELA_MERGE_BASE", "dev").strip() or "dev"
+#
+# A Dispatch-tab knob (CMX-220), restart_required — dashboard-writable through
+# ``config.dashboard_setting`` (env still wins), latched here at THIS module's import same
+# as ``config.JUDGE_ENABLED``/``CRITIC_ENABLED`` are latched in ``chela.config``. Making the
+# fallback dashboard-settable does not loosen anything: the FORBIDDEN_BASES check below is
+# unconditional and runs live at merge time regardless of where AUTONOMOUS_BASE came from.
+AUTONOMOUS_BASE = config.dashboard_setting("merge_base", "CHELA_MERGE_BASE", "dev", cast=str).strip() or "dev"
 
 # NEVER — production-facing branches. No env, no --force, no chain of small autonomous
 # steps reaches these: merging to one is a per-instance human act (ESCALATION_CONTRACT.md

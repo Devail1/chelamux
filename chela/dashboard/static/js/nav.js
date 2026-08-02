@@ -714,6 +714,24 @@ function renderSettings(focus) {
             <div id="timing-msg" class="s-savemsg"></div>
         </section>
 
+        <section class="settings-section" id="settings-dispatch">
+            <h4>Dispatch</h4>
+            <p class="s-desc">Dispatcher, judge, and critic policy. Blank a field to fall back
+            to its <code>CHELA_*</code> env var (or the built-in default, shown as its
+            placeholder). Four of these — <strong>Dispatch workflows</strong>,
+            <strong>Judge</strong>, <strong>Critic</strong>, and <strong>Merge base</strong>
+            (marked <span class="s-badge off" style="display:inline-block">restart</span>
+            below) — are read once when the daemon/dashboard starts, so a save there takes
+            effect on the <strong>next restart</strong>, not immediately. The rest apply on the
+            next tick. A knob whose env var is currently set is disabled here —
+            <strong>env always wins</strong>, so an edit would be silently discarded.</p>
+            <div id="dispatch-rows" class="s-dispatch-rows"><div class="s-desc">Loading…</div></div>
+            <div class="s-row">
+                <button class="btn-accent" onclick="chela.saveDispatch()">Save</button>
+            </div>
+            <div id="dispatch-msg" class="s-savemsg"></div>
+        </section>
+
         <section class="settings-section">
             <h4>Needs-input notifications</h4>
             <p class="s-desc">Fires a one-shot ping when an agent's pane enters
@@ -819,6 +837,7 @@ function renderSettings(focus) {
     _loadAgentModeSetting();
     _loadAgentModelSetting();
     _loadTimingSettings();
+    _loadDispatchSettings();
     _loadSettingsStatus();
 }
 
@@ -1199,6 +1218,90 @@ async function saveTiming() {
     }
     setMsg('ok', 'Saved.');
     _renderTimingRows(body.knobs);
+}
+
+// Dispatch tab (CMX-220): docs/SETTINGS_UI_INVENTORY.md's second group
+// ("Dispatch / judge / critic policy"). Same batch-save idiom as Timing above,
+// but the knobs are NOT all plain positive numbers — `k.kind` picks the control:
+// "bool" -> a 3-way select (Default/On/Off, since blank must mean "fall back to
+// env/default", not "off"), "text"/"size" -> a text input, "number" -> a numeric
+// input, same as Timing's rows.
+function _renderDispatchRows(knobs) {
+    const box = document.getElementById('dispatch-rows');
+    if (!box) return;
+    box.innerHTML = (knobs || []).map(k => {
+        const isEnv = k.source === 'env';
+        const badges =
+            (isEnv ? ` <span class="s-badge on" title="Set by ${attrEsc(k.env)} — env wins over the dashboard.">env</span>` : '') +
+            (k.restart_required ? ' <span class="s-badge off" title="Takes effect after a daemon/dashboard restart, not the next tick.">restart</span>' : '');
+        const envTitle = isEnv ? `title="Overridden by ${attrEsc(k.env)} — dashboard edits are ignored while it's set."` : '';
+        let input;
+        if (k.kind === 'bool') {
+            const stored = k.stored !== '' && k.stored !== undefined ? !!k.stored : null;
+            input = `<select class="s-select s-dispatch-input" data-dispatch-key="${attrEsc(k.key)}"
+                        ${isEnv ? 'disabled' : ''} ${envTitle}>
+                     <option value=""${stored === null ? ' selected' : ''}>Default (${k.default ? 'on' : 'off'})</option>
+                     <option value="true"${(isEnv ? k.effective === true : stored === true) ? ' selected' : ''}>On</option>
+                     <option value="false"${(isEnv ? k.effective === false : stored === false) ? ' selected' : ''}>Off</option>
+                     </select>`;
+        } else {
+            const type = k.kind === 'number' ? 'number' : 'text';
+            const step = type === 'number' ? ' step="any"' : '';
+            const numCls = k.kind === 'number' ? ' s-num' : '';
+            input = isEnv
+                ? `<input class="s-input s-dispatch-input${numCls}" type="${type}"${step}
+                       data-dispatch-key="${attrEsc(k.key)}" value="${attrEsc(String(k.effective))}" disabled ${envTitle}>`
+                : `<input class="s-input s-dispatch-input${numCls}" type="${type}"${step}
+                       data-dispatch-key="${attrEsc(k.key)}"
+                       placeholder="${attrEsc(String(k.default))}"
+                       value="${k.stored !== '' && k.stored !== undefined ? attrEsc(String(k.stored)) : ''}">`;
+        }
+        return `
+        <div class="s-row">
+            <span class="s-rowlabel">${escHtml(k.label)}${badges}</span>
+            ${input}
+            <span class="s-rowunit">${escHtml(k.unit || '')}</span>
+        </div>`;
+    }).join('');
+}
+
+async function _loadDispatchSettings() {
+    const box = document.getElementById('dispatch-rows');
+    if (!box) return;
+    let body;
+    try {
+        body = await api('/api/config/dispatch');
+    } catch (e) { box.innerHTML = '<div class="s-desc">(unavailable)</div>'; return; }
+    if (!body || !body.knobs) { box.innerHTML = '<div class="s-desc">(unavailable)</div>'; return; }
+    _renderDispatchRows(body.knobs);
+}
+
+async function saveDispatch() {
+    const msg = document.getElementById('dispatch-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    const inputs = document.querySelectorAll('#dispatch-rows .s-dispatch-input');
+    const payload = {};
+    // Disabled = env-overridden — never post those, same reasoning as saveTiming().
+    inputs.forEach(inp => { if (!inp.disabled) payload[inp.dataset.dispatchKey] = inp.value.trim(); });
+    setMsg('', 'Saving…');
+    let body;
+    try {
+        body = await api('/api/config/dispatch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    } catch (e) { setMsg('err', 'Save failed — nothing changed.'); return; }
+    if (!body || body.error) {
+        const detail = body && body.errors
+            ? Object.entries(body.errors).map(([k, v]) => k + ': ' + v).join('; ')
+            : 'rejected';
+        setMsg('err', 'Nothing saved — ' + detail);
+        _loadDispatchSettings();     // re-show what's actually stored
+        return;
+    }
+    setMsg('ok', 'Saved.');
+    _renderDispatchRows(body.knobs);
 }
 
 const THEME_LABELS = {
@@ -1609,4 +1712,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveProjectsDir, saveTiming, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });

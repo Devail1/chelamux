@@ -3214,6 +3214,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
    the free-text .s-input rows above since every value here is a short number. */
 .s-timing-rows .s-input { flex: 0 1 90px; text-align: right; }
 .s-timing-rows .s-input:disabled { opacity: 0.55; cursor: not-allowed; }
+/* Dispatch tab (CMX-220): mixed kinds, unlike Timing's all-numeric rows — only the
+   "number" knobs (.s-num) get the narrow right-aligned treatment; "text"/"size" rows
+   (workflow paths, a branch name) keep the free-text .s-input's full width. */
+.s-dispatch-rows .s-input.s-num { flex: 0 1 90px; text-align: right; }
+.s-dispatch-rows .s-input:disabled, .s-dispatch-rows .s-select:disabled { opacity: 0.55; cursor: not-allowed; }
 .s-rowunit { color: var(--text-dim); font-size: 11px; min-width: 44px; }
 .s-badge {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
