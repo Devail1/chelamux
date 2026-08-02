@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from chela import agent_manager
+from chela import agent_manager, sessions
 
 
 class _Clock:
@@ -32,7 +32,7 @@ class _Clock:
 
 
 _RESET = dict(
-    ts=0.0, by_pid={}, by_cwd={}, cwd_by_pid={}, session_by_pid={},
+    ts=0.0, by_pid={}, by_cwd={}, cwd_by_pid={}, session_by_pid={}, started_by_pid={},
     down_since=None, escalated=False, last_success_ts=0.0, last_warning_ts=0.0,
 )
 
@@ -42,6 +42,16 @@ def _reset_status_cache():
     agent_manager._status_cache.update(**_RESET)
     yield
     agent_manager._status_cache.update(**_RESET)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_proc_started(monkeypatch):
+    """CMX-219: `_refresh_status_locked` now calls `sessions.proc_started` per live pid.
+    None of the pids in this suite's canned payloads are real processes, so without this a
+    fast-path /proc miss falls to the `ps` subprocess fallback on every refresh — a real,
+    unstubbed subprocess call this suite otherwise takes pains to avoid. A test that wants
+    started_by_pid populated overrides this explicitly."""
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: None)
 
 
 def _counting_run(payload="[]", returncode=0, counter=None):
@@ -120,7 +130,55 @@ def test_refresh_captures_sessionid_per_pid(monkeypatch):
     assert m["session_by_pid"] == {1339280: "aaef8ff8-9b43-4416-a745-825a694e031a"}
     # cwd_by_pid already existed pre-CMX-184; session_and_cwd_for_pid reads both maps.
     assert m["cwd_by_pid"] == {1339280: "/home/liavedunix"}
-    assert "started_by_pid" not in m
+    # The feed's own `startedAt` (in the payload above) is still not captured — see the
+    # comment on _status_cache's `started_by_pid` key. Absent a real /proc read (stubbed to
+    # None for this pid by the autouse fixture), started_by_pid stays empty.
+    assert m["started_by_pid"] == {}
+
+
+# --- started_by_pid (CMX-219) --------------------------------------------------
+# `chela.sessions` tier 3 needs a SECOND witness — independent of the feed's own cwd —
+# to tell "this pid legitimately cd'ed" apart from "this pid was recycled". A pid's own
+# /proc start time, read by this same refresh, is that witness (not the feed's
+# `startedAt`, which is the session's start time and disagrees with /proc's process fork
+# time by up to 113 days — see the `session_by_pid` comment above).
+
+def test_refresh_captures_started_time_per_pid(monkeypatch):
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: 1785074373.8 if pid == 1339280 else None)
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert m["started_by_pid"] == {1339280: 1785074373.8}
+
+
+def test_started_for_pid_reads_the_captured_map(monkeypatch):
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: 1785074373.8 if pid == 1339280 else None)
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+    agent_manager.session_status_map()
+
+    assert agent_manager.started_for_pid(1339280) == 1785074373.8
+
+
+def test_started_for_pid_is_none_for_an_unknown_or_absent_pid(monkeypatch):
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: 1785074373.8 if pid == 1339280 else None)
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+    agent_manager.session_status_map()
+
+    assert agent_manager.started_for_pid(99999) is None
+    assert agent_manager.started_for_pid(None) is None
+
+
+def test_a_pid_whose_proc_start_time_cannot_be_read_is_absent_from_started_by_pid(monkeypatch):
+    """A dead-between-listing-and-read pid, or a host without /proc and no `ps` on PATH —
+    unknown is not a pass; the pid simply carries no entry, same as `cwd_by_pid` does."""
+    run, _n = _counting_run(_WITH_SESSION)
+    monkeypatch.setattr(agent_manager.subprocess, "run", run)
+
+    m = agent_manager.session_status_map()
+    assert 1339280 not in m["started_by_pid"]
 
 
 def test_session_and_cwd_for_pid_reads_the_captured_map(monkeypatch):

@@ -63,6 +63,12 @@ def _native(monkeypatch, mapping: dict):
                         lambda pid: mapping.get(pid, (None, None)))
 
 
+def _native_started(monkeypatch, mapping: dict):
+    """Stub the tier-3 CMX-219 second witness: ``{pid: proc_start_time}`` — the pid's own
+    ``/proc`` start time as cached by the feed's last refresh."""
+    monkeypatch.setattr(agent_manager, "started_for_pid", lambda pid: mapping.get(pid))
+
+
 @pytest.fixture(autouse=True)
 def no_tmux(monkeypatch):
     """No live tmux in a unit test: a test that wants panes says so."""
@@ -77,6 +83,7 @@ def no_native_status(monkeypatch):
     (or a real background refresh) last put in it. A test that wants tier 3 says so via
     :func:`_native`."""
     monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid", lambda pid: (None, None))
+    monkeypatch.setattr(agent_manager, "started_for_pid", lambda pid: None)
 
 
 # --- the outage ---------------------------------------------------------------------
@@ -228,6 +235,15 @@ def test_a_window_whose_process_cannot_be_read_does_not_inherit_a_SESSION_either
 # test below uses REAL captured numbers for the pid's /proc start time — not one variable
 # shared with the feed's row — so re-introducing any startedAt-based comparison has real,
 # disagreeing numbers to trip on rather than a fixture built to agree by construction.
+#
+# CMX-219: cwd agreement is still the FAST, common-case pass — but a disagreement alone is
+# no longer trusted as recycling. A live, un-recycled process can legitimately chdir (a
+# worktree switch), which leaves the feed's cached cwd stale for up to one refresh cycle and
+# is indistinguishable, on cwd alone, from a different process reusing the pid. So a cwd
+# mismatch is now cross-checked against `agent_manager.started_for_pid` — chela's OWN
+# /proc read of the pid's fork time, cached at the same refresh as cwd, NOT the feed's
+# `startedAt` field this section already explains is the wrong quantity. See
+# ``test_native_status_feed_trusts_a_cwd_mismatch_when_the_pid_start_time_still_agrees``.
 
 # Real /proc-derived start time captured for pid 1339280 (the acceptance case's @78) on
 # the live box that failed review round 1. The feed's own (now-unread) `startedAt` for
@@ -291,6 +307,47 @@ def test_native_status_feed_refuses_a_cwd_mismatch_pid_reuse(projects, monkeypat
 
     res = sessions.resolve_window("@5")
     assert calls == [42], "tier 3 must actually reach the cache read"
+    assert res.source == "cwd"
+    assert res.path == live
+
+
+def test_native_status_feed_trusts_a_cwd_mismatch_when_the_pid_start_time_still_agrees(
+        projects, monkeypatch):
+    """CMX-219, live on ``@217``: ``chela doctor`` refused a five-minute-old, actively
+    running session because its cached cwd had gone stale — the session's own agent had
+    legitimately ``cd``ed (a worktree switch), not been recycled. The feed's cwd is a
+    30s-TTL cache and can always lag a live chdir by up to one refresh cycle; the pid's own
+    ``/proc`` start time cannot, and confirms it is still the SAME process. A cwd
+    disagreement backed by a start-time agreement must resolve, not refuse."""
+    live = _transcript(projects, "/home/u/worktrees/task-9716", SID)
+    started = time.time() - 300
+    _panes(monkeypatch, sessions.Pane(
+        wid="@217", path="/home/u/worktrees/task-9716", command="claude", claude_pid=3449627,
+        launched_in="/home/u/worktrees/task-9716", started=started))
+    _native(monkeypatch, {3449627: (SID, "/home/u")})       # the feed's now-stale cwd
+    _native_started(monkeypatch, {3449627: started})        # but the SAME pid, unrecycled
+
+    res = sessions.resolve_window("@217")
+    assert res.path == live
+    assert res.session_id == SID
+    assert res.source == "native_status"
+    assert "cd, not a recycle" in res.detail
+
+
+def test_native_status_feed_refuses_a_cwd_mismatch_when_the_start_time_ALSO_disagrees(
+        projects, monkeypatch):
+    """The genuine-recycle case, made explicit rather than merely unknown: the feed's
+    cached cwd disagrees AND the pid's own start time (read fresh, right now) disagrees
+    with what the feed cached too — real evidence of a different process, not just a stale
+    cwd. Must still refuse and fall through to the cwd tier."""
+    live = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@5", path="/home/u/repo", command="claude", claude_pid=42,
+        launched_in="/home/u/repo", started=time.time()))
+    _native(monkeypatch, {42: (SID, "/home/u/a-dead-process-used-to-live-here")})
+    _native_started(monkeypatch, {42: time.time() - 99999})  # a different process's start time
+
+    res = sessions.resolve_window("@5")
     assert res.source == "cwd"
     assert res.path == live
 
