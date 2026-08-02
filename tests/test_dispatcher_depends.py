@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from chela import config, dispatcher
+from chela.sources import Task
 
 WORKFLOW = """---
 project_key: TST
@@ -120,18 +121,23 @@ def test_dependency_satisfied_once_struck_done_unblocks_the_follow_up(repo, spaw
 def test_an_unknown_dependency_reference_fails_closed_rather_than_being_ignored(repo, spawns, caplog):
     # A typo'd or since-deleted dependency title must not silently be treated as
     # satisfied — that would defeat the whole feature on the first typo. It blocks,
-    # loudly (a debug log names the unmet id), rather than dispatching prematurely.
+    # LOUDLY (a WARNING naming the offending task — see test_dispatcher_depends.py's
+    # unit-level tests below for the level/counterweight guards), rather than
+    # dispatching prematurely.
     _seed(
         repo,
         '- [ ] follow-up task <!-- depends: "a title that was never typed correctly" -->\n',
     )
 
-    with caplog.at_level(logging.DEBUG, logger="chela.dispatcher"):
+    with caplog.at_level(logging.WARNING, logger="chela.dispatcher"):
         summary = dispatcher.tick(repo / "WORKFLOW.md")
 
     assert summary["dispatched"] == 0
     assert spawns.titles == []
-    assert "held back" in caplog.text
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "follow-up task" in warnings[0].getMessage()
+    assert "held back" in warnings[0].getMessage()
 
 
 def test_a_task_with_no_depends_marker_is_unaffected(repo, spawns):
@@ -173,3 +179,102 @@ def test_multiple_depends_all_must_be_satisfied(repo, spawns):
     dispatcher.tick(repo / "WORKFLOW.md")
 
     assert any(t.startswith("follow-up task") for t in spawns.titles)
+
+
+# --- `_ready` unit-level: WARNING vs INFO, and the inert no-depends control --
+
+def test_ready_warns_on_an_unresolved_dependency_reference(caplog):
+    # 🔴 GUARD: an edge naming no task at all — open or closed — anywhere in the
+    # tracker (a typo, a retitled/deleted blocker) is a TRACKER BUG, not an
+    # ordinary wait. It must be loud: a WARNING naming the offending task, not
+    # buried at debug where it never prints (chela/main.py's basicConfig is
+    # INFO).
+    blocked = Task(id="blocked", title="follow-up", file="", line_number=1, raw="", depends=("ghost",))
+
+    with caplog.at_level(logging.WARNING, logger="chela.dispatcher"):
+        ready = dispatcher._ready([blocked], set())
+
+    assert ready == []
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "follow-up" in warnings[0].getMessage()
+    assert "ghost" in warnings[0].getMessage()
+
+
+def test_ready_does_not_warn_on_a_merely_unmet_but_resolvable_dependency(caplog):
+    # The counterweight to the guard above: a dependency that names a REAL task
+    # (open, just not yet struck) is the ordinary, expected wait — warning on
+    # this too would make "warn on everything" pass the previous guard.
+    prereq = Task(id="prereq", title="prerequisite", file="", line_number=1, raw="", depends=())
+    follow = Task(id="follow", title="follow-up", file="", line_number=2, raw="", depends=("prereq",))
+
+    with caplog.at_level(logging.DEBUG, logger="chela.dispatcher"):
+        ready = dispatcher._ready([prereq, follow], set())
+
+    assert ready == [prereq]
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_ready_is_silent_for_a_task_with_no_depends_marker(caplog):
+    # Inert control: the overwhelming common case (no `depends:` at all) must
+    # produce neither a warning nor a hold — only a corruption that touches the
+    # unmet/unresolved-reference paths above should ever redden this sweep.
+    plain = Task(id="plain", title="a plain task", file="", line_number=1, raw="", depends=())
+
+    with caplog.at_level(logging.WARNING, logger="chela.dispatcher"):
+        ready = dispatcher._ready([plain], set())
+
+    assert ready == [plain]
+    assert not caplog.records
+
+
+# --- /api/dispatcher: open_tasks payload carries the blocked state ----------
+
+def _find(tasks: list[dict], prefix: str) -> dict:
+    return next(t for t in tasks if t["title"].startswith(prefix))
+
+
+def test_open_tasks_payload_carries_blocked_state_and_unmet_depends(monkeypatch, tmp_path):
+    # 🔴 GUARD: drop the "blocked"/"unmet_depends"/"unresolved_depends" fields
+    # from api_dispatcher's open_tasks comprehension and this goes RED — a
+    # permanently-blocked task (an unresolvable `depends:` reference) would
+    # render in the Kanban Open column identically to a claimable one, with
+    # nothing in the payload for the UI to tell them apart.
+    from chela.dashboard import app as dash
+
+    monkeypatch.setattr(dash, "_repo_root_workflow", lambda: None)
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    (repo / "WORKFLOW.md").write_text(
+        "---\nproject_key: XYZ\ntracker:\n  kind: markdown\n  path: TODO.md\n---\nprompt\n"
+    )
+    (repo / "TODO.md").write_text(
+        "## Open\n\n"
+        "- [ ] plain task\n"
+        '- [ ] waiting task <!-- depends: "prerequisite task" -->\n'
+        "- [ ] prerequisite task\n"
+        '- [ ] stuck task <!-- depends: "a title that was never typed correctly" -->\n'
+    )
+    wf_path = (repo / "WORKFLOW.md").resolve()
+    monkeypatch.setattr(dash, "DISPATCH_WORKFLOWS", [wf_path])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
+
+    resp = dash.app.test_client().get("/api/dispatcher")
+    tasks = resp.get_json()["workflows"][0]["open_tasks"]
+
+    plain = _find(tasks, "plain task")
+    assert plain["blocked"] is False
+    assert plain["unmet_depends"] == []
+    assert plain["unresolved_depends"] == []
+
+    waiting = _find(tasks, "waiting task")
+    assert waiting["blocked"] is True
+    assert len(waiting["unmet_depends"]) == 1
+    # Resolvable (a real "prerequisite task" bullet exists, just not struck yet)
+    # — not a tracker bug, so no id should show up as unresolved.
+    assert waiting["unresolved_depends"] == []
+
+    stuck = _find(tasks, "stuck task")
+    assert stuck["blocked"] is True
+    assert stuck["unresolved_depends"] == stuck["unmet_depends"]
+    assert stuck["unresolved_depends"] != []

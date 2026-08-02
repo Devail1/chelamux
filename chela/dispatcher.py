@@ -512,18 +512,37 @@ def _ready(tasks: list[Task], closed_ids: set[str]) -> list[Task]:
     feature; a permanently blocked task at least stays visible in the queue and
     fails loud, which is exactly the frontier this exists to enforce: a task with
     an unmet dependency is not the next thing to claim, full stop, regardless of
-    its position in the file. A held-back task is logged, not silently skipped —
-    a dependency that can never be satisfied (the typo case) should be visible in
-    the daemon's own logs, not just an absence from the queue nobody can explain.
+    its position in the file.
+
+    ``tasks`` is always the FULL universe of currently open candidates (every
+    caller passes its complete on-disk/remote task list, never a pre-filtered
+    subset — see ``_claim_order``), so ``{t.id for t in tasks} | closed_ids`` is
+    every id that could ever legitimately be named. A dependency reference
+    outside that set can never resolve — a typo, or a retitled/deleted blocker,
+    since edges are keyed on title text (``_title_id``) — and is a TRACKER BUG,
+    not an ordinary wait: it warrants ``log.warning``. A reference that DOES
+    resolve but whose task simply hasn't been struck yet is the normal, expected
+    case and only warrants ``log.info`` — warning on every unmet dependency would
+    drown the one case that actually needs a human's attention.
     """
+    known_ids = {t.id for t in tasks} | closed_ids
     ready = []
     for t in tasks:
         unmet = set(t.depends) - closed_ids
         if unmet:
-            log.debug(
-                "claim: task %s (%s) held back — depends on %d task(s) not yet merged: %s",
-                t.id, t.title, len(unmet), ", ".join(sorted(unmet)),
-            )
+            unresolved = unmet - known_ids
+            if unresolved:
+                log.warning(
+                    "claim: task %s (%s) held back — depends on %d unresolved reference(s) "
+                    "(no open or closed task matches — a typo, or a retitled/deleted "
+                    "dependency): %s",
+                    t.id, t.title, len(unresolved), ", ".join(sorted(unresolved)),
+                )
+            else:
+                log.info(
+                    "claim: task %s (%s) held back — depends on %d task(s) not yet merged: %s",
+                    t.id, t.title, len(unmet), ", ".join(sorted(unmet)),
+                )
             continue
         ready.append(t)
     return ready
