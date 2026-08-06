@@ -76,6 +76,27 @@ its own corruption. Write guards that would catch you.
   version** — Claude Code keys plugin updates on the version, so a hook change without a
   bump ships stale hooks to every adopter.
 
+## Releasing (maintainer-only)
+
+The [CHANGELOG](CHANGELOG.md) is the source of a release's notes, and
+`pyproject.toml`'s `version` is the only place the number is written.
+
+On `main`, after a `dev → main` promotion:
+
+1. Turn `## [Unreleased]` into `## [X.Y.Z] — YYYY-MM-DD` in `CHANGELOG.md`.
+2. Bump `version` in `pyproject.toml` to match.
+3. Commit both together (`Release X.Y.Z — <one-line theme>`).
+4. `git tag -a vX.Y.Z -m "X.Y.Z — <one-line theme>" && git push origin vX.Y.Z`
+
+Pushing the tag is the whole release: CI builds the GitHub Release from that
+version's CHANGELOG section. **CI never creates a tag** — step 4 is yours.
+
+To preview a version's notes without publishing anything:
+
+```bash
+gh workflow run release.yml -f version=X.Y.Z    # dry_run defaults to true
+```
+
 ## How the dispatcher builds tasks (optional context)
 
 If you're curious how chela develops itself: the daemon reads unchecked `- [ ]` items

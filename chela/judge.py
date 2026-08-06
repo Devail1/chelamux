@@ -63,7 +63,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -515,6 +517,55 @@ def _unresolvable(worktree: Path, names: list[str]) -> list[str]:
     return [n for n in names if not (worktree / "node_modules" / Path(n)).is_dir()]
 
 
+def _venv_python(worktree: Path) -> Path:
+    """Where a ``uv``-managed ``.venv`` puts its interpreter, platform-appropriate."""
+    if os.name == "nt":
+        return worktree / ".venv" / "Scripts" / "python.exe"
+    return worktree / ".venv" / "bin" / "python"
+
+
+def _provision_python_env(worktree: Path, timeout: float = 600.0) -> str:
+    """Make the judge worktree able to RUN a uv-managed Python suite. "" if it can already, or
+    there is no ``pyproject.toml`` to provision for; the reason if it cannot be provisioned.
+
+    ⛔ CMX-218. This module used to assume ``uv run`` re-syncs a missing ``.venv`` on its own,
+    so nothing here provisioned Python at all — only a claim, never checked. It is false:
+    live 2026-08-02 on cmx-217, a judge worktree with no ``.venv`` made
+    ``uv run pytest`` exit 2 (``No such file or directory``) *before collecting a single
+    test*, and a single ``uv sync`` — not a retry, not a wait — was the actual fix. Mirrors
+    ``declared_npm_packages`` / the npm half below: provision in the JUDGED tree, because
+    ``hooks.before_run`` in WORKFLOW.md builds worktrees out of the DAEMON's OLD copy, never
+    the PR's (see the npm docstring below for the full argument).
+
+    ``--all-extras``, matching ``hooks.before_run`` exactly: a bare ``uv sync`` (or the
+    auto-sync a fresh ``uv run`` performs) drops every extra, and dashboard/telegram tests
+    false-fail on a default-only sync (the CMX-21 trap).
+    """
+    if not (worktree / "pyproject.toml").is_file():
+        return ""                       # not a uv-managed Python project — nothing to provision
+    exe = _venv_python(worktree)
+    if exe.is_file():
+        return ""
+    if not shutil.which("uv"):
+        return (f"{worktree}/.venv is missing a Python interpreter and `uv` is not on this "
+                "machine's PATH, so the judge could not provision it either")
+    try:
+        out = subprocess.run(
+            ["uv", "sync", "--all-extras", "--quiet"],
+            cwd=str(worktree), capture_output=True, text=True, errors="replace", timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"`uv sync` did not finish in {timeout:.0f}s in {worktree}"
+    if out.returncode != 0:
+        why = _last_meaningful_line((out.stdout or "") + (out.stderr or ""))
+        return f"`uv sync` failed in {worktree} (exit {out.returncode}{': ' + why if why else ''})"
+    if not exe.is_file():
+        return (f"`uv sync` exited 0 in {worktree} but {exe} is STILL missing — the suite that "
+                "needs it cannot run")
+    log.info("judge: python env provisioned in %s (uv sync created .venv)", worktree)
+    return ""
+
+
 def provision_suite_env(worktree: Path, timeout: float = 600.0) -> str:
     """Make the judge worktree able to RUN the suite. "" if it can; the reason if it cannot.
 
@@ -527,11 +578,15 @@ def provision_suite_env(worktree: Path, timeout: float = 600.0) -> str:
     reports CANNOT VERIFY on itself. A config fix cannot fix the thing that runs before the
     config is merged; only code in the judged tree can, and this is it.
 
-    Python never exposed this because ``uv run`` re-syncs the venv on every invocation — the
-    hook's ``uv sync`` is a speed-up, not a load-bearing step. Node has no equivalent:
-    ``npm ci`` runs once or never. This IS that equivalent, and it belongs here, in the code
-    the judge worktree executes, rather than in a hook the judged commit cannot reach.
+    ⛔ CMX-218: this used to assume Python did not need this treatment, because ``uv run``
+    "re-syncs the venv on every invocation." That is false — see
+    :func:`_provision_python_env`, called first, below — and Python gets the exact same
+    provision-in-the-judged-tree treatment npm already had.
     """
+    python_problem = _provision_python_env(worktree, timeout)
+    if python_problem:
+        return python_problem
+
     names = declared_npm_packages(worktree)
     if not names:
         return ""                       # no npm deps declared — nothing to provision
@@ -630,18 +685,104 @@ def _diagnose_red_baseline(
             capture_output=True, text=True, errors="replace",
         )
         if restore.returncode != 0:
+            # ⛔ CMX-218: name what git actually said, not just that the checkout failed — the
+            # next thing a caller does is treat this worktree as the PR's own HEAD, and if
+            # that is wrong, "could not restore" with no detail sends a human to re-derive
+            # from scratch what git already reported once, on this line, and threw away.
             log.error("judge: could not restore worktree %s to %s after the base_branch "
-                      "diagnostic", worktree, orig_sha)
+                      "diagnostic (git exited %d: %s)", worktree, orig_sha, restore.returncode,
+                      (restore.stderr or "").strip()[:200])
 
     if not base_result.ok:
         return (f"the judge tried `{test_cmd}` against `{ref}` alone and it would not even run "
                 f"({base_result.detail}) — treat this as a problem with the judge's own "
                 "environment, not a verdict on this PR")
+    # ⛔ `ok` only means the subprocess RETURNED — a shell that exits nonzero before a single
+    # test is collected (a missing `.venv`, an unresolved dependency, an import blow-up) looks
+    # identical to a real failure: `ok=True`, exit code nonzero. The tell is the counts —
+    # 0 passed, 0 failed means nothing EVER RAN. Observed live 2026-08-02 on cmx-217:
+    # the judge worktree had no `.venv`, `uv run pytest` exited 2 with "No such file or
+    # directory", and this function reported "RED ON BASE TOO" — sending the operator to fix
+    # `dev`, which was green the whole time. A `uv sync` in the judge's worktree was the actual
+    # fix; nothing about base_branch needed touching.
+    if base_result.exit_code != 0 and base_result.ran == 0:
+        why = base_result.detail or _last_meaningful_line(base_result.tail)
+        if base_result.errors == 0:
+            return (f"the judge tried `{test_cmd}` against `{ref}` alone and it exited "
+                    f"{base_result.exit_code} without running OR erroring a single test (0 "
+                    f"passed, 0 failed, 0 errors{': ' + why if why else ''}) — that is the "
+                    "judge's OWN worktree failing to even START the suite on this checkout, not "
+                    "a real base_branch failure. Treat this as a problem with the judge's "
+                    "environment (e.g. a missing `.venv`/dependency), not a verdict on "
+                    "base_branch or this PR")
+        # ⛔ CMX-218 rework round: `ran == 0` with `errors > 0` is NOT the same clean signal
+        # as the all-zeros case above. It could still be the judge's own environment, one
+        # layer further into collection — reviewer hit exactly this LIVE: a clone missing
+        # `--extra dashboard` produced 40 passed, 45 errors on a full suite; move the
+        # broken import into a shared conftest/fixture and it collapses to 0 passed, 0
+        # failed, N errors, indistinguishable by count from a GENUINE syntax error already
+        # committed on base_branch — which really would be base_branch's problem. Nothing
+        # here can tell those two apart from the counts alone, so unlike the all-zeros
+        # case, this does NOT claim either "the judge's box" or "RED ON BASE TOO" — an
+        # unresolved guess dressed as a fact is worse than an honest unknown.
+        return (f"the judge tried `{test_cmd}` against `{ref}` alone and it exited "
+                f"{base_result.exit_code} without a single test passing or failing, but "
+                f"{base_result.errors} error(s) came out of collection ({_suite_line(base_result)}"
+                f"{': ' + why if why else ''}) — this could be the judge's OWN worktree failing "
+                "to start the suite one layer further into collection (a missing extra or "
+                "dependency breaking a shared import), or a genuine collection-time break "
+                "already on base_branch itself, and the counts alone cannot tell those apart. "
+                "Treat this as UNRESOLVED — not a verdict on base_branch, this PR, or the "
+                "judge's environment")
     if not base_result.green:
         return (f"⛔ RED ON BASE TOO — `{ref}` alone ({_suite_line(base_result)}) is ALSO red. "
                 "This failure predates the PR: it needs a fix on base_branch, not rework here")
     return (f"RED ONLY ON THIS BRANCH — `{ref}` alone is green ({_suite_line(base_result)}). "
             "This branch's own commits are what turned the suite red")
+
+
+_PROSE_SUFFIXES = {".md", ".mdx", ".rst", ".txt"}
+_PROSE_BASENAMES = {"LICENSE", "NOTICE", "CHANGELOG", "AUTHORS", "CODEOWNERS"}
+
+
+def _is_prose_path(name: str) -> bool:
+    p = Path(name)
+    return p.suffix.lower() in _PROSE_SUFFIXES or p.name in _PROSE_BASENAMES
+
+
+def _docs_only_diff(worktree: Path, base_branch: str) -> bool | None:
+    """Whether EVERY file this PR touches (vs ``base_branch``) is prose, not code.
+
+    ⚖️📄 CMX-205. A docs-only PR has no guard for a mutation to corrupt — ``cannot_verify``
+    on it is STRUCTURAL (there was nothing to check), not a finding (something went wrong).
+    Before this, both cases wrote the same "the judge proposed NO experiments" sentence, so a
+    human reading it could not tell "this PR is prose, act on it" from "this PR has code and
+    the judge inexplicably wrote nothing" apart — the routine, expected case and the one
+    worth investigating looked identical, which is exactly how a bypass stops being read.
+
+    Returns ``None`` — an unknown, never read as yes or no — when it cannot tell: no
+    ``base_branch``, an unresolvable ref, a git failure, or an empty diff.
+    """
+    if not base_branch:
+        return None
+    ref = f"origin/{base_branch}"
+    resolved = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True, errors="replace",
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return None
+    base_sha = resolved.stdout.strip()
+    diff = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--name-only", f"{base_sha}...HEAD"],
+        capture_output=True, text=True, errors="replace",
+    )
+    if diff.returncode != 0:
+        return None
+    files = [f for f in diff.stdout.splitlines() if f.strip()]
+    if not files:
+        return None
+    return all(_is_prose_path(f) for f in files)
 
 
 def run_experiments(
@@ -672,10 +813,15 @@ def run_experiments(
       predates the PR) or green (this branch's own doing) — see
       :func:`_diagnose_red_baseline`;
     * **no experiments at all** — nothing was checked. That is not a clean bill of health.
+      ⚖️📄 CMX-205: given ``base_branch``, the report says WHETHER this is because the PR is
+      DOCS-ONLY (structurally nothing to mutate — see :func:`_docs_only_diff`) or because the
+      judge saw code and proposed nothing anyway (worth investigating) — the two used to read
+      as the same unknown.
 
-    ``base_branch`` is optional and used ONLY to diagnose a red baseline (never to change
-    whether the run is ``cannot_verify``, and never touched if the baseline is green) — pass
-    "" (the default) when it is not known, and the report says so instead of guessing.
+    ``base_branch`` is optional and used to diagnose a red baseline and a docs-only diff
+    (never to change whether the run is ``cannot_verify``, and never touched when neither
+    diagnosis applies) — pass "" (the default) when it is not known, and the report says so
+    instead of guessing.
     """
     report = Report()
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -690,11 +836,21 @@ def run_experiments(
         return report
 
     if not isinstance(items, list) or not items:
-        report.cannot_verify = (
-            "the judge proposed NO experiments — nothing was corrupted, so nothing was "
-            "proven. ⛔ Unknown is never a pass: this is not a clean bill of health, it is "
-            "an unreviewed PR."
-        )
+        if _docs_only_diff(worktree, base_branch):
+            report.cannot_verify = (
+                "the judge proposed NO experiments, AND this PR is DOCS-ONLY (every file it "
+                f"changes vs `origin/{base_branch}` is prose, not code) — there is "
+                "structurally no guard here for a mutation to corrupt. ⛔ This `cannot_verify` "
+                "is not a finding about the PR, the judge, or the suite: it still blocks "
+                "AUTONOMOUS merge (unknown ≠ safe), but it needs a human's read of the prose "
+                "itself, not a rework round."
+            )
+        else:
+            report.cannot_verify = (
+                "the judge proposed NO experiments — nothing was corrupted, so nothing was "
+                "proven. ⛔ Unknown is never a pass: this is not a clean bill of health, it is "
+                "an unreviewed PR."
+            )
         return report
 
     if len(items) > MAX_EXPERIMENTS:
@@ -769,12 +925,29 @@ def run_experiments(
         finally:
             # ⛔ ALWAYS. The next experiment's baseline is this file, unmutated.
             restored = True
+            restore_detail = ""
             if applied and original is not None:
                 try:
                     path.write_text(original)
-                    restored = path.read_text() == original
-                except OSError:
+                except OSError as e:
+                    # ⛔ CMX-218: the write itself raised — say what it raised. This is what
+                    # was actually observed, not a guess at why (permissions, a vanished
+                    # parent dir, disk full all raise OSError and all read differently here).
                     restored = False
+                    restore_detail = f"writing the original content back raised: {e}"
+                else:
+                    readback = path.read_text()
+                    restored = readback == original
+                    if not restored:
+                        # ⛔ The write did not raise, but what is on disk now is neither the
+                        # mutation nor the original — something else touched this file between
+                        # the write and the read-back. Report the observed sizes, not a cause;
+                        # a cause here would be invented.
+                        restore_detail = (
+                            f"the write did not raise, but reading {path} back afterward got "
+                            f"{len(readback)} chars where the original was {len(original)} — "
+                            "something else may have written to this file concurrently"
+                        )
         if not restored:
             # ⛔ THE ARTIFACT IS NOW CONTAMINATED. Every experiment after this one would run
             # against a file still carrying the last mutation, so its "the suite went green"
@@ -787,9 +960,11 @@ def run_experiments(
             report.cannot_verify = (
                 f"{exp.file} could NOT be restored after its mutation — the judge worktree is "
                 "contaminated and every measurement after this point would be about code "
-                "nobody wrote. ⛔ Nothing was blocked and nothing was cleared."
+                f"nobody wrote{': ' + restore_detail if restore_detail else ''}. ⛔ Nothing was "
+                "blocked and nothing was cleared."
             )
-            log.error("judge: could not restore %s — abandoning the whole report", path)
+            log.error("judge: could not restore %s — abandoning the whole report (%s)", path,
+                      restore_detail or "no further detail")
             break
 
     return report
@@ -1003,6 +1178,9 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         return {"ok": False, "error": f"no run matches {ident!r}"}
     task_id = run["task_id"]
     wf_path = run.get("workflow_path")
+    # ⚖️🕳️ CMX-221: the token that proves THIS call still owns the judge slot when it
+    # reaches `_cleanup` — see that function for why a stale call must never act on it.
+    judge_epoch = run.get("judge_window_epoch")
     try:
         wf = workflow.load_workflow(wf_path) if wf_path else None
     except Exception as e:            # a WORKFLOW.md that stopped parsing mid-judgment
@@ -1017,6 +1195,16 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     worktree = judge_worktree_path(wf, task_id)
     repo_dir = str(wf.path.parent)
     pr_url = run.get("pr_url")
+
+    # ⚖️🕳️ CMX-221 round 2: OBJECTIVE 1 was exclusive execution, not just guarded cleanup —
+    # a dispatcher-launched judge and a manual `chela judge run` for the same task (the
+    # documented way an operator clears a stale verdict) land on the identical worktree and
+    # would mutate/restore each other's files concurrently. Claim the slot BEFORE touching
+    # anything; a live claim held by someone else REFUSES loudly instead of racing them.
+    claim_error = _claim_judge_slot(worktree, task_id)
+    if claim_error:
+        log.warning("judge: %s: refusing to start — %s", task_id, claim_error)
+        return {"ok": False, "task_id": task_id, "error": claim_error}
 
     # ⛔ CMX-164: the judge worktree already exists on disk by this point (`_spawn_judge`
     # created it before this ever ran), and MUST be reaped whether this call finishes or
@@ -1092,19 +1280,154 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
 
         return result
     finally:
+        _release_judge_slot(worktree)
         if cleanup:
-            _cleanup(wf, task_id, run.get("branch_name") or "")
+            _cleanup(wf, task_id, run.get("branch_name") or "", judge_epoch)
 
 
-def _cleanup(wf, task_id: str, branch: str) -> None:
+def _judge_lock_path(worktree: Path) -> Path:
+    """A SIBLING of the throwaway worktree, never inside it — `_cleanup`'s `remove_worktree`
+    only knows how to delete the worktree itself, and `run_experiments` applies/restores
+    files INSIDE it; keeping the lock outside means neither can ever touch it by accident.
+    """
+    return worktree.parent / f".{worktree.name}.judgelock"
+
+
+def _read_judge_lock(lock_path: Path) -> dict | None:
+    try:
+        data = json.loads(lock_path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _judge_lock_owner_alive(lock: dict) -> bool:
+    """Is the process that wrote this lock still THAT process — not just any process that
+    happens to have the same pid now (CMX-219's lesson: the kernel recycles pids, so a bare
+    pid match can make a dead owner look live again). ``started`` is the pid's ``/proc``
+    start time at claim time; a live re-read that still matches proves identity.
+
+    When either side is unreadable, identity can't be proven — but unlike CMX-219's tier
+    (where an unproven match must NOT be trusted as "same process"), here the fallback still
+    needs SOME answer, so it degrades to the weaker "does the pid exist at all" signal rather
+    than declaring the claim permanently unrefusable.
+
+    ⛔ THE 1.0s WINDOW IS LOAD-BEARING — do NOT "fix" it to exact equality. CMX-219 rules
+    out a tolerance for ITS comparison, and applying that lesson here would look right and
+    break this: the two sides can come from DIFFERENT sources. :func:`sessions.proc_started`
+    reads ``/proc`` with sub-second precision (…040.97) but falls back to
+    :func:`sessions._sh_started`, which parses ``ps -o lstart=`` — an absolute timestamp with
+    **whole-second** resolution (…040.00). A lock written while ``/proc`` was readable and
+    re-read through the fallback therefore differs by up to one second on a process that
+    never moved. CMX-219's comparison is safe at exact equality because both of its sides
+    come from the same reader on the same call path; this one is not. The window is the
+    fallback's resolution — one second — and nothing wider.
+    """
+    pid = lock.get("pid")
+    if not isinstance(pid, int):
+        return False
+    from chela import sessions
+
+    started = lock.get("started")
+    live_started = sessions.proc_started(pid)
+    if started is None or live_started is None:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True            # exists, just not ours to signal (e.g. permission)
+        return True
+    return abs(live_started - started) < 1.0
+
+
+def _claim_judge_slot(worktree: Path, task_id: str) -> str | None:
+    """Claim the judge slot for ``task_id`` before touching its worktree. ``None`` on
+    success; an error string, meant to be returned to the caller verbatim, if someone else
+    holds it live right now.
+
+    ⚖️🕳️ CMX-221 round 2: OBJECTIVE 1 asked for EXCLUSIVE execution, not just guarded
+    cleanup. A dispatcher-launched judge stamps `judge_window_epoch` at spawn (see
+    `_cleanup`), but a manual `chela judge run` never does — it only READS that column — so
+    two calls for the same task always carried the identical epoch and that guard was a
+    no-op for exactly the collision this closes: an operator's `chela judge run` invoked
+    while a dispatcher-launched judge is still in flight on the same task (the documented way
+    to clear a stale verdict). The dispatcher's own spawned agent ends by calling this exact
+    function too — `judge_run` is "the judge agent's last step" whichever way it started — so
+    claiming HERE, independent of tmux and the dispatcher entirely, closes the gap for both
+    shapes at once, and does it BEFORE any mutation/restore work starts rather than only at
+    the final cleanup.
+
+    A stale claim (the owning process is gone) is taken over silently, not refused forever —
+    a crashed judge that never released its slot must not wedge every future judge on this
+    task; that would trade one bug for a worse one.
+    """
+    lock_path = _judge_lock_path(worktree)
+    existing = _read_judge_lock(lock_path)
+    if existing is not None and _judge_lock_owner_alive(existing):
+        return (f"a judge (pid {existing.get('pid')}) is already running for {task_id} in "
+                f"this worktree — refusing to share it. If that process is actually gone, "
+                f"its claim will be taken over automatically on the next attempt.")
+    from chela import sessions
+
+    pid = os.getpid()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps({
+        "pid": pid, "started": sessions.proc_started(pid), "task_id": task_id,
+        "claimed_at": time.time(),
+    }))
+    return None
+
+
+def _release_judge_slot(worktree: Path) -> None:
+    """Best-effort: drop the claim this call made, so a later run can reclaim it. Only
+    removes the lock if it still names THIS process — never a later claim, so a wrong delete
+    here can't reopen the exact race this whole mechanism exists to close."""
+    lock_path = _judge_lock_path(worktree)
+    existing = _read_judge_lock(lock_path)
+    if existing is not None and existing.get("pid") == os.getpid():
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+
+def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:
     """Drop the throwaway worktree, then kill the judge's own tmux window. Best-effort.
 
     Ordered: the run row is already written, so anything that fails here costs a directory,
     never a verdict. The window is killed LAST because killing it kills this process.
+
+    ⚖️🕳️ CMX-221: guarded by the SAME `judge_window_epoch` CAS that `_launch_agent` stamps
+    on every judge spawn (CMX-97's judge-window identity fix). The judge worktree is keyed
+    only by `task_id` (see `judge_worktree_path`), so if the watchdog ever declares THIS
+    call's judge dead on a stale read (a slow-but-alive judge past `JUDGE_TIMEOUT_SECONDS`,
+    or a `live_windows` snapshot that missed it) and respawns a replacement while this call
+    is still mid-flight, both calls land on the identical directory and the identical window
+    name. Whichever `_cleanup` runs first would delete the other's live workspace out from
+    under it. ⛔ This is a real race of the SAME FAMILY as the evening's three misreports
+    (2026-08-02) — found by reading the code, NOT the one actually observed that night: the
+    watchdog's timeout arm needs `JUDGE_TIMEOUT_SECONDS` (60min) to fire and every run in
+    question took ~90s, and a runs-DB query for both watchdog verdict strings ("window
+    disappeared", "did not finish in") returns 0 rows. That mechanism is RULED OUT as the
+    cause of those three; this guard closes an adjacent, still-real hole regardless. So this
+    re-reads the run row RIGHT NOW and only acts if `judge_window_epoch` still matches what
+    this call was launched under; a mismatch means a newer judge already took the slot, and
+    the stale call does nothing — no worktree removal, no window kill — leaving both to
+    whoever actually owns them now.
     """
+    from chela import dispatcher as _dispatcher
     from chela.dispatcher import _kill_windows_named
     from chela.worktree import remove_worktree
 
+    current = _dispatcher.resolve_run(task_id)
+    still_owns = current is not None and current.get("judge_window_epoch") == judge_epoch
+    if not still_owns:
+        log.warning(
+            "judge: %s: a newer judge now owns this task (judge_window_epoch changed under "
+            "us) — skipping cleanup so its worktree and window are left alone", task_id,
+        )
+        return
     try:
         remove_worktree(wf.path.parent, judge_worktree_path(wf, task_id))
     except Exception:

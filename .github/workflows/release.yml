@@ -1,0 +1,76 @@
+name: Release
+
+# Builds a GitHub Release from a tag a human already pushed by hand, following
+# "Releasing" in CONTRIBUTING.md. Steps 1-4 there (bump pyproject.toml, promote
+# CHANGELOG's Unreleased section, commit, `git tag` + `git push`) stay a deliberate
+# human act — CI NEVER creates or pushes a tag itself. This workflow only automates
+# step 5: turning that already-pushed tag into a published Release whose body is
+# CHANGELOG.md's matching section, extracted by the tested `chela.release_notes`
+# module (never inline sed/awk here), so the notes can't drift from what the tag
+# actually documents or be hand-retyped a second time.
+#
+# `--verify-tag` on the publish step is load-bearing, not decoration: `gh release
+# create v<X>` CREATES the tag at the default branch when `v<X>` doesn't already
+# exist, so without it this workflow could tag on the `workflow_dispatch` path
+# (dry_run=false, CHANGELOG section promoted, tag not yet pushed) — exactly the
+# "CI never tags" boundary this header claims. `tests/test_release_workflow.py`
+# guards every invariant in this file; corrupt one and it goes red.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build notes for, e.g. 0.3.0 (no leading 'v')"
+        required: true
+      dry_run:
+        description: "Print the extracted notes only — do not call `gh release create`"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Skips cleanly on a fork instead of failing red trying to publish someone else's release.
+    if: github.repository == 'Devail1/chelamux'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync
+        run: uv sync
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes from CHANGELOG.md
+        run: uv run python -m chela.release_notes "${{ steps.version.outputs.value }}" > notes.md
+
+      - name: Show extracted notes
+        run: cat notes.md
+
+      # A `push: tags` event is never a dry run — the tag itself was the deliberate
+      # human act that triggered this job. `workflow_dispatch` defaults to dry_run
+      # so the extraction above can be exercised against an already-tagged version
+      # (e.g. v0.3.0) to prove it's correct without publishing anything.
+      - name: Create GitHub Release
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.version.outputs.value }}" \
+            --verify-tag \
+            --title "v${{ steps.version.outputs.value }}" \
+            --notes-file notes.md

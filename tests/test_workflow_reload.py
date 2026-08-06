@@ -187,6 +187,24 @@ def test_poll_interval_is_re_read_when_the_file_changes(wf_file, tmp_path):
     assert dispatcher.poll_interval(wf_file, default=60) == 20
 
 
+def test_poll_interval_reads_the_dispatch_tick_knob_when_no_default_is_passed(wf_file, monkeypatch):
+    """🔴 WIRING — every existing caller here passes `default=60`, so the
+    `default is None` branch (the ONLY consumer of `config.dispatch_tick_interval()`,
+    a Timing-tab knob) was never exercised: reverting it to a literal 60 kept the whole
+    suite green. Pin the knob to a value the literal cannot be and require it through.
+
+    The counterweight is the second assertion: an explicit `default` must still win, so
+    this cannot pass by ignoring the argument and always returning the knob.
+    """
+    monkeypatch.setattr(dispatcher, "dispatch_tick_interval", lambda: 137)
+
+    assert dispatcher.poll_interval(wf_file) == 137, (
+        "poll_interval ignored the dispatch-tick knob on the default=None path — "
+        "the 60 literal is still latched"
+    )
+    assert dispatcher.poll_interval(wf_file, default=60) == 60
+
+
 # --- the tick: reconcile keeps running, new dispatch is blocked -------------
 
 @pytest.fixture

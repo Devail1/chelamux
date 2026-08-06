@@ -124,7 +124,7 @@ def test_start_time_is_read_without_proc(no_proc, child):
     """``ps -o lstart=`` is an absolute local timestamp, so the fallback needs no boot
     time; it only has to be epoch seconds, comparable with the event log's."""
     proc, _ = child
-    started = sessions._proc_started(proc.pid)
+    started = sessions.proc_started(proc.pid)
     assert started is not None
     assert abs(started - time.time()) < 120        # just spawned, not the epoch
 
@@ -164,7 +164,7 @@ def test_proc_is_used_alone_when_it_exists(tmp_path, monkeypatch):
     assert sessions._children(pid) == []
     assert sessions._resumed_session(pid) == SID
     assert sessions._proc_cwd(pid) == str(tmp_path)
-    assert sessions._proc_started(pid) == 1000 + 500 / sessions._CLK_TCK
+    assert sessions.proc_started(pid) == 1000 + 500 / sessions._CLK_TCK
 
 
 def test_a_stubbed_subprocess_cannot_invent_a_pid(no_proc, monkeypatch):
@@ -273,5 +273,5 @@ def test_a_missing_tool_is_just_an_unknown_fact(no_proc, monkeypatch):
     assert sessions._comm(1) == ""
     assert sessions._looks_like_claude(1) is False
     assert sessions._resumed_session(1) is None
-    assert sessions._proc_started(1) is None
+    assert sessions.proc_started(1) is None
     assert sessions._proc_cwd(1) is None

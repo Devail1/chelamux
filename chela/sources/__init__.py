@@ -17,6 +17,12 @@ class Task:
     # task or a source that has no notion of a continuation (gh_issues — an issue's
     # body isn't fetched here; see chela.sources.gh_issues.GhIssuesSource).
     body: str | None = None
+    # Ids of tasks this one must not be CLAIMED before — the tracker's blocking
+    # edges (see chela.sources.markdown's `depends:` marker). Empty for a source
+    # that has no notion of dependencies (gh_issues) or a task that declares none.
+    # A dependency is satisfied only once its task is struck done in the tracker;
+    # see chela.dispatcher._ready, the sole place this is enforced.
+    depends: tuple[str, ...] = ()
 
 
 def get_source(wf: WorkflowDef):

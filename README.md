@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue.svg" alt="License: AGPL v3"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/deps-uv-261230.svg" alt="uv-managed">
   <img src="https://img.shields.io/badge/tmux-native-1bb91f.svg" alt="tmux-native">
@@ -807,4 +807,10 @@ claim novelty for that shape.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Copyright © 2026 Liav Edry. **GNU Affero General Public License v3.0 or later** — see [LICENSE](LICENSE).
+
+AGPL rather than GPL because chela is a long-running daemon with a web dashboard: plain GPL obligations trigger on *distribution*, so running a modified chela as a hosted service would carry none. Under AGPL, offering it to users over a network counts — §13 requires that those users be offered the corresponding source, which the dashboard links to.
+
+In plain terms: use it freely, privately or commercially, modify it as you like. If you distribute a modified version **or run one as a network service**, publish your source under the same licence.
+
+Versions up to and including **0.3.0 were released under MIT** and remain available under it; the change applies from the next release onward. Third-party components keep their own licences — see [NOTICE](NOTICE).

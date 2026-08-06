@@ -1,6 +1,14 @@
 chelamux
 Copyright (c) 2026 Liav Edry
 
+chelamux as a whole is licensed under the GNU Affero General Public License,
+version 3 or later — see the LICENSE file. Releases up to and including 0.3.0
+were published under the MIT License and remain available under it.
+
+The third-party components listed below keep their own licences. Those licences
+are permissive and permit inclusion in an AGPL-licensed work; their notices are
+reproduced here and must be retained.
+
 This product includes software adapted from third-party projects.
 
 --------------------------------------------------------------------------------

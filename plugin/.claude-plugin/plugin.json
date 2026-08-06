@@ -6,7 +6,7 @@
     "name": "chela"
   },
   "homepage": "https://github.com/Devail1/chelamux",
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "keywords": [
     "observability",
     "orchestration",

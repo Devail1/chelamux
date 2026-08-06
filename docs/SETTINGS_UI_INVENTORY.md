@@ -12,10 +12,15 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**58** — every literal `CHELA_*` name a Python module in `chela/` reads straight off
-`os.environ`. `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs
-this scan and diffs it against the table below on every `pytest` run, so the count can't go
-stale the way the README config table twice has (CMX-…, see `docs/CONFIG.md` history).
+**40** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
+wired the 9-strong "Dispatch / judge / critic policy" group the same way, so those 18 are
+no longer *literal* `os.environ.get("CHELA_…")` call sites — see "WIRED" under Groups 2
+and 3) — every literal `CHELA_*` name a Python module in `chela/` reads straight off
+`os.environ`.
+`tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
+diffs it against the table below on every `pytest` run, so the count can't go stale the way
+the README config table twice has (CMX-…, see `docs/CONFIG.md` history).
 
 The Settings drawer (`chela/dashboard/static/js/nav.js`) writes exactly **two** of them
 back to a server-side store: `chela.saveProjectsDir()` → `CHELA_PROJECTS_DIR` and
@@ -93,33 +98,83 @@ and a mutability class:
 | `CHELA_ENV_FILE` | `$CHELA_DIR/chela.env` | Which file *is* the config. Empty disables the file entirely. |
 | `CHELA_TMUX_SESSION` | `chela` | The tmux session orchestrated. Auto-derives from the caller's own pane if unset — a UI toggle would fight that fallback. |
 
-### 2. Daemon loop intervals (9) — `hot`, the strongest tab candidate
+### 2. Daemon loop intervals (9) — WIRED (CMX-217), the Timing tab
 
-| Variable | Default | Notes |
-|---|---|---|
-| `CHELA_SCHEDULER_POLL_INTERVAL` | `30` | Daemon tick (s) |
-| `CHELA_CAPTURE_INTERVAL_SECONDS` | `300` | Context-snapshot cadence (s) |
-| `CHELA_CACHE_STALE_SECONDS` | `7200` | Skip statusLine caches older than this |
-| `CHELA_CONTEXT_RETENTION_DAYS` | `30` | Snapshot pruning window (days) |
-| `CHELA_DISPATCH_TICK_INTERVAL` | `60` | Dispatcher tick inside the daemon (s) |
-| `CHELA_STATUS_CMD_TIMEOUT_S` | `45.0` | `claude agents --json` timeout — see CMX-179, do not tune below measured cold-start |
-| `CHELA_STATUS_TTL_S` | `30.0` | How long the status cache is trusted between refreshes |
-| `CHELA_DOCTOR_CHECK_INTERVAL` | `3600` | How often the daemon self-runs `chela doctor` and pushes ERRORs |
-| `CHELA_DEFAULT_CONTEXT_WINDOW` | `200000` | Fallback context-window size assumption |
+**✅ Done.** These were the strongest tab candidate (all `hot`, no trust-boundary
+concerns, no validation beyond "is it a number") — CMX-217 built the general
+dashboard-setting precedence layer (`chela.config.dashboard_setting()`: the env var
+beats userconfig.json beats the built-in default — the dashboard binds loopback with no
+auth, so a value it wrote must never silently outrank an operator's explicit `export
+CHELA_…`, same rule `projects_dir` / `agent_permission_mode` / `agent_model` now follow,
+generalised into a registry — `chela.config.TIMING_KNOBS`) and proved it end to end on
+this exact group: a "Timing" section in the Settings drawer, backed by `GET`/`POST
+/api/config/timing`. A knob whose env var is set reports `source: "env"` and the drawer
+disables that row rather than offering an edit the env value would silently override.
 
-### 3. Dispatch / judge / critic policy (9) — `hot`, second-strongest tab candidate
+Because each is now read via `config.dashboard_setting()` (the env-var name is a runtime
+argument, not a literal `os.environ.get("CHELA_…")` call), they no longer show up in the
+raw-reads scan above — they are still real, settable env vars (unset falls through to
+them exactly as before), just no longer *only* reachable that way. Not a table row here
+on purpose, so `test_inventory_matches_env_reads` doesn't expect them back as literal
+reads: `CHELA_SCHEDULER_POLL_INTERVAL` (daemon tick, s, default `30`),
+`CHELA_CAPTURE_INTERVAL_SECONDS` (context-snapshot cadence, s, default `300`),
+`CHELA_CACHE_STALE_SECONDS` (skip statusLine caches older than this, s, default `7200`),
+`CHELA_CONTEXT_RETENTION_DAYS` (snapshot pruning window, days, default `30`),
+`CHELA_DISPATCH_TICK_INTERVAL` (dispatcher tick fallback, s, default `60`),
+`CHELA_STATUS_CMD_TIMEOUT_S` (`claude agents --json` timeout, s, default `45.0` — see
+CMX-179; the dashboard write path rejects anything below `45.0`, the measured
+cold-start floor), `CHELA_STATUS_TTL_S` (status-cache TTL,
+s, default `30.0`), `CHELA_DOCTOR_CHECK_INTERVAL` (self-audit cadence, s, default
+`3600`), `CHELA_DEFAULT_CONTEXT_WINDOW` (fallback context-window size, tokens, default
+`200000`).
 
-| Variable | Default | Notes |
-|---|---|---|
-| `CHELA_DISPATCH_WORKFLOWS` | empty | Colon-separated `WORKFLOW.md` paths — empty means dispatcher off (deliberately, see `docs/CONFIG.md` "a config is not a capability") |
-| `CHELA_MAX_REWORKS` | `2` | Rework cap before a run escalates to `needs_human` |
-| `CHELA_JUDGE` | `true` | Fleet-wide judge kill switch |
-| `CHELA_JUDGE_MAX_UNKNOWN_RETRIES` | `2` | Retries on a `cannot_verify` judge verdict |
-| `CHELA_CRITIC` | `true` | Fleet-wide critic (advisory pre-dispatch review) kill switch |
-| `CHELA_WORKTREE_DISK_BUDGET` | unset (off) | Byte/size-suffixed disk ceiling per worktree root |
-| `CHELA_MERGE_BASE` | `dev` | Fallback autonomous base branch (per-workflow `base_branch` still wins; the NEVER-list is never overridable by this) |
-| `CHELA_GATE_WAIT_S` | hook-derived | How long a `PermissionRequest` gate waits for a tap |
-| `CHELA_GATE_MAX_WAITS` | small int | Concurrent gate-wait slots |
+Two of the nine (`CHELA_STATUS_CMD_TIMEOUT_S` / `CHELA_STATUS_TTL_S`) are resolved once
+at `chela/agent_manager.py` import, same as they always were — a dashboard write to
+either needs that process restarted; the other seven are read per call and take effect
+on the next tick/request with no restart.
+
+### 3. Dispatch / judge / critic policy (9) — WIRED (CMX-220), the Dispatch tab
+
+**✅ Done.** The second-strongest tab candidate — unlike Group 2, not every member is
+`hot`: four of the nine are latched at some module's own import (the judge/critic
+fleet-wide kill switches, the dispatcher's own workflow list, the autonomous merge-base
+fallback), so a dashboard write to one of those needs the daemon/dashboard restarted to
+take effect, same shape `status_cmd_timeout_seconds`/`status_ttl_seconds` already modeled
+in Group 2. CMX-220 built `chela.config.DISPATCH_KNOBS` on the same
+`chela.config.dashboard_setting()` precedence layer Group 2 proved, generalised past
+"every knob is a plain positive number" — this group mixes a bool pair, two free-text
+knobs (one, `merge_base`, with an extra branch-name safety check since it feeds
+`chela.contract`'s autonomous-merge fallback — the merge-safety gate itself,
+`chela.contract.FORBIDDEN_BASES`/the NEVER-line check, is unconditional and untouched by
+this), and a K/M/G/T-suffixed size — plus a "Dispatch" section in the Settings drawer,
+backed by `GET`/`POST /api/config/dispatch`.
+
+Because each is now read via `config.dashboard_setting()` (or, for the four latched
+elsewhere, via `config.dispatch_value()`/a direct `dashboard_setting()` call at that
+module's own import), they no longer show up in the raw-reads scan above — they are still
+real, settable env vars (unset falls through to them exactly as before), just no longer
+*only* reachable that way. Not a table row here on purpose, so
+`test_inventory_matches_env_reads` doesn't expect them back as literal reads:
+`CHELA_DISPATCH_WORKFLOWS` (colon-separated `WORKFLOW.md` paths, default empty — empty
+means dispatcher off, deliberately, see `docs/CONFIG.md` "a config is not a capability";
+**restart_required**), `CHELA_MAX_REWORKS` (rework cap before a run escalates to
+`needs_human`, default `2`, `0` allowed — disables rework), `CHELA_JUDGE` (fleet-wide judge
+kill switch, default `true`; **restart_required**), `CHELA_JUDGE_MAX_UNKNOWN_RETRIES`
+(retries on a `cannot_verify` judge verdict, default `2`, `0` allowed), `CHELA_CRITIC`
+(fleet-wide critic/advisory-review kill switch, default `true`; **restart_required**),
+`CHELA_WORKTREE_DISK_BUDGET` (byte/size-suffixed disk ceiling per worktree root, default
+unset/off), `CHELA_MERGE_BASE` (fallback autonomous base branch — per-workflow
+`base_branch` still wins; the NEVER-list is never overridable by this, default `dev`;
+**restart_required**), `CHELA_GATE_WAIT_S` (how long a `PermissionRequest` gate waits for a
+tap, default `90.0`s, `0` allowed — never wait), `CHELA_GATE_MAX_WAITS` (concurrent
+gate-wait slots, default `8`, floor `1` — a `BoundedSemaphore` cannot be sized `0`).
+
+Four of the nine (`CHELA_DISPATCH_WORKFLOWS`/`CHELA_JUDGE`/`CHELA_CRITIC`/`CHELA_MERGE_BASE`)
+are resolved once at their owning module's import (`chela/config.py` for the first three,
+`chela/contract.py` for the fourth) — a dashboard write to any of those needs that process
+restarted; the other five (`chela/config.py`'s `max_reworks()`/
+`judge_max_unknown_retries()`/`worktree_disk_budget_bytes()`, `chela/gateanswer.py`'s
+`wait_budget()`/`max_waits()`) are read per call and take effect on the next tick/request.
 
 ### 4. Unattended-risk switches (3) — `trust-boundary`, keep env-file-only
 
@@ -226,8 +281,8 @@ readout:
 
 | Candidate tab | Writable knobs | Today |
 |---|---|---|
-| Daemon intervals | 9 | 0 |
-| Dispatch / judge / critic | 9 | 0 |
+| Daemon intervals (Timing) | 9 | **9** (CMX-217) |
+| Dispatch / judge / critic | 9 | **9** (CMX-220) |
 | Notifications | ~6 of 9 | 0 |
 | Telegram | 3 of 4 | 0 |
 | Terminal wall (+ the 7 shell-only) | ~9 of 12 | 0 |
@@ -242,3 +297,15 @@ into checkboxes would be quietly loosening a trust boundary `userconfig.py` was 
 protect. A tabbed modal is the right container for the ~40; it should render the other ~18
 as read-only facts (extending the existing Connections & Status pattern) rather than skip
 them or make them editable.
+
+**CMX-217** built the precedence layer the whole ~40 count depends on
+(`chela.config.dashboard_setting()` + a per-tab knob registry, e.g.
+`chela.config.TIMING_KNOBS`) and proved it on the cheapest group — Daemon intervals,
+renamed "Timing" in the UI. **CMX-220** reused it for the second-cheapest group —
+Dispatch/judge/critic, "Dispatch" in the UI (`chela.config.DISPATCH_KNOBS`) — and
+generalised the registry past "every knob is a plain positive number" (a bool pair, free
+text, a K/M/G/T size) and past "every knob lives in `config.py`" (`chela.contract`'s
+`AUTONOMOUS_BASE`, `chela.gateanswer`'s `wait_budget()`/`max_waits()`). The other ~22
+(Notifications, Telegram, Terminal wall, Collaboration, the remaining Launcher knobs) are
+now each a registry entry + an API route + a drawer section away, not a new precedence
+design — that was the actual gap this doc originally measured.

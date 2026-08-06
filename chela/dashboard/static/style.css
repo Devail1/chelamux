@@ -3155,6 +3155,15 @@ input[type="text"]:focus, textarea:focus, select:focus {
     padding: 12px 16px; border-bottom: 1px solid var(--border); font-weight: 700;
 }
 .drawer-body { padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+/* margin-top:auto pins the footer to the bottom of the flex column without giving
+   .drawer-body a flex-grow it does not currently have — the AGPL source offer has
+   to be visible, but not at the cost of relaying the drawer above it. */
+.drawer-foot {
+    margin-top: auto; padding: 10px 16px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-dim);
+}
+.drawer-foot a { color: var(--text-dim); text-decoration: underline; }
+.drawer-foot a:hover { color: var(--text); }
 .drawer-body code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
 
 /* Settings sections — each group of related controls is a card. */
@@ -3210,6 +3219,16 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .s-savemsg:empty { display: none; }
 .s-savemsg.ok { color: var(--green); }
 .s-savemsg.err { color: var(--red); }
+/* Timing tab (CMX-217): one label + numeric input + unit per knob, narrower than
+   the free-text .s-input rows above since every value here is a short number. */
+.s-timing-rows .s-input { flex: 0 1 90px; text-align: right; }
+.s-timing-rows .s-input:disabled { opacity: 0.55; cursor: not-allowed; }
+/* Dispatch tab (CMX-220): mixed kinds, unlike Timing's all-numeric rows — only the
+   "number" knobs (.s-num) get the narrow right-aligned treatment; "text"/"size" rows
+   (workflow paths, a branch name) keep the free-text .s-input's full width. */
+.s-dispatch-rows .s-input.s-num { flex: 0 1 90px; text-align: right; }
+.s-dispatch-rows .s-input:disabled, .s-dispatch-rows .s-select:disabled { opacity: 0.55; cursor: not-allowed; }
+.s-rowunit { color: var(--text-dim); font-size: 11px; min-width: 44px; }
 .s-badge {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
     padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);

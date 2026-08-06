@@ -1812,6 +1812,84 @@ def api_config():
     })
 
 
+@app.route("/api/config/timing", methods=["GET", "POST"])
+@require_auth
+def api_config_timing():
+    """The Timing tab (CMX-217): the "Daemon loop intervals" knob group, made
+    dashboard-writable through the general precedence layer
+    (``chela.config.dashboard_setting`` / ``chela.config.TIMING_KNOBS``) rather
+    than a one-off wiring per knob — the same shape ``/api/config`` already uses
+    for ``projects_dir`` / ``agent_permission_mode`` / ``agent_model``, generalised
+    to a registry instead of three hand-written fields.
+
+    GET reports every knob's stored value (empty if unset), its env-var/built-in
+    fallback default, and the effective (winning) value. POST ``{key: value, ...}``
+    sets one or more by their ``config.json`` key; an empty string clears a key
+    back to its env var / built-in default. Every value is validated server-side
+    (must parse as the knob's numeric type and be greater than zero) — the UI's
+    ``<input>`` is a convenience, not the gate, exactly like the permission-mode
+    and model enums above. The whole POST is ATOMIC: every key is validated
+    before any is applied, so one bad field in a multi-field save rejects 400
+    and leaves every stored value — including the other, valid fields in the
+    same request — untouched, rather than partially applying the batch.
+    """
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        errors: dict[str, str] = {}
+        parsed: dict[str, object] = {}
+        for key, raw in data.items():
+            err, value = config.validate_timing(key, "" if raw is None else str(raw))
+            if err:
+                errors[key] = err
+            else:
+                parsed[key] = value
+        if errors:
+            return jsonify({"error": "invalid timing setting(s)", "errors": errors}), 400
+        for key, value in parsed.items():
+            config.apply_timing(key, value)
+    return jsonify({"knobs": config.timing_snapshot()})
+
+
+@app.route("/api/config/dispatch", methods=["GET", "POST"])
+@require_auth
+def api_config_dispatch():
+    """The Dispatch tab (CMX-220): docs/SETTINGS_UI_INVENTORY.md's second group
+    ("Dispatch / judge / critic policy"), on the same precedence layer as
+    ``/api/config/timing`` — ``chela.config.dashboard_setting`` /
+    ``chela.config.DISPATCH_KNOBS``. Unlike Timing, this group mixes kinds
+    (bool/text/size, not just positive numbers), each knob's ``kind`` says how
+    to validate and render it.
+
+    Four of the nine (``restart_required: true`` in the snapshot) are latched at
+    another module's import (the judge/critic kill switches, the dispatcher's
+    workflow list, the autonomous merge base) — a save here persists immediately
+    but only takes effect the next time the daemon/dashboard restarts, exactly
+    like the Timing tab's status-feed timeout/TTL pair. The other five are read
+    per call and take effect on the next tick.
+
+    Same atomic-batch / fail-closed shape as ``/api/config/timing``: every key
+    is validated before any is applied, and an unknown key or a value that
+    fails its knob's validation (a non-numeric field, an unsafe branch name for
+    ``merge_base``, ...) rejects the WHOLE request 400, leaving every stored
+    value untouched.
+    """
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        errors: dict[str, str] = {}
+        parsed: dict[str, object] = {}
+        for key, raw in data.items():
+            err, value = config.validate_dispatch(key, "" if raw is None else str(raw))
+            if err:
+                errors[key] = err
+            else:
+                parsed[key] = value
+        if errors:
+            return jsonify({"error": "invalid dispatch setting(s)", "errors": errors}), 400
+        for key, value in parsed.items():
+            config.apply_dispatch(key, value)
+    return jsonify({"knobs": config.dispatch_snapshot()})
+
+
 def _notify_host(url: str) -> str:
     """Host of the notify URL for display — never the path/query, which for a
     Telegram sendMessage URL carries the bot token. Status surface, not secrets."""
@@ -1940,7 +2018,7 @@ def _settings_status() -> dict:
         n_wf = len(config.DISPATCH_WORKFLOWS)
     dispatch_on = n_wf > 0 and not wf_errors
     dispatch_state = f"{n_wf} workflow{'' if n_wf == 1 else 's'}" if n_wf else "Off"
-    dispatch_detail = (f"every {config.DISPATCH_TICK_INTERVAL}s · auto-discovered" if n_wf
+    dispatch_detail = (f"every {config.dispatch_tick_interval()}s · auto-discovered" if n_wf
                        else "no workflows yet — run `chela dispatch`")
     if wf_errors:
         dispatch_state = "Blocked"
@@ -1984,9 +2062,9 @@ def _settings_status() -> dict:
 
     try:
         n_tasks = len(scheduler.list_tasks())
-        sched_detail = f"every {config.SCHEDULER_POLL_INTERVAL}s · {n_tasks} task{'' if n_tasks == 1 else 's'}"
+        sched_detail = f"every {config.scheduler_poll_interval()}s · {n_tasks} task{'' if n_tasks == 1 else 's'}"
     except Exception:
-        sched_detail = f"every {config.SCHEDULER_POLL_INTERVAL}s"
+        sched_detail = f"every {config.scheduler_poll_interval()}s"
 
     features = [
         {"label": "Terminal wall", "on": config.TERMINALS_ENABLED,
@@ -2019,6 +2097,20 @@ def _settings_status() -> dict:
     }
 
 
+def _stale_service_names() -> list[str]:
+    """Which running `chela-*` PM2 services predate the checked-out commit — see
+    `update.services_running_stale_code`. `commits_behind` answers "is the CHECKOUT in
+    sync"; this answers "is the RUNNING CODE the checkout" — a bare `git pull` (bypassing
+    `chela update`, which pulls AND restarts together) leaves the former true while the
+    latter is false, and `chela doctor` already reports exactly that gap (`repo.services_current`)
+    while this card said "UP TO DATE" about it (2026-08-02). Best-effort: an unreadable
+    result degrades to "no known-stale services" rather than failing the whole payload
+    over a fact this route doesn't otherwise depend on.
+    """
+    freshness = update.services_running_stale_code()
+    return freshness.stale if freshness.ok else []
+
+
 def _update_status_payload() -> dict:
     """Read-only twin of `capabilities._update_available_capability`, shaped for the
     Settings drawer's Update section rather than a capabilities-list row. Never fetches;
@@ -2029,11 +2121,14 @@ def _update_status_payload() -> dict:
         return {"ok": False, "git": False, "error": str(e)}
     if not status.ok:
         return {"ok": False, "error": status.error}
+    stale = _stale_service_names()
     if status.error:
         # ok=True but carrying a note (no upstream configured) — not a fault, just
         # nothing this control can act on.
-        return {"ok": True, "behind": 0, "ahead": 0, "branch": status.branch, "note": status.error}
-    return {"ok": True, "behind": status.behind, "ahead": status.ahead, "branch": status.branch}
+        return {"ok": True, "behind": 0, "ahead": 0, "branch": status.branch,
+                "note": status.error, "stale_services": stale}
+    return {"ok": True, "behind": status.behind, "ahead": status.ahead, "branch": status.branch,
+            "stale_services": stale}
 
 
 @app.route("/api/settings")
@@ -2959,8 +3054,27 @@ def api_dispatcher():
                 project_key = wf.project_key
                 source = get_source(wf)
                 open_tasks = source.list_open_tasks()
-                entry["open_tasks"] = [
-                    {
+                # Same closed-ids-from-the-tracker read `dispatcher._local_closed_ids`
+                # uses for the offline claim fallback — reused here (not re-derived)
+                # so a task's blocked state in the payload always agrees with what
+                # `dispatcher._ready` would actually do with it. `known_ids` is every
+                # id that could legitimately be named (every open task here, plus
+                # every closed one) — a `depends` reference outside that set can
+                # never resolve (see `dispatcher._ready`'s docstring).
+                closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
+                tracker = getattr(source, "path", None)
+                closed_ids = (
+                    dispatcher._local_closed_ids(closed_ids_from_text, tracker)
+                    if closed_ids_from_text is not None and tracker is not None
+                    else set()
+                )
+                known_ids = {t.id for t in open_tasks} | closed_ids
+                entry["open_tasks"] = []
+                for t in open_tasks:
+                    if t.id in in_flight_ids:
+                        continue
+                    unmet = sorted(set(t.depends) - closed_ids)
+                    entry["open_tasks"].append({
                         "id": t.id,
                         "title": t.title,
                         "file": t.file,
@@ -2975,10 +3089,21 @@ def api_dispatcher():
                         # one-line task or a source with no notion of a continuation
                         # (gh_issues). The task-detail modal prefers this over `raw`.
                         "body": t.body,
-                    }
-                    for t in open_tasks
-                    if t.id not in in_flight_ids
-                ]
+                        # True when this task has a `depends:` reference not yet
+                        # struck done — kept in sync with `dispatcher._ready`, the
+                        # claim-time gate, so a card the dispatcher would refuse to
+                        # claim never renders identically to a takeable one.
+                        "blocked": bool(unmet),
+                        # The ids of the still-unmet `depends` references (empty for
+                        # an unblocked task or one with no `depends:` marker at all).
+                        "unmet_depends": unmet,
+                        # The subset of `unmet_depends` that name no task at all —
+                        # open or closed — anywhere in this tracker: a typo, or a
+                        # retitled/deleted dependency. These can never resolve on
+                        # their own; see `dispatcher._ready`.
+                        "unresolved_depends": sorted(set(unmet) - known_ids),
+                    })
+
                 backlog_path = (wf.path.parent / "BACKLOG.md").resolve()
                 entry["backlog_items"] = [
                     {"section": item.section, "text": item.text, "file": str(backlog_path)}
@@ -3022,6 +3147,53 @@ def api_dispatcher():
         # gates its empty state on this, so run-only discovery must flip it on.
         "configured": bool(workflows_payload),
         "workflows": workflows_payload,
+        # CMX-206: the Board's Pause/Resume button reads its state off THIS payload
+        # (the poll `work.js` already runs every 30s) rather than a second fetch of
+        # `/api/settings` — see `hold.active()` for what makes a hold current.
+        "dispatch_hold": (hold.active().as_dict() if hold.active() else None),
+    })
+
+
+# CMX-206: `chela dispatch --pause` is genuinely operational — it is what stops new
+# claims before a batch of merges — but until now the only way to reach it was SSH +
+# the CLI, same friction the Update control (CMX-199) removed for `chela update`. This
+# is that control for the hold: POST to take it, POST to release it, both wrapping
+# `chela.hold` exactly as the CLI does (see `cmd_dispatch_hold`) — no new hold semantics,
+# just a second front door onto the same file.
+@app.route("/api/dispatcher/pause", methods=["POST"])
+@require_auth
+def api_dispatcher_pause():
+    """Take the dispatch hold — no task is claimed until it is released.
+
+    Re-taking (posting again while already held) extends the expiry, same as the CLI —
+    `hold.take` always overwrites. Reconciliation is untouched: a merged PR still frees
+    its slot (see `chela.hold`'s module docstring for why that split matters).
+    """
+    data = request.get_json(silent=True) or {}
+    reason = (data.get("reason") or "dashboard").strip()
+    ttl_raw = data.get("ttl")
+    try:
+        ttl = hold.parse_ttl(ttl_raw) if ttl_raw else hold.DEFAULT_TTL_SECONDS
+    except ValueError as e:
+        return jsonify({"ok": False, "error": f"ttl: {e}"}), 400
+    try:
+        held = hold.take(reason=reason, ttl_seconds=ttl, by="dashboard")
+    except OSError as e:
+        # A hold the daemon will never see is worse than none — the caller would believe
+        # dispatch is paused when it is not. Fail loudly, same as the CLI.
+        return jsonify({"ok": False, "error": f"could not take the hold: {e}"}), 500
+    return jsonify({"ok": True, "dispatch_hold": held.as_dict()})
+
+
+@app.route("/api/dispatcher/resume", methods=["POST"])
+@require_auth
+def api_dispatcher_resume():
+    """Release the dispatch hold. Idempotent — releasing when nothing is held is not an
+    error, so a stale/duplicate click never surfaces as a failure."""
+    released = hold.release()
+    return jsonify({
+        "ok": True,
+        "released": released.as_dict() if released else None,
     })
 
 
@@ -4021,7 +4193,7 @@ def main():
     _start_notifier()
     # CMX-179 objective 2: keep the native busy/idle status cache warm off the request
     # path — this is the process that actually serves /api/agents, so it is the one that
-    # must pay the (up to config.STATUS_CMD_TIMEOUT_S) subprocess cost, on its own timer,
+    # must pay the (up to config.status_cmd_timeout_s()) subprocess cost, on its own timer,
     # instead of an inbound request paying it inline.
     agent_manager.start_background_refresh()
     collab.start()  # P3: publish running agents as presence peers (to shared viewers)

@@ -699,6 +699,39 @@ function renderSettings(focus) {
             setting.</p>
         </section>
 
+        <section class="settings-section" id="settings-timing">
+            <h4>Timing</h4>
+            <p class="s-desc">Daemon and dispatcher cadences. Blank a field to fall back to
+            its <code>CHELA_*</code> env var (or the built-in default, shown as its
+            placeholder) — takes effect on the <strong>next tick</strong>, no restart, except
+            the status-feed timeout/TTL pair (marked below), which the dashboard/daemon
+            process reads once at startup. A knob whose env var is currently set is disabled
+            here — <strong>env always wins</strong>, so an edit would be silently discarded.</p>
+            <div id="timing-rows" class="s-timing-rows"><div class="s-desc">Loading…</div></div>
+            <div class="s-row">
+                <button class="btn-accent" onclick="chela.saveTiming()">Save</button>
+            </div>
+            <div id="timing-msg" class="s-savemsg"></div>
+        </section>
+
+        <section class="settings-section" id="settings-dispatch">
+            <h4>Dispatch</h4>
+            <p class="s-desc">Dispatcher, judge, and critic policy. Blank a field to fall back
+            to its <code>CHELA_*</code> env var (or the built-in default, shown as its
+            placeholder). Four of these — <strong>Dispatch workflows</strong>,
+            <strong>Judge</strong>, <strong>Critic</strong>, and <strong>Merge base</strong>
+            (marked <span class="s-badge off" style="display:inline-block">restart</span>
+            below) — are read once when the daemon/dashboard starts, so a save there takes
+            effect on the <strong>next restart</strong>, not immediately. The rest apply on the
+            next tick. A knob whose env var is currently set is disabled here —
+            <strong>env always wins</strong>, so an edit would be silently discarded.</p>
+            <div id="dispatch-rows" class="s-dispatch-rows"><div class="s-desc">Loading…</div></div>
+            <div class="s-row">
+                <button class="btn-accent" onclick="chela.saveDispatch()">Save</button>
+            </div>
+            <div id="dispatch-msg" class="s-savemsg"></div>
+        </section>
+
         <section class="settings-section">
             <h4>Needs-input notifications</h4>
             <p class="s-desc">Fires a one-shot ping when an agent's pane enters
@@ -803,6 +836,8 @@ function renderSettings(focus) {
     _loadCollabSetting();
     _loadAgentModeSetting();
     _loadAgentModelSetting();
+    _loadTimingSettings();
+    _loadDispatchSettings();
     _loadSettingsStatus();
 }
 
@@ -985,10 +1020,20 @@ function _renderUpdateStatus(upd) {
         return;
     }
     const behind = upd.behind || 0;
+    const stale = upd.stale_services || [];
     if (behind > 0) {
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${behind} behind</span>
             <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — ${behind} commit(s) unpulled; running services are still serving what they last loaded</span>`;
         if (btn) { btn.disabled = false; btn.textContent = 'Update now'; }
+    } else if (stale.length) {
+        // The checkout itself is fully synced (nothing to pull) — but a bare `git pull`
+        // run by hand, bypassing this control, can leave running services on the OLD
+        // code with nothing left for "Update now" to fix (`apply()` only restarts on an
+        // actual pull). Reporting "Up to date" here would repeat the exact gap `chela
+        // doctor`'s `repo.services_current` fact exists to catch (2026-08-02).
+        row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${stale.length} stale</span>
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull, but ${escHtml(stale.join(', '))} predate this code (probably a bare \`git pull\` bypassing this control) — restart with \`pm2 restart ${escHtml(stale.join(' '))}\`</span>`;
+        if (btn) { btn.disabled = true; btn.textContent = 'Update now'; }
     } else {
         row.innerHTML = `<span class="s-status-badge on"><span class="s-status-dot" aria-hidden="true">●</span>Up to date</span>
             <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull</span>`;
@@ -1090,6 +1135,173 @@ async function saveProjectsDir() {
     setMsg('ok', 'Saved · scanning ' + ((cfg && cfg.projects_dir_effective) || inp.value.trim()));
     // Refresh the launch menu so new suggestions appear right away.
     if (typeof refreshLauncher === 'function') refreshLauncher();
+}
+
+// Timing tab (CMX-217): the Daemon-loop-intervals knob group, the first proof
+// of the general dashboard-setting precedence layer (chela.config.dashboard_setting
+// / TIMING_KNOBS — env wins over the dashboard). One row per knob — stored value
+// in the field, the effective (env/default-resolved) value as its placeholder,
+// same idiom as projects-dir above — and a single Save button that POSTs every
+// row in one batch, which /api/config/timing validates atomically (all-or-nothing)
+// before applying any.
+//
+// A knob whose env var is currently winning (`k.source === 'env'`) renders its
+// field DISABLED, showing the effective value rather than an editable one — env
+// always wins server-side, so an editable field here would silently discard
+// whatever the user typed. `saveTiming()` below excludes disabled fields from
+// the POST for the same reason: without that, every Save would re-persist the
+// env value into config.json as a "dashboard" value nobody chose, which would
+// then surface the moment the env var was later unset.
+function _renderTimingRows(knobs) {
+    const box = document.getElementById('timing-rows');
+    if (!box) return;
+    box.innerHTML = (knobs || []).map(k => {
+        const isEnv = k.source === 'env';
+        const badges =
+            (isEnv ? ` <span class="s-badge on" title="Set by ${attrEsc(k.env)} — env wins over the dashboard.">env</span>` : '') +
+            (k.restart_required ? ' <span class="s-badge off" title="Takes effect after a daemon/dashboard restart, not the next tick.">restart</span>' : '');
+        const input = isEnv
+            ? `<input class="s-input s-timing-input" type="number" step="any"
+                   data-timing-key="${attrEsc(k.key)}" value="${attrEsc(String(k.effective))}" disabled
+                   title="Overridden by ${attrEsc(k.env)} — dashboard edits are ignored while it's set.">`
+            : `<input class="s-input s-timing-input" type="number" step="any"
+                   data-timing-key="${attrEsc(k.key)}"
+                   placeholder="${attrEsc(String(k.default))}"
+                   value="${k.stored !== '' && k.stored !== undefined ? attrEsc(String(k.stored)) : ''}">`;
+        return `
+        <div class="s-row">
+            <span class="s-rowlabel">${escHtml(k.label)}${badges}</span>
+            ${input}
+            <span class="s-rowunit">${escHtml(k.unit || '')}</span>
+        </div>`;
+    }).join('');
+}
+
+async function _loadTimingSettings() {
+    const box = document.getElementById('timing-rows');
+    if (!box) return;
+    let body;
+    try {
+        body = await api('/api/config/timing');
+    } catch (e) { box.innerHTML = '<div class="s-desc">(unavailable)</div>'; return; }
+    if (!body || !body.knobs) { box.innerHTML = '<div class="s-desc">(unavailable)</div>'; return; }
+    _renderTimingRows(body.knobs);
+}
+
+async function saveTiming() {
+    const msg = document.getElementById('timing-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    const inputs = document.querySelectorAll('#timing-rows .s-timing-input');
+    const payload = {};
+    // Disabled = env-overridden (see _renderTimingRows) — never post those, or
+    // every Save would re-persist the env value into config.json unasked.
+    inputs.forEach(inp => { if (!inp.disabled) payload[inp.dataset.timingKey] = inp.value.trim(); });
+    setMsg('', 'Saving…');
+    let body;
+    try {
+        body = await api('/api/config/timing', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    } catch (e) { setMsg('err', 'Save failed — nothing changed.'); return; }
+    // api() resolves on a 4xx too (the rejection arrives as a body, not a throw) —
+    // the whole batch is atomic server-side, so an error here means NONE of the
+    // fields changed, not just the bad one.
+    if (!body || body.error) {
+        const detail = body && body.errors
+            ? Object.entries(body.errors).map(([k, v]) => k + ': ' + v).join('; ')
+            : 'rejected';
+        setMsg('err', 'Nothing saved — ' + detail);
+        _loadTimingSettings();     // re-show what's actually stored
+        return;
+    }
+    setMsg('ok', 'Saved.');
+    _renderTimingRows(body.knobs);
+}
+
+// Dispatch tab (CMX-220): docs/SETTINGS_UI_INVENTORY.md's second group
+// ("Dispatch / judge / critic policy"). Same batch-save idiom as Timing above,
+// but the knobs are NOT all plain positive numbers — `k.kind` picks the control:
+// "bool" -> a 3-way select (Default/On/Off, since blank must mean "fall back to
+// env/default", not "off"), "text"/"size" -> a text input, "number" -> a numeric
+// input, same as Timing's rows.
+function _renderDispatchRows(knobs) {
+    const box = document.getElementById('dispatch-rows');
+    if (!box) return;
+    box.innerHTML = (knobs || []).map(k => {
+        const isEnv = k.source === 'env';
+        const badges =
+            (isEnv ? ` <span class="s-badge on" title="Set by ${attrEsc(k.env)} — env wins over the dashboard.">env</span>` : '') +
+            (k.restart_required ? ' <span class="s-badge off" title="Takes effect after a daemon/dashboard restart, not the next tick.">restart</span>' : '');
+        const envTitle = isEnv ? `title="Overridden by ${attrEsc(k.env)} — dashboard edits are ignored while it's set."` : '';
+        let input;
+        if (k.kind === 'bool') {
+            const stored = k.stored !== '' && k.stored !== undefined ? !!k.stored : null;
+            input = `<select class="s-select s-dispatch-input" data-dispatch-key="${attrEsc(k.key)}"
+                        ${isEnv ? 'disabled' : ''} ${envTitle}>
+                     <option value=""${stored === null ? ' selected' : ''}>Default (${k.default ? 'on' : 'off'})</option>
+                     <option value="true"${(isEnv ? k.effective === true : stored === true) ? ' selected' : ''}>On</option>
+                     <option value="false"${(isEnv ? k.effective === false : stored === false) ? ' selected' : ''}>Off</option>
+                     </select>`;
+        } else {
+            const type = k.kind === 'number' ? 'number' : 'text';
+            const step = type === 'number' ? ' step="any"' : '';
+            const numCls = k.kind === 'number' ? ' s-num' : '';
+            input = isEnv
+                ? `<input class="s-input s-dispatch-input${numCls}" type="${type}"${step}
+                       data-dispatch-key="${attrEsc(k.key)}" value="${attrEsc(String(k.effective))}" disabled ${envTitle}>`
+                : `<input class="s-input s-dispatch-input${numCls}" type="${type}"${step}
+                       data-dispatch-key="${attrEsc(k.key)}"
+                       placeholder="${attrEsc(String(k.default))}"
+                       value="${k.stored !== '' && k.stored !== undefined ? attrEsc(String(k.stored)) : ''}">`;
+        }
+        return `
+        <div class="s-row">
+            <span class="s-rowlabel">${escHtml(k.label)}${badges}</span>
+            ${input}
+            <span class="s-rowunit">${escHtml(k.unit || '')}</span>
+        </div>`;
+    }).join('');
+}
+
+async function _loadDispatchSettings() {
+    const box = document.getElementById('dispatch-rows');
+    if (!box) return;
+    let body;
+    try {
+        body = await api('/api/config/dispatch');
+    } catch (e) { box.innerHTML = '<div class="s-desc">(unavailable)</div>'; return; }
+    if (!body || !body.knobs) { box.innerHTML = '<div class="s-desc">(unavailable)</div>'; return; }
+    _renderDispatchRows(body.knobs);
+}
+
+async function saveDispatch() {
+    const msg = document.getElementById('dispatch-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    const inputs = document.querySelectorAll('#dispatch-rows .s-dispatch-input');
+    const payload = {};
+    // Disabled = env-overridden — never post those, same reasoning as saveTiming().
+    inputs.forEach(inp => { if (!inp.disabled) payload[inp.dataset.dispatchKey] = inp.value.trim(); });
+    setMsg('', 'Saving…');
+    let body;
+    try {
+        body = await api('/api/config/dispatch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    } catch (e) { setMsg('err', 'Save failed — nothing changed.'); return; }
+    if (!body || body.error) {
+        const detail = body && body.errors
+            ? Object.entries(body.errors).map(([k, v]) => k + ': ' + v).join('; ')
+            : 'rejected';
+        setMsg('err', 'Nothing saved — ' + detail);
+        _loadDispatchSettings();     // re-show what's actually stored
+        return;
+    }
+    setMsg('ok', 'Saved.');
+    _renderDispatchRows(body.knobs);
 }
 
 const THEME_LABELS = {
@@ -1500,4 +1712,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveProjectsDir, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });

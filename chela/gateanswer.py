@@ -102,10 +102,10 @@ def wait_budget() -> float:
     """
     from chela.hooks import GATE_TIMEOUT
     ceiling = max(1.0, GATE_TIMEOUT - 5.0)
-    try:
-        budget = float(os.environ.get("CHELA_GATE_WAIT_S", DEFAULT_WAIT_S))
-    except ValueError:
-        budget = DEFAULT_WAIT_S
+    # A Dispatch-tab knob (CMX-220) — config.dashboard_setting() (env beats the
+    # dashboard beats this default), read fresh every call same as before.
+    budget = config.dashboard_setting("gate_wait_seconds", "CHELA_GATE_WAIT_S",
+                                       DEFAULT_WAIT_S, cast=float)
     if budget <= 0:
         return 0.0                              # explicitly disabled — never wait
     if budget > ceiling:
@@ -119,10 +119,9 @@ def wait_budget() -> float:
 
 
 def max_waits() -> int:
-    try:
-        return max(1, int(os.environ.get("CHELA_GATE_MAX_WAITS", DEFAULT_MAX_WAITS)))
-    except ValueError:
-        return DEFAULT_MAX_WAITS
+    """A Dispatch-tab knob (CMX-220) — see :func:`wait_budget`'s comment."""
+    return max(1, config.dashboard_setting("gate_max_waits", "CHELA_GATE_MAX_WAITS",
+                                            DEFAULT_MAX_WAITS, cast=int))
 
 
 _slots = threading.BoundedSemaphore(DEFAULT_MAX_WAITS)

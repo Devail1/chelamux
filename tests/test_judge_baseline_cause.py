@@ -128,6 +128,73 @@ def test_red_only_on_this_branch_is_named_when_base_is_green(tmp_path, repo, ori
     assert head == _git("rev-parse", "pr-1", cwd=repo).stdout.strip()
 
 
+def test_red_on_base_is_not_claimed_when_base_never_actually_ran(tmp_path, repo, origin):
+    """⛔ CMX-218. ``ok`` only means the subprocess RETURNED — not that a single test ran. A
+    ``test_cmd`` that exits nonzero before pytest is ever invoked (a missing ``.venv``, in the
+    incident this pins) must not be read as "base_branch is red": that is the judge's own
+    worktree failing to even start the suite, and blaming base_branch sends the operator to
+    fix a branch that was never broken. Live 2026-08-02 on cmx-217: the judge worktree had no
+    ``.venv``, ``uv run pytest`` exited 2 with "No such file or directory", and the old code
+    reported "RED ON BASE TOO" — ``origin/dev`` was green the whole time."""
+    _commit_on(repo, "dev", FAILING_TEST, "irrelevant — the broken command below never runs it")
+    _push(repo, "dev")
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "unrelated.txt").write_text("noise\n")
+    _git("add", "unrelated.txt", cwd=repo)
+    _git("commit", "-m", "an unrelated PR commit", cwd=repo)
+    wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
+    _git("fetch", "origin", "dev", cwd=wt)
+
+    # Stands in for "no .venv" — a command that exits nonzero WITHOUT ever collecting a test,
+    # on every checkout, so any "RED ON BASE TOO" the function still emits proves it decided
+    # from the exit code alone, not from whether the suite actually ran.
+    broken_cmd = f'"{sys.executable}" -c "import sys; sys.exit(2)"'
+
+    cause = judge._diagnose_red_baseline(wt, broken_cmd, "dev", 60)
+
+    assert "RED ON BASE TOO" not in cause
+    assert "judge's OWN worktree" in cause
+    assert "0 passed, 0 failed, 0 errors" in cause
+    head = _git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+    assert head == _git("rev-parse", "pr-1", cwd=repo).stdout.strip()
+
+
+def test_ran_zero_but_errors_nonzero_is_unresolved_not_a_verdict(tmp_path, repo, origin):
+    """⛔ CMX-218 rework round. ``ran == 0`` with ``errors == 0`` (the test above) is a clean
+    "nothing ever started" signal, but ``ran == 0`` with ``errors > 0`` is one layer further
+    in — reviewer hit this LIVE: a clone missing ``--extra dashboard`` produced 40 passed, 45
+    errors on a full run; move the broken import into a shared conftest/fixture and the same
+    failure collapses to 0 passed, 0 failed, N errors. That is INDISTINGUISHABLE BY COUNT from
+    a genuine syntax error already committed on ``base_branch`` — a real base_branch problem.
+    Neither "RED ON BASE TOO" nor "the judge's OWN worktree" may be claimed here; the honest
+    answer is UNRESOLVED."""
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "unrelated.txt").write_text("noise\n")
+    _git("add", "unrelated.txt", cwd=repo)
+    _git("commit", "-m", "an unrelated PR commit", cwd=repo)
+    wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
+    _git("fetch", "origin", "dev", cwd=wt)
+
+    # Fabricates the exact shape `run_suite`'s counters look for — 0 passed, 0 failed, a
+    # nonzero `errors` — on every checkout, without needing a real pytest collection error to
+    # reproduce it: any verdict this function still reaches proves it decided from the counts
+    # alone, not from anything about `base_branch` or this PR.
+    broken_cmd = f'"{sys.executable}" -c "print(\'2 errors in 0.01s\'); exit(2)"'
+
+    cause = judge._diagnose_red_baseline(wt, broken_cmd, "dev", 60)
+
+    assert "RED ON BASE TOO" not in cause
+    # The all-zeros case (test above) is allowed to CLAIM the judge's own environment; this
+    # one may only ever say it is a POSSIBILITY, never the definitive "even START" verdict.
+    assert "even START" not in cause
+    assert "UNRESOLVED" in cause
+    assert "2 error(s)" in cause
+    head = _git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+    assert head == _git("rev-parse", "pr-1", cwd=repo).stdout.strip()
+
+
 def test_no_base_branch_known_says_so_rather_than_guessing(tmp_path, repo):
     _branch_from_head(repo, "pr-1")
     wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
@@ -163,6 +230,40 @@ def test_the_worktree_tip_already_being_base_is_named_not_mistaken_for_a_PR_regr
 
     assert "already equals" in cause
     assert "red on base_branch itself" in cause
+
+
+def test_restore_failure_is_logged_with_the_git_detail(tmp_path, repo, origin, monkeypatch, caplog):
+    """⛔ CMX-218 mutation-round finding. If the checkout back to the PR's own HEAD (the
+    ``finally`` block) fails, this log line is the ONLY record of why — the next thing a
+    caller does is treat this worktree as the PR's own HEAD. "could not restore" with no
+    detail sends a human to re-derive from scratch what git already reported once, on this
+    line, and threw away. Pin the exit code AND the stderr text, not just the bare fact that
+    restoring failed."""
+    _branch_from_head(repo, "pr-1")
+    _commit_on(repo, "pr-1", FAILING_TEST, "the PR breaks its own suite")
+    wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
+    _git("fetch", "origin", "dev", cwd=wt)
+    orig_sha = _git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+
+    real_run = judge.subprocess.run
+    restore_cmd = ["git", "-C", str(wt), "checkout", "--quiet", "--detach", orig_sha]
+
+    def _fake_run(cmd, *args, **kwargs):
+        if cmd == restore_cmd:
+            return subprocess.CompletedProcess(
+                cmd, 128, stdout="", stderr="fatal: unable to restore worktree, on purpose\n",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(judge.subprocess, "run", _fake_run)
+
+    with caplog.at_level("ERROR", logger="chela.judge"):
+        judge._diagnose_red_baseline(wt, TEST_CMD, "dev", 60)
+
+    [record] = [r for r in caplog.records if "could not restore worktree" in r.getMessage()]
+    msg = record.getMessage()
+    assert "128" in msg
+    assert "fatal: unable to restore worktree, on purpose" in msg
 
 
 # --- wired into run_experiments: the cause lands in `cannot_verify` ----------------------

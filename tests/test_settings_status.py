@@ -197,12 +197,23 @@ def test_a_released_queue_leaves_no_trace_on_the_row(client, monkeypatch, tmp_pa
 
 # --- "update" payload: CMX-199, the Settings-drawer twin of doctor's repo.upstream_synced --
 
+@pytest.fixture(autouse=True)
+def _no_stale_services(monkeypatch):
+    """Every test in this module cares about `commits_behind`, not service freshness —
+    pin `services_running_stale_code` to "nothing stale" so it doesn't shell out to real
+    `git`/`pm2` for a fact these tests aren't exercising. The staleness-specific tests
+    below override this."""
+    monkeypatch.setattr(dash.update, "services_running_stale_code",
+                        lambda *a, **k: dash.update.ServiceFreshness(ok=True, stale=[]))
+
+
 def test_update_payload_reports_behind_count(client, monkeypatch):
     monkeypatch.setattr(dash.update, "commits_behind",
                         lambda fetch=True: dash.update.UpdateStatus(
                             ok=True, behind=5, ahead=0, branch="dev"))
     data = client.get("/api/settings").get_json()
-    assert data["update"] == {"ok": True, "behind": 5, "ahead": 0, "branch": "dev"}
+    assert data["update"] == {"ok": True, "behind": 5, "ahead": 0, "branch": "dev",
+                               "stale_services": []}
 
 
 def test_update_payload_is_clean_when_up_to_date(client, monkeypatch):
@@ -237,7 +248,7 @@ def test_update_payload_carries_the_no_upstream_note(client, monkeypatch):
     data = client.get("/api/settings").get_json()
     assert data["update"] == {
         "ok": True, "behind": 0, "ahead": 0, "branch": "dev",
-        "note": "no upstream configured for this branch",
+        "note": "no upstream configured for this branch", "stale_services": [],
     }
 
 
@@ -257,3 +268,75 @@ def test_update_payload_never_fetches(client, monkeypatch):
     monkeypatch.setattr(dash.update, "commits_behind", fake_commits_behind)
     client.get("/api/settings")
     assert calls == [False]
+
+
+# --- CMX-212: "UP TO DATE" while running services predate the checked-out code ------
+#
+# Measured live 2026-08-02: the card said "UP TO DATE — branch dev — nothing to pull"
+# (true: ahead=0, behind=0) while `chela doctor`'s `repo.services_current` fact
+# simultaneously reported 4 running `chela-*` services predating a HEAD committed hours
+# after they last started (a bare `git pull`, bypassing `chela update`, never restarts
+# anything). `_update_status_payload` only ever asked `commits_behind` — a fact about the
+# CHECKOUT — and never `services_running_stale_code` — the fact about the RUNNING CODE
+# `chela doctor` already had. These pin that the payload (and the row it feeds) surfaces
+# the second fact instead of silently dropping it.
+
+def test_update_payload_reports_stale_services_even_with_nothing_to_pull(client, monkeypatch):
+    monkeypatch.setattr(dash.update, "commits_behind",
+                        lambda fetch=True: dash.update.UpdateStatus(
+                            ok=True, behind=0, ahead=0, branch="dev"))
+    monkeypatch.setattr(dash.update, "services_running_stale_code",
+                        lambda *a, **k: dash.update.ServiceFreshness(
+                            ok=True, stale=["chela-daemon", "chela-dashboard"]))
+    data = client.get("/api/settings").get_json()
+    assert data["update"] == {
+        "ok": True, "behind": 0, "ahead": 0, "branch": "dev",
+        "stale_services": ["chela-daemon", "chela-dashboard"],
+    }
+
+
+def test_update_payload_is_clean_when_no_service_is_stale(client, monkeypatch):
+    """Counterweight — without it, always reporting every online service as stale would
+    also satisfy the test above."""
+    monkeypatch.setattr(dash.update, "commits_behind",
+                        lambda fetch=True: dash.update.UpdateStatus(
+                            ok=True, behind=0, ahead=0, branch="dev"))
+    monkeypatch.setattr(dash.update, "services_running_stale_code",
+                        lambda *a, **k: dash.update.ServiceFreshness(ok=True, stale=[]))
+    data = client.get("/api/settings").get_json()
+    assert data["update"]["stale_services"] == []
+
+
+def test_update_payload_degrades_stale_services_to_empty_on_an_unreadable_freshness_check(
+        client, monkeypatch):
+    """A `services_running_stale_code` that itself can't tell (`ok=False`, e.g. `git log`
+    failed) must not fail the whole payload over a fact this route can otherwise do
+    without — it degrades to "no KNOWN-stale services", the same trade
+    `commits_behind(fetch=False)` already makes for its own local-read failures."""
+    monkeypatch.setattr(dash.update, "commits_behind",
+                        lambda fetch=True: dash.update.UpdateStatus(
+                            ok=True, behind=0, ahead=0, branch="dev"))
+    monkeypatch.setattr(dash.update, "services_running_stale_code",
+                        lambda *a, **k: dash.update.ServiceFreshness(ok=False, error="git log failed"))
+    data = client.get("/api/settings").get_json()
+    assert data["update"]["ok"] is True
+    assert data["update"]["stale_services"] == []
+
+
+def test_update_payload_never_calls_pm2_or_git_for_stale_check_more_than_once(client, monkeypatch):
+    """`services_running_stale_code` must actually be consulted by the payload — not just
+    importable. Corrupting the call-site out (returning `[]` unconditionally) is exactly
+    the CMX-212 regression this test guards against."""
+    calls = []
+
+    def fake_freshness(*a, **k):
+        calls.append("called")
+        return dash.update.ServiceFreshness(ok=True, stale=["chela-daemon"])
+
+    monkeypatch.setattr(dash.update, "commits_behind",
+                        lambda fetch=True: dash.update.UpdateStatus(
+                            ok=True, behind=0, ahead=0, branch="dev"))
+    monkeypatch.setattr(dash.update, "services_running_stale_code", fake_freshness)
+    data = client.get("/api/settings").get_json()
+    assert calls, "services_running_stale_code was never called"
+    assert data["update"]["stale_services"] == ["chela-daemon"]

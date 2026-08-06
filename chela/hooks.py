@@ -257,7 +257,7 @@ def plugin_manifest() -> dict:
                        "answer an AskUserQuestion from Telegram with no keystrokes.",
         "author": {"name": "chela"},
         "homepage": "https://github.com/Devail1/chelamux",
-        "license": "MIT",
+        "license": "AGPL-3.0-or-later",
         "keywords": ["observability", "orchestration", "tmux"],
     }
 

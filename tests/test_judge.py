@@ -310,7 +310,35 @@ def test_a_file_that_cannot_be_RESTORED_takes_the_whole_report_down(tmp_path):
     assert report.blocking == []                     # ⛔ a SURVIVED finding, and it BLOCKS NOTHING
     assert report.state == judge.J_CANNOT_VERIFY
     assert "could NOT be restored" in report.cannot_verify
+    # ⛔ CMX-218 rework round: the message is the deliverable here too — a mismatch after a
+    # write that did NOT raise must say what was actually observed (sizes), not just that
+    # restoration failed, or the next reader re-derives by hand what this line already knew.
+    assert "did not raise" in report.cannot_verify
+    assert "afterward got" in report.cannot_verify
     assert len(report.outcomes) == 1                 # it stopped rather than measure a phantom
+
+
+def test_a_restore_write_that_RAISES_names_what_it_raised(tmp_path):
+    """⛔ CMX-218 rework round. The OTHER way a restore can fail — the write itself raises
+    (permissions, a vanished parent dir, disk full) — must be told apart from a silent
+    mismatch: the exception text IS the cause, and it is thrown away if not carried into the
+    report."""
+    root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
+    real_write = Path.write_text
+    calls = {"n": 0}
+
+    def flaky_write(self, data, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 2:                          # the RESTORE of the first experiment
+            raise OSError("no space left on device")
+        return real_write(self, data, *a, **k)
+
+    with patch.object(Path, "write_text", flaky_write):
+        report = _run(root, _exp(), _exp(guard="a second guard, never measured"))
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert "could NOT be restored" in report.cannot_verify
+    assert "no space left on device" in report.cannot_verify
 
 
 def test_a_cannot_verify_report_blocks_nothing_whatever_its_findings_say(tmp_path):
@@ -544,6 +572,168 @@ def test_a_judge_run_that_RAISES_still_reaps_its_worktree(tmp_path, monkeypatch)
         judge.judge_run(task_id, exp_file, cleanup=True)
 
     assert not wt_path.exists()
+
+
+def test_a_stale_judge_never_deletes_the_worktree_a_newer_judge_now_owns(tmp_path, monkeypatch):
+    """⚖️🕳️ CMX-221: `judge_worktree_path` is keyed only by `task_id` — two judge calls for
+    the same task land on the identical directory and window name. If the watchdog ever
+    declares a slow-but-alive judge dead and respawns a replacement while the first call is
+    still mid-flight (bumping `judge_window_epoch`, the same CAS `_launch_agent` stamps on
+    every spawn), the first call's `_cleanup` must NOT delete the replacement's live
+    worktree, and must NOT kill its window, just because it finishes first.
+
+    Simulated by bumping `judge_window_epoch` partway through this call's `run_experiments`
+    — exactly what a real respawn does while this call is off running the suite."""
+    killed = []
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: killed.append(name))
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_window_epoch="epoch-A")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    assert wt_path.is_dir()
+
+    real_run_experiments = judge.run_experiments
+
+    def _respawn_mid_flight(*a, **kw):
+        with dispatcher._db() as conn:
+            conn.execute(
+                "UPDATE runs SET judge_window_epoch=? WHERE task_id=?", ("epoch-B", task_id),
+            )
+            conn.commit()
+        return real_run_experiments(*a, **kw)
+
+    monkeypatch.setattr(judge, "run_experiments", _respawn_mid_flight)
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert result["state"] == judge.J_CLEAN
+    assert wt_path.is_dir()          # ⛔ NOT reaped — a newer judge owns the slot now
+    assert killed == []              # ⛔ its window was not killed either
+
+
+def test_a_second_judge_for_the_same_task_refuses_while_the_first_is_still_running(
+    tmp_path, monkeypatch,
+):
+    """⚖️🕳️ CMX-221 round 2: OBJECTIVE 1 asked for EXCLUSIVE execution — a second judge for
+    the same task must REFUSE to start, not just skip cleanup once it's done. The collision
+    the ticket names explicitly: a dispatcher-launched judge (which stamps
+    `judge_window_epoch` at spawn) is still running when an operator's bare `chela judge run`
+    targets the same task — the CLI path never stamps that column, it only reads it, so both
+    calls carry the identical epoch and the cleanup-only CAS above cannot see this at all.
+
+    Simulated the same way as the epoch test above: a nested `judge_run` call, fired from
+    inside the first call's `run_experiments`, stands in for the concurrent CLI invocation —
+    pytest is single-threaded, so this is the only way to get one call genuinely mid-flight
+    while a second one starts."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_window_epoch="epoch-A")  # dispatcher-launched
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+
+    real_run_experiments = judge.run_experiments
+    nested = {}
+
+    def _cli_alongside_dispatched(*a, **kw):
+        with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+            nested["result"] = judge.judge_run(task_id, exp_file, cleanup=True)
+        assert wt_path.is_dir()          # ⛔ the refused call must not have touched it
+        return real_run_experiments(*a, **kw)
+
+    monkeypatch.setattr(judge, "run_experiments", _cli_alongside_dispatched)
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert nested["result"]["ok"] is False
+    assert "already running" in nested["result"]["error"]
+    assert result["state"] == judge.J_CLEAN      # the FIRST call still completes normally
+    assert not wt_path.exists()                  # …and reaps its own worktree as usual
+
+
+def test_no_live_claim_the_judge_starts_and_claims_normally(tmp_path, monkeypatch):
+    """⭐ COUNTERWEIGHT to the refusal test above — an "always refuse" bug would pass that
+    test trivially. With no pre-existing claim, `judge_run` must proceed exactly as before,
+    and release its own claim when it finishes so nothing leaks for the next run."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    lock_path = wt_path.parent / f".{wt_path.name}.judgelock"
+    assert not lock_path.exists()
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert result["ok"] is True
+    assert result["state"] == judge.J_CLEAN
+    assert not lock_path.exists()   # released when the call finished — nothing leaked
+
+
+def test_a_stale_judge_lock_is_taken_over_not_wedged_forever(tmp_path, monkeypatch):
+    """⭐ COUNTERWEIGHT — a claim whose owner is provably gone must be TAKEN OVER, never
+    treated as permanently exclusive. A judge that crashed mid-run (and so never reached its
+    own release) must not wedge every future attempt at this task's judge slot forever."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    wt_path = _judge_worktree_path(tmp_path, task_id)
+    lock_path = wt_path.parent / f".{wt_path.name}.judgelock"
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()                      # reaped: this pid is now provably gone
+    lock_path.write_text(json.dumps({"pid": dead.pid, "started": 1.0, "task_id": task_id}))
+
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True)
+
+    assert result["ok"] is True          # ⛔ NOT wedged — the dead claim was taken over
+    assert result["state"] == judge.J_CLEAN
+    assert not lock_path.exists()        # this call released its OWN (new) claim when done
+
+
+def test_judge_lock_owner_alive_rejects_a_recycled_pid_with_a_stale_start_time():
+    """⚖️🕳️ CMX-221 round 2 mutation kill: the judge found `_judge_lock_owner_alive`'s
+    `return abs(live_started - started) < 1.0` collapsible to `return True` with the whole
+    suite still green — every other test only ever hands it a pid that is either the calling
+    process itself (so `started` trivially matches) or one that's truly dead (so it falls
+    into the `os.kill` branch, never reaching the comparison at all). Neither shape exercises
+    the comparison the mutation deleted.
+
+    This pins it directly: a REAL, currently-live process, but with a recorded `started` that
+    does not match its actual `/proc` start time — the exact shape of CMX-219's pid-recycling
+    bug (the old owner that claimed this pid died; a new, unrelated process now holds it). The
+    pid existing is not enough — identity must be proven by start time, or the claim must be
+    refused as belonging to someone else."""
+    from chela import sessions
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+    try:
+        live_started = sessions.proc_started(proc.pid)
+        assert live_started is not None
+
+        recycled = {"pid": proc.pid, "started": live_started - 100.0}
+        assert judge._judge_lock_owner_alive(recycled) is False   # ⛔ different owner, same pid
+
+        genuine = {"pid": proc.pid, "started": live_started}
+        assert judge._judge_lock_owner_alive(genuine) is True     # ⭐ COUNTERWEIGHT: real match
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 # --- (h.5) THE RE-RUN (CMX-201): a REAPED worktree is rebuilt, not declared unverifiable ---
@@ -1167,3 +1357,30 @@ def test_a_judge_that_is_still_working_is_left_alone(tmp_path):
     assert summary["judge_lost"] == 0
     assert dispatcher.resolve_run("abc123")["judge_state"] == judge.J_RUNNING
     assert summary["judged"] == 0                   # …and only one judge at a time
+
+
+@pytest.mark.parametrize("delta,expect_alive", [
+    (0.0, True),        # the same process, same reader
+    (0.4, True),        # /proc wrote .97, the `ps` fallback read .00 — same process
+    (0.99, True),       # the widest the fallback's whole-second resolution can produce
+    (1.5, False),       # beyond it: a different process wearing the same pid
+    (100.0, False),
+])
+def test_the_judge_lock_start_time_window_is_exactly_the_fallbacks_resolution(delta, expect_alive):
+    """🔴 Pins the 1.0s window at BOTH edges. The existing recycled-pid test uses a 100s
+    delta, so it proves the comparison exists but cannot tell `< 1.0` from `< 3600` — the
+    VALUE-SIZE blindness CMX-219's judge flagged on exactly this kind of check.
+
+    The bound is not arbitrary and must not drift in either direction:
+      * WIDER re-opens CMX-219's hole — a recycled pid whose new process started close to
+        the dead one's start time would read as the same process.
+      * NARROWER (e.g. exact equality, the "obvious" CMX-219 fix) breaks the `ps` fallback:
+        `/proc` reports sub-second, `ps -o lstart=` reports whole seconds, so the same
+        untouched process legitimately differs by up to one second across the two readers.
+    """
+    from unittest.mock import patch
+    from chela import sessions
+
+    base = 1785703040.97
+    with patch.object(sessions, "proc_started", lambda pid: base):
+        assert judge._judge_lock_owner_alive({"pid": 4242, "started": base - delta}) is expect_alive

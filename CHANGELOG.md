@@ -10,6 +10,69 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **chelamux is now licensed under the GNU Affero General Public License v3.0 or
+  later**, changed from MIT. AGPL rather than plain GPL because chela is a
+  long-running daemon with a web dashboard: GPL obligations trigger on
+  *distribution*, so running a modified chela as a hosted service would carry
+  none of them. Under AGPL, offering it to users over a network counts.
+
+  For anyone using chela, nothing changes — run it, privately or commercially,
+  and modify it freely. The obligation lands only if you **distribute a modified
+  version or run one as a network service**, in which case your source must be
+  published under the same licence. Note that AGPL does not restrict commercial
+  use and does not entitle the author to any share of revenue.
+
+  Releases up to and including **0.3.0 remain MIT** and stay available under it;
+  a licence change applies going forward and cannot be applied retroactively.
+  Third-party components keep their own licences — see [NOTICE](NOTICE).
+
+  The Settings drawer now carries the AGPL §13 source offer, which the licence
+  requires for software users interact with over a network.
+
+### Added
+
+- **chelamux now tags its releases.** `0.2.0` and `0.3.0` were shipped without a
+  `git tag`, so `git tag` read empty and the GitHub repo sidebar said "No releases
+  published" even though two releases were live. `v0.2.0` and `v0.3.0` are now
+  tagged retroactively (at the commits that set `pyproject.toml`'s version to each),
+  with a GitHub Release per tag whose body is the matching section of this file,
+  pasted in verbatim — see "Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md).
+- **`.github/workflows/release.yml`.** A tag push (`vX.Y.Z`, the deliberate human
+  act "Releasing" in `CONTRIBUTING.md` still describes) now builds that tag's
+  GitHub Release automatically: `chela.release_notes` (a real, unit-tested Python
+  module — `tests/test_release_notes.py` — not inline shell in the workflow YAML)
+  extracts the matching `CHANGELOG.md` section and hands it to `gh release create
+  --notes-file`. CI still never creates or pushes a tag itself. A `workflow_dispatch`
+  input (`dry_run`, default `true`) lets the extraction be exercised against an
+  already-tagged version, like `v0.3.0`, without publishing anything.
+
+### Changed
+
+- **The Settings dashboard no longer outranks an operator's exported `CHELA_*`
+  env vars.** Every dashboard-writable knob (the new "Timing" tab's nine, plus
+  `projects_dir`) now resolves env var > `config.json` (what the dashboard
+  wrote) > built-in default — previously `config.json` won, which meant a
+  value clicked in a browser (the dashboard binds loopback with no auth) could
+  silently override a value an operator had explicitly exported. Anyone
+  relying on the old order — setting both `CHELA_PROJECTS_DIR` and a dashboard
+  `projects_dir` and expecting the dashboard value to win — now gets the env
+  value instead. A knob whose env var is set now also reports that in the
+  Timing tab (`source: "env"`) and disables the field rather than offering an
+  edit the env value would silently discard. (CMX-217)
+- **`chela.__version__` is now derived, not a second hardcoded literal.**
+  `chela/__init__.py` previously hardcoded its own copy of the version string
+  alongside `pyproject.toml`'s — two facts that could (and did) drift. It now reads
+  the installed package's own metadata (`importlib.metadata.version("chelamux")`),
+  so `pyproject.toml` is the only place the number is written. (CMX-214)
+- **`tests/test_version.py` now also guards `pyproject.toml`'s version against
+  `CHANGELOG.md`'s newest dated release heading**, not just against the installed
+  package's own metadata. That first guard alone can't fail in CI — `uv sync`
+  reinstalls from `pyproject.toml` before every run, so the two values it compares
+  are structurally always equal there. The new guard catches the real drift: a
+  version bump with no matching CHANGELOG entry, or vice versa. (CMX-214)
+
 ## [0.3.0] — 2026-08-02
 
 Honest self-reporting, and the operator controls that act on it.
@@ -276,6 +339,9 @@ macOS-onboarding and fleet-safety push.
 
 ---
 
-chelamux does not tag releases yet; `0.2.0` is the current `pyproject` version and
-this entry covers the public-launch arc. Add a new entry per user-facing PR
-(see [CONTRIBUTING.md](CONTRIBUTING.md)).
+Add an entry under `## [Unreleased]` per user-facing PR. It becomes a numbered
+section — and a tag, and a GitHub Release built from it — the next time chelamux
+cuts one; see "Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+[0.3.0]: https://github.com/Devail1/chelamux/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Devail1/chelamux/releases/tag/v0.2.0

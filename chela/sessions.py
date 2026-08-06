@@ -54,6 +54,21 @@ window made by something that cannot be wrong about it:
    happens to land back in the exact same directory is a far narrower coincidence than a
    recycled pid alone. Reads the cache the dashboard's background refresh already keeps
    warm; never spawns the command itself (see Cost, below).
+
+   **CMX-219.** ``cwd`` equality is a PROXY for "same process", not the fact itself — and
+   the proxy breaks the instant a genuinely live, un-recycled session changes its own
+   working directory (``EnterWorktree``/``ExitWorktree``, or any other in-process
+   ``chdir``): the feed's cached ``cwd`` is then simply STALE, up to one refresh cycle
+   behind, and looks identical to a recycled pid landing in a different directory. That is
+   exactly what ``chela doctor`` caught live on ``@217`` — a session five minutes old,
+   pid alive, transcript growing on disk, refused anyway because its cached cwd no longer
+   agreed with its live one. So a ``cwd`` disagreement is no longer trusted as recycling on
+   its own: it is cross-checked against the pid's own ``/proc`` start time
+   (:func:`proc_started`), which :mod:`chela.agent_manager` now caches alongside ``cwd`` at
+   the same refresh. A start time is stable across a ``cd`` and changes the instant the pid
+   IS recycled — the same floor tier 1 already trusts, applied here as a second, independent
+   witness rather than a replacement for the ``cwd`` check (``cwd`` agreeing is still the
+   fast, common-case pass; the start time is only consulted when ``cwd`` disagrees).
 4. **the cwd** — today's path, demoted to LAST. It is right for the only case the other
    signals cannot cover: a brand-new window that has fired no hook, was not resumed, and
    has no pid entry in the native feed either. It never overrides a session id that is
@@ -379,8 +394,13 @@ def _resumed_session(pid: int) -> str | None:
     return None
 
 
-def _proc_started(pid: int) -> float | None:
-    """Epoch seconds the process started — the floor under a stale ``wid`` mapping."""
+def proc_started(pid: int) -> float | None:
+    """Epoch seconds the process started — the floor under a stale ``wid`` mapping.
+
+    Public (not ``_``-prefixed): :mod:`chela.agent_manager` calls this too, at its own
+    native-status refresh, to cache the pid's start time alongside the cwd it already
+    caches — CMX-219, tier 3's second bound (see the module docstring above).
+    """
     try:
         stat = (PROC / str(pid) / "stat").read_text()
     except OSError:
@@ -445,7 +465,7 @@ def _load_panes() -> dict[str, Pane]:
             wid=wid, path=path, command=command, claude_pid=pid,
             launched_in=_proc_cwd(pid) if pid else None,
             resumed=_resumed_session(pid) if pid else None,
-            started=_proc_started(pid) if pid else None,
+            started=proc_started(pid) if pid else None,
         )
     return out
 
@@ -661,19 +681,36 @@ def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
         from chela import agent_manager  # lazy, and a cache READ only — see the module Cost note
         nsid, ncwd = agent_manager.session_and_cwd_for_pid(pane.claude_pid)
         if nsid and SESSION_RE.match(nsid):
-            if pane.origin is None or ncwd is None or _norm(ncwd) != _norm(pane.origin):
+            cwd_agrees = (pane.origin is not None and ncwd is not None
+                          and _norm(ncwd) == _norm(pane.origin))
+            # CMX-219: a cwd disagreement alone is not proof of recycling — a live,
+            # un-recycled process can legitimately chdir (EnterWorktree/ExitWorktree) and
+            # the feed's cached cwd simply lags behind by up to one refresh cycle. Cross-
+            # check against the pid's own /proc start time, cached by chela.agent_manager
+            # at the same refresh: it is stable across a cd and changes the instant the pid
+            # IS recycled, so agreement here is real proof the cwd mismatch was a `cd`, not
+            # a different process wearing the same pid.
+            cached_started = agent_manager.started_for_pid(pane.claude_pid)
+            same_process = (cached_started is not None and pane.started is not None
+                            and cached_started == pane.started)
+            if not cwd_agrees and not same_process:
                 tried.append(
                     f"the native status feed reports session {nsid} for pid "
                     f"{pane.claude_pid}, but its cached cwd does not agree with the "
-                    "pane's own origin (or one of the two is unknown) — REFUSED: the pid "
-                    "may have been recycled since the feed last saw it, and a recycled "
-                    "pid would inherit a dead process's session")
+                    "pane's own origin, and the pid's own start time does not confirm "
+                    "it is still the same process either (or one of the two is unknown) "
+                    "— REFUSED: the pid may have been recycled since the feed last saw "
+                    "it, and a recycled pid would inherit a dead process's session")
             else:
                 path = transcript_for_session(nsid, base)
                 if path is not None:
-                    return Resolution(wid, nsid, path, "native_status",
-                                      f"`claude agents --json` reports session {nsid} for "
-                                      f"pid {pane.claude_pid}")
+                    detail = (f"`claude agents --json` reports session {nsid} for pid "
+                              f"{pane.claude_pid}")
+                    if not cwd_agrees:
+                        detail += (" — its cached cwd is stale, but the pid's own start "
+                                   "time confirms this is still the same, un-recycled "
+                                   "process (CMX-219: a cd, not a recycle)")
+                    return Resolution(wid, nsid, path, "native_status", detail)
                 tried.append(
                     f"the native status feed names session {nsid} for pid "
                     f"{pane.claude_pid}, but no {nsid}.jsonl exists under the projects dir")
