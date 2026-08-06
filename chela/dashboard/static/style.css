@@ -3155,6 +3155,15 @@ input[type="text"]:focus, textarea:focus, select:focus {
     padding: 12px 16px; border-bottom: 1px solid var(--border); font-weight: 700;
 }
 .drawer-body { padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+/* margin-top:auto pins the footer to the bottom of the flex column without giving
+   .drawer-body a flex-grow it does not currently have — the AGPL source offer has
+   to be visible, but not at the cost of relaying the drawer above it. */
+.drawer-foot {
+    margin-top: auto; padding: 10px 16px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-dim);
+}
+.drawer-foot a { color: var(--text-dim); text-decoration: underline; }
+.drawer-foot a:hover { color: var(--text); }
 .drawer-body code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
 
 /* Settings sections — each group of related controls is a card. */

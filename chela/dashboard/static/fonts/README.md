@@ -8,7 +8,7 @@ faces are actually downloaded by the browser.
 
 Each font is an **independent, separately-licensed work** merely aggregated into
 this repository and served verbatim. Bundling them does **not** place the
-chelamux source (MIT) under their licenses. All are permissive **OFL-1.1** except
+chelamux source (AGPLv3) under their licenses. All are permissive **OFL-1.1** except
 Miriam Mono CLM (**GPL-2**), which is the only freely-licensed *monospace* Hebrew
 font — see its note below.
 

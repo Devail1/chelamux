@@ -10,6 +10,27 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **chelamux is now licensed under the GNU Affero General Public License v3.0 or
+  later**, changed from MIT. AGPL rather than plain GPL because chela is a
+  long-running daemon with a web dashboard: GPL obligations trigger on
+  *distribution*, so running a modified chela as a hosted service would carry
+  none of them. Under AGPL, offering it to users over a network counts.
+
+  For anyone using chela, nothing changes — run it, privately or commercially,
+  and modify it freely. The obligation lands only if you **distribute a modified
+  version or run one as a network service**, in which case your source must be
+  published under the same licence. Note that AGPL does not restrict commercial
+  use and does not entitle the author to any share of revenue.
+
+  Releases up to and including **0.3.0 remain MIT** and stay available under it;
+  a licence change applies going forward and cannot be applied retroactively.
+  Third-party components keep their own licences — see [NOTICE](NOTICE).
+
+  The Settings drawer now carries the AGPL §13 source offer, which the licence
+  requires for software users interact with over a network.
+
 ### Added
 
 - **chelamux now tags its releases.** `0.2.0` and `0.3.0` were shipped without a
