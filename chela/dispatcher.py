@@ -21,7 +21,7 @@ from chela.config import (
     max_reworks,
     worktree_disk_budget_bytes,
 )
-from chela.messenger import resend_enter, send_tmux
+from chela.messenger import messaging_socket_launch_arg, resend_enter, send_tmux
 from chela.sources import Task, get_source
 from chela.transcripts import agent_transcript_summary
 from chela.tui_text import sanitize as tui_sanitize
@@ -3501,6 +3501,15 @@ def _launch_agent(
     # affects the NEXT dispatch, never an agent already running. ``role`` keeps the judge on
     # its capable model regardless of the coding-agent Settings choice.
     agent_cmd, cmd_source = resolve_agent_cmd(wf, role)
+    # CMX-223: a chela-owned, deterministic peer-messaging socket path — lets
+    # messenger.send_peer address THIS window without guessing it from our own
+    # env. Appended (never baked into resolve_agent_cmd/agent.cmd — that command
+    # may not even be `claude`) and only once the real @id is known; None (path
+    # would overflow the sun_path ceiling) just launches without the flag.
+    if re.fullmatch(r"@\d+", target_id):
+        socket_arg = messaging_socket_launch_arg(target_id)
+        if socket_arg:
+            agent_cmd = f"{agent_cmd} {socket_arg}"
     log.info("Launching %s with %r (source: %s)", task_id, agent_cmd, cmd_source)
     # CMX-115: strip daemon-only secrets from THIS window's shell before anything else
     # runs in it — must land before the CHELA_WID export and the agent command below,
