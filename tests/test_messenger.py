@@ -10,6 +10,10 @@ All tmux calls are stubbed — no live tmux.
 """
 from __future__ import annotations
 
+import json
+import os
+import socket as socket_module
+import threading
 from unittest.mock import patch
 
 from chela import messenger
@@ -291,24 +295,40 @@ def test_resolve_window_none_for_dead_window_and_empty():
 def test_send_message_to_busy_agent_by_wid_is_delivered():
     # The exact live failure: a working agent addressed by its window id. Busy is
     # not a failure mode — nothing here may consult claude_pid/session status.
-    with _with_windows(), patch.object(messenger, "send_tmux", return_value=True) as send:
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=False), \
+            patch.object(messenger, "send_tmux", return_value=True) as send:
         assert messenger.send_message("orchestrator", "@32", "ping") is True
     send.assert_called_once_with("@32", "[orchestrator] ping")
 
 
 def test_send_message_to_dead_window_is_not_delivered_and_never_sends():
-    with _with_windows(), patch.object(messenger, "send_tmux") as send:
+    with _with_windows(), patch.object(messenger, "send_peer") as peer, \
+            patch.object(messenger, "send_tmux") as send:
         assert messenger.send_message("orchestrator", "@99", "ping") is False
+    peer.assert_not_called()
     send.assert_not_called()
 
 
-def test_send_message_false_when_tmux_send_fails():
-    with _with_windows(), patch.object(messenger, "send_tmux", return_value=False):
+def test_send_message_false_when_both_transports_fail():
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=False), \
+            patch.object(messenger, "send_tmux", return_value=False):
         assert messenger.send_message("orchestrator", "@32", "ping") is False
 
 
+def test_send_message_prefers_peer_socket_and_skips_tmux():
+    # The core of this ticket: agent-to-agent delivery goes over the peer socket
+    # when it's reachable, and send_tmux (the paste-into-a-pane transport) is
+    # never touched.
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=True) as peer, \
+            patch.object(messenger, "send_tmux") as send:
+        assert messenger.send_message("orchestrator", "@32", "ping") is True
+    peer.assert_called_once_with("@32", "orchestrator", "ping")
+    send.assert_not_called()
+
+
 def test_broadcast_skips_own_window_and_reaches_colliding_names():
-    with _with_windows(), patch.object(messenger, "send_tmux", return_value=True) as send:
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=False), \
+            patch.object(messenger, "send_tmux", return_value=True) as send:
         results = messenger.broadcast("@7", "standup")
     targets = sorted(c.args[0] for c in send.call_args_list)
     assert targets == ["@32", "@9"]           # @7 (the sender) is skipped — no self-loop
@@ -316,6 +336,107 @@ def test_broadcast_skips_own_window_and_reaches_colliding_names():
 
 
 def test_broadcast_skips_own_window_when_sender_is_a_name():
-    with _with_windows(), patch.object(messenger, "send_tmux", return_value=True) as send:
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=False), \
+            patch.object(messenger, "send_tmux", return_value=True) as send:
         messenger.broadcast("orchestrator", "standup")
     assert sorted(c.args[0] for c in send.call_args_list) == ["@32", "@9"]
+
+
+# --- send_peer / _peer_socket_path — the Claude Code peer-messaging socket ----
+#
+# Claude Code 2.1.224+ binds a per-session Unix socket at
+# $CLAUDE_CODE_MESSAGING_SOCKET and reads newline-delimited JSON off it. These
+# tests drive send_peer against a REAL AF_UNIX socket (not a mocked one) so the
+# wire format is verified end to end, not just "some bytes were written".
+
+def test_send_peer_false_when_pid_unknown():
+    # No process to address — must short-circuit before even looking for a
+    # socket file (asserted directly: a stub _peer_socket_path that returns
+    # something truthy would otherwise mask a missing `pid is None` guard).
+    with patch("chela.agent_manager.claude_pid", return_value=None), \
+            patch.object(messenger, "_peer_socket_path") as sock_path:
+        assert messenger.send_peer("@1", "orchestrator", "hi") is False
+    sock_path.assert_not_called()
+
+
+def test_send_peer_false_when_no_socket_file():
+    with patch("chela.agent_manager.claude_pid", return_value=12345), \
+            patch.object(messenger, "_peer_socket_path", return_value=None):
+        assert messenger.send_peer("@1", "orchestrator", "hi") is False
+
+
+def test_send_peer_delivers_expected_ndjson_over_a_real_socket(tmp_path):
+    sock_path = tmp_path / "12345.sock"
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    received = {}
+
+    def accept():
+        conn, _ = server.accept()
+        with conn:
+            buf = b""
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        received["data"] = buf.decode()
+
+    t = threading.Thread(target=accept, daemon=True)
+    t.start()
+    try:
+        with patch("chela.agent_manager.claude_pid", return_value=12345), \
+                patch.object(messenger, "_peer_socket_path", return_value=sock_path):
+            assert messenger.send_peer("@1", "orchestrator", "hi") is True
+    finally:
+        t.join(timeout=2)
+        server.close()
+
+    # Exactly one ndjson line, matching the shape Claude Code's uds-messaging
+    # listener parses (verified against the installed 2.1.226 binary).
+    line = received["data"].rstrip("\n")
+    assert "\n" not in line
+    assert json.loads(line) == {
+        "type": "user",
+        "message": {"role": "user", "content": "[orchestrator] hi"},
+        "from": "orchestrator",
+    }
+
+
+def test_send_peer_false_when_socket_refuses_connection(tmp_path):
+    # A stale socket FILE with nothing listening — connect() must fail fast,
+    # not hang, and send_peer must report False so the caller falls back.
+    sock_path = tmp_path / "99999.sock"
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    server.close()
+
+    with patch("chela.agent_manager.claude_pid", return_value=99999), \
+            patch.object(messenger, "_peer_socket_path", return_value=sock_path):
+        assert messenger.send_peer("@1", "orchestrator", "hi") is False
+
+
+def test_peer_socket_path_prefers_xdg_runtime_dir(tmp_path, monkeypatch):
+    sock_dir = tmp_path / "cc-socks"
+    sock_dir.mkdir()
+    sock_file = sock_dir / "555.sock"
+    sock_file.touch()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert messenger._peer_socket_path(555) == sock_file
+
+
+def test_peer_socket_path_falls_back_to_tmp_dir_when_no_xdg_runtime_dir(tmp_path, monkeypatch):
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    fallback_dir = tmp_path / f"cc-socks-{os.getuid()}"
+    fallback_dir.mkdir()
+    sock_file = fallback_dir / "555.sock"
+    sock_file.touch()
+    assert messenger._peer_socket_path(555) == sock_file
+
+
+def test_peer_socket_path_none_when_nothing_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert messenger._peer_socket_path(555) is None
