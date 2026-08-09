@@ -2293,3 +2293,68 @@ def test_a_verdict_summary_carries_a_SNIPPET_of_the_title_not_the_whole_line(
     assert "default agent launch mode editable" in summary, (
         f"a readable snippet of the title must still reach the operator. Got: {summary!r}"
     )
+
+
+# --- CMX-223: peer socket first, tmux paste as fallback, receipts recorded -------
+
+def test_delivery_prefers_the_peer_socket_and_skips_tmux(store_file, windows, sends, monkeypatch):
+    """The verdict-delivery path routes through the peer socket first, same as rooms
+    and `chela msg` — `send_tmux` is the fallback, not the only path."""
+    from chela import messenger
+
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+    calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer",
+        lambda wid, frm, text: (calls.append((wid, frm, text)),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+
+    assert len(calls) == 1
+    wid, _frm, text = calls[0]
+    assert wid == ORCH
+    assert text.startswith("📥 @2 · chelamux finished")
+    assert sends == []                 # tmux never touched — the socket handled it
+
+
+def test_a_held_receipt_holds_the_event_queued_and_records_a_receipt(
+        store_file, windows, sends, monkeypatch):
+    """⛔ Same fail-open fix as rooms/send_message: a socket accepting the bytes is
+    a handoff, not a delivery. Unlike rooms (a receiver's own gate is treated as
+    final), the inbox HOLDS — these events are merge verdicts the orchestrator must
+    eventually see, worth retrying on a later tick rather than dropping."""
+    from chela import messenger
+
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+    monkeypatch.setattr(inbox.messenger, "send_peer",
+                        lambda wid, frm, text: messenger.PeerSendResult(True, "held"))
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+
+    assert sends == []                              # NOT delivered via tmux either
+    assert inbox.load()["queue"]                    # HELD — still queued, not dropped
+    receipts = [e for e in event_log.read()["events"] if e["type"] == "inbox_receipt"]
+    assert len(receipts) == 1
+    assert receipts[0]["payload"]["status"] == "held"
+    assert receipts[0]["wid"] == ORCH
+
+
+def test_peer_socket_unreachable_falls_back_to_tmux(store_file, windows, sends, monkeypatch):
+    """The existing contract, unchanged: no live socket -> tmux paste."""
+    from chela import messenger
+
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+    monkeypatch.setattr(inbox.messenger, "send_peer",
+                        lambda wid, frm, text: messenger.PeerSendResult(False, None))
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+
+    assert len(sends) == 1
+    assert sends[0][0] == ORCH

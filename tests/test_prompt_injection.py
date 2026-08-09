@@ -211,7 +211,13 @@ def test_deliver_into_a_bash_mode_pane_types_nothing_and_HOLDS_the_event(store_f
 
     assert sent == []                      # nothing delivered…
     assert store["queue"] == [event]       # …and nothing LOST
-    assert [c.args[0][1] for c in m.call_args_list] == ["capture-pane"]  # nothing typed
+    # Nothing TYPED — not "the exact call sequence never changes": CMX-223 makes
+    # deliver() try the peer socket first (an extra `display-message` lookup via
+    # send_peer -> claude_pid, itself a no-op here since the pid can't be
+    # resolved), and it's the tmux fallback's mode check that refuses the paste.
+    calls = [c.args[0][1] for c in m.call_args_list]
+    assert "send-keys" not in calls
+    assert "capture-pane" in calls
 
 
 @pytest.fixture

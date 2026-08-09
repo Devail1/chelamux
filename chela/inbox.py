@@ -7,7 +7,8 @@ nothing told the orchestrator; it polled the pane, and the human became the mess
 bus ("he's done"). This closes that loop: agent/run events are pushed straight into
 the orchestrator's session, so it wakes up and acts.
 
-**Push, gated on idle.** An event is delivered with :func:`chela.messenger.send_tmux`
+**Push, gated on idle.** An event is delivered — peer socket first
+(:func:`chela.messenger.send_peer`), :func:`chela.messenger.send_tmux` as fallback —
 ONLY when the orchestrator's window is ``idle``. Otherwise it queues (durably) and
 goes out on the next idle tick. Two rules make that safe:
 
@@ -1390,7 +1391,25 @@ def deliver(store: dict, statuses: dict[str, str],
             store["queue"].pop(0)          # nothing to say — don't wedge the queue on it
             log.warning("inbox: dropping unrenderable %s event", event.get("kind"))
             continue
-        if not messenger.send_tmux(orch, text):
+        # CMX-223: peer socket first (bypasses the pane's terminal-input-mode risk
+        # entirely — CMX-79 doesn't apply), tmux paste as fallback. A handoff whose
+        # receipt comes back held/denied/expired is a DROP, not a delivery, even
+        # though the socket accepted it — recorded, and HOLD (never drop, same as
+        # a tmux refusal): unlike an agent-to-agent room dispatch, this queue's
+        # events are merge verdicts the orchestrator must eventually see, so a
+        # gate that is transient today is worth retrying on a later tick.
+        peer = messenger.send_peer(orch, "chela-inbox", text)
+        if peer.handed_off and peer.status in messenger.ADVERSE_RECEIPT_STATUSES:
+            log.warning("inbox: delivery of %s to %s was %s; holding it queued",
+                        event.get("kind"), orch, peer.status)
+            event_log.append(
+                "inbox_receipt", f"📭 inbox {event.get('kind')} {peer.status} at {orch}",
+                {"kind": event.get("kind"),
+                 "task_id": (event.get("payload") or {}).get("task_id"),
+                 "status": peer.status}, wid=orch,
+            )
+            break
+        if not (peer.handed_off or messenger.send_tmux(orch, text)):
             # Includes the unsafe-input-mode refusal: HOLD, never drop. The pane will be
             # back at its prose prompt eventually, and the event is still true.
             log.warning("inbox: delivery of %s to %s refused/failed; holding it queued",

@@ -91,11 +91,16 @@ KINDS: tuple[str, ...] = (
 DISPATCH_KINDS: frozenset[str] = frozenset({"handoff", "question", "blocker"})
 
 # The event types a room's ledger is made of — `room_<kind>` for a post, plus the
-# delivery record. `type` is the log's own field, so `chela events --type room_question`
-# works with no new machinery and no second event source.
+# delivery and receipt records. `type` is the log's own field, so `chela events
+# --type room_question` works with no new machinery and no second event source.
 POST_TYPES: tuple[str, ...] = tuple(f"room_{k}" for k in KINDS)
 DELIVERY_TYPE = "room_delivery"
-ROOM_TYPES: tuple[str, ...] = (*POST_TYPES, DELIVERY_TYPE)
+# CMX-223: a peer-socket handoff whose receipt comes back held/denied/expired —
+# the socket accepted the bytes but the recipient's own gate dropped the message.
+# Its own event, never folded into DELIVERY_TYPE: `_recent_dispatches` counts
+# DELIVERY_TYPE for the pair rate limit, and a drop must not count as a delivery.
+RECEIPT_TYPE = "room_receipt"
+ROOM_TYPES: tuple[str, ...] = (*POST_TYPES, DELIVERY_TYPE, RECEIPT_TYPE)
 
 # Statuses `claude agents --json` reports (agent_manager.status_by_wid). `waiting` is
 # the one that must NEVER be pasted into — see the module docstring.
@@ -443,6 +448,26 @@ def _record_delivery(post: dict, to_wid: str, *, parked: bool = False) -> None:
     )
 
 
+def _record_receipt(post: dict, to_wid: str, status: str) -> None:
+    """The durable record that a peer-socket handoff did NOT deliver.
+
+    Recorded against the ORIGINATING post's seq, never synthesised — an accepted
+    message produces no receipt at all (:func:`chela.messenger.send_peer`), so this
+    only ever fires for an explicit adverse one (``held``/``denied``/``expired``):
+    the socket accepted the bytes, and the recipient's own gate dropped them anyway.
+    Its own event, never :data:`DELIVERY_TYPE` — :func:`_recent_dispatches` counts
+    deliveries for the pair rate limit, and a drop must not count as one.
+    """
+    p = post["payload"]
+    event_log.append(
+        RECEIPT_TYPE,
+        f'📭 {p["kind"]} #{post["seq"]} {status} at {to_wid} — room "{p["room"]}"',
+        {"room": p["room"], "kind": p["kind"], "from_wid": p["from_wid"],
+         "to_wid": to_wid, "post_seq": post["seq"], "status": status},
+        wid=to_wid,
+    )
+
+
 def post(room: str, kind: str, text: str, *, from_wid: str, targets: list[str] | None = None,
          reply_to: int | None = None, statuses: dict[str, str] | None = None) -> dict:
     """Post to a room: ALWAYS recorded; injected only if targeted and interruptible.
@@ -536,11 +561,22 @@ def post(room: str, kind: str, text: str, *, from_wid: str, targets: list[str] |
             _park(wid, record, prompt)
             result["deferred"].append(wid)
             continue
-        if messenger.send_tmux(wid, prompt):
+        # CMX-223: peer socket first (bypasses the terminal entirely — CMX-79's
+        # bash-mode risk doesn't apply), tmux paste as fallback. A handoff whose
+        # receipt comes back held/denied/expired is NOT a delivery — the socket
+        # accepting the bytes just means the recipient's own gate saw it and
+        # dropped it; that gets its own RECEIPT_TYPE record, never DELIVERY_TYPE.
+        peer = messenger.send_peer(wid, from_wid, prompt)
+        if peer.handed_off and peer.status in messenger.ADVERSE_RECEIPT_STATUSES:
+            log.warning("rooms: %s #%s to %s was %s — NOT delivered", kind,
+                        record["seq"], wid, peer.status)
+            _record_receipt(record, wid, peer.status)
+            result["failed"].append(wid)
+        elif peer.handed_off or messenger.send_tmux(wid, prompt):
             _record_delivery(record, wid)
             result["delivered"].append(wid)
         else:
-            log.warning("rooms: tmux send to %s failed — %s #%s not delivered",
+            log.warning("rooms: send to %s failed — %s #%s not delivered",
                         wid, kind, record["seq"])
             result["failed"].append(wid)
     return result
@@ -594,6 +630,7 @@ def flush_pending(statuses: dict[str, str] | None = None) -> list[dict]:
     # pass settled — delivered or deliberately dropped — and only those are removed from
     # the store afterwards. A post that parks a NEW entry while we paste is left alone.
     sent: list[dict] = []
+    receipted: list[dict] = []   # peer-socket handoffs a receiver's own gate dropped
     resolved: set[tuple[str, int]] = set()
     for wid, queue in sorted(store["pending"].items()):
         for entry in queue:
@@ -610,9 +647,19 @@ def flush_pending(statuses: dict[str, str] | None = None) -> list[dict]:
                 continue
             if statuses.get(wid) == WAITING:
                 continue                   # still at the gate — it waits, it is not lost
-            if not messenger.send_tmux(wid, entry["prompt"]):
+            # CMX-223: peer socket first, tmux paste as fallback (see post()). An
+            # adverse receipt is a drop, not a delivery — recorded and NOT re-queued:
+            # a receiver's own gate refused it, and retrying does not change that.
+            peer = messenger.send_peer(wid, entry["from_wid"], entry["prompt"])
+            if peer.handed_off and peer.status in messenger.ADVERSE_RECEIPT_STATUSES:
+                log.warning("rooms: parked %s #%s to %s was %s — NOT delivered",
+                            entry["kind"], entry["post_seq"], wid, peer.status)
+                resolved.add(key)
+                receipted.append({**entry, "to_wid": wid, "status": peer.status})
+                continue
+            if not (peer.handed_off or messenger.send_tmux(wid, entry["prompt"])):
                 log.warning("rooms: parked delivery to %s failed; leaving it queued", wid)
-                break                      # tmux is unhappy — try this window again next tick
+                break                      # unhappy — try this window again next tick
             resolved.add(key)
             sent.append({**entry, "to_wid": wid})
 
@@ -628,6 +675,10 @@ def flush_pending(statuses: dict[str, str] | None = None) -> list[dict]:
         record = _find_post(entry["post_seq"])
         if record is not None:
             _record_delivery(record, entry["to_wid"], parked=True)
+    for entry in receipted:
+        record = _find_post(entry["post_seq"])
+        if record is not None:
+            _record_receipt(record, entry["to_wid"], entry["status"])
     return sent
 
 

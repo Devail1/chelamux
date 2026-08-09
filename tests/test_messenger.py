@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket as socket_module
 import threading
+from unittest import mock
 from unittest.mock import patch
 
-from chela import messenger
+from chela import config, messenger
 
 
 class _FakeResult:
@@ -292,10 +294,15 @@ def test_resolve_window_none_for_dead_window_and_empty():
         assert messenger.resolve_window(None) is None
 
 
+_UNREACHABLE = messenger.PeerSendResult(False, None)
+_SENT = messenger.PeerSendResult(True, "sent")
+_HELD = messenger.PeerSendResult(True, "held")
+
+
 def test_send_message_to_busy_agent_by_wid_is_delivered():
     # The exact live failure: a working agent addressed by its window id. Busy is
     # not a failure mode — nothing here may consult claude_pid/session status.
-    with _with_windows(), patch.object(messenger, "send_peer", return_value=False), \
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=_UNREACHABLE), \
             patch.object(messenger, "send_tmux", return_value=True) as send:
         assert messenger.send_message("orchestrator", "@32", "ping") is True
     send.assert_called_once_with("@32", "[orchestrator] ping")
@@ -310,24 +317,36 @@ def test_send_message_to_dead_window_is_not_delivered_and_never_sends():
 
 
 def test_send_message_false_when_both_transports_fail():
-    with _with_windows(), patch.object(messenger, "send_peer", return_value=False), \
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=_UNREACHABLE), \
             patch.object(messenger, "send_tmux", return_value=False):
         assert messenger.send_message("orchestrator", "@32", "ping") is False
 
 
 def test_send_message_prefers_peer_socket_and_skips_tmux():
-    # The core of this ticket: agent-to-agent delivery goes over the peer socket
-    # when it's reachable, and send_tmux (the paste-into-a-pane transport) is
-    # never touched.
-    with _with_windows(), patch.object(messenger, "send_peer", return_value=True) as peer, \
+    # The core of CMX-222: agent-to-agent delivery goes over the peer socket when
+    # it's reachable, and send_tmux (the paste-into-a-pane transport) is never
+    # touched — as long as no adverse receipt comes back.
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=_SENT) as peer, \
             patch.object(messenger, "send_tmux") as send:
         assert messenger.send_message("orchestrator", "@32", "ping") is True
-    peer.assert_called_once_with("@32", "orchestrator", "ping")
+    peer.assert_called_once_with("@32", "orchestrator", "[orchestrator] ping")
+    send.assert_not_called()
+
+
+def test_send_message_false_when_peer_socket_handoff_gets_an_adverse_receipt():
+    # THE fail-open bug this ticket exists to close (CMX-223): a socket accepting
+    # the bytes is a HANDOFF, not a delivery. A `held` receipt means the receiver's
+    # own gate dropped the message — send_message must NOT report success, and
+    # must NOT paper over the drop by falling back to tmux (that would route
+    # around a safety setting the receiver chose, not recover a lost transport).
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=_HELD), \
+            patch.object(messenger, "send_tmux") as send:
+        assert messenger.send_message("orchestrator", "@32", "ping") is False
     send.assert_not_called()
 
 
 def test_broadcast_skips_own_window_and_reaches_colliding_names():
-    with _with_windows(), patch.object(messenger, "send_peer", return_value=False), \
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=_UNREACHABLE), \
             patch.object(messenger, "send_tmux", return_value=True) as send:
         results = messenger.broadcast("@7", "standup")
     targets = sorted(c.args[0] for c in send.call_args_list)
@@ -336,7 +355,7 @@ def test_broadcast_skips_own_window_and_reaches_colliding_names():
 
 
 def test_broadcast_skips_own_window_when_sender_is_a_name():
-    with _with_windows(), patch.object(messenger, "send_peer", return_value=False), \
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=_UNREACHABLE), \
             patch.object(messenger, "send_tmux", return_value=True) as send:
         messenger.broadcast("orchestrator", "standup")
     assert sorted(c.args[0] for c in send.call_args_list) == ["@32", "@9"]
@@ -349,30 +368,26 @@ def test_broadcast_skips_own_window_when_sender_is_a_name():
 # tests drive send_peer against a REAL AF_UNIX socket (not a mocked one) so the
 # wire format is verified end to end, not just "some bytes were written".
 
-def test_send_peer_false_when_pid_unknown():
-    # No process to address — must short-circuit before even looking for a
-    # socket file (asserted directly: a stub _peer_socket_path that returns
-    # something truthy would otherwise mask a missing `pid is None` guard).
-    with patch("chela.agent_manager.claude_pid", return_value=None), \
-            patch.object(messenger, "_peer_socket_path") as sock_path:
-        assert messenger.send_peer("@1", "orchestrator", "hi") is False
-    sock_path.assert_not_called()
+_UUID4_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 
 
-def test_send_peer_false_when_no_socket_file():
-    with patch("chela.agent_manager.claude_pid", return_value=12345), \
-            patch.object(messenger, "_peer_socket_path", return_value=None):
-        assert messenger.send_peer("@1", "orchestrator", "hi") is False
+def _fake_peer_target(sock_path, *, reply_status=None):
+    """Bind ``sock_path``, accept ONE connection, capture the ndjson line it sends.
 
-
-def test_send_peer_delivers_expected_ndjson_over_a_real_socket(tmp_path):
-    sock_path = tmp_path / "12345.sock"
+    When ``reply_status`` is given, replies with a
+    ``{"type":"control","action":"peer_message_status", ...}`` receipt to the
+    ``from`` address in the received payload — a REAL round trip over a second
+    AF_UNIX socket, the same shape Claude Code's own receipts use. Returns
+    ``(received_dict, thread)``; caller joins the thread and reads
+    ``received["data"]`` after :func:`messenger.send_peer` returns.
+    """
     server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
     server.bind(str(sock_path))
     server.listen(1)
     received = {}
 
-    def accept():
+    def run():
         conn, _ = server.accept()
         with conn:
             buf = b""
@@ -382,31 +397,73 @@ def test_send_peer_delivers_expected_ndjson_over_a_real_socket(tmp_path):
                     break
                 buf += chunk
         received["data"] = buf.decode()
+        server.close()
+        if reply_status is not None:
+            payload = json.loads(received["data"].rstrip("\n"))
+            reply_addr = payload["from"][len("uds:"):]
+            receipt = {"type": "control", "action": "peer_message_status",
+                       "status": reply_status, "orig_msg_id": payload["msg_id"]}
+            with socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM) as r:
+                r.connect(reply_addr)
+                r.sendall((json.dumps(receipt) + "\n").encode())
 
-    t = threading.Thread(target=accept, daemon=True)
+    t = threading.Thread(target=run, daemon=True)
     t.start()
+    return received, t
+
+
+def test_send_peer_false_when_pid_unknown():
+    # No process to address — must short-circuit before even looking for a
+    # socket file (asserted directly: a stub _peer_socket_path that returns
+    # something truthy would otherwise mask a missing `pid is None` guard).
+    with patch("chela.agent_manager.claude_pid", return_value=None), \
+            patch.object(messenger, "_peer_socket_path") as sock_path:
+        assert messenger.send_peer("@1", "orchestrator", "hi") == messenger.PeerSendResult(False, None)
+    sock_path.assert_not_called()
+
+
+def test_send_peer_false_when_no_socket_file():
+    with patch("chela.agent_manager.claude_pid", return_value=12345), \
+            patch.object(messenger, "_peer_socket_path", return_value=None):
+        assert messenger.send_peer("@1", "orchestrator", "hi") == messenger.PeerSendResult(False, None)
+
+
+def test_send_peer_delivers_expected_ndjson_over_a_real_socket(tmp_path):
+    sock_path = tmp_path / "12345.sock"
+    received, t = _fake_peer_target(sock_path)  # accepts, never replies -> "sent"
     try:
         with patch("chela.agent_manager.claude_pid", return_value=12345), \
                 patch.object(messenger, "_peer_socket_path", return_value=sock_path):
-            assert messenger.send_peer("@1", "orchestrator", "hi") is True
+            result = messenger.send_peer("@1", "orchestrator", "hi")
     finally:
         t.join(timeout=2)
-        server.close()
+
+    # No adverse receipt inside the wait window == "sent", the accept path's own
+    # signature (an accepted message produces no receipt at all — see the
+    # _await_receipt docstring).
+    assert result == messenger.PeerSendResult(True, "sent")
 
     # Exactly one ndjson line, matching the shape Claude Code's uds-messaging
-    # listener parses (verified against the installed 2.1.226 binary).
+    # listener parses (verified against the installed 2.1.226 binary). content is
+    # sent EXACTLY as given — send_peer no longer adds its own "[from] " wrap
+    # (send_message does that itself now, so a caller with an already-formatted,
+    # already-attributed prompt — rooms' build_prompt — isn't double-wrapped).
     line = received["data"].rstrip("\n")
     assert "\n" not in line
-    assert json.loads(line) == {
-        "type": "user",
-        "message": {"role": "user", "content": "[orchestrator] hi"},
-        "from": "orchestrator",
-    }
+    payload = json.loads(line)
+    assert payload["type"] == "user"
+    assert payload["message"] == {"role": "user", "content": "hi"}
+    # msg_id MUST be a real uuid4 — a non-UUID id comes back with orig_msg_id
+    # ABSENT (measured), breaking correlation silently.
+    assert _UUID4_RE.match(payload["msg_id"])
+    # `from` names OUR OWN listening socket, in the SAME DIRECTORY as the
+    # target's socket — the receipt is skipped silently otherwise (measured).
+    assert payload["from"].startswith(f"uds:{sock_path.parent}/")
 
 
 def test_send_peer_false_when_socket_refuses_connection(tmp_path):
     # A stale socket FILE with nothing listening — connect() must fail fast,
-    # not hang, and send_peer must report False so the caller falls back.
+    # not hang, and send_peer must report unreachable so the caller falls back.
     sock_path = tmp_path / "99999.sock"
     server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
     server.bind(str(sock_path))
@@ -415,28 +472,107 @@ def test_send_peer_false_when_socket_refuses_connection(tmp_path):
 
     with patch("chela.agent_manager.claude_pid", return_value=99999), \
             patch.object(messenger, "_peer_socket_path", return_value=sock_path):
-        assert messenger.send_peer("@1", "orchestrator", "hi") is False
+        assert messenger.send_peer("@1", "orchestrator", "hi") == messenger.PeerSendResult(False, None)
+
+
+def test_send_peer_reports_held_receipt_over_a_real_round_trip(tmp_path):
+    # The receipt path end to end: our reply socket really is reachable from a
+    # second process (a real connect, not a mock), and the status it sends back
+    # is what send_peer reports — NOT collapsed to "sent" or to a bare True/False.
+    sock_path = tmp_path / "1.sock"
+    received, t = _fake_peer_target(sock_path, reply_status="held")
+    try:
+        with patch("chela.agent_manager.claude_pid", return_value=1), \
+                patch.object(messenger, "_peer_socket_path", return_value=sock_path):
+            result = messenger.send_peer("@1", "orchestrator", "hi")
+    finally:
+        t.join(timeout=2)
+    assert result == messenger.PeerSendResult(True, "held")
+
+
+def test_send_peer_ignores_a_receipt_for_a_different_msg_id():
+    # Guard for the uuid4 correlation rule: a receipt whose orig_msg_id does not
+    # match ours must NOT be reported as our status — corrupting the correlation
+    # check (e.g. dropping the comparison) would make this return "denied"
+    # instead of "sent" for a receipt that was never ours to begin with.
+    receipt = {"type": "control", "action": "peer_message_status",
+               "status": "denied", "orig_msg_id": "not-our-msg-id"}
+    conn = mock.Mock()
+    conn.recv.return_value = (json.dumps(receipt) + "\n").encode()
+    server = mock.Mock()
+    server.accept.return_value = (conn, None)
+    assert messenger._await_receipt(server, "our-real-msg-id") == "sent"
+
+
+def test_send_peer_content_is_not_escaped_or_routed_through_tmux(tmp_path):
+    # BOUNDARIES: slash-command injection stays tmux (a peer message is routed
+    # skipSlashCommands:true by Claude Code itself, per CMX-222's spike). Prove
+    # send_peer never takes the tmux Escape-then-slash detour and never mutates a
+    # leading "/" — a regression that routed "/"-prefixed content through tmux
+    # would trip the subprocess.run patch below.
+    sock_path = tmp_path / "1.sock"
+    received, t = _fake_peer_target(sock_path)
+    try:
+        with patch("chela.agent_manager.claude_pid", return_value=1), \
+                patch.object(messenger, "_peer_socket_path", return_value=sock_path), \
+                patch("subprocess.run") as tmux_run:
+            result = messenger.send_peer("@1", "orchestrator", "/status")
+    finally:
+        t.join(timeout=2)
+    assert result == messenger.PeerSendResult(True, "sent")
+    tmux_run.assert_not_called()
+    assert json.loads(received["data"])["message"]["content"] == "/status"
+
+
+def test_deterministic_peer_socket_path_is_keyed_on_window_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
+    assert messenger.deterministic_peer_socket_path("@42") == tmp_path / "socks" / "42.sock"
+
+
+def test_messaging_socket_launch_arg_none_when_over_sun_path_ceiling(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / ("x" * 90))
+    assert messenger.messaging_socket_launch_arg("@1") is None
+
+
+def test_messaging_socket_launch_arg_carries_the_deterministic_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
+    arg = messenger.messaging_socket_launch_arg("@42")
+    assert arg == f"--messaging-socket-path {tmp_path / 'socks' / '42.sock'}"
+
+
+def test_peer_socket_path_prefers_the_deterministic_path_when_it_exists(tmp_path, monkeypatch):
+    # CMX-223: a window launched with --messaging-socket-path is found there
+    # FIRST, without even trying the legacy pid-derived guess.
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
+    det_dir = tmp_path / "socks"
+    det_dir.mkdir()
+    det_file = det_dir / "1.sock"
+    det_file.touch()
+    assert messenger._peer_socket_path("@1", 555) == det_file
 
 
 def test_peer_socket_path_prefers_xdg_runtime_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "chela-home")  # no socks/ dir here
     sock_dir = tmp_path / "cc-socks"
     sock_dir.mkdir()
     sock_file = sock_dir / "555.sock"
     sock_file.touch()
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    assert messenger._peer_socket_path(555) == sock_file
+    assert messenger._peer_socket_path("@1", 555) == sock_file
 
 
 def test_peer_socket_path_falls_back_to_tmp_dir_when_no_xdg_runtime_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "chela-home")
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     fallback_dir = tmp_path / f"cc-socks-{os.getuid()}"
     fallback_dir.mkdir()
     sock_file = fallback_dir / "555.sock"
     sock_file.touch()
-    assert messenger._peer_socket_path(555) == sock_file
+    assert messenger._peer_socket_path("@1", 555) == sock_file
 
 
 def test_peer_socket_path_none_when_nothing_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "chela-home")
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    assert messenger._peer_socket_path(555) is None
+    assert messenger._peer_socket_path("@1", 555) is None
