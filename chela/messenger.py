@@ -1,20 +1,43 @@
-"""Route messages between agents over tmux.
+"""Route messages between agents over tmux — or, for agent-to-agent messages,
+Claude Code's own peer-messaging Unix socket.
 
 ``send_tmux`` is the low-level primitive: given a tmux window id and text, type
-it into that window's Claude Code prompt and press Enter. On top of it,
-``send_message``/``broadcast`` resolve an agent reference to a live window with
-:func:`resolve_window` and deliver there. Delivery is live-only: if the agent
-has no live window the message is not delivered (there is no persistent queue).
+it into that window's Claude Code prompt and press Enter. It stays the transport
+for anything that isn't one agent messaging another — the Telegram bridge, the
+dashboard, rooms, the decisions inbox all keep using it unchanged.
+
+``send_message``/``broadcast`` are the agent-to-agent path: they resolve an agent
+reference to a live window with :func:`resolve_window`, then try
+:func:`send_peer` — a direct write to the target session's own Unix socket
+(Claude Code 2.1.224+ binds one per session at ``$CLAUDE_CODE_MESSAGING_SOCKET``
+and ingests newline-delimited JSON on it) — before falling back to
+:func:`send_tmux`. ``send_tmux`` typing into a pane is a poor fit for
+agent-to-agent traffic: it depends on the pane's terminal input MODE (CMX-79 —
+text typed while a pane is mid `!`-bash-command would execute), where the peer
+socket hands the message straight to the target's own message queue, bypassing
+the terminal entirely. The fallback exists because the socket is a newer
+mechanism than tmux delivery: an older Claude Code build, a session that hasn't
+bound the socket yet, or a stale socket file all fall straight through to the
+tried-and-true paste. Delivery is live-only either way: if the agent has no
+live window the message is not delivered (there is no persistent queue).
 """
 from __future__ import annotations
+import json
 import logging
+import os
+import socket
 import subprocess
 import time
+from pathlib import Path
 
 from chela import config
 from chela.discovery import get_windows_by_id
 
 log = logging.getLogger(__name__)
+
+# How long send_peer waits to connect/write before giving up and falling back
+# to send_tmux. A dead or backed-up peer must not stall message delivery.
+_PEER_CONNECT_TIMEOUT = 2.0
 
 _PROMPT_CHAR = "❯"  # marks Claude Code's input line
 _PASTE_PLACEHOLDER = "Pasted text"  # e.g. "[Pasted text #1 +5 lines]"
@@ -266,6 +289,68 @@ def send_escape(window_id: str) -> bool:
     return send_key(window_id, "Escape")
 
 
+def _peer_socket_path(pid: int) -> Path | None:
+    """The Unix socket a Claude Code session ``pid`` listens on, if it exists.
+
+    Mirrors the two locations Claude Code itself binds to (newest build first):
+    ``$XDG_RUNTIME_DIR/cc-socks/<pid>.sock``, falling back to
+    ``$TMPDIR-or-/tmp/cc-socks-<uid>/<pid>.sock`` — the path it uses when no
+    runtime dir is set, or when the runtime-dir path would overflow a sockaddr.
+    We don't know which one a given session picked, so we just check both and
+    take whichever is actually there. None means "no such socket" — a plain,
+    expected outcome (older Claude Code, or the session hasn't bound one yet),
+    not an error.
+    """
+    candidates = []
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        candidates.append(Path(runtime_dir) / "cc-socks" / f"{pid}.sock")
+    tmp_dir = os.environ.get("TMPDIR") or "/tmp"
+    candidates.append(Path(tmp_dir) / f"cc-socks-{os.getuid()}" / f"{pid}.sock")
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def send_peer(window_id: str, from_agent: str, message: str) -> bool:
+    """Deliver ``message`` straight into ``window_id``'s Claude Code message queue
+    over its peer-messaging Unix socket. True if handed off, False if no such
+    socket could be reached — callers fall back to :func:`send_tmux`.
+
+    One line of newline-delimited JSON, ``{"type": "user", "message": {"role":
+    "user", "content": ...}}`` — the wire format Claude Code's own ``uds-messaging``
+    listener parses (verified against the running ``claude`` binary: it reads a
+    session's socket path off ``$CLAUDE_CODE_MESSAGING_SOCKET`` and accepts
+    exactly this shape). Fire-and-forget: we don't hold the connection open for
+    a reply, so a receiving session's optional delivery-status echo (it only
+    replies to a socket-shaped ``from``, which we don't claim to be) is simply
+    not read. That costs us delivery confirmation, not delivery itself.
+    """
+    from chela import agent_manager  # deferred: agent_manager imports send_tmux from us
+
+    pid = agent_manager.claude_pid(window_id)
+    if pid is None:
+        return False
+    sock_path = _peer_socket_path(pid)
+    if sock_path is None:
+        return False
+    payload = {
+        "type": "user",
+        "message": {"role": "user", "content": f"[{from_agent}] {message}"},
+        "from": from_agent,
+    }
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(_PEER_CONNECT_TIMEOUT)
+            sock.connect(str(sock_path))
+            sock.sendall((json.dumps(payload) + "\n").encode())
+        return True
+    except OSError as e:
+        log.warning("peer socket send to %s (pid %s) failed: %s", window_id, pid, e)
+        return False
+
+
 def resolve_window(agent: str | None) -> str | None:
     """Resolve an agent reference to its live tmux window id — id OR display name.
 
@@ -301,17 +386,21 @@ def resolve_window(agent: str | None) -> str | None:
 
 
 def send_message(from_agent: str, to_agent: str, message: str, priority: str = "normal") -> bool:
-    """Send a message to an agent via tmux. Live-only — no fallback queue.
+    """Send a message to an agent — peer socket first, tmux paste as fallback.
+    Live-only — no fallback queue.
 
     ``to_agent`` is anything :func:`resolve_window` accepts (window id or name).
-    Returns True if delivered to a live window, False if the window is genuinely
-    not live or the tmux send failed. Callers that must not lose a message should
-    resolve first and report the two cases apart (``chela msg`` does).
+    Returns True if delivered by either transport, False if the window is
+    genuinely not live or both transports failed. Callers that must not lose a
+    message should resolve first and report the two cases apart (``chela msg``
+    does).
     """
     window_id = resolve_window(to_agent)
     if window_id is None:
         log.warning("%s is not a live tmux window — message NOT delivered", to_agent)
         return False
+    if send_peer(window_id, from_agent, message):
+        return True
     # Prefix with the sender so the recipient has context on who pinged them.
     if send_tmux(window_id, f"[{from_agent}] {message}"):
         return True
