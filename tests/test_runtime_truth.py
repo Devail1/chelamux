@@ -1213,10 +1213,25 @@ def test_judge_blocked_race_names_every_stuck_row_not_just_the_first(fleet, monk
 
 def test_judge_blocked_race_does_not_report_an_ordinary_blocked_run(fleet, monkeypatch):
     """A run that is merely `judge.J_BLOCKED` (an ordinary rework, no CAS race) is not this
-    fact's business — `judge.blocked_race` fires only for the dedicated CMX-239 state."""
+    fact's business — `judge.blocked_race` fires only for the dedicated CMX-239 state.
+
+    Goes through the REAL `_blocked_race_scan`, not a monkeypatched stand-in: widen the
+    scan's `judge_state` filter to also match `J_BLOCKED` and this must go red."""
     monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {})
     findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
     assert findings and findings[0].level == doctor.OK
+
+
+def test_judge_blocked_race_scan_ignores_an_ordinary_blocked_run(tmp_path, monkeypatch):
+    """The real-scan counterpart of the test above: an ordinary `J_BLOCKED` row (a plain
+    rework, no CAS race) must not appear in `_blocked_race_scan`'s output. Widen the scan's
+    `judge_state != judge.J_BLOCKED_RACE` filter to also let `J_BLOCKED` through and this
+    goes red — the mutation the judge caught round 2."""
+    from chela import judge
+
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(),
+                          judge_state=judge.J_BLOCKED)
+    assert scanned == {}, "an ordinary J_BLOCKED row must not be reported as a blocked race"
 
 
 # --- judge.blocked_race must be able to CLEAR — round 2 of CMX-240 review ---------------
@@ -1241,14 +1256,16 @@ def _blocked_race_row(**over) -> dict:
     return row
 
 
-def _scan_with(tmp_path, monkeypatch, row: dict) -> dict:
+def _scan_with(tmp_path, monkeypatch, row: dict, judge_state=None) -> dict:
     from chela import judge
 
+    if judge_state is None:
+        judge_state = judge.J_BLOCKED_RACE
     fake_db = tmp_path / "scheduler.db"
     fake_db.write_text("")
     monkeypatch.setattr(dispatcher, "DB_PATH", fake_db)
     monkeypatch.setattr(dispatcher, "list_runs",
-                        lambda: [{**row, "judge_state": judge.J_BLOCKED_RACE}])
+                        lambda: [{**row, "judge_state": judge_state}])
     return runtime_truth._blocked_race_scan()
 
 
