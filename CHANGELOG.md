@@ -10,6 +10,29 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **A CI job that never ran the suite no longer spends a rework round.** The automatic
+  CI-red gate (CMX-69) treated every failing check as evidence about the code, but GitHub
+  reports two conclusions — `STARTUP_FAILURE` and `ACTION_REQUIRED` — that mean the job's
+  steps never executed at all: a runner/workflow-file problem, or a pending approval gate,
+  neither fixable by a coding agent. A third shape is not visible at the conclusion level
+  at all: a runner that dies mid-job (a `checkout` step failing on a network/TLS fault)
+  reports plain `FAILURE`, indistinguishable from a genuine test failure without reading
+  the job's own steps. All three now short-circuit before `request_changes`: the PR still
+  shows red (the merge gate still refuses it) and a comment still explains why, but no
+  agent is spawned and `rework_count`, the bounded loop's budget, is never touched. A real
+  failure alongside an infra one is still charged (real evidence wins, conservatively), and
+  a run stuck in infra failures is bounded on its own separate streak (capped the same as
+  `CHELA_MAX_REWORKS`, reset the next time CI is seen green) so a permanently broken
+  workflow file still reaches a human instead of looping quietly forever. The plain-`FAILURE`
+  shape is decided by ONE validator (`_validate_ci_jobs`) that turns the untrusted
+  `gh run view --json jobs` payload into a fully-typed `tuple[CIJob, ...] | None` — treating
+  ANY structural deviation, anywhere in the tree, as unreadable — feeding a classifier
+  (`_suite_step_ran`) that only ever sees already-validated data. (CMX-245, a re-scope of
+  CMX-243, which spent 8 reworks discovering one malformed-shape branch at a time; this
+  closes that family by construction instead of one round at a time.)
+
 ### Added
 
 - **`chela retry` — "keep going" on a `needs_human` run, no fix required.** `chela reopen`
