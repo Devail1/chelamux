@@ -31,6 +31,28 @@ history lives in `git log`.
   burns the bounded `cannot_verify` retry budget re-discovering a verdict that is
   already definitive. (CMX-239)
 
+### Fixed
+
+- **A release body could ship the same `### Added`/`### Changed`/`### Fixed` heading
+  two or three times.** Parallel worktree agents each append their own subsection
+  under `## [Unreleased]` per PR, blind to each other's concurrent edits, so nothing
+  in that workflow could stop the same category heading from landing more than once
+  before a release shipped — this file's own `## [Unreleased]` section had exactly
+  that duplication live. `chela.release_notes.extract_release_notes` — the one place
+  every release body (and this repo's own `gh release create --notes-file`) is
+  assembled — now collapses repeated `### <Category>` headings in the extracted
+  section into one block each, content concatenated in the order it appeared, and
+  emitted in Keep a Changelog's canonical category order (Added, Changed,
+  Deprecated, Removed, Fixed, Security) rather than first-appearance order — the
+  latter is itself merge-order-dependent, so it would only push the same race down
+  a level. Titles outside those six categories aren't dropped; they're kept, after
+  the known ones, in first-appearance order among themselves. A section with no
+  duplicate titles is returned byte-for-byte unchanged. `python -m chela.release_notes
+  --write` applies the same coalescing to `CHANGELOG.md`'s own `## [Unreleased]`
+  section in place, so what's in the repo matches what the next release ships;
+  already-published sections are never touched by `--write` — cleaning those up is
+  a separate, deliberate call by the operator. (CMX-235)
+
 - **`TODO.example.md` no longer claims the dispatcher scopes claiming to the `## Open`
   section.** It never did — `chela/sources/markdown.py` claims every unchecked `- [ ]`
   line in the file regardless of which heading precedes it, so a task moved under a
@@ -136,6 +158,18 @@ history lives in `git log`.
   inside a matched pair of quotes no longer ends the segment. (CMX-232)
 
 ### Added
+
+- **A typo'd `depends:` reference now surfaces in `chela doctor` instead of only a
+  daemon log line.** CMX-232 fixed the one CAUSE of an unresolvable edge a human could
+  not work around by writing "better" markdown (a title with an embedded `;`); it never
+  touched the silence — a plain typo, or a retitled/deleted blocker, still resolves to
+  an id nothing on the tracker will ever strike, and `dispatcher._ready` fails that
+  closed by design, forever, saying so only in a `log.warning` line wherever the
+  daemon's own log happens to scroll. The new `dispatch.unresolved_depends` fact runs
+  the same resolution fresh, names the stuck task and the tracker it lives in, and (like
+  every other doctor fact) gets pushed by the daemon's edge-triggered
+  `check_and_notify` the moment it goes red — the CMX-187 fix, applied to this class of
+  bug too.
 
 - **`chela doctor` now reports which transport each agent would actually receive a
   message over.** Peer-socket delivery falls back to typing into the terminal
