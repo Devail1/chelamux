@@ -2339,6 +2339,81 @@ def _restore_report(_declared: None, obs: Observation) -> list[Finding]:
     )]
 
 
+# --- fact: a `depends:` edge naming no task at all — a typo, or a retitled/deleted
+# blocker — permanently blocks its dependent. `dispatcher._ready` already fails this
+# closed BY DESIGN (see its own docstring) and already says so — but only with a
+# `log.warning` line, once per tick, wherever the daemon's own log happens to scroll.
+# CMX-232 fixed one CAUSE of an unresolvable edge (a title with an embedded `;` could
+# never be quoted correctly, however carefully someone wrote the markdown); it never
+# touched the SILENCE — a plain, ordinary typo produces the exact same permanent,
+# unannounced block, and still does. This fact is the one place that turns "held back,
+# forever, for a reason nobody who isn't tailing the daemon's log will ever see" into
+# something `chela doctor` reports and the daemon's `check_and_notify` pushes on the
+# transition into red — the same fix CMX-187 already gave every other red finding.
+
+def _unresolved_depends_scan() -> list[dict]:
+    """Every open task, across every dispatched workflow with a tracker that has a
+    notion of `depends:`, whose declared dependency resolves to no task at all — open
+    or closed — anywhere in that tracker. The exact same resolution
+    `dispatcher._ready` and the dashboard's `open_tasks` payload (`unresolved_depends`)
+    already compute, applied fresh here so doctor sees it too."""
+    out: list[dict] = []
+    for path in dispatched_workflows():
+        if not path.exists():
+            continue
+        try:
+            wf = load_workflow(path)
+            source = get_source(wf)
+        except Exception:
+            continue  # already reported by dispatch.workflows
+        tasks_from_text = getattr(source, "tasks_from_text", None)
+        closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
+        tracker = getattr(source, "path", None)
+        if tasks_from_text is None or closed_ids_from_text is None or tracker is None:
+            continue  # e.g. gh_issues — no notion of depends: at all
+        try:
+            text = Path(tracker).read_text()
+        except OSError:
+            continue  # already reported by dispatch.workflows (no_tracker)
+        tasks = tasks_from_text(text)
+        known_ids = {t.id for t in tasks} | closed_ids_from_text(text)
+        for t in tasks:
+            unresolved = sorted(set(t.depends) - known_ids)
+            if unresolved:
+                out.append({
+                    "workflow": str(path), "tracker": str(tracker),
+                    "task": t.title, "unresolved": unresolved,
+                })
+    return out
+
+
+def _unresolved_depends_read() -> Observation:
+    return observed(_unresolved_depends_scan())
+
+
+def _unresolved_depends_report(_declared: None, obs: Observation) -> list[Finding]:
+    rows = obs.value
+    if not rows:
+        return [Finding(OK, "every depends: edge resolves to a real task")]
+    out = []
+    for row in rows:
+        n = len(row["unresolved"])
+        out.append(Finding(
+            ERROR,
+            f"{row['task']!r} depends on {n} reference(s) that name no task — "
+            "blocked FOREVER",
+            f"tracker: {row['tracker']} — unresolved id(s): "
+            f"{', '.join(row['unresolved'])}. A depends: marker is matched by hashing "
+            "the OTHER bullet's title text (chela.sources.markdown._title_id) — a "
+            "typo, a retitled task, or a deleted one all produce an id nothing on this "
+            "tracker will ever strike. dispatcher._ready fails this closed by design, "
+            "so the task sits in Open forever with no error anywhere but a "
+            "log.warning line. Fix the depends: marker's title text (or the bullet it "
+            "should be naming) to match exactly.",
+        ))
+    return out
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -2659,6 +2734,17 @@ def facts() -> list[Fact]:
             read_back=_restore_read,
             report=_restore_report,
             unverifiable_level=WARN,      # same reason as tmux.session
+        ),
+        Fact(
+            name="dispatch.unresolved_depends",
+            declared_by="nothing — chela never predicts this; a depends: edge either "
+                        "names a real task, open or closed, or it doesn't",
+            owned_by="each dispatched workflow's own tracker — the same resolution "
+                     "dispatcher._ready and the dashboard's open_tasks payload "
+                     "(unresolved_depends) already do, applied fresh",
+            declare=lambda: None,
+            read_back=_unresolved_depends_read,
+            report=_unresolved_depends_report,
         ),
     ]
 

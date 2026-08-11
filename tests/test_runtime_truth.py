@@ -287,6 +287,17 @@ def _break_dispatch_hold(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_unresolved_depends(tmp_path, monkeypatch):
+    """CMX-234: a `depends:` marker whose title is a typo of the real bullet — it
+    resolves to no task at all, open or closed, anywhere in the tracker. Before this
+    fact existed the ONLY trace was a `dispatcher._ready` log.warning line."""
+    (tmp_path / "repo" / "TODO.md").write_text(
+        "- [ ] a task\n"
+        '- [ ] follow-up task <!-- depends: "a tsak" -->\n'
+    )
+    return doctor.ERROR
+
+
 def _break_agent_cmd(tmp_path, monkeypatch):
     """The resolved `agent.cmd` names a binary the spawning shell's PATH cannot find —
     tmux would type it into a fresh window and get `command not found` back."""
@@ -538,6 +549,7 @@ CORRUPTIONS = {
     "repo.services_current": _break_services_current,
     "agents.native_status_feed": _break_native_status_feed,
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
+    "dispatch.unresolved_depends": _break_unresolved_depends,
 }
 
 
@@ -1073,6 +1085,46 @@ def test_restore_dead_epoch_rows_cannot_verify_with_no_tmux_server(fleet, monkey
     findings = [f for f in doctor.check() if f.fact == "restore.dead_epoch_rows"]
     assert findings and all(f.level == doctor.WARN for f in findings)
     assert "CANNOT VERIFY restore.dead_epoch_rows" in findings[0].title
+
+
+# --- dispatch.unresolved_depends: CMX-234, the silence CMX-232 didn't touch ------------
+#
+# CMX-232 fixed the one CAUSE of an unresolvable `depends:` edge that a human could not
+# work around by writing "better" markdown (a title with an embedded `;`). A plain typo
+# in a title produces the exact same permanent, silent block — `dispatcher._ready` fails
+# it closed by design and says so only in a `log.warning` line. This fact is what turns
+# that into something `chela doctor` reports and the daemon's edge-triggered
+# `check_and_notify` pushes on the transition into red.
+
+def test_unresolved_depends_names_the_task_and_the_bad_reference(fleet, monkeypatch):
+    from chela.sources.markdown import _title_id
+
+    _break_unresolved_depends(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.ERROR
+    assert "follow-up task" in findings[0].title
+    assert "1 reference(s)" in findings[0].title
+    assert "TODO.md" in findings[0].detail
+    assert _title_id("TODO.md", "a tsak") in findings[0].detail
+
+
+def test_unresolved_depends_silent_when_every_edge_resolves(fleet):
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings == [runtime_truth.Finding(
+        doctor.OK, "every depends: edge resolves to a real task",
+        fact="dispatch.unresolved_depends")]
+
+
+def test_unresolved_depends_does_not_fire_for_an_ordinary_unmet_wait(fleet):
+    """A dependency that DOES resolve, just hasn't been struck yet, is the ordinary
+    case — not a tracker bug. Only a reference naming no task at all should redden this
+    fact, the same line `dispatcher._ready` draws between log.info and log.warning."""
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [ ] prerequisite task\n"
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+    )
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.OK
 
 
 # --- installed_hooks_stale(): `chela update`'s post-update reminder reuses the exact
