@@ -1948,12 +1948,22 @@ def resolve_run(ident: str) -> dict | None:
     return named[0] if len(named) == 1 else None
 
 
-def request_changes(ident: str, body: str) -> dict:
+def request_changes(ident: str, body: str, *, post_comment: bool = True) -> dict:
     """FAIL a PR under review: the run goes to ``changes_requested`` and the loop turns.
 
-    (a) writes the verdict + the status on the run row — THE authority — and (b) posts the
-    body as a PR comment, which is the human-readable projection and the record the
-    reworking agent reads back. In that order: if the comment fails, the loop still runs.
+    (a) writes the verdict + the status on the run row — THE authority — and (b), when
+    ``post_comment`` is true (the default), posts the body as a PR comment, the
+    human-readable projection and the record the reworking agent reads back. In that
+    order: if the comment fails, the loop still runs.
+
+    ``post_comment=False`` is for a caller that already posted this exact ``body`` to the
+    PR itself, unconditionally, before calling here — ⚖️🕳️ CMX-228, the judge. Two early
+    exits below (an already-moved ``status``, and the compare-and-swap) return before this
+    function would ever reach the comment, so a caller that relied on THIS function to
+    publish would lose the comment on exactly the runs a human or CI reached first — the
+    finding that most needed to reach the PR was the one most likely not to. Set this false
+    only when the comment has independently already been posted; every other caller keeps
+    the default and this behaves exactly as before.
 
     It increments nothing. ``rework_count`` is spent when the dispatcher actually spawns
     the rework (:func:`_respawn_rework`) — a verdict that never gets a concurrency slot
@@ -2005,13 +2015,16 @@ def request_changes(ident: str, body: str) -> dict:
 
     wf_path = run.get("workflow_path")
     repo_dir = str(Path(wf_path).parent) if wf_path else None
-    posted, detail = _post_pr_comment(run.get("pr_url"), repo_dir, body)
-    if not posted:
-        log.warning(
-            "review: %s is changes_requested, but the PR comment did not post (%s). The "
-            "run row is the authority, so the rework still spawns — with the verdict in "
-            "its prompt but nothing on the PR to read back.", task_id, detail,
-        )
+    if post_comment:
+        posted, detail = _post_pr_comment(run.get("pr_url"), repo_dir, body)
+        if not posted:
+            log.warning(
+                "review: %s is changes_requested, but the PR comment did not post (%s). The "
+                "run row is the authority, so the rework still spawns — with the verdict in "
+                "its prompt but nothing on the PR to read back.", task_id, detail,
+            )
+    else:
+        posted, detail = None, "posted by the caller before this call"
     log.info("review: %s → changes_requested (round %d)", task_id, len(reviews))
     return {
         "ok": True, "task_id": task_id, "status": "changes_requested",
