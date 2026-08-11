@@ -2278,6 +2278,33 @@ def test_blocked_race_churn_off_its_status_DOES_reannounce(
     ], "a blocked_race churn off its status must re-announce (CMX-239)"
 
 
+def test_the_blocked_race_reason_is_EXCERPTED_into_the_summary(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-239 round 6): the twin of the CANNOT_VERIFY excerpt guard above, for
+    `J_BLOCKED_RACE`.
+
+    Round 5's judge triaged ~20 of these live and found the ones without an excerpted
+    reason each cost a `gh pr view` to act on — the summary is the one line typed AT the
+    orchestrator's prompt, so a `run_judge_blocked_race` that drops the excerpt is exactly
+    as bad as the CMX-197 round 8 bug this mirrors, and MORE urgent: this branch fires when
+    a guard survived corruption on a commit that may already have shipped.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED_RACE)])
+
+    summary = inbox.load()["queue"][0]["summary"]
+    assert _LONG_DETAIL[:40] in summary, "an excerpt of the reason must reach the operator"
+    assert _LONG_DETAIL not in summary, (
+        "the WHOLE reason was pasted into a summary that gets typed at the prompt — it "
+        "belongs in the payload, which already carries it in full"
+    )
+    assert len(summary) < len(_LONG_DETAIL) + 200
+
+
 def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
         store_file, windows, sends, monkeypatch):
     """🔴 GUARD (CMX-197 round 8): the summary is one line TYPED AT the prompt.
