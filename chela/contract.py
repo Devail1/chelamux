@@ -18,7 +18,9 @@ Two actions live here, each enforcing its slice of the contract:
        **never** a production-facing branch (``main``/``master``/…) UNLESS that same
        workflow explicitly committed to exactly that branch — the contract's NEVER line,
        scoped per workflow so one repo's trunk convention can never widen another's;
-    2. the judge said ``clean`` on this run;
+    2. the judge said ``clean`` on this run, and its verdict is for the PR's CURRENT head
+       commit (read live from GitHub) — a ``clean`` recorded against an older commit is not
+       evidence about one pushed since;
     3. CI is green;
     4. GitHub reports the PR open and ``MERGEABLE``;
     5. **and — for the auto-launched orchestrator only — a human's attended-lease is live.**
@@ -264,7 +266,9 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
        via the env fallback, never on another workflow's behalf, never for chela's own
        control repo) — an unreadable base is refused too (unknown ≠ safe);
     4. the judge said ``clean`` on this run (anything else — ``blocked`` /
-       ``cannot_verify`` / never-ran — is a human's call);
+       ``cannot_verify`` / never-ran — is a human's call), AND that verdict is for the PR's
+       current head commit (read live) — a stale ``clean`` left on the row by a judge that
+       raced a later commit is not evidence about the commit actually being merged;
     5. CI is green per GitHub;
     6. GitHub reports the PR open and ``MERGEABLE``.
 
@@ -430,7 +434,30 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
 
     # 5. CI — green per GitHub, read live. Anything else (pending / red / none / unreadable)
     #    is refused: for an AUTONOMOUS merge, only a check that was SEEN to pass is a pass.
+    #
+    #    ⚖️🕳️ The SAME read also settles whether the judge's `clean` above is even about THIS
+    #    commit. `judge_state='clean'` alone is not evidence about the PR's CURRENT head —
+    #    the dispatcher judges ONE PASS PER HEAD COMMIT (`dispatcher.reopen`'s "new-commit
+    #    gate" enforces the identical invariant on the human reopen path), and `judge_sha` is
+    #    the commit the judge actually verified, stamped at launch and left untouched by a
+    #    later verdict write that doesn't reprovision. A judge still mid-run on an OLDER head
+    #    — or one whose verdict lost a race and got silently overwritten — leaves
+    #    `judge_state='clean'` sitting on the row while a NEW commit has since landed: CI can
+    #    be green and GitHub can report MERGEABLE on THAT new commit, and nothing else in
+    #    this gate would notice the judge never saw it. Refuses only on a KNOWN mismatch
+    #    (both shas read) — an unset `judge_sha` (an older row, or a judge that never stamped
+    #    one) is not treated as a positive mismatch, so this never regresses a run this gate
+    #    already trusted.
     ci = dispatcher._read_pr_checks(pr_url, repo_dir)
+    judge_sha = run.get("judge_sha")
+    if judge_sha and ci.head_sha and judge_sha != ci.head_sha:
+        return _refuse(
+            task_id, "escalate", judge_state=judge_state,
+            error=f"the judge's clean verdict was recorded against {judge_sha[:12]!r}, but "
+                  f"the PR's current head is {ci.head_sha[:12]!r} — a commit has landed since "
+                  "the judge last ran, and this gate never merges a commit the judge has not "
+                  "verified. Refusing; the dispatcher re-judges the new head on its own.")
+
     if ci.state != CI_PASSING:
         detail = {
             dispatcher.CI_FAILING: f"CI is RED (failing: {', '.join(ci.failing) or 'unnamed check(s)'})",

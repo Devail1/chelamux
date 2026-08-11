@@ -82,14 +82,15 @@ def test_actionable_helper_flags_a_recommendation_not_among_its_own_options():
 
 
 def _seed_run(repo: Path, task_id: str = "t1", *, status: str = "awaiting_review",
-              judge_state: str | None = "clean", pr_url: str = "https://github.com/o/r/pull/1") -> None:
+              judge_state: str | None = "clean", pr_url: str = "https://github.com/o/r/pull/1",
+              judge_sha: str | None = None) -> None:
     with dispatcher._db() as conn:
         conn.execute(
             "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
-            "started_at, attempt, pr_url, pr_state, judge_state, branch_name, worktree_path) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "started_at, attempt, pr_url, pr_state, judge_state, judge_sha, branch_name, "
+            "worktree_path) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (task_id, str(repo / "WORKFLOW.md"), "t", status, "@9", dispatcher._now(), 1,
-             pr_url, "open", judge_state, "cmx-1", None),
+             pr_url, "open", judge_state, judge_sha, "cmx-1", None),
         )
         conn.commit()
 
@@ -196,6 +197,96 @@ def test_merge_refuses_a_run_not_judge_clean_even_when_all_else_passes(repo, jud
     assert result.get("judge_state") == judge_state
     _assert_actionable(result)
     squash.assert_not_called()      # ⛔ nothing merged — the judge gate held
+
+
+def test_merge_refuses_a_judge_clean_verdict_that_is_stale_relative_to_the_current_head(repo):
+    """⚖️🕳️ The judge's ``clean`` is for a specific commit (``judge_sha``), not a standing
+    approval of the branch. Base ``dev``, judge ``clean``, CI green, MERGEABLE — the ONLY
+    thing wrong is that GitHub's live head commit differs from the one the judge actually
+    verified (a new commit landed on the PR after the judge finished, or while a slow judge
+    was still mid-run on an older head and its verdict got raced/overwritten). This must
+    refuse: merging a commit the judge never saw is exactly the "presents as approved and
+    mergeable" hole a stale verdict opens.
+
+    Corrupt the ``judge_sha != ci.head_sha`` check to ``False and …`` and this goes green —
+    the run merges on a commit the judge is silent about."""
+    _seed_run(repo, judge_sha="deadbeef0001")
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks",
+                      return_value=CIStatus(CI_PASSING, head_sha="cafef00d0002")), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "escalate"
+    assert "deadbeef0001" in result["error"]
+    assert "cafef00d0002" in result["error"]
+    squash.assert_not_called()      # ⛔ nothing merged — the stale-verdict gate held
+
+
+def test_merge_proceeds_when_the_judge_sha_matches_the_live_head(repo):
+    """The sibling of the staleness refusal above: when ``judge_sha`` DOES match the PR's
+    live head, the new check must not add a spurious refusal — the ordinary happy path
+    (already covered without an explicit sha by ``test_merge_when_the_whole_gate_holds``)
+    still holds when the sha IS recorded and it agrees with GitHub."""
+    _seed_run(repo, judge_sha="deadbeef0001")
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks",
+                      return_value=CIStatus(CI_PASSING, head_sha="deadbeef0001")), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is True
+    squash.assert_called_once()
+
+
+def test_merge_proceeds_when_judge_sha_is_unset_even_though_the_live_head_is_known(repo):
+    """The conservatism the staleness gate explicitly claims: an UNSET ``judge_sha`` (an
+    older row, or a judge that never stamped one) is NOT positive evidence of staleness, so
+    it must never refuse on that basis alone — even when GitHub's live head sha IS known and
+    non-empty. ``test_merge_when_the_whole_gate_holds`` leaves ``ci.head_sha`` at its default
+    ``None`` too, so it can't tell "unset judge_sha is deliberately ignored" apart from
+    "neither sha was ever read" — this test pins a REAL head_sha against the unset judge_sha.
+
+    Corrupt ``judge_sha = run.get("judge_sha")`` to ``run.get("judge_sha") or "0000unstamped"``
+    and this goes red: the fabricated sha never matches the live head, so a run this gate
+    already trusted gets refused."""
+    _seed_run(repo)      # judge_sha defaults to None — never stamped
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks",
+                      return_value=CIStatus(CI_PASSING, head_sha="cafef00d0002")), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is True
+    squash.assert_called_once()
+
+
+def test_merge_proceeds_when_the_live_head_sha_is_unset_even_though_judge_sha_is_known(repo):
+    """The other half of the same conservatism: an UNREADABLE/unset live head
+    (``ci.head_sha`` is ``None`` — GitHub could not report one) is NOT positive evidence of
+    staleness either, so it must never refuse on that basis alone — even when ``judge_sha``
+    IS stamped and non-empty. Every other proceed-path test leaves ``ci.head_sha`` at its
+    default ``None`` *and* leaves ``judge_sha`` unset too, so none of them can tell "an unset
+    live head is deliberately ignored" apart from "neither sha was ever read" — this test
+    pins a REAL ``judge_sha`` against the unset live head.
+
+    Corrupt ``if judge_sha and ci.head_sha and judge_sha != ci.head_sha:`` to
+    ``if judge_sha and judge_sha != ci.head_sha:`` and this goes red: a stamped judge_sha
+    never equals the unset ``None`` head, so a run this gate already trusted gets refused."""
+    _seed_run(repo, judge_sha="deadbeef0001")
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks",
+                      return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is True
+    squash.assert_called_once()
 
 
 @pytest.mark.parametrize("ci", [CI_FAILING, CI_PENDING, CI_NONE, CI_UNKNOWN])

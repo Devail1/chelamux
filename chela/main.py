@@ -1162,9 +1162,10 @@ def _ci_chip(r: dict) -> str:
 def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:
     """One line for the status-filtered view: task id, status, CI, age, PR URL, title.
 
-    ``reopen=N`` only appears once a run has actually been reopened (CMX-198) — a run
-    that never left the automatic loop shows nothing extra, so the chip reads as a
-    signal ("a human has been round N times") and not decoration on every row.
+    ``reopen=N`` / ``retry=N`` only appear once a run has actually seen that path
+    (CMX-198 / CMX-237) — a run that never left the automatic loop shows nothing extra,
+    so each chip reads as a signal ("a human acted here N times") and not decoration on
+    every row.
     """
     task_id = r.get("task_id") or "-"
     status = r.get("status") or "-"
@@ -1172,9 +1173,11 @@ def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:
     pr = r.get("pr_url") or "-"
     title = (r.get("title") or "")[:50]
     reopen_n = r.get("reopen_count") or 0
+    retry_n = r.get("retry_count") or 0
     reopen_chip = f"reopen={reopen_n}  " if reopen_n else ""
+    retry_chip = f"retry={retry_n}  " if retry_n else ""
     return (f"  {task_id}  {status:<16}  {_ci_chip(r):<11}  age={age:<5}  "
-            f"{reopen_chip}{pr:<45}  {title}")
+            f"{reopen_chip}{retry_chip}{pr:<45}  {title}")
 
 
 def cmd_dispatch_runs(args) -> None:
@@ -2059,6 +2062,30 @@ def cmd_reopen(args) -> None:
         print(f"  ⭐ {result['nudge']}")
 
 
+def cmd_retry(args) -> None:
+    """🔁 "Keep going": give a ``needs_human`` run one more automatic rework round.
+
+    ``reopen`` is for "I fixed the branch myself" and refuses an unchanged head. This is
+    the other exit a ``needs_human`` verdict provokes just as often — a human who wants the
+    SAME automatic loop to have another swing at the SAME code, not to fix it by hand and
+    not to merge past it. It sends the run back to ``changes_requested``; the next
+    dispatcher tick re-spawns the agent exactly like a normal rework round.
+    """
+    result = dispatcher.retry(args.run, reason=getattr(args, "reason", "") or "")
+    if not result.get("ok"):
+        print(f"retry: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"🔁 Run {result['task_id']} ({result.get('branch_name') or '?'}) → "
+          f"changes_requested (rework {result.get('rework_count')}/{result.get('max_reworks')}, "
+          f"+{result.get('retry_count')} human-granted) — the dispatcher will re-spawn it "
+          "next tick.")
+    if result.get("comment_posted"):
+        print(f"  PR comment posted: {result.get('pr_url') or ''}")
+    else:
+        print(f"  ⚠ PR comment NOT posted ({result.get('comment_detail')}) — the run row is "
+              "the authority, so it retries regardless, but nothing landed on the PR.")
+
+
 def cmd_escalate(args) -> None:
     """Hand a decision to the human — the ONE structured escalation path (``chela.contract``).
 
@@ -2378,6 +2405,22 @@ def main() -> None:
              "in the run's review history",
     )
 
+    # retry — "keep going": one more automatic rework round on the SAME head, no fix required
+    p_retry = sub.add_parser(
+        "retry",
+        help="🔁 Give a needs_human run one more automatic rework round on the SAME head — "
+             "no new commit required. Use this when you want the loop to keep going, not "
+             "to fix it yourself (that's `reopen`) or merge past it",
+    )
+    p_retry.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
+    p_retry.add_argument(
+        "--reason", required=True,
+        help="The record that a human read the needs_human verdict and judged it worth "
+             "another round — posted on the PR and recorded in the run's review history. "
+             "Required: retry has no pushed commit, so this sentence is the only evidence "
+             "a human made the call",
+    )
+
     # escalate — the ONE structured way to hand a decision to the human
     p_esc = sub.add_parser(
         "escalate",
@@ -2570,6 +2613,8 @@ def main() -> None:
         cmd_merge(args)
     elif args.command == "reopen":
         cmd_reopen(args)
+    elif args.command == "retry":
+        cmd_retry(args)
     elif args.command == "escalate":
         cmd_escalate(args)
     elif args.command == "update":

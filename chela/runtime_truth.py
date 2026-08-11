@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -79,6 +80,7 @@ from chela import (
     sessions,
 )
 from chela.sources import get_source
+from chela.sources.markdown import BLOCKED_RE, DEPENDS_RE, OPEN_RE, _parse_depends, _title_id
 from chela.workflow import load_workflow
 
 OK = "ok"
@@ -1132,47 +1134,127 @@ def _hooks_unattributed_report(_declared: None, obs: Observation) -> list[Findin
 # `_explicit_wid` (hooks.py) correctly refuses a header naming a window that is not live
 # right now — falling through to the same origin-based inference any other hook uses — but
 # it says NOTHING when it does. An unset header is the ordinary case (a session chela did
-# not launch has no `$CHELA_WID`) and must never warn; a well-formed header naming a DEAD
-# window is always a fault: the agent inherited a stale `$CHELA_WID` from tmux's global
-# environment after the window it once named had closed (the actual CMX-192 root cause).
-# `chela.hooks.ingest` keeps that rejected value on the record (`rejected_wid`), distinct
-# from the unset case (`rejected_wid=None` there too) — this fact reads it back.
+# not launch has no `$CHELA_WID`) and must never warn. `chela.hooks.ingest` keeps the
+# rejected value on the record (`rejected_wid`), distinct from the unset case
+# (`rejected_wid=None` there too) — this fact reads it back.
+#
+# CMX-192/CMX-231/CMX-236: this fact used to call every rejected header "always a fault" —
+# a manual relaunch inheriting a stale `$CHELA_WID` from tmux's global environment after
+# its window closed. But measured against production logs, the dominant (often only)
+# shape is a `hook.session_start` naming a window that WAS real and WAS live — just not
+# any more, because tmux replaced it with a different wid shortly before the header
+# arrived. That is an ordinary teardown artifact, not the CMX-192 fault, and the two read
+# identically off a single "not live right now" check.
+#
+# Telling them apart needs a scope a bare wid match does not have: tmux window ids are
+# small integers, unique only WITHIN one tmux server's life — issued per SERVER and never
+# recycled while that server runs (`chela.epoch`), but freely reused by the NEXT server. So
+# `@2` resolving to *somebody's* window elsewhere in a multi-week ring is not evidence the
+# window a rejected header named was ever live — only that the same short string was, quite
+# possibly under a different tmux server entirely. Session-scoping was tried and rejected
+# (CMX-231 rework #2): `rejected_wid` only ever fires on `hook.session_start`, which is BY
+# CONSTRUCTION a session's first record, so "did this session resolve it before" can never
+# be true — the OK branch was dead code. The scope that actually matches "this was
+# genuinely alive, in the same run of the world" is the tmux EPOCH itself: every record
+# `chela.hooks.ingest` writes is stamped with the epoch it saw at write time (CMX-236), and
+# a `rejected_wid` that some OTHER record — any session — resolved under that SAME epoch
+# was a real window in the here-and-now, whatever became of it since. A `rejected_wid` with
+# no such match — because it belongs to a dead epoch, or never resolved at all — has no
+# evidence it was ever live under the epoch that is rejecting it now: the CMX-192 shape.
+#
+# `hooks._explicit_wid`/`_explicit_wid_dead` separately gained a forced-refresh retry
+# before giving up on a header (CMX-231) — a real but DIFFERENT race (a session replacing
+# its own claude process inside a still-open window faster than the ≤1s pane cache
+# refreshes). It just keeps a window that appears a moment later from ever reaching
+# `rejected_wid` in the first place; it does not, by itself, distinguish teardown from
+# CMX-192 for the records that DO reach here.
 
 def _hooks_rejected_wid_read() -> Observation:
     """Every ``hook.*`` record in the ring whose ``X-Chela-Wid`` named a window that was
     not live — ``rejected_wid``, read back exactly as :func:`chela.hooks.ingest` wrote
-    it. Distinct from the unset case, which never sets this field at all."""
+    it, together with the tmux epoch THAT record was stamped with. Distinct from the
+    unset case, which never sets ``rejected_wid`` at all.
+
+    Also collects, PER EPOCH, every ``wid`` that ANY record resolved under that epoch —
+    the scope :func:`_hooks_rejected_wid_report` needs to tell a window that was
+    genuinely live under the SAME tmux server as the rejection (a teardown artifact)
+    apart from a same-numbered window that only ever belonged to a DIFFERENT server (the
+    CMX-192 shape). Records with no epoch (written before CMX-236, or a host where tmux
+    could not be asked) resolve nothing into this map and are never used to downgrade a
+    rejection — an unreadable epoch is not license to guess.
+    """
     records = event_log.ring()
-    dead: dict[str, str] = {}
+    dead: dict[str, tuple[str, str | None]] = {}
+    resolved_by_epoch: dict[str, set[str]] = {}
+    for rec in records:
+        wid = rec.get("wid")
+        rec_epoch = rec.get("epoch")
+        if wid and rec_epoch:
+            resolved_by_epoch.setdefault(rec_epoch, set()).add(wid)
     for rec in records:
         rtype = rec.get("type") or ""
         rejected = rec.get("rejected_wid")
         if rejected and rtype.startswith(hooks.TYPE_PREFIX):
             sid = rec.get("session_id") or "?"
-            dead[sid] = rejected
-    return observed({"dead": dead, "bound": _ring_bound_note(records)})
+            dead[sid] = (rejected, rec.get("epoch"))
+    return observed({"dead": dead, "resolved_by_epoch": resolved_by_epoch,
+                     "bound": _ring_bound_note(records)})
 
 
 def _hooks_rejected_wid_report(_declared: None, obs: Observation) -> list[Finding]:
-    dead: dict[str, str] = obs.value["dead"]
+    dead: dict[str, tuple[str, str | None]] = obs.value["dead"]
+    resolved_by_epoch: dict[str, set[str]] = obs.value["resolved_by_epoch"]
     bound = obs.value["bound"]
     if not dead:
         return [Finding(OK, f"no rejected X-Chela-Wid headers in the {bound} — every "
                             "header seen either named a live window or was unset")]
-    named = ", ".join(f"{sid}→{wid}" for sid, wid in sorted(dead.items()))
-    return [Finding(
-        WARN,
-        f"{len(dead)} session(s) sent an X-Chela-Wid naming a DEAD window in the "
-        f"{bound}: {named}",
-        "A well-formed $CHELA_WID that names a window which is not live right now is "
-        "always a fault, never the ordinary unset case — it means the agent inherited a "
-        "stale window id, most often from tmux's global environment surviving a manual "
-        "relaunch (the CMX-192 root cause). chela.hooks.wid_for_session still fell back "
-        "to origin-based inference for these, so the event was not necessarily lost — "
-        "but the stale id is worth chasing down across the plugin cache, "
-        "installed_plugins.json, the daemon, /proc env and the tmux global env. This "
-        "scan is bounded to the ring above.",
-    )]
+    teardown = {sid: wid for sid, (wid, rec_epoch) in dead.items()
+                if rec_epoch and wid in resolved_by_epoch.get(rec_epoch, ())}
+    orphaned = {sid: wid for sid, (wid, rec_epoch) in dead.items()
+                if sid not in teardown}
+    findings: list[Finding] = []
+    if teardown:
+        named = ", ".join(f"{sid}→{wid}" for sid, wid in sorted(teardown.items()))
+        findings.append(Finding(
+            OK,
+            f"{len(teardown)} rejected X-Chela-Wid header(s) in the {bound} named a "
+            f"window that WAS live under the SAME tmux epoch: {named}",
+            "chela.hooks._explicit_wid_dead rejected these because the named window was "
+            "not live at the moment the header arrived, but some OTHER record in the "
+            "ring resolved that same wid under the SAME tmux server — a teardown "
+            "artifact, not the CMX-192 fault: the window was real and was live under "
+            "this epoch, it just closed or was replaced before this particular request "
+            "landed. Deliberately NOT a ring-wide wid match: tmux window ids are small "
+            "integers reused by every new tmux server, so scoping to the epoch is what "
+            "keeps a DIFFERENT server's same-numbered window from masquerading as this "
+            "one's teardown. No action needed.",
+        ))
+    if orphaned:
+        named = ", ".join(f"{sid}→{wid}" for sid, wid in sorted(orphaned.items()))
+        findings.append(Finding(
+            WARN,
+            f"{len(orphaned)} session(s) sent an X-Chela-Wid naming a window in the "
+            f"{bound} with no evidence it was ever live under that same tmux epoch: "
+            f"{named}",
+            "A well-formed $CHELA_WID that names a window which is not live right now, "
+            "and never resolved anything else under the SAME tmux epoch anywhere in "
+            "this ring either, usually means the agent was relaunched by hand and "
+            "inherited a stale window id from tmux's global environment surviving a "
+            "server restart (the CMX-192 root cause) — window ids are reused by every "
+            "new tmux server, so a wid from a dead epoch can easily name a window that "
+            "is very much alive today, under someone else's identity. "
+            "chela.hooks.wid_for_session still fell back to origin-based inference for "
+            "these, so the event was not necessarily lost — but the stale id is worth "
+            "chasing down: is the window in `chela status` right now, and does the "
+            "session's OWN transcript show a `--resume` shortly before this? A record "
+            "with no readable epoch at all (pre-CMX-236, or a host where tmux could not "
+            "be asked) always lands here too — an unreadable epoch is never grounds to "
+            "call this a harmless teardown. This scan is also bounded to the ring above "
+            "— a window that WAS live earlier under this same epoch but scrolled out of "
+            "the ring before this check ran would look like this shape too; widen the "
+            "window before concluding it never existed.",
+        ))
+    return findings
 
 
 # --- fact: does every LIVE window have a reachable PEER-MESSAGING SOCKET? -------------
@@ -2339,6 +2421,127 @@ def _restore_report(_declared: None, obs: Observation) -> list[Finding]:
     )]
 
 
+# --- fact: a `depends:` edge naming no task at all — a typo, or a retitled/deleted
+# blocker — permanently blocks its dependent. `dispatcher._ready` already fails this
+# closed BY DESIGN (see its own docstring) and already says so — but only with a
+# `log.warning` line, once per tick, wherever the daemon's own log happens to scroll.
+# CMX-232 fixed one CAUSE of an unresolvable edge (a title with an embedded `;` could
+# never be quoted correctly, however carefully someone wrote the markdown); it never
+# touched the SILENCE — a plain, ordinary typo produces the exact same permanent,
+# unannounced block, and still does. This fact is the one place that turns "held back,
+# forever, for a reason nobody who isn't tailing the daemon's log will ever see" into
+# something `chela doctor` reports and the daemon's `check_and_notify` pushes on the
+# transition into red — the same fix CMX-187 already gave every other red finding.
+
+_TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*")
+
+
+def _parked_ids_from_text(text: str, filename: str) -> set[str]:
+    """Ids of the tasks `text` has PARKED (`<!-- blocked: ... -->`) — for identity
+    purposes only, never as claimable work. `tasks_from_text` skips these bullets
+    outright (they are not open work; see `chela.sources.markdown.tasks_from_text`),
+    but a task naming one via `depends:` is naming something that really is on the
+    tracker — ordinary waiting, not a broken reference — so it must count towards
+    `known_ids` here even though it is invisible to `tasks_from_text`.
+
+    A human writes `depends: "task A"` — the bare, visible title — never the raw
+    bullet text with its own `<!-- blocked: ... -->` comment attached. So the id has
+    to be hashed off that bare title (comment stripped), the same string
+    `_resolve_depends` hashes for the referencing marker, not off the full captured
+    line `tasks_from_text` would have used had the bullet not been skipped.
+    """
+    ids: set[str] = set()
+    for raw in text.splitlines():
+        m = OPEN_RE.match(raw)
+        if not m:
+            continue
+        title = m.group(1).strip()
+        if not BLOCKED_RE.search(title):
+            continue
+        bare = _TRAILING_COMMENT_RE.sub(" ", title).strip()
+        ids.add(_title_id(filename, bare))
+    return ids
+
+
+def _unresolved_depends_scan() -> list[dict]:
+    """Every open task, across every dispatched workflow with a tracker that has a
+    notion of `depends:`, whose declared dependency resolves to no task at all — open,
+    closed, or PARKED — anywhere in that tracker. The exact same resolution
+    `dispatcher._ready` and the dashboard's `open_tasks` payload (`unresolved_depends`)
+    already compute, applied fresh here so doctor sees it too — plus parked ids, which
+    neither of those needed for their own purpose (a parked prerequisite already fails
+    `_ready` closed, correctly; it just must not be DIAGNOSED as a broken reference)."""
+    out: list[dict] = []
+    for path in dispatched_workflows():
+        if not path.exists():
+            continue
+        try:
+            wf = load_workflow(path)
+            source = get_source(wf)
+        except Exception:
+            continue  # already reported by dispatch.workflows
+        tasks_from_text = getattr(source, "tasks_from_text", None)
+        closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
+        tracker = getattr(source, "path", None)
+        if tasks_from_text is None or closed_ids_from_text is None or tracker is None:
+            continue  # e.g. gh_issues — no notion of depends: at all
+        try:
+            text = Path(tracker).read_text()
+        except OSError:
+            continue  # already reported by dispatch.workflows (no_tracker)
+        filename = Path(tracker).name
+        tasks = tasks_from_text(text)
+        known_ids = (
+            {t.id for t in tasks}
+            | closed_ids_from_text(text)
+            | _parked_ids_from_text(text, filename)
+        )
+        for t in tasks:
+            unresolved_ids = sorted(set(t.depends) - known_ids)
+            if not unresolved_ids:
+                continue
+            # `t.title` still carries its own `depends:` marker verbatim — re-parse it
+            # (never re-hash — `_title_id` stays the single authority) to map each
+            # unresolved id back to the exact title text a human typed, so the finding
+            # names something a person can go fix rather than a hash they cannot.
+            m = DEPENDS_RE.search(t.title)
+            raw_titles = _parse_depends(m.group(1)) if m else ()
+            by_id = {_title_id(filename, raw): raw for raw in raw_titles}
+            unresolved_titles = [by_id.get(uid, uid) for uid in unresolved_ids]
+            out.append({
+                "workflow": str(path), "tracker": str(tracker),
+                "task": t.title, "unresolved": unresolved_titles,
+            })
+    return out
+
+
+def _unresolved_depends_read() -> Observation:
+    return observed(_unresolved_depends_scan())
+
+
+def _unresolved_depends_report(_declared: None, obs: Observation) -> list[Finding]:
+    rows = obs.value
+    if not rows:
+        return [Finding(OK, "every depends: edge resolves to a real task")]
+    out = []
+    for row in rows:
+        n = len(row["unresolved"])
+        out.append(Finding(
+            ERROR,
+            f"{row['task']!r} depends on {n} reference(s) that name no task — "
+            "blocked FOREVER",
+            f"tracker: {row['tracker']} — unresolved title(s): "
+            f"{', '.join(row['unresolved'])}. A depends: marker is matched by hashing "
+            "the OTHER bullet's title text (chela.sources.markdown._title_id) — a "
+            "typo, a retitled task, or a deleted one all produce an id nothing on this "
+            "tracker will ever strike. dispatcher._ready fails this closed by design, "
+            "so the task sits in Open forever with no error anywhere but a "
+            "log.warning line. Fix the depends: marker's title text above (or the "
+            "bullet it should be naming) to match exactly.",
+        ))
+    return out
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -2659,6 +2862,17 @@ def facts() -> list[Fact]:
             read_back=_restore_read,
             report=_restore_report,
             unverifiable_level=WARN,      # same reason as tmux.session
+        ),
+        Fact(
+            name="dispatch.unresolved_depends",
+            declared_by="nothing — chela never predicts this; a depends: edge either "
+                        "names a real task, open or closed, or it doesn't",
+            owned_by="each dispatched workflow's own tracker — the same resolution "
+                     "dispatcher._ready and the dashboard's open_tasks payload "
+                     "(unresolved_depends) already do, applied fresh",
+            declare=lambda: None,
+            read_back=_unresolved_depends_read,
+            report=_unresolved_depends_report,
         ),
     ]
 
