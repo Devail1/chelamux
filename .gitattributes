@@ -1,0 +1,10 @@
+# CMX-241: every dispatched `cmx-N` branch adds its own entry to the top of the same
+# `## [Unreleased]` section in CHANGELOG.md (see CONTRIBUTING.md). Two branches open at
+# once collide on that exact insertion point — never a semantic conflict, since both
+# entries belong, but plain 3-way merge can't tell that from two edits landing on the same
+# line. `merge=union` (a driver built into git itself, no extra config needed) tells git to
+# keep BOTH sides' lines on a conflicting hunk instead of raising a conflict, so the
+# dispatcher's judge-worktree refresh (`_refresh_judge_worktree` in chela/dispatcher.py)
+# resolves the catch-up merge automatically instead of reporting `cannot_verify` for a
+# reason that has nothing to do with the PR under review.
+CHANGELOG.md merge=union
