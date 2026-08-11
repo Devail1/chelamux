@@ -72,6 +72,13 @@ ADVERSE_RECEIPT_STATUSES = ("held", "denied", "expired")
 # can't be bound at all — checked before it is ever handed to `claude` as a launch flag.
 _SUN_PATH_MAX = 104
 
+# How long a reachability PROBE (peer_socket_reachable) waits to connect before deciding
+# nothing is listening. Deliberately short and separate from _PEER_CONNECT_TIMEOUT: a probe
+# runs from `chela doctor` over the whole fleet and must fail fast on a dead socket, not
+# stall for 2s per window. Matches Claude Code's own bundle, which classifies a socket
+# live/dead the same way with the same 250ms timeout.
+_PROBE_TIMEOUT = 0.25
+
 
 class PeerSendResult(NamedTuple):
     """The outcome of one :func:`send_peer` call.
@@ -374,6 +381,30 @@ def messaging_socket_launch_arg(window_id: str) -> str | None:
     return f"--messaging-socket-path {path}"
 
 
+def _peer_socket_candidate(window_id: str, pid: int) -> tuple[Path, str] | None:
+    """Like :func:`_peer_socket_path`, but also names WHICH family the path came from —
+    ``"deterministic"`` (chela-owned, keyed on the window) or ``"default"`` (the legacy
+    pid-derived guess, read off our own environment). None if neither has a file.
+
+    Existence-only, same as :func:`_peer_socket_path` was: this answers "which file would
+    ``send_peer`` try first", not "would it connect" — see :func:`peer_socket_reachable`
+    for the latter, and :func:`peer_transport_kind` for the two combined.
+    """
+    deterministic = deterministic_peer_socket_path(window_id)
+    if deterministic.exists():
+        return deterministic, "deterministic"
+    candidates = []
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        candidates.append(Path(runtime_dir) / "cc-socks" / f"{pid}.sock")
+    tmp_dir = os.environ.get("TMPDIR") or "/tmp"
+    candidates.append(Path(tmp_dir) / f"cc-socks-{os.getuid()}" / f"{pid}.sock")
+    for path in candidates:
+        if path.exists():
+            return path, "default"
+    return None
+
+
 def _peer_socket_path(window_id: str, pid: int) -> Path | None:
     """The Unix socket ``window_id``'s Claude Code session listens on, if any.
 
@@ -387,21 +418,58 @@ def _peer_socket_path(window_id: str, pid: int) -> Path | None:
     exports the same ``XDG_RUNTIME_DIR`` every session inherits, which is exactly
     why this is a fallback and not the primary path). None means "no such socket" —
     a plain, expected outcome (older Claude Code, or the session hasn't bound one
-    yet), not an error.
+    yet), not an error. Existence-only — see :func:`peer_socket_reachable` for whether
+    anything is actually listening there.
     """
-    deterministic = deterministic_peer_socket_path(window_id)
-    if deterministic.exists():
-        return deterministic
-    candidates = []
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime_dir:
-        candidates.append(Path(runtime_dir) / "cc-socks" / f"{pid}.sock")
-    tmp_dir = os.environ.get("TMPDIR") or "/tmp"
-    candidates.append(Path(tmp_dir) / f"cc-socks-{os.getuid()}" / f"{pid}.sock")
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
+    candidate = _peer_socket_candidate(window_id, pid)
+    return candidate[0] if candidate else None
+
+
+def peer_socket_reachable(path: Path, timeout: float = _PROBE_TIMEOUT) -> bool:
+    """Whether a live process is actually listening on the AF_UNIX socket at ``path`` —
+    not just whether the file exists.
+
+    A socket FILE surviving its process is the ordinary case, not a rare one: the
+    deterministic path is keyed on the WINDOW, not the pid (:func:`deterministic_peer_socket_path`),
+    so it is designed to outlive any one session. An agent SIGKILLed never runs its own
+    unlink; a bare ``claude`` later started in that window with no
+    ``--messaging-socket-path`` leaves the stale file sitting there, passing
+    ``.exists()`` forever while nothing accepts a connection
+    (:func:`test_send_peer_false_when_socket_refuses_connection` in
+    ``tests/test_messenger.py`` is this exact scenario).
+
+    Connects and closes immediately, sending ZERO bytes — this must never be able to
+    hand a target agent a turn (a doctor run has to stay side-effect-free), and only
+    :func:`send_peer`'s actual write does that. Matches Claude Code's own bundle, which
+    classifies a socket live/dead the same way with the same short timeout.
+    """
+    if not path.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(str(path))
+        return True
+    except OSError:
+        return False
+
+
+def peer_transport_kind(window_id: str, pid: int, timeout: float = _PROBE_TIMEOUT) -> str:
+    """Which transport a :func:`send_peer` to ``window_id`` would actually take right
+    now: ``"deterministic"`` (chela-owned path, confirmed reachable), ``"default"``
+    (the legacy pid-derived guess, confirmed reachable — works today, but only because
+    it happens to read OUR OWN environment as a stand-in for the target's, and needs a
+    relaunch to pick up a chela-owned path), or ``"tmux fallback"`` (no socket file, or
+    a stale one nothing is listening on — :func:`send_peer` will fail and the caller
+    silently falls back to :func:`send_tmux`).
+    """
+    candidate = _peer_socket_candidate(window_id, pid)
+    if candidate is None:
+        return "tmux fallback"
+    path, kind = candidate
+    if not peer_socket_reachable(path, timeout=timeout):
+        return "tmux fallback"
+    return kind
 
 
 def _await_receipt(server: socket.socket, msg_id: str) -> str:
