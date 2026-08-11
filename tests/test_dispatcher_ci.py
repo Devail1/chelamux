@@ -818,6 +818,33 @@ def test_suite_step_ran_is_True_when_the_suite_ran_and_succeeded(tmp_path):
         assert dispatcher._suite_step_ran(str(tmp_path), "42", "test (3.12)") is True
 
 
+def test_suite_step_ran_reads_gh_output_with_errors_replace(tmp_path):
+    """Twin of `test_the_log_is_read_with_errors_replace_so_one_bad_byte_cannot_kill_the_tick`:
+    `text=True` alone is a STRICT utf-8 decode, and a `gh run view --json jobs` payload with one
+    invalid byte (a job or step name containing stranger's bytes is enough) would raise
+    `UnicodeDecodeError` — a `ValueError` the `except (OSError, subprocess.TimeoutExpired)` above
+    does NOT catch, so it would escape `_suite_step_ran`, `_ci_infra_by_steps`, and `tick`
+    itself. This pins the actual `subprocess.run` kwarg, not just the returned value, so a
+    mutation that drops `errors="replace"` while leaving every returned payload untouched (the
+    round-8 judge's exact corruption) still turns this test red."""
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+
+        class _R:
+            returncode = 0
+            stdout = json.dumps({"jobs": []})
+            stderr = ""
+
+        return _R()
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+        dispatcher._suite_step_ran(str(tmp_path), "42", "test (3.12)")
+
+    assert captured.get("errors") == "replace"
+
+
 # --- (b) ⛔ A PENDING RUN IS NOT A RED ONE. The single most important test here. --------
 
 @pytest.mark.parametrize("status", ["QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"])
