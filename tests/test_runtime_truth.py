@@ -38,6 +38,7 @@ from chela import (
     hooks,
     inbox,
     main,
+    messenger,
     runtime_truth,
     sessions,
     transcripts,
@@ -173,6 +174,14 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", projects)
     monkeypatch.setattr(sessions, "panes", lambda force=False: {"@1": sessions.Pane(
         wid="@1", path=agent_cwd, command="claude", claude_pid=1, launched_in=agent_cwd)})
+
+    # peer.transport: @1 was launched with --messaging-socket-path, so its deterministic
+    # socket file is really there. The OWNER here is that file on disk, same reason tmux
+    # and git are owners above — the corruption below deletes it.
+    peer_sock = messenger.deterministic_peer_socket_path("@1")
+    peer_sock.parent.mkdir(parents=True, exist_ok=True)
+    peer_sock.touch()
+
     registry = bindings.BindingRegistry(chat_id="-100")
     registry.bind("@1", 42)
     registry.set_topic_name("@1", "cmx-66")
@@ -378,6 +387,15 @@ def _break_hooks_flowing(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_peer_transport(tmp_path, monkeypatch):
+    """@1's peer-messaging socket is gone — an older Claude Code build, a window
+    launched before --messaging-socket-path existed, or a socket that never bound.
+    Every send_message/send_peer call to @1 now falls back to send_tmux SILENTLY,
+    which is exactly the CMX-224 gap: chela doctor said nothing about it."""
+    messenger.deterministic_peer_socket_path("@1").unlink()
+    return doctor.WARN
+
+
 def _break_hooks_attributed(tmp_path, monkeypatch):
     """A hook DID reach the log, but `wid_for_session` landed None — two agents sharing one
     cwd (CMX-190), or the window closed before the POST arrived. The record is the exact
@@ -484,6 +502,7 @@ CORRUPTIONS = {
     "dispatch.base_write_remote": _break_base_write_remote,
     "dispatch.hold": _break_dispatch_hold,
     "tmux.windows": _break_tmux_windows,
+    "peer.transport": _break_peer_transport,
     "inbox.address": _break_inbox_address,
     "runs.parked_branch": _break_runs_parked_branch,
     "pr.checks": _break_pr_checks,
