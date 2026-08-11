@@ -311,6 +311,9 @@ def test_the_tick_respawns_into_the_existing_worktree_and_branch(tmp_path):
     assert prompts and "the wire is loose" in prompts[0]
     assert "gh pr view 80 --comments" in prompts[0]
     assert "test-1" in prompts[0]
+    # CMX-244: the escape hatch is unreachable if nobody tells the agent it exists — the
+    # prompt must name the actual command, not just describe the problem.
+    assert "chela rework-disputed abc123" in prompts[0]
 
 
 def test_a_missing_worktree_is_recreated_from_the_branch(tmp_path):
@@ -1060,6 +1063,9 @@ def test_a_stuck_rework_is_re_nudged_with_its_REWORK_prompt_not_the_first_dispat
     assert summary["watchdog_renudged"] == 1
     assert sent and "REWORK" in sent[0] and "the wire is loose" in sent[0]
     assert "fresh dispatch" not in sent[0]
+    # CMX-244: _renudge_prompt re-renders from the same template as the initial spawn — the
+    # dispute escape hatch must survive a re-nudge too, or a re-nudged agent never learns it.
+    assert "chela rework-disputed abc123" in sent[0]
 
 
 # --- (h) 🔴 changes_requested is not a silent state, and a HOLD must not freeze the exit ---
