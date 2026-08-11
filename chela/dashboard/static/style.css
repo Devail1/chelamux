@@ -13,6 +13,20 @@
     --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
     --term-ctx-bar-h: 30px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space. CMX-129: the 14px № chip sits centered (same align-items: center as the branch/context text), so its bottom AND top gaps are each (bar-h - chip-h) / 2 — 8px only when bar-h = chip-h + 16 = 30px. Supersedes CMX-128's flex-end + margin-bottom scheme, which gave № its own 8px bottom inset independent of the text's center line and left it riding ~4px above it — see .gs-idx below */
     --term-bg: #0d1117;   /* the ttyd terminal's OWN xterm.js background (scripts/agent-terminals.sh TERM_THEME, tests/test_term_bg_sync.py guards the two stay identical) — NOT an arbitrary black; shared with .term-ctx-bar so the bar reads as a seamless footer, not a separate strip */
+
+    /* CMX-230: the wall/pane/card type scale, as NAMED LEVERS instead of the
+       10-12px literals that used to sit inline at .gs-head/.pane-subtitle/
+       .pane-recap/.gs-state/.term-ctx-bar/.ar-title/.ar-sub/.ar-ctx (the Xirp
+       comparison: "their pane text is large with generous leading; ours is
+       10px/10.5px at line-height 1.3"). One lever each, raised here — see
+       tests/dashboard_scale_nav_a11y.test.mjs's type-scale + legibility-floor
+       guards, which fail if a rule below reverts to a bare px literal or if
+       either floor is lowered again. */
+    --wall-pane-font-size: 12px;        /* was 10-12px scattered; floor 11px */
+    --wall-pane-font-size-sm: 10.5px;   /* the .gs-state pill only — was 10px */
+    --wall-pane-line-height: 1.5;       /* was 1.3; floor ~1.45 */
+    --card-font-size: 11.5px;           /* sidebar agent-card text — was 9-10px */
+    --card-line-height: 1.5;            /* was the body default (1.5) — named for the same reason */
 }
 
 /* Themes — each re-declares the palette variables; everything else cascades.
@@ -197,7 +211,7 @@ body {
 }
 .gs-head {
     flex: 0 0 auto; position: relative; display: flex; align-items: center; gap: 6px;
-    padding: 4px 9px; font-size: 12px; color: var(--text-dim);
+    padding: 4px 9px; font-size: var(--wall-pane-font-size); color: var(--text-dim);
     background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 82%, var(--bg)));
     border-bottom: 1px solid var(--border);
 }
@@ -212,7 +226,7 @@ body {
    name / rename), so it rides alongside it rather than replacing it. */
 .pane-subtitle {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-size: 10px; line-height: 1.3; font-weight: 400;
+    font-size: var(--wall-pane-font-size); line-height: var(--wall-pane-line-height); font-weight: 400;
     color: var(--text-dim); opacity: 0.75;
 }
 
@@ -225,7 +239,7 @@ body {
    collapsed) when there is no recap — "degrade quietly", never an empty bar. */
 .pane-recap {
     position: relative; flex: 0 0 auto; padding: 3px 22px 3px 9px;
-    font-size: 10.5px; line-height: 1.3; color: var(--text-dim); opacity: 0.85;
+    font-size: var(--wall-pane-font-size); line-height: var(--wall-pane-line-height); color: var(--text-dim); opacity: 0.85;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     border-bottom: 1px solid var(--border); cursor: pointer;
 }
@@ -280,7 +294,7 @@ body {
 .gs-state {
     flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px;
     padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor;
-    font-size: 10px; font-weight: 700; line-height: 1.5; white-space: nowrap;
+    font-size: var(--wall-pane-font-size-sm); font-weight: 700; line-height: 1.5; white-space: nowrap;
 }
 .gs-state-glyph { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .gs-state-working { color: var(--ok-green); }
@@ -328,7 +342,7 @@ body {
 .term-ctx-bar {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
     display: flex; align-items: center; gap: 8px;
-    height: var(--term-ctx-bar-h); padding: 0 8px; font-size: 10px; color: var(--text-dim);
+    height: var(--term-ctx-bar-h); padding: 0 8px; font-size: var(--wall-pane-font-size); color: var(--text-dim);
     background: var(--term-bg);
     pointer-events: none;   /* never intercept gridstack's bottom resize handle */
 }
@@ -1054,6 +1068,26 @@ body.term-dragging { overflow: hidden; }
 .gs-room:hover { background: color-mix(in srgb, var(--room-accent, var(--accent)) 40%, transparent); }
 /* On-screen key bar: sticky bottom dock, collapsible, grouped + inverted-T D-pad */
 #term-stage { padding-bottom: 4px; }
+
+/* CMX-230: air in the chrome at low densities (Xirp: "their project page is
+   one column with wide margins"; ours "uses every pixel"). Toggled by
+   _setWallDensity (terminals.js) off cols*rows of the active grid preset —
+   1 and 2-pane layouts only; 4/6-up stays exactly as dense as before this
+   ticket (tests/dashboard_scale_nav_a11y.test.mjs's density guard pins the
+   cutoff at <= 2). HORIZONTAL padding + a centred max-width column only —
+   deliberately NOT top/bottom padding: _wallFill (terminals.js) converts the
+   viewport into grid rows off #term-stage's own getBoundingClientRect().top,
+   so a vertical padding change here would desync that math and either
+   starve the wall of rows or run the last row past the fold. Width has no
+   such coupling. */
+body.wall-density-airy #term-stage {
+    padding-left: clamp(16px, 6vw, 64px);
+    padding-right: clamp(16px, 6vw, 64px);
+}
+body.wall-density-airy #term-stage .grid-stack {
+    max-width: 1400px;
+    margin: 0 auto;
+}
 #term-bar {
     flex-direction: column;
     gap: 10px;
@@ -2812,6 +2846,19 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .side-list { display: flex; flex-direction: column; gap: 1px; padding: 0 6px; }
 .side-empty { padding: 8px 10px; color: var(--text-dim); font-size: 11px; }
 
+/* CMX-230: the demoted nav group (Knowledge/Agents/Personas/Cost — "attributes
+   of things, not places to go"). Same .side-item row underneath (icon still a
+   real lucide mark, label still real text — re-parenting must not cost the
+   accessibility cue), just quieter: a plain-text subhead instead of the
+   Navigate section's uppercase label, and a smaller icon/label so the primary
+   3-item rail (Feed/Wall/Work) reads as the nav, this as its footnote. */
+.side-subhead {
+    padding: 10px 16px 3px; font-size: 10px; color: var(--text-dim); opacity: 0.7;
+}
+.side-list-secondary .side-item-icon { font-size: 15px; }
+.side-list-secondary .side-item-label { font-size: 11px; }
+body.sidebar-collapsed .side-subhead { display: none; }
+
 /* Nav rows: rounded, with a shared active vocabulary — accent-tinted fill, a
    short accent rail, and an accent-coloured label. Hover is a quiet surface
    wash. The same look is reused by Wall / Work items and agent rows so the
@@ -2954,7 +3001,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .ar-top { display: flex; align-items: center; gap: 6px; }
 .ar-top .agent-row-name { flex: 1; }
 .ar-ctx {
-    flex: 0 0 auto; font-size: 9px; font-weight: 600; line-height: 15px;
+    flex: 0 0 auto; font-size: var(--card-font-size); font-weight: 600; line-height: 15px;
     color: var(--text-dim); padding: 0 5px; border-radius: 999px; background: var(--surface);
 }
 .ar-ctx.warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
@@ -2963,9 +3010,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
    from `.ar-recap` below (an occasional away_summary blurb, often absent). */
 .ar-title {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-size: 10px; color: var(--text-dim); opacity: 0.75;
+    font-size: var(--card-font-size); line-height: var(--card-line-height); color: var(--text-dim); opacity: 0.75;
 }
-.ar-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; font-size: 10px; color: var(--text-dim); }
+.ar-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; font-size: var(--card-font-size); line-height: var(--card-line-height); color: var(--text-dim); }
 .ar-state { flex: 0 0 auto; font-weight: 600; text-transform: capitalize; }
 .ar-state.working { color: var(--green); }
 .ar-state.waiting { color: var(--yellow); }

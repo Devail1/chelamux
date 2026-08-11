@@ -56,7 +56,10 @@ const BODY = `
 </header>
 <div class="app">
   <aside class="sidebar">
-    <section class="side-section"><div class="side-list" id="side-nav"></div></section>
+    <section class="side-section">
+      <div class="side-list" id="side-nav"></div>
+      <div class="side-list" id="side-nav-more"></div>
+    </section>
     <section class="side-section">
       <span class="side-count" id="hdr-agents">-/-</span>
       <div class="side-list" id="sidebar-agents"><div class="side-empty">No agents</div></div>
@@ -200,6 +203,9 @@ test('colour is the SECOND channel, and it is colourblind-safe (Okabe-Ito)', () 
 // reddens this — it asserts the mark that RENDERS, not the string in the source.
 test('the Feed nav item renders the lucide rss SVG — not a glyph that apes the toggle', () => {
     nav.renderNav();
+    // CMX-230: Feed is a primary-tier view, so it's still in #side-nav specifically
+    // (not the demoted #side-nav-more) — see the nav-inventory guard in
+    // tests/dashboard_scale_nav_a11y.test.mjs, which pins that partition.
     const icon = document.querySelector('#side-nav .side-item[data-view="feed"] .side-item-icon');
     assert.ok(icon, 'the Feed nav item is missing');
     const svg = icon.querySelector('svg');
@@ -221,8 +227,13 @@ test('the Feed nav item renders the lucide rss SVG — not a glyph that apes the
 test('every nav item renders a non-empty lucide SVG — no unicode glyph survives', () => {
     nav.renderNav();
     const OLD_GLYPHS = ['▦', '▤', '◆', '▢', '≡'];
+    // CMX-230: this asserts the ICON quality (real SVG, no glyph fallback) on every
+    // registered view regardless of which nav list it renders into — Knowledge/
+    // Agents/Personas/Cost moved to #side-nav-more (demoted), Feed/Wall/Work stay
+    // in #side-nav (primary). The partition itself is pinned by
+    // tests/dashboard_scale_nav_a11y.test.mjs's nav-inventory guard, not here.
     for (const id of ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas', 'cost']) {
-        const icon = document.querySelector(`#side-nav .side-item[data-view="${id}"] .side-item-icon`);
+        const icon = document.querySelector(`#side-nav .side-item[data-view="${id}"] .side-item-icon, #side-nav-more .side-item[data-view="${id}"] .side-item-icon`);
         assert.ok(icon, `the ${id} nav item is missing`);
         const svg = icon.querySelector('svg');
         assert.ok(svg, `the ${id} nav icon is not an SVG — it fell back to a text glyph`);

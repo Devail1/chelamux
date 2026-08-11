@@ -1170,11 +1170,27 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
     const gsHeadBlocks = rules.filter((r) => r.selector.split(',').map((s) => s.trim()).includes('.gs-head'));
     assert.equal(gsHeadBlocks.length, 2,
         'expected exactly one desktop .gs-head rule and one mobile override — found ' + gsHeadBlocks.length);
+    // CMX-230 tokenised .gs-head's desktop font-size onto :root's
+    // --wall-pane-font-size (a bare px literal there is exactly what that
+    // ticket's own type-scale guard now forbids — see
+    // tests/dashboard_scale_nav_a11y.test.mjs) — so a `font-size:` value here
+    // may be a literal Npx (the mobile override still is) OR a `var(--name)`
+    // reference, resolved against its :root declaration.
+    const rootTokenPx = (name) => {
+        const root = CSS.match(/:root\s*\{([^}]*)\}/);
+        assert.ok(root, ':root block not found');
+        const m = root[1].match(new RegExp('--' + name + ':\\s*([0-9.]+)px'));
+        assert.ok(m, `--${name} not declared as a px value on :root`);
+        return parseFloat(m[1]);
+    };
     const dims = (body) => {
         const pad = body.match(/padding:\s*([0-9.]+)px\s+([0-9.]+)px/);
-        const fs = body.match(/font-size:\s*([0-9.]+)px/);
-        assert.ok(pad && fs, 'each .gs-head rule must declare both padding: Npx Npx and font-size: Npx');
-        return { v: parseFloat(pad[1]), h: parseFloat(pad[2]), fs: parseFloat(fs[1]) };
+        const fsLiteral = body.match(/font-size:\s*([0-9.]+)px/);
+        const fsVar = body.match(/font-size:\s*var\(--([\w-]+)\)/);
+        assert.ok(pad, 'each .gs-head rule must declare padding: Npx Npx');
+        assert.ok(fsLiteral || fsVar, 'each .gs-head rule must declare font-size: Npx or font-size: var(--token)');
+        const fs = fsLiteral ? parseFloat(fsLiteral[1]) : rootTokenPx(fsVar[1]);
+        return { v: parseFloat(pad[1]), h: parseFloat(pad[2]), fs };
     };
     const desktop = dims(gsHeadBlocks[0].body);
     const mobile = dims(gsHeadBlocks[1].body);

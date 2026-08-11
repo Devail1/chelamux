@@ -91,10 +91,22 @@
 
     <!-- Primary navigation. NOT written here: nav.js renders these rows from the
          view REGISTRY (static/js/views.js) — one declaration per view, so adding
-         or deleting a view is one entry there and nothing here. -->
+         or deleting a view is one entry there and nothing here.
+
+         CMX-230 (Xirp comparison: "nav IS the domain objects" — a 7-item rail
+         reads as a dev tool): the registry's `tier` field splits this into two
+         lists. #side-nav is the primary rail (Feed/Wall/Work — 3 items,
+         nav.js's primaryNavViews). #side-nav-more is EVERYTHING ELSE
+         (Knowledge/Agents/Personas/Cost — nav.js's secondaryNavViews),
+         re-parented here rather than removed: same view registry entries, same
+         selectView routing, same .side-item markup — just visually demoted
+         (.side-list-secondary, style.css) so it reads as "attributes of things"
+         under the 3 places you actually navigate BETWEEN. -->
     <section class="side-section">
       <div class="side-head"><span class="side-title">Navigate</span></div>
       <div class="side-list" id="side-nav"></div>
+      <div class="side-subhead">More</div>
+      <div class="side-list side-list-secondary" id="side-nav-more"></div>
     </section>
 
     <!-- Live tmux sessions. The header is a plain label; click a row to land on
