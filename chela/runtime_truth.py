@@ -1020,17 +1020,50 @@ def _hooks_flowing_applies() -> bool:
 # `plugin.hooks_flowing` above asks "did ANY hook arrive from this live window" and stops
 # there. It misses the opposite shape entirely: a hook arrives, is appended, and STILL
 # never lands in that window's lane, because `hooks.wid_for_session` (CMX-48/CMX-190)
-# resolved to None — two agents sharing one origin cwd, or the window closing between the
-# tool call and the POST landing. `chela/hooks.py:ingest` deliberately keeps `session_id`
-# on that record rather than dropping it (an unattributed event is "visibly ownerless",
-# never worse than a misattributed one — the same rule `chela/inbox.py` states for its own
-# `wid=None` rows) — but nothing ever READ that copy back. The record sat in the log,
-# correlatable by session_id, and `chela events --wid @N` could never surface it: an agent
-# was hook-blind for a whole session and nothing said so out loud.
+# resolved to None. `chela/hooks.py:ingest` deliberately keeps `session_id` on that record
+# rather than dropping it (an unattributed event is "visibly ownerless", never worse than
+# a misattributed one — the same rule `chela/inbox.py` states for its own `wid=None` rows)
+# — but nothing ever READ that copy back. The record sat in the log, correlatable by
+# session_id, and `chela events --wid @N` could never surface it: an agent was hook-blind
+# for a whole session and nothing said so out loud.
+#
+# CMX-227 measured *why* against four days of this host's own production log (~13.2k
+# `hook.*` records, 81 sessions, 2077 orphaned events across 53 sessions) instead of
+# guessing. The breakdown does not match what this fact used to imply:
+#
+#   ~95% (1981/2077 events, ~40/53 sessions) — the session never ran in a chela-tracked
+#   tmux window AT ALL, ever, on any record. Every one of these traced to a slug under
+#   `~/.claude/projects/…/memory` (or a sibling project's `memory` dir): the nightly
+#   `dream.py` memory-consolidation job, which launches a headless, non-interactive
+#   `claude` process outside of any tmux pane chela manages. `chela`'s hooks plugin is
+#   installed globally, so these headless runs POST hooks too — but there is no window id
+#   to resolve, ever, by design, the same way `hooks._explicit_wid` treats "no $CHELA_WID"
+#   as a non-fault ("a session chela did not launch"). This is NOT a hole in attribution;
+#   it is this fact crying wolf against a case it never named as a possibility.
+#
+#   ~4% (77/2077 events, 2 sessions) — genuine CMX-190 ambiguity: two sessions sharing one
+#   origin cwd with overlapping active windows (both were the `-home-liavedunix` orchestrator
+#   slug — a relaunch overlapping its predecessor's tail events). Confirmed real, and rare.
+#
+#   ~1% (19/2077 events, 11 sessions) — a teardown race, always the LAST one or two events
+#   of the session (`hook.session_end`, sometimes preceded by one `hook.post_tool_use`),
+#   always on a dispatcher-spawned worktree agent. The agent's own final action
+#   (`chela task-finished`) kills its own tmux window as its last act, so its own
+#   `SessionEnd` POST resolves after the window it names is already gone. Structural and
+#   self-inflicted, not a generic timing flake — "the window closing between the tool call
+#   and the POST landing" the old comment named, but only ever the session's own suicide.
+#
+# Recommendation (not implemented here — this was an investigation, not a fix): the WARN
+# below should stop leading with CMX-190/teardown-race, since together they are ~5% of
+# what actually fires it. A follow-up could downgrade or filter sessions that never once
+# resolved a wid AND never appear in `chela.sessionids.entries()` — the headless-job shape
+# — so the fact reserves WARN for the ambiguity/race shapes it can actually act on.
 #
 # Every `hook.*` record has a real Claude Code session behind it (unlike the inbox's own
-# bookkeeping rows, which legitimately belong to "chela itself") — so, for this type alone,
-# `wid=None` is never an intentional ownerless event. It is always a hole in attribution.
+# bookkeeping rows, which legitimately belong to "chela itself") — so `wid=None` here is
+# never chela's OWN bookkeeping wearing no owner on purpose. But per the measurement above,
+# it is very often a session that was never chela's WINDOW to begin with (a headless job) —
+# a hole in *this fact's naming of the cause*, not necessarily a hole in attribution.
 
 def _ring_bound_note(records: list[dict]) -> str:
     """What :func:`chela.event_log.ring` actually let a fact see — bounded and rolling
@@ -1076,9 +1109,16 @@ def _hooks_unattributed_report(_declared: None, obs: Observation) -> list[Findin
         WARN,
         f"{total} hook.* event(s) unattributable — {len(orphans)} hook-blind session(s) "
         f"in the {bound}: {named}",
-        "chela.hooks.wid_for_session could not resolve a live window for these sessions "
-        "(two agents launched in one cwd, CMX-190 — or the window closed before the POST "
-        "landed). The events were NOT dropped: session_id is kept on the record, but "
+        "chela.hooks.wid_for_session could not resolve a live window for these sessions. "
+        "Measured (CMX-227): most of the time this session never ran in a chela-tracked "
+        "window at all — a headless/non-interactive claude process (e.g. a cron job) that "
+        "chela did not launch, same as an unset $CHELA_WID being a non-fault. Check "
+        "`chela.sessionids.entries()` for the session_id first: absent there across the "
+        "session's whole lifetime means it was never chela's window to attribute. Only if "
+        "it DOES appear there is this the rarer real gap — two agents launched in one cwd "
+        "(CMX-190) or the window closing right as the POST landed (most often a dispatched "
+        "agent's own `chela task-finished` killing its window on its way out). The events "
+        "were NOT dropped either way: session_id is kept on the record, but "
         "`chela events --wid @N` can never reach them because there is no wid to filter "
         "on. Correlate by session_id against `~/.claude/projects/*/<session_id>.jsonl`, or "
         "`chela events --type <type>` and grep the JSON for these ids. This scan is "

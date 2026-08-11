@@ -12,6 +12,17 @@ history lives in `git log`.
 
 ### Changed
 
+- **`chela doctor`'s `hooks.unattributed` fact now names its real cause instead of
+  guessing.** It used to point at two candidates — two agents sharing one cwd (CMX-190)
+  or a window closing before the hook POST landed — as if either explained every
+  hook-blind session. Measured against four days of real production log (CMX-227): ~95%
+  of orphaned `hook.*` events trace to sessions that never ran in a chela-tracked tmux
+  window at all (a headless job like the nightly memory-consolidation run), not to either
+  named cause. The WARN detail now leads with that check (`chela.sessionids.entries()`)
+  and only points at CMX-190/teardown-race for the sessions that actually had a window to
+  lose.
+
+
 - **Agent-to-agent messages now travel over Claude Code's peer messaging socket
   instead of being typed into the recipient's terminal.** Claude Code 2.1.224+
   binds a per-session Unix socket, and chela launches each agent with an explicit
