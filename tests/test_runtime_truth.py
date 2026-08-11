@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from chela import (
     hooks,
     inbox,
     main,
+    messenger,
     runtime_truth,
     sessions,
     transcripts,
@@ -51,7 +53,7 @@ EPOCH = "786-1784045825"          # the tmux server that issued every `@N` in th
 
 
 @pytest.fixture
-def fleet(tmp_path, monkeypatch):
+def fleet(tmp_path, monkeypatch, request):
     """A whole chela install that is HEALTHY — every fact agrees with its owner.
 
     Every corruption below starts from this and breaks exactly one owned value, so a red
@@ -173,6 +175,20 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", projects)
     monkeypatch.setattr(sessions, "panes", lambda force=False: {"@1": sessions.Pane(
         wid="@1", path=agent_cwd, command="claude", claude_pid=1, launched_in=agent_cwd)})
+
+    # peer.transport: @1 was launched with --messaging-socket-path, and its Claude Code
+    # session is really listening there — a live AF_UNIX socket, not just a file, since
+    # the fact now PROBES reachability (CMX-224 rework: a file that merely exists can't
+    # be told apart from a stale one nothing is listening on). The OWNER here is that
+    # live listener, same reason tmux and git are owners above — the corruption below
+    # deletes the file out from under it.
+    peer_sock = messenger.deterministic_peer_socket_path("@1")
+    peer_sock.parent.mkdir(parents=True, exist_ok=True)
+    peer_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    peer_listener.bind(str(peer_sock))
+    peer_listener.listen(1)
+    request.addfinalizer(peer_listener.close)
+
     registry = bindings.BindingRegistry(chat_id="-100")
     registry.bind("@1", 42)
     registry.set_topic_name("@1", "cmx-66")
@@ -378,6 +394,15 @@ def _break_hooks_flowing(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_peer_transport(tmp_path, monkeypatch):
+    """@1's peer-messaging socket is gone — an older Claude Code build, a window
+    launched before --messaging-socket-path existed, or a socket that never bound.
+    Every send_message/send_peer call to @1 now falls back to send_tmux SILENTLY,
+    which is exactly the CMX-224 gap: chela doctor said nothing about it."""
+    messenger.deterministic_peer_socket_path("@1").unlink()
+    return doctor.WARN
+
+
 def _break_hooks_attributed(tmp_path, monkeypatch):
     """A hook DID reach the log, but `wid_for_session` landed None — two agents sharing one
     cwd (CMX-190), or the window closed before the POST arrived. The record is the exact
@@ -484,6 +509,7 @@ CORRUPTIONS = {
     "dispatch.base_write_remote": _break_base_write_remote,
     "dispatch.hold": _break_dispatch_hold,
     "tmux.windows": _break_tmux_windows,
+    "peer.transport": _break_peer_transport,
     "inbox.address": _break_inbox_address,
     "runs.parked_branch": _break_runs_parked_branch,
     "pr.checks": _break_pr_checks,
@@ -547,6 +573,52 @@ def test_gh_missing_entirely_is_cannot_verify_not_a_pass(fleet, monkeypatch):
     assert findings, "an unaskable gh produced no finding at all"
     assert all(f.level == doctor.ERROR for f in findings)
     assert "CANNOT VERIFY dispatch.gh_auth" in findings[0].title
+
+
+def test_peer_transport_warns_on_a_stale_socket_file_nothing_is_listening_on(
+        fleet, monkeypatch):
+    """`.exists()` alone would call this reachable — CMX-224's rework closes exactly this
+    hole. An agent SIGKILLed never runs its own unlink; a bare `claude` later started in
+    the same window with no --messaging-socket-path leaves the file sitting there while
+    nothing accepts a connection. The corruption below reproduces that: bind, listen,
+    close (never unlink) — a real orphaned socket file, not a mock."""
+    peer_sock = messenger.deterministic_peer_socket_path("@1")
+    peer_sock.unlink()
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(peer_sock))
+    stale.listen(1)
+    stale.close()
+
+    findings = [f for f in doctor.check() if f.fact == "peer.transport"]
+    assert findings, "a stale socket file produced no finding at all"
+    assert all(f.level == doctor.WARN for f in findings)
+    assert "@1" in findings[0].title
+
+
+def test_peer_transport_flags_windows_reachable_only_via_the_legacy_default_path(
+        fleet, monkeypatch):
+    """The three-way ask: a `default` window works TODAY, but only by reading OUR OWN
+    XDG_RUNTIME_DIR as a stand-in for the target's — it is exactly the window that
+    still needs a relaunch to pick up a chela-owned path, and a binary
+    reachable/unreachable fact could never tell it apart from a deterministic one.
+    Doctor must name it."""
+    peer_sock = messenger.deterministic_peer_socket_path("@1")
+    peer_sock.unlink()
+    runtime_dir = fleet / "xdg-runtime"
+    (runtime_dir / "cc-socks").mkdir(parents=True)
+    legacy_sock = runtime_dir / "cc-socks" / "1.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(legacy_sock))
+    listener.listen(1)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+    try:
+        findings = [f for f in doctor.check() if f.fact == "peer.transport"]
+        assert findings, "a legacy-only-reachable window produced no finding at all"
+        assert all(f.level == doctor.WARN for f in findings)
+        assert "@1" in findings[0].title
+        assert "legacy" in findings[0].title
+    finally:
+        listener.close()
 
 
 def test_a_healthy_fleet_is_green(fleet):
