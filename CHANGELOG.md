@@ -10,6 +10,16 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`TODO.example.md` no longer claims the dispatcher scopes claiming to the `## Open`
+  section.** It never did — `chela/sources/markdown.py` claims every unchecked `- [ ]`
+  line in the file regardless of which heading precedes it, so a task moved under a
+  different heading (a `## Backlog` or `## Later` section, say) stayed just as claimable
+  as one left under `## Open`. The doc now says so, and points at the markers that
+  actually gate claiming: `<!-- blocked: ... -->` to park a task unclaimed, and
+  `<!-- depends: "..." -->` to hold one back until another is done. (CMX-233)
+
 ### Changed
 
 - **A judge verdict of "cannot verify" now reaches the inbox even when the run has already
