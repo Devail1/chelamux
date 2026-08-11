@@ -187,6 +187,15 @@ CI_PASSED_CONCLUSIONS = ("SUCCESS",)
 # rule again: a thing you could not evaluate is never a pass.
 CI_DID_NOT_RUN_CONCLUSIONS = ("SKIPPED", "NEUTRAL")
 
+# 🚦🏗️ CMX-243. A subset of CI_FAILED_CONCLUSIONS that GitHub itself reports as the job's
+# STEPS NEVER EXECUTING — not "a step ran and exited non-zero", but "nothing in this job
+# ever ran": `STARTUP_FAILURE` is a runner/workflow-file problem before the first step, and
+# `ACTION_REQUIRED` is a pending approval gate the job never got past. Neither evaluated a
+# single line of the code, so neither is EVIDENCE about it — unlike TIMED_OUT or CANCELLED,
+# which are deliberately excluded here because both can happen mid-suite (a hung test, a
+# fail-fast sibling), which IS evidence. See the 1c infra branch in `tick`.
+CI_INFRA_CONCLUSIONS = ("STARTUP_FAILURE", "ACTION_REQUIRED")
+
 # The statuses whose checks we poll. ⛔ NOT `needs_human`: it is TERMINAL — a human owns
 # that run now — so polling it would add a permanent `gh` call per tick, forever, for every
 # run that ever escalated.
@@ -1129,6 +1138,16 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # per-round diff is trivially non-empty and would never fire).
         ("reopen_count", "ALTER TABLE runs ADD COLUMN reopen_count INTEGER DEFAULT 0"),
         ("first_reopen_head_sha", "ALTER TABLE runs ADD COLUMN first_reopen_head_sha TEXT"),
+        # 🚦🏗️ CMX-243. `ci_infra_streak` counts CONSECUTIVE red-CI verdicts whose failing
+        # conclusions are ALL infra-only (`CIStatus.infra` — the job's steps never ran). It is
+        # a SEPARATE budget from `rework_count`: an infra-only red never enters the rework
+        # loop at all (no agent can fix a job that never ran), so it must never spend that
+        # cap — but it still needs ONE, or a permanently broken workflow file loops forever,
+        # silent, never reaching a human. Bounded by the same `CHELA_MAX_REWORKS` cap as
+        # `rework_count` (no new config surface for a second budget), reset to 0 the moment
+        # CI is next seen passing (see the pr_checks refresh in `tick`) — it counts a STREAK,
+        # not a lifetime total.
+        ("ci_infra_streak", "ALTER TABLE runs ADD COLUMN ci_infra_streak INTEGER DEFAULT 0"),
     ):
         try:
             conn.execute(ddl)
@@ -1446,16 +1465,23 @@ class CIStatus(NamedTuple):
     ``failing`` names the jobs that failed and ``run_ids`` the Actions runs they came from
     (the log is fetched from those, once, on the transition into red). ``detail`` says WHY
     when the state is ``unknown`` — an unreadable owner is reported, never swallowed.
+
+    🚦🏗️ CMX-243. ``infra`` is true only when ``state == CI_FAILING`` AND every failing job's
+    conclusion is in :data:`CI_INFRA_CONCLUSIONS` — the job's steps never ran, so nothing
+    about it is evidence about the code. A red with even ONE genuine failure alongside an
+    infra one is NOT infra: real evidence wins, conservatively.
     """
     state: str
     head_sha: str | None = None
     failing: tuple[str, ...] = ()
     run_ids: tuple[str, ...] = ()
     detail: str = ""
+    infra: bool = False
 
 
-def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
-    """Reduce GitHub's ``statusCheckRollup`` to (state, failing job names, Actions run ids).
+def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...], bool]:
+    """Reduce GitHub's ``statusCheckRollup`` to (state, failing job names, Actions run ids,
+    infra-only).
 
     Two node shapes ride in that field and both must be handled: a **CheckRun** (Actions,
     with ``status`` + ``conclusion`` + ``name``) and a **StatusContext** (the legacy commit
@@ -1477,13 +1503,20 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     branch whose CI is still writing its own verdict, and the second half of that run could
     just as well fail too — a second, different red on the SAME sha, which the once-per-sha
     guard would then swallow. The checks settle in a minute; the loop can wait a tick.
+
+    🚦🏗️ CMX-243. The 4th return value is true only when EVERY failing node's conclusion is
+    in :data:`CI_INFRA_CONCLUSIONS` — the job's steps never ran, so nothing here is evidence
+    about the code. One genuine failure alongside it, and the whole rollup is NOT infra-only:
+    real evidence wins, conservatively. A StatusContext failure is never infra-only (that
+    shape's failing states are FAILURE/ERROR only — no startup/approval concept exists there).
     """
     if not nodes:
-        return CI_NONE, (), ()
+        return CI_NONE, (), (), False
     unsettled = False
     passed = 0
     failing: list[str] = []
     run_ids: list[str] = []
+    non_infra_failure = False
     for node in nodes:
         if not isinstance(node, dict):
             unsettled = True       # a node we cannot even read is not a node that passed
@@ -1500,6 +1533,7 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
                 unsettled = True
             elif context_state in CI_FAILED_CONCLUSIONS:
                 failing.append(name)
+                non_infra_failure = True   # StatusContext has no startup/approval concept
             elif context_state in CI_PASSED_CONCLUSIONS:
                 passed += 1
             elif context_state not in CI_DID_NOT_RUN_CONCLUSIONS:
@@ -1511,6 +1545,8 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
         if conclusion in CI_FAILED_CONCLUSIONS:
             workflow = str(node.get("workflowName") or "")
             failing.append(f"{workflow} / {name}" if workflow and workflow != name else name)
+            if conclusion not in CI_INFRA_CONCLUSIONS:
+                non_infra_failure = True
             m = _CI_RUN_ID_RE.search(str(node.get("detailsUrl") or ""))
             if m:
                 run_ids.append(m.group(1))
@@ -1521,13 +1557,14 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
             # one GitHub has not taught us yet. Either way: not evaluated ⇒ not a pass.
             unsettled = True
     if unsettled:
-        return CI_PENDING, (), ()
+        return CI_PENDING, (), (), False
     if failing:
         # dict.fromkeys: dedupe, keep order — a matrix job can fail in several shards.
-        return CI_FAILING, tuple(dict.fromkeys(failing)), tuple(dict.fromkeys(run_ids))
+        return (CI_FAILING, tuple(dict.fromkeys(failing)), tuple(dict.fromkeys(run_ids)),
+                not non_infra_failure)
     if passed:
-        return CI_PASSING, (), ()
-    return CI_NONE, (), ()   # every node skipped: nothing ran, and nothing passed
+        return CI_PASSING, (), (), False
+    return CI_NONE, (), (), False   # every node skipped: nothing ran, and nothing passed
 
 
 def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
@@ -1565,8 +1602,8 @@ def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
         return CIStatus(CI_UNKNOWN, detail="gh returned JSON that is not an object")
     sha = (data.get("headRefOid") or "").strip() or None
     rollup = data.get("statusCheckRollup")
-    state, failing, run_ids = _rollup_state(rollup if isinstance(rollup, list) else [])
-    return CIStatus(state, sha, failing, run_ids)
+    state, failing, run_ids, infra = _rollup_state(rollup if isinstance(rollup, list) else [])
+    return CIStatus(state, sha, failing, run_ids, infra=infra)
 
 
 def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
@@ -1648,6 +1685,44 @@ reviewed this; a failing check is a fact, not a judgment.
 3. Confirm with GitHub, not with your own test run: `gh pr checks` on this PR must be
    green before you finish. ⛔ **A check you did not read back from GitHub is not a pass.**
 4. Then run `chela task-finished <task-id>` as usual.
+
+_PR: {pr_url or "(no url on the run row)"} — posted by the dispatcher's CI gate._
+"""
+
+
+def _ci_infra_verdict_body(ci: CIStatus, log_tail: str, pr_url: str | None,
+                            streak: int, cap: int) -> str:
+    """🚦🏗️ CMX-243. The comment a red CI writes when the job never RAN the suite.
+
+    Unlike :func:`_ci_verdict_body`, this is information for a human, not a rework seed: it
+    is never pasted into an agent's terminal, because no agent is spawned over it (see the
+    1c infra branch in `tick`) — a coding agent cannot fix a job whose steps never executed.
+    Still sanitised the same way (`log_tail` already went through `_failing_log_tail`) since
+    it is still a PR comment, and the fence is still widened past the log's own backtick runs
+    for the same reason `_ci_verdict_body`'s is.
+    """
+    jobs = "\n".join(f"- `{name}`" for name in ci.failing) or "- (the rollup named no job)"
+    longest_run = max((len(m) for m in re.findall(r"`+", log_tail)), default=0)
+    fence = "`" * max(3, longest_run + 1)
+    log_block = (
+        f"\n{fence}\n{log_tail}\n{fence}\n" if log_tail else "\n_(no log tail available)_\n"
+    )
+    return f"""## 🚦🏗️ CI is RED on this PR — but looks like INFRASTRUCTURE, not a test failure
+
+`{(ci.head_sha or "?")[:12]}` failed CI with a conclusion GitHub itself reports as the job's
+steps never having run (a startup failure, or a pending approval gate) — not a test that ran
+and failed. That is not evidence about this code, so **this round is not charged against the
+rework budget**, and no agent was sent back over it (streak {streak}/{cap} in a row of this
+kind — it escalates to a human automatically if it keeps happening).
+
+**Failing check(s):**
+{jobs}
+
+**Tail of the failing job's log, if any:**
+{log_block}
+A human should look: re-run the job, check `.github/workflows/*` for a syntax problem, or
+check for an org policy gate (a first-time contributor's workflow run needing approval, for
+example). This comment is informational — nothing here changed the PR's status.
 
 _PR: {pr_url or "(no url on the run row)"} — posted by the dispatcher's CI gate._
 """
@@ -2396,7 +2471,8 @@ def _refused(error: str | None, refused: bool = False) -> dict:
     return {
         "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
-        "reworked": 0, "escalated": 0, "ci_failed": 0, "judged": 0, "judge_lost": 0,
+        "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
+        "judged": 0, "judge_lost": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
@@ -2471,6 +2547,7 @@ def tick(workflow_path: str | Path) -> dict:
         "reworked": 0,
         "escalated": 0,
         "ci_failed": 0,
+        "ci_infra_failed": 0,
         "judged": 0,
         "judge_lost": 0,
         "trial_ledger": 0,
@@ -2554,6 +2631,14 @@ def tick(workflow_path: str | Path) -> dict:
                     "ci_pending_since=? WHERE task_id=?",
                     (ci.state, ci.head_sha, pending_since, pr_row["task_id"]),
                 )
+                # 🚦🏗️ CMX-243: `ci_infra_streak` counts a STREAK, not a lifetime total — a
+                # PR that goes green has proven its runner/setup path works, so an infra red
+                # much later is a fresh incident, not a continuation of this one.
+                if ci.state == CI_PASSING:
+                    conn.execute(
+                        "UPDATE runs SET ci_infra_streak=0 WHERE task_id=?",
+                        (pr_row["task_id"],),
+                    )
             if state is None and mergeable is None:
                 continue
             # COALESCE so a partial read (e.g. mergeable still UNKNOWN right
@@ -2850,6 +2935,15 @@ def tick(workflow_path: str | Path) -> dict:
         # A verdict written after 1c would be re-spawned this same tick, one round over
         # budget. Written here, a run whose last round this was escalates below, in 1d, on
         # the tick it happens.
+        #
+        # 🚦🏗️ CMX-243. Infrastructure is not evidence about the code: a red whose failing
+        # conclusions are ALL `CIStatus.infra` (the job's STEPS NEVER RAN — GitHub's own
+        # STARTUP_FAILURE / ACTION_REQUIRED) never calls `request_changes` at all — see the
+        # branch below. A coding agent cannot fix a job that never executed, so it is never
+        # sent one; the run stays exactly where it was (still CI_FAILING, still refusing the
+        # merge gate — the FACT stands, only the automatic REACTION to it changes) and
+        # `rework_count` is never touched. It is bounded on its own separate streak instead
+        # (`ci_infra_streak`), so a permanently broken workflow file still reaches a human.
         conn.commit()   # release the write lock: request_changes opens its own connection
         for row in conn.execute(
             "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
@@ -2873,6 +2967,43 @@ def tick(workflow_path: str | Path) -> dict:
             # took the verdict with it — the red was marked delivered and never fired again,
             # and the run sat red in awaiting_review until a human happened to look.
             log_tail = _failing_log_tail(wf_dir, ci.run_ids if ci else ())
+
+            if ci is not None and ci.infra:
+                # NOT evidence about the code — see the module note above this loop. Burn the
+                # sha first, same crash-safety rule as the real-failure path below: a crash
+                # before this line re-fires the same red every tick; a crash after costs at
+                # most one missed comment, and the next tick's log.warning still says so.
+                streak = (row["ci_infra_streak"] or 0) + 1
+                cap = max_reworks()
+                conn.execute(
+                    "UPDATE runs SET ci_failed_sha=?, ci_infra_streak=? WHERE task_id=?",
+                    (sha, streak, task_id),
+                )
+                conn.commit()
+                infra_body = _ci_infra_verdict_body(ci, log_tail, row["pr_url"], streak, cap)
+                posted, detail = _post_pr_comment(row["pr_url"], wf_dir, infra_body)
+                if not posted:
+                    log.warning(
+                        "CI: %s is red (infrastructure, not a test failure) but the PR "
+                        "comment did not post (%s).", task_id, detail,
+                    )
+                summary["ci_infra_failed"] += 1
+                log.warning(
+                    "CI is RED on %s (%s) but looks like INFRASTRUCTURE, not a test "
+                    "failure (%s) — NOT sent for rework (streak %s/%s)",
+                    row["pr_url"] or "?", sha[:12], ", ".join(ci.failing), streak, cap,
+                )
+                if streak >= cap:
+                    _escalate(
+                        conn, row,
+                        f"CI has failed at infrastructure/setup — the job's steps never ran, "
+                        f"never a test — {streak} times in a row on this PR (cap {cap}); a "
+                        "coding agent cannot fix a job that never executed. Branch, worktree "
+                        "and PR are preserved; every verdict is on the run row.",
+                    )
+                    summary["escalated"] += 1
+                continue
+
             body = _ci_verdict_body(ci or CIStatus(CI_FAILING, sha), log_tail, row["pr_url"])
             # ⛔ NOW record the fired sha — after the tail is in hand, before the one step
             # that cannot be taken back. The failure modes are not symmetric: a crash after

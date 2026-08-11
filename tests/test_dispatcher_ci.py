@@ -217,6 +217,124 @@ def test_the_log_is_fetched_once_on_the_transition_into_red_and_never_on_the_pol
     assert fake.log_fetches == 1
 
 
+# --- (a′) 🚦🏗️ CMX-243: infrastructure is not evidence about the code — it must not spend
+# the bounded rework budget the way a real test failure does. -------------------------
+
+def test_an_infra_only_red_does_NOT_spend_a_rework_round(tmp_path):
+    """STARTUP_FAILURE means the job's STEPS NEVER RAN — nothing here is evidence about the
+    code, and a coding agent cannot fix a job that never executed. It must never enter the
+    rework loop at all."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test (3.12)", conclusion="STARTUP_FAILURE")],
+                   log="Error: the runner lost its connection before any step ran\n")
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_infra_failed"] == 1
+    assert summary["ci_failed"] == 0             # not the "real evidence" counter
+    assert summary["reworked"] == 0              # ⛔ no agent was spawned over it
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"    # ⛔ untouched — never entered changes_requested
+    assert (run["rework_count"] or 0) == 0       # ⛔ the real budget is untouched
+    assert run["pr_checks"] == dispatcher.CI_FAILING   # still red — still refuses the merge gate
+    assert run["ci_failed_sha"] == "deadbee1"    # the once-per-sha guard still applies
+    assert (run["ci_infra_streak"] or 0) == 1
+    assert not dispatcher.reviews_of(run)        # no review verdict was ever written — no
+                                                  # rework prompt exists to carry one
+
+    assert fake.comments and "INFRASTRUCTURE" in fake.comments[0]
+    assert "not charged against the" in fake.comments[0] and "rework budget" in fake.comments[0]
+    assert "CI / test (3.12)" in fake.comments[0]
+
+
+def test_an_infra_red_beside_a_real_failure_IS_charged(tmp_path):
+    """Real evidence wins, conservatively: one genuine failure alongside a STARTUP_FAILURE
+    sibling in the same rollup still goes through the normal rework loop."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[
+        _check_run("test (3.11)", conclusion="FAILURE"),
+        _check_run("test (3.12)", conclusion="STARTUP_FAILURE"),
+    ])
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+    assert summary["reworked"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "running"
+    assert (run["rework_count"] or 0) == 1
+
+
+def test_an_infra_red_fires_once_per_sha_too(tmp_path):
+    """The once-per-sha guard is shared with the real-failure path: an unchanged infra red
+    does not re-comment or re-count on every tick."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="ACTION_REQUIRED")], sha="samesha1")
+
+    assert _tick(wf, fake)["ci_infra_failed"] == 1
+    assert len(fake.comments) == 1
+
+    assert _tick(wf, fake)["ci_infra_failed"] == 0    # unchanged sha — no re-fire
+    run = dispatcher.resolve_run("abc123")
+    assert (run["ci_infra_streak"] or 0) == 1
+    assert len(fake.comments) == 1
+
+
+def test_an_infra_streak_escalates_without_ever_touching_rework_count(tmp_path, monkeypatch):
+    """A permanently broken workflow file would otherwise retry free forever: infra rounds
+    are bounded on their OWN streak (`ci_infra_streak`), capped the same as
+    `CHELA_MAX_REWORKS` — but `rework_count`, the real budget, must stay at zero throughout."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="STARTUP_FAILURE")], sha="sha-one")
+
+    summary1 = _tick(wf, fake)
+    assert summary1["ci_infra_failed"] == 1
+    assert summary1["escalated"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"
+    assert (run["ci_infra_streak"] or 0) == 1
+
+    fake.sha = "sha-two"    # a fresh push, still red the same infra way
+    summary2 = _tick(wf, fake)
+
+    assert summary2["ci_infra_failed"] == 1
+    assert summary2["escalated"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert (run["ci_infra_streak"] or 0) == 2
+    assert (run["rework_count"] or 0) == 0          # ⛔ the REAL budget was never touched
+    assert "infrastructure" in run["last_error"].lower()
+    assert not dispatcher.reviews_of(run)           # escalated without ever writing a verdict
+
+
+def test_ci_infra_streak_resets_once_ci_is_seen_passing(tmp_path):
+    """`ci_infra_streak` counts a STREAK, not a lifetime total: a PR that goes green has
+    proven its runner/setup path works, so a LATER infra red is a fresh incident."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="STARTUP_FAILURE")], sha="sha-one")
+
+    _tick(wf, fake)
+    assert (dispatcher.resolve_run("abc123")["ci_infra_streak"] or 0) == 1
+
+    fake.rollup = [_check_run("test", conclusion="SUCCESS")]
+    fake.sha = "sha-two"
+    _tick(wf, fake)
+
+    assert (dispatcher.resolve_run("abc123")["ci_infra_streak"] or 0) == 0
+
+
 # --- (b) ⛔ A PENDING RUN IS NOT A RED ONE. The single most important test here. --------
 
 @pytest.mark.parametrize("status", ["QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"])
@@ -452,26 +570,56 @@ def test_the_legacy_status_context_shape_is_read_too():
     """`statusCheckRollup` carries TWO node shapes — a CheckRun (Actions) and a
     StatusContext (the commit-status API, e.g. a CI service posting a status). A reducer
     that knew only the first would read a red StatusContext as a pass."""
-    state, failing, _ = dispatcher._rollup_state(
+    state, failing, _, infra = dispatcher._rollup_state(
         [{"__typename": "StatusContext", "context": "ci/circleci", "state": "FAILURE"}])
     assert state == dispatcher.CI_FAILING and failing == ("ci/circleci",)
+    # A StatusContext failure is never infra-only: that shape has no startup/approval
+    # concept (only FAILURE/ERROR), so it is always treated as real evidence.
+    assert infra is False
 
-    state, _, _ = dispatcher._rollup_state(
+    state, _, _, _ = dispatcher._rollup_state(
         [{"__typename": "StatusContext", "context": "ci/circleci", "state": "PENDING"}])
     assert state == dispatcher.CI_PENDING
 
 
-@pytest.mark.parametrize("conclusion", ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED",
-                                        "STARTUP_FAILURE", "ACTION_REQUIRED"])
-def test_every_conclusive_non_pass_is_a_failure(conclusion):
-    state, failing, run_ids = dispatcher._rollup_state(
+@pytest.mark.parametrize("conclusion", ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"])
+def test_every_conclusive_non_pass_is_a_failure_and_NOT_infra(conclusion):
+    """These four are real evidence: a step ran and exited badly, or the job was cut off
+    mid-run (a hang, a fail-fast sibling) — never "the steps never executed"."""
+    state, failing, run_ids, infra = dispatcher._rollup_state(
         [_check_run("test", conclusion=conclusion)])
     assert state == dispatcher.CI_FAILING
     assert failing == ("CI / test",) and run_ids == ("42",)
+    assert infra is False
+
+
+@pytest.mark.parametrize("conclusion", ["STARTUP_FAILURE", "ACTION_REQUIRED"])
+def test_startup_failure_and_action_required_are_failures_AND_infra(conclusion):
+    """🚦🏗️ CMX-243. GitHub's own semantics: the job's steps never ran at all — a runner/
+    workflow-file problem, or a pending approval gate. Still CI_FAILING (the merge gate must
+    still refuse it), but flagged `infra` so the dispatcher does not spend a rework round on
+    something no coding agent can act on."""
+    state, failing, run_ids, infra = dispatcher._rollup_state(
+        [_check_run("test", conclusion=conclusion)])
+    assert state == dispatcher.CI_FAILING
+    assert failing == ("CI / test",) and run_ids == ("42",)
+    assert infra is True
+
+
+def test_one_real_failure_beside_an_infra_one_is_NOT_infra_only():
+    """Real evidence wins, conservatively: a matrix with one genuine failure and one
+    STARTUP_FAILURE sibling is still evidence about the code."""
+    state, failing, _, infra = dispatcher._rollup_state([
+        _check_run("test (3.11)", conclusion="FAILURE"),
+        _check_run("test (3.12)", conclusion="STARTUP_FAILURE"),
+    ])
+    assert state == dispatcher.CI_FAILING
+    assert failing == ("CI / test (3.11)", "CI / test (3.12)")
+    assert infra is False
 
 
 def test_a_matrix_that_fails_in_several_shards_names_each_job_once():
-    state, failing, run_ids = dispatcher._rollup_state([
+    state, failing, run_ids, infra = dispatcher._rollup_state([
         _check_run("test (3.11)", conclusion="FAILURE"),
         _check_run("test (3.12)", conclusion="FAILURE"),
         _check_run("test (3.11)", conclusion="FAILURE"),
@@ -479,6 +627,7 @@ def test_a_matrix_that_fails_in_several_shards_names_each_job_once():
     assert state == dispatcher.CI_FAILING
     assert failing == ("CI / test (3.11)", "CI / test (3.12)")
     assert run_ids == ("42",)
+    assert infra is False
 
 
 def test_a_log_bigger_than_a_prompt_is_truncated_to_its_tail(tmp_path):
@@ -687,11 +836,11 @@ def test_a_rollup_node_we_cannot_recognise_is_not_a_pass():
     """The reducer's own docstring promised this and the code did the opposite: a node with
     none of status/conclusion/state fell through every branch and came out GREEN. A shape
     GitHub adds tomorrow would have merged itself."""
-    state, failing, _ = dispatcher._rollup_state([{"__typename": "SomethingNew", "id": "x"}])
+    state, failing, _, _ = dispatcher._rollup_state([{"__typename": "SomethingNew", "id": "x"}])
     assert state == dispatcher.CI_PENDING and not failing
 
     # A conclusion we have never heard of is not one we may call green either.
-    state, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="MOON_PHASE")])
+    state, _, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="MOON_PHASE")])
     assert state == dispatcher.CI_PENDING
 
     # Nor is a node that is not even a JSON object.
@@ -702,13 +851,13 @@ def test_a_rollup_of_only_skipped_checks_is_NONE_and_never_PASSING():
     """SKIPPED/NEUTRAL means the check did not run — a `paths-ignore` filter, a skipped
     required job. Zero checks is `none`, said out loud; all-skipped is the SAME fact, and it
     was silently green. Both mean *nothing evaluated this code*."""
-    state, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
-                                            _check_run("lint", conclusion="NEUTRAL")])
+    state, _, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
+                                               _check_run("lint", conclusion="NEUTRAL")])
     assert state == dispatcher.CI_NONE
 
     # One check that really ran and really passed is still a pass, skipped siblings and all.
-    state, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
-                                            _check_run("lint", conclusion="SUCCESS")])
+    state, _, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
+                                               _check_run("lint", conclusion="SUCCESS")])
     assert state == dispatcher.CI_PASSING
 
 

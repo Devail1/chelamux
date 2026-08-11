@@ -10,6 +10,21 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **A CI job that never ran the suite no longer spends a rework round.** The automatic
+  CI-red gate (CMX-69) treated every failing check as evidence about the code, but GitHub
+  reports two conclusions — `STARTUP_FAILURE` and `ACTION_REQUIRED` — that mean the job's
+  steps never executed at all: a runner/workflow-file problem, or a pending approval gate,
+  neither fixable by a coding agent. These now short-circuit before `request_changes`:
+  the PR still shows red (the merge gate still refuses it) and a comment still explains
+  why, but no agent is spawned and `rework_count`, the bounded loop's budget, is never
+  touched. A real failure alongside an infra one is still charged (real evidence wins,
+  conservatively), and a run stuck in infra failures is bounded on its own separate streak
+  (capped the same as `CHELA_MAX_REWORKS`, reset the next time CI is seen green) so a
+  permanently broken workflow file still reaches a human instead of looping quietly
+  forever. (CMX-243)
+
 ### Fixed
 
 - **`TODO.example.md` no longer claims the dispatcher scopes claiming to the `## Open`
