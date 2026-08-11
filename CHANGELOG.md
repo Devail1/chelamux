@@ -12,6 +12,17 @@ history lives in `git log`.
 
 ### Fixed
 
+- **A release body could ship the same `### Added`/`### Changed`/`### Fixed` heading
+  two or three times.** Parallel worktree agents each append their own subsection
+  under `## [Unreleased]` per PR, blind to each other's concurrent edits, so nothing
+  in that workflow could stop the same category heading from landing more than once
+  before a release shipped — this file's own `## [Unreleased]` section had exactly
+  that duplication live. `chela.release_notes.extract_release_notes` — the one place
+  every release body (and this repo's own `gh release create --notes-file`) is
+  assembled — now collapses repeated `### <Category>` headings in the extracted
+  section into one block each, content concatenated in the order it appeared. A
+  section with no duplicate titles is returned byte-for-byte unchanged. (CMX-235)
+
 - **`TODO.example.md` no longer claims the dispatcher scopes claiming to the `## Open`
   section.** It never did — `chela/sources/markdown.py` claims every unchecked `- [ ]`
   line in the file regardless of which heading precedes it, so a task moved under a

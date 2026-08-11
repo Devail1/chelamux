@@ -24,6 +24,10 @@ _HEADING = re.compile(r"(?m)^## \[(?P<version>[^\]]+)\](?P<suffix>.*)$")
 # dash and no date at all (e.g. `## [Unreleased]`).
 _KNOWN_SEPARATOR = re.compile(r"^(?:\s*[-–—].*)?$")
 
+# `### Added` / `### Changed` / `### Fixed` / ... — the Keep a Changelog
+# category headings a release body is organised under.
+_SUBHEADING = re.compile(r"(?m)^### (.+)$")
+
 
 class ReleaseNotFoundError(ValueError):
     """No matching `## [version]` section exists in the changelog."""
@@ -31,6 +35,47 @@ class ReleaseNotFoundError(ValueError):
 
 class UnrecognisedHeadingError(ValueError):
     """A `## [version]` heading's suffix uses a separator this parser doesn't know."""
+
+
+def _merge_duplicate_subheadings(body: str) -> str:
+    """Collapse repeated `### <Category>` headings in a release body into one
+    block per category, content concatenated in the order it appeared.
+
+    Parallel worktree agents each append their own `### Added`/`### Changed`/
+    `### Fixed` subsection under `## [Unreleased]`, blind to each other's
+    concurrent edits — no single agent's diff can know another already added
+    a section with the same title, so the same category heading ends up
+    duplicated in the file. A GitHub Release built straight from the raw
+    section would ship those duplicates verbatim; this runs at extraction,
+    the one place every release body is assembled, so it fixes every release
+    regardless of how many agents' edits landed in it.
+
+    A section with no duplicate titles is returned byte-for-byte unchanged.
+    """
+    matches = list(_SUBHEADING.finditer(body))
+    titles = [m.group(1).strip() for m in matches]
+    if len(set(titles)) == len(titles):
+        return body
+
+    order: list[str] = []
+    chunks: dict[str, list[str]] = {}
+    for i, match in enumerate(matches):
+        title = titles[i]
+        content_end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        content = body[match.end() : content_end].strip("\n")
+        if title not in chunks:
+            chunks[title] = []
+            order.append(title)
+        if content:
+            chunks[title].append(content)
+
+    preamble = body[: matches[0].start()]
+    sections = []
+    for title in order:
+        merged = "\n\n".join(chunks[title])
+        sections.append(f"### {title}\n\n{merged}" if merged else f"### {title}")
+
+    return preamble + "\n\n".join(sections) + "\n"
 
 
 def _iter_headings(changelog_text: str):
@@ -66,7 +111,8 @@ def extract_release_notes(changelog_text: str, version: str) -> str:
     candidates = later_heading_starts + ([footer] if footer != -1 else [])
     body_end = min(candidates) if candidates else len(changelog_text)
 
-    return changelog_text[body_start:body_end].strip() + "\n"
+    body = _merge_duplicate_subheadings(changelog_text[body_start:body_end])
+    return body.strip() + "\n"
 
 
 def latest_released_version(changelog_text: str) -> str:

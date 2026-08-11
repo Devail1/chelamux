@@ -5,6 +5,7 @@ CLI the workflow actually shells out to.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -159,3 +160,78 @@ def test_cli_exits_nonzero_on_unknown_version():
     result = _run_cli("9.9.9")
     assert result.returncode == 1
     assert "no '## [9.9.9]'" in result.stderr
+
+
+# Parallel worktree agents each append their own `### Added`/`### Changed`/
+# `### Fixed` subsection under `## [Unreleased]`, blind to each other's
+# concurrent edits, so the same category heading can land in the file two or
+# three times before a release ships.
+_DUPLICATE_HEADINGS_SAMPLE = """\
+# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- first fixed item
+
+### Changed
+
+- first changed item
+
+### Fixed
+
+- second fixed item
+
+### Added
+
+- first added item
+
+### Changed
+
+- second changed item
+
+## [1.0.0] — 2026-01-01
+
+### Added
+
+- first release body
+"""
+
+
+def test_duplicate_subheadings_are_merged_into_one_block_each():
+    notes = extract_release_notes(_DUPLICATE_HEADINGS_SAMPLE, "Unreleased")
+    assert notes.count("### Fixed") == 1
+    assert notes.count("### Changed") == 1
+    assert notes.count("### Added") == 1
+    assert "first fixed item" in notes
+    assert "second fixed item" in notes
+    assert "first changed item" in notes
+    assert "second changed item" in notes
+    assert "first added item" in notes
+
+
+def test_duplicate_subheadings_keep_first_appearance_order():
+    notes = extract_release_notes(_DUPLICATE_HEADINGS_SAMPLE, "Unreleased")
+    headings = re.findall(r"^### (.+)$", notes, re.MULTILINE)
+    assert headings == ["Fixed", "Changed", "Added"]
+
+
+def test_duplicate_subheadings_do_not_leak_into_other_releases():
+    notes = extract_release_notes(_DUPLICATE_HEADINGS_SAMPLE, "1.0.0")
+    assert notes == "### Added\n\n- first release body\n"
+
+
+def test_no_duplicate_subheadings_leaves_body_untouched():
+    # A section with one heading per category is returned byte-for-byte
+    # unchanged — merging only kicks in when a title actually repeats.
+    notes = extract_release_notes(_SAMPLE, "2.0.0")
+    assert notes == "### Added\n\n- second release body\n- more of it\n"
+
+
+def test_real_changelog_unreleased_section_has_no_duplicate_headings():
+    notes = extract_release_notes(_CHANGELOG.read_text(), "Unreleased")
+    headings = re.findall(r"^### (.+)$", notes, re.MULTILINE)
+    assert len(headings) == len(set(headings)), (
+        f"duplicate ### headings survived extraction: {headings}"
+    )
