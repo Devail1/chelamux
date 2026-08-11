@@ -343,6 +343,32 @@ def test_a_missing_branch_is_a_hard_error(tmp_path):
         worktree.attach_worktree(repo, "test-1", tmp_path / "wt")
 
 
+def test_a_run_with_no_branch_at_all_escalates_with_a_recommendation_too(tmp_path):
+    """The FIRST `_escalate` call site in `_respawn_rework` — a row that was never given a
+    branch to rework in the first place (``branch_name`` is falsy), so there is nothing to
+    reattach and `attach_worktree` is never even called (CMX-242)."""
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested", branch_name=None)
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "attach_worktree") as attach, \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        dispatcher.tick(wf.path)
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert attach.call_count == 0            # no branch to reattach — never even tried
+    assert "no branch" in (run["last_error"] or "")
+    assert "Recommendation:" in run["last_error"]
+    assert "Options:\n  - " in run["last_error"]
+    _assert_actionable_escalation(run["last_error"])
+
+
 def test_a_run_whose_branch_is_gone_escalates_instead_of_forking_a_fresh_one(tmp_path):
     wf = _wf(tmp_path)
     source = _Source("abc123")
