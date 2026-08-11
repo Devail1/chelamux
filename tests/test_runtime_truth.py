@@ -1234,6 +1234,21 @@ def test_judge_blocked_race_scan_ignores_an_ordinary_blocked_run(tmp_path, monke
     assert scanned == {}, "an ordinary J_BLOCKED row must not be reported as a blocked race"
 
 
+def test_judge_blocked_race_scan_carries_the_row_fields_through(tmp_path, monkeypatch):
+    """Every other test that checks `pr_url` / `detail` / `sha` hands `_blocked_race_scan`'s
+    OUTPUT in directly via the CORRUPTIONS monkeypatch — none of them exercise the real
+    scan's own field extraction (`_blocked_race_scan`, `chela/runtime_truth.py`), which is
+    what `_blocked_race_report` actually renders into the finding an operator reads ("Check
+    whether this already shipped — <pr_url>"). Drop `"pr_url": run.get("pr_url")` (or the
+    `judge_detail` / `judge_sha` reads next to it) down to `None` and this goes red; the
+    CORRUPTIONS-based tests cannot catch it because they replace `_blocked_race_scan`
+    wholesale rather than going through it."""
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row())
+    assert scanned["CMX-239"]["pr_url"] == "https://github.com/acme/repo/pull/239"
+    assert scanned["CMX-239"]["detail"] == "a guard SURVIVED corruption"
+    assert scanned["CMX-239"]["sha"] == "deadbeef"
+
+
 # --- judge.blocked_race must be able to CLEAR — round 2 of CMX-240 review ---------------
 #
 # Round 1 reported every J_BLOCKED_RACE row regardless of status and never gave it a way
