@@ -287,6 +287,17 @@ def _break_dispatch_hold(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_unresolved_depends(tmp_path, monkeypatch):
+    """CMX-234: a `depends:` marker whose title is a typo of the real bullet — it
+    resolves to no task at all, open or closed, anywhere in the tracker. Before this
+    fact existed the ONLY trace was a `dispatcher._ready` log.warning line."""
+    (tmp_path / "repo" / "TODO.md").write_text(
+        "- [ ] a task\n"
+        '- [ ] follow-up task <!-- depends: "a tsak" -->\n'
+    )
+    return doctor.ERROR
+
+
 def _break_agent_cmd(tmp_path, monkeypatch):
     """The resolved `agent.cmd` names a binary the spawning shell's PATH cannot find —
     tmux would type it into a fresh window and get `command not found` back."""
@@ -538,6 +549,7 @@ CORRUPTIONS = {
     "repo.services_current": _break_services_current,
     "agents.native_status_feed": _break_native_status_feed,
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
+    "dispatch.unresolved_depends": _break_unresolved_depends,
 }
 
 
@@ -1073,6 +1085,134 @@ def test_restore_dead_epoch_rows_cannot_verify_with_no_tmux_server(fleet, monkey
     findings = [f for f in doctor.check() if f.fact == "restore.dead_epoch_rows"]
     assert findings and all(f.level == doctor.WARN for f in findings)
     assert "CANNOT VERIFY restore.dead_epoch_rows" in findings[0].title
+
+
+# --- dispatch.unresolved_depends: CMX-234, the silence CMX-232 didn't touch ------------
+#
+# CMX-232 fixed the one CAUSE of an unresolvable `depends:` edge that a human could not
+# work around by writing "better" markdown (a title with an embedded `;`). A plain typo
+# in a title produces the exact same permanent, silent block — `dispatcher._ready` fails
+# it closed by design and says so only in a `log.warning` line. This fact is what turns
+# that into something `chela doctor` reports and the daemon's edge-triggered
+# `check_and_notify` pushes on the transition into red.
+
+def test_unresolved_depends_names_the_task_and_the_bad_reference(fleet, monkeypatch):
+    """CMX-234 rework round 1: the finding must name the TYPO'D TITLE a human can go
+    fix, not the hash it resolves to — reporting the id defeats the ticket's whole
+    point (a human cannot reverse a sha1 prefix back into the string they mistyped)."""
+    _break_unresolved_depends(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.ERROR
+    assert "follow-up task" in findings[0].title
+    assert "1 reference(s)" in findings[0].title
+    assert "TODO.md" in findings[0].detail
+    assert "a tsak" in findings[0].detail, (
+        "the finding must name the typo'd TITLE, not just its hash — a human cannot "
+        "act on an id"
+    )
+
+
+def test_unresolved_depends_silent_when_every_edge_resolves(fleet):
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings == [runtime_truth.Finding(
+        doctor.OK, "every depends: edge resolves to a real task",
+        fact="dispatch.unresolved_depends")]
+
+
+def test_unresolved_depends_does_not_fire_for_an_ordinary_unmet_wait(fleet):
+    """A dependency that DOES resolve, just hasn't been struck yet, is the ordinary
+    case — not a tracker bug. Only a reference naming no task at all should redden this
+    fact, the same line `dispatcher._ready` draws between log.info and log.warning."""
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [ ] prerequisite task\n"
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+    )
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_unresolved_depends_does_not_fire_for_a_dependency_on_a_closed_task(fleet):
+    """[JUDGE MUTATION #1] `known_ids` dropping `closed_ids_from_text` must go red here:
+    a dependency on a task the tracker has already struck `[x]` is a perfectly healthy
+    tracker, not a broken reference — the scan's own docstring says 'no task at all —
+    open OR CLOSED' matters."""
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [x] prerequisite task\n"
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+    )
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_unresolved_depends_is_quiet_for_a_dependency_on_a_parked_task(fleet):
+    """A `depends:` naming a PARKED (`<!-- blocked: ... -->`) task is ordinary waiting,
+    not a tracker bug — the referenced task is real, it just hasn't been unparked yet.
+    `tasks_from_text` drops parked bullets entirely, so without folding parked ids into
+    `known_ids` this reads exactly like a typo and fires at ERROR — the loudest possible
+    false positive on a documented, routine feature (TODO.md's own header teaches
+    parking as how you hold a task back)."""
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [ ] task A <!-- blocked: waiting on design -->\n"
+        '- [ ] task B <!-- depends: "task A" -->\n'
+    )
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_unresolved_depends_names_every_broken_row_not_just_the_first(fleet):
+    """[JUDGE MUTATION #2] truncating the scan's rows to the first must go red here:
+    two independently broken `depends:` edges must both surface, or the second one
+    hides silently behind the first."""
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [ ] a task\n"
+        '- [ ] first follow-up <!-- depends: "a tsak" -->\n'
+        '- [ ] second follow-up <!-- depends: "another tsak" -->\n'
+    )
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert len(findings) == 2
+    assert any("a tsak" in f.detail for f in findings)
+    assert any("another tsak" in f.detail for f in findings)
+
+
+def test_unresolved_depends_edge_triggers_through_check_and_notify(fleet, monkeypatch):
+    """The ticket's heaviest marker: announce ONCE on the transition into red, stay
+    quiet on an unchanged broken set, and announce AGAIN the moment a distinct new
+    reference breaks — a report every tick is a firehose nobody reads. This fact
+    inherits `doctor.check_and_notify`'s edge-trigger (keyed on (fact, title)) rather
+    than growing a second notification path; this test proves that inheritance
+    actually holds for THIS fact, driving three explicit ticks."""
+    class _StubNotify:
+        def __init__(self):
+            self.sent = []
+
+        def enabled(self):
+            return True
+
+        def send(self, message, title=None):
+            self.sent.append((message, title))
+            return True
+
+    stub = _StubNotify()
+    monkeypatch.setattr(doctor, "notify", stub)
+
+    # tick 1: introduce a broken reference — must announce.
+    _break_unresolved_depends(fleet, monkeypatch)
+    red = doctor.check_and_notify(set())
+    assert len(stub.sent) == 1
+
+    # tick 2: the SAME broken reference, unchanged — must NOT re-announce.
+    red = doctor.check_and_notify(red)
+    assert len(stub.sent) == 1
+
+    # tick 3: a SECOND, distinct broken reference appears — the set changed, so this
+    # must announce again.
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [ ] a task\n"
+        '- [ ] follow-up task <!-- depends: "a tsak" -->\n'
+        '- [ ] another follow-up <!-- depends: "another tsak" -->\n'
+    )
+    doctor.check_and_notify(red)
+    assert len(stub.sent) == 2
 
 
 # --- installed_hooks_stale(): `chela update`'s post-update reminder reuses the exact

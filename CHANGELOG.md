@@ -118,6 +118,18 @@ history lives in `git log`.
 
 ### Added
 
+- **A typo'd `depends:` reference now surfaces in `chela doctor` instead of only a
+  daemon log line.** CMX-232 fixed the one CAUSE of an unresolvable edge a human could
+  not work around by writing "better" markdown (a title with an embedded `;`); it never
+  touched the silence — a plain typo, or a retitled/deleted blocker, still resolves to
+  an id nothing on the tracker will ever strike, and `dispatcher._ready` fails that
+  closed by design, forever, saying so only in a `log.warning` line wherever the
+  daemon's own log happens to scroll. The new `dispatch.unresolved_depends` fact runs
+  the same resolution fresh, names the stuck task and the tracker it lives in, and (like
+  every other doctor fact) gets pushed by the daemon's edge-triggered
+  `check_and_notify` the moment it goes red — the CMX-187 fix, applied to this class of
+  bug too.
+
 - **`chela doctor` now reports which transport each agent would actually receive a
   message over.** Peer-socket delivery falls back to typing into the terminal
   whenever the socket cannot be reached, which is correct on a mixed fleet and

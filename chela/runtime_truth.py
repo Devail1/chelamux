@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -79,6 +80,7 @@ from chela import (
     sessions,
 )
 from chela.sources import get_source
+from chela.sources.markdown import BLOCKED_RE, DEPENDS_RE, OPEN_RE, _parse_depends, _title_id
 from chela.workflow import load_workflow
 
 OK = "ok"
@@ -2339,6 +2341,127 @@ def _restore_report(_declared: None, obs: Observation) -> list[Finding]:
     )]
 
 
+# --- fact: a `depends:` edge naming no task at all — a typo, or a retitled/deleted
+# blocker — permanently blocks its dependent. `dispatcher._ready` already fails this
+# closed BY DESIGN (see its own docstring) and already says so — but only with a
+# `log.warning` line, once per tick, wherever the daemon's own log happens to scroll.
+# CMX-232 fixed one CAUSE of an unresolvable edge (a title with an embedded `;` could
+# never be quoted correctly, however carefully someone wrote the markdown); it never
+# touched the SILENCE — a plain, ordinary typo produces the exact same permanent,
+# unannounced block, and still does. This fact is the one place that turns "held back,
+# forever, for a reason nobody who isn't tailing the daemon's log will ever see" into
+# something `chela doctor` reports and the daemon's `check_and_notify` pushes on the
+# transition into red — the same fix CMX-187 already gave every other red finding.
+
+_TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*")
+
+
+def _parked_ids_from_text(text: str, filename: str) -> set[str]:
+    """Ids of the tasks `text` has PARKED (`<!-- blocked: ... -->`) — for identity
+    purposes only, never as claimable work. `tasks_from_text` skips these bullets
+    outright (they are not open work; see `chela.sources.markdown.tasks_from_text`),
+    but a task naming one via `depends:` is naming something that really is on the
+    tracker — ordinary waiting, not a broken reference — so it must count towards
+    `known_ids` here even though it is invisible to `tasks_from_text`.
+
+    A human writes `depends: "task A"` — the bare, visible title — never the raw
+    bullet text with its own `<!-- blocked: ... -->` comment attached. So the id has
+    to be hashed off that bare title (comment stripped), the same string
+    `_resolve_depends` hashes for the referencing marker, not off the full captured
+    line `tasks_from_text` would have used had the bullet not been skipped.
+    """
+    ids: set[str] = set()
+    for raw in text.splitlines():
+        m = OPEN_RE.match(raw)
+        if not m:
+            continue
+        title = m.group(1).strip()
+        if not BLOCKED_RE.search(title):
+            continue
+        bare = _TRAILING_COMMENT_RE.sub(" ", title).strip()
+        ids.add(_title_id(filename, bare))
+    return ids
+
+
+def _unresolved_depends_scan() -> list[dict]:
+    """Every open task, across every dispatched workflow with a tracker that has a
+    notion of `depends:`, whose declared dependency resolves to no task at all — open,
+    closed, or PARKED — anywhere in that tracker. The exact same resolution
+    `dispatcher._ready` and the dashboard's `open_tasks` payload (`unresolved_depends`)
+    already compute, applied fresh here so doctor sees it too — plus parked ids, which
+    neither of those needed for their own purpose (a parked prerequisite already fails
+    `_ready` closed, correctly; it just must not be DIAGNOSED as a broken reference)."""
+    out: list[dict] = []
+    for path in dispatched_workflows():
+        if not path.exists():
+            continue
+        try:
+            wf = load_workflow(path)
+            source = get_source(wf)
+        except Exception:
+            continue  # already reported by dispatch.workflows
+        tasks_from_text = getattr(source, "tasks_from_text", None)
+        closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
+        tracker = getattr(source, "path", None)
+        if tasks_from_text is None or closed_ids_from_text is None or tracker is None:
+            continue  # e.g. gh_issues — no notion of depends: at all
+        try:
+            text = Path(tracker).read_text()
+        except OSError:
+            continue  # already reported by dispatch.workflows (no_tracker)
+        filename = Path(tracker).name
+        tasks = tasks_from_text(text)
+        known_ids = (
+            {t.id for t in tasks}
+            | closed_ids_from_text(text)
+            | _parked_ids_from_text(text, filename)
+        )
+        for t in tasks:
+            unresolved_ids = sorted(set(t.depends) - known_ids)
+            if not unresolved_ids:
+                continue
+            # `t.title` still carries its own `depends:` marker verbatim — re-parse it
+            # (never re-hash — `_title_id` stays the single authority) to map each
+            # unresolved id back to the exact title text a human typed, so the finding
+            # names something a person can go fix rather than a hash they cannot.
+            m = DEPENDS_RE.search(t.title)
+            raw_titles = _parse_depends(m.group(1)) if m else ()
+            by_id = {_title_id(filename, raw): raw for raw in raw_titles}
+            unresolved_titles = [by_id.get(uid, uid) for uid in unresolved_ids]
+            out.append({
+                "workflow": str(path), "tracker": str(tracker),
+                "task": t.title, "unresolved": unresolved_titles,
+            })
+    return out
+
+
+def _unresolved_depends_read() -> Observation:
+    return observed(_unresolved_depends_scan())
+
+
+def _unresolved_depends_report(_declared: None, obs: Observation) -> list[Finding]:
+    rows = obs.value
+    if not rows:
+        return [Finding(OK, "every depends: edge resolves to a real task")]
+    out = []
+    for row in rows:
+        n = len(row["unresolved"])
+        out.append(Finding(
+            ERROR,
+            f"{row['task']!r} depends on {n} reference(s) that name no task — "
+            "blocked FOREVER",
+            f"tracker: {row['tracker']} — unresolved title(s): "
+            f"{', '.join(row['unresolved'])}. A depends: marker is matched by hashing "
+            "the OTHER bullet's title text (chela.sources.markdown._title_id) — a "
+            "typo, a retitled task, or a deleted one all produce an id nothing on this "
+            "tracker will ever strike. dispatcher._ready fails this closed by design, "
+            "so the task sits in Open forever with no error anywhere but a "
+            "log.warning line. Fix the depends: marker's title text above (or the "
+            "bullet it should be naming) to match exactly.",
+        ))
+    return out
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -2659,6 +2782,17 @@ def facts() -> list[Fact]:
             read_back=_restore_read,
             report=_restore_report,
             unverifiable_level=WARN,      # same reason as tmux.session
+        ),
+        Fact(
+            name="dispatch.unresolved_depends",
+            declared_by="nothing — chela never predicts this; a depends: edge either "
+                        "names a real task, open or closed, or it doesn't",
+            owned_by="each dispatched workflow's own tracker — the same resolution "
+                     "dispatcher._ready and the dashboard's open_tasks payload "
+                     "(unresolved_depends) already do, applied fresh",
+            declare=lambda: None,
+            read_back=_unresolved_depends_read,
+            report=_unresolved_depends_report,
         ),
     ]
 
