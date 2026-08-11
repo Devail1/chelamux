@@ -1487,3 +1487,29 @@ def test_the_judge_lock_start_time_window_is_exactly_the_fallbacks_resolution(de
     base = 1785703040.97
     with patch.object(sessions, "proc_started", lambda pid: base):
         assert judge._judge_lock_owner_alive({"pid": 4242, "started": base - delta}) is expect_alive
+
+
+def test_cmd_judge_prints_the_blocked_race_verdict_distinctly(capsys):
+    """⚖️🧊 CMX-239 round 2: `chela judge run`'s CLI print branch for `J_BLOCKED_RACE` is a
+    dead ``elif`` away from silently falling through to the ``else`` — which prints "every
+    guard held", the exact opposite of what happened. Drive the real argparse dispatch (the
+    way `test_contract_cli.py` proves the merge/escalate call-sites) so a corrupted
+    ``elif state == judge.J_BLOCKED_RACE:`` turns this red instead of leaving it green.
+    """
+    from unittest.mock import patch
+
+    from chela import main
+
+    fake = {
+        "ok": False, "task_id": "cmx-99", "blocking": 2, "round": 1,
+        "error": "the run moved to merged before the verdict could be written",
+        "state": judge.J_BLOCKED_RACE, "outcomes": [],
+    }
+    with patch.object(main.judge, "judge_run", return_value=fake):
+        with patch.object(sys, "argv",
+                           ["chela", "judge", "run", "cmx-99", "--experiments", "x.json"]):
+            main.main()
+    out = capsys.readouterr().out
+    assert "SURVIVED corruption, but the run had already moved on" in out
+    assert "This needs a human look NOW" in out
+    assert "every guard held" not in out

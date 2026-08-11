@@ -209,7 +209,9 @@ function _unbindTaskModalDismiss() {
 }
 
 // --- Stage 0: ES-module exports ---
-export { openTaskModal, closeTaskModal };
+// `_JUDGE_BADGE` is exported (like dispatcher.js's `_runDisplayId`/`_runPrCell`) so a
+// guard test can pin its severity mapping without driving the full modal DOM.
+export { openTaskModal, closeTaskModal, _JUDGE_BADGE };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
