@@ -407,6 +407,20 @@ def test_cmd_retry_failure_exits_nonzero(tmp_path, capsys):
     assert "not 'needs_human'" in out
 
 
+def test_chela_retry_without_reason_exits_nonzero(tmp_path, capsys):
+    """🔴 ``--reason`` is the only evidence a human made the call (no pushed commit to
+    attest it, unlike ``reopen``) — omitting it must fail argparse, not silently default
+    to an empty note. Make ``--reason`` optional again and this goes green."""
+    import sys
+
+    from chela import main
+
+    with pytest.raises(SystemExit) as exc, \
+         patch.object(sys, "argv", ["chela", "retry", "abc123"]):
+        main.main()
+    assert exc.value.code != 0
+
+
 def test_chela_retry_reaches_the_dispatcher_end_to_end(tmp_path):
     """``chela retry cmx-96`` must actually parse AND reach ``dispatcher.retry`` — the
     dispatch call-site is the guard here. Mutate ``elif args.command == "retry": …`` to

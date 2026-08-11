@@ -2406,9 +2406,11 @@ def main() -> None:
     )
     p_retry.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
     p_retry.add_argument(
-        "--reason", default="",
-        help="Optional free-text note (e.g. why it's worth another round), posted on the "
-             "PR and recorded in the run's review history",
+        "--reason", required=True,
+        help="The record that a human read the needs_human verdict and judged it worth "
+             "another round — posted on the PR and recorded in the run's review history. "
+             "Required: retry has no pushed commit, so this sentence is the only evidence "
+             "a human made the call",
     )
 
     # escalate — the ONE structured way to hand a decision to the human
