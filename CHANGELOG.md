@@ -22,6 +22,15 @@ history lives in `git log`.
 
 ### Changed
 
+- **An automatic escalation to `needs_human` now names a recommendation and concrete next
+  steps, not just a bare reason.** `chela escalate` — the human-typed escalation path —
+  has always taken a `--recommendation` and `--options`, but nothing that escalated on its
+  own (a stuck CI check, a rework that spent its budget, a rework that could not re-enter
+  its branch/worktree) used them: the loop handed a human a dead end with no suggested way
+  out. Every automatic escalation site in the dispatcher now composes the same
+  reason/recommendation/options shape `chela escalate` does, so `needs_human` always reads
+  as "here's what happened, here's what I'd try, here's what you can do about it." (CMX-242)
+
 - **A judge verdict of "cannot verify" now reaches the inbox even when the run has already
   left review, and a merge can no longer silently kill a judge that is still working.**
   Two follow-ups to the unconditional PR comment below (CMX-228), both measured live on a

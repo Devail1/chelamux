@@ -2938,6 +2938,17 @@ def tick(workflow_path: str | Path) -> dict:
                 "registered and never reported). Nothing can merge a PR whose checks never "
                 "answer, and nothing can send it back either: pending is not red. Branch, "
                 "worktree and PR are preserved.",
+                recommendation="Open the PR's Checks tab and find the one still pending — "
+                                "most likely a required reviewer/deployment gate awaiting "
+                                "manual approval, or an app that registered a check and never "
+                                "reported back. Approve or re-run it, then `chela reopen` this "
+                                "run so the merge gate re-reads CI.",
+                options=[
+                    "Approve the pending deployment/reviewer gate on GitHub, then `chela reopen`",
+                    "Re-run the stuck check from the PR's Checks tab, then `chela reopen`",
+                    "Remove the check from branch protection if it no longer applies",
+                    "Close the PR and let the task be redispatched fresh, if the branch is unrecoverable",
+                ],
             )
             summary["escalated"] += 1
 
@@ -2961,6 +2972,15 @@ def tick(workflow_path: str | Path) -> dict:
                     f"rework cap reached ({row['rework_count'] or 0}/{cap}) — the PR still "
                     "fails review. Branch, worktree and PR are preserved; every verdict is "
                     "on the run row (review_history).",
+                    recommendation="Read the review history on the run for what every rework "
+                                    "round already tried, fix the remaining issue by hand on "
+                                    "the branch, push, then `chela reopen` to put it back "
+                                    "under judge/review/merge.",
+                    options=[
+                        "Fix it yourself on the branch and `chela reopen`",
+                        "Close the PR and let the task be redispatched fresh",
+                        "Abandon the task",
+                    ],
                 )
                 summary["escalated"] += 1
 
@@ -3635,7 +3655,25 @@ def _rework_vars(
     }
 
 
-def _escalate(conn: sqlite3.Connection, row: sqlite3.Row, reason: str) -> None:
+def _format_escalation(reason: str, recommendation: str = "", options: list[str] | None = None) -> str:
+    """Compose the text an automatic escalation stores — reason, then a recommendation and
+    options, in exactly the shape ``chela escalate`` (``contract.escalate``) uses for a
+    human-initiated one. An automatic escalation is the loop giving up, not a human typing
+    a summary — it must not hand over a bare "I quit" with no next step: it already knows
+    WHY it gave up, so it is the one best placed to name what a human should try, and every
+    call site below does. Both fields are optional so a caller with nothing useful to add
+    (there isn't always a sane suggestion) still gets a plain reason, unchanged from before.
+    """
+    body = reason
+    if recommendation:
+        body += f"\n\nRecommendation: {recommendation}"
+    if options:
+        body += "\n\nOptions:\n" + "\n".join(f"  - {o}" for o in options if (o or "").strip())
+    return body
+
+
+def _escalate(conn: sqlite3.Connection, row: sqlite3.Row, reason: str, *,
+              recommendation: str = "", options: list[str] | None = None) -> None:
     """Stop the loop and hand the run to a human — keeping EVERYTHING.
 
     The branch, the worktree and the PR all stay exactly where they are: a run that
@@ -3643,19 +3681,25 @@ def _escalate(conn: sqlite3.Connection, row: sqlite3.Row, reason: str) -> None:
     concurrency slot is freed simply by not being in :data:`ACTIVE_STATUSES` — a stuck run
     must never pin the queue behind it.
 
+    ``recommendation``/``options`` mirror ``chela escalate``'s own fields (CMX-242): a bare
+    reason hands a human a dead end, so every call site below says what it would try next.
+    Formatted into the same ``last_error`` text a bare reason always went to (see
+    :func:`_format_escalation`) — no new column, no new publisher.
+
     The orchestrator finds out through the decisions inbox, which is edge-triggered on the
     runs DB (``inbox.run_events``) and carries the whole review history in the payload —
     every verdict, not just the last. That is also why nothing is pushed from here: the
     row IS the notification, and a second publisher would be a second source of truth.
     """
+    text = _format_escalation(reason, recommendation, options)
     conn.execute(
         "UPDATE runs SET status='needs_human', ended_at=?, last_error=? WHERE task_id=?",
-        (_now(), reason, row["task_id"]),
+        (_now(), text, row["task_id"]),
     )
     conn.commit()
     log.warning(
         "Task %s → needs_human: %s (branch %s and worktree %s preserved; slot freed)",
-        row["task_id"], reason, row["branch_name"], row["worktree_path"],
+        row["task_id"], text, row["branch_name"], row["worktree_path"],
     )
 
 
@@ -3751,7 +3795,12 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
     repo_path = wf.path.parent
     branch = row["branch_name"]
     if not branch:
-        _escalate(conn, row, "rework: the run row has no branch — nothing to re-enter")
+        _escalate(
+            conn, row, "rework: the run row has no branch — nothing to re-enter",
+            recommendation="This row was never given a branch to rework, so there is nothing "
+                            "to reattach. Treat it like a fresh task.",
+            options=["Redispatch the task as new", "Abandon the task"],
+        )
         return False
 
     root = resolve_workspace_root(wf)
@@ -3759,11 +3808,32 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
     try:
         worktree, attached = attach_worktree(repo_path, branch, want)
     except BranchGone as e:
-        _escalate(conn, row, f"rework: {e} — the work it points at is unreachable")
+        _escalate(
+            conn, row, f"rework: {e} — the work it points at is unreachable",
+            recommendation=f"Check whether branch {branch!r} still exists on the remote or in "
+                            "`git reflog` — if it was deleted by mistake it may be recoverable. "
+                            "If not, the PR's own commits (if it's still open on GitHub) are "
+                            "the only surviving copy of the work.",
+            options=[
+                f"Recover branch {branch!r} from reflog/remote and `chela reopen`",
+                "Redispatch the task fresh if the work is not recoverable",
+                "Abandon the task",
+            ],
+        )
         return False
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or b"").decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
-        _escalate(conn, row, f"rework: could not attach a worktree for {branch}: {stderr.strip()}")
+        _escalate(
+            conn, row, f"rework: could not attach a worktree for {branch}: {stderr.strip()}",
+            recommendation="Read the git error above — it's usually a stale worktree "
+                            "registration or a path conflict, not a lost branch. Fix it by "
+                            "hand (e.g. `git worktree prune`), then `chela reopen`.",
+            options=[
+                "Resolve the git error by hand, then `chela reopen`",
+                "Manually attach a worktree for the branch and continue outside chela",
+                "Abandon the task",
+            ],
+        )
         return False
     if attached:
         log.info("Task %s: worktree was gone; re-attached %s from branch %s",

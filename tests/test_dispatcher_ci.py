@@ -825,6 +825,10 @@ def test_a_pending_check_that_never_settles_ages_out_into_needs_human(tmp_path):
     run = dispatcher.resolve_run("abc123")
     assert run["status"] == "needs_human"
     assert "not settled in 9h" in run["last_error"] and "STUCK" in run["last_error"]
+    # CMX-242: an automatic escalation is not just a bare reason — it names a
+    # recommendation and concrete next steps, the same as a human-typed `chela escalate`.
+    assert "Recommendation:" in run["last_error"]
+    assert "Options:\n  - " in run["last_error"]
 
 
 def test_a_pending_check_that_is_merely_SLOW_is_left_alone(tmp_path):
