@@ -178,3 +178,25 @@ def test_cli_rework_disputed_exits_nonzero_on_refusal(capsys):
         main_mod.cmd_rework_disputed(Args())
     assert exc.value.code == 1
     assert "no run found" in capsys.readouterr().out
+
+
+def test_chela_rework_disputed_reaches_the_dispatcher_end_to_end():
+    """``chela rework-disputed abc123 "reason"`` must actually parse AND reach
+    ``dispatcher.mark_rework_disputed`` — the dispatch call-site is the guard here. Mutate
+    ``elif args.command == "rework-disputed": …`` to anything else and this fails: a
+    subparser that parses but is never wired is silent, same idiom as `retry`/`reopen`
+    (tests/test_dispatcher_retry.py, tests/test_dispatcher_reopen.py)."""
+    import sys
+
+    from chela import main
+
+    with dispatcher._db() as conn:
+        _row(conn)
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router()), \
+         patch.object(dispatcher, "_kill_window"), \
+         patch.object(sys, "argv", ["chela", "rework-disputed", "abc123", "nothing to fix"]):
+        main.main()
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert dispatcher.reviews_of(dict(run))[-1]["verdict"] == "disputed"
