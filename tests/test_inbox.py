@@ -693,30 +693,65 @@ def test_a_verdict_already_clean_on_first_sight_skips_the_generic_notice(
     assert "MERGEABLE" in sends[0][1]
 
 
-@pytest.mark.parametrize("kind", ["run_judge_clean", "run_judge_cannot_verify"])
 @pytest.mark.parametrize("gone_state", ["merged", "closed"])
-def test_a_judge_verdict_event_goes_stale_once_the_run_moves_on(kind, gone_state, store_file):
-    """A queued judge-verdict event is a claim about the PAST — re-checked at delivery
+def test_a_clean_verdict_event_goes_stale_once_the_run_moves_on(gone_state, store_file):
+    """A queued CLEAN judge-verdict event is a claim about the PAST — re-checked at delivery
     (inbox.stale_reason), same as `run_review`. A merged/closed PR, or a run that moved off
-    `awaiting_review` before delivery, must drop it rather than deliver stale work.
+    `awaiting_review` before delivery, must drop it rather than deliver stale work: "clean
+    and MERGEABLE" about a run nothing is waiting to merge any more is moot.
 
-    ⚠️ Parametrized over BOTH kinds and BOTH gone-states: this branch is SHARED with
-    `run_review`, so excluding one kind from either sub-check is a one-token change that a
-    single-kind test cannot see — the same both-kinds rule that has now cost three rounds,
-    applied to the last unparametrized site.
+    ⚠️ CMX-229 round: this test used to be shared with `run_judge_cannot_verify` (the
+    "both-kinds" rule from CMX-197 round 4). It no longer is, ON PURPOSE — Objective 1
+    makes `cannot_verify` diverge from `clean` on EXACTLY this axis; see its own
+    deliberate, documented counterpart right below,
+    `test_a_cannot_verify_verdict_event_survives_the_run_moving_on`.
     """
-    event = {"kind": kind, "payload": {"task_id": "T1"}}
+    event = {"kind": "run_judge_clean", "payload": {"task_id": "T1"}}
     still_open = [{"task_id": "T1", "status": "awaiting_review", "pr_state": "open"}]
     assert inbox.stale_reason(event, still_open) is None
 
     gone = [{"task_id": "T1", "status": "awaiting_review", "pr_state": gone_state}]
     assert gone_state in (inbox.stale_reason(event, gone) or ""), (
-        f"a {kind} for a {gone_state} PR must be dropped — there is nothing left to review"
+        f"a run_judge_clean for a {gone_state} PR must be dropped — there is nothing left "
+        "to review"
     )
 
     moved_on = [{"task_id": "T1", "status": "changes_requested", "pr_state": "open"}]
     assert "changes_requested" in (inbox.stale_reason(event, moved_on) or ""), (
-        f"a {kind} for a run that left awaiting_review must be dropped"
+        "a run_judge_clean for a run that left awaiting_review must be dropped"
+    )
+
+
+@pytest.mark.parametrize("gone_state", ["merged", "closed"])
+def test_a_cannot_verify_verdict_event_survives_the_run_moving_on(gone_state, store_file):
+    """⚖️🔔 CMX-229 Objective 1 — the deliberate counterpart to the CLEAN test above.
+
+    "The judge could not verify this commit" is not a claim about `awaiting_review`, it is
+    a claim about a commit that was never actually checked — measured live on CMX-227, that
+    is exactly the outcome of the CAS-refused race (the run merges/moves on WHILE the judge
+    is still working). Dropping it the moment the run leaves `awaiting_review` or its PR
+    merges/closes is the bug this objective closes: it is the ONE record that a
+    SURVIVED-mutation finding might exist, undetected, on a commit already shipped.
+    """
+    event = {"kind": "run_judge_cannot_verify", "payload": {"task_id": "T1"}}
+    still_open = [{"task_id": "T1", "status": "awaiting_review", "pr_state": "open"}]
+    assert inbox.stale_reason(event, still_open) is None
+
+    gone = [{"task_id": "T1", "status": "awaiting_review", "pr_state": gone_state}]
+    assert inbox.stale_reason(event, gone) is None, (
+        f"a run_judge_cannot_verify for a {gone_state} PR must still be delivered"
+    )
+
+    moved_on = [{"task_id": "T1", "status": "changes_requested", "pr_state": "open"}]
+    assert inbox.stale_reason(event, moved_on) is None, (
+        "a run_judge_cannot_verify for a run that left awaiting_review must still be "
+        "delivered — that IS the CAS-refused race this objective closes"
+    )
+
+    gone_row = [{"task_id": "T1", "status": "done", "pr_state": "merged"}]
+    assert inbox.stale_reason(event, gone_row) is None, (
+        "a run_judge_cannot_verify for an already-merged run is the MOST important case, "
+        "not a droppable one"
     )
 
 
@@ -1979,43 +2014,77 @@ def test_a_run_ARRIVING_at_awaiting_review_still_gets_the_plain_review_edge(
     )
 
 
-@pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
 @pytest.mark.parametrize("other_status", ["running", "changes_requested", "done"])
-def test_a_verdict_is_announced_ONLY_while_the_run_SITS_in_awaiting_review(
-        judge_state, kind, other_status, store_file, windows, sends, monkeypatch):
-    """🔴 GUARD (CMX-197 round 7): the status half of the emit condition.
+def test_a_clean_verdict_is_announced_ONLY_while_the_run_SITS_in_awaiting_review(
+        other_status, store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-197 round 7): the status half of the emit condition — for
+    `run_judge_clean`.
 
     Every comment and docstring on this feature says the same thing — "the judge's own
     verdict on a run still SITTING in awaiting_review". Drop the status test and a stale
     `judge_state` left on a row that has since moved on fires a verdict announcement about
     a run that is running again, already sent back, or finished: the orchestrator is told a
     PR is "clean and MERGEABLE" when it is not even under review.
+
+    ⚠️ CMX-229 round: this test used to be shared with `run_judge_cannot_verify` via
+    `JUDGE_KINDS` (CMX-197 round 4's "every judge kind must cover every site" rule). It no
+    longer is, ON PURPOSE: Objective 1 makes `cannot_verify` diverge from `clean` on
+    EXACTLY this axis — see its own deliberate, documented counterpart right below,
+    `test_a_cannot_verify_verdict_IS_announced_off_awaiting_review`.
     """
     _statuses(monkeypatch, {ORCH: inbox.BUSY})
     store = inbox.load()
     store["orchestrator"] = ORCH
     inbox.save(store)
 
-    inbox.tick({}, runs=[dict(_verdict_run(judge_state), status=other_status)])
+    inbox.tick({}, runs=[dict(_verdict_run(judge.J_CLEAN), status=other_status)])
 
     kinds = [e["kind"] for e in inbox.load()["queue"]]
-    assert kind not in kinds, (
-        f"a {judge_state!r} verdict fired for a run in {other_status!r}. Queued: {kinds}"
+    assert "run_judge_clean" not in kinds, (
+        f"a clean verdict fired for a run in {other_status!r}. Queued: {kinds}"
+    )
+
+
+@pytest.mark.parametrize("other_status", ["running", "changes_requested", "done"])
+def test_a_cannot_verify_verdict_IS_announced_off_awaiting_review(
+        other_status, store_file, windows, sends, monkeypatch):
+    """⚖️🔔 CMX-229 Objective 1 — the deliberate counterpart to the CLEAN guard above.
+
+    Measured live on CMX-227: the judge's CAS-refused path sets `J_CANNOT_VERIFY` on a run
+    that has ALREADY left `awaiting_review` (a merge, a fresh review, a rework respawn can
+    all race it there first), and `run_judge_cannot_verify` used to never fire for it — the
+    ONLY place this outcome could ever surface (`chela events --type run_judge_cannot_verify`
+    showed nothing; the run row was the sole, silent record). It must fire regardless of
+    what the run's status became.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[dict(_verdict_run(judge.J_CANNOT_VERIFY), status=other_status)])
+
+    kinds = [e["kind"] for e in inbox.load()["queue"]]
+    assert "run_judge_cannot_verify" in kinds, (
+        f"a cannot_verify verdict did NOT fire for a run already in {other_status!r} — "
+        f"Objective 1 requires it to. Queued: {kinds}"
     )
 
 
 def test_the_judge_state_mark_is_scoped_to_awaiting_review_ONLY(
         store_file, windows, sends, monkeypatch):
-    """🔴 GUARD (CMX-197 round 8): every OTHER status keeps the bare status as its mark.
+    """🔴 GUARD (CMX-197 round 8): every OTHER status keeps the bare status as its mark —
+    EXCEPT `cannot_verify`, carved out ON PURPOSE by CMX-229 Objective 1 (see its
+    counterpart right below, `test_cannot_verify_churn_off_awaiting_review_DOES_reannounce`).
 
     Widening `mark` to `f"{status}:{judge_state}"` unconditionally makes the judge's own
     churn re-announce states that have nothing to do with it: a run parked at needs_human
-    while a judge re-runs goes J_RUNNING → J_CANNOT_VERIFY → …, and each transition mints a
-    NEW mark, so the orchestrator is pinged "NEEDS A HUMAN" again and again for one
-    unchanged situation.
+    while a judge re-runs goes J_RUNNING → J_CLEAN → …, and each transition mints a NEW
+    mark, so the orchestrator is pinged "NEEDS A HUMAN" again and again for one unchanged
+    situation.
 
-    ⛔ The re-announce is deliberately scoped to `awaiting_review`, where the verdict is the
-    news. Everywhere else the status IS the news and the judge is noise.
+    ⛔ The re-announce is deliberately scoped to `awaiting_review` for RUNNING/CLEAN —
+    everywhere else the status IS the news and the judge is noise for those two.
     """
     _statuses(monkeypatch, {ORCH: inbox.BUSY})
     store = inbox.load()
@@ -2027,14 +2096,36 @@ def test_the_judge_state_mark_is_scoped_to_awaiting_review_ONLY(
     first = [e["kind"] for e in inbox.load()["queue"]]
     assert first == ["run_needs_human"]
 
-    # the judge re-runs on the same parked row — its state churns, the situation does not
-    for churn in (judge.J_RUNNING, judge.J_CANNOT_VERIFY, judge.J_CLEAN):
+    # the judge re-runs on the same parked row — RUNNING/CLEAN churn is noise here
+    for churn in (judge.J_RUNNING, judge.J_CLEAN):
         inbox.tick({}, runs=[dict(parked, judge_state=churn)])
 
     assert [e["kind"] for e in inbox.load()["queue"]] == first, (
-        "judge churn re-announced a status that never changed — the judge_state half of "
-        "the mark must apply to awaiting_review only"
+        "judge churn (RUNNING/CLEAN) re-announced a status that never changed — the "
+        "judge_state half of the mark must apply to awaiting_review only for these"
     )
+
+
+def test_cannot_verify_churn_off_awaiting_review_DOES_reannounce(
+        store_file, windows, sends, monkeypatch):
+    """⚖️🔔 CMX-229 Objective 1 — the deliberate counterpart to the guard above. A run
+    parked at `needs_human` (or anywhere else off `awaiting_review`) whose `judge_state`
+    churns to `cannot_verify` DOES mint a new mark and DOES re-announce — that transition
+    is itself the news the guard above says everywhere else is noise for RUNNING/CLEAN."""
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    parked = dict(_verdict_run(), status="needs_human", judge_state=judge.J_BLOCKED)
+    inbox.tick({}, runs=[parked])
+    assert [e["kind"] for e in inbox.load()["queue"]] == ["run_needs_human"]
+
+    inbox.tick({}, runs=[dict(parked, judge_state=judge.J_CANNOT_VERIFY)])
+
+    assert [e["kind"] for e in inbox.load()["queue"]] == [
+        "run_needs_human", "run_judge_cannot_verify",
+    ], "a cannot_verify churn off awaiting_review must re-announce (CMX-229 Objective 1)"
 
 
 def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
