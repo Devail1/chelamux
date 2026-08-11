@@ -793,6 +793,51 @@ def test_a_blocked_race_verdict_rots_once_the_head_moves_past_the_judged_commit(
     assert reason and "moved past" in reason
 
 
+def test_a_blocked_race_verdicts_payload_carries_the_judged_sha_and_state(
+        store_file, windows, monkeypatch):
+    """⚖️🧊 CMX-239 round 5 — the twin of `test_a_judge_verdicts_payload_carries_the_judged_sha`
+    below, for `J_BLOCKED_RACE`. That test's `JUDGE_KINDS` parametrize does NOT cover this
+    kind on purpose: `_live_judge_heads` never nominates a `blocked_race` run (see its own
+    docstring), so folding this kind into the shared list would silently break every
+    live-head-supersession test that shares it — a gap in `_live_judge_heads` this PR did not
+    write, not something this test should paper over.
+
+    Written standalone, and deriving the event from a REAL run row via `inbox.tick()` — not
+    hand-fed. The test above (`..._rots_once_the_head_moves_past_the_judged_commit`) builds its
+    event dict by hand (`{"payload": {"judge_sha": _JUDGE_SHA}}`), which proves `stale_reason`
+    reads `judge_sha` correctly but says nothing about whether `run_events`'s `J_BLOCKED_RACE`
+    branch ever PUTS the judged sha and verdict into the payload in the first place. A judge
+    run that corrupted `payload["judge_sha"] = None` or `payload["judge_state"] = ""` in that
+    branch survived the full suite before this test existed.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED_RACE)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "run_judge_blocked_race"
+    payload = queued[0]["payload"]
+    # ⭐ The payload is the RECORD `stale_reason`'s live-head supersession check reads (see
+    # the test above) — a blocked_race verdict with no judged commit attached can never be
+    # checked against a live head, and would sail through as un-stale forever.
+    assert payload["judge_sha"] == _JUDGE_SHA, (
+        f"the judged sha did not reach the payload, got {payload['judge_sha']!r}"
+    )
+    # ...and the VERDICT itself has to reach it too — the kind string says a blocked_race
+    # fired, but a consumer reading the record (the dashboard, a replay of the event log)
+    # has only this field to learn the judge's own state string.
+    assert payload["judge_state"] == judge.J_BLOCKED_RACE, (
+        f"the verdict did not reach the payload, got {payload['judge_state']!r}"
+    )
+    assert payload["judge_detail"] == _LONG_DETAIL, (
+        f"the judge detail did not survive into the payload, got {payload['judge_detail']!r}"
+    )
+
+
 # --- CMX-197 rework: a verdict is only meaningful against the commit it judged --------
 #
 # The status-staleness check above catches a run that moved OFF awaiting_review. It says
