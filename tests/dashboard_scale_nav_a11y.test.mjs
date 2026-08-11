@@ -116,6 +116,53 @@ test('minimum legibility floor: --wall-pane-font-size and --wall-pane-line-heigh
         `--wall-pane-line-height (${lh[1]}) has dropped back toward the old 1.3 leading`);
 });
 
+// --- GUARD 2b: the legibility floor also covers the two tokens GUARD 2 does not
+// reach. --card-font-size (the sidebar-card scale — the ticket's HEADLINE objective
+// is raising 9-10px card text to 11.5px) and --wall-pane-font-size-sm (the .gs-state
+// pill's own escape hatch, exempt from GUARD 2's >= 11px floor by construction) can
+// both be shrunk back toward or below their pre-CMX-230 values while GUARD 1's
+// "is it a var()" check and every other guard here stay green.
+test('minimum legibility floor: --card-font-size and --wall-pane-font-size-sm are above the pre-CMX-230 floor', () => {
+    const card = rootTokenPx(CSS, 'card-font-size');
+    assert.ok(card >= 11, `--card-font-size (${card}px) has dropped back toward the old 9-10px card text`);
+    const sm = rootTokenPx(CSS, 'wall-pane-font-size-sm');
+    assert.ok(sm > 10, `--wall-pane-font-size-sm (${sm}px) has dropped back to (or below) the old 10px pill text`);
+});
+
+// --- GUARD 2c: "air in the chrome" at low densities (the CMX-230 comment above
+// `body.wall-density-airy #term-stage` in style.css names THIS file's density
+// guard by filename — this test is it). Two facts, both source-text since neither
+// is behaviourally provable in jsdom the way GUARD 2's numeric tokens are:
+//
+//   1. _setWallDensity's own cutoff is pinned at `<= 2` — style.css's comment's
+//      claim, made true.
+//
+//   2. buildWall calls _setWallDensity UNCONDITIONALLY (given a persisted
+//      _wallPreset), not from behind dead code. This one is genuinely
+//      unreachable-by-behaviour: buildWall only ever runs from inside
+//      renderTerminals, which ALWAYS calls _refitWallForDock() (itself calling
+//      the UNMUTATED applyGridLayout, which sets the SAME class) synchronously
+//      moments later in the very same render pass — so disabling buildWall's own
+//      restore line produces byte-identical DOM after every real render path a
+//      test can drive, no matter which public entry point exercises it. Anchored
+//      to the exact `if (_wallPreset) _setWallDensity(...)` form so a dead-code
+//      wrap (`if (false && _wallPreset) ...`) — which a plain substring/regex
+//      match on the call alone would miss, the exact hole GUARD 3a below fell
+//      into — cannot pass.
+test('density guard: _setWallDensity cuts off at <=2 panes, and buildWall restores it unconditionally on first paint', () => {
+    const fn = TERMINALS.slice(TERMINALS.indexOf('function _setWallDensity'));
+    const body = fn.slice(0, fn.indexOf('\nfunction ', 10));
+    assert.match(body, /wall-density-airy['"],\s*cols\s*\*\s*rows\s*<=\s*2\)/,
+        '_setWallDensity must toggle wall-density-airy off `cols * rows <= 2` — the style.css comment\'s claimed cutoff');
+
+    const build = TERMINALS.slice(TERMINALS.indexOf('function buildWall'));
+    const buildBody = build.slice(0, build.indexOf('\nfunction ', 10));
+    assert.match(buildBody, /if\s*\(\s*_wallPreset\s*\)\s*_setWallDensity\(_wallPreset\.cols,\s*_wallPreset\.rows\);/,
+        'buildWall must call _setWallDensity(_wallPreset.cols, _wallPreset.rows) unconditionally when _wallPreset ' +
+        'is set — not from behind a dead `if (false && ...)` — so a reload sitting on a 1/2-col preset is airy on ' +
+        'its own first paint, independent of applyGridLayout\'s later call');
+});
+
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
 // span (or the text it carries) and leaving only the colour class must fail.
 

@@ -244,6 +244,30 @@ test('every nav item renders a non-empty lucide SVG — no unicode glyph survive
     }
 });
 
+// --- 1c³. 🔴 renderNav ACTUALLY SPLITS the sidebar: primary → #side-nav, demoted →
+// #side-nav-more — not just "somewhere in either list" (the test above, by design,
+// is blind to which host an item lands in). tests/dashboard_scale_nav_a11y.test.mjs's
+// GUARD 7 only calls primaryNavViews/secondaryNavViews directly on entries scraped
+// out of views.js source text — it never asserts the RENDERED sidebar, so reverting
+// renderNav to dump every item into #side-nav (leaving #side-nav-more empty, the
+// registry, `tier` fields and both selector functions all untouched) stayed green. This
+// drives the REAL renderNav() into the REAL #side-nav / #side-nav-more and reads the
+// partition back off the rendered nodes.
+test('CMX-230: renderNav actually SPLITS the sidebar — primary views in #side-nav, demoted views in #side-nav-more', () => {
+    nav.renderNav();
+    const idsIn = sel => [...document.querySelectorAll(`${sel} .side-item`)].map(el => el.dataset.view);
+    const primaryIds = idsIn('#side-nav');
+    const secondaryIds = idsIn('#side-nav-more');
+
+    assert.deepEqual(primaryIds.sort(), ['feed', 'terminals', 'work'].sort(),
+        '#side-nav must render exactly the 3 primary views — a full un-split dump (or an empty split) breaks this');
+    assert.deepEqual(secondaryIds.sort(), ['knowledge', 'agents', 'personas', 'cost'].sort(),
+        '#side-nav-more must render exactly the 4 demoted views — an empty #side-nav-more means the split never ran');
+
+    for (const id of secondaryIds) assert.ok(!primaryIds.includes(id), `${id} must not ALSO render into #side-nav`);
+    for (const id of primaryIds) assert.ok(!secondaryIds.includes(id), `${id} must not ALSO render into #side-nav-more`);
+});
+
 // --- 1d. 🔴 the EXPANDED sidebar icons are sized to MATCH the collapsed rail ------
 //
 // CMX-85 enlarged the collapsed-rail glyphs; CMX-86 brings the expanded ones up to

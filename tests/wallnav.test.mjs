@@ -414,6 +414,33 @@ test('a pinned pane keeps its exact geometry through a grid-preset reflow', () =
     assert.notEqual(geom(PINNED), before.pinned, 'once unpinned, a reflow may move it again');
 });
 
+// 3b — CMX-230 WIRING: A GRID-PRESET CLICK ACTUALLY TOGGLES "AIR IN THE CHROME"
+// (body.wall-density-airy) at <=2 panes, off above. style.css's density rule and
+// _setWallDensity itself stay untouched by the corruption this guards against —
+// only applyGridLayout's call site is disabled — so a source-text guard on either
+// of those would stay green. This drives the REAL applyGridLayout and reads the
+// REAL body class back.
+test('CMX-230: a grid-preset click toggles body.wall-density-airy — on at <=2 panes, off above', () => {
+    window.chela.applyGridLayout(2, 2);   // 4-up: dense
+    assert.ok(!document.body.classList.contains('wall-density-airy'), 'a 4-pane preset must NOT be airy');
+
+    window.chela.applyGridLayout(1, 1);   // 1-up: airy
+    assert.ok(document.body.classList.contains('wall-density-airy'),
+        'applyGridLayout(1,1) must add wall-density-airy — the preset-click density wiring is missing');
+
+    window.chela.applyGridLayout(2, 3);   // 6-up: dense again
+    assert.ok(!document.body.classList.contains('wall-density-airy'), 'a 6-pane preset must remove wall-density-airy again');
+});
+
+// buildWall's OWN first-paint restore of wall-density-airy (independent of this
+// test's applyGridLayout call) is guarded in tests/dashboard_scale_nav_a11y.test.mjs
+// instead, as a source-text fact rather than a DOM behaviour: renderTerminals always
+// calls _refitWallForDock() synchronously right after buildWall, and that ALWAYS
+// re-applies the class via the unmutated applyGridLayout — so disabling buildWall's
+// own restore line is unobservable through any real, black-box render path this file
+// can drive (verified empirically before writing the guard the other way). See the
+// GUARD 2c comment there for the full reasoning.
+
 // 4 — THE KEYBOARD SWITCHER. Alt+N jumps to the pane the badge shows; bare N does not.
 test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alone', async () => {
     const idx = wid => tile(wid).querySelector('.gs-idx');
@@ -804,6 +831,29 @@ test('the header dot is painted by live status (working vs idle carry different 
     delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
     await terminals.termTick();
     assert.ok(badge.classList.contains('idle'), 'reverting session_status must repaint the dot back to idle');
+});
+
+// 12b — THE .gs-state PILL'S WORD ACTUALLY REPAINTS ON A LIVE STATE CHANGE, NOT JUST
+// ITS COLOUR CLASS (CMX-230). tests/dashboard_scale_nav_a11y.test.mjs's GUARD 3a only
+// source-text-matches `w.textContent = s.word` inside _applyWallTileFrame's body — a
+// judge round found that regex still matches even when the whole statement is dead
+// code (`if (false && w) w.textContent = s.word;`), because the substring survives
+// unchanged. This drives the REAL function through a REAL live state transition
+// (termTick, same as test 12 above) and reads the rendered word back off the node,
+// so dead-coding the repaint actually goes red here.
+test('CMX-230: the .gs-state pill\'s WORD text actually repaints on a live state change, not just its colour class', async () => {
+    const wid = '@1';
+    const word = tile(wid).querySelector('.gs-state-word');
+    assert.equal(word.textContent, 'idle', 'sanity: an agent with no session_status paints the idle word');
+
+    AGENTS[0].session_status = 'busy';
+    await terminals.termTick();
+    assert.equal(word.textContent, 'working',
+        '_applyWallTileFrame must repaint .gs-state-word\'s TEXT on a live state change, not just recolour the pill');
+
+    delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
+    await terminals.termTick();
+    assert.equal(word.textContent, 'idle', 'reverting session_status must repaint the word back to idle too');
 });
 
 // 13 — THE ☰ GLYPH IS GONE; .gs-grip STAYS THE DRAG HANDLE (CMX-117 B). GridStack's
