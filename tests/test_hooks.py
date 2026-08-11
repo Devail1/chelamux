@@ -52,6 +52,18 @@ def no_tmux(monkeypatch):
     monkeypatch.setattr(hooks, "_panes", lambda force=False: {})
 
 
+@pytest.fixture(autouse=True)
+def no_epoch(monkeypatch):
+    """No tmux epoch in a unit test by default: stamped as None unless a test says so.
+
+    The cache in `hooks._current_epoch` lives for the process's lifetime, not the test's
+    — reset it too, or a value a prior test set could still be within its TTL here.
+    """
+    hooks._epoch_cache["ts"] = 0.0
+    hooks._epoch_cache["value"] = None
+    monkeypatch.setattr(hooks.epoch, "current", lambda: None)
+
+
 @pytest.fixture
 def client():
     return dash.app.test_client()
@@ -476,6 +488,65 @@ def test_explicit_wid_dead_names_the_window_when_it_is_not_live():
     assert hooks._explicit_wid_dead("@999", panes={}) == "@999"
 
 
+# --- the forced-refresh retry (CMX-231) -----------------------------------------------
+#
+# `sessions.panes` is TTL-cached (≤1s), so a real, live window can in principle briefly
+# look dead to a single un-forced read — if a session restarts its OWN claude process
+# INSIDE an already-open window (auto-compact, `/clear` — no window ever closes) and
+# `SessionStart` fires before the cache refreshes. `wid_for_session`'s inference fallback
+# already handles that shape with one forced re-read on a miss; `_explicit_wid`/
+# `_explicit_wid_dead` do the same — but ONLY when `panes=None` (the real caller). A
+# caller that passes a fixed snapshot explicitly (every test above) is asking for that
+# snapshot's answer, not a retry. The tests above never need `hooks._panes` to answer
+# anything in particular — the autouse `no_tmux` fixture's `{}` is enough — because a
+# working short-circuit never calls it again; see the test below for the one that actually
+# proves the short-circuit fires, by making a hidden retry answer differently.
+
+def test_explicit_wid_retries_a_forced_refresh_before_calling_a_live_window_dead(monkeypatch):
+    """Missing from the cached read, present after a forced one: this is the live window,
+    not a dead one — the header must win, exactly as if the cache had been fresh."""
+    calls = []
+
+    def fake_panes(force=False):
+        calls.append(force)
+        return {"@299": object()} if force else {}
+
+    monkeypatch.setattr(hooks, "_panes", fake_panes)
+    assert hooks._explicit_wid("@299") == "@299"
+    assert calls == [False, True]      # cached read first, forced retry only on a miss
+
+
+def test_explicit_wid_dead_retries_a_forced_refresh_before_reporting_a_fault(monkeypatch):
+    """The complementary function must reach the SAME verdict: found on the forced retry
+    means this was never a fault, so `rejected_wid` must stay unset."""
+    monkeypatch.setattr(hooks, "_panes",
+                        lambda force=False: {"@299": object()} if force else {})
+    assert hooks._explicit_wid_dead("@299") is None
+
+
+def test_explicit_wid_dead_still_reports_a_fault_when_the_forced_retry_also_misses(monkeypatch):
+    """The retry is one extra look, not infinite trust — a window still missing after a
+    fresh tmux read is genuinely dead, and this must still warn."""
+    monkeypatch.setattr(hooks, "_panes", lambda force=False: {})
+    assert hooks._explicit_wid("@999") is None
+    assert hooks._explicit_wid_dead("@999") == "@999"
+
+
+def test_explicit_wid_never_retries_when_the_caller_supplies_a_fixed_snapshot(monkeypatch):
+    """A caller that passes `panes=` explicitly gets exactly that answer — no hidden
+    second tmux call behind its back. The autouse `no_tmux` fixture already stubs
+    `hooks._panes` to `{}` for both `force=True` and `force=False`, which makes a hidden
+    retry indistinguishable from the short-circuit (both land on the same empty answer) —
+    so here `_panes` is re-mocked to answer differently by `force`: a forced call reports
+    `@299` live. If the short-circuit were ever removed, both functions below would fall
+    through to that forced call and flip their verdict; asserting the short-circuited
+    answer here catches that."""
+    monkeypatch.setattr(hooks, "_panes",
+                        lambda force=False: {"@299": object()} if force else {})
+    assert hooks._explicit_wid("@299", panes={}) is None
+    assert hooks._explicit_wid_dead("@299", panes={}) == "@299"
+
+
 def test_ingest_never_reports_rejected_wid_when_the_header_is_simply_unset(monkeypatch):
     monkeypatch.setattr(hooks, "_slug_from_disk", lambda session_id: None)
     record = hooks.ingest("SessionStart", _body(), explicit_wid=None)
@@ -504,6 +575,62 @@ def test_ingest_reports_rejected_wid_when_the_header_names_a_dead_window(monkeyp
     record = hooks.ingest("SessionStart", _body(), explicit_wid="@999")
     assert record["wid"] is None
     assert record["rejected_wid"] == "@999"
+
+
+# --- the epoch stamp (CMX-236) ----------------------------------------------------
+#
+# `runtime_truth._hooks_rejected_wid_report` needs to know WHICH tmux server a record was
+# written under to tell a genuine teardown apart from a stale id surviving a server
+# restart — `ingest` is the one write path, so it is the one place that can stamp it.
+
+def test_ingest_stamps_every_record_with_the_current_tmux_epoch(monkeypatch):
+    monkeypatch.setattr(hooks.epoch, "current", lambda: "1234-5678")
+    record = hooks.ingest("PreToolUse", _body())
+    assert record["epoch"] == "1234-5678"
+
+
+def test_ingest_stamps_none_when_the_epoch_cannot_be_read(monkeypatch):
+    """No tmux, no server: `chela.epoch.current` already returns `None` for "unknown, not
+    stale" — `ingest` must carry that through unchanged, not invent a value."""
+    monkeypatch.setattr(hooks.epoch, "current", lambda: None)
+    record = hooks.ingest("PreToolUse", _body())
+    assert record["epoch"] is None
+
+
+def test_ingest_caches_the_epoch_instead_of_asking_tmux_on_every_hook(monkeypatch):
+    """`chela.epoch.current` is its own tmux subprocess — asking it fresh on every single
+    hook (PreToolUse fires per tool call, far hotter than SessionStart) would add a real
+    subprocess to the hot path for a value that essentially never changes. One read must
+    serve every hook inside the TTL."""
+    calls = []
+    monkeypatch.setattr(hooks.epoch, "current", lambda: calls.append(1) or "ep-A")
+    hooks.ingest("PreToolUse", _body())
+    hooks.ingest("PreToolUse", _body())
+    hooks.ingest("PreToolUse", _body())
+    assert len(calls) == 1
+
+
+def test_ingest_refreshes_the_epoch_after_the_cache_ttl_expires(monkeypatch):
+    """The cache is not permanent — a real tmux server restart must eventually be seen.
+
+    The elapsed time simulated below is a fixed, ABSOLUTE number of seconds — not derived
+    from ``_EPOCH_TTL`` itself. A dashboard process lives for days, so if the TTL were ever
+    widened to something effectively permanent, a test that measures its own wait relative
+    to the constant it is guarding could never observe that (the wait would just widen along
+    with it). The bound below pins the TTL to something sane for a live process; the elapsed
+    simulation is comfortably past that bound regardless of what ``_EPOCH_TTL`` is set to.
+    """
+    assert hooks._EPOCH_TTL <= 60.0, (
+        "epoch cache TTL must stay bounded — a live dashboard process must eventually see a "
+        "tmux server restart, not cache the epoch forever"
+    )
+    monkeypatch.setattr(hooks.epoch, "current", lambda: "ep-A")
+    first = hooks.ingest("PreToolUse", _body())
+    assert first["epoch"] == "ep-A"
+    monkeypatch.setattr(hooks.epoch, "current", lambda: "ep-B")
+    hooks._epoch_cache["ts"] -= 61.0     # simulate 61s elapsing — past any sane TTL bound
+    second = hooks.ingest("PreToolUse", _body())
+    assert second["epoch"] == "ep-B"
 
 
 def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
