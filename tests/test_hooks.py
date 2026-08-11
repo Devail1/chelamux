@@ -478,14 +478,21 @@ def test_explicit_wid_dead_names_the_window_when_it_is_not_live():
 
 # --- the forced-refresh retry (CMX-231) -----------------------------------------------
 #
-# `sessions.panes` is TTL-cached (≤1s). A session that restarts its OWN claude process
-# INSIDE an already-open window (auto-compact, `/clear` — no window ever closes) can fire
-# `SessionStart` faster than that cache refreshes, so a real, live window briefly looks
-# dead to a single un-forced read. `wid_for_session`'s inference fallback already handles
-# this exact shape with one forced re-read on a miss; `_explicit_wid`/`_explicit_wid_dead`
-# must do the same — but ONLY when `panes=None` (the real caller). A caller that passes a
-# fixed snapshot explicitly (every test above) is asking for that snapshot's answer, not a
-# retry — the tests above assert that by never mocking `hooks._panes` at all.
+# `sessions.panes` is TTL-cached (≤1s), so a real, live window can in principle briefly
+# look dead to a single un-forced read — if a session restarts its OWN claude process
+# INSIDE an already-open window (auto-compact, `/clear` — no window ever closes) and
+# `SessionStart` fires before the cache refreshes. `wid_for_session`'s inference fallback
+# already handles that shape with one forced re-read on a miss; `_explicit_wid`/
+# `_explicit_wid_dead` now do the same — but ONLY when `panes=None` (the real caller). A
+# caller that passes a fixed snapshot explicitly (every test above) is asking for that
+# snapshot's answer, not a retry — the tests above assert that by never mocking
+# `hooks._panes` at all.
+#
+# NOTE this retry is a defensible race-guard on its own terms, but it is NOT what CMX-231
+# measured in production: the two real rejections both named a window that had already
+# been replaced ~40s (and ~90s+) earlier — long past anything a ≤1s cache TTL explains.
+# That shape is a genuine teardown artifact, and it is handled by the severity split in
+# `runtime_truth._hooks_rejected_wid_report`, not by this retry.
 
 def test_explicit_wid_retries_a_forced_refresh_before_calling_a_live_window_dead(monkeypatch):
     """Missing from the cached read, present after a forced one: this is the live window,
@@ -557,9 +564,10 @@ def test_ingest_reports_rejected_wid_when_the_header_names_a_dead_window(monkeyp
 
 def test_ingest_never_reports_rejected_wid_for_a_window_missed_only_by_a_stale_cache(
         monkeypatch):
-    """CMX-231, the production shape measured live: a session restarts its own claude
-    process inside a window that never closed, and `SessionStart` outruns the ≤1s pane
-    cache. The forced retry must resolve @299 as live, so this must land exactly like
+    """A synthetic version of the race the retry guards against (NOT the CMX-231 production
+    shape — see the module comment above): a session restarts its own claude process inside
+    a window that never closed, and `SessionStart` outruns the ≤1s pane cache. The forced
+    retry must resolve @299 as live, so this must land exactly like
     `test_ingest_never_reports_rejected_wid_when_the_header_is_live` — no fault at all."""
     monkeypatch.setattr(hooks, "_slug_from_disk", lambda session_id: None)
     monkeypatch.setattr(hooks, "_panes",

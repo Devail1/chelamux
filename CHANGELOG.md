@@ -34,17 +34,21 @@ history lives in `git log`.
   and only points at CMX-190/teardown-race for the sessions that actually had a window to
   lose.
 
-- **`chela doctor`'s `plugin.hooks_wid_rejected` fact no longer calls a live window dead.**
-  It used to declare a well-formed `$CHELA_WID` naming a not-currently-live window "always
-  a fault, never the ordinary unset case," pointing a reader at a manual-relaunch/stale
-  global-env hunt (CMX-192). Measured against this host's own production log (CMX-231):
-  the only two real occurrences ever recorded were both a session restarting its own
-  claude process INSIDE a window that never closed (auto-compact, `/clear`) — `SessionStart`
-  outran `sessions.panes`' ≤1s-TTL cache, a race `wid_for_session`'s own inference fallback
-  already absorbed with a forced re-read, but the header path never got the same retry.
-  `chela/hooks.py`'s `_explicit_wid`/`_explicit_wid_dead` now get that same forced-refresh
-  retry before ever calling a header's window dead, and the WARN detail no longer overclaims
-  — a rejected header is now one that is still not live after a fresh tmux read.
+- **`chela doctor`'s `plugin.hooks_wid_rejected` fact no longer calls every teardown a
+  fault.** It used to declare a well-formed `$CHELA_WID` naming a not-currently-live
+  window "always a fault, never the ordinary unset case," pointing a reader at a
+  manual-relaunch/stale global-env hunt (CMX-192). Measured against this host's own
+  production log (CMX-231): the only two real occurrences ever recorded named a window
+  that HAD been live earlier in that same log and was replaced ~40s before the first of
+  them — a teardown artifact, not a stale-env fault. The fact now tells the two shapes
+  apart using the ring's own history: a rejected wid that also resolved some other record
+  in the ring reports OK (teardown, no action needed); a rejected wid with no such record
+  anywhere in the ring keeps the WARN and the CMX-192 chase-list. Separately,
+  `chela/hooks.py`'s `_explicit_wid`/`_explicit_wid_dead` (the header fast path) gained
+  the same forced-refresh retry `wid_for_session`'s inference fallback already had, so a
+  session that races the ≤1s pane-cache TTL by replacing its own claude process inside a
+  still-open window no longer reaches `rejected_wid` at all — a defensible guard in its
+  own right, though it is not what explains the two measured records above.
 
 
 - **Agent-to-agent messages now travel over Claude Code's peer messaging socket

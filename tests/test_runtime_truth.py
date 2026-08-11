@@ -565,6 +565,53 @@ def test_corrupting_the_owned_value_makes_doctor_say_so(name, fleet, monkeypatch
         f"{level}. A check that cannot be seen to go red is not a check.")
 
 
+def test_hooks_rejected_wid_teardown_is_ok_not_warn(fleet, monkeypatch):
+    """CMX-231: a rejected wid that ALSO resolved another record earlier in the ring is a
+    teardown artifact — the window was real and live, it just was not live any more by
+    the time this header arrived — and must never chase the CMX-192 lead."""
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@299",
+                     session_id="1969180e-dead-beef-cafe-000000000002")
+    event_log.append("hook.session_start", "session start (resume)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000002",
+                     rejected_wid="@299")
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.OK for f in findings)
+    assert "@299" in findings[0].title
+    assert "teardown" in findings[0].detail.lower()
+
+
+def test_hooks_rejected_wid_never_live_stays_warn(fleet, monkeypatch):
+    """The complementary shape: a rejected wid that never resolved ANYTHING else in the
+    ring has no evidence it was ever this process's live window — the genuinely rare,
+    genuinely actionable CMX-192 shape — and must still warn."""
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000003",
+                     rejected_wid="@999")
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.WARN for f in findings)
+    assert "@999" in findings[0].title
+    assert "CMX-192" in findings[0].detail
+
+
+def test_hooks_rejected_wid_splits_severity_when_both_shapes_are_present(
+        fleet, monkeypatch):
+    """Both shapes exercised together must produce two DISTINCT findings, not one
+    verdict blended across both — a real teardown must never mask a real CMX-192 case,
+    or vice versa."""
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@299",
+                     session_id="1969180e-dead-beef-cafe-000000000004")
+    event_log.append("hook.session_start", "session start (resume)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000004",
+                     rejected_wid="@299")
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000005",
+                     rejected_wid="@999")
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    levels = {f.level for f in findings}
+    assert levels == {doctor.OK, doctor.WARN}, (
+        f"expected one OK (teardown, @299) and one WARN (never-live, @999), got {findings}")
+
+
 def test_a_check_state_that_cannot_be_read_is_never_a_pass(fleet, monkeypatch):
     """⛔ `gh` missing / offline / rate-limited = UNKNOWN, not GREEN.
 

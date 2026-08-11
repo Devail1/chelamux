@@ -1140,59 +1140,95 @@ def _hooks_unattributed_report(_declared: None, obs: Observation) -> list[Findin
 # ordinary unset case" — a manual relaunch inheriting a stale `$CHELA_WID` from tmux's
 # global environment after its window closed (CMX-192). Measured against this host's own
 # production log (~13.8k `hook.*` records across ~4 weeks): the only two occurrences ever
-# recorded were BOTH `hook.session_start`, BOTH naming the SAME long-lived window, which
-# never closed or was replaced anywhere in the surrounding log — other hooks kept
-# resolving to it, before and after. That is the signature of a session restarting INSIDE
-# an already-open window (auto-compact, `/clear` — a new claude process replaces the old
-# one in place, no window is killed) whose `SessionStart` fires before
-# `sessions.panes`' ≤1s-TTL cache catches up: not a dead window, a cache that hadn't
-# refreshed yet. `wid_for_session`'s own inference fallback already had a name and a fix
-# for this exact shape ("a window that appeared since the last refresh") — one forced
-# re-read on a miss — but `_explicit_wid`/`_explicit_wid_dead` never got it, so the same
-# race that inference treated as benign got reported one layer up as a hard fault.
-# CMX-231 gave both functions that same forced-refresh retry (hooks.py), so what reaches
-# `rejected_wid` now is a header still not live after a fresh tmux read — the genuinely
-# rare, genuinely actionable CMX-192 shape, not a session replacing its own process a
-# moment before the cache noticed.
+# recorded were BOTH `hook.session_start`, BOTH naming the SAME window — a window that had
+# resolved other hooks earlier in that same log and was then REPLACED by a different wid
+# ~40s before the first rejection (the second rejection followed ~90s after the first,
+# long after the replacement too). That is a teardown artifact: the window the header
+# named was real and had been live, it just was not live ANY MORE by the time this header
+# arrived — not the CMX-192 shape, where the named window was never part of this
+# process's story at all, only a stale env var's.
+#
+# Those two things read identically off a single "not live right now" check, so this fact
+# now tells them apart using the ring's OWN history: if `rejected_wid` also appears as the
+# resolved `wid` on some OTHER record in the same ring, the window was genuinely live at
+# some point in the observed window and this is teardown — reported at OK, not WARN. Only
+# a `rejected_wid` that never once resolved anything in the ring keeps the WARN and the
+# CMX-192 chase-list; that is the shape with no evidence the window was ever this
+# process's to begin with.
+#
+# `hooks._explicit_wid`/`_explicit_wid_dead` separately gained a forced-refresh retry
+# before giving up on a header (CMX-231) — a real but DIFFERENT race (a session
+# replacing its own claude process inside a still-open window faster than the ≤1s pane
+# cache refreshes). That retry does not explain the two records above — the window was
+# genuinely gone by the time either fired, not merely stale-cached — it just keeps a
+# window that appears a moment later from ever reaching `rejected_wid` in the first place.
 
 def _hooks_rejected_wid_read() -> Observation:
     """Every ``hook.*`` record in the ring whose ``X-Chela-Wid`` named a window that was
     not live — ``rejected_wid``, read back exactly as :func:`chela.hooks.ingest` wrote
-    it. Distinct from the unset case, which never sets this field at all."""
+    it. Distinct from the unset case, which never sets this field at all.
+
+    Also collects every ``wid`` any record in the ring resolved to, so the report can
+    tell a window that used to be live (a teardown artifact) apart from one that never
+    appears anywhere else in the observed window (the CMX-192 shape)."""
     records = event_log.ring()
     dead: dict[str, str] = {}
+    resolved_ever: set[str] = set()
+    for rec in records:
+        wid = rec.get("wid")
+        if wid:
+            resolved_ever.add(wid)
     for rec in records:
         rtype = rec.get("type") or ""
         rejected = rec.get("rejected_wid")
         if rejected and rtype.startswith(hooks.TYPE_PREFIX):
             sid = rec.get("session_id") or "?"
             dead[sid] = rejected
-    return observed({"dead": dead, "bound": _ring_bound_note(records)})
+    return observed({"dead": dead, "resolved_ever": resolved_ever,
+                     "bound": _ring_bound_note(records)})
 
 
 def _hooks_rejected_wid_report(_declared: None, obs: Observation) -> list[Finding]:
     dead: dict[str, str] = obs.value["dead"]
+    resolved_ever: set[str] = obs.value["resolved_ever"]
     bound = obs.value["bound"]
     if not dead:
         return [Finding(OK, f"no rejected X-Chela-Wid headers in the {bound} — every "
                             "header seen either named a live window or was unset")]
-    named = ", ".join(f"{sid}→{wid}" for sid, wid in sorted(dead.items()))
-    return [Finding(
-        WARN,
-        f"{len(dead)} session(s) sent an X-Chela-Wid naming a DEAD window in the "
-        f"{bound}: {named}",
-        "A well-formed $CHELA_WID that names a window which is STILL not live after a "
-        "forced tmux re-read (chela.hooks._explicit_wid_dead retries once before "
-        "reporting this — CMX-231) usually means the agent was relaunched by hand and "
-        "inherited a stale window id from tmux's global environment surviving that "
-        "relaunch (the CMX-192 root cause). It is NOT the ordinary shape of a session "
-        "restarting inside a window that never closed (auto-compact, /clear) — the retry "
-        "already absorbs that race. chela.hooks.wid_for_session still fell back to "
-        "origin-based inference for these, so the event was not necessarily lost — but "
-        "the stale id is worth chasing down: is the window in `chela status` right now, "
-        "and does the session's OWN transcript show a `--resume` shortly before this? "
-        "This scan is bounded to the ring above.",
-    )]
+    teardown = {sid: wid for sid, wid in dead.items() if wid in resolved_ever}
+    orphaned = {sid: wid for sid, wid in dead.items() if wid not in resolved_ever}
+    findings: list[Finding] = []
+    if teardown:
+        named = ", ".join(f"{sid}→{wid}" for sid, wid in sorted(teardown.items()))
+        findings.append(Finding(
+            OK,
+            f"{len(teardown)} rejected X-Chela-Wid header(s) in the {bound} named a "
+            f"window that WAS live earlier in this same window: {named}",
+            "chela.hooks._explicit_wid_dead rejected these because the named window was "
+            "not live at the moment the header arrived, but that same wid also resolved "
+            "other hook.* records elsewhere in the ring — a teardown artifact, not the "
+            "CMX-192 fault: the window the agent named was real, it just closed or was "
+            "replaced before this particular request landed. No action needed.",
+        ))
+    if orphaned:
+        named = ", ".join(f"{sid}→{wid}" for sid, wid in sorted(orphaned.items()))
+        findings.append(Finding(
+            WARN,
+            f"{len(orphaned)} session(s) sent an X-Chela-Wid naming a window in the "
+            f"{bound} that was NEVER live in this same window: {named}",
+            "A well-formed $CHELA_WID that names a window which is not live right now, "
+            "and never resolved anything else anywhere in this ring either, usually "
+            "means the agent was relaunched by hand and inherited a stale window id "
+            "from tmux's global environment surviving that relaunch (the CMX-192 root "
+            "cause). chela.hooks.wid_for_session still fell back to origin-based "
+            "inference for these, so the event was not necessarily lost — but the stale "
+            "id is worth chasing down: is the window in `chela status` right now, and "
+            "does the session's OWN transcript show a `--resume` shortly before this? "
+            "This scan is bounded to the ring above — a window that WAS live earlier but "
+            "scrolled out of the ring before this check ran would look like this shape "
+            "too; widen the window before concluding it never existed.",
+        ))
+    return findings
 
 
 # --- fact: does every LIVE window have a reachable PEER-MESSAGING SOCKET? -------------

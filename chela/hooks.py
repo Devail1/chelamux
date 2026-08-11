@@ -619,13 +619,18 @@ def _explicit_wid(hint: str | None,
 
     ``panes=None`` (the real caller, never a test with a fixed snapshot) gets ONE retry
     against a forced-fresh read before "not live" is trusted: ``sessions.panes``' own TTL
-    cache (≤1s) can predate a session that just replaced its own claude process INSIDE an
-    already-open window (auto-compact, ``/clear`` — the window never closed), and
-    ``SessionStart`` fires the instant the new process attaches, often faster than the
-    cache refreshes. ``wid_for_session``'s own inference fallback already forces a re-read
-    for exactly this shape ("a window that appeared since the last refresh"); this mirrors
-    it so the header path gets the same second look before a live window is ever called
-    not-live.
+    cache (≤1s) can in principle predate a session that just replaced its own claude
+    process INSIDE an already-open window (auto-compact, ``/clear`` — the window never
+    closed), if ``SessionStart`` fires before the cache refreshes. ``wid_for_session``'s
+    own inference fallback already forces a re-read for exactly this shape ("a window that
+    appeared since the last refresh"); this mirrors it so the header path gets the same
+    second look before a live window is ever called not-live.
+
+    NOTE this retry is justified on its own terms, independent of CMX-231's measurement
+    below: the two production rejections that motivated CMX-231 were NOT this race — the
+    named window had been replaced ~40s and ~90s+ earlier, so a fresh read would have
+    missed it too. That shape is a genuine teardown artifact, handled by the severity
+    split in ``runtime_truth._hooks_rejected_wid_report``, not by this retry.
     """
     if not hint or not _WID_RE.match(hint):
         return None
@@ -645,12 +650,13 @@ def _explicit_wid_dead(hint: str | None,
 
     Unset (no ``$CHELA_WID`` — a session chela did not launch) and malformed both return
     ``None`` here too, same as a live wid — those are never a fault and must never warn.
-    A well-formed hint that survives the retry and is still not live usually means the
-    agent was relaunched by hand and inherited a stale ``$CHELA_WID`` from tmux's global
-    environment (the CMX-192 root cause) — the retry exists precisely so this signal isn't
-    also true of a window that is very much alive, just not yet in the cache (CMX-231:
-    measured live on this host, both real occurrences were a `SessionStart` racing its OWN
-    still-open window this way, not a dead one).
+    A well-formed hint that survives the retry and is still not live can mean the agent
+    was relaunched by hand and inherited a stale ``$CHELA_WID`` from tmux's global
+    environment (the CMX-192 root cause) — but it can just as well mean the window it once
+    named simply closed or was replaced normally, seconds or minutes ago, which is not a
+    fault at all. This function cannot tell those two shapes apart on its own; see
+    ``runtime_truth._hooks_rejected_wid_report`` (CMX-231) for the severity split that
+    does, using the ring's own history of what ``wid`` this value used to resolve to.
     """
     if not hint or not _WID_RE.match(hint):
         return None
