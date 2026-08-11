@@ -1219,6 +1219,69 @@ def test_judge_blocked_race_does_not_report_an_ordinary_blocked_run(fleet, monke
     assert findings and findings[0].level == doctor.OK
 
 
+# --- judge.blocked_race must be able to CLEAR — round 2 of CMX-240 review ---------------
+#
+# Round 1 reported every J_BLOCKED_RACE row regardless of status and never gave it a way
+# back to green: a row that reaches a terminal status without being re-judged would have
+# stayed ERROR forever, with no operator action able to resolve it. `_blocked_race_scan`
+# is monkeypatched wholesale by the CORRUPTIONS fixture above (it hands the scan's OUTPUT,
+# never exercising its filtering), so these test the real scan directly against a fake
+# `dispatcher.list_runs()` — the same seam `_blocked_race_scan`'s own docstring names, and
+# the only way to reach `_blocked_race_resolved` without depending on the real
+# `dispatcher.DB_PATH` (cached at import against the developer's actual ~/.chela).
+
+def _blocked_race_row(**over) -> dict:
+    row = {
+        "task_id": "CMX-239", "status": "needs_human",
+        "pr_url": "https://github.com/acme/repo/pull/239",
+        "judge_detail": "a guard SURVIVED corruption",
+        "judge_sha": "deadbeef", "pr_head_sha": "deadbeef",
+    }
+    row.update(over)
+    return row
+
+
+def _scan_with(tmp_path, monkeypatch, row: dict) -> dict:
+    from chela import judge
+
+    fake_db = tmp_path / "scheduler.db"
+    fake_db.write_text("")
+    monkeypatch.setattr(dispatcher, "DB_PATH", fake_db)
+    monkeypatch.setattr(dispatcher, "list_runs",
+                        lambda: [{**row, "judge_state": judge.J_BLOCKED_RACE}])
+    return runtime_truth._blocked_race_scan()
+
+
+def test_judge_blocked_race_clears_once_the_head_moves_past_the_judged_sha(tmp_path, monkeypatch):
+    """The ordinary resolution path: a fresh push superseded the judged commit — dispatcher's
+    own per-sha trigger (`judge_sha != pr_head_sha`) re-judges the new head automatically.
+    The alarm was about `judge_sha`'s commit specifically, and that commit is no longer what
+    the PR's head names, so the row must stop qualifying. Remove `_blocked_race_resolved`'s
+    check and this goes red for the wrong reason: a resolved row keeps reporting."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(pr_head_sha="cafef00d"))
+    assert scanned == {}, "a row whose head moved past judge_sha must clear, not keep reporting"
+
+
+def test_judge_blocked_race_does_not_clear_on_an_unrelated_status_change(tmp_path, monkeypatch):
+    """The counterweight: a genuinely stuck row (head unmoved) must keep reporting no matter
+    how its `status` changes underneath it — status is exactly what round 1 used, and exactly
+    what the ticket named as NOT proof of resolution. Loosen the guard to clear on any status
+    change and this goes red."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(status="done", pr_head_sha="deadbeef"))
+    assert "CMX-239" in scanned
+    assert scanned["CMX-239"]["status"] == "done"
+
+
+def test_judge_blocked_race_does_not_clear_with_no_head_to_compare(tmp_path, monkeypatch):
+    """A row with no `pr_head_sha` on it proves nothing either way — silence must not be
+    read as resolution."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(pr_head_sha=None))
+    assert "CMX-239" in scanned
+
+
 # --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------
 
 def test_restore_dead_epoch_rows_reports_the_count(fleet, monkeypatch):

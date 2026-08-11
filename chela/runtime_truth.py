@@ -694,10 +694,35 @@ def _checks_report(declared: dict[str, dict], obs: Observation) -> list[Finding]
 # find it: nothing here reads `judge_state` at all. This closes that — a run stuck in
 # `J_BLOCKED_RACE` is reported every single time doctor runs, for as long as it stays stuck,
 # not just on the tick it happened.
+#
+# ⛔ CMX-240 round 2: this fact reports a row WHATEVER its status (a run that already shipped
+# with a lost blocking verdict is more alarming than one still under review, not less) — but
+# that means `status` can never be what clears it: a row's status changing is not evidence
+# ANYTHING about the verdict was resolved. The one thing that IS evidence: `judge_sha` (the
+# commit the race happened on) no longer being the PR's head. Either an operator ran `chela
+# judge run <task>` by hand — the documented way to clear a stale verdict (see
+# `judge.judge_run`'s own comment) — which stamps a fresh `judge_state` and takes the row out
+# of this scan on its own; or a later push moved `pr_head_sha` past the judged commit, which
+# means the specific commit this alarm was about is no longer what would ship, and
+# dispatcher's own per-sha trigger (`judge_sha != pr_head_sha`) re-judges the new head
+# automatically. A row whose head has NOT moved keeps reporting no matter how many times its
+# `status` changes underneath it — that is the guarantee `_blocked_race_resolved` encodes.
+
+
+def _blocked_race_resolved(row: dict) -> bool:
+    """True once the PR's head has moved past the commit the race was recorded on — the
+    only thing (besides `judge_state` itself changing, which already takes a row out of the
+    scan below) that resolves a `J_BLOCKED_RACE` row. A missing `judge_sha` or `pr_head_sha`
+    proves nothing either way, so it does NOT resolve — silence is not a signal here."""
+    sha = row.get("judge_sha")
+    head = row.get("pr_head_sha")
+    return bool(sha and head and sha != head)
+
 
 def _blocked_race_scan() -> dict[str, dict]:
-    """Every run row whose `judge_state` is `judge.J_BLOCKED_RACE` — the CAS-refused race on
-    a BLOCKING verdict (CMX-239). A module-level function, like `_parked_runs` / `_reviewed_prs`
+    """Every run row whose `judge_state` is `judge.J_BLOCKED_RACE` and that has not since
+    been resolved (see `_blocked_race_resolved`) — the CAS-refused race on a BLOCKING
+    verdict (CMX-239). A module-level function, like `_parked_runs` / `_reviewed_prs`
     above, so the test suite can hand it a fixed table instead of reaching
     `dispatcher.DB_PATH` (cached at import time against the real ``~/.chela``, not the
     fixture's temp one)."""
@@ -708,6 +733,8 @@ def _blocked_race_scan() -> dict[str, dict]:
     out: dict[str, dict] = {}
     for run in dispatcher.list_runs():
         if run.get("judge_state") != judge.J_BLOCKED_RACE:
+            continue
+        if _blocked_race_resolved(run):
             continue
         out[str(run["task_id"])] = {
             "status": str(run.get("status")),
