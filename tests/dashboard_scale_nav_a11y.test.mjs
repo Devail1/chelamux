@@ -84,6 +84,16 @@ function rootTokenPx(css, name) {
 const WALL_PANE_SELECTORS = ['.gs-head', '.pane-subtitle', '.pane-recap', '.gs-state', '.term-ctx-bar'];
 const CARD_SELECTORS = ['.ar-title', '.ar-sub', '.ar-ctx'];
 
+// GUARD 1's font-size regex used to accept EITHER --wall-pane-font-size or its
+// `-sm` escape hatch for all five WALL_PANE_SELECTORS. style.css declares
+// --wall-pane-font-size-sm as "the .gs-state pill only", but nothing enforced
+// that scope — a judge round repointed .pane-subtitle (prose text the ticket
+// explicitly fixes at the big token) to the `-sm` token instead, and this test
+// still passed because the `-sm` alternation was permitted everywhere. Only
+// .gs-state may read the `-sm` token; the other four must read the base token
+// with no alternation, mirroring CARD_SELECTORS's exact-one-token discipline.
+const WALL_PANE_SM_ALLOWED = new Set(['.gs-state']);
+
 test('type scale: every wall/pane rule\'s font-size is a var() token, not a bare px literal', () => {
     for (const sel of WALL_PANE_SELECTORS) {
         const body = blockFor(CSS, sel);
@@ -91,6 +101,15 @@ test('type scale: every wall/pane rule\'s font-size is a var() token, not a bare
             `${sel} must set font-size from a --wall-pane-font-size* token`);
         assert.doesNotMatch(body, /font-size:\s*[0-9.]+px/,
             `${sel} has reverted to a bare font-size px literal — the type scale has no single lever again`);
+
+        if (WALL_PANE_SM_ALLOWED.has(sel)) {
+            assert.match(body, /font-size:\s*var\(--wall-pane-font-size-sm\)/,
+                `${sel} is the one selector style.css scopes the -sm token to — it must actually use it`);
+        } else {
+            assert.doesNotMatch(body, /font-size:\s*var\(--wall-pane-font-size-sm\)/,
+                `${sel} must read the base --wall-pane-font-size token, not the -sm escape hatch style.css scopes to .gs-state only — ` +
+                `this is the 11px legibility floor GUARD 2 relies on GUARD 1 to enforce at every use site`);
+        }
     }
 });
 
@@ -242,6 +261,16 @@ test('WIRING: the airy-density rule actually pads the stage — not just an empt
     assert.ok(maxWidth, 'body.wall-density-airy #term-stage .grid-stack has no max-width rule');
     assert.ok(parseFloat(maxWidth[1]) > 0,
         `the centred max-width column (${maxWidth[1]}px) has been zeroed — panes would stretch edge-to-edge again`);
+
+    // The floors above pin the padding and the max-width, but this rule's own
+    // failure message calls the result "the centred max-width column" without
+    // ever asserting the centring itself. Without `margin: 0 auto`, the capped
+    // column is left-aligned inside the padded stage — at any viewport wider
+    // than max-width + padding, the wall hugs the left edge with all the slack
+    // dumped on the right: a narrower left-anchored wall, not the ticket's "one
+    // column with wide margins" (Liav's Xirp comparison).
+    assert.match(gridBody, /margin:\s*0\s+auto\s*;/,
+        'body.wall-density-airy #term-stage .grid-stack must set margin: 0 auto — without it the capped column is left-anchored, not centred');
 });
 
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
@@ -424,11 +453,45 @@ test('nav inventory: demoting a view never removes it from the sidebar entirely 
     assert.deepEqual(all, expected, 'a non-virtual, enabled view fell out of BOTH the primary and secondary nav groups');
 });
 
+// viewreg.js's own comment states the must-never explicitly: "A view with no
+// `tier` (or any value other than 'secondary') defaults to primary, so this is
+// additive: forgetting to tier a new entry never silently hides it." Every
+// SHIPPED entry happens to carry an explicit tier, so the test above (built
+// from shippedViewEntries()) never exercises that default branch — a judge
+// round flipped primaryNavViews's filter from `tier !== 'secondary'` to
+// `tier === 'primary'` (byte-for-byte the failure the comment promises can't
+// happen) and every shipped-entry test above stayed green because 'primary'
+// was never actually asserted as the untiered default. This drives
+// primaryNavViews/secondaryNavViews directly on a SYNTHETIC entry with no
+// `tier` field at all, closing the untested branch.
+test('nav inventory: a view with NO tier field defaults to primary, per viewreg.js\'s own must-never comment', () => {
+    const ctx = { terminalsOn: true };
+    const entries = [{ id: 'untiered-view' }];
+    const primary = primaryNavViews(entries, ctx).map(v => v.id);
+    const secondary = secondaryNavViews(entries, ctx).map(v => v.id);
+    assert.deepEqual(primary, ['untiered-view'],
+        'a view entry with no `tier` field must default into primaryNavViews — forgetting to tier a new entry must never silently hide it');
+    assert.deepEqual(secondary, [],
+        'an untiered view must NOT land in secondaryNavViews — only tier === \'secondary\' may demote it');
+});
+
 // --- index.html carries the #side-nav-more container the demoted group renders
 // into (nav.js's renderNav guards on it, so a missing container degrades
 // silently to "those 4 views vanish from the sidebar" rather than a crash —
 // this is the guard that actually catches that).
-test('index.html declares #side-nav-more — the demoted group\'s render target', () => {
+// The id-only match below caught a missing render target, but not a demoted-
+// looking-primary regression: index.html's own comment says the four
+// re-parented views are "just visually demoted (.side-list-secondary,
+// style.css)", and style.css styles .side-list-secondary specifically so the
+// primary 3-item rail "reads as the nav, this as its footnote". A judge round
+// dropped the class while keeping the id, the container, the split and every
+// nav row identical — the demoted group renders at full primary weight again,
+// the exact regression objective 3 exists to prevent — and the id-only match
+// stayed green. This asserts the SAME element carries both.
+test('index.html declares #side-nav-more — the demoted group\'s render target, styled as demoted', () => {
     const html = src('templates/index.html');
     assert.match(html, /id="side-nav-more"/, 'index.html no longer has a #side-nav-more container for the demoted nav group');
+    assert.match(html, /class="side-list side-list-secondary"\s+id="side-nav-more"/,
+        '#side-nav-more must carry .side-list-secondary — without it the demoted group renders at full primary weight, ' +
+        'visually a 7-item rail again, even though the split itself still works');
 });

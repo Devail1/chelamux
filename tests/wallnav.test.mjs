@@ -879,6 +879,35 @@ test('CMX-230: the .gs-state pill\'s GLYPH text actually repaints on a live stat
     assert.equal(glyph.textContent, '○', 'reverting session_status must repaint the glyph back to idle too');
 });
 
+// 12d — THE .gs-state PILL'S OWN COLOUR CLASS ACTUALLY REPAINTS ON A LIVE STATE
+// CHANGE TOO (CMX-230, round 4). 12b/12c drove the word and glyph text nodes
+// through a real live transition after a judge round found GUARD 3a only
+// source-text-matched them; the SAME regex hole was still open one statement up
+// for `el.className = 'gs-state gs-state-' + s.cls` — dead-coding that one
+// (`if (false) el.className = ...`) left the pill painted `gs-state gs-state-idle`
+// forever while 12b/12c's word/glyph reads (and GUARD 3a's source match) all stay
+// green, so a live transition would say "working" but stay coloured idle. This
+// drives the REAL function through a REAL live state transition and reads the
+// pill's own className back off the node, closing the last of the three statements
+// in _applyWallTileFrame's repaint trio.
+test('CMX-230: the .gs-state pill\'s own colour CLASS actually repaints on a live state change', async () => {
+    const wid = '@1';
+    const pill = tile(wid).querySelector('.gs-state');
+    assert.ok(pill.classList.contains('gs-state-idle'), 'sanity: an agent with no session_status paints gs-state-idle');
+    assert.ok(!pill.classList.contains('gs-state-working'));
+
+    AGENTS[0].session_status = 'busy';
+    await terminals.termTick();
+    assert.ok(pill.classList.contains('gs-state-working'),
+        '_applyWallTileFrame must repaint the .gs-state pill\'s own className on a live state change, not just the word/glyph text');
+    assert.ok(!pill.classList.contains('gs-state-idle'), 'and lose the stale gs-state-idle class — colour must actually change');
+
+    delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
+    await terminals.termTick();
+    assert.ok(pill.classList.contains('gs-state-idle'), 'reverting session_status must repaint the pill\'s colour class back to idle too');
+    assert.ok(!pill.classList.contains('gs-state-working'));
+});
+
 // 13 — THE ☰ GLYPH IS GONE; .gs-grip STAYS THE DRAG HANDLE (CMX-117 B). GridStack's
 // `handle`/`draggable.handle` option targets `.gs-grip` (buildWall) — dropping the
 // class, not just the glyph, would silently break dragging.
