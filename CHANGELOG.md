@@ -117,6 +117,23 @@ history lives in `git log`.
 
 ### Changed
 
+- **An automatic escalation to `needs_human` now names a recommendation and concrete next
+  steps, not just a bare reason — and so does a refused `chela merge`.** `chela escalate`
+  — the human-typed escalation path — has always taken a `--recommendation` and
+  `--options`, but nothing that escalated on its own used them: not the dispatcher (a
+  stuck CI check, a rework that spent its budget, a rework that could not re-enter its
+  branch/worktree), and not `contract.merge`'s own `escalate`-tier refusals, which is the
+  case that actually produced this ticket — an autonomous merge refused on CI (no checks
+  registered at all) with nothing but a bare reason, leaving the caller to derive the
+  option set itself and, worse, to not know that pushing an empty commit to retrigger CI
+  quietly invalidates the judge's already-clean verdict (a new sha the judge never saw).
+  Every automatic escalation site in the dispatcher, and every `escalate`-tier refusal in
+  `contract.merge`, now carries a recommendation and options in the same shape
+  `chela escalate` does — `needs_human` and a refused merge both read as "here's what
+  happened, here's what I'd try, here's what you can do about it." `never`-tier refusals
+  (a PR targeting a production branch) are untouched: that is a hard line, not a human's
+  decision to be handed options for. (CMX-242)
+
 - **A judge verdict of "cannot verify" now reaches the inbox even when the run has already
   left review, and a merge can no longer silently kill a judge that is still working.**
   Two follow-ups to the unconditional PR comment below (CMX-228), both measured live on a

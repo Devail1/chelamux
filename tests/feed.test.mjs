@@ -43,6 +43,10 @@ test('a gate is a gate, a tool call is the firehose, an unknown type is shown', 
     // mergeable" renders as an anonymous `·` outside the Runs filter.
     assert.equal(classOf('run_judge_clean'), 'run');
     assert.equal(classOf('run_judge_cannot_verify'), 'run');
+    // CMX-239: the CAS-refused race for a BLOCKING verdict — a run that never reaches
+    // `run_changes_requested` because it left review before the write could land. Same
+    // reasoning: unmapped falls to `other` and renders as an anonymous `·`.
+    assert.equal(classOf('run_judge_blocked_race'), 'run');
     assert.equal(classOf('daemon_start'), 'lifecycle');
     // An inbox that cannot deliver is a GATE: work is stuck until a human acts, and it
     // stayed invisible for a whole outage (CMX-77). `other` would render it as a `·`.

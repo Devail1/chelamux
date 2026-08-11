@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1487,3 +1488,58 @@ def test_the_judge_lock_start_time_window_is_exactly_the_fallbacks_resolution(de
     base = 1785703040.97
     with patch.object(sessions, "proc_started", lambda pid: base):
         assert judge._judge_lock_owner_alive({"pid": 4242, "started": base - delta}) is expect_alive
+
+
+def test_cmd_judge_prints_the_blocked_race_verdict_distinctly(capsys):
+    """⚖️🧊 CMX-239 round 2: `chela judge run`'s CLI print branch for `J_BLOCKED_RACE` is a
+    dead ``elif`` away from silently falling through to the ``else`` — which prints "every
+    guard held", the exact opposite of what happened. Drive the real argparse dispatch (the
+    way `test_contract_cli.py` proves the merge/escalate call-sites) so a corrupted
+    ``elif state == judge.J_BLOCKED_RACE:`` turns this red instead of leaving it green.
+    """
+    from unittest.mock import patch
+
+    from chela import main
+
+    fake = {
+        "ok": False, "task_id": "cmx-99", "blocking": 2, "round": 1,
+        "error": "the run moved to merged before the verdict could be written",
+        "state": judge.J_BLOCKED_RACE, "outcomes": [],
+    }
+    with patch.object(main.judge, "judge_run", return_value=fake):
+        with patch.object(sys, "argv",
+                           ["chela", "judge", "run", "cmx-99", "--experiments", "x.json"]):
+            main.main()
+    out = capsys.readouterr().out
+    assert "SURVIVED corruption, but the run had already moved on" in out
+    assert "This needs a human look NOW" in out
+    assert "every guard held" not in out
+
+
+def test_taskmodal_judge_badge_key_matches_j_blocked_race_value():
+    """⚖️🧊 CMX-239 round 4: the judge corrupted `J_BLOCKED_RACE`'s VALUE (not a call site)
+    and the suite stayed green. `taskmodal.js`'s `_JUDGE_BADGE` is keyed on the literal
+    ``'blocked_race'``, and `tests/taskmodal_judge_badge.test.mjs` only pins that SAME
+    hardcoded literal against itself — it never looks at `judge.py`. Every Python test, in
+    turn, references the SYMBOL `judge.J_BLOCKED_RACE`, never its string value, so neither
+    side of the language boundary would notice the two drifting apart. If they do,
+    `item.judge_state` (populated straight from the DB column `J_BLOCKED_RACE` writes) no
+    longer matches any `_JUDGE_BADGE` key, and `_JUDGE_BADGE[item.judge_state] ||
+    'badge-priority-low'`'s fallback silently degrades a CONFIRMED blocking finding into
+    `cannot_verify`'s low-priority tier.
+
+    This test is the only thing that reads BOTH sides: it takes `judge.J_BLOCKED_RACE`'s
+    live value and requires that exact string to appear as a key in the real
+    `taskmodal.js` source. Corrupt the constant's value in `judge.py` alone (JS untouched)
+    and this goes red, because the JS source no longer has a key matching the new value.
+    """
+    js_path = (Path(__file__).resolve().parent.parent / "chela" / "dashboard" / "static"
+               / "js" / "taskmodal.js")
+    src = js_path.read_text()
+    match = re.search(r"const _JUDGE_BADGE = \{(.*?)\n\};", src, re.DOTALL)
+    assert match, "taskmodal.js's _JUDGE_BADGE object literal not found — did it move or get renamed?"
+    keys = set(re.findall(r"^\s*(\w+):", match.group(1), re.MULTILINE))
+    assert judge.J_BLOCKED_RACE in keys, (
+        f"_JUDGE_BADGE has no key matching judge.J_BLOCKED_RACE ({judge.J_BLOCKED_RACE!r}) — "
+        f"the Python↔JS judge_state contract has drifted. _JUDGE_BADGE keys: {sorted(keys)}"
+    )

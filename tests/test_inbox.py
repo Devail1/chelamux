@@ -793,6 +793,51 @@ def test_a_blocked_race_verdict_rots_once_the_head_moves_past_the_judged_commit(
     assert reason and "moved past" in reason
 
 
+def test_a_blocked_race_verdicts_payload_carries_the_judged_sha_and_state(
+        store_file, windows, monkeypatch):
+    """⚖️🧊 CMX-239 round 5 — the twin of `test_a_judge_verdicts_payload_carries_the_judged_sha`
+    below, for `J_BLOCKED_RACE`. That test's `JUDGE_KINDS` parametrize does NOT cover this
+    kind on purpose: `_live_judge_heads` never nominates a `blocked_race` run (see its own
+    docstring), so folding this kind into the shared list would silently break every
+    live-head-supersession test that shares it — a gap in `_live_judge_heads` this PR did not
+    write, not something this test should paper over.
+
+    Written standalone, and deriving the event from a REAL run row via `inbox.tick()` — not
+    hand-fed. The test above (`..._rots_once_the_head_moves_past_the_judged_commit`) builds its
+    event dict by hand (`{"payload": {"judge_sha": _JUDGE_SHA}}`), which proves `stale_reason`
+    reads `judge_sha` correctly but says nothing about whether `run_events`'s `J_BLOCKED_RACE`
+    branch ever PUTS the judged sha and verdict into the payload in the first place. A judge
+    run that corrupted `payload["judge_sha"] = None` or `payload["judge_state"] = ""` in that
+    branch survived the full suite before this test existed.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED_RACE)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "run_judge_blocked_race"
+    payload = queued[0]["payload"]
+    # ⭐ The payload is the RECORD `stale_reason`'s live-head supersession check reads (see
+    # the test above) — a blocked_race verdict with no judged commit attached can never be
+    # checked against a live head, and would sail through as un-stale forever.
+    assert payload["judge_sha"] == _JUDGE_SHA, (
+        f"the judged sha did not reach the payload, got {payload['judge_sha']!r}"
+    )
+    # ...and the VERDICT itself has to reach it too — the kind string says a blocked_race
+    # fired, but a consumer reading the record (the dashboard, a replay of the event log)
+    # has only this field to learn the judge's own state string.
+    assert payload["judge_state"] == judge.J_BLOCKED_RACE, (
+        f"the verdict did not reach the payload, got {payload['judge_state']!r}"
+    )
+    assert payload["judge_detail"] == _LONG_DETAIL, (
+        f"the judge detail did not survive into the payload, got {payload['judge_detail']!r}"
+    )
+
+
 # --- CMX-197 rework: a verdict is only meaningful against the commit it judged --------
 #
 # The status-staleness check above catches a run that moved OFF awaiting_review. It says
@@ -2231,6 +2276,33 @@ def test_blocked_race_churn_off_its_status_DOES_reannounce(
     assert [e["kind"] for e in inbox.load()["queue"]] == [
         "run_needs_human", "run_judge_blocked_race",
     ], "a blocked_race churn off its status must re-announce (CMX-239)"
+
+
+def test_the_blocked_race_reason_is_EXCERPTED_into_the_summary(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-239 round 6): the twin of the CANNOT_VERIFY excerpt guard above, for
+    `J_BLOCKED_RACE`.
+
+    Round 5's judge triaged ~20 of these live and found the ones without an excerpted
+    reason each cost a `gh pr view` to act on — the summary is the one line typed AT the
+    orchestrator's prompt, so a `run_judge_blocked_race` that drops the excerpt is exactly
+    as bad as the CMX-197 round 8 bug this mirrors, and MORE urgent: this branch fires when
+    a guard survived corruption on a commit that may already have shipped.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED_RACE)])
+
+    summary = inbox.load()["queue"][0]["summary"]
+    assert _LONG_DETAIL[:40] in summary, "an excerpt of the reason must reach the operator"
+    assert _LONG_DETAIL not in summary, (
+        "the WHOLE reason was pasted into a summary that gets typed at the prompt — it "
+        "belongs in the payload, which already carries it in full"
+    )
+    assert len(summary) < len(_LONG_DETAIL) + 200
 
 
 def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
