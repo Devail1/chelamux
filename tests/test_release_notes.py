@@ -342,5 +342,10 @@ def test_write_mode_does_not_touch_historical_sections_even_with_duplicates(tmp_
 
 def test_cli_requires_version_unless_write_is_given():
     result = _run_cli()
-    assert result.returncode != 0
-    assert "version" in result.stderr.lower()
+    # argparse's `parser.error()` exits 2 and prints a usage line + the
+    # message; a crash (e.g. `None.startswith` reached because the version
+    # check was skipped) exits 1 and prints a traceback instead — pin both
+    # the exit code and the exact message so a bypassed check reads red.
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "version is required unless --write is given" in result.stderr
