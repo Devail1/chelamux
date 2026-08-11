@@ -497,8 +497,10 @@ def test_explicit_wid_dead_names_the_window_when_it_is_not_live():
 # already handles that shape with one forced re-read on a miss; `_explicit_wid`/
 # `_explicit_wid_dead` do the same — but ONLY when `panes=None` (the real caller). A
 # caller that passes a fixed snapshot explicitly (every test above) is asking for that
-# snapshot's answer, not a retry — the tests above assert that by never mocking
-# `hooks._panes` at all.
+# snapshot's answer, not a retry. The tests above never need `hooks._panes` to answer
+# anything in particular — the autouse `no_tmux` fixture's `{}` is enough — because a
+# working short-circuit never calls it again; see the test below for the one that actually
+# proves the short-circuit fires, by making a hidden retry answer differently.
 
 def test_explicit_wid_retries_a_forced_refresh_before_calling_a_live_window_dead(monkeypatch):
     """Missing from the cached read, present after a forced one: this is the live window,
@@ -532,8 +534,15 @@ def test_explicit_wid_dead_still_reports_a_fault_when_the_forced_retry_also_miss
 
 def test_explicit_wid_never_retries_when_the_caller_supplies_a_fixed_snapshot(monkeypatch):
     """A caller that passes `panes=` explicitly gets exactly that answer — no hidden
-    second tmux call behind its back. `hooks._panes` is left unmocked on purpose: a retry
-    here would hit the real `sessions.panes` and likely raise or hang in a test env."""
+    second tmux call behind its back. The autouse `no_tmux` fixture already stubs
+    `hooks._panes` to `{}` for both `force=True` and `force=False`, which makes a hidden
+    retry indistinguishable from the short-circuit (both land on the same empty answer) —
+    so here `_panes` is re-mocked to answer differently by `force`: a forced call reports
+    `@299` live. If the short-circuit were ever removed, both functions below would fall
+    through to that forced call and flip their verdict; asserting the short-circuited
+    answer here catches that."""
+    monkeypatch.setattr(hooks, "_panes",
+                        lambda force=False: {"@299": object()} if force else {})
     assert hooks._explicit_wid("@299", panes={}) is None
     assert hooks._explicit_wid_dead("@299", panes={}) == "@299"
 
