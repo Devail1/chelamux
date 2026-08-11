@@ -150,6 +150,22 @@ def test_a_dead_dashboard_is_not_a_live_one(chela_dir, monkeypatch):
     assert config.live_dashboard_port() == 5001
 
 
+def test_a_dead_update_apply_lock_is_not_a_live_one(chela_dir):
+    """CMX-226's review round 2: `live_update_apply_lock`'s dead-pid check
+    (mirroring `live_dashboard`'s, right above) had no test at all — the full suite
+    stayed green with it deleted outright. Without it, a dashboard that crashes or is
+    killed mid-apply (so `clear_update_apply_lock()` never runs) leaves a lock file
+    behind forever, and `dashboard.update_lock` would warn that the lock has been held
+    for days on a perfectly healthy, freshly-restarted dashboard — the CMX-224 stale-
+    socket failure mode, in this mechanism."""
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()                                        # a pid that has certainly exited
+    config.update_apply_lock_file().write_text(
+        json.dumps({"pid": dead.pid, "started_at": 0.0})
+    )
+    assert config.live_update_apply_lock() is None
+
+
 def test_a_corrupt_port_file_is_ignored(chela_dir):
     config.dashboard_port_file().write_text("{not json")
     assert config.live_dashboard() is None

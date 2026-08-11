@@ -66,7 +66,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chela import agent_manager, capabilities, config, discovery, epoch, event_log, hold, hooks, sessions
+from chela import (
+    agent_manager,
+    capabilities,
+    config,
+    discovery,
+    epoch,
+    event_log,
+    hold,
+    hooks,
+    messenger,
+    sessions,
+)
 from chela.sources import get_source
 from chela.workflow import load_workflow
 
@@ -697,6 +708,56 @@ def _port_report(configured: int, obs: Observation) -> list[Finding]:
     return [Finding(OK, f"dashboard listening on {port} ({obs.detail})")]
 
 
+# --- fact: is the dashboard's update-apply lock actually held by a live process? -----
+#
+# CMX-226's `/api/update/apply` route already tells an operator who clicks Update AGAIN
+# that a held lock looks wedged (`stuck: true` in its 409) — but that is visible only to
+# someone who clicks. `chela doctor` (a human's own CLI invocation) and the daemon's
+# periodic notify edge both run in a DIFFERENT process from the dashboard
+# (chela-daemon, not chela-dashboard), so neither can see `chela.dashboard.app`'s
+# in-process `_update_apply_lock` / `_update_apply_started_at` directly — the exact
+# cross-process gap `daemon.capabilities` and `dashboard.port` above already solve, and
+# solved here the same way: the dashboard PUBLISHES the hold
+# (`config.publish_update_apply_lock`, called right beside where the route sets
+# `_update_apply_started_at`) and this fact reads that back (`config.live_update_apply_
+# lock`), pid-checked exactly like `live_dashboard` — a file whose pid is dead is a lock
+# the process holding it died with, and a restarted dashboard already handed out a
+# fresh, unheld `threading.Lock()`. Without this, a stuck lock silently disables the
+# dashboard's whole deploy path (CMX-199/200's whole premise) for anyone who never
+# clicks Update a second time to find out.
+
+def _update_apply_lock_read() -> Observation:
+    live = config.live_update_apply_lock()
+    if live is None:
+        return observed(None)
+    return observed(live)
+
+
+def _update_apply_lock_report(_declared: None, obs: Observation) -> list[Finding]:
+    from chela import update                        # lazy: doctor must import cheaply
+
+    live = obs.value
+    if live is None:
+        return [Finding(OK, "update-apply lock is not held")]
+    elapsed = int(time.time() - live["started_at"])
+    ceiling = update.apply_stuck_after_seconds()
+    if elapsed <= ceiling:
+        return [Finding(
+            OK, f"update-apply lock has been held {elapsed}s (pid {live['pid']}) — "
+                f"within the {ceiling}s ceiling for an honest run")]
+    return [Finding(
+        WARN,
+        f"update-apply lock has been held {elapsed}s (pid {live['pid']}) — past the "
+        f"{ceiling}s ceiling any honest `update.apply()` run can take",
+        "Every subprocess apply() shells out to is individually timeout-bounded (see "
+        "chela/update.py's GIT_TIMEOUT_SECONDS / _SHELL_TIMEOUT_SECONDS), so a hold "
+        "this long is not a slow run in progress — it's a wedged lock (the background "
+        "thread that owned it died without reaching its own `finally: release()`) that "
+        "nothing but a restart clears, and until then the dashboard's Update control "
+        "refuses every click. `pm2 restart chela-dashboard` clears it.",
+    )]
+
+
 # --- fact: the native `claude agents --json` status feed the dashboard polls --------
 # CMX-179: the timeout guarding this call (`agent_manager._STATUS_CMD_TIMEOUT`) was BELOW
 # the command's real warm-start cost, so every call failed and the dashboard's busy/idle
@@ -1072,6 +1133,89 @@ def _hooks_rejected_wid_report(_declared: None, obs: Observation) -> list[Findin
         "installed_plugins.json, the daemon, /proc env and the tmux global env. This "
         "scan is bounded to the ring above.",
     )]
+
+
+# --- fact: does every LIVE window have a reachable PEER-MESSAGING SOCKET? -------------
+#
+# CMX-222/223 made the peer UDS socket the transport for `chela msg`/`broadcast`, room
+# `handoff`/`question`/`blocker` dispatch, and the decisions inbox's verdict delivery —
+# and every one of those tries the socket FIRST, then falls back to `send_tmux` SILENTLY
+# the moment it cannot be reached (chela.messenger's own module docstring names this: the
+# fallback is correct — a mixed fleet must not lose messages — and it is exactly what
+# makes it dangerous. The fleet can silently degrade to the pre-CMX-222 paste transport,
+# with CMX-79's bash-mode-injection risk back in play, and nothing anywhere reports it.
+# `chela doctor` emitted ZERO facts about peer messaging before this one. This closes
+# that gap the same way `plugin.hooks_flowing` closed "the manifest matches but the hook
+# never arrives": ask the OWNER — the socket file on disk — not chela's own belief that
+# `--messaging-socket-path` was used at launch.
+
+def _peer_transport_declared() -> dict[str, sessions.Pane]:
+    """Every live claude-agent window — the population any peer-eligible send (`chela
+    msg`/`broadcast`, rooms' dispatch, the decisions inbox's verdict delivery) could
+    target."""
+    return {wid: pane for wid, pane in sessions.panes().items() if pane.claude_pid}
+
+
+def _peer_transport_read() -> Observation:
+    declared = _peer_transport_declared()
+    if not declared:
+        return observed({})
+    return observed({
+        wid: messenger.peer_transport_kind(wid, pane.claude_pid)
+        for wid, pane in declared.items()
+    })
+
+
+def _peer_transport_report(declared: dict[str, sessions.Pane],
+                           obs: Observation) -> list[Finding]:
+    if not declared:
+        return []
+    kinds: dict[str, str] = obs.value
+    unreachable = sorted(wid for wid, kind in kinds.items() if kind == "tmux fallback")
+    default = sorted(wid for wid, kind in kinds.items() if kind == "default")
+    out: list[Finding] = []
+    if unreachable:
+        out.append(Finding(
+            WARN,
+            f"{len(unreachable)} live window(s) have NO reachable peer-messaging "
+            f"socket: {', '.join(unreachable)}",
+            "chela msg/broadcast, room handoff/question/blocker dispatch, and the "
+            "decisions inbox's verdict delivery all try the peer socket FIRST and fall "
+            "back to send_tmux SILENTLY the instant it cannot be reached — an older "
+            "Claude Code build, a window launched before --messaging-socket-path "
+            "existed, a socket that has not bound yet, or a socket FILE that outlived "
+            "the process behind it (a SIGKILLed agent never runs its own unlink). The "
+            "fallback is correct (a mixed fleet must not lose messages), and it is "
+            "exactly what makes this dangerous: every message to these windows quietly "
+            "degrades to typing into the pane, re-opening CMX-79's bash-mode-injection "
+            "risk, with nothing but this check saying so. Relaunch the window so it "
+            "picks up --messaging-socket-path (dispatcher.py / personas/autolaunch.py "
+            "already wire it in), or confirm its Claude Code build supports the peer "
+            "socket.",
+        ))
+    if default:
+        out.append(Finding(
+            WARN,
+            f"{len(default)} live window(s) reach their peer-messaging socket only "
+            f"through the legacy pid-derived guess, not a chela-owned path: "
+            f"{', '.join(default)}",
+            "These windows were launched before --messaging-socket-path existed, or "
+            "its path overflowed the AF_UNIX sun_path ceiling (messaging_socket_"
+            "launch_arg logs when that happens) — messenger._peer_socket_path is "
+            "reading OUR OWN XDG_RUNTIME_DIR/TMPDIR/getuid() as a stand-in for the "
+            "target's, which only holds today because the live daemon happens to "
+            "export the same values every session inherits. They work right now, but "
+            "they are one environment drift away from silently failing the same way "
+            "an unreachable window does — relaunch them so they pick up a chela-owned, "
+            "window-keyed path (dispatcher.py / personas/autolaunch.py already wire "
+            "--messaging-socket-path in) instead of depending on that coincidence.",
+        ))
+    if out:
+        return out
+    return [Finding(
+        OK, f"{len(declared)} live window(s): every one reaches its peer-messaging "
+            "socket through the chela-owned deterministic path — chela "
+            "msg/broadcast/rooms/inbox use it, not the tmux fallback")]
 
 
 # --- fact: what the RUNNING daemon came up with --------------------------------------
@@ -2204,6 +2348,18 @@ def facts() -> list[Fact]:
             report=_port_report,
         ),
         Fact(
+            name="dashboard.update_lock",
+            declared_by="nothing — chela never predicts this; the lock is either held "
+                        "past the ceiling an honest update.apply() run can take, or it "
+                        "isn't",
+            owned_by="the dashboard process itself (it publishes update-apply-lock.json "
+                     "for as long as its update-apply lock is held) — pid-checked, like "
+                     "dashboard.port",
+            declare=lambda: None,
+            read_back=_update_apply_lock_read,
+            report=_update_apply_lock_report,
+        ),
+        Fact(
             name="agents.native_status_feed",
             declared_by="nothing — chela never configures whether `claude agents --json` "
                         "succeeds; the dashboard's status cache just assumes it answers "
@@ -2262,6 +2418,18 @@ def facts() -> list[Fact]:
             read_back=_hooks_rejected_wid_read,
             report=_hooks_rejected_wid_report,
             applies=_hooks_flowing_applies,
+        ),
+        Fact(
+            name="peer.transport",
+            declared_by="chela.sessions — the live claude-agent windows any peer-"
+                        "eligible send (chela msg/broadcast, rooms, the decisions "
+                        "inbox) could target",
+            owned_by="whether a connect() actually succeeds against "
+                     "deterministic_peer_socket_path, else the legacy pid-derived guess "
+                     "(messenger.peer_transport_kind) — not merely whether the file exists",
+            declare=_peer_transport_declared,
+            read_back=_peer_transport_read,
+            report=_peer_transport_report,
         ),
         Fact(
             name="daemon.capabilities",

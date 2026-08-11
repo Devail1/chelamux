@@ -9,12 +9,13 @@ in flight, never claim to have started when there is nothing to pull, and never 
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 import pytest
 
-from chela import dispatcher, update
+from chela import config, dispatcher, update
 from chela.dashboard import app as dash
 
 
@@ -23,13 +24,103 @@ def client():
     return dash.app.test_client()
 
 
+def _wait_for_release_then_clear(lock, timeout=2):
+    """The `_reset_lock` teardown body, factored out so `test_teardown_waits_for_the_leaked_
+    threads_own_release` below can exercise this exact code — not a copy of it — directly
+    against a throwaway lock.
+
+    It must be a WAIT, not a check-then-release: `_run`'s `finally: release()` fires on its
+    own background thread, asynchronously, after the test body that started it has already
+    returned (several tests in this file set their release/finished event and move on
+    without joining that thread). A bare `if locked(): release()` races that thread —
+    observed flaky on PR #287 (test_apply_refuses_a_second_run_while_one_is_in_flight, green
+    in isolation, red only in the full file): a thread LEAKED from an earlier test would
+    reach its own `release()` mid-way through a LATER test, after that later test had
+    legitimately re-acquired the lock for itself — freeing it early and turning an expected
+    409 ("already running") into a 200, or, if the earlier test's teardown forced a release
+    while the leaked thread still owned the lock, the leaked thread's own later `release()`
+    lands on an already-free lock and raises `RuntimeError: release unlocked lock`.
+
+    `acquire(timeout=...)` blocks until the background thread's own release() lands and
+    hands the lock back free — no polling granularity, no spin, and it distinguishes "the
+    thread released it" (we now hold it, so drop it) from "the thread is genuinely hung"
+    (still held after the timeout, so force it as a last resort) instead of inferring the
+    latter from a bare deadline.
+    """
+    if lock.acquire(timeout=timeout):
+        lock.release()
+    else:
+        lock.release()
+
+
 @pytest.fixture(autouse=True)
 def _reset_lock():
-    # The lock is process-global (module state) — start and end every test unlocked
-    # regardless of what a previous test's background thread did.
+    # The lock (and its start-time sidecar) are process-global module state — start and
+    # end every test unlocked/unset regardless of what a previous test's background
+    # thread did. See `_wait_for_release_then_clear` for why freeing the lock must be a
+    # WAIT, not a check-then-release (CMX-225): CMX-226's own tests below leak a thread
+    # deliberately, so this teardown is what keeps them from racing a later test.
     yield
-    if dash._update_apply_lock.locked():
-        dash._update_apply_lock.release()
+    _wait_for_release_then_clear(dash._update_apply_lock)
+    dash._update_apply_started_at = None
+    config.clear_update_apply_lock()
+
+
+def test_teardown_waits_for_the_leaked_threads_own_release():
+    """Regression for `_wait_for_release_then_clear` itself (the teardown, not the route):
+    a thread that still owns the lock when a test body returns must have ITS OWN release()
+    observed by the next teardown, not raced. Reproduces the exact interleaving that
+    produced `RuntimeError: release unlocked lock` on a full-file run — sequenced with an
+    `Event`, not timing, so it is deterministic on every run.
+
+    The OLD teardown (`if locked(): release()`) is reproduced inline below purely as the
+    counterfactual this test is pinned against: run it, and the leaked thread's own release
+    (which fires only once we set `release_now`, guaranteed after the old teardown already
+    ran while the thread was still blocked on the event) lands on an already-freed lock —
+    a double release, `RuntimeError`. `_wait_for_release_then_clear` — the actual code the
+    real fixture calls — is run against the same interleaving directly below it and must
+    end the lock free with no error, proving it does not race the thread.
+    """
+
+    def leak_a_thread(lock, release_now, errors):
+        def _run():
+            release_now.wait(timeout=2)
+            try:
+                lock.release()  # stands in for `_run`'s `finally: release()`
+            except RuntimeError as e:
+                errors.append(e)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        return t
+
+    # --- counterfactual: the OLD check-then-act teardown races the leaked thread ---
+    old_lock = threading.Lock()
+    old_lock.acquire()
+    old_release_now = threading.Event()
+    old_errors = []
+    old_thread = leak_a_thread(old_lock, old_release_now, old_errors)
+
+    assert old_lock.locked(), "thread must still own the lock when the old teardown runs"
+    if old_lock.locked():  # the old, buggy teardown body
+        old_lock.release()
+    old_release_now.set()  # only now does the leaked thread run its own release
+    old_thread.join(timeout=2)
+    assert old_errors, "the old teardown should have raced the thread into a double release"
+    assert not old_lock.locked()
+
+    # --- the real fix: `_wait_for_release_then_clear` waits for that same release instead ---
+    new_lock = threading.Lock()
+    new_lock.acquire()
+    new_release_now = threading.Event()
+    new_errors = []
+    new_thread = leak_a_thread(new_lock, new_release_now, new_errors)
+    new_release_now.set()  # let the leaked thread release on its own schedule
+
+    _wait_for_release_then_clear(new_lock)
+    new_thread.join(timeout=2)
+    assert not new_errors, "the fixed teardown must not race the leaked thread's own release"
+    assert not new_lock.locked(), "the lock must end free"
 
 
 def test_apply_refuses_when_already_up_to_date(client, monkeypatch):
@@ -152,6 +243,115 @@ def test_apply_refuses_a_second_run_while_one_is_in_flight(client, monkeypatch):
     assert "already running" in second.get_json()["error"]
 
     release.set()
+
+
+def test_second_click_reports_elapsed_seconds_not_just_running(client, monkeypatch):
+    """CMX-226: a held lock and a genuinely running update look identical from outside
+    unless the refusal says how long it's been going — the whole point of tracking
+    `_update_apply_started_at`."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    release = threading.Event()
+    monkeypatch.setattr(update, "apply", lambda: (release.wait(timeout=2), update.ApplyResult(
+        ok=True, step="done", behind_before=3))[1])
+
+    first = client.post("/api/update/apply")
+    assert first.get_json()["started"] is True
+
+    second = client.post("/api/update/apply")
+    data = second.get_json()
+    assert second.status_code == 409
+    assert data["stuck"] is False
+    assert isinstance(data["elapsed_seconds"], int) and data["elapsed_seconds"] >= 0
+    assert f"{data['elapsed_seconds']}s" in data["error"]
+
+    release.set()
+
+
+def test_lock_held_far_past_any_legitimate_apply_is_flagged_stuck(client, monkeypatch):
+    """Every subprocess `update.apply()` shells out to is individually timeout-bounded
+    (see chela/update.py), so a lock held well past the sum of those timeouts is not a
+    slow run in progress — it's a wedged lock (e.g. the process died mid-run) that
+    nothing but a dashboard restart will clear. The refusal must say so, not just
+    'already running', so an operator doesn't wait forever on a run that already ended."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    dash._update_apply_lock.acquire()
+    dash._update_apply_started_at = (
+        time.monotonic() - update.apply_stuck_after_seconds() - 1)
+
+    resp = client.post("/api/update/apply")
+    data = resp.get_json()
+
+    assert resp.status_code == 409
+    assert data["stuck"] is True
+    assert data["elapsed_seconds"] > update.apply_stuck_after_seconds()
+    assert "restart" in data["error"].lower()
+
+
+def test_freshly_held_lock_is_not_flagged_stuck(client, monkeypatch):
+    """Counterweight to the test above — without it, always reporting `stuck: True`
+    would satisfy it."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    dash._update_apply_lock.acquire()
+    dash._update_apply_started_at = time.monotonic()
+
+    resp = client.post("/api/update/apply")
+    data = resp.get_json()
+
+    assert resp.status_code == 409
+    assert data["stuck"] is False
+
+
+def test_apply_publishes_the_lock_hold_for_the_doctor_fact_to_read(client, monkeypatch):
+    """CMX-226: `chela doctor` (and the daemon's notify edge) runs in a DIFFERENT
+    process from the dashboard, so `runtime_truth.dashboard.update_lock` cannot see
+    `_update_apply_started_at` directly — it reads `config.live_update_apply_lock()`
+    instead. This is the other half of that contract: the route must actually publish
+    while held, and clear once the run ends, or that fact is permanently blind."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    release = threading.Event()
+    entered = threading.Event()
+
+    def fake_apply():
+        entered.set()
+        release.wait(timeout=2)
+        return update.ApplyResult(ok=True, step="done", behind_before=3)
+
+    monkeypatch.setattr(update, "apply", fake_apply)
+
+    resp = client.post("/api/update/apply")
+    assert resp.get_json()["started"] is True
+    assert entered.wait(timeout=2)
+
+    live = config.live_update_apply_lock()
+    assert live is not None, "the route never published its hold for doctor to read"
+    assert live["pid"] == os.getpid()
+
+    release.set()
+    _wait_for_release_then_clear(dash._update_apply_lock)
+    assert config.live_update_apply_lock() is None, \
+        "the published hold outlived the run it timed"
+
+
+def test_started_at_is_cleared_once_the_run_finishes(client, monkeypatch):
+    """The sidecar timestamp must not outlive the run it timed, or a NEXT run's fresh
+    hold would misreport elapsed time against the previous run's start."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=1, ahead=0, branch="dev"))
+    entered = threading.Event()
+    monkeypatch.setattr(update, "apply", lambda: (entered.set(), update.ApplyResult(
+        ok=True, step="done", behind_before=1))[1])
+
+    resp = client.post("/api/update/apply")
+    assert resp.get_json()["started"] is True
+    assert entered.wait(timeout=2)
+
+    _wait_for_release_then_clear(dash._update_apply_lock)
+    assert dash._update_apply_started_at is None, \
+        "the background run finished but never cleared its start-time sidecar"
 
 
 def test_apply_reports_dirty_tree_refusal_without_pulling(client, monkeypatch):
