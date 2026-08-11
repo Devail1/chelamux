@@ -23,7 +23,15 @@ history lives in `git log`.
   conservatively), and a run stuck in infra failures is bounded on its own separate streak
   (capped the same as `CHELA_MAX_REWORKS`, reset the next time CI is seen green) so a
   permanently broken workflow file still reaches a human instead of looping quietly
-  forever. (CMX-243)
+  forever. Those two conclusions do not cover every infra failure, though: a runner that
+  dies mid-job (a `checkout` step failing on a network/TLS fault, the incident that
+  motivated this ticket) reports plain `FAILURE`, indistinguishable at the conclusion level
+  from a genuine test failure. For that shape, the job's own STEPS are read once, on the
+  transition into red: if the workflow's suite-running steps (`ruff`, `pytest`) never
+  reached a conclusion of their own — left `skipped` because something upstream of them
+  died first — it is still classified infra, and a real failure among them (including one
+  step failing and skipping the rest, e.g. a lint error skipping the test run) still
+  charges the round, unconditionally. (CMX-243)
 
 ### Added
 

@@ -96,21 +96,40 @@ def _check_run(name, status="COMPLETED", conclusion="SUCCESS", run_id="42"):
     }
 
 
+def _step(name, conclusion):
+    """A `gh run view <id> --json jobs` step — `.jobs[].steps[]` shape."""
+    return {"name": name, "status": "completed", "conclusion": conclusion}
+
+
+def _job(name, steps):
+    """A `gh run view <id> --json jobs` job — `.jobs[]` shape."""
+    return {"name": name, "steps": steps}
+
+
 class _FakeGh:
     """`gh` and `tmux`, at the argv boundary. Records what was asked and what it answered."""
 
     def __init__(self, rollup=None, sha="deadbee1", log="E   assert 1 == 2\nFAILED test_x\n",
-                 gh_missing=False, mergeable="MERGEABLE", on_check_read=None):
+                 gh_missing=False, mergeable="MERGEABLE", on_check_read=None,
+                 jobs_by_run=None, steps_readable=True):
         self.rollup = rollup if rollup is not None else [_check_run("test (3.12)")]
         self.sha = sha
         self.log = log
         self.gh_missing = gh_missing
         self.mergeable = mergeable
         self.on_check_read = on_check_read     # a hook that runs WHILE gh is "on the network"
+        # 🚦🏗️ CMX-243 round 2. `run_id -> [job dict, ...]`, the shape of
+        # `gh run view <id> --json jobs`'s `.jobs` array — each job needs at least `name`
+        # and `steps` (`[{"name": ..., "conclusion": ...}, ...]`) to be looked up by
+        # `_suite_step_ran`. Empty by default: an untargeted test gets "job not found",
+        # i.e. `None` (unknown, never infra) — exactly the conservative default.
+        self.jobs_by_run: dict[str, list[dict]] = jobs_by_run or {}
+        self.steps_readable = steps_readable   # False simulates `gh run view --json jobs` failing
         self.calls: list[list[str]] = []
         self.kwargs: list[dict] = []
         self.comments: list[str] = []
         self.log_fetches = 0
+        self.steps_fetches = 0
         self.check_reads = 0
         self._next_id = 100
         self.windows: list[tuple[str, str]] = []
@@ -139,9 +158,17 @@ class _FakeGh:
                 R.stdout = self.mergeable + "\n"     # `-q .mergeable`: a bare string, as gh does
             elif cmd[:3] == ["gh", "pr", "view"]:
                 R.stdout = json.dumps({"state": "OPEN", "mergeable": "MERGEABLE"})
-            elif cmd[:3] == ["gh", "run", "view"]:
+            elif cmd[:3] == ["gh", "run", "view"] and "--log-failed" in cmd:
                 self.log_fetches += 1
                 R.stdout = self.log
+            elif cmd[:3] == ["gh", "run", "view"] and "--json" in cmd:
+                self.steps_fetches += 1
+                if not self.steps_readable:
+                    R.returncode = 1
+                    R.stderr = "gh: could not read run"
+                else:
+                    run_id = cmd[3]
+                    R.stdout = json.dumps({"jobs": self.jobs_by_run.get(run_id, [])})
             elif cmd[:3] == ["gh", "pr", "comment"]:
                 self.comments.append(k.get("input") or "")
             return R()
@@ -333,6 +360,178 @@ def test_ci_infra_streak_resets_once_ci_is_seen_passing(tmp_path):
     _tick(wf, fake)
 
     assert (dispatcher.resolve_run("abc123")["ci_infra_streak"] or 0) == 0
+
+
+# --- (a″) 🚦🏗️ CMX-243 round 2: `STARTUP_FAILURE`/`ACTION_REQUIRED` do not cover the
+# incident that motivated this ticket — a runner that dies MID-JOB (not before it starts)
+# reports plain `FAILURE`, indistinguishable at the conclusion level from a genuine test
+# failure. These pin the job's own STEPS as the real signal. -------------------------------
+
+def test_the_real_checkout_TLS_incident_classifies_as_infra(tmp_path):
+    """Pinned VERBATIM from the incident that motivated this ticket — GitHub Actions run
+    31527377082, attempt 1, job `test (3.12)`: `actions/checkout@v4` died on a TLS fault
+    (`server certificate verification failed. CAfile: none CRLfile: none`, exit 128) and
+    GitHub reported the job as plain `FAILURE`, not `STARTUP_FAILURE`. Round 1 of this PR
+    classified this as a real test failure and spent a rework round on it — the same thing
+    that happened for real on CMX-240, whose budget it exhausted. Corrupt the step-reading
+    classifier and this goes RED."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "failure"),
+        _step("Install uv", "skipped"),
+        _step("Set up Python 3.12", "skipped"),
+        _step("Sync (with dev + dashboard extras)", "skipped"),
+        _step("Run actions/setup-node@v4", "skipped"),
+        _step("Install jsdom (DOM test suites)", "skipped"),
+        _step("Ruff", "skipped"),
+        _step("Pytest", "skipped"),
+        _step("Post Run actions/checkout@v4", "success"),
+        _step("Complete job", "success"),
+    ]
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="31527377082")],
+        jobs_by_run={"31527377082": [_job("test (3.12)", steps)]},
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_infra_failed"] == 1
+    assert summary["ci_failed"] == 0
+    assert summary["reworked"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"
+    assert (run["rework_count"] or 0) == 0
+    assert run["pr_checks"] == dispatcher.CI_FAILING
+    assert (run["ci_infra_streak"] or 0) == 1
+
+
+def test_a_real_pytest_failure_with_readable_steps_still_charges(tmp_path):
+    """The suite DID run — `Pytest` reached a conclusion of its own — so this is real
+    evidence, even though the job-level conclusion is the SAME plain `FAILURE` the infra
+    incident reports. This is the load-bearing guard: a classifier that called every plain
+    `FAILURE` infra would give every red PR a free pass."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "success"),
+        _step("Install uv", "success"),
+        _step("Ruff", "success"),
+        _step("Pytest", "failure"),
+        _step("Complete job", "success"),
+    ]
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="999")],
+        jobs_by_run={"999": [_job("test (3.12)", steps)]},
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+    assert summary["reworked"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert (run["rework_count"] or 0) == 1
+
+
+def test_ruff_failing_before_pytest_is_skipped_is_still_real(tmp_path):
+    """A naive "was the LAST step skipped" rule would call this infra — `Pytest` never ran.
+    But `Ruff` DID run and failed: that is real evidence about the code (a lint error), and
+    the job never reached `Pytest` only because of it, not because of a runner fault."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "success"),
+        _step("Install uv", "success"),
+        _step("Ruff", "failure"),
+        _step("Pytest", "skipped"),
+        _step("Complete job", "success"),
+    ]
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="777")],
+        jobs_by_run={"777": [_job("test (3.12)", steps)]},
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+
+
+def test_unreadable_step_data_charges_the_round(tmp_path):
+    """The steps API call can itself fail (rate limit, network, a run gh cannot find) —
+    that must NOT be read as infra. Unknown is never a pass, the same rule `CI_UNKNOWN`
+    already lives by."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="555")],
+        steps_readable=False,
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+
+
+def test_a_job_missing_from_the_steps_response_charges_the_round(tmp_path):
+    """The run id resolves but no job in it matches the failing job's name (a rename, a
+    matrix that changed shape between polls) — still unknown, still charges."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="444")],
+        jobs_by_run={"444": [_job("some other job", [_step("Pytest", "skipped")])]},
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+
+
+def test_a_mid_suite_timeout_never_even_asks_the_steps_api(tmp_path):
+    """TIMED_OUT/CANCELLED are real evidence unconditionally (`CI_INFRA_CONCLUSIONS`
+    excludes them on purpose, since both can happen mid-suite) — they must not cost an
+    extra `gh` call, let alone be reclassified by one. Steps that would (wrongly) look like
+    infra if ever consulted are wired in on purpose, to prove they are never read."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    steps = [_step("Pytest", "skipped")]
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="TIMED_OUT", run_id="333")],
+        jobs_by_run={"333": [_job("test (3.12)", steps)]},
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+    assert fake.steps_fetches == 0
+
+
+def test_a_green_run_never_touches_the_steps_api(tmp_path):
+    """Negative control: nothing about a passing PR should ever reach the steps check."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test (3.12)", conclusion="SUCCESS")])
+
+    summary = _tick(wf, fake)
+
+    assert summary.get("ci_failed", 0) == 0
+    assert summary.get("ci_infra_failed", 0) == 0
+    assert fake.steps_fetches == 0
 
 
 # --- (b) ⛔ A PENDING RUN IS NOT A RED ONE. The single most important test here. --------
@@ -570,14 +769,16 @@ def test_the_legacy_status_context_shape_is_read_too():
     """`statusCheckRollup` carries TWO node shapes — a CheckRun (Actions) and a
     StatusContext (the commit-status API, e.g. a CI service posting a status). A reducer
     that knew only the first would read a red StatusContext as a pass."""
-    state, failing, _, infra = dispatcher._rollup_state(
+    state, failing, _, infra, plain = dispatcher._rollup_state(
         [{"__typename": "StatusContext", "context": "ci/circleci", "state": "FAILURE"}])
     assert state == dispatcher.CI_FAILING and failing == ("ci/circleci",)
     # A StatusContext failure is never infra-only: that shape has no startup/approval
     # concept (only FAILURE/ERROR), so it is always treated as real evidence.
     assert infra is False
+    # ...and never a plain-failure candidate either — it has no run id, no job steps.
+    assert plain == ()
 
-    state, _, _, _ = dispatcher._rollup_state(
+    state, _, _, _, _ = dispatcher._rollup_state(
         [{"__typename": "StatusContext", "context": "ci/circleci", "state": "PENDING"}])
     assert state == dispatcher.CI_PENDING
 
@@ -586,11 +787,14 @@ def test_the_legacy_status_context_shape_is_read_too():
 def test_every_conclusive_non_pass_is_a_failure_and_NOT_infra(conclusion):
     """These four are real evidence: a step ran and exited badly, or the job was cut off
     mid-run (a hang, a fail-fast sibling) — never "the steps never executed"."""
-    state, failing, run_ids, infra = dispatcher._rollup_state(
+    state, failing, run_ids, infra, plain = dispatcher._rollup_state(
         [_check_run("test", conclusion=conclusion)])
     assert state == dispatcher.CI_FAILING
     assert failing == ("CI / test",) and run_ids == ("42",)
     assert infra is False
+    # 🚦🏗️ CMX-243 round 2. Only a plain FAILURE is a step-check candidate: TIMED_OUT/
+    # CANCELLED/ERROR are real evidence unconditionally and never reach the steps API.
+    assert plain == (("test", "42"),) if conclusion == "FAILURE" else plain == ()
 
 
 @pytest.mark.parametrize("conclusion", ["STARTUP_FAILURE", "ACTION_REQUIRED"])
@@ -599,17 +803,18 @@ def test_startup_failure_and_action_required_are_failures_AND_infra(conclusion):
     workflow-file problem, or a pending approval gate. Still CI_FAILING (the merge gate must
     still refuse it), but flagged `infra` so the dispatcher does not spend a rework round on
     something no coding agent can act on."""
-    state, failing, run_ids, infra = dispatcher._rollup_state(
+    state, failing, run_ids, infra, plain = dispatcher._rollup_state(
         [_check_run("test", conclusion=conclusion)])
     assert state == dispatcher.CI_FAILING
     assert failing == ("CI / test",) and run_ids == ("42",)
     assert infra is True
+    assert plain == ()   # already infra by conclusion alone — never a step-check candidate
 
 
 def test_one_real_failure_beside_an_infra_one_is_NOT_infra_only():
     """Real evidence wins, conservatively: a matrix with one genuine failure and one
     STARTUP_FAILURE sibling is still evidence about the code."""
-    state, failing, _, infra = dispatcher._rollup_state([
+    state, failing, _, infra, _ = dispatcher._rollup_state([
         _check_run("test (3.11)", conclusion="FAILURE"),
         _check_run("test (3.12)", conclusion="STARTUP_FAILURE"),
     ])
@@ -619,7 +824,7 @@ def test_one_real_failure_beside_an_infra_one_is_NOT_infra_only():
 
 
 def test_a_matrix_that_fails_in_several_shards_names_each_job_once():
-    state, failing, run_ids, infra = dispatcher._rollup_state([
+    state, failing, run_ids, infra, _ = dispatcher._rollup_state([
         _check_run("test (3.11)", conclusion="FAILURE"),
         _check_run("test (3.12)", conclusion="FAILURE"),
         _check_run("test (3.11)", conclusion="FAILURE"),
@@ -836,11 +1041,11 @@ def test_a_rollup_node_we_cannot_recognise_is_not_a_pass():
     """The reducer's own docstring promised this and the code did the opposite: a node with
     none of status/conclusion/state fell through every branch and came out GREEN. A shape
     GitHub adds tomorrow would have merged itself."""
-    state, failing, _, _ = dispatcher._rollup_state([{"__typename": "SomethingNew", "id": "x"}])
+    state, failing, _, _, _ = dispatcher._rollup_state([{"__typename": "SomethingNew", "id": "x"}])
     assert state == dispatcher.CI_PENDING and not failing
 
     # A conclusion we have never heard of is not one we may call green either.
-    state, _, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="MOON_PHASE")])
+    state, _, _, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="MOON_PHASE")])
     assert state == dispatcher.CI_PENDING
 
     # Nor is a node that is not even a JSON object.
@@ -851,13 +1056,13 @@ def test_a_rollup_of_only_skipped_checks_is_NONE_and_never_PASSING():
     """SKIPPED/NEUTRAL means the check did not run — a `paths-ignore` filter, a skipped
     required job. Zero checks is `none`, said out loud; all-skipped is the SAME fact, and it
     was silently green. Both mean *nothing evaluated this code*."""
-    state, _, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
-                                               _check_run("lint", conclusion="NEUTRAL")])
+    state, _, _, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
+                                                  _check_run("lint", conclusion="NEUTRAL")])
     assert state == dispatcher.CI_NONE
 
     # One check that really ran and really passed is still a pass, skipped siblings and all.
-    state, _, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
-                                               _check_run("lint", conclusion="SUCCESS")])
+    state, _, _, _, _ = dispatcher._rollup_state([_check_run("test", conclusion="SKIPPED"),
+                                                  _check_run("lint", conclusion="SUCCESS")])
     assert state == dispatcher.CI_PASSING
 
 

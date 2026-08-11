@@ -1483,6 +1483,12 @@ class CIStatus(NamedTuple):
     conclusion is in :data:`CI_INFRA_CONCLUSIONS` — the job's steps never ran, so nothing
     about it is evidence about the code. A red with even ONE genuine failure alongside an
     infra one is NOT infra: real evidence wins, conservatively.
+
+    🚦🏗️ CMX-243 round 2. ``plain_failures`` names the (job name, Actions run id) of every
+    failing job whose conclusion is exactly ``FAILURE`` — a candidate for the SAME infra
+    reclassification, decided by that job's own steps rather than its conclusion alone (see
+    :func:`_ci_infra_by_steps`). It is populated whether or not ``infra`` is already true;
+    the reclassification runs only once, on the transition into a new red.
     """
     state: str
     head_sha: str | None = None
@@ -1490,11 +1496,14 @@ class CIStatus(NamedTuple):
     run_ids: tuple[str, ...] = ()
     detail: str = ""
     infra: bool = False
+    plain_failures: tuple[tuple[str, str], ...] = ()
 
 
-def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...], bool]:
+def _rollup_state(
+    nodes: list,
+) -> tuple[str, tuple[str, ...], tuple[str, ...], bool, tuple[tuple[str, str], ...]]:
     """Reduce GitHub's ``statusCheckRollup`` to (state, failing job names, Actions run ids,
-    infra-only).
+    infra-only, plain-failure candidates).
 
     Two node shapes ride in that field and both must be handled: a **CheckRun** (Actions,
     with ``status`` + ``conclusion`` + ``name``) and a **StatusContext** (the legacy commit
@@ -1522,13 +1531,27 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...], b
     about the code. One genuine failure alongside it, and the whole rollup is NOT infra-only:
     real evidence wins, conservatively. A StatusContext failure is never infra-only (that
     shape's failing states are FAILURE/ERROR only — no startup/approval concept exists there).
+
+    🚦🏗️ CMX-243 round 2. `STARTUP_FAILURE`/`ACTION_REQUIRED` do not cover the incident that
+    motivated this ticket: `actions/checkout@v4` dying mid-job (a TLS fault) reports plain
+    `FAILURE`, the same conclusion a genuine test failure gets — GitHub does not distinguish
+    "a step ran and failed" from "the runner died before anything could run" at the job
+    level. The 5th return value, ``plain_failures``, names the (job name, Actions run id) of
+    every CheckRun node whose conclusion is EXACTLY ``FAILURE`` (not TIMED_OUT/CANCELLED,
+    which are real evidence unconditionally — see :data:`CI_INFRA_CONCLUSIONS`'s note — and
+    not a StatusContext, which has no such candidate). It is a *candidate* list, not a
+    verdict: the job's own STEPS (fetched once, only on the once-per-sha transition into a
+    new red — see :func:`_ci_infra_by_steps`) decide whether each one is truly infra. A node
+    whose run id could not be read is simply not a candidate, which is what makes the caller
+    treat it conservatively (see :func:`_ci_infra_by_steps`'s length check).
     """
     if not nodes:
-        return CI_NONE, (), (), False
+        return CI_NONE, (), (), False, ()
     unsettled = False
     passed = 0
     failing: list[str] = []
     run_ids: list[str] = []
+    plain_candidates: list[tuple[str, str]] = []
     non_infra_failure = False
     for node in nodes:
         if not isinstance(node, dict):
@@ -1563,6 +1586,11 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...], b
             m = _CI_RUN_ID_RE.search(str(node.get("detailsUrl") or ""))
             if m:
                 run_ids.append(m.group(1))
+                # 🚦🏗️ CMX-243 round 2. A candidate ONLY when it is exactly FAILURE (never
+                # TIMED_OUT/CANCELLED — real evidence unconditionally) and its run id could
+                # be read — see the docstring above.
+                if conclusion == "FAILURE":
+                    plain_candidates.append((name, m.group(1)))
         elif conclusion in CI_PASSED_CONCLUSIONS:
             passed += 1
         elif conclusion not in CI_DID_NOT_RUN_CONCLUSIONS:
@@ -1570,14 +1598,14 @@ def _rollup_state(nodes: list) -> tuple[str, tuple[str, ...], tuple[str, ...], b
             # one GitHub has not taught us yet. Either way: not evaluated ⇒ not a pass.
             unsettled = True
     if unsettled:
-        return CI_PENDING, (), (), False
+        return CI_PENDING, (), (), False, ()
     if failing:
         # dict.fromkeys: dedupe, keep order — a matrix job can fail in several shards.
         return (CI_FAILING, tuple(dict.fromkeys(failing)), tuple(dict.fromkeys(run_ids)),
-                not non_infra_failure)
+                not non_infra_failure, tuple(dict.fromkeys(plain_candidates)))
     if passed:
-        return CI_PASSING, (), (), False
-    return CI_NONE, (), (), False   # every node skipped: nothing ran, and nothing passed
+        return CI_PASSING, (), (), False, ()
+    return CI_NONE, (), (), False, ()   # every node skipped: nothing ran, and nothing passed
 
 
 def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
@@ -1615,8 +1643,10 @@ def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
         return CIStatus(CI_UNKNOWN, detail="gh returned JSON that is not an object")
     sha = (data.get("headRefOid") or "").strip() or None
     rollup = data.get("statusCheckRollup")
-    state, failing, run_ids, infra = _rollup_state(rollup if isinstance(rollup, list) else [])
-    return CIStatus(state, sha, failing, run_ids, infra=infra)
+    state, failing, run_ids, infra, plain_failures = _rollup_state(
+        rollup if isinstance(rollup, list) else []
+    )
+    return CIStatus(state, sha, failing, run_ids, infra=infra, plain_failures=plain_failures)
 
 
 def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
@@ -1657,6 +1687,88 @@ def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
     if len(text) <= CI_LOG_TAIL_CHARS:
         return text
     return "… (log truncated — this is the tail)\n" + text[-CI_LOG_TAIL_CHARS:]
+
+
+# 🚦🏗️ CMX-243 round 2. Named explicitly from `.github/workflows/ci.yml`'s own step names,
+# not inferred structurally (e.g. "the last step"): if `Ruff` fails, `Pytest` is skipped
+# right after it, but that is a REAL lint failure, not infra — the naive "was the last step
+# skipped" rule would misclassify it. A job's suite steps ran iff AT LEAST ONE of these names
+# reached a conclusion of its own (anything but `skipped`). Keep this in sync with ci.yml if
+# its step names change.
+_CI_SUITE_STEP_NAMES = frozenset({"ruff", "pytest"})
+
+
+def _suite_step_ran(repo_dir: str | None, run_id: str, job_name: str) -> bool | None:
+    """Did JOB_NAME's own suite step(s) (:data:`_CI_SUITE_STEP_NAMES`) ever execute, for a
+    job GitHub reports as failed?
+
+    This is what tells "the runner died before anything could run" apart from "a step ran
+    and exited non-zero" — GitHub's job-level `conclusion` reports both as plain `FAILURE`.
+    The incident that motivated this ticket: `actions/checkout@v4` died on a TLS fault, and
+    every step after it — including `Pytest` — came back `skipped`.
+
+    ``True`` — at least one suite step has a conclusion other than `skipped`: the suite ran,
+    so whatever GitHub reported IS evidence about the code, however it turned out.
+    ``False`` — every suite step is `skipped`: nothing that evaluates the code ever ran.
+    ``None`` — could not be determined (gh unreachable, bad JSON, job or its steps not
+    found). ⛔ Callers must treat this the same as ``True`` — "could not verify" is never
+    infra, the same rule ``_read_pr_checks`` uses for :data:`CI_UNKNOWN`.
+    """
+    if not repo_dir or not run_id:
+        return None
+    try:
+        out = subprocess.run(
+            ["gh", "run", "view", run_id, "--json", "jobs"],
+            cwd=repo_dir, capture_output=True, text=True, errors="replace", timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        data = json.loads(out.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, list):
+        return None
+    job = next((j for j in jobs if isinstance(j, dict) and j.get("name") == job_name), None)
+    if not isinstance(job, dict):
+        return None
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return None
+    suite_steps = [
+        s for s in steps
+        if isinstance(s, dict)
+        and str(s.get("name") or "").strip().lower() in _CI_SUITE_STEP_NAMES
+    ]
+    if not suite_steps:
+        return None
+    return any(str(s.get("conclusion") or "").strip().lower() != "skipped" for s in suite_steps)
+
+
+def _ci_infra_by_steps(ci: CIStatus, repo_dir: str | None) -> CIStatus:
+    """Round-2 reclassification of a plain `FAILURE` red, decided by the job's own STEPS
+    instead of its conclusion alone. Called ONLY at the once-per-sha transition into a new
+    red (never on the poll — :func:`_suite_step_ran` is a `gh run view` call per candidate,
+    the same "not per tick" rule :func:`_failing_log_tail` already follows).
+
+    A no-op unless every failing job is a plain-FAILURE candidate (``ci.plain_failures``
+    covers all of ``ci.failing``) — a red mixed with a TIMED_OUT/CANCELLED/StatusContext
+    failure is already real evidence and is left alone, exactly like the conclusion-only
+    check ``_rollup_state`` already does for :data:`CI_INFRA_CONCLUSIONS`. Reclassifies to
+    infra only when EVERY candidate's own suite steps never ran; one candidate whose suite
+    steps DID run (or could not be checked) keeps the whole red real.
+    """
+    if ci.state != CI_FAILING or ci.infra or not ci.plain_failures:
+        return ci
+    if len(ci.plain_failures) != len(ci.failing):
+        return ci   # a non-plain failure sits alongside these — already real, unconditionally
+    for job_name, run_id in ci.plain_failures:
+        if _suite_step_ran(repo_dir, run_id, job_name) is not False:
+            return ci   # ran, or unknown — real evidence, or "unknown is never a pass"
+    return ci._replace(infra=True)
 
 
 def _ci_verdict_body(ci: CIStatus, log_tail: str, pr_url: str | None) -> str:
@@ -3089,6 +3201,11 @@ def tick(workflow_path: str | Path) -> dict:
             # took the verdict with it — the red was marked delivered and never fired again,
             # and the run sat red in awaiting_review until a human happened to look.
             log_tail = _failing_log_tail(wf_dir, ci.run_ids if ci else ())
+            # 🚦🏗️ CMX-243 round 2. Same "once, on the transition" rule as the log fetch
+            # above: a plain FAILURE is only reclassified as infra here, by its job's own
+            # steps — never on the poll that produced `ci_now`.
+            if ci is not None:
+                ci = _ci_infra_by_steps(ci, wf_dir)
 
             if ci is not None and ci.infra:
                 # NOT evidence about the code — see the module note above this loop. Burn the
