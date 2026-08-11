@@ -204,6 +204,29 @@ def test_merge_proceeds_when_the_judge_sha_matches_the_live_head(repo):
     squash.assert_called_once()
 
 
+def test_merge_proceeds_when_judge_sha_is_unset_even_though_the_live_head_is_known(repo):
+    """The conservatism the staleness gate explicitly claims: an UNSET ``judge_sha`` (an
+    older row, or a judge that never stamped one) is NOT positive evidence of staleness, so
+    it must never refuse on that basis alone — even when GitHub's live head sha IS known and
+    non-empty. ``test_merge_when_the_whole_gate_holds`` leaves ``ci.head_sha`` at its default
+    ``None`` too, so it can't tell "unset judge_sha is deliberately ignored" apart from
+    "neither sha was ever read" — this test pins a REAL head_sha against the unset judge_sha.
+
+    Corrupt ``judge_sha = run.get("judge_sha")`` to ``run.get("judge_sha") or "0000unstamped"``
+    and this goes red: the fabricated sha never matches the live head, so a run this gate
+    already trusted gets refused."""
+    _seed_run(repo)      # judge_sha defaults to None — never stamped
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks",
+                      return_value=CIStatus(CI_PASSING, head_sha="cafef00d0002")), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is True
+    squash.assert_called_once()
+
+
 @pytest.mark.parametrize("ci", [CI_FAILING, CI_PENDING, CI_NONE, CI_UNKNOWN])
 def test_merge_requires_green_CI(repo, ci):
     _seed_run(repo)
