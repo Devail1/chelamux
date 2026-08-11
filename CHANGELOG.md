@@ -12,6 +12,22 @@ history lives in `git log`.
 
 ### Changed
 
+- **A judge verdict of "cannot verify" now reaches the inbox even when the run has already
+  left review, and a merge can no longer silently kill a judge that is still working.**
+  Two follow-ups to the unconditional PR comment below (CMX-228), both measured live on a
+  run whose PR merged while its judge was still mid-check: first, the notification that a
+  judge could not verify a commit — the CAS-refused race, where the run moves on out from
+  under a still-running judge — only ever fired while the run's status was still
+  `awaiting_review`; a run that had already merged got no notification at all, so the one
+  outcome that means "I could not do my job" was also the one nobody heard about. It now
+  fires (and survives delivery) regardless of what the run's status became. Second, the
+  dispatcher's judge watchdog reaped a judge's worktree and killed its window off a single
+  tick's tmux snapshot — a signal that can miss a genuinely live judge — which SIGKILLed
+  one mid-run. The watchdog now cross-checks the judge's own claim lock (pid and start
+  time) before tearing anything down, and holds if a live owner still has it; the hold is
+  bounded by the existing stuck-judge timeout, so a judge that really did hang is still
+  reaped.
+
 - **The judge's verdict now reaches the pull request even when the run moves out from
   under it.** A blocking verdict — a guard that survived deliberate corruption — used to
   reach the PR only as a side-effect of recording a changes-requested state, so if the run

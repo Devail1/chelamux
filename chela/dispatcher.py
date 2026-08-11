@@ -4065,6 +4065,22 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         alive = window in live_windows
         if alive and not timed_out:
             continue
+        # ⚖️🕳️ CMX-229 Objective 2: `alive` is ONE signal (this tick's tmux snapshot) and
+        # it can be wrong — measured live on CMX-227, a judge SIGKILLed (exit 137) mid-
+        # `chela judge run` because the watchdog reaped its worktree/window on exactly
+        # this kind of miss. `judge.judge_lock_live` is a SECOND, independent signal (the
+        # judge's own claim file: pid + `/proc` start time, CMX-219) — cross-check it
+        # before tearing anything down. ⛔ BOUNDED, not a second timeout: once `timed_out`
+        # is True the lock is never consulted and this always reaps, exactly as before —
+        # a live owner past JUDGE_TIMEOUT_SECONDS is "stuck, not thinking" regardless of
+        # what its own lock claims, so a hold can never outlive that bound.
+        if not timed_out and judge.judge_lock_live(judge.judge_worktree_path(wf, row["task_id"])):
+            log.info(
+                "judge watchdog: %s: window %s missing from this tick's tmux snapshot, but "
+                "the judge lock says its owner is still alive — holding teardown", row["task_id"],
+                window,
+            )
+            continue
         reason = (
             f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}min — it is stuck, "
             "not thinking" if timed_out else

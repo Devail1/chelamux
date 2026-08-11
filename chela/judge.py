@@ -1428,6 +1428,24 @@ def _release_judge_slot(worktree: Path) -> None:
             pass
 
 
+def judge_lock_live(worktree: Path) -> bool:
+    """Is a judge for this worktree claimed by a process that is STILL ALIVE, right now?
+
+    ⚖️🕳️ CMX-229 Objective 2. A thin public wrapper around the exact liveness test
+    :func:`_claim_judge_slot` already trusts (pid + ``/proc`` start time, CMX-219) — for a
+    caller (the dispatcher's judge watchdog) that needs to ask "is someone live in here"
+    WITHOUT claiming the slot for itself. Measured live on CMX-227: the watchdog reaped a
+    judge worktree/window (SIGKILL, exit 137) mid-``chela judge run`` because its only
+    liveness signal was that tick's tmux window snapshot — a signal with no cross-check.
+    This gives it a second, independent one to consult before tearing anything down.
+
+    ``False`` on no lock at all (nothing claimed) or a lock whose owner is provably gone —
+    both are "safe to reap", the same answer :func:`_claim_judge_slot` gives a stale claim.
+    """
+    lock = _read_judge_lock(_judge_lock_path(worktree))
+    return lock is not None and _judge_lock_owner_alive(lock)
+
+
 def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:
     """Drop the throwaway worktree, then kill the judge's own tmux window. Best-effort.
 
