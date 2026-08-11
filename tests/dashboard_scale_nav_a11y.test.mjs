@@ -148,6 +148,40 @@ test('minimum legibility floor: --card-font-size and --wall-pane-font-size-sm ar
     assert.ok(sm > 10, `--wall-pane-font-size-sm (${sm}px) has dropped back to (or below) the old 10px pill text`);
 });
 
+// --- GUARD 2y: mirrors GUARD 2z, one surface over. --card-line-height
+// (style.css:29) is consumed at its use site by .ar-title and .ar-sub — the two
+// CARD_SELECTORS that carry flowing prose. .ar-ctx is a fixed-height pill badge
+// (border-radius: 999px, padding for a chip shape), not prose, and keeps its own
+// bare `line-height: 15px` by design — the same non-prose exemption GUARD 1's
+// comment grants .gs-idx and .pane-recap::after among the wall/pane selectors —
+// so it is deliberately excluded here rather than folded in. Reverting either
+// prose selector's line-height to a bare literal, the exact corruption GUARD 2z
+// already guards against for .pane-subtitle/.pane-recap, must fail here too.
+const CARD_LINE_HEIGHT_SELECTORS = ['.ar-title', '.ar-sub'];
+test('type scale: .ar-title and .ar-sub read line-height from --card-line-height, not a bare literal', () => {
+    for (const sel of CARD_LINE_HEIGHT_SELECTORS) {
+        const body = blockFor(CSS, sel);
+        assert.match(body, /line-height:\s*var\(--card-line-height\)/,
+            `${sel} must set line-height from var(--card-line-height)`);
+        assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
+            `${sel} has reverted to a bare line-height literal — the card leading token has no effect at its use site`);
+    }
+});
+
+// --- GUARD 2y-floor: mirrors GUARD 2's numeric floor for the one CMX-230 :root
+// token GUARD 2/2b leave unfloored. --card-line-height was NAMED at the body
+// default (1.5), not raised from a worse prior value the way
+// --wall-pane-line-height was (1.3 -> 1.5), so there is no
+// regression-to-a-prior-worse-value for this floor to catch — but an unenforced
+// token can still be dropped to 1 with every other guard here green.
+test('minimum legibility floor: --card-line-height is above the same floor GUARD 2 sets for --wall-pane-line-height', () => {
+    const root = CSS.match(/:root\s*\{([^}]*)\}/)[1];
+    const lh = root.match(/--card-line-height:\s*([0-9.]+)/);
+    assert.ok(lh, '--card-line-height not declared on :root');
+    assert.ok(parseFloat(lh[1]) >= 1.45,
+        `--card-line-height (${lh[1]}) has dropped below the legibility floor`);
+});
+
 // --- GUARD 2c: "air in the chrome" at low densities (the CMX-230 comment above
 // `body.wall-density-airy #term-stage` in style.css names THIS file's density
 // guard by filename — this test is it). Two facts, both source-text since neither
