@@ -27,7 +27,22 @@ def client():
 def _reset_lock():
     # The lock is process-global (module state) — start and end every test unlocked
     # regardless of what a previous test's background thread did.
+    #
+    # It must be a WAIT, not a check-then-release: `_run`'s `finally: release()` fires on
+    # its own background thread, asynchronously, after the test body that started it has
+    # already returned (several tests here set their release/finished event and move on
+    # without joining that thread). A bare `if locked(): release()` races that thread —
+    # observed flaky on PR #287 (test_apply_refuses_a_second_run_while_one_is_in_flight,
+    # green in isolation, red only in the full file): a thread LEAKED from an earlier test
+    # would reach its own `release()` mid-way through a LATER test, after that later test
+    # had legitimately re-acquired the lock for itself — freeing it early and turning an
+    # expected 409 ("already running") into a 200. Polling for the thread's own release
+    # instead of racing it closes that window; the forced release below is only a
+    # last-resort backstop for a genuinely hung thread.
     yield
+    deadline = time.monotonic() + 2
+    while dash._update_apply_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
     if dash._update_apply_lock.locked():
         dash._update_apply_lock.release()
 
