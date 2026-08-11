@@ -565,6 +565,96 @@ def test_corrupting_the_owned_value_makes_doctor_say_so(name, fleet, monkeypatch
         f"{level}. A check that cannot be seen to go red is not a check.")
 
 
+def test_hooks_rejected_wid_teardown_is_ok_not_warn(fleet, monkeypatch):
+    """CMX-236: a rejected wid that some OTHER record resolved under the SAME tmux epoch
+    is a teardown artifact — the window was real and live under this epoch, it just was
+    not live any more by the time this header arrived — and must never chase the CMX-192
+    lead. The resolving record is a DIFFERENT session: `rejected_wid` only ever fires on
+    `hook.session_start`, which is BY CONSTRUCTION that session's first record, so an
+    ordering where the SAME session resolved it first could never occur in production
+    (CMX-231 rework #3's fixture defect) — this fixture uses one that can."""
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@299",
+                     session_id="1969180e-dead-beef-cafe-000000000002", epoch=EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000003",
+                     rejected_wid="@299", epoch=EPOCH)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.OK for f in findings)
+    assert "@299" in findings[0].title
+    assert "teardown" in findings[0].detail.lower()
+
+
+def test_hooks_rejected_wid_never_live_stays_warn(fleet, monkeypatch):
+    """The complementary shape: a rejected wid that never resolved ANYTHING under the SAME
+    epoch has no evidence it was ever live under the epoch rejecting it — the genuinely
+    rare, genuinely actionable CMX-192 shape — and must still warn."""
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000004",
+                     rejected_wid="@999", epoch=EPOCH)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.WARN for f in findings)
+    assert "@999" in findings[0].title
+    assert "CMX-192" in findings[0].detail
+
+
+def test_hooks_rejected_wid_splits_severity_when_both_shapes_are_present(
+        fleet, monkeypatch):
+    """Both shapes exercised together must produce two DISTINCT findings, not one verdict
+    blended across both — a real teardown must never mask a real CMX-192 case, or vice
+    versa."""
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@299",
+                     session_id="1969180e-dead-beef-cafe-000000000005", epoch=EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000006",
+                     rejected_wid="@299", epoch=EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000007",
+                     rejected_wid="@999", epoch=EPOCH)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    levels = {f.level for f in findings}
+    assert levels == {doctor.OK, doctor.WARN}, (
+        f"expected one OK (teardown, @299) and one WARN (never-live, @999), got {findings}")
+
+
+def test_hooks_rejected_wid_cross_epoch_collision_stays_warn(fleet, monkeypatch):
+    """tmux window ids are small integers, reused by every NEW tmux server — a
+    `rejected_wid` resolving SOMEWHERE in the ring under a DIFFERENT epoch is not evidence
+    it was ever live under the epoch that is rejecting it now. Session `...0008` resolves
+    `@2` under an OLD, now-dead epoch (an unrelated, ordinary window from a previous tmux
+    server); session `...0009` rejects a header naming that same `@2` under the CURRENT
+    epoch — the exact CMX-192 shape (a stale env var whose wid happens to collide with a
+    dead epoch's window) — and must stay WARN. A bare ring-wide (epoch-blind) match would
+    wrongly call this OK; corrupt the epoch check back to a plain wid match and this
+    assertion goes red."""
+    OLD_EPOCH = "111-1111111111"
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@2",
+                     session_id="1969180e-dead-beef-cafe-000000000008", epoch=OLD_EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000009",
+                     rejected_wid="@2", epoch=EPOCH)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.WARN for f in findings), (
+        f"a wid resolved only under a DIFFERENT epoch must not downgrade this rejection "
+        f"to OK, got {findings}")
+    assert "@2" in findings[0].title
+    assert "CMX-192" in findings[0].detail
+
+
+def test_hooks_rejected_wid_with_no_readable_epoch_stays_warn(fleet, monkeypatch):
+    """A record written with no epoch at all (pre-CMX-236, or a host where tmux could not
+    be asked) must never be waved through as a teardown just because SOME record,
+    somewhere, happens to have resolved the same wid string — an unreadable epoch is not
+    license to guess, same discipline as `chela.epoch.is_dangling`."""
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@5",
+                     session_id="1969180e-dead-beef-cafe-000000000010", epoch=EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000011",
+                     rejected_wid="@5", epoch=None)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.WARN for f in findings)
+    assert "@5" in findings[0].title
+
+
 def test_a_check_state_that_cannot_be_read_is_never_a_pass(fleet, monkeypatch):
     """⛔ `gh` missing / offline / rate-limited = UNKNOWN, not GREEN.
 
