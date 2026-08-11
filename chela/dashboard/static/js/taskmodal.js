@@ -68,13 +68,16 @@ function _ciChip(item) {
 }
 
 // judge_state is one of chela.judge's J_* values (running/clean/blocked/
-// cannot_verify) — reuse the existing severity-ladder badge classes so a
+// cannot_verify/blocked_race) — reuse the existing severity-ladder badge classes so a
 // blocked judgement reads exactly as loud as a failed run, not a new color.
 const _JUDGE_BADGE = {
     clean: 'badge-on',
     blocked: 'badge-off',
     running: 'badge-awaiting',
     cannot_verify: 'badge-priority-low',
+    // CMX-239: a CONFIRMED blocking finding the run row never recorded (the CAS-refused
+    // race) — as loud as an ordinary `blocked`, never `cannot_verify`'s low-priority tier.
+    blocked_race: 'badge-off',
 };
 
 function _judgeHtml(item) {

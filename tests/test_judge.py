@@ -508,7 +508,13 @@ def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_p
     refuses to resurrect the row — but that refusal must not also swallow the ONE record
     that a guard SURVIVED corruption. Before this fix the comment posted from INSIDE
     `request_changes`, past its own status check and CAS, so this exact race silently
-    dropped it — while a clean verdict (no such gate) always posted. Inverted severity."""
+    dropped it — while a clean verdict (no such gate) always posted. Inverted severity.
+
+    ⚖️🧊 CMX-239: the run ROW's `judge_state` must not repeat that same inversion one layer
+    down. It used to record `J_CANNOT_VERIFY` here — downgrading a CONFIRMED finding (a
+    guard SURVIVED corruption) to the same shrug-tier state as a launch failure. It must
+    record `J_BLOCKED_RACE`: unambiguous, and never confusable with an ordinary blocked run
+    that later moved on (see `inbox.py`'s `J_BLOCKED_RACE` handling)."""
     task_id = "abc123"
     repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
     with dispatcher._db() as conn:
@@ -520,9 +526,10 @@ def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_p
                       side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
         result = judge.judge_run(task_id, exp_file, cleanup=False)
 
-    assert result["state"] == judge.J_CANNOT_VERIFY      # the run ROW was not resurrected
+    assert result["state"] == judge.J_BLOCKED_RACE       # NOT cannot_verify — a CONFIRMED find
     run = dispatcher.resolve_run(task_id)
     assert run["status"] == "done"                        # untouched — no resurrection
+    assert run["judge_state"] == judge.J_BLOCKED_RACE
     assert posted and "SURVIVED" in posted[0]             # …but the finding still reached the PR
     assert "colourblind glyph cue" in posted[0]
 
@@ -1170,6 +1177,11 @@ def test_only_cannot_verify_re_fires_a_real_verdict_and_a_spent_budget_do_not(tm
     for state, tries, expect_fire in [
         (judge.J_CLEAN, 0, False),          # a real verdict — the judge is done here
         (judge.J_BLOCKED, 0, False),        # a real verdict — it went back through rework
+        # ⚖️🧊 CMX-239: also a real, definitive verdict (a guard SURVIVED corruption) — just
+        # one the run row never recorded because the CAS lost the race. Re-judging the SAME
+        # commit would only re-discover a fact this call already has; it is not an unknown
+        # and must not spend the cannot_verify retry budget re-proving it.
+        (judge.J_BLOCKED_RACE, 0, False),
         (judge.J_CANNOT_VERIFY, 0, True),   # unknown, budget untouched → retry
         (judge.J_CANNOT_VERIFY, 1, True),   # unknown, one retry left → retry
         (judge.J_CANNOT_VERIFY, 2, False),  # budget spent → a human's now
