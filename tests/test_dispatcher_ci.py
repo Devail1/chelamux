@@ -38,6 +38,23 @@ def _own_runs_db(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
 
 
+def _assert_actionable_escalation(last_error: str) -> None:
+    """Structural guard (CMX-242, rework round 1): the recommendation must be non-empty, the
+    menu must have ≥2 real options, and the recommendation must actually NAME one of them
+    (or explicitly opt out) — not just that the "Recommendation:"/"Options:" labels render."""
+    reason, sep, rest = last_error.partition("\n\nRecommendation: ")
+    assert sep, "no recommendation section to parse"
+    recommendation, sep2, rest2 = rest.partition("\n\nOptions:\n")
+    assert sep2, "no options section to parse"
+    options = [line[len("  - "):] for line in rest2.split("\n") if line.startswith("  - ")]
+    assert recommendation.strip(), "an automatic escalation must carry a non-empty recommendation"
+    assert len(options) >= 2, "one option is not a choice"
+    assert (
+        any(o in recommendation for o in options)
+        or recommendation.lower().startswith("none of these")
+    ), "the recommendation must name one of its own options (or explicitly opt out)"
+
+
 def _wf(tmp_path: Path, **cfg) -> WorkflowDef:
     (tmp_path / "TODO.md").write_text("- [ ] do a thing\n")
     return WorkflowDef(
@@ -825,6 +842,11 @@ def test_a_pending_check_that_never_settles_ages_out_into_needs_human(tmp_path):
     run = dispatcher.resolve_run("abc123")
     assert run["status"] == "needs_human"
     assert "not settled in 9h" in run["last_error"] and "STUCK" in run["last_error"]
+    # CMX-242: an automatic escalation is not just a bare reason — it names a
+    # recommendation and concrete next steps, the same as a human-typed `chela escalate`.
+    assert "Recommendation:" in run["last_error"]
+    assert "Options:\n  - " in run["last_error"]
+    _assert_actionable_escalation(run["last_error"])
 
 
 def test_a_pending_check_that_is_merely_SLOW_is_left_alone(tmp_path):
