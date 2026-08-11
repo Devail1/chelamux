@@ -57,6 +57,49 @@ log = logging.getLogger(__name__)
 # re-sync or a service restart can legitimately take longer than GIT_TIMEOUT_SECONDS.
 _SHELL_TIMEOUT_SECONDS = 300
 
+# CMX-226: how many of `apply()`'s OWN subprocess calls sit on each side of that split, on
+# its single slowest real path (behind > 0, not diverged, at least one chela-* PM2 service
+# running, exactly one plugin marketplace to refresh — the common case, and the one the
+# original CMX-199 outage was) — recount by reading `apply()` itself if this ever drifts:
+#   git (GIT_TIMEOUT_SECONDS each): `_is_dirty`'s `git status`, the pre-fetch `git
+#   rev-parse @{u}` (`old_upstream`), `commits_behind`'s `fetch` + 2x `rev-parse` + 2x
+#   `rev-list`, and `git pull --ff-only`                                        = 8 calls
+#   shell (_SHELL_TIMEOUT_SECONDS each): `uv sync`, `pm2 jlist` (inside
+#   `_running_pm2_services`), `pm2 restart`, and one marketplace's 2 `claude plugin ...`
+#   calls (`_update_plugin`)                                                    = 5 calls
+_APPLY_GIT_CALLS = 8
+_APPLY_SHELL_CALLS = 5
+
+
+def apply_stuck_after_seconds() -> int:
+    """The longest an honest, still-progressing :func:`apply` run can plausibly take.
+
+    Every subprocess `apply()` shells out to is individually timeout-bounded (`_sh`/`_git`
+    below), and any one of them failing — including via its own timeout — aborts `apply()`
+    immediately: every step checks `_git_ok` / a non-zero return code and returns early
+    rather than continuing. So the sum of the timeouts along its single slowest path (see
+    `_APPLY_GIT_CALLS` / `_APPLY_SHELL_CALLS` above) IS a hard ceiling on how long a
+    genuinely still-running `apply()` can take — past that sum, every call on that path has
+    either finished or been killed. The only way a caller is still waiting past it (e.g. the
+    `threading.Lock` `chela.dashboard.app`'s update-apply route holds while `apply()` runs)
+    is that whatever held the lock died without releasing it — a wedged lock, not a slow run.
+
+    Padded with half a shell timeout of headroom for the parts that sum doesn't model
+    (interpreter/thread-scheduling overhead between calls) — not because the bound above is
+    loose (it already assumes every call runs the full length of its own timeout, which is
+    itself pessimistic), just so this doesn't fire on the very first second past it.
+
+    Derived from `GIT_TIMEOUT_SECONDS` / `_SHELL_TIMEOUT_SECONDS` rather than a literal so
+    it tracks them if either ever changes — see `chela.dashboard.app`'s own use of this and
+    the doctor fact (`runtime_truth.py`'s `dashboard.update_lock`) that reports a lock held
+    past it.
+    """
+    return (
+        _APPLY_GIT_CALLS * GIT_TIMEOUT_SECONDS
+        + _APPLY_SHELL_CALLS * _SHELL_TIMEOUT_SECONDS
+        + _SHELL_TIMEOUT_SECONDS // 2
+    )
+
 
 class NotAGitCheckout(RuntimeError):
     """Raised by :func:`repo_root` when chela was installed some other way (e.g. pip)."""

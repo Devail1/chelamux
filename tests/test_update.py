@@ -110,6 +110,40 @@ def _install_plugin(
     return root
 
 
+# --- apply_stuck_after_seconds: the ceiling must be DERIVED, not an independent literal -
+
+def test_stuck_after_ceiling_is_derived_from_the_timeout_constants():
+    """CMX-226 rework: the ceiling chela.dashboard.app uses to flag a wedged update-apply
+    lock has to come out of `apply()`'s own subprocess timeouts, not a guess that drifts
+    the moment either constant changes. Pin the arithmetic itself, not just "some number
+    comes back" — a formula that quietly stopped matching apply()'s real step count would
+    still pass a looser assertion."""
+    expected = (
+        update._APPLY_GIT_CALLS * update.GIT_TIMEOUT_SECONDS
+        + update._APPLY_SHELL_CALLS * update._SHELL_TIMEOUT_SECONDS
+        + update._SHELL_TIMEOUT_SECONDS // 2
+    )
+    assert update.apply_stuck_after_seconds() == expected
+
+
+def test_stuck_after_ceiling_tracks_git_timeout(monkeypatch):
+    """The fence a hardcoded literal cannot pass: raise GIT_TIMEOUT_SECONDS and the
+    ceiling must move with it, proving it is actually read from the constant rather than
+    baked in at the moment someone last did the arithmetic by hand."""
+    baseline = update.apply_stuck_after_seconds()
+    monkeypatch.setattr(update, "GIT_TIMEOUT_SECONDS", update.GIT_TIMEOUT_SECONDS + 1000)
+    assert update.apply_stuck_after_seconds() > baseline
+
+
+def test_stuck_after_ceiling_tracks_shell_timeout(monkeypatch):
+    """Same fence, the other constant — `uv sync`/`pm2`/the plugin refresh calls are
+    bounded by `_SHELL_TIMEOUT_SECONDS`, not `GIT_TIMEOUT_SECONDS`, and both must move
+    the ceiling independently or one of them is dead weight in the formula."""
+    baseline = update.apply_stuck_after_seconds()
+    monkeypatch.setattr(update, "_SHELL_TIMEOUT_SECONDS", update._SHELL_TIMEOUT_SECONDS + 1000)
+    assert update.apply_stuck_after_seconds() > baseline
+
+
 # --- dirty tree ⇒ refuse -------------------------------------------------------------
 
 def test_dirty_tree_refuses_and_never_pulls(checkout, upstream, git_calls):

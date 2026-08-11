@@ -2153,6 +2153,23 @@ def api_settings():
 # restart` in sequence, and a second click mid-run would race the same working tree.
 _update_apply_lock = threading.Lock()
 
+# CMX-226: a held lock and a genuinely running update look IDENTICAL from outside — both
+# render as the 409 below. That's fine while the run is fresh (every subprocess `_run`
+# shells out to is individually timeout-bounded — see `_sh`/`_git` in chela/update.py) but
+# indistinguishable from a wedged lock (e.g. the process was killed mid-run, taking the
+# daemon thread and this module-global with it) with nothing left to release it — the only
+# recovery is restarting this process, which hands out a fresh `threading.Lock()`. Track
+# when the current hold started so the refusal can say "N seconds" instead of a bare
+# "running", and flag it `stuck` past the longest an honest run should ever take, so an
+# operator (or the drawer) can tell "wait" from "go restart the dashboard" without reading
+# this source file first.
+_update_apply_started_at: float | None = None
+# CMX-226: `update.apply_stuck_after_seconds()` derives the ceiling from
+# GIT_TIMEOUT_SECONDS / _SHELL_TIMEOUT_SECONDS instead of a literal, so it moves with
+# them — see that function's docstring for the full derivation. Also read (via
+# `config.live_update_apply_lock`) by the `dashboard.update_lock` doctor fact below, so a
+# wedged lock is visible to `chela doctor` too, not just to whoever clicks Update again.
+
 
 @app.route("/api/update/apply", methods=["POST"])
 @require_auth
@@ -2168,6 +2185,7 @@ def api_update_apply():
     Refuses outright — no queueing — while any dispatched run is `claimed`/`running`:
     the restart this triggers would orphan it mid-flight.
     """
+    global _update_apply_started_at
     try:
         status = update.commits_behind(fetch=False)
     except update.NotAGitCheckout as e:
@@ -2190,9 +2208,28 @@ def api_update_apply():
         }), 409
 
     if not _update_apply_lock.acquire(blocking=False):
-        return jsonify({"ok": False, "error": "an update is already running"}), 409
+        started_at = _update_apply_started_at
+        elapsed = int(time.monotonic() - started_at) if started_at is not None else None
+        ceiling = update.apply_stuck_after_seconds()
+        if elapsed is not None and elapsed > ceiling:
+            error = (f"an update has been running for {elapsed}s — longer than any "
+                     "legitimate apply() should take, so this is very likely a wedged "
+                     "lock from a process that died mid-run; restart this dashboard "
+                     "(`pm2 restart chela-dashboard`) to clear it")
+        elif elapsed is not None:
+            error = f"an update is already running ({elapsed}s so far)"
+        else:
+            error = "an update is already running"
+        return jsonify({
+            "ok": False, "error": error, "elapsed_seconds": elapsed,
+            "stuck": elapsed is not None and elapsed > ceiling,
+        }), 409
+
+    _update_apply_started_at = time.monotonic()
+    config.publish_update_apply_lock(time.time())
 
     def _run():
+        global _update_apply_started_at
         try:
             result = update.apply()
             if not result.ok:
@@ -2204,6 +2241,8 @@ def api_update_apply():
                     "dashboard-triggered update applied %d commit(s), restarted: %s",
                     result.behind_before, restarted)
         finally:
+            _update_apply_started_at = None
+            config.clear_update_apply_lock()
             _update_apply_lock.release()
 
     threading.Thread(target=_run, daemon=True, name="dashboard-update-apply").start()

@@ -626,6 +626,70 @@ def clear_dashboard_port() -> None:
         pass
 
 
+def update_apply_lock_file() -> Path:
+    """Where the dashboard records that its update-apply lock (chela.dashboard.app's
+    ``_update_apply_lock``) is currently held, and since when."""
+    return CHELA_DIR / "update-apply-lock.json"
+
+
+def publish_update_apply_lock(started_at: float) -> None:
+    """Record that THIS process's update-apply lock is held, and since when — wall-clock
+    (``time.time()``), not the route's own ``time.monotonic()`` sidecar, because this has
+    to be comparable across processes, not just within the one holding the lock.
+
+    Same reason as :func:`publish_dashboard_port`: ``chela doctor`` and the daemon's
+    periodic notify edge run in a DIFFERENT process from the dashboard, so neither can see
+    an in-process ``threading.Lock`` directly — only what gets published for them to read.
+    Best-effort by design: a dashboard that cannot write this file still serves the route's
+    own 409 guard, which never depends on this file existing; it only loses the doctor
+    fact's ability to warn about it from outside that process.
+    """
+    try:
+        CHELA_DIR.mkdir(parents=True, exist_ok=True)
+        update_apply_lock_file().write_text(
+            json.dumps({"pid": os.getpid(), "started_at": started_at}) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def clear_update_apply_lock() -> None:
+    """Drop the published hold once the run ends — a crash leaves it; the pid check in
+    :func:`live_update_apply_lock` is what makes that harmless either way."""
+    try:
+        update_apply_lock_file().unlink()
+    except OSError:
+        pass
+
+
+def live_update_apply_lock() -> dict | None:
+    """What the dashboard's update-apply lock really is right now, or None if it isn't
+    held by a live process.
+
+    Same staleness rule as :func:`live_dashboard`: a file whose ``pid`` is gone is a lock
+    the process holding it died with — a restart (by hand or PM2's own auto-restart)
+    already handed out a fresh, unheld ``threading.Lock()``, so there is nothing left to
+    warn about.
+    """
+    try:
+        data = json.loads(update_apply_lock_file().read_text(encoding="utf-8"))
+        started_at = float(data["started_at"])
+        pid = int(data.get("pid") or 0)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if pid > 0:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            pass                     # alive, owned by someone else
+        except OSError:
+            return None
+    return {"started_at": started_at, "pid": pid}
+
+
 def live_dashboard() -> dict | None:
     """What the running dashboard published, or None if none is running.
 
