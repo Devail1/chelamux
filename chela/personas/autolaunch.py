@@ -64,6 +64,7 @@ from pathlib import Path
 
 from chela import config, event_log, inbox
 from chela.config import TMUX_SESSION
+from chela.messenger import messaging_socket_launch_arg
 from chela.personas import ORCHESTRATOR_PROMPT, lease
 
 log = logging.getLogger(__name__)
@@ -265,6 +266,14 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
     # orchestrator's identity for the whole session, on top of the user's Claude Code config.
     cmd = (f"claude --permission-mode auto "
            f"--append-system-prompt \"$(cat {ORCHESTRATOR_PROMPT})\"")
+    # CMX-223: a chela-owned, deterministic peer-messaging socket path, same as the
+    # dispatcher's own agents — lets messenger.send_peer address this window without
+    # guessing it from our own env. None (path would overflow the sun_path ceiling)
+    # just launches without the flag.
+    if re.fullmatch(r"@\d+", target):
+        socket_arg = messaging_socket_launch_arg(target)
+        if socket_arg:
+            cmd = f"{cmd} {socket_arg}"
     subprocess.run(
         ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target}", cmd, "Enter"],
         check=True, capture_output=True,

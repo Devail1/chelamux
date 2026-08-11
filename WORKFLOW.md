@@ -107,7 +107,7 @@ hooks:
 # Autonomous coding agent — chelamux
 
 You are an autonomous coding agent working on a single TODO item in the **chelamux**
-repo (a public MIT project: a tmux-driven orchestrator for Claude Code agents).
+repo (a public AGPL-3.0-or-later project: a tmux-driven orchestrator for Claude Code agents).
 
 ## Your task
 
@@ -160,7 +160,7 @@ writer, on purpose: when agents struck their own line in their branch while the
 orchestrator kept appending items to `{{base_branch}}`, every dispatched PR conflicted
 on it. Leave it alone and your PR merges clean.
 
-## Public-repo boundaries (load-bearing — this is a public MIT repo)
+## Public-repo boundaries (load-bearing — this is a public AGPL-3.0-or-later repo)
 
 - **No secrets or private data in committed code**: no real tokens, chat ids, absolute
   `/home/<user>` paths, or private project/host names. Config must be env-driven; use

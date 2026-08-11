@@ -401,3 +401,67 @@ def test_cli_recap_prints_nothing_for_a_roomless_window(wired, capsys):
     rooms.leave("wire", "@9")
     main.cmd_room_recap(Namespace(wid="@9"))
     assert capsys.readouterr().out == ""
+
+
+# --- CMX-223: peer socket first, tmux paste as fallback, receipts recorded -------
+
+def test_a_targeted_dispatch_prefers_the_peer_socket(wired):
+    """A reachable peer socket delivers without ever touching send_tmux — mirrors
+    messenger.send_message's own peer-first contract."""
+    sent = messenger.PeerSendResult(True, "sent")
+    with patch.object(messenger, "send_peer", return_value=sent) as peer:
+        result = _post("question")
+    assert result["ok"] and result["delivered"] == ["@2"]
+    peer.assert_called_once()
+    wid, from_agent, prompt = peer.call_args[0]
+    assert wid == "@2" and from_agent == "@1"
+    assert prompt.startswith(rooms.RELAY_HEADER)          # NOT re-wrapped by send_peer
+    wired.assert_not_called()                             # tmux never touched
+    assert _types() == ["room_question", rooms.DELIVERY_TYPE]
+
+
+def test_a_held_receipt_is_recorded_and_NOT_treated_as_delivered(wired):
+    """⛔ THE fail-open fix: a peer socket accepting the bytes is a handoff, not a
+    delivery. Corrupting this (e.g. treating any handed_off as delivered) makes
+    this fail by reporting @2 as delivered with no room_receipt in the log."""
+    held = messenger.PeerSendResult(True, "held")
+    with patch.object(messenger, "send_peer", return_value=held):
+        result = _post("question")
+    assert result["ok"] and result["delivered"] == [] and result["failed"] == ["@2"]
+    wired.assert_not_called()          # a receiver's own gate — not a transport failure
+    assert _types() == ["room_question", rooms.RECEIPT_TYPE]
+    receipt = next(e for e in event_log.read()["events"] if e["type"] == rooms.RECEIPT_TYPE)
+    assert receipt["payload"]["status"] == "held"
+    assert receipt["payload"]["to_wid"] == "@2"
+    assert receipt["payload"]["post_seq"] == result["seq"]
+
+
+def test_peer_socket_unreachable_falls_back_to_tmux(wired):
+    """The existing contract, unchanged: no live socket -> tmux paste, same as
+    before CMX-223 ever routed rooms through the peer socket."""
+    unreachable = messenger.PeerSendResult(False, None)
+    with patch.object(messenger, "send_peer", return_value=unreachable):
+        result = _post("question")
+    assert result["ok"] and result["delivered"] == ["@2"]
+    wired.assert_called_once()
+    assert _types() == ["room_question", rooms.DELIVERY_TYPE]
+
+
+def test_a_parked_delivery_with_an_adverse_receipt_is_recorded_and_dropped(wired):
+    """A parked post whose gate clears, then gets held/denied/expired over the peer
+    socket: recorded as a receipt, removed from the pending queue (not re-parked —
+    a receiver's own gate refusing it again next tick would just spin forever)."""
+    posted = rooms.post("wire", "question", "can you take this?", from_wid="@1",
+                        targets=["@3"])
+    assert rooms.has_pending()
+
+    denied = messenger.PeerSendResult(True, "denied")
+    with patch.object(messenger, "send_peer", return_value=denied):
+        sent = rooms.flush_pending({**STATUSES, "@3": "idle"})
+    assert sent == []
+    wired.assert_not_called()
+    assert not rooms.has_pending()     # dropped, not left queued forever
+    receipt = next(e for e in event_log.read()["events"] if e["type"] == rooms.RECEIPT_TYPE)
+    assert receipt["payload"]["status"] == "denied"
+    assert receipt["payload"]["post_seq"] == posted["seq"]
+    assert receipt["payload"]["to_wid"] == "@3"

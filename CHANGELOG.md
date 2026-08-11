@@ -12,6 +12,29 @@ history lives in `git log`.
 
 ### Changed
 
+- **Agent-to-agent messages now travel over Claude Code's peer messaging socket
+  instead of being typed into the recipient's terminal.** Claude Code 2.1.224+
+  binds a per-session Unix socket, and chela launches each agent with an explicit
+  `--messaging-socket-path`, so `chela msg`/`broadcast`, room `handoff`/`question`/
+  `blocker` dispatch, and merge-verdict delivery hand the message straight to the
+  recipient's message queue. Typing into a pane depended on that pane's input mode
+  — a message arriving while the recipient sat in `!`-bash mode would have been
+  executed rather than read — and on the terminal accepting a paste cleanly. The
+  socket bypasses the terminal entirely.
+
+  Delivery falls back to the previous paste transport whenever the socket can't be
+  reached (an older Claude Code, a session that hasn't bound one, a stale socket
+  file), so nothing regresses on a mixed fleet. **Key presses, slash commands, and
+  permission-gate answers deliberately still go over the terminal**: a peer message
+  can never answer a permission prompt, and Claude Code delivers slash commands in
+  a peer message as inert text.
+
+  A handoff is not a delivery: a recipient whose own `crossSessionInbound` setting
+  holds or refuses the message drops it while the socket still accepts the bytes.
+  chela now reads the receipt that reports this and treats it as a failure rather
+  than a success — and deliberately does *not* retry over the terminal, since the
+  recipient's gate is a policy decision rather than a transport fault.
+
 - **chelamux is now licensed under the GNU Affero General Public License v3.0 or
   later**, changed from MIT. AGPL rather than plain GPL because chela is a
   long-running daemon with a web dashboard: GPL obligations trigger on
