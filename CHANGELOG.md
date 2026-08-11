@@ -34,6 +34,18 @@ history lives in `git log`.
   and only points at CMX-190/teardown-race for the sessions that actually had a window to
   lose.
 
+- **`chela doctor`'s `plugin.hooks_wid_rejected` fact no longer calls a live window dead.**
+  It used to declare a well-formed `$CHELA_WID` naming a not-currently-live window "always
+  a fault, never the ordinary unset case," pointing a reader at a manual-relaunch/stale
+  global-env hunt (CMX-192). Measured against this host's own production log (CMX-231):
+  the only two real occurrences ever recorded were both a session restarting its own
+  claude process INSIDE a window that never closed (auto-compact, `/clear`) — `SessionStart`
+  outran `sessions.panes`' ≤1s-TTL cache, a race `wid_for_session`'s own inference fallback
+  already absorbed with a forced re-read, but the header path never got the same retry.
+  `chela/hooks.py`'s `_explicit_wid`/`_explicit_wid_dead` now get that same forced-refresh
+  retry before ever calling a header's window dead, and the WARN detail no longer overclaims
+  — a rejected header is now one that is still not live after a fresh tmux read.
+
 
 - **Agent-to-agent messages now travel over Claude Code's peer messaging socket
   instead of being typed into the recipient's terminal.** Claude Code 2.1.224+

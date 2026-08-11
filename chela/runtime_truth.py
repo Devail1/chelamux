@@ -1132,11 +1132,28 @@ def _hooks_unattributed_report(_declared: None, obs: Observation) -> list[Findin
 # `_explicit_wid` (hooks.py) correctly refuses a header naming a window that is not live
 # right now — falling through to the same origin-based inference any other hook uses — but
 # it says NOTHING when it does. An unset header is the ordinary case (a session chela did
-# not launch has no `$CHELA_WID`) and must never warn; a well-formed header naming a DEAD
-# window is always a fault: the agent inherited a stale `$CHELA_WID` from tmux's global
-# environment after the window it once named had closed (the actual CMX-192 root cause).
-# `chela.hooks.ingest` keeps that rejected value on the record (`rejected_wid`), distinct
-# from the unset case (`rejected_wid=None` there too) — this fact reads it back.
+# not launch has no `$CHELA_WID`) and must never warn. `chela.hooks.ingest` keeps the
+# rejected value on the record (`rejected_wid`), distinct from the unset case
+# (`rejected_wid=None` there too) — this fact reads it back.
+#
+# CMX-231: this fact used to call every rejected header "always a fault, never the
+# ordinary unset case" — a manual relaunch inheriting a stale `$CHELA_WID` from tmux's
+# global environment after its window closed (CMX-192). Measured against this host's own
+# production log (~13.8k `hook.*` records across ~4 weeks): the only two occurrences ever
+# recorded were BOTH `hook.session_start`, BOTH naming the SAME long-lived window, which
+# never closed or was replaced anywhere in the surrounding log — other hooks kept
+# resolving to it, before and after. That is the signature of a session restarting INSIDE
+# an already-open window (auto-compact, `/clear` — a new claude process replaces the old
+# one in place, no window is killed) whose `SessionStart` fires before
+# `sessions.panes`' ≤1s-TTL cache catches up: not a dead window, a cache that hadn't
+# refreshed yet. `wid_for_session`'s own inference fallback already had a name and a fix
+# for this exact shape ("a window that appeared since the last refresh") — one forced
+# re-read on a miss — but `_explicit_wid`/`_explicit_wid_dead` never got it, so the same
+# race that inference treated as benign got reported one layer up as a hard fault.
+# CMX-231 gave both functions that same forced-refresh retry (hooks.py), so what reaches
+# `rejected_wid` now is a header still not live after a fresh tmux read — the genuinely
+# rare, genuinely actionable CMX-192 shape, not a session replacing its own process a
+# moment before the cache noticed.
 
 def _hooks_rejected_wid_read() -> Observation:
     """Every ``hook.*`` record in the ring whose ``X-Chela-Wid`` named a window that was
@@ -1164,14 +1181,17 @@ def _hooks_rejected_wid_report(_declared: None, obs: Observation) -> list[Findin
         WARN,
         f"{len(dead)} session(s) sent an X-Chela-Wid naming a DEAD window in the "
         f"{bound}: {named}",
-        "A well-formed $CHELA_WID that names a window which is not live right now is "
-        "always a fault, never the ordinary unset case — it means the agent inherited a "
-        "stale window id, most often from tmux's global environment surviving a manual "
-        "relaunch (the CMX-192 root cause). chela.hooks.wid_for_session still fell back "
-        "to origin-based inference for these, so the event was not necessarily lost — "
-        "but the stale id is worth chasing down across the plugin cache, "
-        "installed_plugins.json, the daemon, /proc env and the tmux global env. This "
-        "scan is bounded to the ring above.",
+        "A well-formed $CHELA_WID that names a window which is STILL not live after a "
+        "forced tmux re-read (chela.hooks._explicit_wid_dead retries once before "
+        "reporting this — CMX-231) usually means the agent was relaunched by hand and "
+        "inherited a stale window id from tmux's global environment surviving that "
+        "relaunch (the CMX-192 root cause). It is NOT the ordinary shape of a session "
+        "restarting inside a window that never closed (auto-compact, /clear) — the retry "
+        "already absorbs that race. chela.hooks.wid_for_session still fell back to "
+        "origin-based inference for these, so the event was not necessarily lost — but "
+        "the stale id is worth chasing down: is the window in `chela status` right now, "
+        "and does the session's OWN transcript show a `--resume` shortly before this? "
+        "This scan is bounded to the ring above.",
     )]
 
 

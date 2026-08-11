@@ -616,29 +616,50 @@ def _explicit_wid(hint: str | None,
     launch) or naming a window that is not live right now all fall through to ``None``
     exactly as if the header had never been sent, and the caller re-derives it the old way
     — a bad header must never be WORSE than no header.
+
+    ``panes=None`` (the real caller, never a test with a fixed snapshot) gets ONE retry
+    against a forced-fresh read before "not live" is trusted: ``sessions.panes``' own TTL
+    cache (≤1s) can predate a session that just replaced its own claude process INSIDE an
+    already-open window (auto-compact, ``/clear`` — the window never closed), and
+    ``SessionStart`` fires the instant the new process attaches, often faster than the
+    cache refreshes. ``wid_for_session``'s own inference fallback already forces a re-read
+    for exactly this shape ("a window that appeared since the last refresh"); this mirrors
+    it so the header path gets the same second look before a live window is ever called
+    not-live.
     """
     if not hint or not _WID_RE.match(hint):
         return None
     live = _panes() if panes is None else panes
-    return hint if hint in live else None
+    if hint in live:
+        return hint
+    if panes is not None:
+        return None
+    return hint if hint in _panes(force=True) else None
 
 
 def _explicit_wid_dead(hint: str | None,
                        panes: dict[str, sessions.Pane] | None = None) -> str | None:
     """The ``X-Chela-Wid`` value itself, but ONLY on the one shape :func:`_explicit_wid`
     folds silently into ``None`` alongside "no header at all": well-formed, present, and
-    naming a window that is not live right now.
+    STILL not live after the same forced-refresh retry :func:`_explicit_wid` gives it.
 
     Unset (no ``$CHELA_WID`` — a session chela did not launch) and malformed both return
     ``None`` here too, same as a live wid — those are never a fault and must never warn.
-    A well-formed hint naming a dead window IS always a fault: it means the agent was
-    relaunched by hand and inherited a stale ``$CHELA_WID`` from tmux's global environment
-    (the CMX-192 root cause, verbatim), and this is the one signal that says so.
+    A well-formed hint that survives the retry and is still not live usually means the
+    agent was relaunched by hand and inherited a stale ``$CHELA_WID`` from tmux's global
+    environment (the CMX-192 root cause) — the retry exists precisely so this signal isn't
+    also true of a window that is very much alive, just not yet in the cache (CMX-231:
+    measured live on this host, both real occurrences were a `SessionStart` racing its OWN
+    still-open window this way, not a dead one).
     """
     if not hint or not _WID_RE.match(hint):
         return None
     live = _panes() if panes is None else panes
-    return None if hint in live else hint
+    if hint in live:
+        return None
+    if panes is not None:
+        return hint
+    return None if hint in _panes(force=True) else hint
 
 
 def wid_for_session(session_id: str | None,

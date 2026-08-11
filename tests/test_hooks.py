@@ -476,6 +476,55 @@ def test_explicit_wid_dead_names_the_window_when_it_is_not_live():
     assert hooks._explicit_wid_dead("@999", panes={}) == "@999"
 
 
+# --- the forced-refresh retry (CMX-231) -----------------------------------------------
+#
+# `sessions.panes` is TTL-cached (≤1s). A session that restarts its OWN claude process
+# INSIDE an already-open window (auto-compact, `/clear` — no window ever closes) can fire
+# `SessionStart` faster than that cache refreshes, so a real, live window briefly looks
+# dead to a single un-forced read. `wid_for_session`'s inference fallback already handles
+# this exact shape with one forced re-read on a miss; `_explicit_wid`/`_explicit_wid_dead`
+# must do the same — but ONLY when `panes=None` (the real caller). A caller that passes a
+# fixed snapshot explicitly (every test above) is asking for that snapshot's answer, not a
+# retry — the tests above assert that by never mocking `hooks._panes` at all.
+
+def test_explicit_wid_retries_a_forced_refresh_before_calling_a_live_window_dead(monkeypatch):
+    """Missing from the cached read, present after a forced one: this is the live window,
+    not a dead one — the header must win, exactly as if the cache had been fresh."""
+    calls = []
+
+    def fake_panes(force=False):
+        calls.append(force)
+        return {"@299": object()} if force else {}
+
+    monkeypatch.setattr(hooks, "_panes", fake_panes)
+    assert hooks._explicit_wid("@299") == "@299"
+    assert calls == [False, True]      # cached read first, forced retry only on a miss
+
+
+def test_explicit_wid_dead_retries_a_forced_refresh_before_reporting_a_fault(monkeypatch):
+    """The complementary function must reach the SAME verdict: found on the forced retry
+    means this was never a fault, so `rejected_wid` must stay unset."""
+    monkeypatch.setattr(hooks, "_panes",
+                        lambda force=False: {"@299": object()} if force else {})
+    assert hooks._explicit_wid_dead("@299") is None
+
+
+def test_explicit_wid_dead_still_reports_a_fault_when_the_forced_retry_also_misses(monkeypatch):
+    """The retry is one extra look, not infinite trust — a window still missing after a
+    fresh tmux read is genuinely dead, and this must still warn."""
+    monkeypatch.setattr(hooks, "_panes", lambda force=False: {})
+    assert hooks._explicit_wid("@999") is None
+    assert hooks._explicit_wid_dead("@999") == "@999"
+
+
+def test_explicit_wid_never_retries_when_the_caller_supplies_a_fixed_snapshot(monkeypatch):
+    """A caller that passes `panes=` explicitly gets exactly that answer — no hidden
+    second tmux call behind its back. `hooks._panes` is left unmocked on purpose: a retry
+    here would hit the real `sessions.panes` and likely raise or hang in a test env."""
+    assert hooks._explicit_wid("@299", panes={}) is None
+    assert hooks._explicit_wid_dead("@299", panes={}) == "@299"
+
+
 def test_ingest_never_reports_rejected_wid_when_the_header_is_simply_unset(monkeypatch):
     monkeypatch.setattr(hooks, "_slug_from_disk", lambda session_id: None)
     record = hooks.ingest("SessionStart", _body(), explicit_wid=None)
@@ -504,6 +553,20 @@ def test_ingest_reports_rejected_wid_when_the_header_names_a_dead_window(monkeyp
     record = hooks.ingest("SessionStart", _body(), explicit_wid="@999")
     assert record["wid"] is None
     assert record["rejected_wid"] == "@999"
+
+
+def test_ingest_never_reports_rejected_wid_for_a_window_missed_only_by_a_stale_cache(
+        monkeypatch):
+    """CMX-231, the production shape measured live: a session restarts its own claude
+    process inside a window that never closed, and `SessionStart` outruns the ≤1s pane
+    cache. The forced retry must resolve @299 as live, so this must land exactly like
+    `test_ingest_never_reports_rejected_wid_when_the_header_is_live` — no fault at all."""
+    monkeypatch.setattr(hooks, "_slug_from_disk", lambda session_id: None)
+    monkeypatch.setattr(hooks, "_panes",
+                        lambda force=False: {"@299": object()} if force else {})
+    record = hooks.ingest("SessionStart", _body(), explicit_wid="@299")
+    assert record["wid"] == "@299"
+    assert record["rejected_wid"] is None
 
 
 def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
