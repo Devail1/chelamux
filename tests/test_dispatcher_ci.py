@@ -626,6 +626,53 @@ def test_a_TIMED_OUT_sibling_blocks_infra_reclassification_of_a_plain_failure_be
     assert (run["rework_count"] or 0) == 1
 
 
+def test_one_plain_failure_that_never_ran_beside_one_that_DID_is_NOT_infra_only(tmp_path):
+    """Two plain-`FAILURE` candidates in the SAME rollup — `test (3.12)` looks exactly like
+    the checkout-TLS incident (every suite step skipped), `test (3.11)` genuinely ran
+    `Pytest` and failed. `_ci_infra_by_steps` must reclassify to infra only when EVERY
+    candidate's suite never ran — one candidate with real evidence keeps the WHOLE red real,
+    the same "real evidence wins" rule the conclusion-level check already applies (see
+    `test_an_infra_red_beside_a_real_failure_IS_charged` and
+    `test_one_real_failure_beside_an_infra_one_is_NOT_infra_only`). The infra-looking job is
+    listed FIRST on purpose: a classifier that returns `infra=True` on the first never-ran
+    candidate it meets, instead of scanning for one that DID run, would misfire here before
+    ever reaching the real evidence."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    dead_steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "failure"),
+        _step("Ruff", "skipped"),
+        _step("Pytest", "skipped"),
+        _step("Complete job", "success"),
+    ]
+    ran_steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "success"),
+        _step("Ruff", "success"),
+        _step("Pytest", "failure"),
+        _step("Complete job", "success"),
+    ]
+    fake = _FakeGh(rollup=[
+        _check_run("test (3.12)", conclusion="FAILURE", run_id="222"),
+        _check_run("test (3.11)", conclusion="FAILURE", run_id="111"),
+    ], jobs_by_run={
+        "222": [_job("test (3.12)", dead_steps)],
+        "111": [_job("test (3.11)", ran_steps)],
+    })
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+    assert summary["reworked"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "running"
+    assert (run["rework_count"] or 0) == 1
+    assert run["pr_checks"] == dispatcher.CI_FAILING
+
+
 def test_the_steps_api_is_read_once_on_the_transition_into_red_and_never_on_the_poll(
     tmp_path,
 ):
