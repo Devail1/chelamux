@@ -1299,6 +1299,17 @@ def test_judge_blocked_race_does_not_clear_with_no_head_to_compare(tmp_path, mon
     assert "CMX-239" in scanned
 
 
+def test_judge_blocked_race_does_not_clear_with_no_judge_sha_to_compare(tmp_path, monkeypatch):
+    """The other half of the same sentence: a row with no `judge_sha` on it (spawn-time
+    stamping never happened, or was wiped) also proves nothing either way, even though
+    `pr_head_sha` is present and would trivially differ from `None`. Drop the `sha and`
+    half of `_blocked_race_resolved`'s check and this goes red: a row with an unknown
+    judged commit would read as resolved just because `None != pr_head_sha`."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(judge_sha=None, pr_head_sha="deadbeef"))
+    assert "CMX-239" in scanned
+
+
 # --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------
 
 def test_restore_dead_epoch_rows_reports_the_count(fleet, monkeypatch):
