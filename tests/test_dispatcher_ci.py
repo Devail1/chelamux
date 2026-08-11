@@ -22,6 +22,7 @@ rollup reduction and the log fetch are all really exercised, not mocked past:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -727,6 +728,44 @@ def test_the_steps_api_is_read_once_on_the_transition_into_red_and_never_on_the_
     assert fake.steps_fetches == 1
 
 
+def test_suite_step_ran_is_None_not_False_on_every_path_that_could_not_verify(tmp_path):
+    """🚦🏗️ CMX-243 round 6. `_ci_infra_by_steps` treats `_suite_step_ran(...) is not False`
+    as "ran, or unknown — real evidence, or 'unknown is never a pass'" (see its docstring).
+    That property depends entirely on `_suite_step_ran` returning `None` — not `False` — on
+    every path where it could not actually determine whether the suite ran. `False` and
+    `None` are NOT interchangeable here: a `False` on an unverifiable path would get treated
+    exactly like "the suite steps were checked and none of them ran", handing a red PR a free
+    infra pass chela never actually confirmed. This exercises `_suite_step_ran` directly
+    (it is a pure function of `(repo_dir, run_id, job_name)`) with one junk payload per
+    unverifiable path, instead of a `_tick` fixture per path."""
+    # no repo dir, or no run id: the steps API is never even asked.
+    assert dispatcher._suite_step_ran(None, "42", "test (3.12)") is None
+    assert dispatcher._suite_step_ran(str(tmp_path), "", "test (3.12)") is None
+
+    # gh cannot be executed at all.
+    with patch.object(dispatcher.subprocess, "run", side_effect=OSError("no gh on PATH")):
+        assert dispatcher._suite_step_ran(str(tmp_path), "42", "test (3.12)") is None
+
+    # gh hits the 30s timeout.
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=30),
+    ):
+        assert dispatcher._suite_step_ran(str(tmp_path), "42", "test (3.12)") is None
+
+    # `jobs` resolves to something other than a list: null, an object, a bare string — all
+    # valid JSON, none of them something `_suite_step_ran` can search for a job in.
+    for jobs_value in (None, {"oops": "wrong shape"}, "not-a-list"):
+
+        class _R:
+            returncode = 0
+            stdout = json.dumps({"jobs": jobs_value})
+            stderr = ""
+
+        with patch.object(dispatcher.subprocess, "run", return_value=_R()):
+            assert dispatcher._suite_step_ran(str(tmp_path), "42", "test (3.12)") is None
+
+
 # --- (b) ⛔ A PENDING RUN IS NOT A RED ONE. The single most important test here. --------
 
 @pytest.mark.parametrize("status", ["QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"])
@@ -1017,7 +1056,7 @@ def test_one_real_failure_beside_an_infra_one_is_NOT_infra_only():
 
 
 def test_a_matrix_that_fails_in_several_shards_names_each_job_once():
-    state, failing, run_ids, infra, _ = dispatcher._rollup_state([
+    state, failing, run_ids, infra, plain_failures = dispatcher._rollup_state([
         _check_run("test (3.11)", conclusion="FAILURE"),
         _check_run("test (3.12)", conclusion="FAILURE"),
         _check_run("test (3.11)", conclusion="FAILURE"),
@@ -1026,6 +1065,12 @@ def test_a_matrix_that_fails_in_several_shards_names_each_job_once():
     assert failing == ("CI / test (3.11)", "CI / test (3.12)")
     assert run_ids == ("42",)
     assert infra is False
+    # 🚦🏗️ CMX-243 round 6. `plain_failures` must be deduped exactly like `failing`/`run_ids`
+    # (same job re-failing across matrix shards collapses to one entry): `_ci_infra_by_steps`
+    # compares `len(ci.plain_failures) != len(ci.failing)` to decide whether a non-plain
+    # failure sits alongside these, and both lists must dedupe the same way or that length
+    # check misfires on exactly the matrix-shard case this test is named for.
+    assert plain_failures == (("test (3.11)", "42"), ("test (3.12)", "42"))
 
 
 def test_a_log_bigger_than_a_prompt_is_truncated_to_its_tail(tmp_path):
