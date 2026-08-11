@@ -56,6 +56,29 @@ history lives in `git log`.
 
 ### Added
 
+- **`chela doctor` now reports which transport each agent would actually receive a
+  message over.** Peer-socket delivery falls back to typing into the terminal
+  whenever the socket cannot be reached, which is correct on a mixed fleet and
+  therefore invisible — a fleet can quietly degrade to the old paste transport with
+  nothing saying so. The new `peer.transport` fact names every live window as
+  `deterministic` (chela-owned socket), `default` (Claude Code's own path — works,
+  but resolved through a pid-derived guess and worth relaunching), or
+  `tmux fallback`, and warns on the last. Reachability is tested by connecting and
+  closing while sending zero bytes, so a stale socket file left behind by a killed
+  agent is reported as unreachable rather than mistaken for a live one, and a doctor
+  run can never hand an agent a turn.
+
+- **A stuck update-apply lock is now visible instead of silent.** The dashboard's
+  `/api/update/apply` refuses a concurrent run with `409`, and that refusal used to
+  say only "an update is already running" — indistinguishable from a lock wedged
+  hours ago. It now reports how long the lock has been held, says *held* rather than
+  *running* when it cannot know, and flags `stuck` past the longest an honest run
+  could take, a ceiling derived from the update path's own subprocess timeouts rather
+  than a hardcoded number. Because that lock lives inside the dashboard process, the
+  hold is published for other processes to read, and a new `dashboard.update_lock`
+  doctor fact reports it — so a wedged deploy path surfaces without anyone having to
+  click Update again. A lock file whose process has died reads as free, not stuck.
+
 - **chelamux now tags its releases.** `0.2.0` and `0.3.0` were shipped without a
   `git tag`, so `git tag` read empty and the GitHub repo sidebar said "No releases
   published" even though two releases were live. `v0.2.0` and `v0.3.0` are now
