@@ -410,15 +410,36 @@ def test_cmd_retry_failure_exits_nonzero(tmp_path, capsys):
 def test_chela_retry_without_reason_exits_nonzero(tmp_path, capsys):
     """🔴 ``--reason`` is the only evidence a human made the call (no pushed commit to
     attest it, unlike ``reopen``) — omitting it must fail argparse, not silently default
-    to an empty note. Make ``--reason`` optional again and this goes green."""
+    to an empty note. Make ``--reason`` optional again and this goes green.
+
+    The row here is a REAL retryable ``needs_human`` run (unlike an earlier version of
+    this test, which left ``abc123`` absent from the DB entirely — that let the mutation
+    survive: with ``--reason`` optional, ``dispatcher.retry`` still got called with an
+    unknown run, still returned ``ok=False``, and ``cmd_retry`` still called
+    ``sys.exit(1)``, so the test stayed green for the WRONG reason). With a real row and
+    ``gh`` mocked to succeed, an optional ``--reason`` would let retry go all the way
+    through and flip the status — no ``SystemExit`` at all, and this test goes red, as
+    it must. The exit code is pinned to argparse's own ``2`` (not ``cmd_retry``'s ``1``)
+    so a mutation that swaps this refusal for some other nonzero exit can't hide either.
+    """
     import sys
 
     from chela import main
 
-    with pytest.raises(SystemExit) as exc, \
+    with dispatcher._db() as conn:
+        _row(conn)
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", ("abc123",)).fetchone()
+    assert dict(row)["status"] == "needs_human"
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router()), \
+         pytest.raises(SystemExit) as exc, \
          patch.object(sys, "argv", ["chela", "retry", "abc123"]):
         main.main()
-    assert exc.value.code != 0
+    assert exc.value.code == 2
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
 
 
 def test_chela_retry_reaches_the_dispatcher_end_to_end(tmp_path):
