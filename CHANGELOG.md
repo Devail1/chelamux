@@ -62,7 +62,9 @@ history lives in `git log`.
   `pr_head_sha` right before either branch would act; a KNOWN mismatch against the commit
   actually tested discards the verdict without spending a round or touching `judge_state` —
   the finding still posts to the PR as a comment, and the per-sha trigger re-judges the new
-  head on its own. (CMX-246)
+  head on its own. The PR comment and a new `judge.stale_head` event log entry both name the
+  judged sha and the PR's live head, so a superseded verdict is never mistaken for a live
+  one. (CMX-246)
 - **Concurrent `cmx-N` branches no longer collide on `CHANGELOG.md`.** Every dispatched
   branch adds its own entry to the top of the same `## [Unreleased]` section, so any two
   branches open at once conflicted on that exact spot the moment the judge's worktree

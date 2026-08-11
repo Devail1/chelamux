@@ -1054,6 +1054,23 @@ def _notes_section(notes: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _stale_head_notice(judged_sha: str, live_head: str) -> str:
+    """⚖️⏱️ CMX-246 Objective 2: prefixed onto the PR comment when a verdict is superseded.
+
+    Not charging a stale verdict fixes the rework budget; it does nothing for the human who
+    still has to tell a stale verdict apart from a live one. Without this, the only way to
+    tell is diffing the verdict's timestamp against the PR's commit history by hand — the
+    exact thing that motivated this ticket (CMX-230, CMX-240 twice, CMX-243). Naming both
+    shas here is what stops a human from re-triaging this finding as if it were current.
+    """
+    return (
+        f"> ⚖️⏱️ **SUPERSEDED** — this verdict is for `{judged_sha[:12]}`, but a newer "
+        f"commit, `{live_head[:12]}`, landed on this PR before the judge finished. Shown "
+        "for the record only: no rework round was spent and nothing on the run row moved. "
+        "A fresh judge is already re-checking the new head on its own."
+    )
+
+
 def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
     """The verdict a SURVIVED mutation writes — stated as the fact it is."""
     parts = [
@@ -1205,7 +1222,7 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     ⛔ It never merges and never approves. A clean run is left in ``awaiting_review``, where
     the orchestrator finds it.
     """
-    from chela import dispatcher, workflow
+    from chela import dispatcher, event_log, workflow
 
     run = dispatcher.resolve_run(ident)
     if run is None:
@@ -1311,9 +1328,28 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                 "head that no longer exists; the per-sha trigger re-judges the new head on "
                 "its own.", task_id, verified_sha[:12], live_head[:12],
             )
+            # ⚖️⏱️ CMX-246 Objective 2: `J_STALE_HEAD` is deliberately never written to the
+            # run row (see its docstring), so `inbox.run_events`'s row-diffing — the ONLY
+            # path an inbox event normally takes — can never see this. This is the durable,
+            # push-side record instead (the same pattern `contract.escalate` and
+            # `dispatcher._respawn_rework`'s reopen-nudge use): a fact a human or `chela
+            # events` can find without diffing a verdict's timestamp against the PR's commit
+            # history by hand.
+            event_log.append(
+                "judge.stale_head",
+                f"{task_id}: judge verdict for {verified_sha[:12]} superseded by "
+                f"{live_head[:12]} — discarded, no rework round spent",
+                payload={
+                    "task_id": task_id, "pr_url": pr_url,
+                    "judged_sha": verified_sha, "live_head_sha": live_head,
+                    "verdict": J_BLOCKED if blocking else report.state,
+                },
+            )
 
         if blocking:
             body = block_body(report, pr_url, test_cmd or "?")
+            if stale_head:
+                body = _stale_head_notice(verified_sha, live_head) + "\n\n" + body
             # ⚖️🕳️ CMX-228: POST FIRST, unconditionally — never behind the CAS below.
             # Before this, the ONLY way this comment reached the PR was inside
             # `request_changes`, past its `status == 'awaiting_review'` check AND its
@@ -1393,6 +1429,8 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
             result["comment_posted"] = posted
         else:
             body = comment_body(report, pr_url, test_cmd or "?")
+            if stale_head:
+                body = _stale_head_notice(verified_sha, live_head) + "\n\n" + body
             posted, post_detail = dispatcher._post_pr_comment(pr_url, repo_dir, body)
             if not posted:
                 log.warning("judge: %s clean verdict did NOT post to the PR: %s",
