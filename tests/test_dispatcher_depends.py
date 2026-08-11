@@ -140,6 +140,34 @@ def test_an_unknown_dependency_reference_fails_closed_rather_than_being_ignored(
     assert "held back" in warnings[0].getMessage()
 
 
+def test_a_semicolon_titled_prerequisite_gates_and_then_unblocks_the_follow_up(repo, spawns):
+    # 🔴 GUARD: before the quote-aware split, a quoted title with an embedded `;`
+    # resolved to garbage ids that no real task ever satisfies — the follow-up
+    # would stay blocked FOREVER even after the prerequisite is struck done, and
+    # `_ready` would log it as an unresolved (typo-looking) reference instead of
+    # an ordinary wait.
+    _seed(
+        repo,
+        '- [ ] follow-up task <!-- depends: "fix the bug; handle the edge case" -->\n'
+        "- [ ] fix the bug; handle the edge case\n",
+    )
+
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert summary["dispatched"] == 1
+    assert spawns.titles == ["fix the bug; handle the edge case"]
+
+    _seed(
+        repo,
+        '- [ ] follow-up task <!-- depends: "fix the bug; handle the edge case" -->\n'
+        "- [x] fix the bug; handle the edge case\n",
+    )
+
+    dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert any(t.startswith("follow-up task") for t in spawns.titles)
+
+
 def test_a_task_with_no_depends_marker_is_unaffected(repo, spawns):
     # Regression guard: plain bullets (the overwhelming common case) must claim exactly
     # as they did before this feature existed.
