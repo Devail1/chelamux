@@ -165,6 +165,11 @@ def test_cli_rework_disputed_prints_needs_human_on_success(capsys):
     out = capsys.readouterr().out
     assert "disputed" in out
     assert "needs_human" in out
+    # the CLI must forward the AGENT's own reason, not a canned one — a human reads
+    # this to resolve the dispute, so a constant string here would defeat the point.
+    run = dispatcher.resolve_run("abc123")
+    assert "already fixed last round" in run["last_error"]
+    assert "already fixed last round" in dispatcher.reviews_of(dict(run))[-1]["body"]
 
 
 def test_cli_rework_disputed_exits_nonzero_on_refusal(capsys):
