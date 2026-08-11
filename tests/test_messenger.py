@@ -576,3 +576,111 @@ def test_peer_socket_path_none_when_nothing_exists(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "chela-home")
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     assert messenger._peer_socket_path("@1", 555) is None
+
+
+# --- peer_socket_reachable / peer_transport_kind — CMX-224's rework ------------
+#
+# `_peer_socket_path` is existence-only: a stale socket FILE surviving its process
+# (the process was SIGKILLed, so its own unlink never ran) still passes `.exists()`
+# forever. These prove the doctor-facing seam actually tries the connection instead
+# of trusting the file's mere presence.
+
+def test_peer_socket_reachable_false_when_file_does_not_exist(tmp_path):
+    assert messenger.peer_socket_reachable(tmp_path / "nope.sock") is False
+
+
+def test_peer_socket_reachable_true_for_a_real_listener(tmp_path):
+    sock_path = tmp_path / "1.sock"
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    try:
+        assert messenger.peer_socket_reachable(sock_path, timeout=0.25) is True
+    finally:
+        server.close()
+
+
+def test_peer_socket_reachable_false_for_a_stale_file_nothing_is_listening_on(tmp_path):
+    # Bind, listen, close — never unlink. The special file is still there; nothing
+    # is behind it. This is the exact shape a SIGKILLed agent leaves.
+    sock_path = tmp_path / "1.sock"
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    server.close()
+    assert messenger.peer_socket_reachable(sock_path, timeout=0.25) is False
+
+
+def test_peer_socket_reachable_sends_zero_bytes(tmp_path):
+    # A doctor probe must never be able to hand the target a turn — connect and
+    # close immediately, with nothing ever read off the wire on the far end.
+    sock_path = tmp_path / "1.sock"
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    received = {}
+
+    def run():
+        conn, _ = server.accept()
+        with conn:
+            conn.settimeout(1)
+            try:
+                received["data"] = conn.recv(4096)
+            except OSError:
+                received["data"] = b""
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    try:
+        assert messenger.peer_socket_reachable(sock_path, timeout=0.25) is True
+    finally:
+        t.join(timeout=2)
+        server.close()
+    assert received["data"] == b""
+
+
+def test_peer_transport_kind_deterministic_when_that_path_is_reachable(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
+    det = messenger.deterministic_peer_socket_path("@1")
+    det.parent.mkdir(parents=True)
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(det))
+    server.listen(1)
+    try:
+        assert messenger.peer_transport_kind("@1", 555, timeout=0.25) == "deterministic"
+    finally:
+        server.close()
+
+
+def test_peer_transport_kind_default_when_only_the_legacy_path_is_reachable(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "chela-home")  # no socks/ dir
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    sock_dir = tmp_path / "cc-socks"
+    sock_dir.mkdir()
+    sock_path = sock_dir / "555.sock"
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    try:
+        assert messenger.peer_transport_kind("@1", 555, timeout=0.25) == "default"
+    finally:
+        server.close()
+
+
+def test_peer_transport_kind_tmux_fallback_when_nothing_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "chela-home")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert messenger.peer_transport_kind("@1", 555, timeout=0.25) == "tmux fallback"
+
+
+def test_peer_transport_kind_tmux_fallback_for_a_stale_deterministic_file(tmp_path, monkeypatch):
+    # A stale FILE at the chela-owned path must not be reported "deterministic" —
+    # the whole point of the reachability probe is that existence isn't enough.
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
+    det = messenger.deterministic_peer_socket_path("@1")
+    det.parent.mkdir(parents=True)
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(det))
+    server.listen(1)
+    server.close()
+    assert messenger.peer_transport_kind("@1", 555, timeout=0.25) == "tmux fallback"
