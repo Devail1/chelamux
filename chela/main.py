@@ -1934,6 +1934,12 @@ def cmd_judge(args) -> None:
     if state == judge.J_BLOCKED:
         print(f"⚖️ {result['task_id']}: {result['blocking']} guard(s) SURVIVED corruption — "
               f"the PR was SENT BACK (rework round {result.get('round')}).")
+    elif state == judge.J_BLOCKED_RACE:
+        # ⚖️🧊 CMX-239: the CAS lost the race — the run moved before the verdict could be
+        # written. The finding is real and already on the PR; only the run row didn't move.
+        print(f"⚖️ {result['task_id']}: {result['blocking']} guard(s) SURVIVED corruption, "
+              f"but the run had already moved on ({result.get('error')}) — the finding is "
+              "posted to the PR. This needs a human look NOW.")
     elif state == judge.J_CANNOT_VERIFY:
         print(f"⚖️ {result['task_id']}: ⚠ CANNOT VERIFY — {result.get('cannot_verify') or result.get('error')}")
         print("   Nothing was blocked and nothing was cleared. This PR is a human's.")

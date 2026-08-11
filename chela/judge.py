@@ -96,6 +96,15 @@ J_RUNNING = "running"
 J_CLEAN = "clean"
 J_BLOCKED = "blocked"
 J_CANNOT_VERIFY = "cannot_verify"
+# ⚖️🧊 CMX-239: a guard SURVIVED corruption, but `request_changes`'s CAS refused to record
+# it (the run moved out of `awaiting_review` while the judge was still working — a human
+# merged it, or the CI gate got there first). Deliberately its OWN value, never `J_BLOCKED`:
+# `J_BLOCKED` also persists on a row long after it settles (through rework rounds, even
+# through an eventual `needs_human` escalation — see `inbox.run_events`'s guard test), so
+# reusing it here would make a LATER, unrelated status change on an ordinary blocked run
+# misread as this race. This value means exactly one thing and is set from exactly one
+# place: the finding is real, and the run row never moved to reflect it.
+J_BLOCKED_RACE = "blocked_race"
 
 # A judge that proposes forty mutations is not being thorough, it is re-running the suite
 # forty times. The cap is enforced OUT LOUD (the report says what was dropped) — a silent
@@ -1280,16 +1289,42 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                             task_id, post_detail)
             verdict = dispatcher.request_changes(task_id, body, post_comment=False)
             if not verdict.get("ok"):
-                # The CAS refused it: the row moved under us (a human merged it, or the CI gate
-                # got there first). The RUN ROW was not written — but the comment above was
-                # posted regardless, so the finding itself was not lost.
-                log.info("judge: %s found %d blocking finding(s), but the run row was not "
-                         "updated: %s", task_id, len(blocking), verdict.get("error"))
+                # ⚖️🧊 CMX-239: The CAS refused it: the row moved under us (a human merged it,
+                # or the CI gate got there first). The RUN ROW was not written — but the
+                # comment above was posted regardless, so the finding itself was not lost.
+                #
+                # ⛔ This is NOT a `cannot_verify` — the judge DID verify, and a guard
+                # SURVIVED corruption. Recording `J_CANNOT_VERIFY` here (as this used to)
+                # downgrades a confirmed BLOCKING finding to the same shrug-tier "the judge
+                # couldn't do its job" state as a launch failure or a flaky worktree. That is
+                # the inverted-severity bug CMX-228 already fixed for the PR comment — this is
+                # its twin, one layer down: the DB column (and everything that reads it — the
+                # inbox event, `chela status`, the retry trigger) still told the weaker story.
+                # A human skimming "cannot verify, needs a look" reads as an unknown; a run
+                # that already MERGED with a guard proven to survive corruption is not an
+                # unknown, it is the most urgent verdict this judge can produce.
+                #
+                # And it is NOT plain `J_BLOCKED` either — that value also sits on a row long
+                # after it settles (through rework rounds, even through an eventual
+                # `needs_human` escalation once the run genuinely reached `changes_requested`),
+                # so reusing it here would make an unrelated LATER status change on an
+                # ordinary blocked run misread as this race. `J_BLOCKED_RACE` means exactly
+                # one thing — the finding is real and the row never moved to reflect it — and
+                # is what lets `inbox.run_events` raise it at full severity regardless of what
+                # the row became, unambiguously, and what stops the per-sha retry trigger from
+                # wasting another mutation pass re-discovering a verdict that is already
+                # definitive.
+                moved = dispatcher.resolve_run(task_id)
+                log.warning("judge: %s found %d blocking finding(s), but the run row was not "
+                            "updated (already %r): %s", task_id, len(blocking),
+                            moved.get("status") if moved else "gone", verdict.get("error"))
                 dispatcher.set_judge_state(
-                    task_id, J_CANNOT_VERIFY,
-                    f"the run moved while the judge was running: {verdict.get('error')}",
+                    task_id, J_BLOCKED_RACE,
+                    "a guard SURVIVED corruption, but the run moved on before it could be "
+                    f"sent back: {verdict.get('error')}",
+                    sha=judged_sha,
                 )
-                result.update(ok=False, state=J_CANNOT_VERIFY, error=verdict.get("error"))
+                result.update(ok=False, state=J_BLOCKED_RACE, error=verdict.get("error"))
             else:
                 dispatcher.set_judge_state(
                     task_id, J_BLOCKED,

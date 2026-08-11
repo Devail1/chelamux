@@ -29,6 +29,27 @@ history lives in `git log`.
 
 ### Fixed
 
+- **A judge's BLOCKING verdict that loses the CAS no longer downgrades to "cannot
+  verify."** CMX-228 and CMX-229 made a blocking finding (a guard SURVIVED corruption)
+  survive the race where a run leaves `awaiting_review` while the judge is still
+  working — the PR comment posts unconditionally, and an inbox notification fires
+  regardless of what the run's status became. But the run row's `judge_state` — and
+  therefore `chela status`, the dashboard badge, and which inbox event actually fired —
+  still recorded the SAME `cannot_verify` state as a launch failure or a flaky
+  worktree, silently downgrading a CONFIRMED, urgent finding to an unknown shrug. A
+  human skimming "cannot verify, needs a look" reads as "the judge couldn't do its
+  job"; a run that already merged with a guard proven to survive corruption is not an
+  unknown, it is the most urgent verdict the judge can produce. This race now records
+  its own state (`blocked_race`, never plain `blocked` — that value also persists on a
+  row long after an ordinary blocked run settles, through rework rounds and even an
+  eventual `needs_human` escalation, so reusing it would misread that unrelated later
+  status change as this race) and raises a dedicated, correctly-urgent inbox event
+  (`run_judge_blocked_race`) regardless of what the run became. It also no longer
+  burns the bounded `cannot_verify` retry budget re-discovering a verdict that is
+  already definitive. (CMX-239)
+
+### Fixed
+
 - **Concurrent `cmx-N` branches no longer collide on `CHANGELOG.md`.** Every dispatched
   branch adds its own entry to the top of the same `## [Unreleased]` section, so any two
   branches open at once conflicted on that exact spot the moment the judge's worktree

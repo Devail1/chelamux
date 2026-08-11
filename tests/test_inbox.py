@@ -755,6 +755,89 @@ def test_a_cannot_verify_verdict_event_survives_the_run_moving_on(gone_state, st
     )
 
 
+@pytest.mark.parametrize("gone_state", ["merged", "closed"])
+def test_a_blocked_race_verdict_event_survives_the_run_moving_on(gone_state, store_file):
+    """⚖️🧊 CMX-239 — the twin of the CANNOT_VERIFY test above, for a CONFIRMED blocking
+    finding whose CAS lost the race. "A guard survived corruption" is not a claim about
+    `changes_requested`, it is a claim about a commit — dropping it the moment the run
+    leaves review or its PR merges/closes is strictly worse than dropping the cannot_verify
+    twin: this is a FACT, not an unknown."""
+    event = {"kind": "run_judge_blocked_race", "payload": {"task_id": "T1"}}
+    still_running = [{"task_id": "T1", "status": "running", "pr_state": "open"}]
+    assert inbox.stale_reason(event, still_running) is None
+
+    gone = [{"task_id": "T1", "status": "running", "pr_state": gone_state}]
+    assert inbox.stale_reason(event, gone) is None, (
+        f"a run_judge_blocked_race for a {gone_state} PR must still be delivered"
+    )
+
+    gone_row = [{"task_id": "T1", "status": "done", "pr_state": "merged"}]
+    assert inbox.stale_reason(event, gone_row) is None, (
+        "a run_judge_blocked_race for an already-merged run is the MOST important case, "
+        "not a droppable one — the guard proven to survive corruption may already have shipped"
+    )
+
+
+def test_a_blocked_race_verdict_rots_once_the_head_moves_past_the_judged_commit(store_file):
+    """The one legitimate way a `run_judge_blocked_race` claim goes stale: a newer commit
+    superseded the one the judge actually found blocking. Mirrors `run_judge_cannot_verify`'s
+    live-head check exactly."""
+    event = {"kind": "run_judge_blocked_race",
+             "payload": {"task_id": "T1", "judge_sha": _JUDGE_SHA}}
+    run = [{"task_id": "T1", "status": "done", "pr_state": "merged"}]
+
+    assert inbox.stale_reason(event, run, live_heads={"T1": _JUDGE_SHA}) is None, (
+        "the live head still matches the judged commit — not stale"
+    )
+    reason = inbox.stale_reason(event, run, live_heads={"T1": _SUPERSEDING_SHA})
+    assert reason and "moved past" in reason
+
+
+def test_a_blocked_race_verdicts_payload_carries_the_judged_sha_and_state(
+        store_file, windows, monkeypatch):
+    """⚖️🧊 CMX-239 round 5 — the twin of `test_a_judge_verdicts_payload_carries_the_judged_sha`
+    below, for `J_BLOCKED_RACE`. That test's `JUDGE_KINDS` parametrize does NOT cover this
+    kind on purpose: `_live_judge_heads` never nominates a `blocked_race` run (see its own
+    docstring), so folding this kind into the shared list would silently break every
+    live-head-supersession test that shares it — a gap in `_live_judge_heads` this PR did not
+    write, not something this test should paper over.
+
+    Written standalone, and deriving the event from a REAL run row via `inbox.tick()` — not
+    hand-fed. The test above (`..._rots_once_the_head_moves_past_the_judged_commit`) builds its
+    event dict by hand (`{"payload": {"judge_sha": _JUDGE_SHA}}`), which proves `stale_reason`
+    reads `judge_sha` correctly but says nothing about whether `run_events`'s `J_BLOCKED_RACE`
+    branch ever PUTS the judged sha and verdict into the payload in the first place. A judge
+    run that corrupted `payload["judge_sha"] = None` or `payload["judge_state"] = ""` in that
+    branch survived the full suite before this test existed.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED_RACE)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "run_judge_blocked_race"
+    payload = queued[0]["payload"]
+    # ⭐ The payload is the RECORD `stale_reason`'s live-head supersession check reads (see
+    # the test above) — a blocked_race verdict with no judged commit attached can never be
+    # checked against a live head, and would sail through as un-stale forever.
+    assert payload["judge_sha"] == _JUDGE_SHA, (
+        f"the judged sha did not reach the payload, got {payload['judge_sha']!r}"
+    )
+    # ...and the VERDICT itself has to reach it too — the kind string says a blocked_race
+    # fired, but a consumer reading the record (the dashboard, a replay of the event log)
+    # has only this field to learn the judge's own state string.
+    assert payload["judge_state"] == judge.J_BLOCKED_RACE, (
+        f"the verdict did not reach the payload, got {payload['judge_state']!r}"
+    )
+    assert payload["judge_detail"] == _LONG_DETAIL, (
+        f"the judge detail did not survive into the payload, got {payload['judge_detail']!r}"
+    )
+
+
 # --- CMX-197 rework: a verdict is only meaningful against the commit it judged --------
 #
 # The status-staleness check above catches a run that moved OFF awaiting_review. It says
@@ -2126,6 +2209,100 @@ def test_cannot_verify_churn_off_awaiting_review_DOES_reannounce(
     assert [e["kind"] for e in inbox.load()["queue"]] == [
         "run_needs_human", "run_judge_cannot_verify",
     ], "a cannot_verify churn off awaiting_review must re-announce (CMX-229 Objective 1)"
+
+
+@pytest.mark.parametrize("other_status", ["running", "changes_requested", "done", "needs_human"])
+def test_a_blocked_race_verdict_IS_announced_regardless_of_status(
+        other_status, store_file, windows, sends, monkeypatch):
+    """⚖️🧊 CMX-239 — the twin of the CANNOT_VERIFY test above, for `J_BLOCKED_RACE`.
+
+    `judge.judge_run`'s CAS-refused path on a BLOCKING verdict now records `J_BLOCKED_RACE`
+    (not `J_CANNOT_VERIFY`, which would downgrade a CONFIRMED finding to a shrug). It must
+    fire `run_judge_blocked_race` regardless of what the run's status became — including
+    `changes_requested`, since `J_BLOCKED_RACE` (unlike plain `J_BLOCKED`) can only ever
+    mean the row never actually recorded the send-back.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[dict(_verdict_run(judge.J_BLOCKED_RACE), status=other_status)])
+
+    kinds = [e["kind"] for e in inbox.load()["queue"]]
+    assert "run_judge_blocked_race" in kinds, (
+        f"a blocked_race verdict did NOT fire for a run already in {other_status!r}. "
+        f"Queued: {kinds}"
+    )
+
+
+def test_a_blocked_race_verdict_is_never_confused_with_an_ordinary_blocked_run(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-239): plain `J_BLOCKED` — the ORDINARY outcome, left on a row long after
+    it settles (through rework rounds, even through an eventual `needs_human` escalation) —
+    must NEVER trip the `run_judge_blocked_race` branch. Only the judge's own, distinct
+    `J_BLOCKED_RACE` value may. Collapsing the two would make an unrelated LATER status
+    change on an ordinary blocked run misread as the CAS-refused race."""
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    parked = dict(_verdict_run(), status="needs_human", judge_state=judge.J_BLOCKED)
+    inbox.tick({}, runs=[parked])
+
+    kinds = [e["kind"] for e in inbox.load()["queue"]]
+    assert kinds == ["run_needs_human"]
+    assert "run_judge_blocked_race" not in kinds
+
+
+def test_blocked_race_churn_off_its_status_DOES_reannounce(
+        store_file, windows, sends, monkeypatch):
+    """⚖️🧊 CMX-239 — the twin of `test_cannot_verify_churn_off_awaiting_review_DOES_reannounce`.
+    A run parked at `needs_human` whose `judge_state` churns from an ordinary `blocked` to
+    `blocked_race` DOES mint a new mark and DOES re-announce — proving the mark computation
+    (not just the branch dispatch) actually tracks `J_BLOCKED_RACE` off its terminal status."""
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    parked = dict(_verdict_run(), status="needs_human", judge_state=judge.J_BLOCKED)
+    inbox.tick({}, runs=[parked])
+    assert [e["kind"] for e in inbox.load()["queue"]] == ["run_needs_human"]
+
+    inbox.tick({}, runs=[dict(parked, judge_state=judge.J_BLOCKED_RACE)])
+
+    assert [e["kind"] for e in inbox.load()["queue"]] == [
+        "run_needs_human", "run_judge_blocked_race",
+    ], "a blocked_race churn off its status must re-announce (CMX-239)"
+
+
+def test_the_blocked_race_reason_is_EXCERPTED_into_the_summary(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-239 round 6): the twin of the CANNOT_VERIFY excerpt guard above, for
+    `J_BLOCKED_RACE`.
+
+    Round 5's judge triaged ~20 of these live and found the ones without an excerpted
+    reason each cost a `gh pr view` to act on — the summary is the one line typed AT the
+    orchestrator's prompt, so a `run_judge_blocked_race` that drops the excerpt is exactly
+    as bad as the CMX-197 round 8 bug this mirrors, and MORE urgent: this branch fires when
+    a guard survived corruption on a commit that may already have shipped.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED_RACE)])
+
+    summary = inbox.load()["queue"][0]["summary"]
+    assert _LONG_DETAIL[:40] in summary, "an excerpt of the reason must reach the operator"
+    assert _LONG_DETAIL not in summary, (
+        "the WHOLE reason was pasted into a summary that gets typed at the prompt — it "
+        "belongs in the payload, which already carries it in full"
+    )
+    assert len(summary) < len(_LONG_DETAIL) + 200
 
 
 def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(

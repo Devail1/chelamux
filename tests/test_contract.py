@@ -21,7 +21,7 @@ import pytest
 
 from chela import config, contract, dispatcher, event_log
 from chela.dispatcher import CI_FAILING, CI_NONE, CI_PASSING, CI_PENDING, CI_UNKNOWN, CIStatus
-from chela.judge import J_BLOCKED, J_CANNOT_VERIFY, J_RUNNING
+from chela.judge import J_BLOCKED, J_BLOCKED_RACE, J_CANNOT_VERIFY, J_RUNNING
 from chela.personas import lease
 
 
@@ -138,11 +138,11 @@ def test_merge_refuses_unless_the_judge_is_clean(repo, judge_state):
     squash.assert_not_called()
 
 
-@pytest.mark.parametrize("judge_state", [J_BLOCKED, J_CANNOT_VERIFY, J_RUNNING, None])
+@pytest.mark.parametrize("judge_state", [J_BLOCKED, J_BLOCKED_RACE, J_CANNOT_VERIFY, J_RUNNING, None])
 def test_merge_refuses_a_run_not_judge_clean_even_when_all_else_passes(repo, judge_state):
     """The ``judge_state != J_CLEAN`` gate IN ISOLATION — base ``dev``, CI green, MERGEABLE, so
     the ONLY thing wrong is the judge is not ``clean`` (blocked / cannot_verify / still running /
-    never ran). Each must refuse, tier ``escalate``.
+    never ran / blocked-but-the-CAS-lost-the-race — CMX-239). Each must refuse, tier ``escalate``.
 
     Every other gate is mocked to pass, so this gate is the sole possible refusal: corrupt
     ``if judge_state != J_CLEAN`` to ``if False and …`` and an un-vetted run merges, turning
