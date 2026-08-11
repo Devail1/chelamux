@@ -484,6 +484,18 @@ def _break_restore_dead_epoch(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_update_apply_lock(tmp_path, monkeypatch):
+    """CMX-226: the dashboard's update-apply lock has been held far longer than any
+    honest `update.apply()` run can take — the process holding it (this test process
+    stands in for the dashboard's own, so the pid-liveness check passes) is alive, but
+    the background thread that owned the lock never reached its own `finally:
+    release()`. Nothing but a dashboard restart clears it, and until doctor says so this
+    is invisible to anyone who never clicks Update a second time to find out."""
+    ceiling = update.apply_stuck_after_seconds()
+    config.publish_update_apply_lock(time.time() - ceiling - 60)
+    return doctor.WARN
+
+
 def _break_services_current(tmp_path, monkeypatch):
     """A bare `git pull` (bypassing `chela update`) landed new code chela-dashboard never
     restarted onto — the checkout is fine, the running service is not (CMX-200)."""
@@ -499,6 +511,7 @@ CORRUPTIONS = {
     "env.running": _break_env_running,
     "tmux.session": _break_tmux_session,
     "dashboard.port": _break_dashboard_port,
+    "dashboard.update_lock": _break_update_apply_lock,
     "plugin.rendered": _break_plugin_rendered,
     "plugin.installed": _break_plugin_installed,
     "daemon.capabilities": _break_daemon_capabilities,
@@ -619,6 +632,15 @@ def test_peer_transport_flags_windows_reachable_only_via_the_legacy_default_path
         assert "legacy" in findings[0].title
     finally:
         listener.close()
+
+
+def test_update_apply_lock_freshly_held_is_not_flagged(fleet):
+    """Counterweight to `dashboard.update_lock`'s corruption above — without it, always
+    warning on ANY held lock (even a genuinely in-progress one) would satisfy that test
+    just as well as correctly reading the ceiling would."""
+    config.publish_update_apply_lock(time.time())
+    findings = [f for f in doctor.check() if f.fact == "dashboard.update_lock"]
+    assert findings and all(f.level == doctor.OK for f in findings)
 
 
 def test_a_healthy_fleet_is_green(fleet):

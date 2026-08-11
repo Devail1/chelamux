@@ -708,6 +708,56 @@ def _port_report(configured: int, obs: Observation) -> list[Finding]:
     return [Finding(OK, f"dashboard listening on {port} ({obs.detail})")]
 
 
+# --- fact: is the dashboard's update-apply lock actually held by a live process? -----
+#
+# CMX-226's `/api/update/apply` route already tells an operator who clicks Update AGAIN
+# that a held lock looks wedged (`stuck: true` in its 409) — but that is visible only to
+# someone who clicks. `chela doctor` (a human's own CLI invocation) and the daemon's
+# periodic notify edge both run in a DIFFERENT process from the dashboard
+# (chela-daemon, not chela-dashboard), so neither can see `chela.dashboard.app`'s
+# in-process `_update_apply_lock` / `_update_apply_started_at` directly — the exact
+# cross-process gap `daemon.capabilities` and `dashboard.port` above already solve, and
+# solved here the same way: the dashboard PUBLISHES the hold
+# (`config.publish_update_apply_lock`, called right beside where the route sets
+# `_update_apply_started_at`) and this fact reads that back (`config.live_update_apply_
+# lock`), pid-checked exactly like `live_dashboard` — a file whose pid is dead is a lock
+# the process holding it died with, and a restarted dashboard already handed out a
+# fresh, unheld `threading.Lock()`. Without this, a stuck lock silently disables the
+# dashboard's whole deploy path (CMX-199/200's whole premise) for anyone who never
+# clicks Update a second time to find out.
+
+def _update_apply_lock_read() -> Observation:
+    live = config.live_update_apply_lock()
+    if live is None:
+        return observed(None)
+    return observed(live)
+
+
+def _update_apply_lock_report(_declared: None, obs: Observation) -> list[Finding]:
+    from chela import update                        # lazy: doctor must import cheaply
+
+    live = obs.value
+    if live is None:
+        return [Finding(OK, "update-apply lock is not held")]
+    elapsed = int(time.time() - live["started_at"])
+    ceiling = update.apply_stuck_after_seconds()
+    if elapsed <= ceiling:
+        return [Finding(
+            OK, f"update-apply lock has been held {elapsed}s (pid {live['pid']}) — "
+                f"within the {ceiling}s ceiling for an honest run")]
+    return [Finding(
+        WARN,
+        f"update-apply lock has been held {elapsed}s (pid {live['pid']}) — past the "
+        f"{ceiling}s ceiling any honest `update.apply()` run can take",
+        "Every subprocess apply() shells out to is individually timeout-bounded (see "
+        "chela/update.py's GIT_TIMEOUT_SECONDS / _SHELL_TIMEOUT_SECONDS), so a hold "
+        "this long is not a slow run in progress — it's a wedged lock (the background "
+        "thread that owned it died without reaching its own `finally: release()`) that "
+        "nothing but a restart clears, and until then the dashboard's Update control "
+        "refuses every click. `pm2 restart chela-dashboard` clears it.",
+    )]
+
+
 # --- fact: the native `claude agents --json` status feed the dashboard polls --------
 # CMX-179: the timeout guarding this call (`agent_manager._STATUS_CMD_TIMEOUT`) was BELOW
 # the command's real warm-start cost, so every call failed and the dashboard's busy/idle
@@ -2296,6 +2346,18 @@ def facts() -> list[Fact]:
             declare=config.dashboard_port,
             read_back=_port_read,
             report=_port_report,
+        ),
+        Fact(
+            name="dashboard.update_lock",
+            declared_by="nothing — chela never predicts this; the lock is either held "
+                        "past the ceiling an honest update.apply() run can take, or it "
+                        "isn't",
+            owned_by="the dashboard process itself (it publishes update-apply-lock.json "
+                     "for as long as its update-apply lock is held) — pid-checked, like "
+                     "dashboard.port",
+            declare=lambda: None,
+            read_back=_update_apply_lock_read,
+            report=_update_apply_lock_report,
         ),
         Fact(
             name="agents.native_status_feed",

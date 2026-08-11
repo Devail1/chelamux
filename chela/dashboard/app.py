@@ -2164,9 +2164,11 @@ _update_apply_lock = threading.Lock()
 # operator (or the drawer) can tell "wait" from "go restart the dashboard" without reading
 # this source file first.
 _update_apply_started_at: float | None = None
-# fetch(30) + pull(30) + uv sync(300) + pm2 restart(300) + one plugin marketplace
-# refresh(2 x 300) — see chela/update.py's timeout constants — with slack on top.
-_UPDATE_APPLY_STUCK_AFTER_SECONDS = 1800
+# CMX-226: `update.apply_stuck_after_seconds()` derives the ceiling from
+# GIT_TIMEOUT_SECONDS / _SHELL_TIMEOUT_SECONDS instead of a literal, so it moves with
+# them — see that function's docstring for the full derivation. Also read (via
+# `config.live_update_apply_lock`) by the `dashboard.update_lock` doctor fact below, so a
+# wedged lock is visible to `chela doctor` too, not just to whoever clicks Update again.
 
 
 @app.route("/api/update/apply", methods=["POST"])
@@ -2208,7 +2210,8 @@ def api_update_apply():
     if not _update_apply_lock.acquire(blocking=False):
         started_at = _update_apply_started_at
         elapsed = int(time.monotonic() - started_at) if started_at is not None else None
-        if elapsed is not None and elapsed > _UPDATE_APPLY_STUCK_AFTER_SECONDS:
+        ceiling = update.apply_stuck_after_seconds()
+        if elapsed is not None and elapsed > ceiling:
             error = (f"an update has been running for {elapsed}s — longer than any "
                      "legitimate apply() should take, so this is very likely a wedged "
                      "lock from a process that died mid-run; restart this dashboard "
@@ -2219,10 +2222,11 @@ def api_update_apply():
             error = "an update is already running"
         return jsonify({
             "ok": False, "error": error, "elapsed_seconds": elapsed,
-            "stuck": elapsed is not None and elapsed > _UPDATE_APPLY_STUCK_AFTER_SECONDS,
+            "stuck": elapsed is not None and elapsed > ceiling,
         }), 409
 
     _update_apply_started_at = time.monotonic()
+    config.publish_update_apply_lock(time.time())
 
     def _run():
         global _update_apply_started_at
@@ -2238,6 +2242,7 @@ def api_update_apply():
                     result.behind_before, restarted)
         finally:
             _update_apply_started_at = None
+            config.clear_update_apply_lock()
             _update_apply_lock.release()
 
     threading.Thread(target=_run, daemon=True, name="dashboard-update-apply").start()

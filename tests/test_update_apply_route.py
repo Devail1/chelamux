@@ -9,12 +9,13 @@ in flight, never claim to have started when there is nothing to pull, and never 
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 import pytest
 
-from chela import dispatcher, update
+from chela import config, dispatcher, update
 from chela.dashboard import app as dash
 
 
@@ -62,6 +63,7 @@ def _reset_lock():
     yield
     _wait_for_release_then_clear(dash._update_apply_lock)
     dash._update_apply_started_at = None
+    config.clear_update_apply_lock()
 
 
 def test_teardown_waits_for_the_leaked_threads_own_release():
@@ -276,14 +278,14 @@ def test_lock_held_far_past_any_legitimate_apply_is_flagged_stuck(client, monkey
                         lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
     dash._update_apply_lock.acquire()
     dash._update_apply_started_at = (
-        time.monotonic() - dash._UPDATE_APPLY_STUCK_AFTER_SECONDS - 1)
+        time.monotonic() - update.apply_stuck_after_seconds() - 1)
 
     resp = client.post("/api/update/apply")
     data = resp.get_json()
 
     assert resp.status_code == 409
     assert data["stuck"] is True
-    assert data["elapsed_seconds"] > dash._UPDATE_APPLY_STUCK_AFTER_SECONDS
+    assert data["elapsed_seconds"] > update.apply_stuck_after_seconds()
     assert "restart" in data["error"].lower()
 
 
@@ -300,6 +302,40 @@ def test_freshly_held_lock_is_not_flagged_stuck(client, monkeypatch):
 
     assert resp.status_code == 409
     assert data["stuck"] is False
+
+
+def test_apply_publishes_the_lock_hold_for_the_doctor_fact_to_read(client, monkeypatch):
+    """CMX-226: `chela doctor` (and the daemon's notify edge) runs in a DIFFERENT
+    process from the dashboard, so `runtime_truth.dashboard.update_lock` cannot see
+    `_update_apply_started_at` directly — it reads `config.live_update_apply_lock()`
+    instead. This is the other half of that contract: the route must actually publish
+    while held, and clear once the run ends, or that fact is permanently blind."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    release = threading.Event()
+    entered = threading.Event()
+
+    def fake_apply():
+        entered.set()
+        release.wait(timeout=2)
+        return update.ApplyResult(ok=True, step="done", behind_before=3)
+
+    monkeypatch.setattr(update, "apply", fake_apply)
+
+    resp = client.post("/api/update/apply")
+    assert resp.get_json()["started"] is True
+    assert entered.wait(timeout=2)
+
+    live = config.live_update_apply_lock()
+    assert live is not None, "the route never published its hold for doctor to read"
+    assert live["pid"] == os.getpid()
+
+    release.set()
+    deadline = time.monotonic() + 2
+    while dash._update_apply_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert config.live_update_apply_lock() is None, \
+        "the published hold outlived the run it timed"
 
 
 def test_started_at_is_cleared_once_the_run_finishes(client, monkeypatch):
