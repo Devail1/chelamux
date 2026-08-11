@@ -10,6 +10,23 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **`chela retry` — "keep going" on a `needs_human` run, no fix required.** `chela reopen`
+  (CMX-96) covers one human intent: "I fixed the branch myself, re-verify the new head" —
+  and its new-commit gate correctly refuses an unchanged one, since flipping straight to
+  `awaiting_review` on a stale head would let an already-rejected commit reach `merge`
+  unjudged. That left the *other* intent a `needs_human` verdict provokes just as often
+  with no in-contract exit: not wanting to fix it by hand, not wanting to merge past it
+  either — just wanting the automatic rework loop to have one more swing at the same code.
+  Hit live on CMX-231, twice, with the only escape being to hand-edit the runs database.
+  `chela retry <run>` sends the run back to `changes_requested` — the automatic loop's own
+  carrier — so the next dispatcher tick re-spawns the agent exactly like a normal rework
+  round, on the SAME head, with the SAME verdict it failed on. It spends a *separate*
+  `retry_count` grant, never the automatic loop's own `rework_count` budget, and the
+  escalation cap check now honors that grant: a run given one retry gets exactly one extra
+  round past `CHELA_MAX_REWORKS`, not an unbounded exemption. (CMX-237)
+
 ### Fixed
 
 - **`TODO.example.md` no longer claims the dispatcher scopes claiming to the `## Open`
