@@ -274,6 +274,9 @@ def test_an_infra_only_red_does_NOT_spend_a_rework_round(tmp_path):
     assert fake.comments and "INFRASTRUCTURE" in fake.comments[0]
     assert "not charged against the" in fake.comments[0] and "rework budget" in fake.comments[0]
     assert "CI / test (3.12)" in fake.comments[0]
+    # This comment is the ONLY evidence a human ever gets on this path — no agent is
+    # dispatched and no verdict row is written — so it must actually carry the log tail.
+    assert "the runner lost its connection before any step ran" in fake.comments[0]
 
 
 def test_an_infra_red_beside_a_real_failure_IS_charged(tmp_path):
@@ -491,6 +494,26 @@ def test_a_job_missing_from_the_steps_response_charges_the_round(tmp_path):
     fake = _FakeGh(
         rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="444")],
         jobs_by_run={"444": [_job("some other job", [_step("Pytest", "skipped")])]},
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+
+
+def test_a_job_with_no_steps_array_at_all_charges_the_round(tmp_path):
+    """The job resolves and its NAME matches, but the job dict itself carries no `steps` key
+    at all (a `gh` response shape chela has not seen) — there is no steps array to read, so
+    `_suite_step_ran` has nothing to reason about. This must be UNKNOWN, exactly like a job
+    gh cannot find at all — never silently reclassified as infra, or a malformed payload
+    would hand a red PR a free pass."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="222")],
+        jobs_by_run={"222": [{"name": "test (3.12)"}]},   # no "steps" key at all
     )
 
     summary = _tick(wf, fake)
@@ -1143,6 +1166,23 @@ def test_a_code_fence_inside_the_log_cannot_break_out_of_the_verdicts_code_block
     fence = "````"
     assert f"\n{fence}\n{tail}\n{fence}\n" in body
     # The log's own fences are strictly shorter than the one holding them.
+    assert "\n`````" not in body
+
+
+def test_a_code_fence_inside_the_log_cannot_break_out_of_the_infra_verdicts_code_block(
+    tmp_path,
+):
+    """The same fence-widening rule `_ci_verdict_body` uses applies verbatim to the
+    INFRASTRUCTURE comment `_ci_infra_verdict_body` writes — it is still a PR comment built
+    from an untrusted log."""
+    tail = "E   assert x == '```'\n``` and more\n"
+    body = dispatcher._ci_infra_verdict_body(
+        dispatcher.CIStatus(dispatcher.CI_FAILING, "abc", ("CI / test",), infra=True),
+        tail, "u", 1, 3,
+    )
+
+    fence = "````"
+    assert f"\n{fence}\n{tail}\n{fence}\n" in body
     assert "\n`````" not in body
 
 
