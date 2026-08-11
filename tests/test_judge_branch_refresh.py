@@ -188,6 +188,32 @@ def test_concurrent_changelog_entries_merge_without_conflict(tmp_path, repo):
     assert "existing entry" in merged
 
 
+def test_repos_own_gitattributes_marks_changelog_union(tmp_path):
+    """⛔ CMX-241 guard: the fixture above proves union merge works when the attribute is
+    present — it does NOT prove THIS repo ships it. Delete `.gitattributes` and this must
+    go RED; it is checking the real checkout, not a synthetic one."""
+    repo_root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        ["git", "check-attr", "merge", "--", "CHANGELOG.md"],
+        cwd=repo_root, capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.strip() == "CHANGELOG.md: merge: union"
+
+
+def test_gitattributes_does_not_widen_past_changelog(tmp_path):
+    """⛔⛔ CMX-241 guard: bounds the blast radius. `merge=union` on a changelog just keeps
+    both sides' lines — correct. The same driver on source (e.g. `chela/dispatcher.py`)
+    would keep BOTH branches' bodies interleaved on a conflicting hunk: a merge that reports
+    success and ships semantically corrupt code with no conflict marker. `CHANGELOG.md` must
+    stay the only path covered; widening the pattern to `*` must turn this RED."""
+    repo_root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        ["git", "check-attr", "merge", "--", "chela/dispatcher.py"],
+        cwd=repo_root, capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.strip() == "chela/dispatcher.py: merge: unspecified"
+
+
 def test_no_origin_remote_degrades_to_a_no_op_never_blocks(tmp_path):
     """Degrades, never blocks: a repo this is not wired to a remote at all (or the fetch
     fails for any reason) must leave the worktree exactly as detached_worktree left it,
