@@ -12,6 +12,17 @@ history lives in `git log`.
 
 ### Fixed
 
+- **Concurrent `cmx-N` branches no longer collide on `CHANGELOG.md`.** Every dispatched
+  branch adds its own entry to the top of the same `## [Unreleased]` section, so any two
+  branches open at once conflicted on that exact spot the moment the judge's worktree
+  refresh (`_refresh_judge_worktree`, CMX-176) pulled a moved-on `base_branch` back in. The
+  conflict was never semantic — both entries belong — but plain 3-way merge can't know
+  that from two edits landing on the same line, so a branch fell behind and its judge
+  reported `cannot_verify` for reasons that had nothing to do with the change under review.
+  A new `.gitattributes` marks `CHANGELOG.md merge=union` — a driver built into git itself —
+  so a conflicting hunk there now keeps both sides' lines instead of stopping the merge.
+  (CMX-241)
+
 - **`TODO.example.md` no longer claims the dispatcher scopes claiming to the `## Open`
   section.** It never did — `chela/sources/markdown.py` claims every unchecked `- [ ]`
   line in the file regardless of which heading precedes it, so a task moved under a

@@ -150,6 +150,44 @@ def test_a_real_conflict_is_named_not_silently_swallowed_and_leaves_a_clean_tree
     assert merge_head.returncode != 0                # no merge in progress
 
 
+def test_concurrent_changelog_entries_merge_without_conflict(tmp_path, repo):
+    """⛔ CMX-241. Two branches that each add their own entry to the top of the same
+    CHANGELOG.md `## [Unreleased]` section must not conflict when the judge's refresh pulls
+    a moved-on base back in — the collision is never semantic (both entries belong), only
+    textual. The repo's `.gitattributes` marks `CHANGELOG.md merge=union` for exactly this:
+    keep both sides' lines on a conflicting hunk instead of stopping the merge."""
+    seed = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- existing entry\n"
+    (repo / ".gitattributes").write_text("CHANGELOG.md merge=union\n")
+    (repo / "CHANGELOG.md").write_text(seed)
+    _git("add", ".gitattributes", "CHANGELOG.md", cwd=repo)
+    _git("commit", "-m", "seed changelog", cwd=repo)
+    _git("push", "origin", "dev", cwd=repo)
+
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- entry from this PR\n- existing entry\n"
+    )
+    _git("commit", "-am", "this PR's own changelog entry", cwd=repo)
+    sha = _git("rev-parse", "pr-1", cwd=repo).stdout.strip()
+    _git("checkout", "dev", cwd=repo)
+
+    _advance_base(
+        repo, "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- entry from a concurrent PR\n- existing entry\n",
+        "a concurrent PR's changelog entry lands on dev first",
+    )
+    wt = _detached_worktree(repo, sha, tmp_path / "wt")
+
+    detail = dispatcher._refresh_judge_worktree(repo, wt, "dev")
+
+    assert detail == ""                                    # no cannot_verify over a changelog line
+    merged = (wt / "CHANGELOG.md").read_text()
+    assert "entry from this PR" in merged
+    assert "entry from a concurrent PR" in merged
+    assert "existing entry" in merged
+
+
 def test_no_origin_remote_degrades_to_a_no_op_never_blocks(tmp_path):
     """Degrades, never blocks: a repo this is not wired to a remote at all (or the fetch
     fails for any reason) must leave the worktree exactly as detached_worktree left it,
