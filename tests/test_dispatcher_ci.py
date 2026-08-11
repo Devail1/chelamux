@@ -534,6 +534,129 @@ def test_a_green_run_never_touches_the_steps_api(tmp_path):
     assert fake.steps_fetches == 0
 
 
+def test_pytest_reaching_a_conclusion_alone_is_still_real_even_if_ruffs_own_step_is_skipped(
+    tmp_path,
+):
+    """`_CI_SUITE_STEP_NAMES` must recognise EITHER named step on its own — not just
+    whichever one happens to run alongside the other. If `Ruff`'s own step is `skipped`
+    but `Pytest` reached a real conclusion, the suite DID run and this is real evidence,
+    full stop. A classifier that only ever looked at `Ruff` (say, because `pytest` was
+    quietly dropped from the recognised-name set) would see nothing but a skipped step
+    here and misclassify a genuine test failure as infra."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "success"),
+        _step("Ruff", "skipped"),
+        _step("Pytest", "failure"),
+        _step("Complete job", "failure"),
+    ]
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="888")],
+        jobs_by_run={"888": [_job("test (3.12)", steps)]},
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+    assert summary["reworked"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert (run["rework_count"] or 0) == 1
+
+
+def test_a_ci_yml_step_rename_with_no_recognised_suite_step_charges_the_round(tmp_path):
+    """The job resolves and its steps ARE readable, but none of them is named `Ruff` or
+    `Pytest` (a rename in `.github/workflows/ci.yml` that `_CI_SUITE_STEP_NAMES` was never
+    updated to match). This must be treated as UNKNOWN, exactly like a job gh cannot find
+    at all — never silently reclassified as infra, or a step rename would hand every red
+    PR a free pass with no signal anywhere that the feature had stopped working."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "success"),
+        _step("Lint", "failure"),        # renamed from "Ruff"
+        _step("Run tests", "skipped"),   # renamed from "Pytest"
+        _step("Complete job", "failure"),
+    ]
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="666")],
+        jobs_by_run={"666": [_job("test (3.12)", steps)]},
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+
+
+def test_a_TIMED_OUT_sibling_blocks_infra_reclassification_of_a_plain_failure_beside_it(
+    tmp_path,
+):
+    """A red mixed with a non-plain failure (here, `TIMED_OUT`) must be left alone
+    UNCONDITIONALLY, even when the one plain-`FAILURE` job in the same rollup looks
+    exactly like the checkout-TLS infra incident on its own steps. `plain_failures` must
+    cover ALL of `failing` before any reclassification runs at all — a red is real evidence
+    the moment even one of its jobs is not a plain-FAILURE candidate."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "failure"),
+        _step("Ruff", "skipped"),
+        _step("Pytest", "skipped"),
+        _step("Complete job", "failure"),
+    ]
+    fake = _FakeGh(rollup=[
+        _check_run("test (3.11)", conclusion="TIMED_OUT", run_id="111"),
+        _check_run("test (3.12)", conclusion="FAILURE", run_id="222"),
+    ], jobs_by_run={"222": [_job("test (3.12)", steps)]})
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+    assert summary["reworked"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert (run["rework_count"] or 0) == 1
+
+
+def test_the_steps_api_is_read_once_on_the_transition_into_red_and_never_on_the_poll(
+    tmp_path,
+):
+    """Mirror of `test_the_log_is_fetched_once_on_the_transition_into_red_and_never_on_the_poll`
+    for the OTHER heavy read this feature adds: `gh run view --json jobs` must only be asked
+    once, on the once-per-sha transition into a new red — never on the 60s poll that keeps
+    refreshing `pr_checks` for a red already delivered."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "failure"),
+        _step("Ruff", "skipped"),
+        _step("Pytest", "skipped"),
+        _step("Complete job", "success"),
+    ]
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="999999")],
+        jobs_by_run={"999999": [_job("test (3.12)", steps)]},
+    )
+
+    _tick(wf, fake)
+    fetched_after_first = fake.steps_fetches
+    _tick(wf, fake)          # already delivered — the poll must not re-ask
+    _tick(wf, fake)
+
+    assert fetched_after_first == 1
+    assert fake.steps_fetches == 1
+
+
 # --- (b) ⛔ A PENDING RUN IS NOT A RED ONE. The single most important test here. --------
 
 @pytest.mark.parametrize("status", ["QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"])
