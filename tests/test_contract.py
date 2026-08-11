@@ -227,6 +227,30 @@ def test_merge_proceeds_when_judge_sha_is_unset_even_though_the_live_head_is_kno
     squash.assert_called_once()
 
 
+def test_merge_proceeds_when_the_live_head_sha_is_unset_even_though_judge_sha_is_known(repo):
+    """The other half of the same conservatism: an UNREADABLE/unset live head
+    (``ci.head_sha`` is ``None`` — GitHub could not report one) is NOT positive evidence of
+    staleness either, so it must never refuse on that basis alone — even when ``judge_sha``
+    IS stamped and non-empty. Every other proceed-path test leaves ``ci.head_sha`` at its
+    default ``None`` *and* leaves ``judge_sha`` unset too, so none of them can tell "an unset
+    live head is deliberately ignored" apart from "neither sha was ever read" — this test
+    pins a REAL ``judge_sha`` against the unset live head.
+
+    Corrupt ``if judge_sha and ci.head_sha and judge_sha != ci.head_sha:`` to
+    ``if judge_sha and judge_sha != ci.head_sha:`` and this goes red: a stamped judge_sha
+    never equals the unset ``None`` head, so a run this gate already trusted gets refused."""
+    _seed_run(repo, judge_sha="deadbeef0001")
+    with patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks",
+                      return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge",
+                      return_value={"ok": True, "merge_commit_sha": "x"}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is True
+    squash.assert_called_once()
+
+
 @pytest.mark.parametrize("ci", [CI_FAILING, CI_PENDING, CI_NONE, CI_UNKNOWN])
 def test_merge_requires_green_CI(repo, ci):
     _seed_run(repo)
