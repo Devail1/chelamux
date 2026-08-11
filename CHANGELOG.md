@@ -31,6 +31,21 @@ history lives in `git log`.
   burns the bounded `cannot_verify` retry budget re-discovering a verdict that is
   already definitive. (CMX-239)
 
+### Added
+
+- **`chela doctor` now has a STANDING signal that a judge's blocking verdict was
+  lost, not just a one-shot notification.** CMX-239 gave the CAS-refused race on a
+  BLOCKING verdict its own state (`judge_state=blocked_race`) and its own urgent
+  inbox event (`run_judge_blocked_race`) — but that event is edge-triggered: it
+  fires once, the moment the run row first lands in that state, and never again
+  while the row sits stuck. A guard that survived corruption on a commit that may
+  already have shipped is exactly the kind of finding that can be missed by
+  whoever happened to be watching at that one moment, and until now there was
+  nowhere a LATER `chela doctor` run could still find it — nothing read
+  `judge_state` at all. A new fact, `judge.blocked_race`, closes that: every run
+  stuck in `blocked_race` is reported every time doctor runs, for as long as it
+  stays stuck. (CMX-240)
+
 ### Fixed
 
 - **A release body could ship the same `### Added`/`### Changed`/`### Fixed` heading

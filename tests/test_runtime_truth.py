@@ -159,6 +159,12 @@ def fleet(tmp_path, monkeypatch, request):
     # (the inbox registration above) matches the running epoch.
     monkeypatch.setattr(runtime_truth, "_restore_scan", lambda now: 0)
 
+    # judge.blocked_race: no run in this fleet is stuck with a CAS-refused BLOCKING
+    # verdict (CMX-239) — same reason _restore_scan is stubbed above: the real
+    # `dispatcher.DB_PATH` is cached at import time against the developer's actual
+    # ~/.chela, not this fixture's temp one.
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {})
+
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
         runtime_truth, "collected_js_suites",
@@ -497,6 +503,19 @@ def _break_restore_dead_epoch(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_judge_blocked_race(tmp_path, monkeypatch):
+    """CMX-239's race landed: a guard SURVIVED corruption but `request_changes`'s CAS was
+    refused, and `judge.judge_run` recorded `J_BLOCKED_RACE` on the row. This is the
+    STANDING half CMX-239 itself did not build — `inbox.run_events` already raised this
+    once, on the tick it happened, but says nothing on any LATER tick while the row sits
+    stuck. `chela doctor` must keep saying so for as long as it stays stuck."""
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {
+        "CMX-239": {"status": "needs_human", "pr_url": "https://github.com/acme/repo/pull/239",
+                    "detail": "a guard SURVIVED corruption", "sha": "deadbeef"},
+    })
+    return doctor.ERROR
+
+
 def _break_update_apply_lock(tmp_path, monkeypatch):
     """CMX-226: the dashboard's update-apply lock has been held far longer than any
     honest `update.apply()` run can take — the process holding it (this test process
@@ -550,6 +569,7 @@ CORRUPTIONS = {
     "agents.native_status_feed": _break_native_status_feed,
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
     "dispatch.unresolved_depends": _break_unresolved_depends,
+    "judge.blocked_race": _break_judge_blocked_race,
 }
 
 
@@ -1153,6 +1173,50 @@ def test_repo_services_current_does_not_apply_to_a_pip_install(monkeypatch):
         update, "repo_root",
         lambda: (_ for _ in ()).throw(update.NotAGitCheckout("not a git checkout")))
     assert not runtime_truth.fact("repo.services_current").applies()
+
+
+# --- judge.blocked_race: CMX-240, the STANDING half CMX-239 didn't build ---------------
+#
+# `inbox.run_events` raises `run_judge_blocked_race` once, edge-triggered on the tick the
+# row first lands in `J_BLOCKED_RACE`. If that one notification is missed, nothing else
+# ever says it again — this fact is the ONLY other place a later `chela doctor` run can
+# still find it.
+
+def test_judge_blocked_race_reports_the_stuck_run(fleet, monkeypatch):
+    _break_judge_blocked_race(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert findings and all(f.level == doctor.ERROR for f in findings)
+    assert "CMX-239" in findings[0].title
+    assert "needs_human" in findings[0].title
+    assert "https://github.com/acme/repo/pull/239" in findings[0].detail
+
+
+def test_judge_blocked_race_silent_when_nothing_stuck(fleet):
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_judge_blocked_race_names_every_stuck_row_not_just_the_first(fleet, monkeypatch):
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {
+        "CMX-239": {"status": "needs_human", "pr_url": "https://github.com/acme/repo/pull/239",
+                    "detail": "a guard SURVIVED corruption", "sha": "deadbeef"},
+        "CMX-241": {"status": "awaiting_review", "pr_url": "https://github.com/acme/repo/pull/241",
+                    "detail": "", "sha": None},
+    })
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert len(findings) == 2
+    assert all(f.level == doctor.ERROR for f in findings)
+    titles = {f.title for f in findings}
+    assert any("CMX-239" in t for t in titles)
+    assert any("CMX-241" in t for t in titles)
+
+
+def test_judge_blocked_race_does_not_report_an_ordinary_blocked_run(fleet, monkeypatch):
+    """A run that is merely `judge.J_BLOCKED` (an ordinary rework, no CAS race) is not this
+    fact's business — `judge.blocked_race` fires only for the dedicated CMX-239 state."""
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {})
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert findings and findings[0].level == doctor.OK
 
 
 # --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------

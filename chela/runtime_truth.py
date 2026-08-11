@@ -681,6 +681,72 @@ def _checks_report(declared: dict[str, dict], obs: Observation) -> list[Finding]
     return out
 
 
+# --- fact: a judge's BLOCKING verdict whose CAS write was refused (CMX-239) ------------
+#
+# CMX-239 gave this race its own state (`judge.J_BLOCKED_RACE`, never plain `J_CANNOT_VERIFY`
+# or `J_BLOCKED` — see that module's own comment for why) and its own urgent inbox event
+# (`run_judge_blocked_race`). But `inbox.run_events` is EDGE-TRIGGERED — keyed off
+# `seen[task_id]`, it fires once, the moment the row's `f"{status}:{judge_state}"` mark first
+# reads this way, and never again while the row sits still. A guard that SURVIVED CORRUPTION
+# on a commit that may already have shipped is exactly the finding CMX-187 taught this module
+# to worry about being missed by whoever happened to be watching at that one moment — and
+# unlike every other CMX-187 fact, there was nowhere a LATER `chela doctor` run could still
+# find it: nothing here reads `judge_state` at all. This closes that — a run stuck in
+# `J_BLOCKED_RACE` is reported every single time doctor runs, for as long as it stays stuck,
+# not just on the tick it happened.
+
+def _blocked_race_scan() -> dict[str, dict]:
+    """Every run row whose `judge_state` is `judge.J_BLOCKED_RACE` — the CAS-refused race on
+    a BLOCKING verdict (CMX-239). A module-level function, like `_parked_runs` / `_reviewed_prs`
+    above, so the test suite can hand it a fixed table instead of reaching
+    `dispatcher.DB_PATH` (cached at import time against the real ``~/.chela``, not the
+    fixture's temp one)."""
+    from chela import dispatcher, judge          # lazy: doctor must import cheaply
+
+    if not Path(dispatcher.DB_PATH).exists():
+        return {}
+    out: dict[str, dict] = {}
+    for run in dispatcher.list_runs():
+        if run.get("judge_state") != judge.J_BLOCKED_RACE:
+            continue
+        out[str(run["task_id"])] = {
+            "status": str(run.get("status")),
+            "pr_url": run.get("pr_url"),
+            "detail": str(run.get("judge_detail") or ""),
+            "sha": run.get("judge_sha"),
+        }
+    return out
+
+
+def _blocked_race_read() -> Observation:
+    return observed(_blocked_race_scan())
+
+
+def _blocked_race_report(_declared: None, obs: Observation) -> list[Finding]:
+    rows: dict[str, dict] = obs.value or {}
+    if not rows:
+        return [Finding(OK, "no run carries a blocked-race judge verdict (CMX-239)")]
+    out: list[Finding] = []
+    for task, row in sorted(rows.items()):
+        pr = row.get("pr_url")
+        ref = f" — {pr}" if pr else " — no PR link on the row"
+        detail = row.get("detail", "")[:140]
+        out.append(Finding(
+            ERROR,
+            f"run {task} has a BLOCKING judge verdict that survived the CAS race "
+            f"(judge.J_BLOCKED_RACE) — the row is stuck at {row.get('status')!r}",
+            "A guard SURVIVED CORRUPTION on "
+            f"{row.get('sha') or 'a commit this row no longer names'}, but "
+            "`request_changes`'s CAS was refused — the run moved out of `awaiting_review` "
+            "(a human merged it, or CI got there first) while the judge was still working, "
+            "so the row was never sent back. `inbox.run_events` raised this once already, "
+            "on the tick it happened (`run_judge_blocked_race`) — if that notification was "
+            "missed, this is the only other place it is ever said again. Check whether this "
+            f"already shipped{ref}.{': ' + detail if detail else ''}",
+        ))
+    return out
+
+
 # --- fact: the port the dashboard actually BOUND -------------------------------------
 
 def _port_read() -> Observation:
@@ -2782,6 +2848,18 @@ def facts() -> list[Fact]:
             declare=_reviewed_prs,
             read_back=_checks_read,
             report=_checks_report,
+        ),
+        Fact(
+            name="judge.blocked_race",
+            declared_by="nothing — chela never predicts this; a run row's judge_state "
+                        "either records the CAS-refused blocked-race (CMX-239) or it "
+                        "doesn't",
+            owned_by="the dispatcher's runs table — judge_state/judge_detail/judge_sha, "
+                     "set once by judge.judge_run and never revisited once the CAS is "
+                     "refused (CMX-239)",
+            declare=lambda: None,
+            read_back=_blocked_race_read,
+            report=_blocked_race_report,
         ),
         Fact(
             name="relay.transcripts",
