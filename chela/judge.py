@@ -56,6 +56,18 @@ clean run stays in ``awaiting_review`` for the orchestrator, who owns the merge.
 suite that would not run, zero proposed experiments: all of them are CANNOT VERIFY. Nothing
 is blocked and nothing is approved; the run is handed to a human, exactly as
 ``CI_UNKNOWN`` is.
+
+⚖️🕳️ A BLOCKING VERDICT IS POSTED TO THE PR UNCONDITIONALLY — CMX-228. It used to reach the
+PR only from inside ``dispatcher.request_changes``, past that function's own
+``status == 'awaiting_review'`` check and compare-and-swap — both of which return early,
+posting NOTHING, the moment the run moves out from under a still-running judge (a human
+merges it, or the CI gate reaches it first). A clean verdict has always posted with no such
+gate. The result was inverted severity: the finding that mattered most — a guard that
+SURVIVED deliberate corruption — was the one most likely to go unpublished, precisely
+because it takes longer to compute than a clean pass and so has more time to race a merge.
+:func:`judge_run` now posts the block-body comment first, before either check; the CAS in
+``request_changes`` still guards the run ROW (no resurrecting an already-merged run), it
+just never again gates whether the finding is SHOWN.
 """
 from __future__ import annotations
 
@@ -1248,12 +1260,31 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
 
         if blocking:
             body = block_body(report, pr_url, test_cmd or "?")
-            verdict = dispatcher.request_changes(task_id, body)
+            # ⚖️🕳️ CMX-228: POST FIRST, unconditionally — never behind the CAS below.
+            # Before this, the ONLY way this comment reached the PR was inside
+            # `request_changes`, past its `status == 'awaiting_review'` check AND its
+            # compare-and-swap — both of which return early, with NO comment posted, the
+            # moment a human merges the PR (or CI gets there first) while the judge is
+            # still mid-run. That is the one race a mutation-testing finding cannot afford
+            # to lose to: it is the ONLY record that a guard survived corruption — unlike a
+            # CI failure, GitHub shows nothing else for it — so the run most likely to have
+            # moved out from under a slow judge is exactly the one whose verdict most needed
+            # to survive the race. Inverted severity: the `else` branch below posts a clean
+            # verdict with no gate at all, while the more important blocking one silently
+            # dropped. Posting here, before either check, makes "always shown" literal; the
+            # CAS below still guards the RUN ROW (no resurrecting an already-merged run) —
+            # it must never gate whether the finding is SHOWN.
+            posted, post_detail = dispatcher._post_pr_comment(pr_url, repo_dir, body)
+            if not posted:
+                log.warning("judge: %s blocking verdict did NOT post to the PR: %s",
+                            task_id, post_detail)
+            verdict = dispatcher.request_changes(task_id, body, post_comment=False)
             if not verdict.get("ok"):
                 # The CAS refused it: the row moved under us (a human merged it, or the CI gate
-                # got there first). Nothing was written, and nothing should be.
-                log.info("judge: %s found %d blocking finding(s), but the verdict was not "
-                         "written: %s", task_id, len(blocking), verdict.get("error"))
+                # got there first). The RUN ROW was not written — but the comment above was
+                # posted regardless, so the finding itself was not lost.
+                log.info("judge: %s found %d blocking finding(s), but the run row was not "
+                         "updated: %s", task_id, len(blocking), verdict.get("error"))
                 dispatcher.set_judge_state(
                     task_id, J_CANNOT_VERIFY,
                     f"the run moved while the judge was running: {verdict.get('error')}",
@@ -1268,15 +1299,20 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                 log.warning("judge: %s SENT BACK — %d guard(s) survived corruption",
                             task_id, len(blocking))
                 result["round"] = verdict.get("round")
+            result["comment_posted"] = posted
         else:
             body = comment_body(report, pr_url, test_cmd or "?")
-            dispatcher._post_pr_comment(pr_url, repo_dir, body)
+            posted, post_detail = dispatcher._post_pr_comment(pr_url, repo_dir, body)
+            if not posted:
+                log.warning("judge: %s clean verdict did NOT post to the PR: %s",
+                            task_id, post_detail)
             dispatcher.set_judge_state(
                 task_id, report.state, report.cannot_verify or "every guard held",
                 sha=judged_sha,
             )
             log.info("judge: %s → %s (%d experiment(s))", task_id, report.state,
                      len(report.outcomes))
+            result["comment_posted"] = posted
 
         return result
     finally:
