@@ -80,6 +80,32 @@ def test_a_blank_depends_marker_yields_no_dependencies_rather_than_an_empty_stri
     assert tasks[0].depends == ()
 
 
+def test_a_quoted_title_containing_a_semicolon_still_resolves(tmp_path):
+    # 🔴 GUARD: a naive `raw.split(";")` done BEFORE quote-stripping cuts a
+    # quoted title with an embedded `;` into two garbage segments, neither of
+    # which hashes to the real target — the dependency silently resolves to
+    # ids nothing satisfies and the task is stuck forever, indistinguishable
+    # from a typo. Quoting must make the whole title, `;` included, one segment.
+    text = (
+        "- [ ] fix the bug; handle the edge case\n"
+        '- [ ] follow-up task <!-- depends: "fix the bug; handle the edge case" -->\n'
+    )
+    tasks = _source(tmp_path).tasks_from_text(text)
+    follow_up = next(t for t in tasks if t.title.startswith("follow-up"))
+    assert follow_up.depends == (_id("fix the bug; handle the edge case"),)
+
+
+def test_a_semicolon_titled_dependency_mixed_with_a_plain_one_both_resolve(tmp_path):
+    text = (
+        "- [ ] a; b\n"
+        "- [ ] plain prerequisite\n"
+        '- [ ] follow-up task <!-- depends: "a; b"; "plain prerequisite" -->\n'
+    )
+    tasks = _source(tmp_path).tasks_from_text(text)
+    follow_up = next(t for t in tasks if t.title.startswith("follow-up"))
+    assert set(follow_up.depends) == {_id("a; b"), _id("plain prerequisite")}
+
+
 def test_depends_does_not_disturb_the_blocked_marker(tmp_path):
     # `<!-- blocked -->` still removes the task from the open list entirely — a
     # wholly separate, pre-existing marker this feature must not interact with.

@@ -182,13 +182,41 @@ def _parse_depends(raw: str) -> tuple[str, ...]:
     """Split a `depends:` marker's payload into the titles it names.
 
     `;`-separated (not `,` — a title is prose and commonly contains one), each
-    optionally wrapped in matching quotes so a title that itself ends in `;`
-    remains expressible. Blank segments (a trailing `;`, `<!-- depends: -->`
-    written with nothing in it) are dropped rather than yielding an empty-string
-    dependency nothing can ever satisfy.
+    optionally wrapped in matching quotes so a title that itself CONTAINS a `;`
+    remains expressible. The split is quote-aware — a `;` inside a matched pair
+    of quotes does not end the segment — because a naive `raw.split(";")` done
+    first, with quote-stripping only applied to the resulting pieces, can never
+    recover a title with an embedded `;`: the split has already cut it in two
+    before the quotes are even looked at, and no amount of quoting in the
+    tracker file can fix that from the outside. A dependency named that way
+    would silently resolve to the wrong (nonexistent) ids and read exactly like
+    a typo'd reference — permanently blocking its dependent with no way for a
+    human to correct it by writing "better" markdown.
+
+    Blank segments (a trailing `;`, `<!-- depends: -->` written with nothing in
+    it) are dropped rather than yielding an empty-string dependency nothing can
+    ever satisfy.
     """
+    segments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    for ch in raw:
+        if quote is not None:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+            current.append(ch)
+        elif ch == ";":
+            segments.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    segments.append("".join(current))
+
     titles = []
-    for part in raw.split(";"):
+    for part in segments:
         part = part.strip()
         if len(part) >= 2 and part[0] == part[-1] and part[0] in "\"'":
             part = part[1:-1].strip()

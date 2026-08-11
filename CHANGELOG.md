@@ -77,6 +77,19 @@ history lives in `git log`.
   The Settings drawer now carries the AGPL §13 source offer, which the licence
   requires for software users interact with over a network.
 
+### Fixed
+
+- **A `depends:` marker naming a title with an embedded `;` could never resolve, no
+  matter how it was quoted.** `_parse_depends` split the marker's payload on `;`
+  *before* stripping quotes, so a title such as `fix the bug; handle the edge case`
+  got cut into two garbage segments the moment someone tried to reference it — even
+  wrapped in the documented `"..."` quoting. The dependency silently resolved to ids
+  no real task holds, which reads exactly like a typo'd reference: the dependent task
+  fails closed and stays blocked forever (`chela.dispatcher._ready` logs it as an
+  "unresolved reference"), with no way for a human to fix it by writing "better"
+  markdown — the title itself was the trap. The split is now quote-aware: a `;`
+  inside a matched pair of quotes no longer ends the segment. (CMX-232)
+
 ### Added
 
 - **`chela doctor` now reports which transport each agent would actually receive a
