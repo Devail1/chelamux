@@ -28,6 +28,13 @@ _KNOWN_SEPARATOR = re.compile(r"^(?:\s*[-–—].*)?$")
 # category headings a release body is organised under.
 _SUBHEADING = re.compile(r"(?m)^### (.+)$")
 
+# Keep a Changelog's canonical category order. Emitting merged sections in
+# this fixed order (rather than first-appearance order) makes the output a
+# pure function of the content: two branches carrying identical entries that
+# merge in a different sequence still produce byte-identical release bodies.
+# First-appearance order would preserve that nondeterminism in a subtler form.
+_CANONICAL_CATEGORY_ORDER = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
+
 
 class ReleaseNotFoundError(ValueError):
     """No matching `## [version]` section exists in the changelog."""
@@ -39,7 +46,11 @@ class UnrecognisedHeadingError(ValueError):
 
 def _merge_duplicate_subheadings(body: str) -> str:
     """Collapse repeated `### <Category>` headings in a release body into one
-    block per category, content concatenated in the order it appeared.
+    block per category, content concatenated in the order it appeared, and
+    emit the resulting blocks in Keep a Changelog's canonical category order
+    (`_CANONICAL_CATEGORY_ORDER`) rather than first-appearance order. A title
+    that isn't one of those six categories is not dropped — it's emitted
+    after the known ones, in first-appearance order among themselves.
 
     Parallel worktree agents each append their own `### Added`/`### Changed`/
     `### Fixed` subsection under `## [Unreleased]`, blind to each other's
@@ -57,7 +68,7 @@ def _merge_duplicate_subheadings(body: str) -> str:
     if len(set(titles)) == len(titles):
         return body
 
-    order: list[str] = []
+    first_seen: list[str] = []
     chunks: dict[str, list[str]] = {}
     for i, match in enumerate(matches):
         title = titles[i]
@@ -65,9 +76,12 @@ def _merge_duplicate_subheadings(body: str) -> str:
         content = body[match.end() : content_end].strip("\n")
         if title not in chunks:
             chunks[title] = []
-            order.append(title)
+            first_seen.append(title)
         if content:
             chunks[title].append(content)
+
+    order = [title for title in _CANONICAL_CATEGORY_ORDER if title in chunks]
+    order += [title for title in first_seen if title not in _CANONICAL_CATEGORY_ORDER]
 
     preamble = body[: matches[0].start()]
     sections = []
@@ -115,6 +129,43 @@ def extract_release_notes(changelog_text: str, version: str) -> str:
     return body.strip() + "\n"
 
 
+def coalesce_unreleased_section(changelog_text: str) -> str:
+    """Return `changelog_text` with duplicate `### <Category>` headings in its
+    `## [Unreleased]` section collapsed, via `_merge_duplicate_subheadings`.
+
+    Only `## [Unreleased]` is touched — the section parallel worktree agents
+    actually append to. Dated release sections are left alone on purpose:
+    cleaning up an already-published release body is a separate, deliberate
+    call by the operator, not something this automation does silently. If
+    `## [Unreleased]` is absent, or has no duplicate headings, the text comes
+    back byte-for-byte unchanged.
+    """
+    headings = list(_iter_headings(changelog_text))
+    start = next((m for m in headings if m.group("version") == "Unreleased"), None)
+    if start is None:
+        return changelog_text
+
+    body_start = start.end()
+    later_heading_starts = [m.start() for m in headings if m.start() > start.start()]
+    footer = changelog_text.find("\n---\n", body_start)
+    candidates = later_heading_starts + ([footer] if footer != -1 else [])
+    body_end = min(candidates) if candidates else len(changelog_text)
+
+    body = changelog_text[body_start:body_end]
+    merged = _merge_duplicate_subheadings(body)
+    if merged == body:
+        return changelog_text
+
+    # `_merge_duplicate_subheadings` always ends its output with exactly one
+    # `\n`, which is right for a standalone extracted release body but wrong
+    # here: `body` itself may have ended with more than that (e.g. the blank
+    # line that separates it from the next `## [...]` heading), and that
+    # trailing whitespace is otherwise dropped, splicing the merged section
+    # directly onto the next heading with no blank line between them.
+    trailing_ws = re.search(r"\s*\Z", body).group()
+    return changelog_text[:body_start] + merged.rstrip("\n") + trailing_ws + changelog_text[body_end:]
+
+
 def latest_released_version(changelog_text: str) -> str:
     """Return the version of the newest dated (non-`Unreleased`) heading.
 
@@ -137,14 +188,34 @@ def main(argv: list[str] | None = None) -> int:
         description="Print a release's CHANGELOG.md section body, for "
         "`gh release create --notes-file`.",
     )
-    parser.add_argument("version", help="release version, e.g. 0.3.0 (a leading 'v' is stripped)")
+    parser.add_argument(
+        "version",
+        nargs="?",
+        help="release version, e.g. 0.3.0 (a leading 'v' is stripped); ignored with --write",
+    )
     parser.add_argument(
         "--changelog",
         type=Path,
         default=_default_changelog_path(),
         help="path to CHANGELOG.md (default: repo root)",
     )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="coalesce duplicate ### headings in --changelog's ## [Unreleased] "
+        "section in place, instead of printing one release's notes",
+    )
     args = parser.parse_args(argv)
+
+    if args.write:
+        original = args.changelog.read_text()
+        rewritten = coalesce_unreleased_section(original)
+        if rewritten != original:
+            args.changelog.write_text(rewritten)
+        return 0
+
+    if not args.version:
+        parser.error("version is required unless --write is given")
     version = args.version[1:] if args.version.startswith("v") else args.version
 
     try:

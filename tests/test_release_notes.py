@@ -211,10 +211,53 @@ def test_duplicate_subheadings_are_merged_into_one_block_each():
     assert "first added item" in notes
 
 
-def test_duplicate_subheadings_keep_first_appearance_order():
+def test_duplicate_subheadings_use_canonical_category_order():
+    # First appearance in the fixture is Fixed, Changed, Added — deliberately
+    # NOT canonical order, so this proves the output is reordered rather than
+    # happening to already match. First-appearance order is itself
+    # merge-order-dependent (identical entries merged in a different sequence
+    # would produce a different release body); canonical order isn't.
     notes = extract_release_notes(_DUPLICATE_HEADINGS_SAMPLE, "Unreleased")
     headings = re.findall(r"^### (.+)$", notes, re.MULTILINE)
-    assert headings == ["Fixed", "Changed", "Added"]
+    assert headings == ["Added", "Changed", "Fixed"]
+
+
+_UNKNOWN_HEADING_SAMPLE = """\
+# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- first fixed item
+
+### Notes
+
+- a contributor note that isn't a Keep a Changelog category
+
+### Fixed
+
+- second fixed item
+
+### Added
+
+- first added item
+
+## [1.0.0] — 2026-01-01
+
+### Added
+
+- first release body
+"""
+
+
+def test_unrecognised_subheading_survives_the_merge():
+    # A ### title outside the six canonical categories must not be dropped —
+    # it's emitted after the known ones, in first-appearance order.
+    notes = extract_release_notes(_UNKNOWN_HEADING_SAMPLE, "Unreleased")
+    headings = re.findall(r"^### (.+)$", notes, re.MULTILINE)
+    assert headings == ["Added", "Fixed", "Notes"]
+    assert "a contributor note that isn't a Keep a Changelog category" in notes
 
 
 def test_duplicate_subheadings_do_not_leak_into_other_releases():
@@ -229,9 +272,75 @@ def test_no_duplicate_subheadings_leaves_body_untouched():
     assert notes == "### Added\n\n- second release body\n- more of it\n"
 
 
-def test_real_changelog_unreleased_section_has_no_duplicate_headings():
-    notes = extract_release_notes(_CHANGELOG.read_text(), "Unreleased")
-    headings = re.findall(r"^### (.+)$", notes, re.MULTILINE)
-    assert len(headings) == len(set(headings)), (
-        f"duplicate ### headings survived extraction: {headings}"
+def test_write_mode_is_a_noop_on_a_changelog_with_no_duplicate_headings(tmp_path):
+    path = tmp_path / "CHANGELOG.md"
+    path.write_text(_SAMPLE)
+
+    result = _run_cli("--write", "--changelog", str(path))
+
+    assert result.returncode == 0
+    assert path.read_text() == _SAMPLE
+
+
+def test_write_mode_collapses_duplicate_headings_in_unreleased_in_place(tmp_path):
+    path = tmp_path / "CHANGELOG.md"
+    path.write_text(_DUPLICATE_HEADINGS_SAMPLE)
+
+    result = _run_cli("--write", "--changelog", str(path))
+
+    assert result.returncode == 0
+    written = path.read_text()
+    assert written.count("### Fixed") == 1
+    assert written.count("### Changed") == 1
+    assert written.count("### Added") == 2  # one in Unreleased, one in 1.0.0
+    assert "first fixed item" in written
+    assert "second fixed item" in written
+    # canonical order, on disk
+    unreleased = extract_release_notes(written, "Unreleased")
+    headings = re.findall(r"^### (.+)$", unreleased, re.MULTILINE)
+    assert headings == ["Added", "Changed", "Fixed"]
+    # the historical 1.0.0 section is untouched
+    assert extract_release_notes(written, "1.0.0") == "### Added\n\n- first release body\n"
+
+
+def test_write_mode_preserves_the_blank_line_before_the_next_heading(tmp_path):
+    # `_merge_duplicate_subheadings` always ends its own return value with a
+    # single `\n` (right for a standalone extracted release body) — --write
+    # splices that merged text back into the file, so it must restore
+    # whatever blank line originally separated Unreleased from what follows,
+    # not the extractor's single newline.
+    path = tmp_path / "CHANGELOG.md"
+    path.write_text(_DUPLICATE_HEADINGS_SAMPLE)
+
+    result = _run_cli("--write", "--changelog", str(path))
+
+    assert result.returncode == 0
+    written = path.read_text()
+    before_next_heading, sep, _after = written.partition("## [1.0.0]")
+    assert sep, "the 1.0.0 heading must survive --write unchanged"
+    assert before_next_heading.endswith("\n\n")
+    assert not before_next_heading.endswith("\n\n\n")
+
+
+def test_write_mode_does_not_touch_historical_sections_even_with_duplicates(tmp_path):
+    # ⛔ Cleaning up an already-published release body is a separate,
+    # deliberate operator call — --write must never make it silently.
+    dirty_historical = _DUPLICATE_HEADINGS_SAMPLE.replace(
+        "## [1.0.0] — 2026-01-01\n\n### Added",
+        "## [1.0.0] — 2026-01-01\n\n### Added\n\n- x\n\n### Added",
     )
+    path = tmp_path / "CHANGELOG.md"
+    path.write_text(dirty_historical)
+
+    result = _run_cli("--write", "--changelog", str(path))
+
+    assert result.returncode == 0
+    written = path.read_text()
+    historical_section = written.split("## [1.0.0]", 1)[1]
+    assert historical_section.count("### Added") == 2
+
+
+def test_cli_requires_version_unless_write_is_given():
+    result = _run_cli()
+    assert result.returncode != 0
+    assert "version" in result.stderr.lower()
