@@ -612,6 +612,29 @@ def test_hooks_rejected_wid_splits_severity_when_both_shapes_are_present(
         f"expected one OK (teardown, @299) and one WARN (never-live, @999), got {findings}")
 
 
+def test_hooks_rejected_wid_cross_session_collision_stays_warn(fleet, monkeypatch):
+    """CMX-231 rework: tmux window ids are small integers, reused across restarts and
+    unrelated sessions — a `rejected_wid` resolving SOMEWHERE in the ring is not evidence
+    it was ever THIS session's window. Session `...0006` resolves `@2` for itself (an
+    unrelated, ordinary window) while session `...0007` — a DIFFERENT session — rejects a
+    header naming that same `@2`, which `...0007` never resolved itself anywhere in the
+    ring. That is exactly the CMX-192 shape (a stale env var whose wid happens to collide
+    with an unrelated session's window elsewhere in the ring) and must stay WARN. A
+    same-string-anywhere-in-the-ring discriminator would wrongly call this OK; corrupt
+    this fact back to ring-wide matching and this assertion goes red."""
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@2",
+                     session_id="1969180e-dead-beef-cafe-000000000006")
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000007",
+                     rejected_wid="@2")
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.WARN for f in findings), (
+        f"a wid resolved only by a DIFFERENT session must not downgrade this session's "
+        f"rejection to OK, got {findings}")
+    assert "@2" in findings[0].title
+    assert "CMX-192" in findings[0].detail
+
+
 def test_a_check_state_that_cannot_be_read_is_never_a_pass(fleet, monkeypatch):
     """⛔ `gh` missing / offline / rate-limited = UNKNOWN, not GREEN.
 

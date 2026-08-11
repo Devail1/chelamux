@@ -1149,12 +1149,18 @@ def _hooks_unattributed_report(_declared: None, obs: Observation) -> list[Findin
 # process's story at all, only a stale env var's.
 #
 # Those two things read identically off a single "not live right now" check, so this fact
-# now tells them apart using the ring's OWN history: if `rejected_wid` also appears as the
-# resolved `wid` on some OTHER record in the same ring, the window was genuinely live at
-# some point in the observed window and this is teardown — reported at OK, not WARN. Only
-# a `rejected_wid` that never once resolved anything in the ring keeps the WARN and the
-# CMX-192 chase-list; that is the shape with no evidence the window was ever this
-# process's to begin with.
+# now tells them apart using the ring's OWN history — SCOPED TO THE REJECTING SESSION, not
+# the whole ring: if `rejected_wid` also appears as the resolved `wid` on some OTHER record
+# from that SAME `session_id`, the window was genuinely THIS session's at some point in the
+# observed window and this is teardown — reported at OK, not WARN. A bare ring-wide wid
+# match is not this discriminator: tmux window ids are small integers, reused across tmux
+# restarts and unrelated sessions, so `@2` resolving to *someone else's* window at some
+# other point in a multi-week ring is not evidence the window THIS header named was ever
+# live in THIS session's story — it would silence the exact CMX-192 shape (a stale env var
+# naming a wid that happens to collide with an unrelated session elsewhere in the ring).
+# Only a `rejected_wid` that never once resolved anything for the SAME session keeps the
+# WARN and the CMX-192 chase-list; that is the shape with no evidence the window was ever
+# this process's to begin with.
 #
 # `hooks._explicit_wid`/`_explicit_wid_dead` separately gained a forced-refresh retry
 # before giving up on a header (CMX-231) — a real but DIFFERENT race (a session
@@ -1168,65 +1174,83 @@ def _hooks_rejected_wid_read() -> Observation:
     not live — ``rejected_wid``, read back exactly as :func:`chela.hooks.ingest` wrote
     it. Distinct from the unset case, which never sets this field at all.
 
-    Also collects every ``wid`` any record in the ring resolved to, so the report can
-    tell a window that used to be live (a teardown artifact) apart from one that never
-    appears anywhere else in the observed window (the CMX-192 shape)."""
+    Also collects, PER SESSION, every ``wid`` that session's own other records resolved
+    to — so the report can tell a window that was genuinely THIS SESSION's, earlier in
+    the ring (a teardown artifact), apart from a same-numbered window that only ever
+    belonged to some other session (the CMX-192 shape). A bare wid match across the
+    whole ring is not enough: tmux window ids are small integers that get reused across
+    tmux restarts and unrelated sessions, so ``@2`` resolving to *someone's* window
+    weeks ago is not evidence the window THIS header named was ever live at all — only
+    that the same short string was. Scoping to the rejecting session's own history is
+    what makes the match mean "this was my window," not "this string appeared once."""
     records = event_log.ring()
     dead: dict[str, str] = {}
-    resolved_ever: set[str] = set()
+    resolved_by_session: dict[str, set[str]] = {}
     for rec in records:
         wid = rec.get("wid")
-        if wid:
-            resolved_ever.add(wid)
+        sid = rec.get("session_id")
+        if wid and sid:
+            resolved_by_session.setdefault(sid, set()).add(wid)
     for rec in records:
         rtype = rec.get("type") or ""
         rejected = rec.get("rejected_wid")
         if rejected and rtype.startswith(hooks.TYPE_PREFIX):
             sid = rec.get("session_id") or "?"
             dead[sid] = rejected
-    return observed({"dead": dead, "resolved_ever": resolved_ever,
+    return observed({"dead": dead, "resolved_by_session": resolved_by_session,
                      "bound": _ring_bound_note(records)})
 
 
 def _hooks_rejected_wid_report(_declared: None, obs: Observation) -> list[Finding]:
     dead: dict[str, str] = obs.value["dead"]
-    resolved_ever: set[str] = obs.value["resolved_ever"]
+    resolved_by_session: dict[str, set[str]] = obs.value["resolved_by_session"]
     bound = obs.value["bound"]
     if not dead:
         return [Finding(OK, f"no rejected X-Chela-Wid headers in the {bound} — every "
                             "header seen either named a live window or was unset")]
-    teardown = {sid: wid for sid, wid in dead.items() if wid in resolved_ever}
-    orphaned = {sid: wid for sid, wid in dead.items() if wid not in resolved_ever}
+    teardown = {sid: wid for sid, wid in dead.items()
+                if wid in resolved_by_session.get(sid, ())}
+    orphaned = {sid: wid for sid, wid in dead.items()
+                if wid not in resolved_by_session.get(sid, ())}
     findings: list[Finding] = []
     if teardown:
         named = ", ".join(f"{sid}→{wid}" for sid, wid in sorted(teardown.items()))
         findings.append(Finding(
             OK,
             f"{len(teardown)} rejected X-Chela-Wid header(s) in the {bound} named a "
-            f"window that WAS live earlier in this same window: {named}",
+            f"window that WAS live earlier for that SAME session: {named}",
             "chela.hooks._explicit_wid_dead rejected these because the named window was "
-            "not live at the moment the header arrived, but that same wid also resolved "
-            "other hook.* records elsewhere in the ring — a teardown artifact, not the "
-            "CMX-192 fault: the window the agent named was real, it just closed or was "
-            "replaced before this particular request landed. No action needed.",
+            "not live at the moment the header arrived, but that same session's OWN "
+            "other hook.* records show that wid was genuinely live for it earlier in the "
+            "ring — a teardown artifact, not the CMX-192 fault: the window the agent "
+            "named was real and was this session's, it just closed or was replaced "
+            "before this particular request landed. Deliberately NOT a ring-wide wid "
+            "match: tmux window ids are small integers reused across restarts and "
+            "unrelated sessions, so scoping to the rejecting session's own history is "
+            "what keeps an unrelated session's same-numbered window from masquerading "
+            "as this one's teardown. No action needed.",
         ))
     if orphaned:
         named = ", ".join(f"{sid}→{wid}" for sid, wid in sorted(orphaned.items()))
         findings.append(Finding(
             WARN,
             f"{len(orphaned)} session(s) sent an X-Chela-Wid naming a window in the "
-            f"{bound} that was NEVER live in this same window: {named}",
+            f"{bound} that was NEVER live for that same session: {named}",
             "A well-formed $CHELA_WID that names a window which is not live right now, "
-            "and never resolved anything else anywhere in this ring either, usually "
-            "means the agent was relaunched by hand and inherited a stale window id "
-            "from tmux's global environment surviving that relaunch (the CMX-192 root "
-            "cause). chela.hooks.wid_for_session still fell back to origin-based "
-            "inference for these, so the event was not necessarily lost — but the stale "
-            "id is worth chasing down: is the window in `chela status` right now, and "
-            "does the session's OWN transcript show a `--resume` shortly before this? "
-            "This scan is bounded to the ring above — a window that WAS live earlier but "
-            "scrolled out of the ring before this check ran would look like this shape "
-            "too; widen the window before concluding it never existed.",
+            "and never resolved anything else for THIS session anywhere in this ring "
+            "either, usually means the agent was relaunched by hand and inherited a "
+            "stale window id from tmux's global environment surviving that relaunch "
+            "(the CMX-192 root cause). chela.hooks.wid_for_session still fell back to "
+            "origin-based inference for these, so the event was not necessarily lost — "
+            "but the stale id is worth chasing down: is the window in `chela status` "
+            "right now, and does the session's OWN transcript show a `--resume` shortly "
+            "before this? Note this check intentionally ignores whether some OTHER "
+            "session resolved this same wid elsewhere in the ring — tmux window ids are "
+            "reused across restarts and unrelated sessions, so that alone is not "
+            "evidence the window was ever live for THIS session. This scan is also "
+            "bounded to the ring above — a window that WAS live earlier for this same "
+            "session but scrolled out of the ring before this check ran would look like "
+            "this shape too; widen the window before concluding it never existed.",
         ))
     return findings
 
