@@ -116,6 +116,25 @@ test('minimum legibility floor: --wall-pane-font-size and --wall-pane-line-heigh
         `--wall-pane-line-height (${lh[1]}) has dropped back toward the old 1.3 leading`);
 });
 
+// --- GUARD 2z: GUARD 1 checks every wall/pane rule's font-size is a var() token;
+// GUARD 2 floors --wall-pane-line-height's own :root declaration. Neither asserts
+// that any rule actually CONSUMES the line-height token at its use site — a judge
+// round reverted .pane-recap's line-height to the exact pre-CMX-230 literal (1.3)
+// while leaving the :root token declared at 1.5 and .pane-recap's font-size still
+// tokenised, and both guards stayed green. This pins the two selectors that ship
+// prose text needing real leading (.pane-subtitle, .pane-recap) to read
+// line-height FROM the token, not a bare literal.
+const LINE_HEIGHT_SELECTORS = ['.pane-subtitle', '.pane-recap'];
+test('type scale: .pane-subtitle and .pane-recap read line-height from --wall-pane-line-height, not a bare literal', () => {
+    for (const sel of LINE_HEIGHT_SELECTORS) {
+        const body = blockFor(CSS, sel);
+        assert.match(body, /line-height:\s*var\(--wall-pane-line-height\)/,
+            `${sel} must set line-height from var(--wall-pane-line-height)`);
+        assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
+            `${sel} has reverted to a bare line-height literal — the leading token has no effect at its use site`);
+    }
+});
+
 // --- GUARD 2b: the legibility floor also covers the two tokens GUARD 2 does not
 // reach. --card-font-size (the sidebar-card scale — the ticket's HEADLINE objective
 // is raising 9-10px card text to 11.5px) and --wall-pane-font-size-sm (the .gs-state
@@ -161,6 +180,34 @@ test('density guard: _setWallDensity cuts off at <=2 panes, and buildWall restor
         'buildWall must call _setWallDensity(_wallPreset.cols, _wallPreset.rows) unconditionally when _wallPreset ' +
         'is set — not from behind a dead `if (false && ...)` — so a reload sitting on a 1/2-col preset is airy on ' +
         'its own first paint, independent of applyGridLayout\'s later call');
+});
+
+// --- WIRING: the "air in the chrome" feature must actually PRODUCE air, not just
+// toggle a class. GUARD 2c above pins that body.wall-density-airy gets TOGGLED at
+// the right cutoff; that says nothing about what the class rule itself DOES. A
+// judge round zeroed body.wall-density-airy #term-stage's horizontal padding to
+// 0px while leaving the class-toggle logic and GUARD 2c's regexes untouched, and
+// both density guards stayed green while the ticket's actual objective (wide
+// margins at low density — Liav's Xirp comparison) silently regressed to
+// edge-to-edge dense. jsdom can't resolve the cascade (this file's own note
+// above cssBlocks), so this is a source-text floor on the same class GUARD 2c
+// already pins, mirroring GUARD 2's numeric-floor discipline.
+test('WIRING: the airy-density rule actually pads the stage — not just an empty class toggle', () => {
+    const stageBody = blockFor(CSS, 'body.wall-density-airy #term-stage');
+    const left = stageBody.match(/padding-left:\s*clamp\(([0-9.]+)px/);
+    const right = stageBody.match(/padding-right:\s*clamp\(([0-9.]+)px/);
+    assert.ok(left, 'body.wall-density-airy #term-stage has no padding-left: clamp(...) rule');
+    assert.ok(right, 'body.wall-density-airy #term-stage has no padding-right: clamp(...) rule');
+    assert.ok(parseFloat(left[1]) > 0,
+        `body.wall-density-airy #term-stage's padding-left clamp floor (${left[1]}px) has been zeroed — the airy class toggles but produces no margin`);
+    assert.ok(parseFloat(right[1]) > 0,
+        `body.wall-density-airy #term-stage's padding-right clamp floor (${right[1]}px) has been zeroed — the airy class toggles but produces no margin`);
+
+    const gridBody = blockFor(CSS, 'body.wall-density-airy #term-stage .grid-stack');
+    const maxWidth = gridBody.match(/max-width:\s*([0-9.]+)px/);
+    assert.ok(maxWidth, 'body.wall-density-airy #term-stage .grid-stack has no max-width rule');
+    assert.ok(parseFloat(maxWidth[1]) > 0,
+        `the centred max-width column (${maxWidth[1]}px) has been zeroed — panes would stretch edge-to-edge again`);
 });
 
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word

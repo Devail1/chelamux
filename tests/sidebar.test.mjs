@@ -424,3 +424,32 @@ test('the sidebar is two sections — Launch folded into the launch menu', () =>
     // One toggle in the markup, not two.
     assert.equal(HTML.match(/toggleSidebar\(\)/g).length, 1, 'a second sidebar toggle appeared');
 });
+
+// --- CMX-230, round 2: GUARD 3b / GUARD 4 in tests/dashboard_scale_nav_a11y.test.mjs
+// only source-text-match nav.js's templates — `_AGENT_STATUS_WORD`'s literal map
+// and the `<span class="ar-state ${stCls}">${stWord}</span>` / `${p}%` template
+// strings. Neither renders a row, so a judge round blanked the VALUE that feeds
+// each template (`const stWord = '';` / `const p = '';`) and both regexes still
+// matched the untouched template shape byte-for-byte, green. These drive the REAL
+// `_agentRowHtml` (via `renderSidebarAgents`) into a REAL row and read `.ar-state`
+// / `.ar-ctx` back off the rendered node — blanking either value now shows up as
+// an empty text node, not a passing regex.
+test('CMX-230: the sidebar row\'s .ar-state renders the real status word, not blank — colour is not the only cue', () => {
+    nav.renderSidebarAgents([
+        agent('working-one', { session_status: 'busy' }),
+        agent('idle-one', { session_status: 'idle' }),
+    ]);
+    assert.equal(rowFor('working-one').querySelector('.ar-state').textContent, 'working',
+        '.ar-state must carry the real status word, not an empty span the colour class alone would leave');
+    assert.equal(rowFor('idle-one').querySelector('.ar-state').textContent, 'idle');
+});
+
+test('CMX-230: the sidebar row\'s .ar-ctx renders the real percentage number, not blank — colour is not the only cue', () => {
+    nav.updateCtxCache([{ window_id: '@1', used_pct: 87 }]);
+    nav.renderSidebarAgents([agent('ctx-one', { window_id: '@1' })]);
+    const chip = rowFor('ctx-one').querySelector('.ar-ctx');
+    assert.ok(chip, '.ar-ctx chip did not render for an agent with a cached context %');
+    assert.equal(chip.textContent, '87%',
+        '.ar-ctx must carry the real percentage number, not a bare "%" the warn/danger class alone would leave');
+    assert.ok(chip.classList.contains('danger'), 'a used_pct > 80 must still carry the danger class alongside the number');
+});

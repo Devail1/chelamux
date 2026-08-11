@@ -856,6 +856,29 @@ test('CMX-230: the .gs-state pill\'s WORD text actually repaints on a live state
     assert.equal(word.textContent, 'idle', 'reverting session_status must repaint the word back to idle too');
 });
 
+// 12c — THE .gs-state PILL'S GLYPH ACTUALLY REPAINTS ON A LIVE STATE CHANGE TOO
+// (CMX-230, round 2). A judge round found 12b only covers the WORD half of
+// _applyWallTileFrame's repaint — GUARD 3a in tests/dashboard_scale_nav_a11y.test.mjs
+// still only source-text-matches `g.textContent = s.glyph`, which stays green even
+// when that statement is dead-coded (`if (false && g) g.textContent = s.glyph;`),
+// the exact same hole 12b was written to close for the word span one line below.
+// This drives the REAL function through a REAL live state transition and reads the
+// GLYPH text back off the node, so dead-coding the glyph repaint goes red here too.
+test('CMX-230: the .gs-state pill\'s GLYPH text actually repaints on a live state change, not just its colour class', async () => {
+    const wid = '@1';
+    const glyph = tile(wid).querySelector('.gs-state-glyph');
+    assert.equal(glyph.textContent, '○', 'sanity: an agent with no session_status paints the idle glyph');
+
+    AGENTS[0].session_status = 'busy';
+    await terminals.termTick();
+    assert.equal(glyph.textContent, '●',
+        '_applyWallTileFrame must repaint .gs-state-glyph\'s TEXT on a live state change, not just recolour the pill');
+
+    delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
+    await terminals.termTick();
+    assert.equal(glyph.textContent, '○', 'reverting session_status must repaint the glyph back to idle too');
+});
+
 // 13 — THE ☰ GLYPH IS GONE; .gs-grip STAYS THE DRAG HANDLE (CMX-117 B). GridStack's
 // `handle`/`draggable.handle` option targets `.gs-grip` (buildWall) — dropping the
 // class, not just the glyph, would silently break dragging.
