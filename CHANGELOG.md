@@ -12,6 +12,29 @@ history lives in `git log`.
 
 ### Changed
 
+- **The judge's verdict now reaches the pull request even when the run moves out from
+  under it.** A blocking verdict — a guard that survived deliberate corruption — used to
+  reach the PR only as a side-effect of recording a changes-requested state, so if the run
+  left review while the judge was still working (someone merged it, or the CI gate got
+  there first), the finding was computed and then silently discarded. A clean verdict had
+  never been gated that way, which inverted the severity: the finding that mattered most
+  was the one most likely to vanish, and being slower to compute gave it more time to lose
+  that race. The comment is now posted unconditionally, before any state check, and a
+  verdict that fails to post says so in the log instead of disappearing. The run row is
+  still guarded — an already-merged run is never resurrected — it just no longer decides
+  whether the finding is shown.
+
+- **`chela doctor`'s `hooks.unattributed` fact now names its real cause instead of
+  guessing.** It used to point at two candidates — two agents sharing one cwd (CMX-190)
+  or a window closing before the hook POST landed — as if either explained every
+  hook-blind session. Measured against four days of real production log (CMX-227): ~95%
+  of orphaned `hook.*` events trace to sessions that never ran in a chela-tracked tmux
+  window at all (a headless job like the nightly memory-consolidation run), not to either
+  named cause. The WARN detail now leads with that check (`chela.sessionids.entries()`)
+  and only points at CMX-190/teardown-race for the sessions that actually had a window to
+  lose.
+
+
 - **Agent-to-agent messages now travel over Claude Code's peer messaging socket
   instead of being typed into the recipient's terminal.** Claude Code 2.1.224+
   binds a per-session Unix socket, and chela launches each agent with an explicit

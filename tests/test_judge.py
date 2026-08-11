@@ -493,11 +493,37 @@ def test_a_surviving_guard_sends_the_run_back_through_request_changes(tmp_path):
     assert "the colourblind glyph cue" in verdict
     assert 'glyph = ""' in verdict                  # the exact corruption, in the verdict
     assert posted and "SURVIVED" in posted[0]       # …and on the PR
+    assert len(posted) == 1                          # ⚖️🕳️ CMX-228: exactly once — not double
 
     # ⛔ A judge round IS a rework round: the dispatcher spends it on the re-spawn, so the
     # judge cannot judge its own rework forever — CHELA_MAX_REWORKS bounds the whole loop.
     assert (run["rework_count"] or 0) == 0          # not spent until the rework SPAWNS
     assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
+
+
+def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_path):
+    """⚖️🕳️ CMX-228: the run moved out of `awaiting_review` (a human merged it, or CI got
+    there first) WHILE the judge was mid-run. `request_changes`'s compare-and-swap correctly
+    refuses to resurrect the row — but that refusal must not also swallow the ONE record
+    that a guard SURVIVED corruption. Before this fix the comment posted from INSIDE
+    `request_changes`, past its own status check and CAS, so this exact race silently
+    dropped it — while a clean verdict (no such gate) always posted. Inverted severity."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, status="done")     # moved out from under the judge
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    posted: list[str] = []
+    with patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_CANNOT_VERIFY      # the run ROW was not resurrected
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "done"                        # untouched — no resurrection
+    assert posted and "SURVIVED" in posted[0]             # …but the finding still reached the PR
+    assert "colourblind glyph cue" in posted[0]
 
 
 def test_a_clean_run_is_LEFT_ALONE_the_judge_never_merges_and_never_approves(tmp_path):
