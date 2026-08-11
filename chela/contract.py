@@ -95,7 +95,16 @@ def _actor(explicit: str | None = None) -> str:
 def _refuse(task_id: str | None, tier: str, error: str, **extra) -> dict:
     """A gate refusal, shaped like every other dispatcher result. ``tier`` is the contract
     tier the refusal belongs to (``never`` / ``escalate``) so the caller can say *why* the
-    action was not the orchestrator's to take."""
+    action was not the orchestrator's to take.
+
+    Every ``escalate``-tier call site in :func:`merge` passes ``recommendation`` and
+    ``options`` through ``**extra`` (CMX-242) — the refusal IS the escalation surface, and
+    whoever reads it (typically an LLM orchestrator invoking ``chela merge`` unattended)
+    needs the same "here's what I'd try, here's your menu" a human-typed ``chela escalate``
+    gets, not a bare reason it has to turn into a decision itself. ``never``-tier refusals
+    (the forbidden-base line) deliberately carry neither: that is not a human's decision to
+    be handed options for, it is a hard line with no menu.
+    """
     return {"ok": False, "task_id": task_id, "tier": tier, "error": error, **extra}
 
 
@@ -269,33 +278,78 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
     """
     run = dispatcher.resolve_run(ident)
     if run is None:
-        return _refuse(None, "escalate",
-                       f"no run matches {ident!r} (task id, branch, or window name)")
+        return _refuse(
+            None, "escalate",
+            f"no run matches {ident!r} (task id, branch, or window name)",
+            recommendation="Run `chela status` to list real task ids/branches/window names "
+                            "and retry with the correct one — this identifier does not "
+                            "resolve to any run chela knows about.",
+            options=[
+                "Run `chela status` to list real task ids/branches/window names and retry with the correct one",
+                "If the run truly doesn't exist, there is nothing to merge — check dispatch history instead",
+            ],
+        )
     task_id = run["task_id"]
 
     if run["status"] != "awaiting_review":
-        return _refuse(task_id, "escalate",
-                       f"run is in status {run['status']!r}, not 'awaiting_review' — only a "
-                       "run actually under review can be merged")
+        return _refuse(
+            task_id, "escalate",
+            f"run is in status {run['status']!r}, not 'awaiting_review' — only a "
+            "run actually under review can be merged",
+            recommendation=f"Wait for the run to reach awaiting_review, then retry `chela "
+                            f"merge` — it is currently {run['status']!r}, and only a run "
+                            "under review can be merged.",
+            options=[
+                "Wait for the run to reach awaiting_review, then retry `chela merge`",
+                "If it's stuck in this status, `chela reopen` it or investigate why it never reached review",
+            ],
+        )
 
     pr_url = run.get("pr_url")
     if not pr_url:
-        return _refuse(task_id, "escalate", "the run has no PR url to merge")
+        return _refuse(
+            task_id, "escalate", "the run has no PR url to merge",
+            recommendation="Check the run row / dashboard for why no PR was ever recorded, "
+                            "and open one by hand if needed — there is no PR url on this "
+                            "run to merge.",
+            options=[
+                "Check the run row / dashboard for why no PR was ever recorded, and open one by hand if needed",
+                "Abandon the task if the work was never turned into a PR",
+            ],
+        )
 
     wf_path = run.get("workflow_path")
     repo_dir = str(Path(wf_path).parent) if wf_path else None
     if not repo_dir or not Path(repo_dir).is_dir():
-        return _refuse(task_id, "escalate", f"the workflow repo dir is missing ({wf_path})")
+        return _refuse(
+            task_id, "escalate", f"the workflow repo dir is missing ({wf_path})",
+            recommendation=f"Restore the workflow's repo dir ({wf_path!r}) or fix its path "
+                            "in WORKFLOW.md — the dispatching workflow's repo directory no "
+                            "longer exists on disk.",
+            options=[
+                f"Restore the workflow's repo dir ({wf_path!r}) or fix its path in WORKFLOW.md",
+                "Abandon the task if the repo dir is permanently gone",
+            ],
+        )
 
     # 2. THE ATTENDED-LEASE — the ACTION-time supervision gate, for the auto-orchestrator only.
     #    The auto-launched orchestrator may merge ONLY while a human's lease is live; stale or
     #    absent ⇒ it must escalate, not act. A human merge (no actor stamp) is never gated here.
     if _actor(actor) == config.AUTO_ORCHESTRATOR_ACTOR and lease.active() is None:
-        return _refuse(task_id, "escalate", actor=config.AUTO_ORCHESTRATOR_ACTOR,
-                       error="the auto-launched orchestrator has NO active attended-lease — its "
-                             "autonomous actions require a human to be attending (`chela "
-                             "orchestrator attend`). The lease has lapsed or was never granted, so "
-                             "this merge is unattended and is REFUSED. Escalate to a human instead.")
+        return _refuse(
+            task_id, "escalate", actor=config.AUTO_ORCHESTRATOR_ACTOR,
+            error="the auto-launched orchestrator has NO active attended-lease — its "
+                  "autonomous actions require a human to be attending (`chela "
+                  "orchestrator attend`). The lease has lapsed or was never granted, so "
+                  "this merge is unattended and is REFUSED. Escalate to a human instead.",
+            recommendation="Run `chela orchestrator attend` to grant a fresh attended-lease, "
+                            "then retry — the auto-launched orchestrator may only act while a "
+                            "human is attending.",
+            options=[
+                "Run `chela orchestrator attend` to grant a fresh attended-lease, then retry",
+                "Merge it yourself as a human (a human's own `chela merge` is never lease-gated)",
+            ],
+        )
 
     # 3. THE NEVER LINE — the base branch, read live and checked first & hardest.
     #
@@ -305,9 +359,18 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
     #    read, falls back to the global AUTONOMOUS_BASE (`dev`) — fail-closed, never a guess.
     base = _read_pr_base(pr_url, repo_dir)
     if base is None:
-        return _refuse(task_id, "escalate",
-                       "could not read this PR's base branch — and a target nobody could "
-                       "read is never assumed safe. Refusing to merge.")
+        return _refuse(
+            task_id, "escalate",
+            "could not read this PR's base branch — and a target nobody could "
+            "read is never assumed safe. Refusing to merge.",
+            recommendation="Check `gh pr view` / GitHub API access from the workflow's repo "
+                            "dir and retry — the base branch could not be read live from "
+                            "GitHub, and an unreadable target is never assumed safe.",
+            options=[
+                "Check `gh pr view` / GitHub API access from the workflow's repo dir and retry",
+                "Merge it yourself as a human once you've confirmed the PR's actual base branch",
+            ],
+        )
 
     declared_base = _declared_base_branch(wf_path)
     allowed_base = declared_base or AUTONOMOUS_BASE
@@ -334,19 +397,36 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
                       "act. Refusing.")
 
     if base != allowed_base:
-        return _refuse(task_id, "escalate", pr_base=base,
-                       error=f"this PR targets {base!r}, not the autonomous base "
-                             f"{allowed_base!r} declared for its dispatching workflow. Merging "
-                             "outside that grant is an escalation. Refusing.")
+        return _refuse(
+            task_id, "escalate", pr_base=base,
+            error=f"this PR targets {base!r}, not the autonomous base "
+                  f"{allowed_base!r} declared for its dispatching workflow. Merging "
+                  "outside that grant is an escalation. Refusing.",
+            recommendation=f"Re-target the PR's base to {allowed_base!r} on GitHub, then "
+                            f"retry `chela merge` — this PR targets {base!r}, not the "
+                            f"autonomous base {allowed_base!r} declared for its workflow.",
+            options=[
+                f"Re-target the PR's base to {allowed_base!r} on GitHub, then retry `chela merge`",
+                f"If {base!r} really is the intended target, merge it yourself as a human's explicit act",
+            ],
+        )
 
     # 4. The judge's verdict — clean, or it is not the orchestrator's to merge.
     judge_state = run.get("judge_state")
     if judge_state != J_CLEAN:
         shown = judge_state or "never ran"
-        return _refuse(task_id, "escalate", judge_state=judge_state,
-                       error=f"the judge is {shown!r} on this run, not {J_CLEAN!r}. A run that "
-                             "is not judge-clean is a human's call (blocked → rework, "
-                             "cannot_verify / no-judge → escalate). Refusing to merge.")
+        return _refuse(
+            task_id, "escalate", judge_state=judge_state,
+            error=f"the judge is {shown!r} on this run, not {J_CLEAN!r}. A run that "
+                  "is not judge-clean is a human's call (blocked → rework, "
+                  "cannot_verify / no-judge → escalate). Refusing to merge.",
+            recommendation=f"Wait for the judge to finish and report {J_CLEAN!r}, then "
+                            f"retry — the judge is {shown!r} on this run, not {J_CLEAN!r}.",
+            options=[
+                f"Wait for the judge to finish and report {J_CLEAN!r}, then retry",
+                f"If it's stuck at {shown!r}, investigate why (`chela judge run`) before merging by hand",
+            ],
+        )
 
     # 5. CI — green per GitHub, read live. Anything else (pending / red / none / unreadable)
     #    is refused: for an AUTONOMOUS merge, only a check that was SEEN to pass is a pass.
@@ -358,19 +438,52 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
             dispatcher.CI_NONE: "this PR has NO checks at all, and no checks is not passing checks",
             dispatcher.CI_UNKNOWN: f"the checks could not be read ({ci.detail})",
         }.get(ci.state, f"CI state is {ci.state!r}")
-        return _refuse(task_id, "escalate", ci_state=ci.state,
-                       error=f"{detail}. An autonomous merge requires green CI. Refusing.")
+        # CMX-242: this was the incident that created this ticket — a caller refused here has
+        # no way to know that an empty commit changes the sha and makes the judge's clean
+        # verdict stale, so "just push something to trigger CI" is a trap this must name.
+        ci_options = [
+            "Open the PR's Checks tab, resolve/re-run whatever is red or pending, then retry `chela merge`",
+            "If no checks are registered at all, push a REAL commit (not an empty one — an "
+            "empty commit changes the sha and makes the judge's clean verdict stale) or "
+            "re-trigger whatever workflow registers checks",
+            "Merge it yourself as a human once you've verified CI by hand",
+        ]
+        return _refuse(
+            task_id, "escalate", ci_state=ci.state,
+            error=f"{detail}. An autonomous merge requires green CI. Refusing.",
+            recommendation=ci_options[0] + f" — {detail}.",
+            options=ci_options,
+        )
 
     # 6. Mergeable — GitHub's own verdict on whether the merge is clean, read live.
     pr_state, mergeable = dispatcher._read_pr_status(pr_url, repo_dir)
     if pr_state and pr_state != "open":
-        return _refuse(task_id, "escalate", pr_state=pr_state,
-                       error=f"the PR is {pr_state!r}, not open. Refusing to merge.")
+        return _refuse(
+            task_id, "escalate", pr_state=pr_state,
+            error=f"the PR is {pr_state!r}, not open. Refusing to merge.",
+            recommendation=f"Check the PR's actual state on GitHub (merged vs. closed) "
+                            f"before doing anything else — chela reported it {pr_state!r}, "
+                            "which this gate never auto-resolves.",
+            options=[
+                "Check the PR's actual state on GitHub (merged vs. closed) before doing anything else",
+                "If merged, nothing to do — the task is done",
+                "If closed without merging, reopen it on GitHub and retry `chela merge`",
+            ],
+        )
     if mergeable != "MERGEABLE":
-        return _refuse(task_id, "escalate", pr_mergeable=mergeable,
-                       error=f"GitHub reports this PR {mergeable or 'un-mergeable'!r}, not "
-                             "MERGEABLE (a conflict, or mergeability not yet computed). "
-                             "Resolving a conflict is a human's call. Refusing to merge.")
+        return _refuse(
+            task_id, "escalate", pr_mergeable=mergeable,
+            error=f"GitHub reports this PR {mergeable or 'un-mergeable'!r}, not "
+                  "MERGEABLE (a conflict, or mergeability not yet computed). "
+                  "Resolving a conflict is a human's call. Refusing to merge.",
+            recommendation=f"Resolve the merge conflict on the branch, push, then retry "
+                            f"`chela merge` — GitHub reports this PR "
+                            f"{mergeable or 'un-mergeable'!r}.",
+            options=[
+                "Resolve the merge conflict on the branch, push, then retry `chela merge`",
+                "If GitHub hasn't finished computing mergeability yet, wait a moment and retry",
+            ],
+        )
 
     # THE GATE HELD. Merge, then record the decision with its justification.
     result = _squash_merge(run, repo_dir, pr_url)
@@ -385,8 +498,17 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
             f"merge of {task_id} passed the gate but gh failed: {result.get('error', '')}",
             payload={**justification, "error": result.get("error")},
         )
-        return _refuse(task_id, "escalate",
-                       error=f"the gate held but the merge itself failed: {result.get('error')}")
+        return _refuse(
+            task_id, "escalate",
+            error=f"the gate held but the merge itself failed: {result.get('error')}",
+            recommendation="Read the `gh pr merge` error above and resolve it, then retry "
+                            "`chela merge` — the gate held (base/judge/CI/mergeable all "
+                            f"passed) but the merge command itself failed: {result.get('error')}.",
+            options=[
+                "Read the `gh pr merge` error above and resolve it, then retry `chela merge`",
+                "Merge it yourself with `gh pr merge` (or on GitHub) once the error is resolved",
+            ],
+        )
 
     justification["merge_commit_sha"] = result.get("merge_commit_sha")
     rec = event_log.append(

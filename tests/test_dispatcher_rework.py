@@ -41,6 +41,34 @@ def _own_runs_db(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
 
 
+def _parse_escalation(last_error: str) -> tuple[str, str, list[str]]:
+    """Split a composed ``last_error`` back into (reason, recommendation, options) — the
+    inverse of ``dispatcher._format_escalation``. Lets a test assert the CONTENT of the
+    recommendation/options, not just that the "Recommendation:"/"Options:" labels render."""
+    reason, sep, rest = last_error.partition("\n\nRecommendation: ")
+    if not sep:
+        return last_error, "", []
+    recommendation, sep2, rest2 = rest.partition("\n\nOptions:\n")
+    if not sep2:
+        return reason, recommendation, []
+    options = [line[len("  - "):] for line in rest2.split("\n") if line.startswith("  - ")]
+    return reason, recommendation, options
+
+
+def _assert_actionable_escalation(last_error: str) -> None:
+    """Structural guard (CMX-242, rework round 1): the recommendation must be non-empty, the
+    menu must have ≥2 real options, and the recommendation must actually NAME one of them
+    (or explicitly opt out) — not just that the labels render. Checked on the PARSED
+    content, so it survives a pure formatting change."""
+    _, recommendation, options = _parse_escalation(last_error)
+    assert recommendation.strip(), "an automatic escalation must carry a non-empty recommendation"
+    assert len(options) >= 2, "one option is not a choice"
+    assert (
+        any(o in recommendation for o in options)
+        or recommendation.lower().startswith("none of these")
+    ), "the recommendation must name one of its own options (or explicitly opt out)"
+
+
 def _wf(tmp_path: Path, **cfg) -> WorkflowDef:
     """The workflow these tests dispatch — WITH HOOKS, and that is the point.
 
@@ -334,9 +362,11 @@ def test_a_run_whose_branch_is_gone_escalates_instead_of_forking_a_fresh_one(tmp
     assert run["status"] == "needs_human"
     assert fresh_fork.call_count == 0        # it did NOT invent a replacement branch
     assert "gone" in (run["last_error"] or "")
-    # CMX-242: a dead end still names what a human could try next.
+    # CMX-242: a dead end still names what a human could try next — and it must be an
+    # actual recommendation naming a real option, not just rendered labels.
     assert "Recommendation:" in run["last_error"]
     assert "Options:\n  - " in run["last_error"]
+    _assert_actionable_escalation(run["last_error"])
 
 
 def test_a_worktree_attach_failure_escalates_with_a_recommendation_too(tmp_path):
@@ -362,6 +392,7 @@ def test_a_worktree_attach_failure_escalates_with_a_recommendation_too(tmp_path)
     assert "already exists" in run["last_error"]
     assert "Recommendation:" in run["last_error"]
     assert "Options:\n  - " in run["last_error"]
+    _assert_actionable_escalation(run["last_error"])
 
 
 # --- (c) the cap: bounded, then it SURFACES — it never spins ---------------------------
@@ -412,6 +443,7 @@ def test_round_three_escalates_to_needs_human_with_every_verdict_and_a_free_slot
     # not just "it gave up".
     assert "Recommendation:" in run["last_error"]
     assert "Options:\n  - " in run["last_error"]
+    _assert_actionable_escalation(run["last_error"])
 
 
 def test_max_reworks_zero_escalates_the_very_first_verdict(tmp_path, monkeypatch):
@@ -465,6 +497,19 @@ def test_escalate_formats_a_recommendation_and_every_option(tmp_path):
         "\n\nRecommendation: try this first"
         "\n\nOptions:\n  - do A\n  - do B\n  - do C"
     )
+
+
+def test_actionable_escalation_helper_flags_a_recommendation_not_among_its_own_options():
+    """Sanity on the parsed-content guard itself: a recommendation naming something that
+    isn't in its own options list must fail — proving the check inspects content, not just
+    that "Recommendation:"/"Options:" render (the ticket's explicit example)."""
+    last_error = (
+        "the loop gave up"
+        "\n\nRecommendation: do something else entirely"
+        "\n\nOptions:\n  - do A\n  - do B"
+    )
+    with pytest.raises(AssertionError):
+        _assert_actionable_escalation(last_error)
 
 
 # --- (d) 🔴 the slot arithmetic: a rework CANNOT exceed max_concurrent -----------------

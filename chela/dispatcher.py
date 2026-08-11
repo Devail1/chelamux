@@ -2938,11 +2938,10 @@ def tick(workflow_path: str | Path) -> dict:
                 "registered and never reported). Nothing can merge a PR whose checks never "
                 "answer, and nothing can send it back either: pending is not red. Branch, "
                 "worktree and PR are preserved.",
-                recommendation="Open the PR's Checks tab and find the one still pending — "
-                                "most likely a required reviewer/deployment gate awaiting "
-                                "manual approval, or an app that registered a check and never "
-                                "reported back. Approve or re-run it, then `chela reopen` this "
-                                "run so the merge gate re-reads CI.",
+                recommendation="Approve the pending deployment/reviewer gate on GitHub, then "
+                                "`chela reopen` — that is the most common cause of a check "
+                                "that registers and never reports back; if it isn't that, "
+                                "re-run the stuck check from the PR's Checks tab instead.",
                 options=[
                     "Approve the pending deployment/reviewer gate on GitHub, then `chela reopen`",
                     "Re-run the stuck check from the PR's Checks tab, then `chela reopen`",
@@ -2972,10 +2971,10 @@ def tick(workflow_path: str | Path) -> dict:
                     f"rework cap reached ({row['rework_count'] or 0}/{cap}) — the PR still "
                     "fails review. Branch, worktree and PR are preserved; every verdict is "
                     "on the run row (review_history).",
-                    recommendation="Read the review history on the run for what every rework "
-                                    "round already tried, fix the remaining issue by hand on "
-                                    "the branch, push, then `chela reopen` to put it back "
-                                    "under judge/review/merge.",
+                    recommendation="Fix it yourself on the branch and `chela reopen` — read "
+                                    "the review history on the run first for what every rework "
+                                    "round already tried, then push the fix and reopen to put "
+                                    "it back under judge/review/merge.",
                     options=[
                         "Fix it yourself on the branch and `chela reopen`",
                         "Close the PR and let the task be redispatched fresh",
@@ -3797,8 +3796,9 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
     if not branch:
         _escalate(
             conn, row, "rework: the run row has no branch — nothing to re-enter",
-            recommendation="This row was never given a branch to rework, so there is nothing "
-                            "to reattach. Treat it like a fresh task.",
+            recommendation="Redispatch the task as new — this row was never given a branch "
+                            "to rework, so there is nothing to reattach. Treat it like a fresh "
+                            "task.",
             options=["Redispatch the task as new", "Abandon the task"],
         )
         return False
@@ -3810,10 +3810,11 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
     except BranchGone as e:
         _escalate(
             conn, row, f"rework: {e} — the work it points at is unreachable",
-            recommendation=f"Check whether branch {branch!r} still exists on the remote or in "
-                            "`git reflog` — if it was deleted by mistake it may be recoverable. "
-                            "If not, the PR's own commits (if it's still open on GitHub) are "
-                            "the only surviving copy of the work.",
+            recommendation=f"Recover branch {branch!r} from reflog/remote and `chela reopen` "
+                            "— check whether it still exists on the remote or in `git "
+                            "reflog` first. If it was deleted by mistake it may be "
+                            "recoverable; if not, the PR's own commits (if still open on "
+                            "GitHub) are the only surviving copy of the work.",
             options=[
                 f"Recover branch {branch!r} from reflog/remote and `chela reopen`",
                 "Redispatch the task fresh if the work is not recoverable",
@@ -3825,9 +3826,9 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
         stderr = (e.stderr or b"").decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
         _escalate(
             conn, row, f"rework: could not attach a worktree for {branch}: {stderr.strip()}",
-            recommendation="Read the git error above — it's usually a stale worktree "
-                            "registration or a path conflict, not a lost branch. Fix it by "
-                            "hand (e.g. `git worktree prune`), then `chela reopen`.",
+            recommendation="Resolve the git error by hand, then `chela reopen` — read the git "
+                            "error above; it's usually a stale worktree registration or a "
+                            "path conflict (try `git worktree prune`), not a lost branch.",
             options=[
                 "Resolve the git error by hand, then `chela reopen`",
                 "Manually attach a worktree for the branch and continue outside chela",

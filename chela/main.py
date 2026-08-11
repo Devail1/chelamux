@@ -2017,7 +2017,15 @@ def cmd_merge(args) -> None:
         tier = result.get("tier")
         prefix = "⛔ NEVER" if tier == "never" else "merge REFUSED"
         print(f"{prefix}: {result.get('error', 'unknown error')}")
-        if tier == "escalate":
+        recommendation = result.get("recommendation")
+        options = result.get("options")
+        if recommendation:
+            print(f"  Recommendation: {recommendation}")
+        if options:
+            print("  Options:")
+            for option in options:
+                print(f"    - {option}")
+        if tier == "escalate" and not recommendation:
             print("  This is a decision for a human — run `chela escalate` with a recommendation.")
         sys.exit(1)
     print(f"✅ Merged {result['task_id']} → {result['base']} "
