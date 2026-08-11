@@ -11,10 +11,15 @@
 
 # TODO
 
-The chela dispatcher claims each unchecked `- [ ]` item under the **Open** section, runs
-it as an isolated git-worktree agent (adversarially reviewed by the judge), and strikes
-it `- [x]` once its PR merges. This file is your **live queue** — it is per-install and
-**gitignored**, so it never ships to anyone who clones the repo and never churns their tree.
+The chela dispatcher claims every unchecked `- [ ]` item **anywhere in this file** —
+headings like **Open** below are organizational only; the parser does not look at what
+section a line sits under, so moving a task under a different heading does not hold it
+back. To park a task unclaimed, mark it `<!-- blocked: ... -->` (or make it wait on
+another task with `<!-- depends: "..." -->`) — see `examples/TODO.md` for both markers.
+Each claimed task runs as an isolated git-worktree agent (adversarially reviewed by the
+judge), and strikes `- [x]` once its PR merges. This file is your **live queue** — it is
+per-install and **gitignored**, so it never ships to anyone who clones the repo and never
+churns their tree.
 
 Each item is a four-field brief the judge can enforce mechanically:
 
