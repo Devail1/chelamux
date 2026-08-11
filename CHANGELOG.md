@@ -12,6 +12,18 @@ history lives in `git log`.
 
 ### Fixed
 
+- **The autonomous merge gate no longer trusts a judge-clean verdict recorded against a
+  stale commit.** `judge_state == 'clean'` alone was treated as sufficient evidence to
+  autonomously merge — nothing compared the commit the judge actually verified
+  (`judge_sha`) against the PR's live head. A slow judge still mid-run on an older commit,
+  or one whose verdict raced a newer commit landing on the PR and lost, could leave
+  `clean` sitting on the row while CI and GitHub's mergeability check both settled on a
+  commit the judge never saw — the run would then present as approved and mergeable with
+  no record that anything was wrong. `chela.contract.merge` now refuses (as an escalation)
+  whenever `judge_sha` and the PR's live head commit are both known and differ; an unset
+  `judge_sha` is left exactly as trusted as before, so no existing judge-clean run is
+  affected. (CMX-238)
+
 - **`TODO.example.md` no longer claims the dispatcher scopes claiming to the `## Open`
   section.** It never did — `chela/sources/markdown.py` claims every unchecked `- [ ]`
   line in the file regardless of which heading precedes it, so a task moved under a
