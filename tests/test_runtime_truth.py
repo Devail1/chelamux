@@ -287,6 +287,17 @@ def _break_dispatch_hold(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_unresolved_depends(tmp_path, monkeypatch):
+    """CMX-234: a `depends:` marker whose title is a typo of the real bullet — it
+    resolves to no task at all, open or closed, anywhere in the tracker. Before this
+    fact existed the ONLY trace was a `dispatcher._ready` log.warning line."""
+    (tmp_path / "repo" / "TODO.md").write_text(
+        "- [ ] a task\n"
+        '- [ ] follow-up task <!-- depends: "a tsak" -->\n'
+    )
+    return doctor.ERROR
+
+
 def _break_agent_cmd(tmp_path, monkeypatch):
     """The resolved `agent.cmd` names a binary the spawning shell's PATH cannot find —
     tmux would type it into a fresh window and get `command not found` back."""
@@ -538,6 +549,7 @@ CORRUPTIONS = {
     "repo.services_current": _break_services_current,
     "agents.native_status_feed": _break_native_status_feed,
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
+    "dispatch.unresolved_depends": _break_unresolved_depends,
 }
 
 
@@ -563,6 +575,96 @@ def test_corrupting_the_owned_value_makes_doctor_say_so(name, fleet, monkeypatch
     assert reported, (
         f"corrupting the value {name} REALLY runs on did not make doctor report it at "
         f"{level}. A check that cannot be seen to go red is not a check.")
+
+
+def test_hooks_rejected_wid_teardown_is_ok_not_warn(fleet, monkeypatch):
+    """CMX-236: a rejected wid that some OTHER record resolved under the SAME tmux epoch
+    is a teardown artifact — the window was real and live under this epoch, it just was
+    not live any more by the time this header arrived — and must never chase the CMX-192
+    lead. The resolving record is a DIFFERENT session: `rejected_wid` only ever fires on
+    `hook.session_start`, which is BY CONSTRUCTION that session's first record, so an
+    ordering where the SAME session resolved it first could never occur in production
+    (CMX-231 rework #3's fixture defect) — this fixture uses one that can."""
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@299",
+                     session_id="1969180e-dead-beef-cafe-000000000002", epoch=EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000003",
+                     rejected_wid="@299", epoch=EPOCH)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.OK for f in findings)
+    assert "@299" in findings[0].title
+    assert "teardown" in findings[0].detail.lower()
+
+
+def test_hooks_rejected_wid_never_live_stays_warn(fleet, monkeypatch):
+    """The complementary shape: a rejected wid that never resolved ANYTHING under the SAME
+    epoch has no evidence it was ever live under the epoch rejecting it — the genuinely
+    rare, genuinely actionable CMX-192 shape — and must still warn."""
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000004",
+                     rejected_wid="@999", epoch=EPOCH)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.WARN for f in findings)
+    assert "@999" in findings[0].title
+    assert "CMX-192" in findings[0].detail
+
+
+def test_hooks_rejected_wid_splits_severity_when_both_shapes_are_present(
+        fleet, monkeypatch):
+    """Both shapes exercised together must produce two DISTINCT findings, not one verdict
+    blended across both — a real teardown must never mask a real CMX-192 case, or vice
+    versa."""
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@299",
+                     session_id="1969180e-dead-beef-cafe-000000000005", epoch=EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000006",
+                     rejected_wid="@299", epoch=EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000007",
+                     rejected_wid="@999", epoch=EPOCH)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    levels = {f.level for f in findings}
+    assert levels == {doctor.OK, doctor.WARN}, (
+        f"expected one OK (teardown, @299) and one WARN (never-live, @999), got {findings}")
+
+
+def test_hooks_rejected_wid_cross_epoch_collision_stays_warn(fleet, monkeypatch):
+    """tmux window ids are small integers, reused by every NEW tmux server — a
+    `rejected_wid` resolving SOMEWHERE in the ring under a DIFFERENT epoch is not evidence
+    it was ever live under the epoch that is rejecting it now. Session `...0008` resolves
+    `@2` under an OLD, now-dead epoch (an unrelated, ordinary window from a previous tmux
+    server); session `...0009` rejects a header naming that same `@2` under the CURRENT
+    epoch — the exact CMX-192 shape (a stale env var whose wid happens to collide with a
+    dead epoch's window) — and must stay WARN. A bare ring-wide (epoch-blind) match would
+    wrongly call this OK; corrupt the epoch check back to a plain wid match and this
+    assertion goes red."""
+    OLD_EPOCH = "111-1111111111"
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@2",
+                     session_id="1969180e-dead-beef-cafe-000000000008", epoch=OLD_EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000009",
+                     rejected_wid="@2", epoch=EPOCH)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.WARN for f in findings), (
+        f"a wid resolved only under a DIFFERENT epoch must not downgrade this rejection "
+        f"to OK, got {findings}")
+    assert "@2" in findings[0].title
+    assert "CMX-192" in findings[0].detail
+
+
+def test_hooks_rejected_wid_with_no_readable_epoch_stays_warn(fleet, monkeypatch):
+    """A record written with no epoch at all (pre-CMX-236, or a host where tmux could not
+    be asked) must never be waved through as a teardown just because SOME record,
+    somewhere, happens to have resolved the same wid string — an unreadable epoch is not
+    license to guess, same discipline as `chela.epoch.is_dangling`."""
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid="@5",
+                     session_id="1969180e-dead-beef-cafe-000000000010", epoch=EPOCH)
+    event_log.append("hook.session_start", "session start (startup)", {}, wid=None,
+                     session_id="1969180e-dead-beef-cafe-000000000011",
+                     rejected_wid="@5", epoch=None)
+    findings = [f for f in doctor.check() if f.fact == "plugin.hooks_wid_rejected"]
+    assert findings and all(f.level == doctor.WARN for f in findings)
+    assert "@5" in findings[0].title
 
 
 def test_a_check_state_that_cannot_be_read_is_never_a_pass(fleet, monkeypatch):
@@ -1073,6 +1175,134 @@ def test_restore_dead_epoch_rows_cannot_verify_with_no_tmux_server(fleet, monkey
     findings = [f for f in doctor.check() if f.fact == "restore.dead_epoch_rows"]
     assert findings and all(f.level == doctor.WARN for f in findings)
     assert "CANNOT VERIFY restore.dead_epoch_rows" in findings[0].title
+
+
+# --- dispatch.unresolved_depends: CMX-234, the silence CMX-232 didn't touch ------------
+#
+# CMX-232 fixed the one CAUSE of an unresolvable `depends:` edge that a human could not
+# work around by writing "better" markdown (a title with an embedded `;`). A plain typo
+# in a title produces the exact same permanent, silent block — `dispatcher._ready` fails
+# it closed by design and says so only in a `log.warning` line. This fact is what turns
+# that into something `chela doctor` reports and the daemon's edge-triggered
+# `check_and_notify` pushes on the transition into red.
+
+def test_unresolved_depends_names_the_task_and_the_bad_reference(fleet, monkeypatch):
+    """CMX-234 rework round 1: the finding must name the TYPO'D TITLE a human can go
+    fix, not the hash it resolves to — reporting the id defeats the ticket's whole
+    point (a human cannot reverse a sha1 prefix back into the string they mistyped)."""
+    _break_unresolved_depends(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.ERROR
+    assert "follow-up task" in findings[0].title
+    assert "1 reference(s)" in findings[0].title
+    assert "TODO.md" in findings[0].detail
+    assert "a tsak" in findings[0].detail, (
+        "the finding must name the typo'd TITLE, not just its hash — a human cannot "
+        "act on an id"
+    )
+
+
+def test_unresolved_depends_silent_when_every_edge_resolves(fleet):
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings == [runtime_truth.Finding(
+        doctor.OK, "every depends: edge resolves to a real task",
+        fact="dispatch.unresolved_depends")]
+
+
+def test_unresolved_depends_does_not_fire_for_an_ordinary_unmet_wait(fleet):
+    """A dependency that DOES resolve, just hasn't been struck yet, is the ordinary
+    case — not a tracker bug. Only a reference naming no task at all should redden this
+    fact, the same line `dispatcher._ready` draws between log.info and log.warning."""
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [ ] prerequisite task\n"
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+    )
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_unresolved_depends_does_not_fire_for_a_dependency_on_a_closed_task(fleet):
+    """[JUDGE MUTATION #1] `known_ids` dropping `closed_ids_from_text` must go red here:
+    a dependency on a task the tracker has already struck `[x]` is a perfectly healthy
+    tracker, not a broken reference — the scan's own docstring says 'no task at all —
+    open OR CLOSED' matters."""
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [x] prerequisite task\n"
+        '- [ ] follow-up task <!-- depends: "prerequisite task" -->\n'
+    )
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_unresolved_depends_is_quiet_for_a_dependency_on_a_parked_task(fleet):
+    """A `depends:` naming a PARKED (`<!-- blocked: ... -->`) task is ordinary waiting,
+    not a tracker bug — the referenced task is real, it just hasn't been unparked yet.
+    `tasks_from_text` drops parked bullets entirely, so without folding parked ids into
+    `known_ids` this reads exactly like a typo and fires at ERROR — the loudest possible
+    false positive on a documented, routine feature (TODO.md's own header teaches
+    parking as how you hold a task back)."""
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [ ] task A <!-- blocked: waiting on design -->\n"
+        '- [ ] task B <!-- depends: "task A" -->\n'
+    )
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_unresolved_depends_names_every_broken_row_not_just_the_first(fleet):
+    """[JUDGE MUTATION #2] truncating the scan's rows to the first must go red here:
+    two independently broken `depends:` edges must both surface, or the second one
+    hides silently behind the first."""
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [ ] a task\n"
+        '- [ ] first follow-up <!-- depends: "a tsak" -->\n'
+        '- [ ] second follow-up <!-- depends: "another tsak" -->\n'
+    )
+    findings = [f for f in doctor.check() if f.fact == "dispatch.unresolved_depends"]
+    assert len(findings) == 2
+    assert any("a tsak" in f.detail for f in findings)
+    assert any("another tsak" in f.detail for f in findings)
+
+
+def test_unresolved_depends_edge_triggers_through_check_and_notify(fleet, monkeypatch):
+    """The ticket's heaviest marker: announce ONCE on the transition into red, stay
+    quiet on an unchanged broken set, and announce AGAIN the moment a distinct new
+    reference breaks — a report every tick is a firehose nobody reads. This fact
+    inherits `doctor.check_and_notify`'s edge-trigger (keyed on (fact, title)) rather
+    than growing a second notification path; this test proves that inheritance
+    actually holds for THIS fact, driving three explicit ticks."""
+    class _StubNotify:
+        def __init__(self):
+            self.sent = []
+
+        def enabled(self):
+            return True
+
+        def send(self, message, title=None):
+            self.sent.append((message, title))
+            return True
+
+    stub = _StubNotify()
+    monkeypatch.setattr(doctor, "notify", stub)
+
+    # tick 1: introduce a broken reference — must announce.
+    _break_unresolved_depends(fleet, monkeypatch)
+    red = doctor.check_and_notify(set())
+    assert len(stub.sent) == 1
+
+    # tick 2: the SAME broken reference, unchanged — must NOT re-announce.
+    red = doctor.check_and_notify(red)
+    assert len(stub.sent) == 1
+
+    # tick 3: a SECOND, distinct broken reference appears — the set changed, so this
+    # must announce again.
+    (fleet / "repo" / "TODO.md").write_text(
+        "- [ ] a task\n"
+        '- [ ] follow-up task <!-- depends: "a tsak" -->\n'
+        '- [ ] another follow-up <!-- depends: "another tsak" -->\n'
+    )
+    doctor.check_and_notify(red)
+    assert len(stub.sent) == 2
 
 
 # --- installed_hooks_stale(): `chela update`'s post-update reminder reuses the exact
