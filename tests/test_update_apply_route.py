@@ -25,11 +25,13 @@ def client():
 
 @pytest.fixture(autouse=True)
 def _reset_lock():
-    # The lock is process-global (module state) — start and end every test unlocked
-    # regardless of what a previous test's background thread did.
+    # The lock (and its start-time sidecar) are process-global module state — start and
+    # end every test unlocked/unset regardless of what a previous test's background
+    # thread did.
     yield
     if dash._update_apply_lock.locked():
         dash._update_apply_lock.release()
+    dash._update_apply_started_at = None
 
 
 def test_apply_refuses_when_already_up_to_date(client, monkeypatch):
@@ -152,6 +154,85 @@ def test_apply_refuses_a_second_run_while_one_is_in_flight(client, monkeypatch):
     assert "already running" in second.get_json()["error"]
 
     release.set()
+
+
+def test_second_click_reports_elapsed_seconds_not_just_running(client, monkeypatch):
+    """CMX-226: a held lock and a genuinely running update look identical from outside
+    unless the refusal says how long it's been going — the whole point of tracking
+    `_update_apply_started_at`."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    release = threading.Event()
+    monkeypatch.setattr(update, "apply", lambda: (release.wait(timeout=2), update.ApplyResult(
+        ok=True, step="done", behind_before=3))[1])
+
+    first = client.post("/api/update/apply")
+    assert first.get_json()["started"] is True
+
+    second = client.post("/api/update/apply")
+    data = second.get_json()
+    assert second.status_code == 409
+    assert data["stuck"] is False
+    assert isinstance(data["elapsed_seconds"], int) and data["elapsed_seconds"] >= 0
+    assert f"{data['elapsed_seconds']}s" in data["error"]
+
+    release.set()
+
+
+def test_lock_held_far_past_any_legitimate_apply_is_flagged_stuck(client, monkeypatch):
+    """Every subprocess `update.apply()` shells out to is individually timeout-bounded
+    (see chela/update.py), so a lock held well past the sum of those timeouts is not a
+    slow run in progress — it's a wedged lock (e.g. the process died mid-run) that
+    nothing but a dashboard restart will clear. The refusal must say so, not just
+    'already running', so an operator doesn't wait forever on a run that already ended."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    dash._update_apply_lock.acquire()
+    dash._update_apply_started_at = (
+        time.monotonic() - dash._UPDATE_APPLY_STUCK_AFTER_SECONDS - 1)
+
+    resp = client.post("/api/update/apply")
+    data = resp.get_json()
+
+    assert resp.status_code == 409
+    assert data["stuck"] is True
+    assert data["elapsed_seconds"] > dash._UPDATE_APPLY_STUCK_AFTER_SECONDS
+    assert "restart" in data["error"].lower()
+
+
+def test_freshly_held_lock_is_not_flagged_stuck(client, monkeypatch):
+    """Counterweight to the test above — without it, always reporting `stuck: True`
+    would satisfy it."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    dash._update_apply_lock.acquire()
+    dash._update_apply_started_at = time.monotonic()
+
+    resp = client.post("/api/update/apply")
+    data = resp.get_json()
+
+    assert resp.status_code == 409
+    assert data["stuck"] is False
+
+
+def test_started_at_is_cleared_once_the_run_finishes(client, monkeypatch):
+    """The sidecar timestamp must not outlive the run it timed, or a NEXT run's fresh
+    hold would misreport elapsed time against the previous run's start."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=1, ahead=0, branch="dev"))
+    entered = threading.Event()
+    monkeypatch.setattr(update, "apply", lambda: (entered.set(), update.ApplyResult(
+        ok=True, step="done", behind_before=1))[1])
+
+    resp = client.post("/api/update/apply")
+    assert resp.get_json()["started"] is True
+    assert entered.wait(timeout=2)
+
+    deadline = time.monotonic() + 2
+    while dash._update_apply_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert dash._update_apply_started_at is None, \
+        "the background run finished but never cleared its start-time sidecar"
 
 
 def test_apply_reports_dirty_tree_refusal_without_pulling(client, monkeypatch):
