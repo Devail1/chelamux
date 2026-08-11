@@ -442,6 +442,41 @@ def test_a_real_pytest_failure_with_readable_steps_still_charges(tmp_path):
     assert (run["rework_count"] or 0) == 1
 
 
+def test_suite_ran_and_succeeded_but_the_job_still_failed_is_real_not_infra(tmp_path):
+    """Both `Ruff` and `Pytest` concluded `success` — the suite ran clean — but something
+    AFTER the suite (an artifact upload, a cache save, a coverage post step) failed, so
+    GitHub still reports the job as plain `FAILURE`. Per `_suite_step_ran`'s own contract
+    ("at least one suite step has a conclusion other than `skipped`... IS evidence about the
+    code, however it turned out"), a suite step concluding `success` counts as "ran" exactly
+    like one concluding `failure` — this must stay real, not get waved through as infra. A
+    classifier narrowed from "did a suite step run" to "did a suite step specifically fail"
+    would silently hand a free pass to every real post-suite failure too — this is round 7's
+    mutation (`!= "skipped"` → `== "failure"`), exercised end to end."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    steps = [
+        _step("Set up job", "success"),
+        _step("Run actions/checkout@v4", "success"),
+        _step("Ruff", "success"),
+        _step("Pytest", "success"),
+        _step("Upload coverage", "failure"),
+        _step("Complete job", "failure"),
+    ]
+    fake = _FakeGh(
+        rollup=[_check_run("test (3.12)", conclusion="FAILURE", run_id="321")],
+        jobs_by_run={"321": [_job("test (3.12)", steps)]},
+    )
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["ci_infra_failed"] == 0
+    assert summary["reworked"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert (run["rework_count"] or 0) == 1
+
+
 def test_ruff_failing_before_pytest_is_skipped_is_still_real(tmp_path):
     """A naive "was the LAST step skipped" rule would call this infra — `Pytest` never ran.
     But `Ruff` DID run and failed: that is real evidence about the code (a lint error), and
@@ -764,6 +799,23 @@ def test_suite_step_ran_is_None_not_False_on_every_path_that_could_not_verify(tm
 
         with patch.object(dispatcher.subprocess, "run", return_value=_R()):
             assert dispatcher._suite_step_ran(str(tmp_path), "42", "test (3.12)") is None
+
+
+def test_suite_step_ran_is_True_when_the_suite_ran_and_succeeded(tmp_path):
+    """Pins the exact anchor the round-7 judge broke: `!= "skipped"` narrowed to
+    `== "failure"`. A step that concluded `success` is not `skipped` either — it ran — and
+    the function's own docstring says its question is "did it run", not "did it fail" (`True`
+    is defined as "at least one suite step has a conclusion other than `skipped`", full stop).
+    Both `Ruff` and `Pytest` succeeding must still answer `True`."""
+    steps = [_step("Ruff", "success"), _step("Pytest", "success")]
+
+    class _R:
+        returncode = 0
+        stdout = json.dumps({"jobs": [_job("test (3.12)", steps)]})
+        stderr = ""
+
+    with patch.object(dispatcher.subprocess, "run", return_value=_R()):
+        assert dispatcher._suite_step_ran(str(tmp_path), "42", "test (3.12)") is True
 
 
 # --- (b) ⛔ A PENDING RUN IS NOT A RED ONE. The single most important test here. --------
