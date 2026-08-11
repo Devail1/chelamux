@@ -1148,6 +1148,19 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # CI is next seen passing (see the pr_checks refresh in `tick`) — it counts a STREAK,
         # not a lifetime total.
         ("ci_infra_streak", "ALTER TABLE runs ADD COLUMN ci_infra_streak INTEGER DEFAULT 0"),
+        # 🔁🚪 CMX-237. `reopen` covers ONE human intent — "I fixed it myself, re-verify the
+        # new head" — and refuses everything else via its new-commit gate. It has no answer
+        # for the other intent a `needs_human` verdict provokes just as often: "don't merge
+        # it, don't fix it for it, just let the loop have another automatic swing at the SAME
+        # head" (hit live on CMX-231, twice, with no in-contract way to say it). `retry_count`
+        # is that second counter — how many extra automatic rounds a human has explicitly
+        # granted via `chela retry`. It is added to `CHELA_MAX_REWORKS` at the escalation cap
+        # check (see the `changes_requested` scan below) rather than folded into
+        # `rework_count` itself, for the same reason `reopen_count` stays separate from it:
+        # `rework_count` is the AUTOMATIC loop's own spent-budget ledger, and conflating a
+        # human's grant with the agent's spend would make either counter lie about what it
+        # measures.
+        ("retry_count", "ALTER TABLE runs ADD COLUMN retry_count INTEGER DEFAULT 0"),
     ):
         try:
             conn.execute(ddl)
@@ -1905,8 +1918,22 @@ def reviews_of(run: dict) -> list[dict]:
 
 
 def latest_verdict(run: dict) -> str:
+    """The most recent SUBSTANTIVE verdict body — what a rework prompt tells the agent to fix.
+
+    🔁🚪 CMX-237. ``retry()`` appends a meta entry ("keep going") to ``review_history``
+    without anyone re-reviewing the code — it exists to grant the automatic loop another
+    round, not to replace what that round should fix. Were it not skipped here, the very
+    next rework prompt would render the human's "keep going" note as THE verdict, in place
+    of the real defect description the previous round actually failed on — the agent would
+    be told to fix nothing in particular. Skipped, not deleted: the entry stays in the
+    history for the audit trail, it is just never mistaken for a review.
+    """
     reviews = reviews_of(run)
-    return str(reviews[-1].get("body") or "") if reviews else ""
+    for r in reversed(reviews):
+        if r.get("verdict") == "retry":
+            continue
+        return str(r.get("body") or "")
+    return ""
 
 
 def _pr_number(pr_url: str | None) -> str | None:
@@ -2334,6 +2361,101 @@ def reopen(ident: str, reason: str = "") -> dict:
     if nudge:
         result["nudge"] = nudge
     return result
+
+
+def retry(ident: str, reason: str = "") -> dict:
+    """🔁🚪 Give a ``needs_human`` run ONE MORE automatic rework round — "keep going".
+
+    ``reopen`` answers "I fixed it myself, re-verify the new head" and REFUSES an
+    unchanged one (the new-commit gate) — on purpose, because flipping straight to
+    ``awaiting_review`` would let a stale, already-rejected head reach ``merge``
+    unjudged. That refusal is correct for what ``reopen`` is for, and it leaves the
+    OTHER intent a ``needs_human`` verdict just as often provokes with no in-contract
+    exit: a human who read the verdict, does not want to fix it by hand, and does not
+    want to merge past it either — just wants the SAME automatic loop to have another
+    swing at the SAME head. Hit live on CMX-231, twice, with the only escape being to
+    edit the runs DB by hand. This is that exit.
+
+    Unlike ``reopen`` this does not touch ``awaiting_review`` or the judge/merge path at
+    all — it sends the run back to ``changes_requested``, the automatic rework loop's own
+    carrier, exactly where a failing verdict already puts it. The very next dispatcher
+    tick re-spawns the agent in its own worktree with the SAME rework prompt (the latest
+    verdict, unchanged) it would have gotten on a normal round — this is not a new code
+    path for the agent, only a human-granted extension of the one that already exists.
+
+    ``rework_count`` is left exactly as ``reopen`` leaves it: untouched. Bumping it here
+    would spend the human's grant before the agent ever got a slot, and a launch that
+    then fails (:func:`_rework_failed`) would double-charge the round. Instead
+    ``retry_count`` — a SEPARATE counter, never read by the automatic loop's spend path —
+    records how many extra rounds a human has granted, and the escalation cap check
+    (the ``changes_requested`` scan above, in :func:`dispatch_tick`) adds it to
+    ``CHELA_MAX_REWORKS`` before comparing. A run granted zero retries escalates at
+    EXACTLY the automatic cap, same as before this existed.
+
+    Same compare-and-swap discipline as ``reopen``/``request_changes``: refuses unless
+    the row is STILL ``needs_human`` at write time, so a concurrent reconcile (a human
+    merged the stale PR directly, in the gap between the read and this write) cannot be
+    resurrected out of ``done``.
+    """
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    task_id = run["task_id"]
+    if run["status"] != "needs_human":
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"run is in status {run['status']!r}, not 'needs_human' — only a run "
+                     "the rework loop actually gave up on can be retried",
+        }
+
+    reviews = reviews_of(run)
+    note = (reason or "").strip() or "asked to keep going — one more automatic round, same head"
+    reviews.append({"round": len(reviews) + 1, "at": _now(), "body": note, "verdict": "retry"})
+    new_retry_count = (run.get("retry_count") or 0) + 1
+
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET status='changes_requested', review_history=?, last_error=NULL, "
+            "retry_count=? WHERE task_id=? AND status='needs_human'",
+            (json.dumps(reviews), new_retry_count, task_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            now = conn.execute(
+                "SELECT status FROM runs WHERE task_id=?", (task_id,)
+            ).fetchone()
+            current = now["status"] if now else "gone"
+            log.warning("retry: %s moved to %r before it could be retried", task_id, current)
+            return {
+                "ok": False, "task_id": task_id,
+                "error": f"run moved to {current!r} while this was being written (a tick "
+                         "reconciled it, or someone else acted on it first) — nothing was "
+                         "changed. Re-read it and decide again.",
+            }
+
+    wf_path = run.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    posted, detail = _post_pr_comment(
+        run.get("pr_url"), repo_dir,
+        f"🔁 Asked to keep going by a human: {note}\n\nBack in the automatic rework loop "
+        "for one more round on the same head — the next dispatcher tick re-spawns it.",
+    )
+    if not posted:
+        log.warning("retry: %s is changes_requested again, but the PR comment did not post "
+                    "(%s)", task_id, detail)
+    cap = max_reworks()
+    log.info(
+        "retry: %s (needs_human) → changes_requested (rework %d/%d, retry #%d)",
+        task_id, run.get("rework_count") or 0, cap + new_retry_count, new_retry_count,
+    )
+
+    return {
+        "ok": True, "task_id": task_id, "status": "changes_requested",
+        "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
+        "rework_count": run.get("rework_count") or 0, "max_reworks": cap,
+        "retry_count": new_retry_count,
+        "comment_posted": posted, "comment_detail": detail,
+    }
 
 
 def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None) -> None:
@@ -3086,12 +3208,16 @@ def tick(workflow_path: str | Path) -> dict:
             "SELECT * FROM runs WHERE workflow_path=? AND status='changes_requested'",
             (str(wf.path),),
         ).fetchall():
-            if (row["rework_count"] or 0) >= cap:
+            # 🔁🚪 CMX-237. A `chela retry` grants extra rounds ON TOP of the automatic
+            # budget — never folded into `cap` itself, so a run with no grant escalates at
+            # EXACTLY `cap`, same as before this existed.
+            effective_cap = cap + (row["retry_count"] or 0)
+            if (row["rework_count"] or 0) >= effective_cap:
                 _escalate(
                     conn, row,
-                    f"rework cap reached ({row['rework_count'] or 0}/{cap}) — the PR still "
-                    "fails review. Branch, worktree and PR are preserved; every verdict is "
-                    "on the run row (review_history).",
+                    f"rework cap reached ({row['rework_count'] or 0}/{effective_cap}) — the "
+                    "PR still fails review. Branch, worktree and PR are preserved; every "
+                    "verdict is on the run row (review_history).",
                 )
                 summary["escalated"] += 1
 

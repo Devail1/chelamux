@@ -43,10 +43,11 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from chela import config, event_log, sessions, transcripts
+from chela import config, epoch, event_log, sessions, transcripts
 
 log = logging.getLogger(__name__)
 
@@ -547,6 +548,24 @@ def _panes(force: bool = False) -> dict[str, sessions.Pane]:
     return sessions.panes(force)
 
 
+# ``chela.epoch.current()`` is its own ~5 ms tmux subprocess (`display-message`), same
+# order of cost as `_panes()` above — but unlike a pane map, the tmux SERVER identity
+# essentially never changes between two hooks fired seconds apart, so paying that cost on
+# every single hook event (CMX-236 stamps one onto every record — see `ingest` below) buys
+# nothing an occasional refresh would not. TTL-cached the same shape as `sessions.panes`,
+# deliberately more generous (an epoch flip is a tmux server restart, not a window churn).
+_EPOCH_TTL = 5.0
+_epoch_cache: dict[str, object] = {"ts": 0.0, "value": None}
+
+
+def _current_epoch() -> str | None:
+    now = time.time()
+    if now - _epoch_cache["ts"] >= _EPOCH_TTL:
+        _epoch_cache["value"] = epoch.current()
+        _epoch_cache["ts"] = now
+    return _epoch_cache["value"]
+
+
 def _by_slug(panes: dict[str, sessions.Pane]) -> dict[str, list[sessions.Pane]]:
     """``{project slug of the pane's ORIGIN: [pane, …]}`` — the lookup the slug hits."""
     out: dict[str, list[sessions.Pane]] = {}
@@ -616,29 +635,50 @@ def _explicit_wid(hint: str | None,
     launch) or naming a window that is not live right now all fall through to ``None``
     exactly as if the header had never been sent, and the caller re-derives it the old way
     — a bad header must never be WORSE than no header.
+
+    ``panes=None`` (the real caller, never a test with a fixed snapshot) gets ONE retry
+    against a forced-fresh read before "not live" is trusted: ``sessions.panes``'s own TTL
+    cache (≤1s) can in principle predate a session that just replaced its own claude
+    process INSIDE an already-open window (auto-compact, ``/clear`` — the window never
+    closed), if ``SessionStart`` fires before the cache refreshes. ``wid_for_session``'s
+    own inference fallback already forces a re-read for exactly this shape ("a window that
+    appeared since the last refresh"); this mirrors it so the header path gets the same
+    second look before a live window is ever called not-live.
     """
     if not hint or not _WID_RE.match(hint):
         return None
     live = _panes() if panes is None else panes
-    return hint if hint in live else None
+    if hint in live:
+        return hint
+    if panes is not None:
+        return None
+    return hint if hint in _panes(force=True) else None
 
 
 def _explicit_wid_dead(hint: str | None,
                        panes: dict[str, sessions.Pane] | None = None) -> str | None:
     """The ``X-Chela-Wid`` value itself, but ONLY on the one shape :func:`_explicit_wid`
     folds silently into ``None`` alongside "no header at all": well-formed, present, and
-    naming a window that is not live right now.
+    STILL not live after the same forced-refresh retry :func:`_explicit_wid` gives it.
 
     Unset (no ``$CHELA_WID`` — a session chela did not launch) and malformed both return
     ``None`` here too, same as a live wid — those are never a fault and must never warn.
-    A well-formed hint naming a dead window IS always a fault: it means the agent was
-    relaunched by hand and inherited a stale ``$CHELA_WID`` from tmux's global environment
-    (the CMX-192 root cause, verbatim), and this is the one signal that says so.
+    A well-formed hint that survives the retry and is still not live USUALLY means the
+    agent was relaunched by hand and inherited a stale ``$CHELA_WID`` from tmux's global
+    environment (the CMX-192 root cause) — but it can just as well be a window that was
+    genuinely THIS session's and simply closed or was replaced moments earlier, which is
+    not a fault at all. This function cannot tell those two shapes apart on its own; see
+    ``runtime_truth._hooks_rejected_wid_report`` (CMX-236) for the severity split that
+    does, scoped to the tmux epoch this record is stamped with below.
     """
     if not hint or not _WID_RE.match(hint):
         return None
     live = _panes() if panes is None else panes
-    return None if hint in live else hint
+    if hint in live:
+        return None
+    if panes is not None:
+        return hint
+    return None if hint in _panes(force=True) else hint
 
 
 def wid_for_session(session_id: str | None,
@@ -818,6 +858,11 @@ def ingest(event: str, body, explicit_wid: str | None = None) -> dict | None:
     controls, so it cannot be spoofed by a payload. ``explicit_wid`` is the ``X-Chela-Wid``
     header — set only on ``SessionStart`` (see :func:`recap_command`) — and is validated
     inside :func:`wid_for_session`, not here.
+
+    Every record is also stamped with the tmux epoch it was written under (CMX-236, via
+    :func:`_current_epoch`) — ``None`` if it could not be read. ``rejected_wid`` alone
+    cannot say whether a dead window is a genuine CMX-192 fault or an ordinary teardown; the
+    epoch stamp is what lets ``runtime_truth._hooks_rejected_wid_report`` tell them apart.
     """
     try:
         if event not in HOOK_EVENTS:
@@ -841,6 +886,7 @@ def ingest(event: str, body, explicit_wid: str | None = None) -> dict | None:
             ),
             session_id=session_id,
             rejected_wid=_explicit_wid_dead(explicit_wid),
+            epoch=_current_epoch(),
         )
     except Exception:                          # noqa: BLE001 — see the docstring
         log.exception("hooks: ingest failed for %s — event dropped", event)
