@@ -19,6 +19,7 @@ pytest guard, a real `python -m pytest` subprocess. The one thing that is stubbe
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -1383,6 +1384,70 @@ def test_a_judge_that_is_still_working_is_left_alone(tmp_path):
     assert summary["judge_lost"] == 0
     assert dispatcher.resolve_run("abc123")["judge_state"] == judge.J_RUNNING
     assert summary["judged"] == 0                   # …and only one judge at a time
+
+
+def _write_live_judge_lock(wf, task_id: str) -> Path:
+    """A real ``.judgelock`` sibling of the judge worktree, naming THIS test process — the
+    same shape :func:`judge._claim_judge_slot` writes, read back by
+    :func:`judge.judge_lock_live` exactly as the watchdog will."""
+    from chela import sessions
+
+    worktree = judge.judge_worktree_path(wf, task_id)
+    lock_path = worktree.parent / f".{worktree.name}.judgelock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    lock_path.write_text(json.dumps(
+        {"pid": pid, "started": sessions.proc_started(pid), "task_id": task_id}
+    ))
+    return lock_path
+
+
+def test_a_missing_judge_window_is_HELD_not_reaped_while_its_lock_is_live(tmp_path):
+    """⚖️🕳️ CMX-229 Objective 2. Measured live on CMX-227: the watchdog reaped a judge's
+    worktree/window off a single tick's tmux snapshot and SIGKILLed it (exit 137) mid-
+    `chela judge run`. `alive=False` here (the window is missing from THIS tick's snapshot)
+    — the old behaviour reaped immediately. With a live judge lock naming a real process,
+    the watchdog must hold instead: no reap, no CANNOT_VERIFY, no worktree removal."""
+    wf = _wf(tmp_path)
+    from chela.dispatcher import _now
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path),
+                 judge_state=judge.J_RUNNING, judge_sha="cafe1234", judge_started_at=_now())
+    lock_path = _write_live_judge_lock(wf, "abc123")
+
+    removed: list[Path] = []
+    with patch.object(dispatcher, "remove_worktree", side_effect=lambda repo, p: removed.append(p) or True):
+        summary = _tick(wf, lambda *a: True, windows=())   # window missing from THIS snapshot
+
+    assert summary["judge_lost"] == 0
+    assert dispatcher.resolve_run("abc123")["judge_state"] == judge.J_RUNNING
+    assert removed == []                              # ⛔ the worktree must not be touched
+    assert lock_path.exists()                          # …and the lock itself is left alone
+
+
+def test_the_hold_still_expires_once_the_judge_TIMES_OUT(tmp_path):
+    """⛔ COUNTERWEIGHT — the hold above must be BOUNDED, not a second, unbounded lock-driven
+    timeout. A judge whose window is missing AND whose own start time is past
+    `JUDGE_TIMEOUT_SECONDS` is reaped regardless of what its lock file still claims — a
+    hold that ignored this bound would leak a wedged watchdog forever on a judge that
+    claimed its lock and then hung."""
+    from datetime import datetime, timedelta, timezone
+
+    wf = _wf(tmp_path)
+    stale_started = (
+        datetime.now(timezone.utc) - timedelta(seconds=dispatcher.JUDGE_TIMEOUT_SECONDS + 60)
+    ).isoformat()
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path),
+                 judge_state=judge.J_RUNNING, judge_sha="cafe1234", judge_started_at=stale_started)
+    _write_live_judge_lock(wf, "abc123")
+
+    summary = _tick(wf, lambda *a: True, windows=())
+
+    assert summary["judge_lost"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["judge_state"] == judge.J_CANNOT_VERIFY
+    assert "did not finish" in run["judge_detail"]
 
 
 @pytest.mark.parametrize("delta,expect_alive", [

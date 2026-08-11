@@ -10,7 +10,33 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`TODO.example.md` no longer claims the dispatcher scopes claiming to the `## Open`
+  section.** It never did — `chela/sources/markdown.py` claims every unchecked `- [ ]`
+  line in the file regardless of which heading precedes it, so a task moved under a
+  different heading (a `## Backlog` or `## Later` section, say) stayed just as claimable
+  as one left under `## Open`. The doc now says so, and points at the markers that
+  actually gate claiming: `<!-- blocked: ... -->` to park a task unclaimed, and
+  `<!-- depends: "..." -->` to hold one back until another is done. (CMX-233)
+
 ### Changed
+
+- **A judge verdict of "cannot verify" now reaches the inbox even when the run has already
+  left review, and a merge can no longer silently kill a judge that is still working.**
+  Two follow-ups to the unconditional PR comment below (CMX-228), both measured live on a
+  run whose PR merged while its judge was still mid-check: first, the notification that a
+  judge could not verify a commit — the CAS-refused race, where the run moves on out from
+  under a still-running judge — only ever fired while the run's status was still
+  `awaiting_review`; a run that had already merged got no notification at all, so the one
+  outcome that means "I could not do my job" was also the one nobody heard about. It now
+  fires (and survives delivery) regardless of what the run's status became. Second, the
+  dispatcher's judge watchdog reaped a judge's worktree and killed its window off a single
+  tick's tmux snapshot — a signal that can miss a genuinely live judge — which SIGKILLed
+  one mid-run. The watchdog now cross-checks the judge's own claim lock (pid and start
+  time) before tearing anything down, and holds if a live owner still has it; the hold is
+  bounded by the existing stuck-judge timeout, so a judge that really did hang is still
+  reaped.
 
 - **The judge's verdict now reaches the pull request even when the run moves out from
   under it.** A blocking verdict — a guard that survived deliberate corruption — used to
@@ -76,6 +102,19 @@ history lives in `git log`.
 
   The Settings drawer now carries the AGPL §13 source offer, which the licence
   requires for software users interact with over a network.
+
+### Fixed
+
+- **A `depends:` marker naming a title with an embedded `;` could never resolve, no
+  matter how it was quoted.** `_parse_depends` split the marker's payload on `;`
+  *before* stripping quotes, so a title such as `fix the bug; handle the edge case`
+  got cut into two garbage segments the moment someone tried to reference it — even
+  wrapped in the documented `"..."` quoting. The dependency silently resolved to ids
+  no real task holds, which reads exactly like a typo'd reference: the dependent task
+  fails closed and stays blocked forever (`chela.dispatcher._ready` logs it as an
+  "unresolved reference"), with no way for a human to fix it by writing "better"
+  markdown — the title itself was the trap. The split is now quote-aware: a `;`
+  inside a matched pair of quotes no longer ends the segment. (CMX-232)
 
 ### Added
 
