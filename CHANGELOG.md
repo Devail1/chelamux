@@ -50,6 +50,19 @@ history lives in `git log`.
 
 ### Fixed
 
+- **A judge verdict about a head that no longer exists no longer spends a rework round.**
+  The judge's mutation battery takes minutes to run; if a newer commit lands on the PR in
+  that window (the once-per-sha trigger already re-spawns a fresh judge for it), a still-
+  running judge's eventual verdict is about a commit the PR no longer presents as its head.
+  Nothing compared the two before spending anything: a stale BLOCKING verdict burned a round
+  of `CHELA_MAX_REWORKS` through `request_changes` — and at the cap, escalated the run to
+  `needs_human` for a finding the newer commit may have already fixed — while a stale CLEAN
+  verdict could silently overwrite a newer, different verdict (e.g. a genuine `blocked`) a
+  fresh judge had already recorded on the same row. `judge_run` now re-reads the run's live
+  `pr_head_sha` right before either branch would act; a KNOWN mismatch against the commit
+  actually tested discards the verdict without spending a round or touching `judge_state` —
+  the finding still posts to the PR as a comment, and the per-sha trigger re-judges the new
+  head on its own. (CMX-246)
 - **Concurrent `cmx-N` branches no longer collide on `CHANGELOG.md`.** Every dispatched
   branch adds its own entry to the top of the same `## [Unreleased]` section, so any two
   branches open at once conflicted on that exact spot the moment the judge's worktree

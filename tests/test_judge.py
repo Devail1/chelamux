@@ -535,6 +535,64 @@ def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_p
     assert "colourblind glyph cue" in posted[0]
 
 
+def test_a_blocking_verdict_for_a_head_that_no_longer_exists_does_not_spend_a_rework_round(tmp_path):
+    """⚖️⏱️ CMX-246: this judge was launched to judge `oldsha000001`, but by the time its
+    mutation battery finishes (minutes later), a newer commit has landed on the PR —
+    `pr_head_sha` now reads `newsha000002`. The once-per-sha trigger already re-spawns a
+    fresh judge for the new head on its own; THIS verdict is about a commit that no longer
+    exists as the PR's live head. It must not spend a round of `CHELA_MAX_REWORKS` for a
+    finding the newer commit may have already fixed — at the cap, that would escalate the
+    run to `needs_human` for work that is already done.
+
+    Corrupt `stale_head` to `False` (the mismatch is never detected) and this goes red: the
+    stale verdict spends a round through `request_changes` exactly as an ordinary blocking
+    verdict would."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha="oldsha000001", pr_head_sha="newsha000002")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    posted: list[str] = []
+    with patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["ok"] is False
+    assert result["state"] == judge.J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "awaiting_review"          # never moved to changes_requested
+    assert (run["rework_count"] or 0) == 0              # ⛔ no round spent
+    assert not dispatcher.reviews_of(run)               # request_changes was never called
+    assert run["judge_sha"] == "oldsha000001"           # untouched — never overwritten
+    assert posted and "SURVIVED" in posted[0]           # the finding still reached the PR
+
+
+def test_a_clean_verdict_for_a_head_that_no_longer_exists_never_overwrites_judge_state(tmp_path):
+    """The clean-path twin of the test above: a `clean` verdict about a superseded head must
+    not clobber `judge_state`. A second judge spawned for the new head (the per-sha trigger)
+    may already have recorded a DIFFERENT, newer verdict (here `blocked`) on this row — a
+    stale `clean` landing after it would silently erase that finding, and the merge gate
+    would then trust `clean` for a commit it never actually verified.
+
+    Corrupt `stale_head` to `False` and this goes red: `set_judge_state` runs unconditionally
+    and overwrites `judge_state` with the stale `clean`."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha="oldsha000001", pr_head_sha="newsha000002",
+                 judge_state=judge.J_BLOCKED, judge_detail="a newer judge already blocked this")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["judge_state"] == judge.J_BLOCKED        # the NEWER verdict survives, untouched
+    assert run["judge_sha"] == "oldsha000001"            # untouched
+
+
 def test_a_clean_run_is_LEFT_ALONE_the_judge_never_merges_and_never_approves(tmp_path):
     result, run, posted = _judge_run(tmp_path, REAL_GUARD_TEST, {"experiments": [_exp()]})
 
