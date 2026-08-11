@@ -331,9 +331,7 @@ def test_apply_publishes_the_lock_hold_for_the_doctor_fact_to_read(client, monke
     assert live["pid"] == os.getpid()
 
     release.set()
-    deadline = time.monotonic() + 2
-    while dash._update_apply_lock.locked() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_for_release_then_clear(dash._update_apply_lock)
     assert config.live_update_apply_lock() is None, \
         "the published hold outlived the run it timed"
 
@@ -351,9 +349,7 @@ def test_started_at_is_cleared_once_the_run_finishes(client, monkeypatch):
     assert resp.get_json()["started"] is True
     assert entered.wait(timeout=2)
 
-    deadline = time.monotonic() + 2
-    while dash._update_apply_lock.locked() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_for_release_then_clear(dash._update_apply_lock)
     assert dash._update_apply_started_at is None, \
         "the background run finished but never cleared its start-time sidecar"
 

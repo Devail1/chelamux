@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -639,6 +641,25 @@ def test_update_apply_lock_freshly_held_is_not_flagged(fleet):
     warning on ANY held lock (even a genuinely in-progress one) would satisfy that test
     just as well as correctly reading the ceiling would."""
     config.publish_update_apply_lock(time.time())
+    findings = [f for f in doctor.check() if f.fact == "dashboard.update_lock"]
+    assert findings and all(f.level == doctor.OK for f in findings)
+
+
+def test_update_apply_lock_stale_pid_is_not_flagged(fleet):
+    """CMX-226's review round 2: a lock file surviving a dead dashboard process (crash
+    or kill mid-apply skips `clear_update_apply_lock()`'s `finally`) must read as OK, not
+    WARN — `config.live_update_apply_lock()`'s dead-pid check is what makes that true,
+    and this is the doctor-level counterpart to `test_a_dead_update_apply_lock_is_not_a_
+    live_one` in test_config_env.py, which pins the same guarantee at the config layer.
+    Without it, a PM2 restart onto a fresh, unheld `threading.Lock()` would warn 'the
+    update-apply lock has been held for 3 days' forever, on a perfectly healthy system —
+    the CMX-224 stale-socket failure mode, in this mechanism."""
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()                                        # a pid that has certainly exited
+    ceiling = update.apply_stuck_after_seconds()
+    config.update_apply_lock_file().write_text(
+        json.dumps({"pid": dead.pid, "started_at": time.time() - ceiling - 60})
+    )
     findings = [f for f in doctor.check() if f.fact == "dashboard.update_lock"]
     assert findings and all(f.level == doctor.OK for f in findings)
 
