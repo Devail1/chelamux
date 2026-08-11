@@ -12,6 +12,19 @@ history lives in `git log`.
 
 ### Added
 
+- **`chela rework-disputed` — a rework agent's "nothing to push" escape hatch.** A rework
+  agent that reads the verdict and concludes it is wrong, already fixed, or otherwise
+  unfixable has no new commit to offer. The rework prompt used to just tell such an agent
+  to say so in its final message and stop — which left the run in `running` forever:
+  `task-finished` assumes a fresh commit landed (the dispatcher judges once per head
+  commit, so an unchanged sha never gets re-judged), and the idle watchdog just re-sends
+  the same rework prompt on a timer, so every liveness signal kept reading healthy while
+  the run itself never moved again. `chela rework-disputed <id> "<reason>"` is the
+  in-contract alternative: it moves the row straight to `needs_human` (never
+  `awaiting_review`, which would carry the same already-judged head) without touching the
+  branch, worktree, PR, or `rework_count` — a human resolves it from there with `chela
+  retry`, `chela reopen`, or by closing the PR. (CMX-244)
+
 - **`chela retry` — "keep going" on a `needs_human` run, no fix required.** `chela reopen`
   (CMX-96) covers one human intent: "I fixed the branch myself, re-verify the new head" —
   and its new-commit gate correctly refuses an unchanged one, since flipping straight to
