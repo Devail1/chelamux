@@ -611,12 +611,24 @@ def test_ingest_caches_the_epoch_instead_of_asking_tmux_on_every_hook(monkeypatc
 
 
 def test_ingest_refreshes_the_epoch_after_the_cache_ttl_expires(monkeypatch):
-    """The cache is not permanent — a real tmux server restart must eventually be seen."""
+    """The cache is not permanent — a real tmux server restart must eventually be seen.
+
+    The elapsed time simulated below is a fixed, ABSOLUTE number of seconds — not derived
+    from ``_EPOCH_TTL`` itself. A dashboard process lives for days, so if the TTL were ever
+    widened to something effectively permanent, a test that measures its own wait relative
+    to the constant it is guarding could never observe that (the wait would just widen along
+    with it). The bound below pins the TTL to something sane for a live process; the elapsed
+    simulation is comfortably past that bound regardless of what ``_EPOCH_TTL`` is set to.
+    """
+    assert hooks._EPOCH_TTL <= 60.0, (
+        "epoch cache TTL must stay bounded — a live dashboard process must eventually see a "
+        "tmux server restart, not cache the epoch forever"
+    )
     monkeypatch.setattr(hooks.epoch, "current", lambda: "ep-A")
     first = hooks.ingest("PreToolUse", _body())
     assert first["epoch"] == "ep-A"
     monkeypatch.setattr(hooks.epoch, "current", lambda: "ep-B")
-    hooks._epoch_cache["ts"] -= hooks._EPOCH_TTL + 1.0     # simulate the TTL elapsing
+    hooks._epoch_cache["ts"] -= 61.0     # simulate 61s elapsing — past any sane TTL bound
     second = hooks.ingest("PreToolUse", _body())
     assert second["epoch"] == "ep-B"
 
