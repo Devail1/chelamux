@@ -209,6 +209,13 @@ def test_duplicate_subheadings_are_merged_into_one_block_each():
     assert "first changed item" in notes
     assert "second changed item" in notes
     assert "first added item" in notes
+    # Presence alone doesn't prove the merge preserved document order — a
+    # reversed join would pass every assertion above. In the fixture, "first
+    # fixed item" appears in the earlier ### Fixed block and "second fixed
+    # item" in the later one, so their relative position in the merged
+    # output pins that `_merge_duplicate_subheadings` concatenates chunks in
+    # the order they appeared rather than, say, reversing them.
+    assert notes.index("first fixed item") < notes.index("second fixed item")
 
 
 def test_duplicate_subheadings_use_canonical_category_order():
