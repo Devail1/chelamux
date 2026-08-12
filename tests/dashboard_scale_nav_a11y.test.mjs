@@ -265,6 +265,25 @@ test('WIRING: the airy-density rule actually pads the stage — not just an empt
         `body.wall-density-airy #term-stage's padding-left clamp PREFERRED term (${left[2]}vw) has been zeroed — desktop widths would collapse to the ${left[1]}px floor forever, effectively dense again`);
     assert.ok(parseFloat(right[2]) > 0,
         `body.wall-density-airy #term-stage's padding-right clamp PREFERRED term (${right[2]}vw) has been zeroed — desktop widths would collapse to the ${right[1]}px floor forever, effectively dense again`);
+    // CMX-230 round 8: MIN and PREFERRED (left[1]/[2]) were pinned above, but MAX
+    // (left[3]/right[3]) — the argument that actually decides the desktop margin —
+    // was only ever captured, never asserted. A round shrank the cap from 64px to
+    // 17px, which reads as ">0" and leaves both floors + the vw term untouched, but
+    // resolves the clamp to a flat 17px at any width above ~283px (below that, the
+    // PREFERRED vw term would have won instead). Resolve the actual clamp() formula
+    // at a real desktop width and assert the margin it produces is still wide, not
+    // just non-zero — that's the only way to see a shrunk-but-nonzero cap.
+    const resolveClamp = (min, preferredVw, max, viewportPx) =>
+        Math.min(max, Math.max(min, preferredVw * viewportPx / 100));
+    const DESKTOP_PX = 1920;
+    const leftMargin = resolveClamp(parseFloat(left[1]), parseFloat(left[2]), parseFloat(left[3]), DESKTOP_PX);
+    const rightMargin = resolveClamp(parseFloat(right[1]), parseFloat(right[2]), parseFloat(right[3]), DESKTOP_PX);
+    assert.ok(leftMargin >= 32,
+        `at a ${DESKTOP_PX}px desktop width the resolved padding-left margin (${leftMargin}px) is too thin — the clamp's MAX ` +
+        `argument (${left[3]}px) has been shrunk toward the floor, so the airy class toggles but produces almost no margin`);
+    assert.ok(rightMargin >= 32,
+        `at a ${DESKTOP_PX}px desktop width the resolved padding-right margin (${rightMargin}px) is too thin — the clamp's MAX ` +
+        `argument (${right[3]}px) has been shrunk toward the floor, so the airy class toggles but produces almost no margin`);
 
     const gridBody = blockFor(CSS, 'body.wall-density-airy #term-stage .grid-stack');
     const maxWidth = gridBody.match(/max-width:\s*([0-9.]+)px/);
@@ -409,6 +428,13 @@ test('wall pane footer completeness: model + spend + branch + context% + tokens 
 // any `.active` rule must fail here.
 const NEUTRAL_VAR_RE = /--(text(-dim)?|bg|surface(-2)?|border|room-accent)\b/;
 const NEUTRAL_HEX_RE = /#0d1117\b/;
+// CMX-230 round 8: the var()/hex scans above key on NOTATION, not hue — a
+// colour written as rgb()/rgba()/hsl()/hsla() is invisible to both regexes.
+// That's not hypothetical: `.kanban-nav-chip.active .kanban-nav-count`
+// already carries `rgba(13, 17, 23, 0.18)`, the SAME neutral #0d1117
+// text-on-accent colour in functional form, so the allowlist below matches
+// it (and any alpha) by RGB triple, not by guessing at a fixed string.
+const NEUTRAL_FUNCTIONAL_RE = /^rgba?\(\s*13\s*,\s*17\s*,\s*23\s*(?:,\s*[\d.]+\s*)?\)$/;
 test('single accent: every .active rule\'s highlight colour is --accent (or a neutral), never a second hue', () => {
     const activeBlocks = cssBlocks(CSS).filter(b =>
         b.selector.split(',').map(s => s.trim()).some(s => /\.active(::|\s|$|\.)/.test(s + ' ')));
@@ -416,6 +442,7 @@ test('single accent: every .active rule\'s highlight colour is --accent (or a ne
     for (const b of activeBlocks) {
         const vars = [...b.body.matchAll(/var\(\s*--([\w-]+)/g)].map(m => '--' + m[1]);
         const hexes = [...b.body.matchAll(/#[0-9a-fA-F]{3,6}\b/g)].map(m => m[0]);
+        const functional = [...b.body.matchAll(/\b(?:rgb|rgba|hsl|hsla)\([^)]*\)/g)].map(m => m[0]);
         for (const v of vars) {
             assert.ok(v === '--accent' || NEUTRAL_VAR_RE.test(v),
                 `${b.selector} { ${b.body.trim().slice(0, 60)}... } references ${v} — a second accent hue, not --accent or a neutral`);
@@ -423,6 +450,11 @@ test('single accent: every .active rule\'s highlight colour is --accent (or a ne
         for (const h of hexes) {
             assert.ok(NEUTRAL_HEX_RE.test(h),
                 `${b.selector} references a raw hex colour ${h} outside the neutral text-on-accent allowlist`);
+        }
+        for (const f of functional) {
+            assert.ok(NEUTRAL_FUNCTIONAL_RE.test(f),
+                `${b.selector} { ${b.body.trim().slice(0, 60)}... } references ${f} — a second accent hue written as rgb()/` +
+                'rgba()/hsl()/hsla(), a notation the var()/hex scans above can\'t see');
         }
     }
 });
@@ -450,6 +482,24 @@ test('nav inventory: the shipped primary rail is exactly Feed, Wall, Work — no
     const primary = primaryNavViews(entries, { terminalsOn: true }).map(v => v.id);
     assert.deepEqual(primary, ['feed', 'terminals', 'work'],
         'the primary nav set drifted from the ticket\'s exact 3 domain objects');
+});
+
+// CMX-230 round 8: viewreg.js's own comment says primaryNavViews/secondaryNavViews
+// share "the SAME... ENABLED/virtual filtering" as navViews() — but every fixture
+// above runs with terminalsOn: true, so a mutation that drops JUST the isEnabled
+// filter from primaryNavViews (keeping virtual + tier intact) stayed invisible: no
+// test here ever renders a disabled entry through primaryNavViews. Mirrors the
+// real 'terminals' entry (views.js: `enabled: ctx => !!ctx.terminalsOn`) — on a
+// TERMINALS_ENABLED=false deployment this must vanish from the primary rail, not
+// route to a #panel-terminals that was never rendered.
+test('nav inventory: primaryNavViews drops a disabled view — the enabled filter, not just virtual/tier', () => {
+    const entries = [{ id: 'terminals-like', tier: 'primary', enabled: ctx => !!ctx.terminalsOn }];
+    assert.deepEqual(primaryNavViews(entries, { terminalsOn: false }).map(v => v.id), [],
+        'primaryNavViews must drop a disabled view (enabled() false) — this is the ENABLED half of the shared navViews() filter');
+    assert.deepEqual(secondaryNavViews(entries, { terminalsOn: false }).map(v => v.id), [],
+        'a disabled view must not resurface in secondaryNavViews either — it is disabled, not demoted');
+    assert.deepEqual(primaryNavViews(entries, { terminalsOn: true }).map(v => v.id), ['terminals-like'],
+        'primaryNavViews must include the same view once its enabled() check passes');
 });
 
 test('nav inventory: Knowledge/Agents/Personas/Cost are demoted (secondary), not deleted', () => {

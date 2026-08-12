@@ -999,6 +999,38 @@ test('the wall .gs-ctx chip carries a REAL danger/warn class off a live poll cro
     await terminals.termTick();
 });
 
+// 15d — CMX-230 round 8: GUARD 5 (dashboard_scale_nav_a11y.test.mjs) only ever
+// matched `.gs-model`/`.gs-cost`'s CLASS inside _ctxBarHTML's template string —
+// both chips ship `hidden` in that markup, and no test anywhere drove a poll
+// carrying `model`/`cost_usd` to prove the reveal half of the wiring (the `if
+// (c.model) { ...hidden = false }` branch in _applyTermContext) ever actually
+// runs. That left `if (false && c.model)` — a permanently dead reveal — byte-
+// indistinguishable from the real thing to every test that came before this
+// one. Mirrors test 15's own discipline: drive termTick, read the rendered node.
+test('the wall footer\'s model + cost chips are revealed by a live poll carrying model/cost_usd — CMX-230', async () => {
+    const wid = '@1';
+    const ctxBar = tile(wid).querySelector('.term-ctx-bar');
+    const modelChip = ctxBar.querySelector('.gs-model');
+    const costChip = ctxBar.querySelector('.gs-cost');
+    assert.ok(modelChip, 'the wall pane footer has no .gs-model chip');
+    assert.ok(costChip, 'the wall pane footer has no .gs-cost chip');
+
+    CTX = [{
+        window_id: wid, used_pct: 42, used: '84.0K', total: '200K', estimated: false,
+        branch: 'cmx-230', model: 'opus-5', cost_usd: 1.23,
+    }];
+    await terminals.termTick();
+    assert.equal(modelChip.hidden, false, 'a poll carrying c.model must reveal .gs-model — it must not stay dead-coded hidden');
+    assert.equal(modelChip.textContent, 'opus-5');
+    assert.equal(costChip.hidden, false, 'a poll carrying c.cost_usd must reveal .gs-cost');
+    assert.equal(costChip.textContent, '$1.23');
+
+    CTX = [];   // leave the fixture as other tests expect it (real shape: an array)
+    await terminals.termTick();
+    assert.equal(modelChip.hidden, true, 'a poll with no context data must hide .gs-model again');
+    assert.equal(costChip.hidden, true, 'a poll with no context data must hide .gs-cost again');
+});
+
 // 15b — THE BOTTOM BAR'S ORDER IS CONSTANT REGARDLESS OF BRANCH PRESENCE (CMX-127,
 // supersedes CMX-124). CMX-119 put № last, after context; a branch-less pane
 // (`.gs-branch` hidden) then let `justify-content: space-between` slide `.gs-ctx` left
