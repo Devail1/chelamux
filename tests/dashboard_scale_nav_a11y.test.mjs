@@ -101,6 +101,15 @@ test('type scale: every wall/pane rule\'s font-size is a var() token, not a bare
             `${sel} must set font-size from a --wall-pane-font-size* token`);
         assert.doesNotMatch(body, /font-size:\s*[0-9.]+px/,
             `${sel} has reverted to a bare font-size px literal — the type scale has no single lever again`);
+        // GUARD 1 round 9: the px-literal check above only catches a REPLACEMENT
+        // literal. A judge round instead ADDED a second font-size declaration
+        // (e.g. `font-size: 0.6rem;`) after the tokenised one — the var() match
+        // and the "no bare px" check both stay true, but the LATER declaration
+        // wins the cascade, so the token never actually decides the rendered
+        // size. Pin the declaration to appear exactly once, in any unit.
+        const count = (body.match(/font-size:/g) || []).length;
+        assert.equal(count, 1,
+            `${sel} declares font-size ${count} times — a second declaration (any unit) wins the cascade over the tokenised one`);
 
         if (WALL_PANE_SM_ALLOWED.has(sel)) {
             assert.match(body, /font-size:\s*var\(--wall-pane-font-size-sm\)/,
@@ -120,6 +129,12 @@ test('type scale: every sidebar-card rule\'s font-size is the --card-font-size t
             `${sel} must set font-size from --card-font-size`);
         assert.doesNotMatch(body, /font-size:\s*[0-9.]+px/,
             `${sel} has reverted to a bare font-size px literal`);
+        // GUARD 1 round 9 (see the wall/pane loop above for the full rationale):
+        // a second font-size declaration in a non-px unit wins the cascade
+        // while both checks above stay green.
+        const count = (body.match(/font-size:/g) || []).length;
+        assert.equal(count, 1,
+            `${sel} declares font-size ${count} times — a second declaration (any unit) wins the cascade over the tokenised one`);
     }
 });
 
@@ -151,6 +166,14 @@ test('type scale: .pane-subtitle and .pane-recap read line-height from --wall-pa
             `${sel} must set line-height from var(--wall-pane-line-height)`);
         assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
             `${sel} has reverted to a bare line-height literal — the leading token has no effect at its use site`);
+        // GUARD 2z round 9: the literal check above is anchored on a DIGIT, so
+        // a CSS-wide keyword value (`line-height: normal;`) added as a SECOND
+        // declaration slips past it, and the later declaration wins the
+        // cascade over the tokenised one. Pin the declaration count instead of
+        // just its notation.
+        const count = (body.match(/line-height:/g) || []).length;
+        assert.equal(count, 1,
+            `${sel} declares line-height ${count} times — a second declaration (any form, including keywords like "normal") wins the cascade over the tokenised one`);
     }
 });
 
@@ -184,6 +207,12 @@ test('type scale: .ar-title and .ar-sub read line-height from --card-line-height
             `${sel} must set line-height from var(--card-line-height)`);
         assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
             `${sel} has reverted to a bare line-height literal — the card leading token has no effect at its use site`);
+        // GUARD 2y round 9 (see GUARD 2z above): a second, keyword-form
+        // line-height declaration wins the cascade while the literal-only
+        // check stays green.
+        const count = (body.match(/line-height:/g) || []).length;
+        assert.equal(count, 1,
+            `${sel} declares line-height ${count} times — a second declaration (any form, including keywords like "normal") wins the cascade over the tokenised one`);
     }
 });
 
@@ -307,6 +336,15 @@ test('WIRING: the airy-density rule actually pads the stage — not just an empt
     // column with wide margins" (Liav's Xirp comparison).
     assert.match(gridBody, /margin:\s*0\s+auto\s*;/,
         'body.wall-density-airy #term-stage .grid-stack must set margin: 0 auto — without it the capped column is left-anchored, not centred');
+
+    // GUARD 5 (WIRING) round 9: per CSS 2.1 §10.4, min-width overrides
+    // max-width when they conflict. A min-width: 100% declaration added
+    // alongside the untouched max-width leaves every assertion above green
+    // (max-width is still present, >0, <=1920, and margin: 0 auto is still
+    // there) while the cap never actually binds at any viewport.
+    assert.doesNotMatch(gridBody, /min-width\s*:/,
+        'body.wall-density-airy #term-stage .grid-stack must not declare min-width — per CSS 2.1 §10.4 it overrides max-width when they conflict, ' +
+        'so the capped column would never bind at any viewport and the wall would stretch edge-to-edge again');
 });
 
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
@@ -335,8 +373,13 @@ test('non-hue cue — wall .gs-state pill: every tileState() result carries a gl
 test('non-hue cue — wall .gs-state pill: both the initial paint AND every live repaint set the glyph + word text nodes', () => {
     // Initial paint: paneHead's own literal markup (terminals.js), before the
     // first live repaint ever runs.
-    assert.match(TERMINALS, /gs-state-glyph[^>]*>[^<]*<\/span><span class="gs-state-word">idle<\/span>/,
-        'paneHead\'s initial .gs-state markup no longer carries both a glyph and the word "idle"');
+    // GUARD 3a round 9: `[^<]*` matches ZERO characters too, so an emptied
+    // glyph (colour-only) satisfies this — the same "blank a live-repainted
+    // value" hole rounds 2-4 closed for _applyWallTileFrame's three statements,
+    // one instance earlier in the initial markup. Require at least one
+    // character between the tags.
+    assert.match(TERMINALS, /gs-state-glyph[^>]*>[^<]+<\/span><span class="gs-state-word">idle<\/span>/,
+        'paneHead\'s initial .gs-state markup no longer carries both a non-empty glyph and the word "idle"');
     // Live repaint: _applyWallTileFrame must write BOTH text nodes from
     // tileState()'s result, not just recolour the pill via className.
     const frame = TERMINALS.slice(TERMINALS.indexOf('function _applyWallTileFrame'));
@@ -435,6 +478,37 @@ const NEUTRAL_HEX_RE = /#0d1117\b/;
 // text-on-accent colour in functional form, so the allowlist below matches
 // it (and any alpha) by RGB triple, not by guessing at a fixed string.
 const NEUTRAL_FUNCTIONAL_RE = /^rgba?\(\s*13\s*,\s*17\s*,\s*23\s*(?:,\s*[\d.]+\s*)?\)$/;
+// CMX-230 round 9: the var()/hex/functional scans above key on NOTATION —
+// a colour written as a bare CSS KEYWORD (`color: orange;`) is invisible to
+// all three. Round 8's own comment names --orange as the thing that must
+// fail; a keyword literal of the same hue is the same hole one notation
+// over. Grayscale/CSS-wide keywords are neutral by construction (no hue to
+// clash with --accent), so only they're allowlisted.
+const CSS_COLOR_KEYWORDS = new Set([
+    'aliceblue', 'antiquewhite', 'aqua', 'aquamarine', 'azure', 'beige', 'bisque',
+    'blanchedalmond', 'blue', 'blueviolet', 'brown', 'burlywood', 'cadetblue',
+    'chartreuse', 'chocolate', 'coral', 'cornflowerblue', 'cornsilk', 'crimson',
+    'cyan', 'darkblue', 'darkcyan', 'darkgoldenrod', 'darkgreen', 'darkkhaki',
+    'darkmagenta', 'darkolivegreen', 'darkorange', 'darkorchid', 'darkred',
+    'darksalmon', 'darkseagreen', 'darkslateblue', 'darkturquoise', 'darkviolet',
+    'deeppink', 'deepskyblue', 'dodgerblue', 'firebrick', 'floralwhite',
+    'forestgreen', 'fuchsia', 'gold', 'goldenrod', 'green', 'greenyellow',
+    'honeydew', 'hotpink', 'indianred', 'indigo', 'ivory', 'khaki', 'lavender',
+    'lavenderblush', 'lawngreen', 'lemonchiffon', 'lightblue', 'lightcoral',
+    'lightcyan', 'lightgoldenrodyellow', 'lightgreen', 'lightpink', 'lightsalmon',
+    'lightseagreen', 'lightskyblue', 'lightsteelblue', 'lightyellow', 'lime',
+    'limegreen', 'linen', 'magenta', 'maroon', 'mediumaquamarine', 'mediumblue',
+    'mediumorchid', 'mediumpurple', 'mediumseagreen', 'mediumslateblue',
+    'mediumspringgreen', 'mediumturquoise', 'mediumvioletred', 'midnightblue',
+    'mintcream', 'mistyrose', 'moccasin', 'navajowhite', 'navy', 'oldlace',
+    'olive', 'olivedrab', 'orange', 'orangered', 'orchid', 'palegoldenrod',
+    'palegreen', 'paleturquoise', 'palevioletred', 'papayawhip', 'peachpuff',
+    'peru', 'pink', 'plum', 'powderblue', 'purple', 'rebeccapurple', 'red',
+    'rosybrown', 'royalblue', 'saddlebrown', 'salmon', 'sandybrown', 'seagreen',
+    'seashell', 'sienna', 'skyblue', 'slateblue', 'snow', 'springgreen',
+    'steelblue', 'tan', 'teal', 'thistle', 'tomato', 'turquoise', 'violet',
+    'wheat', 'yellow', 'yellowgreen',
+]);
 test('single accent: every .active rule\'s highlight colour is --accent (or a neutral), never a second hue', () => {
     const activeBlocks = cssBlocks(CSS).filter(b =>
         b.selector.split(',').map(s => s.trim()).some(s => /\.active(::|\s|$|\.)/.test(s + ' ')));
@@ -443,6 +517,13 @@ test('single accent: every .active rule\'s highlight colour is --accent (or a ne
         const vars = [...b.body.matchAll(/var\(\s*--([\w-]+)/g)].map(m => '--' + m[1]);
         const hexes = [...b.body.matchAll(/#[0-9a-fA-F]{3,6}\b/g)].map(m => m[0]);
         const functional = [...b.body.matchAll(/\b(?:rgb|rgba|hsl|hsla)\([^)]*\)/g)].map(m => m[0]);
+        const keywords = [...b.body.matchAll(/:\s*([a-zA-Z-]+)\s*;/g)]
+            .map(m => m[1].toLowerCase())
+            .filter(v => CSS_COLOR_KEYWORDS.has(v));
+        for (const k of keywords) {
+            assert.fail(`${b.selector} { ${b.body.trim().slice(0, 60)}... } references bare colour keyword "${k}" — ` +
+                'a second accent hue, not --accent or a neutral');
+        }
         for (const v of vars) {
             assert.ok(v === '--accent' || NEUTRAL_VAR_RE.test(v),
                 `${b.selector} { ${b.body.trim().slice(0, 60)}... } references ${v} — a second accent hue, not --accent or a neutral`);
@@ -561,6 +642,16 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
     assert.match(html, /class="side-list side-list-secondary"\s+id="side-nav-more"/,
         '#side-nav-more must carry .side-list-secondary — without it the demoted group renders at full primary weight, ' +
         'visually a 7-item rail again, even though the split itself still works');
+
+    // GUARD 4 (index.html) round 9: the container's id/class were pinned above,
+    // but nothing asserted the demoted group's own LABEL — style.css's CMX-230
+    // comment states the design claim explicitly: "a plain-text subhead
+    // instead of the Navigate section's uppercase label". Blanking the text
+    // leaves four unlabelled rows dangling under the 3-item rail with no
+    // heading telling a reader they are a separate, demoted group, while the
+    // container id/class, the split and every other guard here stay green.
+    assert.match(html, /<div class="side-subhead">\S[^<]*<\/div>/,
+        'the .side-subhead label text is missing/blank — the demoted nav group would render with no heading at all');
 });
 
 // The test above pins that #side-nav-more carries the .side-list-secondary
