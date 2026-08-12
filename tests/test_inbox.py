@@ -2935,6 +2935,20 @@ def test_register_peer_records_pid_session_and_started_without_touching_the_wid_
     assert inbox.orchestrator_wid() is None
 
 
+def test_register_peer_clears_a_latched_address_alarm(store_file, windows, monkeypatch):
+    """`register_peer` is a THIRD writer of the orchestrator address (alongside `register`
+    and `readdress`/`unregister_dangling`) and must clear the alarm exactly like the other
+    two: a latched `address_alarm_pushed=True` SUPPRESSES the push for the NEXT real outage,
+    so a windowless re-registration after a rotted wid must not leave it latched."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    store = _arm_the_address_alarm(inbox.load())
+    inbox.save(store)
+
+    inbox.register_peer(4242, "sid-abc")
+
+    _assert_address_alarm_cleared(inbox.load(), "register_peer")
+
+
 def test_orchestrator_peer_and_orchestrator_wid_are_independent(
         store_file, windows, monkeypatch):
     monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
@@ -3197,6 +3211,11 @@ def test_watching_shows_the_windowless_peer_registration_and_its_state(
     assert "windowless orchestrator: pid 4242" in out
     assert "sid-abc" in out
     assert "[ok]" in out
+    # ⛔ no wid orchestrator is registered at all — CMX-255's own primary scenario, where the
+    # peer is the SOLE destination. Pins the `orch and` half of the suffix's condition: without
+    # it, the suffix fires on ADDR_NONE (not in UNDELIVERABLE) even though nothing is registered
+    # by wid to actually "fall back" to.
+    assert "(fallback only" not in out
 
 
 def test_watching_reports_why_a_stale_windowless_peer_cannot_be_used(
@@ -3209,7 +3228,13 @@ def test_watching_reports_why_a_stale_windowless_peer_cannot_be_used(
 
     out = capsys.readouterr().out
     assert "[stale]" in out
-    assert "4242" in out.split("windowless orchestrator", 1)[1]  # `pwhy` reached the operator
+    # ⛔ NOT just "4242" — the header line (`windowless orchestrator: pid 4242  [stale]`)
+    # already prints the pid regardless of whether `pwhy` was ever reached, so an assertion
+    # that only looks for the pid can't tell a full diagnosis from a stripped one. Assert on
+    # text only `pwhy` can supply: the actual diagnosis and the `chela watch` remedy.
+    tail = out.split("windowless orchestrator", 1)[1]
+    assert "DIFFERENT process" in tail
+    assert "chela watch" in tail
 
 
 def test_watching_reports_why_a_gone_windowless_peer_cannot_be_used(
