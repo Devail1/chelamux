@@ -45,15 +45,60 @@
 // .side-list-secondary weight/wiring pair) are kept as-is: they weren't the
 // source of the recurring findings and already assert a resolved value or a
 // real function's behaviour, not a property-presence scan.
+//
+// CMX-257 round 9 — HARD NARROWING (human directive on PR #326, superseding
+// round 6's "resolved effect" framing): round 6 collapsed property-by-property
+// pins into ONE assertion per claim, but each of those assertions was still
+// UNIVERSALLY QUANTIFIED ("every wall/pane/card text selector", "the demoted
+// group actually renders") — an unbounded surface with a label on it, not a
+// bounded one, and the judge kept finding new holes in the same hand-rolled
+// CSS resolver (cssRules/resolveAllForContext) for three more rounds. The
+// fix isn't a smarter resolver, it's not being one: claims 1-3 below now
+// mount the REAL style.css in jsdom (same technique as
+// tests/wire_live_css.test.mjs) against a CONCRETE, ENUMERATED fixture — one
+// real wall tile, one real sidebar card, one real nav section — and read
+// jsdom's own getComputedStyle/custom-property cascade, which is verifiably
+// correct for inheritance and specificity (unlike this file's old hand-rolled
+// selectorSpecificity()) even though it can't expand var() into a used
+// font-size or resolve vw units. Where jsdom genuinely cannot resolve a value
+// honestly (clamp()'s vw term — confirmed empirically: it falls back to the
+// initial value, indistinguishable from a corrupted flat 0), that specific
+// number is NOT GUARDED rather than approximated.
+//
+// CLAIM 4 (non-hue cue) is the exception: Liav is red-weak and a status
+// distinguishable only by hue is the one regression that would actually hurt
+// him, so it stays fully guarded and gets the most direct proof available —
+// the kanban chip/error text are now asserted off a REAL renderKanban() call
+// into a REAL DOM, not a source-text regex pair with the interpolated value
+// unpinned (see "WIRING: the kanban card" below).
+//
 // NOT GUARDED here — verified instead by manual greyscale capture (per the
 // round-6 directive: "I verified it live on an isolated dashboard... a
 // greyscale capture showing every status distinguishable with hue fully
 // removed"), and deliberately not re-litigated property-by-property in this
 // file: exact opacity/spacing/padding VALUES beyond the specific floors and
 // margins asserted below, font weights, precise source order beyond what's
-// asserted explicitly (#side-nav < .side-subhead < #side-nav-more), and a
+// asserted explicitly (#side-nav < .side-subhead < #side-nav-more), a
 // bare-literal value that happens to already clear a floor (detokenisation
-// that doesn't also regress the number is out of scope for this file).
+// that doesn't also regress the number is out of scope for this file),
+// EXHAUSTIVE selector coverage across the stylesheet beyond the concrete
+// fixtures enumerated below (the greyscale capture at 1/2/4/6 densities is
+// its acceptance check), the airy-density clamp()'s actual PIXEL margin at a
+// real viewport width using its REAL `6vw` term (jsdom cannot resolve `vw` at
+// all — confirmed empirically: `clamp(16px, 6vw, 64px)` resolves to jsdom's
+// initial-value fallback "0" for the correct rule too, so a corrupted flat
+// 0px override is not honestly distinguishable from the real one on the
+// unmodified stylesheet; the WIRING test below works around this for the
+// cascade-winner question by substituting `6vw`'s literal computed value at
+// DESKTOP_VIEWPORT_PX, but the exact px number a real `vw` produces at an
+// arbitrary viewport is still the greyscale capture's job, not this file's),
+// and whether buildWall's persisted-density restore call
+// runs UNCONDITIONALLY on first paint (two rounds of increasingly specific
+// text predicates on the same line converged on a false premise each time —
+// see GUARD 2c below; every real render path this file can drive calls
+// _refitWallForDock -> applyGridLayout moments later regardless, so the call
+// site is behaviourally unobservable from a black-box render, and the
+// greyscale capture is its acceptance check too).
 //
 // Run: node --test tests/dashboard_scale_nav_a11y.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
@@ -62,6 +107,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 
 import { tileState } from '../chela/dashboard/static/js/wallmodel.js';
 import { primaryNavViews, secondaryNavViews } from '../chela/dashboard/static/js/viewreg.js';
@@ -137,12 +183,11 @@ function cssRules(css) {
 
 // Every declaration ("prop, value[, important]" triple) in `body`, in source
 // order. CMX-257 round 8: this used to leave a trailing `!important` INSIDE
-// the returned value string (so a literal-value regex like
-// resolvedNumberViaToken's `/^([0-9.]+)(px)?$/` simply failed to match an
-// important declaration's value rather than recognising it as important) —
-// stripped here into its own boolean so resolveAllForContext() can rank
-// importance the way a real cascade does: importance beats specificity
-// beats source order, not "loses the property entirely".
+// the returned value string (so a plain numeric-literal regex simply failed
+// to match an important declaration's value rather than recognising it as
+// important) — stripped here into its own boolean so resolveAllForContext()
+// can rank importance the way a real cascade does: importance beats
+// specificity beats source order, not "loses the property entirely".
 function declarations(body) {
     return [...body.matchAll(/([\w-]+)\s*:\s*([^;]+);/g)]
         .map(m => {
@@ -171,14 +216,6 @@ function resolvedRootVars(css) {
         if (k.startsWith('--')) vars.set(k, v);
     return vars;
 }
-function resolvedRootTokenPx(css, name) {
-    const raw = resolvedRootVars(css).get('--' + name);
-    assert.ok(raw, `--${name} not declared as a top-level :root custom property`);
-    const m = raw.match(/^([0-9.]+)px$/);
-    assert.ok(m, `--${name} (${raw}) is not declared as a px value on :root`);
-    return parseFloat(m[1]);
-}
-
 // --- CMX-257 round 2: a naive selector lookup that only accepts top-level
 // (non-@media) rules deliberately excludes a selector's legitimate narrow-
 // viewport override (e.g. .gs-head/.pane-subtitle's real CMX-133 mobile bar)
@@ -213,88 +250,41 @@ function resolvedBodyAtDesktop(css, selector) {
     for (const r of active) for (const [k, v] of declarations(r.body)) props.set(k, v);
     return [...props].map(([k, v]) => `${k}: ${v};`).join(' ');
 }
-// Same resolution as resolvedBodyAtDesktop(), but tolerant of a selector with
-// NO matching rule at all (returns '' instead of failing an assertion) —
-// correct for an element like #side-nav-more that has no rule of its own and
-// is styled only via its .side-list-secondary class: "no override" means
-// "renders with browser/inherited defaults", not "this test is broken".
-function resolvedBodyAtDesktopOrEmpty(css, selector) {
-    const all = cssRules(css).filter(r =>
-        r.selector.split(',').map(s => s.trim()).includes(selector));
-    const active = all.filter(r => r.media === null || mediaSatisfiedAtViewport(r.media, DESKTOP_VIEWPORT_PX));
-    const props = new Map();
-    for (const r of active) for (const [k, v] of declarations(r.body)) props.set(k, v);
-    return [...props].map(([k, v]) => `${k}: ${v};`).join(' ');
+// --- jsdom fixtures: mount the REAL style.css and a concrete, hand-written
+// fragment of REAL markup (mirroring terminals.js's paneHead()/
+// _wallTileHTML()/_ctxBarHTML(), nav.js's _agentRowHtml(), and index.html's
+// sidebar section closely enough to match every selector these guards read —
+// verified against those sources as of round 9) in jsdom, then read jsdom's
+// OWN getComputedStyle/custom-property cascade. This replaces this file's old
+// hand-rolled cssRules()/resolveAllForContext() cascade for the three claims
+// that kept finding new holes in it (round-9 header comment above has the
+// full rationale). jsdom's custom-property INHERITANCE/cascade is verified
+// correct (a `body { --x: ... }` override IS visible to a descendant's
+// getPropertyValue) even though it does not expand var() into a resolved
+// used value for shorthand-like properties such as font-size — computed
+// fontSize/lineHeight stays the literal string "var(--name)" when THAT
+// declaration is the cascade winner, and becomes a resolved literal instead
+// when some other declaration outranks it. Both facts are used below: the
+// declaration-identity check (which selector actually won) and the
+// custom-property VALUE check (what that token really resolves to,
+// inheritance included) are two different questions, and jsdom answers both
+// honestly for everything except `vw`, which it does not resolve at all
+// (confirmed empirically — see the NOT GUARDED note at the top of this file).
+function mountWithRealCss(bodyHtml, extraBodyAttrs, cssOverride) {
+    const dom = new JSDOM(
+        `<!doctype html><html><head><style>${cssOverride || CSS}</style></head><body${extraBodyAttrs || ''}>${bodyHtml}</body></html>`,
+        { pretendToBeVisual: true });
+    return dom.window;
 }
 
-// A single SHARED "this element occupies space and paints" assertion — round
-// 6's replacement for the incremental per-property pins .side-subhead alone
-// drew across five separate judge findings (display:none ban, then opacity
-// floor, then font-size floor, then — this round — a `visibility: hidden`
-// that none of the previous three ever read, since each one only checked the
-// ONE property the previous round's mutation happened to use). Rather than
-// add a sixth property-shaped patch, this checks every recognised way this
-// stylesheet's cascade can make a resolved rule invisible in ONE assertion,
-// applied identically to every "must actually render" element instead of
-// bespoke floors per element. Deliberately NOT exhaustive of every CSS
-// invisibility trick (see the NOT GUARDED note at the top of this file) —
-// narrow enough to converge, wide enough to close the specific class of hole
-// (display/visibility/opacity/content-visibility/clip/zeroed-box) this file's
-// judge history has actually hit.
-// CMX-257 round 7: took ancestorTokens (a specificity-aware Set, same
-// contract as resolveForContext()/CARD_ANCESTORS) instead of relying on a
-// literal-selector-string lookup — the judge found `.side-section
-// #side-nav-more { display: none; }` (a real ancestor of the demoted nav
-// group, per index.html's `<section class="side-section">` wrapper) hides
-// the group at every viewport while resolvedBodyAtDesktopOrEmpty()'s literal
-// match on the bare `#side-nav-more` string never sees it.
-function assertRendersVisibly(css, selector, ancestorTokens, label) {
-    const body = resolvedBodyForContext(css, selector, ancestorTokens);
-    const decls = new Map(declarations(body));
-    assert.notEqual(decls.get('display'), 'none',
-        `${label} (${selector}) has display: none at desktop — removed from the box tree entirely`);
-    const vis = decls.get('visibility');
-    assert.ok(!vis || !/^(hidden|collapse)$/.test(vis),
-        `${label} (${selector}) has visibility: ${vis} — invisible but still occupying box-tree space`);
-    const cv = decls.get('content-visibility');
-    assert.ok(!cv || cv !== 'hidden',
-        `${label} (${selector}) has content-visibility: hidden — skipped from rendering entirely`);
-    const op = decls.get('opacity');
-    if (op != null) {
-        assert.ok(parseFloat(op) >= 0.3,
-            `${label} (${selector})'s opacity (${op}) has dropped toward invisible`);
-    }
-    const clip = decls.get('clip-path');
-    assert.ok(!clip || !/circle\(\s*0|inset\(\s*100%|polygon\(\s*0%?\s*,?\s*0%?\s*,?\s*0%?\s*,?\s*0%?\s*\)/.test(clip),
-        `${label} (${selector})'s clip-path (${clip}) fully clips the box to nothing`);
-    const h = decls.get('height'), mh = decls.get('max-height'), ov = decls.get('overflow');
-    const zeroBox = (h && /^0(px)?$/.test(h)) || (mh && /^0(px)?$/.test(mh));
-    assert.ok(!(zeroBox && ov === 'hidden'),
-        `${label} (${selector}) has a zeroed height/max-height with overflow: hidden — clipped away to nothing`);
-    const fs = decls.get('font-size');
-    if (fs != null) {
-        const m = fs.match(/^([0-9.]+)px$/);
-        if (m) {
-            assert.ok(parseFloat(m[1]) >= 8,
-                `${label} (${selector})'s font-size (${fs}) has dropped toward unreadable`);
-        }
-    }
-}
-
-// --- TYPE SCALE (ticket claim 1, round-6 consolidation): six separate GUARD
-// tests (1/2/2b/2y/2y-floor/2z, round history above) each pinned ONE property
-// or ONE token in isolation — "is font-size a var()?", "is the token's :root
-// value above a floor?", "does line-height consume its own token?" — as
-// separate assertions added one judge round at a time. This collapses them
-// into two tests, one per selector family, each asserting the thing that
-// actually matters at RESOLVED EFFECT: the real font-size/line-height a
-// browser computes for that selector, in px/ratio, must (a) come from the
-// expected token and (b) never sit below the pre-CMX-230 legibility floor.
-// A bare-literal revert, a wrong-token swap (e.g. .pane-subtitle repointed to
-// the .gs-state-only `-sm` escape hatch) and a shrunk :root token are all the
-// SAME failure mode here — "the resolved number is wrong or ungoverned" — so
-// one assertion per selector/property catches all three instead of three
-// separate GUARD tests per selector.
+// --- TYPE SCALE (ticket claim 1) — ENUMERATED to exactly the concrete
+// selectors below (round 9: no longer "every wall/pane/card text selector",
+// an unbounded claim — see the header comment). One real wall tile fixture,
+// one real sidebar-card fixture; jsdom's cascade decides which declaration
+// wins and what the winning custom property actually resolves to at THAT
+// element, honestly — including the exact body-scoped custom-property
+// override and ancestor-scoped higher-specificity holes rounds 3/6/7/8 chased
+// with an increasingly complex hand-rolled resolver.
 //
 // .pane-recap::after (the chevron glyph) and .gs-idx (a fixed-box numeric
 // badge, tightly coupled to --term-ctx-bar-h's own px math) are deliberately
@@ -304,330 +294,208 @@ function assertRendersVisibly(css, selector, ancestorTokens, label) {
 // own bare `line-height: 15px` by design and is excluded from the
 // line-height check (font-size still applies to it, same as the other card
 // selectors).
-const WALL_PANE_SELECTORS = ['.gs-head', '.pane-subtitle', '.pane-recap', '.gs-state', '.term-ctx-bar'];
-const CARD_SELECTORS = ['.ar-title', '.ar-sub', '.ar-ctx'];
-const WALL_PANE_LINE_HEIGHT_SELECTORS = ['.pane-subtitle', '.pane-recap'];
-const CARD_LINE_HEIGHT_SELECTORS = ['.ar-title', '.ar-sub'];
-// Only .gs-state may read the `-sm` escape hatch style.css scopes to it; the
-// other four wall/pane selectors must read the base token.
-const WALL_PANE_SM_ALLOWED = new Set(['.gs-state']);
-// Real DOM ancestor chain each card selector renders under (nav.js's
-// _agentRowHtml: .agent-row > .ar-main > .ar-top > .ar-ctx, and .agent-row >
-// .ar-main > .ar-title/.ar-sub directly) — used to resolve font-size the way
-// a browser's cascade actually would (highest real specificity wins), not by
-// literal selector-string lookup. CMX-257 round 6: a higher-specificity
-// `.ar-main .ar-title, .ar-main .ar-sub { font-size: 9px; }` rule reverts the
-// card type scale while the plain `.ar-title`/`.ar-sub` rules keep their
-// tokenised declarations untouched — a literal-string lookup (as GUARD 1
-// used) never sees the override that actually wins on a real screen.
-const CARD_ANCESTORS = {
-    '.ar-title': new Set(['.agent-row', '.ar-main']),
-    '.ar-sub': new Set(['.agent-row', '.ar-main']),
-    '.ar-ctx': new Set(['.agent-row', '.ar-main', '.ar-top']),
-};
+const WALL_TILE_FIXTURE = `
+<div id="term-stage">
+  <div class="grid-stack">
+    <div class="grid-stack-item">
+      <div class="grid-stack-item-content">
+        <div class="gs-head">
+          <span class="gs-state gs-state-idle" data-state-for="@1">
+            <span class="gs-state-glyph">&#9675;</span><span class="gs-state-word">idle</span>
+          </span>
+          <span class="gs-grip">
+            <span class="pane-title">t</span>
+            <span class="pane-subtitle">s</span>
+          </span>
+        </div>
+        <div class="pane-recap">recap text</div>
+        <div class="term-ctx-bar"></div>
+      </div>
+    </div>
+  </div>
+</div>`;
+const CARD_FIXTURE = `
+<div id="sidebar-agents">
+  <div class="agent-row rich" data-agent="a">
+    <span class="term-status-dot"></span>
+    <span class="ar-type"></span>
+    <div class="ar-main">
+      <div class="ar-top">
+        <span class="agent-row-name"></span>
+        <span class="ar-ctx">50%</span>
+      </div>
+      <div class="ar-title">ai title</div>
+      <div class="ar-sub"><span class="ar-state">working</span></div>
+    </div>
+  </div>
+</div>`;
 
-// CMX-257 round 7: the judge found the exact same specificity-blind hole
-// resolveForContext()/CARD_ANCESTORS already closed for the card family, one
-// selector-string lookup over — `body .pane-subtitle { font-size: 10px; }`
-// (0,1,1) outranks the plain `.pane-subtitle` rule (0,1,0) at every viewport
-// and reverts the type scale while resolvedBodyAtDesktop() keeps reading the
-// untouched tokenised rule, since it only matches the literal selector
-// string. Real DOM ancestor chain per terminals.js's paneHead()/
-// _wallTileHTML()/_recapLineHTML()/_ctxBarHTML(): every one of these five
-// selectors renders under `body`, and inside either `.term-pane` (single
-// mode) or `.grid-stack-item`/`.grid-stack-item-content` (wall mode);
-// `.pane-subtitle` additionally sits inside `.gs-head`'s `.gs-grip`/
-// `.gs-label` wrapper span. A shared superset (rather than per-selector
-// sets) is safe here: resolveForContext() only requires a rule's ancestor
-// TOKENS to be a subset of the given set, so including every selector's real
-// ancestors in one set can't let a rule scoped to an unreal context match.
-const WALL_PANE_ANCESTORS = new Set([
-    'body', '.term-pane', '.grid-stack-item', '.grid-stack-item-content',
-    '.gs-head', '.gs-grip', '.gs-label',
-]);
-
-// Resolves a font-size/line-height declaration VALUE (either "var(--name)" or
-// a bare "Npx"/ratio literal) to a { num, tokenName } pair, following the
-// var() through the resolved :root map. tokenName is null for a bare literal
-// (still resolvable — the floor still applies — but not token-sourced).
-function resolvedNumberViaToken(rawValue, rootVars) {
-    const v = rawValue.trim();
-    const varM = v.match(/^var\((--[\w-]+)\)$/);
-    if (varM) {
-        const tokenName = varM[1];
-        const tokenVal = rootVars.get(tokenName);
-        assert.ok(tokenVal, `${tokenName} not resolvable from :root`);
-        const m = tokenVal.match(/^([0-9.]+)(px)?$/);
-        assert.ok(m, `${tokenName} (${tokenVal}) is not a plain numeric value`);
-        return { num: parseFloat(m[1]), tokenName };
-    }
-    const lit = v.match(/^([0-9.]+)(px)?$/);
-    assert.ok(lit, `unresolvable value "${v}"`);
-    return { num: parseFloat(lit[1]), tokenName: null };
+// Asserts (a) the given token's var() is the declaration that actually wins
+// the cascade at `el` (a bare literal or a different, higher-specificity
+// declaration winning both fail this) and (b) that token's real cascaded
+// value at `el` — following jsdom's own custom-property inheritance, exactly
+// as a browser would — clears the legibility floor. `strict` selects `>` vs
+// `>=` (only .gs-state's `-sm` escape hatch needs the old ">" pill-text
+// floor).
+function assertTokenFontSize(win, el, wantToken, floorPx, strict) {
+    const cs = win.getComputedStyle(el);
+    assert.equal(cs.fontSize, `var(${wantToken})`,
+        `expected font-size: var(${wantToken}) to win the cascade at this element, got "${cs.fontSize}" — a bare ` +
+        'literal, the wrong token, or a higher-specificity rule for the same rendered element is winning');
+    const raw = cs.getPropertyValue(wantToken);
+    const m = raw.match(/^([0-9.]+)px$/);
+    assert.ok(m, `${wantToken}'s real cascaded value at this element ("${raw}") is not a plain px value`);
+    const num = parseFloat(m[1]);
+    assert.ok(strict ? num > floorPx : num >= floorPx,
+        `${wantToken}'s real cascaded value at this element (${raw}) has dropped ${strict ? 'to (or below)' : 'back toward'} the ${floorPx}px legibility floor`);
+}
+function assertTokenLineHeight(win, el, wantToken, floor) {
+    const cs = win.getComputedStyle(el);
+    assert.equal(cs.lineHeight, `var(${wantToken})`,
+        `expected line-height: var(${wantToken}) to win the cascade at this element, got "${cs.lineHeight}" — a bare ` +
+        'literal or a higher-specificity rule for the same rendered element is winning');
+    const raw = cs.getPropertyValue(wantToken);
+    const num = parseFloat(raw);
+    assert.ok(Number.isFinite(num), `${wantToken}'s real cascaded value ("${raw}") is not numeric`);
+    assert.ok(num >= floor, `${wantToken}'s real cascaded value (${raw}) has dropped back toward the old 1.3 leading`);
 }
 
-test('type scale: wall/pane text resolves font-size from --wall-pane-font-size* tokens, specificity-aware, never below the legibility floor', () => {
-    const rootVars = resolvedRootVars(CSS);
-    for (const sel of WALL_PANE_SELECTORS) {
-        const raw = resolveForContext(CSS, sel, WALL_PANE_ANCESTORS, 'font-size');
-        assert.ok(raw, `no font-size resolves for ${sel} in its real wall/pane context`);
-        const wantToken = WALL_PANE_SM_ALLOWED.has(sel) ? '--wall-pane-font-size-sm' : '--wall-pane-font-size';
-        const { num, tokenName } = resolvedNumberViaToken(raw, rootVars);
-        assert.equal(tokenName, wantToken,
-            `${sel} must resolve font-size from var(${wantToken}) at its real render site — resolved to "${raw.trim()}" ` +
-            'instead (a bare literal, the wrong token, or a higher-specificity rule for the same rendered element may be winning)');
-        if (WALL_PANE_SM_ALLOWED.has(sel)) {
-            assert.ok(num > 10, `${sel}'s resolved font-size (${num}px, via ${tokenName}) has dropped to (or below) the old 10px pill text`);
-        } else {
-            assert.ok(num >= 11, `${sel}'s resolved font-size (${num}px, via ${tokenName}) has dropped back toward the old <11px pane text`);
-        }
+test('type scale: the real wall tile\'s .gs-head/.pane-subtitle/.pane-recap/.term-ctx-bar resolve font-size from --wall-pane-font-size, jsdom cascade', () => {
+    const win = mountWithRealCss(WALL_TILE_FIXTURE);
+    const q = sel => win.document.querySelector(sel);
+    for (const sel of ['.gs-head', '.pane-subtitle', '.pane-recap', '.term-ctx-bar']) {
+        assertTokenFontSize(win, q(sel), '--wall-pane-font-size', 11, false);
     }
 });
 
-test('type scale: .pane-subtitle/.pane-recap resolve line-height from --wall-pane-line-height, specificity-aware, above the legibility floor', () => {
-    const rootVars = resolvedRootVars(CSS);
-    for (const sel of WALL_PANE_LINE_HEIGHT_SELECTORS) {
-        const raw = resolveForContext(CSS, sel, WALL_PANE_ANCESTORS, 'line-height');
-        assert.ok(raw, `no line-height resolves for ${sel} in its real wall/pane context`);
-        const { num, tokenName } = resolvedNumberViaToken(raw, rootVars);
-        assert.equal(tokenName, '--wall-pane-line-height',
-            `${sel} must resolve line-height from var(--wall-pane-line-height) at its real render site — resolved to ` +
-            `"${raw.trim()}" instead (a higher-specificity rule for the same rendered element may be winning)`);
-        assert.ok(num >= 1.45, `${sel}'s resolved line-height (${num}) has dropped back toward the old 1.3 leading`);
+test('type scale: the real wall tile\'s .gs-state pill resolves font-size from the --wall-pane-font-size-sm escape hatch, jsdom cascade', () => {
+    const win = mountWithRealCss(WALL_TILE_FIXTURE);
+    assertTokenFontSize(win, win.document.querySelector('.gs-state'), '--wall-pane-font-size-sm', 10, true);
+});
+
+test('type scale: .pane-subtitle/.pane-recap resolve line-height from --wall-pane-line-height in the real wall tile, jsdom cascade', () => {
+    const win = mountWithRealCss(WALL_TILE_FIXTURE);
+    const q = sel => win.document.querySelector(sel);
+    for (const sel of ['.pane-subtitle', '.pane-recap']) {
+        assertTokenLineHeight(win, q(sel), '--wall-pane-line-height', 1.45);
     }
 });
 
-test('type scale: sidebar-card text resolves font-size from --card-font-size, specificity-aware, never below the legibility floor', () => {
-    const rootVars = resolvedRootVars(CSS);
-    for (const sel of CARD_SELECTORS) {
-        const raw = resolveForContext(CSS, sel, CARD_ANCESTORS[sel], 'font-size');
-        assert.ok(raw, `no font-size resolves for ${sel} in its real card context`);
-        const { num, tokenName } = resolvedNumberViaToken(raw, rootVars);
-        assert.equal(tokenName, '--card-font-size',
-            `${sel} must resolve font-size from var(--card-font-size) at its real render site — resolved to ` +
-            `"${raw.trim()}" instead (a higher-specificity rule for the same rendered element may be winning)`);
-        assert.ok(num >= 11, `${sel}'s resolved font-size (${num}px) has dropped back toward the old 9-10px card text`);
+test('type scale: the real sidebar card\'s .ar-title/.ar-sub/.ar-ctx resolve font-size from --card-font-size, jsdom cascade', () => {
+    const win = mountWithRealCss(CARD_FIXTURE);
+    const q = sel => win.document.querySelector(sel);
+    for (const sel of ['.ar-title', '.ar-sub', '.ar-ctx']) {
+        assertTokenFontSize(win, q(sel), '--card-font-size', 11, false);
     }
 });
 
-test('type scale: .ar-title/.ar-sub resolve line-height from --card-line-height, specificity-aware, above the legibility floor', () => {
-    const rootVars = resolvedRootVars(CSS);
-    for (const sel of CARD_LINE_HEIGHT_SELECTORS) {
-        const raw = resolveForContext(CSS, sel, CARD_ANCESTORS[sel], 'line-height');
-        assert.ok(raw, `no line-height resolves for ${sel} in its real card context`);
-        const { num, tokenName } = resolvedNumberViaToken(raw, rootVars);
-        assert.equal(tokenName, '--card-line-height',
-            `${sel} must resolve line-height from var(--card-line-height) at its real render site — resolved to "${raw.trim()}" instead`);
-        assert.ok(num >= 1.45, `${sel}'s resolved line-height (${num}) has dropped below the legibility floor`);
+test('type scale: .ar-title/.ar-sub resolve line-height from --card-line-height in the real sidebar card, jsdom cascade', () => {
+    const win = mountWithRealCss(CARD_FIXTURE);
+    const q = sel => win.document.querySelector(sel);
+    for (const sel of ['.ar-title', '.ar-sub']) {
+        assertTokenLineHeight(win, q(sel), '--card-line-height', 1.45);
     }
 });
 
-// --- GUARD 2c: "air in the chrome" at low densities (the CMX-230 comment above
-// `body.wall-density-airy #term-stage` in style.css names THIS file's density
-// guard by filename — this test is it). Two facts, both source-text since neither
-// is behaviourally provable in jsdom the way GUARD 2's numeric tokens are:
-//
-//   1. _setWallDensity's own cutoff is pinned at `<= 2` — style.css's comment's
-//      claim, made true.
-//
-//   2. buildWall calls _setWallDensity UNCONDITIONALLY (given a persisted
-//      _wallPreset), not from behind dead code. This one is genuinely
-//      unreachable-by-behaviour: buildWall only ever runs from inside
-//      renderTerminals, which ALWAYS calls _refitWallForDock() (itself calling
-//      the UNMUTATED applyGridLayout, which sets the SAME class) synchronously
-//      moments later in the very same render pass — so disabling buildWall's own
-//      restore line produces byte-identical DOM after every real render path a
-//      test can drive, no matter which public entry point exercises it. Anchored
-//      to the exact `if (_wallPreset) _setWallDensity(...)` form so a dead-code
-//      wrap (`if (false && _wallPreset) ...`) — which a plain substring/regex
-//      match on the call alone would miss, the exact hole GUARD 3a below fell
-//      into — cannot pass.
-test('density guard: _setWallDensity cuts off at <=2 panes, and buildWall restores it unconditionally on first paint', () => {
+// Shared "this element occupies space and paints" assertion, now against
+// jsdom's own resolved computed style instead of a hand-rolled property scan
+// — display/visibility/opacity/font-size are all properties jsdom resolves
+// honestly without needing `vw` (confirmed empirically). Used by the nav
+// "actually renders" fixture below.
+function assertRendersVisibly(win, el, label) {
+    const cs = win.getComputedStyle(el);
+    assert.notEqual(cs.display, 'none', `${label} has display: none at desktop — removed from the box tree entirely`);
+    assert.ok(!/^(hidden|collapse)$/.test(cs.visibility),
+        `${label} has visibility: ${cs.visibility} — invisible but still occupying box-tree space`);
+    assert.ok(parseFloat(cs.opacity) >= 0.3, `${label}'s opacity (${cs.opacity}) has dropped toward invisible`);
+    const fs = cs.fontSize.match(/^([0-9.]+)px$/);
+    if (fs) {
+        assert.ok(parseFloat(fs[1]) >= 8, `${label}'s font-size (${cs.fontSize}) has dropped toward unreadable`);
+    }
+}
+
+// --- GUARD 2c: "air in the chrome" at low densities — _setWallDensity's own
+// cutoff is pinned at `<= 2` (style.css's comment's claim, made true). Round
+// 9: the OTHER half this test used to assert — that buildWall calls
+// _setWallDensity unconditionally, not from behind dead code — is now in the
+// NOT GUARDED block at the top of this file. Two rounds of increasingly
+// specific text predicates on the same line (round 6's full-line anchor,
+// round 8's preceding-line precondition) each converged on a premise the next
+// mutation falsified, and the call site is genuinely unobservable from any
+// real render path this file can drive (renderTerminals always calls
+// _refitWallForDock -> applyGridLayout moments after buildWall, setting the
+// same class) — a third regex would be the same shape of hole with a new
+// premise, not a fix.
+test('density guard: _setWallDensity toggles wall-density-airy off at <=2 panes', () => {
     const fn = TERMINALS.slice(TERMINALS.indexOf('function _setWallDensity'));
     const body = fn.slice(0, fn.indexOf('\nfunction ', 10));
     assert.match(body, /wall-density-airy['"],\s*cols\s*\*\s*rows\s*<=\s*2\)/,
         '_setWallDensity must toggle wall-density-airy off `cols * rows <= 2` — the style.css comment\'s claimed cutoff');
-
-    const build = TERMINALS.slice(TERMINALS.indexOf('function buildWall'));
-    const buildBody = build.slice(0, build.indexOf('\nfunction ', 10));
-    // round 6: a substring match (the form this used to be) still matches the
-    // SAME text when it's wrapped in a dead outer branch — `if (false) if
-    // (_wallPreset) _setWallDensity(...)` contains the exact byte sequence
-    // `if (_wallPreset) _setWallDensity(...)` as a substring, so the old regex
-    // stayed green under that mutation. Anchored to the FULL LINE (^...$/m):
-    // whatever comes right after the line's leading whitespace must be this
-    // statement and nothing else, so any wrapper on the same line — `if
-    // (false)`, `if (0)`, `if (null)`, any of them — pushes the statement off
-    // the start of the line and the match fails. Closes the wrap as a class,
-    // not just the one spelling the judge tried.
-    assert.match(buildBody, /^\s*if\s*\(\s*_wallPreset\s*\)\s*_setWallDensity\(_wallPreset\.cols,\s*_wallPreset\.rows\);\s*$/m,
-        'buildWall must call _setWallDensity(_wallPreset.cols, _wallPreset.rows) unconditionally when _wallPreset ' +
-        'is set, as its OWN statement — not from behind a dead `if (false) ...` (or any other) wrapper on the same ' +
-        'line — so a reload sitting on a 1/2-col preset is airy on its own first paint, independent of ' +
-        'applyGridLayout\'s later call');
-    // CMX-257 round 8: the full-line anchor above closes the wrap on ONE line
-    // only — a dangling `if (false)` on the PRECEDING line (`if (false)\n    if
-    // (_wallPreset) _setWallDensity(...);`) leaves the guarded statement alone
-    // on ITS OWN line, byte-identical, still satisfying the /m-anchored regex,
-    // while making it that dangling if's (skipped) body. A real statement can
-    // only sit where it does unconditionally if whatever precedes it (skipping
-    // blank lines and `//` comments) is a COMPLETE prior statement/block
-    // boundary — ends in `;`, `{` or `}` — never an unbraced control-flow
-    // header (`if (...)`, `else`, `for (...)`, `while (...)`) with nothing
-    // else on it, which in real JS binds the very next statement as its body.
-    const buildLines = buildBody.split('\n');
-    const restoreLineIdx = buildLines.findIndex(l =>
-        /^\s*if\s*\(\s*_wallPreset\s*\)\s*_setWallDensity\(_wallPreset\.cols,\s*_wallPreset\.rows\);\s*$/.test(l));
-    assert.ok(restoreLineIdx > 0, 'could not locate the _setWallDensity restore line inside buildWall to check its preceding line');
-    let precedingIdx = restoreLineIdx - 1;
-    while (precedingIdx >= 0 && (buildLines[precedingIdx].trim() === '' || buildLines[precedingIdx].trim().startsWith('//')))
-        precedingIdx--;
-    const precedingLine = precedingIdx >= 0 ? buildLines[precedingIdx].trim() : '';
-    assert.ok(precedingLine === '' || /[;{}]$/.test(precedingLine),
-        `the _setWallDensity restore line sits directly after \`${precedingLine}\` — a line that does not end in ; { or } ` +
-        'reads as a dangling unbraced control-flow header (if/else/for/while with no braces), which in real JS silently ' +
-        'makes the restore statement THAT header\'s (conditionally-skipped) body while still matching the full-line regex above');
 });
 
-// --- WIRING: the "air in the chrome" feature must actually PRODUCE air, not just
-// toggle a class. GUARD 2c above pins that body.wall-density-airy gets TOGGLED at
-// the right cutoff; that says nothing about what the class rule itself DOES. A
-// judge round zeroed body.wall-density-airy #term-stage's horizontal padding to
-// 0px while leaving the class-toggle logic and GUARD 2c's regexes untouched, and
-// both density guards stayed green while the ticket's actual objective (wide
-// margins at low density — Liav's Xirp comparison) silently regressed to
-// edge-to-edge dense. jsdom can't resolve the cascade (this file's own note
-// above cssRules), so this is a source-text floor on the same class GUARD 2c
-// already pins, mirroring GUARD 2's numeric-floor discipline.
-//
-// CMX-257 round 7: resolvedBodyAtDesktop() matches by literal selector
-// STRING, so it is specificity-blind — exactly the hole resolveForContext()/
-// CARD_ANCESTORS already closed for the card family. The judge found the
-// same hole here: `html body.wall-density-airy #term-stage { padding-left: 0;
-// ...}` and `html ...  .grid-stack { max-width: none; }` both have a
-// different selector STRING than the guarded rules, so they win the real
-// cascade (higher specificity) while resolvedBodyAtDesktop() keeps reading
-// the untouched originals. The padding/margin/max-width/min-width checks
-// below now resolve through resolveAllForContext()'s real ancestor-token set
-// instead.
-//
-// CMX-257 round 8: round 7's set was just `{'.wall-density-airy'}` —
-// "the one token the round-7 mutation happened to need". The judge's next
-// mutation (`body.wall-density-airy #panel-terminals #term-stage`) used a
-// REAL ancestor id (per templates/index.html: `#term-stage` sits inside
-// `<div class="panel" id="panel-terminals">`, itself inside `<main
-// class="canvas" id="canvas">`, itself inside `<div class="app">`) that
-// simply wasn't in the set, so resolveAllForContext() dropped that rule as
-// "ancestor not available" even though it's the highest-specificity rule a
-// real browser actually applies. Rather than add just `#panel-terminals` (the
-// same one-token patch that created this hole), this lists the FULL real
-// ancestor chain from index.html between `<body>` and `#term-stage` — the
-// only way a future selector naming ANY real ancestor (not just the one this
-// round's judge picked) still resolves correctly.
-const AIRY_STAGE_ANCESTORS = new Set(['.wall-density-airy', '.app', '.canvas', '#canvas', '.panel', '#panel-terminals']);
-const AIRY_GRID_ANCESTORS = new Set([...AIRY_STAGE_ANCESTORS, '#term-stage']);
-test('WIRING: the airy-density rule actually pads the stage — not just an empty class toggle', () => {
-    // Kept as a literal-selector lookup deliberately: this is ONLY read by the
-    // padding-top/-bottom/padding-shorthand ban below, which asks "does THIS
-    // specific rule add vertical padding", not "what wins the cascade" — a
-    // resolved-cascade read would also surface #term-stage's OWN unrelated
-    // `padding-bottom: 4px` base rule (line ~1070) and false-fail on every run.
-    // CMX-257 round 3: resolvedBody() drops ANY rule inside an @media block —
-    // including one whose condition is always true at a real desktop
-    // viewport (`@media (min-width: 0px) { ... }`). Every check below reads
-    // stageBody, so a padding-bottom declaration smuggled in through such a
-    // wrapper was invisible to the property-ban loop further down. Same hole,
-    // same fix, as resolvedRootVars() above.
+// --- WIRING: the "air in the chrome" feature must actually PRODUCE air, not
+// just toggle a class (claim 2). Round 9: the padding-left/-right clamp()'s
+// actual PIXEL margin is `vw`-dependent and jsdom cannot resolve `vw` at all
+// (confirmed empirically — see the NOT GUARDED note at the top of this
+// file), so the exact desktop margin in px is out of scope here. WHICH RULE
+// WINS the cascade — the actual shape of the round-7 judge mutation
+// (`#term-stage:not(.no-air)` outranking the guarded rule on specificity and
+// zeroing the padding outright) — IS still honestly observable: substituting
+// the one unresolvable `6vw` term for its literal computed equivalent AT
+// DESKTOP_VIEWPORT_PX (6% of 1920px = 115.2px) is a mechanical value swap,
+// not a hand-rolled cascade/specificity resolver — the selector text,
+// specificity and clamp() MIN/MAX floors stay byte-identical to production,
+// and jsdom's OWN engine still decides which declaration wins.
+const AIRY_PADDING_CSS = CSS.replace(/clamp\(16px, 6vw, 64px\)/g, 'clamp(16px, 115.2px, 64px)');
+const AIRY_FIXTURE = `<div class="app"><main class="canvas" id="canvas"><div class="panel" id="panel-terminals">
+  <div id="term-stage"><div class="grid-stack"></div></div>
+</div></main></div>`;
+test('WIRING: the airy-density rule\'s horizontal padding is won by the real selector, not a higher-specificity override', () => {
+    const win = mountWithRealCss(AIRY_FIXTURE, ' class="wall-density-airy"', AIRY_PADDING_CSS);
+    const cs = win.getComputedStyle(win.document.getElementById('term-stage'));
+    const px = v => {
+        const m = v.match(/([0-9.]+)px/);
+        return m ? parseFloat(m[1]) : NaN;
+    };
+    // At DESKTOP_VIEWPORT_PX the PREFERRED term (115.2px) exceeds the 64px MAX,
+    // so the clamp resolves to its 64px ceiling — a floor well below that (32px,
+    // the same generous-but-real floor the old vw-based version used) still
+    // fails hard against the round-7 mutation's flat 0.
+    assert.ok(px(cs.paddingLeft) >= 32,
+        `#term-stage's resolved padding-left (${cs.paddingLeft}) is too thin at a desktop width — a higher-specificity ` +
+        'override (or a zeroed clamp) is winning the cascade instead of the airy-density rule');
+    assert.ok(px(cs.paddingRight) >= 32,
+        `#term-stage's resolved padding-right (${cs.paddingRight}) is too thin at a desktop width — a higher-specificity ` +
+        'override (or a zeroed clamp) is winning the cascade instead of the airy-density rule');
+});
+test('WIRING: the airy-density rule never adds vertical padding — #term-stage\'s own row math depends on it', () => {
+    // Deliberately a literal-selector source-text read, not a jsdom mount: this
+    // asks "does THIS specific rule add vertical padding", not "what wins the
+    // cascade" — a resolved-cascade read would also surface #term-stage's OWN
+    // unrelated `padding-bottom: 4px` base rule and false-fail on every run.
     const stageBody = resolvedBodyAtDesktop(CSS, 'body.wall-density-airy #term-stage');
-    // Specificity-aware resolution of the SAME rule's padding-left/-right, for
-    // the clamp checks below — this is what a browser actually renders, and
-    // what the round-7 `html`-prefixed override mutation would win over.
-    const stageResolved = resolvedBodyForContext(CSS, '#term-stage', AIRY_STAGE_ANCESTORS);
-    // clamp(MIN, PREFERRED, MAX) — a round neutered the padding by zeroing the
-    // vw-based PREFERRED term (clamp(16px, 0vw, 64px)) while leaving both px
-    // floors untouched at 16px, so at any real desktop width the clamp just
-    // resolves to its 16px minimum forever — a flat edge-to-edge nub, not the
-    // scaling margin the ticket wants. Capturing only the first (MIN) argument
-    // can't see that: this pins all three clamp() arguments.
-    const left = stageResolved.match(/padding-left:\s*clamp\(([0-9.]+)px,\s*([0-9.]+)vw,\s*([0-9.]+)px\)/);
-    const right = stageResolved.match(/padding-right:\s*clamp\(([0-9.]+)px,\s*([0-9.]+)vw,\s*([0-9.]+)px\)/);
-    assert.ok(left, 'body.wall-density-airy #term-stage has no resolved padding-left: clamp(MINpx, PREFERREDvw, MAXpx)');
-    assert.ok(right, 'body.wall-density-airy #term-stage has no resolved padding-right: clamp(MINpx, PREFERREDvw, MAXpx)');
-    assert.ok(parseFloat(left[1]) > 0,
-        `body.wall-density-airy #term-stage's padding-left clamp floor (${left[1]}px) has been zeroed — the airy class toggles but produces no margin`);
-    assert.ok(parseFloat(right[1]) > 0,
-        `body.wall-density-airy #term-stage's padding-right clamp floor (${right[1]}px) has been zeroed — the airy class toggles but produces no margin`);
-    assert.ok(parseFloat(left[2]) > 0,
-        `body.wall-density-airy #term-stage's padding-left clamp PREFERRED term (${left[2]}vw) has been zeroed — desktop widths would collapse to the ${left[1]}px floor forever, effectively dense again`);
-    assert.ok(parseFloat(right[2]) > 0,
-        `body.wall-density-airy #term-stage's padding-right clamp PREFERRED term (${right[2]}vw) has been zeroed — desktop widths would collapse to the ${right[1]}px floor forever, effectively dense again`);
-
-    // This PR's judge, round 1: the checks above pin padding-left/-right, but
-    // nothing here forbids ADDING padding-top/padding-bottom (or the `padding`
-    // shorthand, which sets all four sides at once). style.css's own comment
-    // on this rule states the must-never explicitly: #term-stage's vertical
-    // extent feeds _wallFill's row math via getBoundingClientRect().top, so a
-    // vertical padding change here desyncs that math and either starves the
-    // wall of rows or runs the last row past the fold. A round that added
-    // `padding-bottom: 48px;` alongside the untouched horizontal clamps left
-    // every assertion above green.
     for (const [prop] of declarations(stageBody)) {
         assert.ok(prop !== 'padding-top' && prop !== 'padding-bottom' && prop !== 'padding',
             `body.wall-density-airy #term-stage declares ${prop} — this rule must add HORIZONTAL padding only; ` +
             '_wallFill computes grid rows off #term-stage\'s own getBoundingClientRect().top, so any vertical ' +
             'padding here desyncs that math and either starves the wall of rows or runs the last row past the fold');
     }
-    // CMX-230 round 8: MIN and PREFERRED (left[1]/[2]) were pinned above, but MAX
-    // (left[3]/right[3]) — the argument that actually decides the desktop margin —
-    // was only ever captured, never asserted. A round shrank the cap from 64px to
-    // 17px, which reads as ">0" and leaves both floors + the vw term untouched, but
-    // resolves the clamp to a flat 17px at any width above ~283px (below that, the
-    // PREFERRED vw term would have won instead). Resolve the actual clamp() formula
-    // at a real desktop width and assert the margin it produces is still wide, not
-    // just non-zero — that's the only way to see a shrunk-but-nonzero cap.
-    const resolveClamp = (min, preferredVw, max, viewportPx) =>
-        Math.min(max, Math.max(min, preferredVw * viewportPx / 100));
-    const DESKTOP_PX = 1920;
-    const leftMargin = resolveClamp(parseFloat(left[1]), parseFloat(left[2]), parseFloat(left[3]), DESKTOP_PX);
-    const rightMargin = resolveClamp(parseFloat(right[1]), parseFloat(right[2]), parseFloat(right[3]), DESKTOP_PX);
-    assert.ok(leftMargin >= 32,
-        `at a ${DESKTOP_PX}px desktop width the resolved padding-left margin (${leftMargin}px) is too thin — the clamp's MAX ` +
-        `argument (${left[3]}px) has been shrunk toward the floor, so the airy class toggles but produces almost no margin`);
-    assert.ok(rightMargin >= 32,
-        `at a ${DESKTOP_PX}px desktop width the resolved padding-right margin (${rightMargin}px) is too thin — the clamp's MAX ` +
-        `argument (${right[3]}px) has been shrunk toward the floor, so the airy class toggles but produces almost no margin`);
-
-    const gridBody = resolvedBodyForContext(CSS, '.grid-stack', AIRY_GRID_ANCESTORS);
-    const maxWidth = gridBody.match(/max-width:\s*([0-9.]+)px/);
-    assert.ok(maxWidth, 'body.wall-density-airy #term-stage .grid-stack has no max-width rule');
-    assert.ok(parseFloat(maxWidth[1]) > 0,
-        `the centred max-width column (${maxWidth[1]}px) has been zeroed — panes would stretch edge-to-edge again`);
-    // A floor alone lets the cap be raised instead of zeroed — at any real
-    // viewport a 100000px cap never binds, so margin: 0 auto has no slack and
-    // the wall stretches edge-to-edge again just as surely as a 0px cap does.
-    // Pin an actual ceiling too, generous enough for a deliberate future
-    // redesign but well below "never binds".
-    assert.ok(parseFloat(maxWidth[1]) <= 1920,
-        `the centred max-width column (${maxWidth[1]}px) is so large it never binds at any real viewport — panes would stretch edge-to-edge again just as if it were zeroed`);
-
-    // The floors above pin the padding and the max-width, but this rule's own
-    // failure message calls the result "the centred max-width column" without
-    // ever asserting the centring itself. Without `margin: 0 auto`, the capped
-    // column is left-aligned inside the padded stage — at any viewport wider
-    // than max-width + padding, the wall hugs the left edge with all the slack
-    // dumped on the right: a narrower left-anchored wall, not the ticket's "one
-    // column with wide margins" (Liav's Xirp comparison).
-    assert.match(gridBody, /margin:\s*0\s+auto\s*;/,
-        'body.wall-density-airy #term-stage .grid-stack must set margin: 0 auto — without it the capped column is left-anchored, not centred');
-
-    // GUARD 5 (WIRING) round 9: per CSS 2.1 §10.4, min-width overrides
-    // max-width when they conflict. A min-width: 100% declaration added
-    // alongside the untouched max-width leaves every assertion above green
-    // (max-width is still present, >0, <=1920, and margin: 0 auto is still
-    // there) while the cap never actually binds at any viewport.
-    assert.doesNotMatch(gridBody, /min-width\s*:/,
-        'body.wall-density-airy #term-stage .grid-stack must not declare min-width — per CSS 2.1 §10.4 it overrides max-width when they conflict, ' +
-        'so the capped column would never bind at any viewport and the wall would stretch edge-to-edge again');
+});
+test('WIRING: the airy-density .grid-stack column stays capped (max-width), centred (margin: 0 auto), and the cap is never overridden by min-width', () => {
+    const win = mountWithRealCss(AIRY_FIXTURE, ' class="wall-density-airy"');
+    const cs = win.getComputedStyle(win.document.querySelector('.grid-stack'));
+    // A shrunk-but-nonzero cap (e.g. 17px) would still pass a bare ">0" floor;
+    // pin the actual shipped value instead.
+    assert.equal(cs.maxWidth, '1400px',
+        `the centred max-width column resolved to ${cs.maxWidth}, not the shipped 1400px — either zeroed/shrunk or overridden by a higher-specificity rule`);
+    assert.equal(cs.marginLeft, 'auto', `margin-left resolved to ${cs.marginLeft}, not auto — without it the capped column is left-anchored, not centred`);
+    assert.equal(cs.marginRight, 'auto', `margin-right resolved to ${cs.marginRight}, not auto — without it the capped column is left-anchored, not centred`);
+    // Per CSS 2.1 §10.4, min-width overrides max-width when they conflict — a
+    // min-width: 100% override left every check above green in a real judge
+    // mutation (max-width was even present, just never binding) while the cap
+    // never actually took effect at any viewport.
+    assert.equal(cs.minWidth, 'auto',
+        `min-width resolved to ${cs.minWidth}, not auto — per CSS 2.1 §10.4 it overrides max-width when they conflict, so the capped column would never bind at any viewport`);
 });
 
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
@@ -704,26 +572,62 @@ test('non-hue cue — kanban "error" analogue (failed): the status chip carries 
     assert.match(m[1], /failed/i, 'STATUS_CHIPS.failed.label must literally say "failed"');
 });
 
-// CMX-257 round 7: the test above only pins STATUS_CHIPS.failed's label
-// CONSTANT — nothing asserted the label actually reaches the rendered card.
-// The judge blanked the render site (`${escHtml(chipMeta.label)}` →
-// `${escHtml('')}`) and left the constant, and every other guard in this
-// file, untouched: every card's .kanban-state-chip still carries its
-// st-failed/st-running/... colour class but renders as an empty pill — the
-// exact hue-only regression this guard family exists to prevent, on a board
-// where one lane (Review) holds four different statuses at once. Mirrors the
-// wall .gs-state pill's WIRING test above (`g.textContent = s.glyph` /
-// `w.textContent = s.word`) — pin the render call site's source, not just
-// the data it reads from.
-test('WIRING: the kanban state chip actually renders chipMeta.label — not colour-only', () => {
-    assert.match(KANBAN, /class="kanban-state-chip \$\{chipMeta\.cls\}">\$\{escHtml\(chipMeta\.label\)\}<\/span>/,
-        'the kanban card\'s .kanban-state-chip no longer interpolates escHtml(chipMeta.label) — only the st-* colour ' +
-        'class would remain, going hue-only for every status on the board, including "failed"');
-});
+// CMX-257 round 9 (CLAIM 4's exception — stays fully guarded, gets the most
+// direct proof available per the human directive): the test above only pins
+// STATUS_CHIPS.failed's label CONSTANT — round 7's source-regex pair pinned
+// the render call site's TEXT but not the VALUE travelling between them, and
+// the judge blanked chipMeta.label right where it's looked up (leaving both
+// regexes byte-identical). This drives the REAL renderKanban() into a REAL
+// DOM (same jsdom-import technique as tests/wallnav.test.mjs/
+// tests/sidebar.test.mjs: real main.js entry order, then the target module)
+// and reads the rendered .kanban-state-chip/.kanban-card-error text nodes
+// back — mirrors the wall .gs-state pill's WIRING test above and
+// sidebar.test.mjs:447's real `.ar-state` read, the two members of this guard
+// family that have never fallen to a judge mutation because they assert the
+// rendered node, not source text.
+test('WIRING: a REAL rendered kanban card shows its status chip word AND its error text — not colour-only', async () => {
+    const BODY = '<div id="work-board"><div id="kanban-board"></div><div id="kanban-empty"></div><div id="kanban-filters"></div></div>';
+    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
+        { url: 'http://localhost:5005/', pretendToBeVisual: true });
+    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
+        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
+        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
+        // defineProperty, NOT assignment — globalThis.navigator is getter-only
+        // from node 21 (see tests/wall.test.mjs's note).
+        Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
+    }
+    dom.window.matchMedia = q => ({
+        media: q, matches: false, addEventListener() {}, removeEventListener() {},
+        addListener() {}, removeListener() {},
+    });
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    globalThis.window.chela = globalThis.window.chela || {};
+    globalThis.setInterval = () => 0;
+    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
 
-test('non-hue cue — kanban card error: the error TEXT renders on the card, not just .kanban-card-error\'s red colour', () => {
-    assert.match(KANBAN, /class="kanban-card-error"[^>]*>\$\{escHtml\(card\.last_error/,
-        'the card no longer renders card.last_error as text — only the red .kanban-card-error colour would remain');
+    // Browser-faithful import order: main.js is the entry (nav <-> main is a
+    // cycle — import anything else first and its `let`s are in their TDZ).
+    await import('../chela/dashboard/static/js/main.js');
+    const kanban = await import('../chela/dashboard/static/js/kanban.js');
+
+    kanban.renderKanban({
+        configured: true,
+        workflows: [{
+            path: 'wf.yaml',
+            recent_runs: [{ task_id: 'T1', status: 'failed', last_error: 'boom', ended_at: '2026-01-01' }],
+        }],
+    });
+
+    const chip = document.querySelector('#kanban-board .kanban-state-chip');
+    assert.ok(chip, 'no .kanban-state-chip rendered for a failed card');
+    assert.match(chip.textContent, /failed/i,
+        'the REAL rendered .kanban-state-chip has no "failed" text — only its st-failed colour class would remain, ' +
+        'the exact hue-only regression this guard exists to prevent');
+
+    const err = document.querySelector('#kanban-board .kanban-card-error');
+    assert.ok(err, 'no .kanban-card-error rendered for a failed card with last_error set');
+    assert.match(err.textContent, /boom/,
+        'the REAL rendered .kanban-card-error has no error text — only its red colour would remain');
 });
 
 // --- GUARD 4: a context-% threshold is never colour-only — the exact number
@@ -1091,25 +995,30 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
         'the .side-subhead label text is missing/blank — the demoted nav group would render with no heading at all');
 });
 
-// round 6: .side-subhead alone drew FIVE separate findings across this file's
-// history (display:none, opacity, font-size, and — this round — visibility)
-// because each fix pinned only the ONE property the previous mutation used.
-// #side-nav-more (the demoted group's actual render target — views.js's own
-// "RE-PARENTING, NOT REMOVAL" must-never) has the SAME failure mode and, until
-// now, no visibility guard at all: hiding it in CSS deletes Knowledge/Agents/
-// Personas/Cost from the shipped sidebar with every markup-level guard above
-// still green, since none of them read a stylesheet. One shared assertion
-// (assertRendersVisibly, defined near the top of this file) applied to both
-// elements closes the class instead of adding a sixth property-shaped patch.
-//
-// Real DOM ancestor chain, per templates/index.html: both `.side-subhead` and
-// `#side-nav-more` sit directly inside `<section class="side-section">`,
-// itself inside `<aside class="sidebar">` — the exact context the round-7
-// judge's `.side-section #side-nav-more` mutation exploits.
-const SIDE_SECTION_ANCESTORS = new Set(['.app', '.sidebar', '.side-section']);
+// round 9: .side-subhead alone drew FIVE separate findings before round 6's
+// consolidation and one more after it (a `font-size: 0` that the old
+// property-scan's px-only regex SKIPPED — a valid unitless zero — rather than
+// failed, the strongest possible version of the exact regression this guard
+// exists to catch). #side-nav-more (the demoted group's actual render target
+// — views.js's own "RE-PARENTING, NOT REMOVAL" must-never) shares the same
+// element and failure mode. Both are mounted via the REAL style.css in jsdom
+// (assertRendersVisibly, defined near the top of this file), against the
+// real ancestor markup — per templates/index.html, both sit directly inside
+// `<section class="side-section">`, itself inside `<aside class="sidebar">`,
+// itself inside `<div class="app">` — so jsdom's own cascade/specificity
+// (verified honest for display/visibility/opacity/font-size) decides what
+// actually renders, closing the ancestor-scoped-override hole a literal
+// selector-string lookup missed AND the font-size:0 regex-skip hole in the
+// same fixture.
+const SIDE_SECTION_FIXTURE = `<div class="app"><aside class="sidebar"><section class="side-section">
+  <div class="side-list" id="side-nav"></div>
+  <div class="side-subhead">More</div>
+  <div class="side-list side-list-secondary" id="side-nav-more"><div class="side-item"><span class="side-item-icon"></span><span class="side-item-label">x</span></div></div>
+</section></aside></div>`;
 test('.side-subhead and #side-nav-more both actually render — occupy space and paint, not just exist in the markup', () => {
-    assertRendersVisibly(CSS, '.side-subhead', SIDE_SECTION_ANCESTORS, 'the demoted nav group\'s "More" heading');
-    assertRendersVisibly(CSS, '#side-nav-more', SIDE_SECTION_ANCESTORS, 'the demoted nav group\'s render target');
+    const win = mountWithRealCss(SIDE_SECTION_FIXTURE);
+    assertRendersVisibly(win, win.document.querySelector('.side-subhead'), 'the demoted nav group\'s "More" heading');
+    assertRendersVisibly(win, win.document.getElementById('side-nav-more'), 'the demoted nav group\'s render target');
 });
 
 // --- CMX-257 round 3: resolvedBodyAtDesktop() resolves a selector by matching
@@ -1151,16 +1060,6 @@ function selectorSpecificity(selector) {
     const types = (bare.match(/[a-zA-Z][\w-]*/g) || []).length;
     return ids * 100 + classlike * 10 + types;
 }
-// CMX-257 round 7: resolveForContext() below only ever resolved ONE property
-// at a time — fine for a single font-size/line-height check, but the airy-
-// density WIRING test (claim 2) needs every declaration a real cascade would
-// resolve for a selector (padding-left/-right, max-width, margin, min-width,
-// a padding-top/-bottom ban) at once, the same way resolvedBodyAtDesktop()'s
-// callers already do via its joined "prop: value;" string. Factored out so
-// both a single-property lookup (resolveForContext) and a full resolved-body
-// string (resolvedBodyForContext, used where the airy rule's own higher-
-// specificity override must be seen) share one cascade walk instead of two
-// copies that could drift.
 // CMX-257 round 8: ranked by spec/idx ONLY — an `!important` declaration on
 // the SAME selector, placed EARLIER in source order, lost the idx tie-break
 // against a later non-important declaration for the same property, even
@@ -1195,15 +1094,6 @@ function resolveForContext(css, targetCompound, ancestorTokens, prop) {
     const m = resolveAllForContext(css, targetCompound, ancestorTokens);
     return m.has(prop) ? m.get(prop).value : null;
 }
-// Same resolution as resolveForContext(), but returns every resolved
-// declaration as a joined "prop: value;" string (empty when nothing
-// resolves) — a specificity-aware drop-in for resolvedBodyAtDesktop()/
-// resolvedBodyAtDesktopOrEmpty() wherever a selector's real ancestor
-// context (not just its literal selector text) decides what wins.
-function resolvedBodyForContext(css, targetCompound, ancestorTokens) {
-    const m = resolveAllForContext(css, targetCompound, ancestorTokens);
-    return [...m].map(([k, v]) => `${k}: ${v.value};`).join(' ');
-}
 // .side-item-label carries no base font-size of its own (only `flex: 1`) —
 // it inherits from its parent .side-item unless a context-specific rule
 // (`.side-list-secondary .side-item-label`, or a corrupting higher-
@@ -1229,8 +1119,8 @@ function resolveIconFontSizePx(itemAncestors) {
 // of that row.
 //
 // CMX-257 round 8: this set was missing `.side-section`/`.sidebar` — the
-// SAME two real ancestor tokens SIDE_SECTION_ANCESTORS (below) already
-// declares for the exact same DOM subtree ("both .side-subhead and
+// same two real ancestor tokens the SIDE_SECTION_FIXTURE above already
+// mounts for the exact same DOM subtree ("both .side-subhead and
 // #side-nav-more sit directly inside <section class="side-section">, itself
 // inside <aside class="sidebar">"). The judge's `.side-section
 // .side-list-secondary .side-item-icon`/`...-label` mutation is a REAL,
