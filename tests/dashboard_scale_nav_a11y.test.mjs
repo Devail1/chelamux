@@ -135,10 +135,23 @@ function cssRules(css) {
     return rules;
 }
 
-// Every declaration ("prop: value" pair) in `body`, in source order.
+// Every declaration ("prop, value[, important]" triple) in `body`, in source
+// order. CMX-257 round 8: this used to leave a trailing `!important` INSIDE
+// the returned value string (so a literal-value regex like
+// resolvedNumberViaToken's `/^([0-9.]+)(px)?$/` simply failed to match an
+// important declaration's value rather than recognising it as important) —
+// stripped here into its own boolean so resolveAllForContext() can rank
+// importance the way a real cascade does: importance beats specificity
+// beats source order, not "loses the property entirely".
 function declarations(body) {
     return [...body.matchAll(/([\w-]+)\s*:\s*([^;]+);/g)]
-        .map(m => [m[1].trim().toLowerCase(), m[2].trim()]);
+        .map(m => {
+            const raw = m[2].trim();
+            const imp = raw.match(/^([\s\S]*?)\s*!\s*important\s*$/i);
+            return imp
+                ? [m[1].trim().toLowerCase(), imp[1].trim(), true]
+                : [m[1].trim().toLowerCase(), raw, false];
+        });
 }
 
 // The RESOLVED custom-property map for :root — merges every TOP-LEVEL :root
@@ -452,6 +465,28 @@ test('density guard: _setWallDensity cuts off at <=2 panes, and buildWall restor
         'is set, as its OWN statement — not from behind a dead `if (false) ...` (or any other) wrapper on the same ' +
         'line — so a reload sitting on a 1/2-col preset is airy on its own first paint, independent of ' +
         'applyGridLayout\'s later call');
+    // CMX-257 round 8: the full-line anchor above closes the wrap on ONE line
+    // only — a dangling `if (false)` on the PRECEDING line (`if (false)\n    if
+    // (_wallPreset) _setWallDensity(...);`) leaves the guarded statement alone
+    // on ITS OWN line, byte-identical, still satisfying the /m-anchored regex,
+    // while making it that dangling if's (skipped) body. A real statement can
+    // only sit where it does unconditionally if whatever precedes it (skipping
+    // blank lines and `//` comments) is a COMPLETE prior statement/block
+    // boundary — ends in `;`, `{` or `}` — never an unbraced control-flow
+    // header (`if (...)`, `else`, `for (...)`, `while (...)`) with nothing
+    // else on it, which in real JS binds the very next statement as its body.
+    const buildLines = buildBody.split('\n');
+    const restoreLineIdx = buildLines.findIndex(l =>
+        /^\s*if\s*\(\s*_wallPreset\s*\)\s*_setWallDensity\(_wallPreset\.cols,\s*_wallPreset\.rows\);\s*$/.test(l));
+    assert.ok(restoreLineIdx > 0, 'could not locate the _setWallDensity restore line inside buildWall to check its preceding line');
+    let precedingIdx = restoreLineIdx - 1;
+    while (precedingIdx >= 0 && (buildLines[precedingIdx].trim() === '' || buildLines[precedingIdx].trim().startsWith('//')))
+        precedingIdx--;
+    const precedingLine = precedingIdx >= 0 ? buildLines[precedingIdx].trim() : '';
+    assert.ok(precedingLine === '' || /[;{}]$/.test(precedingLine),
+        `the _setWallDensity restore line sits directly after \`${precedingLine}\` — a line that does not end in ; { or } ` +
+        'reads as a dangling unbraced control-flow header (if/else/for/while with no braces), which in real JS silently ' +
+        'makes the restore statement THAT header\'s (conditionally-skipped) body while still matching the full-line regex above');
 });
 
 // --- WIRING: the "air in the chrome" feature must actually PRODUCE air, not just
@@ -474,12 +509,23 @@ test('density guard: _setWallDensity cuts off at <=2 panes, and buildWall restor
 // cascade (higher specificity) while resolvedBodyAtDesktop() keeps reading
 // the untouched originals. The padding/margin/max-width/min-width checks
 // below now resolve through resolveAllForContext()'s real ancestor-token set
-// instead. `#term-stage`'s real ancestor is just `body.wall-density-airy`
-// (id selectors don't need help from specificity to win, but a `.wall-
-// density-airy` token still has to be present for the rule to apply at all);
-// `.grid-stack`'s real ancestor chain adds `#term-stage` on top of that.
-const AIRY_STAGE_ANCESTORS = new Set(['.wall-density-airy']);
-const AIRY_GRID_ANCESTORS = new Set(['.wall-density-airy', '#term-stage']);
+// instead.
+//
+// CMX-257 round 8: round 7's set was just `{'.wall-density-airy'}` —
+// "the one token the round-7 mutation happened to need". The judge's next
+// mutation (`body.wall-density-airy #panel-terminals #term-stage`) used a
+// REAL ancestor id (per templates/index.html: `#term-stage` sits inside
+// `<div class="panel" id="panel-terminals">`, itself inside `<main
+// class="canvas" id="canvas">`, itself inside `<div class="app">`) that
+// simply wasn't in the set, so resolveAllForContext() dropped that rule as
+// "ancestor not available" even though it's the highest-specificity rule a
+// real browser actually applies. Rather than add just `#panel-terminals` (the
+// same one-token patch that created this hole), this lists the FULL real
+// ancestor chain from index.html between `<body>` and `#term-stage` — the
+// only way a future selector naming ANY real ancestor (not just the one this
+// round's judge picked) still resolves correctly.
+const AIRY_STAGE_ANCESTORS = new Set(['.wall-density-airy', '.app', '.canvas', '#canvas', '.panel', '#panel-terminals']);
+const AIRY_GRID_ANCESTORS = new Set([...AIRY_STAGE_ANCESTORS, '#term-stage']);
 test('WIRING: the airy-density rule actually pads the stage — not just an empty class toggle', () => {
     // Kept as a literal-selector lookup deliberately: this is ONLY read by the
     // padding-top/-bottom/padding-shorthand ban below, which asks "does THIS
@@ -1060,7 +1106,7 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
 // `#side-nav-more` sit directly inside `<section class="side-section">`,
 // itself inside `<aside class="sidebar">` — the exact context the round-7
 // judge's `.side-section #side-nav-more` mutation exploits.
-const SIDE_SECTION_ANCESTORS = new Set(['.sidebar', '.side-section']);
+const SIDE_SECTION_ANCESTORS = new Set(['.app', '.sidebar', '.side-section']);
 test('.side-subhead and #side-nav-more both actually render — occupy space and paint, not just exist in the markup', () => {
     assertRendersVisibly(CSS, '.side-subhead', SIDE_SECTION_ANCESTORS, 'the demoted nav group\'s "More" heading');
     assertRendersVisibly(CSS, '#side-nav-more', SIDE_SECTION_ANCESTORS, 'the demoted nav group\'s render target');
@@ -1115,9 +1161,17 @@ function selectorSpecificity(selector) {
 // string (resolvedBodyForContext, used where the airy rule's own higher-
 // specificity override must be seen) share one cascade walk instead of two
 // copies that could drift.
+// CMX-257 round 8: ranked by spec/idx ONLY — an `!important` declaration on
+// the SAME selector, placed EARLIER in source order, lost the idx tie-break
+// against a later non-important declaration for the same property, even
+// though CSS Cascade §6.4.4 makes importance outrank specificity and source
+// order outright (an important declaration beats every non-important one,
+// full stop; ties BETWEEN two important — or two non-important —
+// declarations still resolve by spec then source order, same as before).
+// `important` is therefore compared FIRST, ahead of spec/idx.
 function resolveAllForContext(css, targetCompound, ancestorTokens) {
     const rules = cssRules(css).filter(r => r.media === null || mediaSatisfiedAtViewport(r.media, DESKTOP_VIEWPORT_PX));
-    const best = new Map(); // prop -> { value, spec, idx }
+    const best = new Map(); // prop -> { value, spec, idx, important }
     rules.forEach((r, idx) => {
         for (const sel of r.selector.split(',').map(s => s.trim())) {
             const comps = selectorCompounds(sel);
@@ -1126,9 +1180,12 @@ function resolveAllForContext(css, targetCompound, ancestorTokens) {
                 compoundTokens(c).every(t => ancestorTokens.has(t)));
             if (!ancestorsOk) continue;
             const spec = selectorSpecificity(sel);
-            for (const [k, v] of declarations(r.body)) {
+            for (const [k, v, important] of declarations(r.body)) {
                 const cur = best.get(k);
-                if (!cur || spec > cur.spec || (spec === cur.spec && idx >= cur.idx)) best.set(k, { value: v, spec, idx });
+                const better = !cur
+                    || (important && !cur.important)
+                    || (important === cur.important && (spec > cur.spec || (spec === cur.spec && idx >= cur.idx)));
+                if (better) best.set(k, { value: v, spec, idx, important });
             }
         }
     });
@@ -1170,8 +1227,22 @@ function resolveIconFontSizePx(itemAncestors) {
 // for the primary rail, #side-nav-more (class="side-list side-list-secondary")
 // for the demoted group — each row is a .side-item, each icon/label a child
 // of that row.
-const PRIMARY_ROW_ANCESTORS = new Set(['#side-nav', '.side-list']);
-const SECONDARY_ROW_ANCESTORS = new Set(['#side-nav-more', '.side-list', '.side-list-secondary']);
+//
+// CMX-257 round 8: this set was missing `.side-section`/`.sidebar` — the
+// SAME two real ancestor tokens SIDE_SECTION_ANCESTORS (below) already
+// declares for the exact same DOM subtree ("both .side-subhead and
+// #side-nav-more sit directly inside <section class="side-section">, itself
+// inside <aside class="sidebar">"). The judge's `.side-section
+// .side-list-secondary .side-item-icon`/`...-label` mutation is a REAL,
+// higher-specificity ancestor-scoped override that wins the actual cascade,
+// but resolveAllForContext() dropped it as "ancestor not available" since
+// neither token was listed here. Also adding `.app` (per index.html:
+// `<aside class="sidebar">` sits inside `<div class="app">`) for the same
+// reason the airy-stage set above lists its own full chain: the failure mode
+// is "forgot an ancestor token", and the fix is the FULL real chain, not the
+// one token this round's mutation happened to use.
+const PRIMARY_ROW_ANCESTORS = new Set(['#side-nav', '.side-list', '.app', '.sidebar', '.side-section']);
+const SECONDARY_ROW_ANCESTORS = new Set(['#side-nav-more', '.side-list', '.side-list-secondary', '.app', '.sidebar', '.side-section']);
 const PRIMARY_ITEM_ANCESTORS = new Set([...PRIMARY_ROW_ANCESTORS, '.side-item']);
 const SECONDARY_ITEM_ANCESTORS = new Set([...SECONDARY_ROW_ANCESTORS, '.side-item']);
 
