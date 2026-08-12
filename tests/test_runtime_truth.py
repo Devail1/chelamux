@@ -159,6 +159,12 @@ def fleet(tmp_path, monkeypatch, request):
     # (the inbox registration above) matches the running epoch.
     monkeypatch.setattr(runtime_truth, "_restore_scan", lambda now: 0)
 
+    # judge.blocked_race: no run in this fleet is stuck with a CAS-refused BLOCKING
+    # verdict (CMX-239) — same reason _restore_scan is stubbed above: the real
+    # `dispatcher.DB_PATH` is cached at import time against the developer's actual
+    # ~/.chela, not this fixture's temp one.
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {})
+
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
         runtime_truth, "collected_js_suites",
@@ -497,6 +503,19 @@ def _break_restore_dead_epoch(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_judge_blocked_race(tmp_path, monkeypatch):
+    """CMX-239's race landed: a guard SURVIVED corruption but `request_changes`'s CAS was
+    refused, and `judge.judge_run` recorded `J_BLOCKED_RACE` on the row. This is the
+    STANDING half CMX-239 itself did not build — `inbox.run_events` already raised this
+    once, on the tick it happened, but says nothing on any LATER tick while the row sits
+    stuck. `chela doctor` must keep saying so for as long as it stays stuck."""
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {
+        "CMX-239": {"status": "needs_human", "pr_url": "https://github.com/acme/repo/pull/239",
+                    "detail": "a guard SURVIVED corruption", "sha": "deadbeef"},
+    })
+    return doctor.ERROR
+
+
 def _break_update_apply_lock(tmp_path, monkeypatch):
     """CMX-226: the dashboard's update-apply lock has been held far longer than any
     honest `update.apply()` run can take — the process holding it (this test process
@@ -550,6 +569,7 @@ CORRUPTIONS = {
     "agents.native_status_feed": _break_native_status_feed,
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
     "dispatch.unresolved_depends": _break_unresolved_depends,
+    "judge.blocked_race": _break_judge_blocked_race,
 }
 
 
@@ -1153,6 +1173,156 @@ def test_repo_services_current_does_not_apply_to_a_pip_install(monkeypatch):
         update, "repo_root",
         lambda: (_ for _ in ()).throw(update.NotAGitCheckout("not a git checkout")))
     assert not runtime_truth.fact("repo.services_current").applies()
+
+
+# --- judge.blocked_race: CMX-240, the STANDING half CMX-239 didn't build ---------------
+#
+# `inbox.run_events` raises `run_judge_blocked_race` once, edge-triggered on the tick the
+# row first lands in `J_BLOCKED_RACE`. If that one notification is missed, nothing else
+# ever says it again — this fact is the ONLY other place a later `chela doctor` run can
+# still find it.
+
+def test_judge_blocked_race_reports_the_stuck_run(fleet, monkeypatch):
+    _break_judge_blocked_race(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert findings and all(f.level == doctor.ERROR for f in findings)
+    assert "CMX-239" in findings[0].title
+    assert "needs_human" in findings[0].title
+    assert "https://github.com/acme/repo/pull/239" in findings[0].detail
+
+
+def test_judge_blocked_race_silent_when_nothing_stuck(fleet):
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_judge_blocked_race_names_every_stuck_row_not_just_the_first(fleet, monkeypatch):
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {
+        "CMX-239": {"status": "needs_human", "pr_url": "https://github.com/acme/repo/pull/239",
+                    "detail": "a guard SURVIVED corruption", "sha": "deadbeef"},
+        "CMX-241": {"status": "awaiting_review", "pr_url": "https://github.com/acme/repo/pull/241",
+                    "detail": "", "sha": None},
+    })
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert len(findings) == 2
+    assert all(f.level == doctor.ERROR for f in findings)
+    titles = {f.title for f in findings}
+    assert any("CMX-239" in t for t in titles)
+    assert any("CMX-241" in t for t in titles)
+
+
+def test_judge_blocked_race_does_not_report_an_ordinary_blocked_run(fleet, monkeypatch):
+    """A run that is merely `judge.J_BLOCKED` (an ordinary rework, no CAS race) is not this
+    fact's business — `judge.blocked_race` fires only for the dedicated CMX-239 state.
+
+    Goes through the REAL `_blocked_race_scan`, not a monkeypatched stand-in: widen the
+    scan's `judge_state` filter to also match `J_BLOCKED` and this must go red."""
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {})
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_judge_blocked_race_scan_ignores_an_ordinary_blocked_run(tmp_path, monkeypatch):
+    """The real-scan counterpart of the test above: an ordinary `J_BLOCKED` row (a plain
+    rework, no CAS race) must not appear in `_blocked_race_scan`'s output. Widen the scan's
+    `judge_state != judge.J_BLOCKED_RACE` filter to also let `J_BLOCKED` through and this
+    goes red — the mutation the judge caught round 2."""
+    from chela import judge
+
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(),
+                          judge_state=judge.J_BLOCKED)
+    assert scanned == {}, "an ordinary J_BLOCKED row must not be reported as a blocked race"
+
+
+def test_judge_blocked_race_scan_carries_the_row_fields_through(tmp_path, monkeypatch):
+    """Every other test that checks `pr_url` / `detail` / `sha` hands `_blocked_race_scan`'s
+    OUTPUT in directly via the CORRUPTIONS monkeypatch — none of them exercise the real
+    scan's own field extraction (`_blocked_race_scan`, `chela/runtime_truth.py`), which is
+    what `_blocked_race_report` actually renders into the finding an operator reads ("Check
+    whether this already shipped — <pr_url>"). Drop `"pr_url": run.get("pr_url")` (or the
+    `judge_detail` / `judge_sha` reads next to it) down to `None` and this goes red; the
+    CORRUPTIONS-based tests cannot catch it because they replace `_blocked_race_scan`
+    wholesale rather than going through it."""
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row())
+    assert scanned["CMX-239"]["pr_url"] == "https://github.com/acme/repo/pull/239"
+    assert scanned["CMX-239"]["detail"] == "a guard SURVIVED corruption"
+    assert scanned["CMX-239"]["sha"] == "deadbeef"
+
+
+# --- judge.blocked_race must be able to CLEAR — round 2 of CMX-240 review ---------------
+#
+# Round 1 reported every J_BLOCKED_RACE row regardless of status and never gave it a way
+# back to green: a row that reaches a terminal status without being re-judged would have
+# stayed ERROR forever, with no operator action able to resolve it. `_blocked_race_scan`
+# is monkeypatched wholesale by the CORRUPTIONS fixture above (it hands the scan's OUTPUT,
+# never exercising its filtering), so these test the real scan directly against a fake
+# `dispatcher.list_runs()` — the same seam `_blocked_race_scan`'s own docstring names, and
+# the only way to reach `_blocked_race_resolved` without depending on the real
+# `dispatcher.DB_PATH` (cached at import against the developer's actual ~/.chela).
+
+def _blocked_race_row(**over) -> dict:
+    row = {
+        "task_id": "CMX-239", "status": "needs_human",
+        "pr_url": "https://github.com/acme/repo/pull/239",
+        "judge_detail": "a guard SURVIVED corruption",
+        "judge_sha": "deadbeef", "pr_head_sha": "deadbeef",
+    }
+    row.update(over)
+    return row
+
+
+def _scan_with(tmp_path, monkeypatch, row: dict, judge_state=None) -> dict:
+    from chela import judge
+
+    if judge_state is None:
+        judge_state = judge.J_BLOCKED_RACE
+    fake_db = tmp_path / "scheduler.db"
+    fake_db.write_text("")
+    monkeypatch.setattr(dispatcher, "DB_PATH", fake_db)
+    monkeypatch.setattr(dispatcher, "list_runs",
+                        lambda: [{**row, "judge_state": judge_state}])
+    return runtime_truth._blocked_race_scan()
+
+
+def test_judge_blocked_race_clears_once_the_head_moves_past_the_judged_sha(tmp_path, monkeypatch):
+    """The ordinary resolution path: a fresh push superseded the judged commit — dispatcher's
+    own per-sha trigger (`judge_sha != pr_head_sha`) re-judges the new head automatically.
+    The alarm was about `judge_sha`'s commit specifically, and that commit is no longer what
+    the PR's head names, so the row must stop qualifying. Remove `_blocked_race_resolved`'s
+    check and this goes red for the wrong reason: a resolved row keeps reporting."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(pr_head_sha="cafef00d"))
+    assert scanned == {}, "a row whose head moved past judge_sha must clear, not keep reporting"
+
+
+def test_judge_blocked_race_does_not_clear_on_an_unrelated_status_change(tmp_path, monkeypatch):
+    """The counterweight: a genuinely stuck row (head unmoved) must keep reporting no matter
+    how its `status` changes underneath it — status is exactly what round 1 used, and exactly
+    what the ticket named as NOT proof of resolution. Loosen the guard to clear on any status
+    change and this goes red."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(status="done", pr_head_sha="deadbeef"))
+    assert "CMX-239" in scanned
+    assert scanned["CMX-239"]["status"] == "done"
+
+
+def test_judge_blocked_race_does_not_clear_with_no_head_to_compare(tmp_path, monkeypatch):
+    """A row with no `pr_head_sha` on it proves nothing either way — silence must not be
+    read as resolution."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(pr_head_sha=None))
+    assert "CMX-239" in scanned
+
+
+def test_judge_blocked_race_does_not_clear_with_no_judge_sha_to_compare(tmp_path, monkeypatch):
+    """The other half of the same sentence: a row with no `judge_sha` on it (spawn-time
+    stamping never happened, or was wiped) also proves nothing either way, even though
+    `pr_head_sha` is present and would trivially differ from `None`. Drop the `sha and`
+    half of `_blocked_race_resolved`'s check and this goes red: a row with an unknown
+    judged commit would read as resolved just because `None != pr_head_sha`."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(judge_sha=None, pr_head_sha="deadbeef"))
+    assert "CMX-239" in scanned
 
 
 # --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------

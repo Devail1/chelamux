@@ -1810,6 +1810,31 @@ def cmd_task_finished(args) -> None:
     print(f"Task {result['task_id']} awaiting review (pr_url={result.get('pr_url') or 'unknown'})")
 
 
+def cmd_rework_disputed(args) -> None:
+    """⏳🪤 CMX-248 (re-scope of CMX-244). A rework agent's escape hatch for "there is
+    nothing to push."
+
+    Invoked by a reworking agent as its LAST step in place of `task-finished` when it
+    concludes the verdict is wrong, already fixed, or otherwise unfixable — i.e. it has no
+    new commit to offer for review. Moves the run straight to `needs_human` (never
+    `awaiting_review`, which would carry the SAME head the judge already ruled on, unjudged
+    again) so a human resolves the disagreement instead of the run sitting in `running`
+    forever with no commit that could ever trigger a fresh judge pass.
+    """
+    result = dispatcher.mark_rework_disputed(args.task_id, args.reason)
+    if not result.get("ok"):
+        print(f"rework-disputed: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"🔁🚫 Task {result['task_id']} disputed — needs_human "
+          f"(rework {result.get('rework_count')}/{result.get('max_reworks')})")
+    if result.get("comment_posted"):
+        print(f"  PR comment posted: {result.get('pr_url') or ''}")
+    else:
+        print(f"  ⚠ PR comment NOT posted ({result.get('comment_detail')}) — the run row is "
+              "the authority, so the dispute is recorded regardless, but nothing landed on "
+              "the PR.")
+
+
 def _rework_prospects(workflow_path: str | None) -> list[str]:
     """Will anything ACTUALLY re-spawn this run? Say what is true, not what is intended.
 
@@ -1943,9 +1968,48 @@ def cmd_judge(args) -> None:
     elif state == judge.J_CANNOT_VERIFY:
         print(f"⚖️ {result['task_id']}: ⚠ CANNOT VERIFY — {result.get('cannot_verify') or result.get('error')}")
         print("   Nothing was blocked and nothing was cleared. This PR is a human's.")
+    elif state == judge.J_STALE_HEAD:
+        # ⚖️⏱️ CMX-246: a newer commit landed on the PR while this judge ran. Discarded on
+        # purpose — no rework round spent, no judge_state overwritten; the per-sha trigger
+        # re-judges the new head on its own.
+        print(f"⚖️ {result['task_id']}: {result.get('error')} — no rework round was spent "
+              "and nothing on the run row was changed; a fresh judge covers the new head.")
     else:
         print(f"⚖️ {result['task_id']}: every guard held. The run stays awaiting_review — "
               "the judge never merges.")
+
+
+def cmd_judge_self_check(args) -> None:
+    """⚖️🔎 CMX-249: the CHECK, not the habit. Runs the judge's own apply/parse/run/restore
+    mechanics against ``--cwd`` (default: here) — the mechanical form of Done Criteria #3
+    ("corrupt each guard and watch it go RED"), so an agent does not have to do that by hand.
+
+    Exit codes: ``0`` every guard KILLED (safe to commit), ``1`` a guard SURVIVED corruption
+    (this is decoration — fix it before committing), ``2`` CANNOT VERIFY (no experiments, a
+    red baseline, or an unprovisionable env — not a verdict either way).
+    """
+    result = judge.run_self_check(
+        args.cwd, args.experiments, workflow_path=args.workflow, test_cmd=args.test_cmd,
+    )
+    if not result.get("ok"):
+        print(f"self-check: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+
+    for outcome in result.get("outcomes") or []:
+        print(f"  [{outcome['verdict']:8}] {outcome['file']}: {outcome['guard'][:70]}")
+        print(f"             {outcome['reason']}")
+
+    if result["blocking"]:
+        print(f"⚖️ {result['blocking']} guard(s) SURVIVED corruption — this is DECORATION, "
+              "not a guard: it asserts something other than what it claims. Fix it before "
+              "you commit.")
+        sys.exit(1)
+    if result["cannot_verify"]:
+        print(f"⚠ CANNOT VERIFY — {result['cannot_verify']}")
+        print("   Nothing was blocked and nothing was cleared.")
+        sys.exit(2)
+    print(f"✓ every guard held ({len(result['outcomes'])} experiment(s), all KILLED) — "
+          "safe to commit.")
 
 
 def cmd_update(args) -> None:
@@ -2385,6 +2449,29 @@ def main() -> None:
         "--no-cleanup", action="store_true",
         help="Keep the judge worktree and the tmux window (debugging a judge run by hand)",
     )
+    p_jcheck = judge_sub.add_parser(
+        "self-check",
+        help="⚖️🔎 Run the judge's own mutation mechanics against YOUR OWN worktree, before "
+             "you commit — the mechanical form of 'corrupt each guard and watch it go RED'",
+    )
+    p_jcheck.add_argument(
+        "--experiments", required=True, metavar="PATH",
+        help="JSON you write: {\"experiments\": [{guard, file, before, after, kind}], "
+             "\"notes\": [...]}. chela runs them; it does not trust them",
+    )
+    p_jcheck.add_argument(
+        "--workflow", metavar="PATH",
+        help="WORKFLOW.md to read `judge.test_cmd` (and `suite_timeout_seconds`) from — the "
+             "same suite the real judge will measure against. Optional if --test-cmd is given",
+    )
+    p_jcheck.add_argument(
+        "--test-cmd", metavar="CMD",
+        help="Run this suite command instead of reading one from --workflow",
+    )
+    p_jcheck.add_argument(
+        "--cwd", metavar="DIR", default=".",
+        help="Worktree to mutate in place (default: the current directory)",
+    )
 
     # merge — the AUTONOMOUS merge gate: the escalation contract enforced in code
     p_merge = sub.add_parser(
@@ -2534,6 +2621,17 @@ def main() -> None:
     )
     p_tf.add_argument("task_id")
 
+    # rework-disputed — the rework agent's "nothing to push" escape hatch
+    # (CMX-248, re-scope of CMX-244)
+    p_rd = sub.add_parser(
+        "rework-disputed",
+        help="A rework agent's last step when it has nothing to push: moves the run to "
+             "needs_human instead of leaving it stuck in `running` forever",
+    )
+    p_rd.add_argument("task_id")
+    p_rd.add_argument("reason", help="Why there is nothing to push — read by the human who "
+                                      "resolves the dispute")
+
     args = parser.parse_args()
 
     if args.command == "status":
@@ -2608,11 +2706,15 @@ def main() -> None:
         cmd_dashboard(args)
     elif args.command == "task-finished":
         cmd_task_finished(args)
+    elif args.command == "rework-disputed":
+        cmd_rework_disputed(args)
     elif args.command == "review":
         cmd_review(args)
     elif args.command == "judge":
         if args.judge_cmd == "run":
             cmd_judge(args)
+        elif args.judge_cmd == "self-check":
+            cmd_judge_self_check(args)
         else:
             p_judge.print_help()
     elif args.command == "merge":

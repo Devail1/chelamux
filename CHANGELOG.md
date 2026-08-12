@@ -24,8 +24,41 @@ history lives in `git log`.
   payload, not pasted into the one line typed at an operator's prompt), excerpted to
   `SUMMARY_TITLE_CHARS` the same way a judge's cannot-verify reason already is. The
   `reworks: N · verdicts on the row: M` counts are unchanged. (CMX-247)
+- **A CI job that never ran the suite no longer spends a rework round.** The automatic
+  CI-red gate (CMX-69) treated every failing check as evidence about the code, but GitHub
+  reports two conclusions — `STARTUP_FAILURE` and `ACTION_REQUIRED` — that mean the job's
+  steps never executed at all: a runner/workflow-file problem, or a pending approval gate,
+  neither fixable by a coding agent. A third shape is not visible at the conclusion level
+  at all: a runner that dies mid-job (a `checkout` step failing on a network/TLS fault)
+  reports plain `FAILURE`, indistinguishable from a genuine test failure without reading
+  the job's own steps. All three now short-circuit before `request_changes`: the PR still
+  shows red (the merge gate still refuses it) and a comment still explains why, but no
+  agent is spawned and `rework_count`, the bounded loop's budget, is never touched. A real
+  failure alongside an infra one is still charged (real evidence wins, conservatively), and
+  a run stuck in infra failures is bounded on its own separate streak (capped the same as
+  `CHELA_MAX_REWORKS`, reset the next time CI is seen green) so a permanently broken
+  workflow file still reaches a human instead of looping quietly forever. The plain-`FAILURE`
+  shape is decided by ONE validator (`_validate_ci_jobs`) that turns the untrusted
+  `gh run view --json jobs` payload into a fully-typed `tuple[CIJob, ...] | None` — treating
+  ANY structural deviation, anywhere in the tree, as unreadable — feeding a classifier
+  (`_suite_step_ran`) that only ever sees already-validated data. (CMX-245, a re-scope of
+  CMX-243, which spent 8 reworks discovering one malformed-shape branch at a time; this
+  closes that family by construction instead of one round at a time.)
 
 ### Added
+
+- **`chela rework-disputed` — a rework agent's "nothing to push" escape hatch.** A rework
+  agent that reads the verdict and concludes it is wrong, already fixed, or otherwise
+  unfixable has no new commit to offer. The rework prompt used to just tell such an agent
+  to say so in its final message and stop — which left the run in `running` forever:
+  `task-finished` assumes a fresh commit landed (the dispatcher judges once per head
+  commit, so an unchanged sha never gets re-judged), and the idle watchdog just re-sends
+  the same rework prompt on a timer, so every liveness signal kept reading healthy while
+  the run itself never moved again. `chela rework-disputed <id> "<reason>"` is the
+  in-contract alternative: it moves the row straight to `needs_human` (never
+  `awaiting_review`, which would carry the same already-judged head) without touching the
+  branch, worktree, PR, or `rework_count` — a human resolves it from there with `chela
+  retry`, `chela reopen`, or by closing the PR. (CMX-248, re-scope of CMX-244)
 
 - **`chela retry` — "keep going" on a `needs_human` run, no fix required.** `chela reopen`
   (CMX-96) covers one human intent: "I fixed the branch myself, re-verify the new head" —
@@ -63,8 +96,38 @@ history lives in `git log`.
   burns the bounded `cannot_verify` retry budget re-discovering a verdict that is
   already definitive. (CMX-239)
 
+### Added
+
+- **`chela doctor` now has a STANDING signal that a judge's blocking verdict was
+  lost, not just a one-shot notification.** CMX-239 gave the CAS-refused race on a
+  BLOCKING verdict its own state (`judge_state=blocked_race`) and its own urgent
+  inbox event (`run_judge_blocked_race`) — but that event is edge-triggered: it
+  fires once, the moment the run row first lands in that state, and never again
+  while the row sits stuck. A guard that survived corruption on a commit that may
+  already have shipped is exactly the kind of finding that can be missed by
+  whoever happened to be watching at that one moment, and until now there was
+  nowhere a LATER `chela doctor` run could still find it — nothing read
+  `judge_state` at all. A new fact, `judge.blocked_race`, closes that: every run
+  stuck in `blocked_race` is reported every time doctor runs, for as long as it
+  stays stuck. (CMX-240)
+
 ### Fixed
 
+- **A judge verdict about a head that no longer exists no longer spends a rework round.**
+  The judge's mutation battery takes minutes to run; if a newer commit lands on the PR in
+  that window (the once-per-sha trigger already re-spawns a fresh judge for it), a still-
+  running judge's eventual verdict is about a commit the PR no longer presents as its head.
+  Nothing compared the two before spending anything: a stale BLOCKING verdict burned a round
+  of `CHELA_MAX_REWORKS` through `request_changes` — and at the cap, escalated the run to
+  `needs_human` for a finding the newer commit may have already fixed — while a stale CLEAN
+  verdict could silently overwrite a newer, different verdict (e.g. a genuine `blocked`) a
+  fresh judge had already recorded on the same row. `judge_run` now re-reads the run's live
+  `pr_head_sha` right before either branch would act; a KNOWN mismatch against the commit
+  actually tested discards the verdict without spending a round or touching `judge_state` —
+  the finding still posts to the PR as a comment, and the per-sha trigger re-judges the new
+  head on its own. The PR comment and a new `judge.stale_head` event log entry both name the
+  judged sha and the PR's live head, so a superseded verdict is never mistaken for a live
+  one. (CMX-246)
 - **Concurrent `cmx-N` branches no longer collide on `CHANGELOG.md`.** Every dispatched
   branch adds its own entry to the top of the same `## [Unreleased]` section, so any two
   branches open at once conflicted on that exact spot the moment the judge's worktree
