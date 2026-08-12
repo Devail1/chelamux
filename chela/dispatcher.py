@@ -2094,6 +2094,102 @@ def mark_awaiting_review(task_id: str) -> dict:
         }
 
 
+def mark_rework_disputed(task_id: str, reason: str) -> dict:
+    """⏳🪤 CMX-248 (re-scope of CMX-244). Transition a REWORK IN FLIGHT to ``needs_human``
+    when the agent has NOTHING TO PUSH — the escape hatch for the case ``task-finished``
+    cannot cover.
+
+    ``task-finished`` assumes a commit landed: it flips the row to ``awaiting_review``
+    so the next tick judges the NEW head. A rework agent that reads the verdict and
+    concludes it is wrong, already fixed, or otherwise has nothing to change has no new
+    commit — the head sha is exactly what it was when the judge already ruled on it. The
+    REWORK_PROMPT used to just tell such an agent to "say so in your final message and
+    stop." That leaves the row in ``running`` forever: nothing about that state changes
+    without a fresh judge verdict, the dispatcher judges once per head commit (so an
+    unchanged sha never gets one), and the idle watchdog just re-sends the same rework
+    prompt on a timer — the window answers it every time, so every liveness signal
+    (session status, idle-nudge, last activity) reads healthy while the RUN itself never
+    moves again.
+
+    This is the in-contract alternative: call ``chela rework-disputed <id> "<reason>"``
+    instead of just stopping. It moves the row straight to ``needs_human`` — the same
+    terminal state :func:`_escalate` uses for every other "the automatic loop cannot
+    proceed" case — WITHOUT touching the branch, the worktree, the PR, or
+    ``rework_count`` (this round was already spent by :func:`_respawn_rework`; refunding
+    it would let a disputed verdict retry for free). A human resolves it from there:
+    ``chela retry`` for another automatic round, ``chela reopen`` after fixing it by
+    hand, or closing the PR outright.
+
+    Refuses anything that is not a rework actually in flight (``running`` with
+    ``rework_count > 0``) — a first dispatch has no verdict to dispute, and a run that
+    already left ``running`` needs a different command, not this one.
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        return {
+            "ok": False, "task_id": task_id,
+            "error": "a disputed rework with no reason is not a dispute — say what you "
+                     "found (or didn't find) so a human can judge it",
+        }
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM runs WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "error": f"no run found for task_id {task_id}"}
+        if row["status"] != "running" or not _is_rework(row):
+            return {
+                "ok": False, "task_id": task_id,
+                "error": f"run is in status {row['status']!r} (rework_count="
+                         f"{row['rework_count'] or 0}) — this is only for a rework IN "
+                         "FLIGHT that has nothing to push; a first dispatch or an "
+                         "already-settled run should use `chela task-finished` or "
+                         "`chela escalate` instead",
+            }
+        rework_count = row["rework_count"] or 0
+        reviews = reviews_of(dict(row))
+        reviews.append({
+            "round": len(reviews) + 1, "at": _now(), "body": reason, "verdict": "disputed",
+        })
+        text = _format_escalation(
+            f"🔁🚫 Rework round {rework_count}/{max_reworks()} disputed by the agent — "
+            f"nothing was pushed: {reason}",
+            recommendation="Read the agent's reasoning against the verdict. If it's right, "
+                            "`chela retry` to send the same head through the loop again "
+                            "with corrected guidance, or fix it yourself and `chela reopen` "
+                            "once you've pushed a commit. If the original verdict stands, "
+                            "close the PR or redispatch the task.",
+            options=[
+                "chela retry — give the loop another round with new guidance",
+                "Fix it yourself and chela reopen once pushed",
+                "Close the PR / redispatch the task",
+            ],
+        )
+        window_name = row["window_name"]
+        pr_url = row["pr_url"]
+        wf_path = row["workflow_path"]
+        conn.execute(
+            "UPDATE runs SET status='needs_human', ended_at=?, last_error=?, "
+            "review_history=? WHERE task_id=?",
+            (_now(), text, json.dumps(reviews), task_id),
+        )
+        conn.commit()
+        if window_name:
+            _kill_window(window_name)
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    posted, detail = _post_pr_comment(pr_url, repo_dir, text)
+    log.warning(
+        "Task %s: rework round %d disputed by the agent — needs_human (%s)",
+        task_id, rework_count, reason,
+    )
+    return {
+        "ok": True, "task_id": task_id, "status": "needs_human",
+        "branch_name": row["branch_name"], "pr_url": pr_url,
+        "rework_count": rework_count, "max_reworks": max_reworks(),
+        "comment_posted": posted, "comment_detail": detail,
+    }
+
+
 # --- the review verdict: the carrier of the rework loop ----------------------
 #
 # A PR that FAILED review used to have nowhere to go. The dispatcher could claim a task
@@ -4091,9 +4187,19 @@ existing PR updates itself.
 5. Run `chela task-finished {{task_id}}` as your last step — it puts the run back in
    `awaiting_review` and wakes the reviewer.
 
-**Do NOT touch the tracker file.** If the verdict is wrong, or you cannot fix it, say so
-plainly in your final message and stop — do not push a half-fix. There are only
-{{max_reworks}} rounds; after that the run escalates to a human.
+**Do NOT touch the tracker file.**
+
+⛔ **If you conclude there is NOTHING to push** — the verdict is wrong, already fixed, or
+you cannot fix it — do **NOT** just say so in your final message and stop. `task-finished`
+assumes a new commit landed; calling it (or nothing at all) with no push leaves this run
+stuck forever with no way for anyone to notice — the window still answers every prompt, it
+just has nothing new to report. Instead run, as your LAST step:
+
+    chela rework-disputed {{task_id}} "<why there is nothing to push>"
+
+which hands the run straight to a human instead of leaving it stuck — the automatic loop
+cannot resolve a disagreement with the verdict on its own. There are only {{max_reworks}}
+rounds either way; after that the run escalates to a human regardless.
 """
 
 

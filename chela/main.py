@@ -1810,6 +1810,31 @@ def cmd_task_finished(args) -> None:
     print(f"Task {result['task_id']} awaiting review (pr_url={result.get('pr_url') or 'unknown'})")
 
 
+def cmd_rework_disputed(args) -> None:
+    """⏳🪤 CMX-248 (re-scope of CMX-244). A rework agent's escape hatch for "there is
+    nothing to push."
+
+    Invoked by a reworking agent as its LAST step in place of `task-finished` when it
+    concludes the verdict is wrong, already fixed, or otherwise unfixable — i.e. it has no
+    new commit to offer for review. Moves the run straight to `needs_human` (never
+    `awaiting_review`, which would carry the SAME head the judge already ruled on, unjudged
+    again) so a human resolves the disagreement instead of the run sitting in `running`
+    forever with no commit that could ever trigger a fresh judge pass.
+    """
+    result = dispatcher.mark_rework_disputed(args.task_id, args.reason)
+    if not result.get("ok"):
+        print(f"rework-disputed: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"🔁🚫 Task {result['task_id']} disputed — needs_human "
+          f"(rework {result.get('rework_count')}/{result.get('max_reworks')})")
+    if result.get("comment_posted"):
+        print(f"  PR comment posted: {result.get('pr_url') or ''}")
+    else:
+        print(f"  ⚠ PR comment NOT posted ({result.get('comment_detail')}) — the run row is "
+              "the authority, so the dispute is recorded regardless, but nothing landed on "
+              "the PR.")
+
+
 def _rework_prospects(workflow_path: str | None) -> list[str]:
     """Will anything ACTUALLY re-spawn this run? Say what is true, not what is intended.
 
@@ -2540,6 +2565,17 @@ def main() -> None:
     )
     p_tf.add_argument("task_id")
 
+    # rework-disputed — the rework agent's "nothing to push" escape hatch
+    # (CMX-248, re-scope of CMX-244)
+    p_rd = sub.add_parser(
+        "rework-disputed",
+        help="A rework agent's last step when it has nothing to push: moves the run to "
+             "needs_human instead of leaving it stuck in `running` forever",
+    )
+    p_rd.add_argument("task_id")
+    p_rd.add_argument("reason", help="Why there is nothing to push — read by the human who "
+                                      "resolves the dispute")
+
     args = parser.parse_args()
 
     if args.command == "status":
@@ -2614,6 +2650,8 @@ def main() -> None:
         cmd_dashboard(args)
     elif args.command == "task-finished":
         cmd_task_finished(args)
+    elif args.command == "rework-disputed":
+        cmd_rework_disputed(args)
     elif args.command == "review":
         cmd_review(args)
     elif args.command == "judge":
