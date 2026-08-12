@@ -515,6 +515,37 @@ def test_the_doctor_fact_counts_ZERO_when_every_row_is_current(live_stores, tmp_
     )
 
 
+def test_the_doctor_fact_excludes_a_closed_run_row_from_the_count(live_stores, capsys):
+    """🩺🐺 CMX-261, measured live: `chela doctor` reported "112 stamped row(s) from a dead
+    epoch → chela restore", and `chela restore --apply` run twice never moved the count —
+    every one of the 112 was a `done`/merged run. `task-finished` kills the agent's tmux
+    window as a run's LAST step, so a closed row's dangling stamp is the expected,
+    permanent shape of every completed task, not something `restore.plan`/`apply` has ever
+    classified (that store is report-only, always was) or ever could fix. Replace the
+    fixture's one `running` row with a closed one and it must vanish from BOTH the doctor
+    fact's count and the CLI's own orphan report — not merely stop appearing in the verdict
+    block, which was never reached for this store to begin with.
+    """
+    from chela import dispatcher, runtime_truth
+
+    dispatcher_row = {
+        "task_id": "abc123", "title": "cmx-77 do a thing", "status": "done",
+        "pr_state": "merged", "window_id": "@9", "window_epoch": OLD,
+        "judge_window_id": "@10", "judge_window_epoch": OLD, "judge_state": "clean",
+    }
+    live_stores.setattr(dispatcher, "list_runs", lambda *a, **k: [dispatcher_row])
+
+    # inbox.watches @3 · session-ids @5 and @7 — the closed run contributes nothing.
+    assert runtime_truth._restore_scan(NOW) == 3
+
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+    out = capsys.readouterr().out
+    assert "@9" not in out and "@10" not in out and "dispatcher.runs" not in out, (
+        f"a closed run's dead window stamp must not appear in the report at all. Got:\n{out}"
+    )
+
+
 # --- the two DI defaults ----------------------------------------------------------------
 #
 # 🔴 GUARDS (CMX-195 round 8). `plan()` has exactly TWO callable defaults — verified by

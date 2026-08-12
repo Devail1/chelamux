@@ -859,6 +859,24 @@ def _run_trial_outcome(row: sqlite3.Row) -> str | None:
     return None
 
 
+def run_is_terminal(row) -> bool:
+    """Plain yes/no twin of :func:`_run_trial_outcome`, for callers (``chela.restore``)
+    that only need to know whether a `runs` row will ever move again — not which of
+    merged/died/abandoned it stopped on. Same three conditions, deliberately kept in
+    sync with that function rather than calling it: this one reads with ``.get()`` so a
+    lighter-weight dict than a real `runs` row (missing ``pr_state``/``attempt``
+    entirely) reads as still-pending rather than raising, since a row's `task-finished`
+    kills its tmux window as the LAST step of a trial — the window address going dead is
+    the expected, permanent shape of every closed trial, not evidence anything needs
+    fixing.
+    """
+    if row.get("pr_state") == "merged":
+        return True
+    if row.get("status") == "failed" and (row.get("attempt") or 1) >= MAX_ATTEMPTS:
+        return True
+    return row.get("status") == "done"
+
+
 def reconcile_trial_ledger(existing_text: str, rows: list[sqlite3.Row]) -> tuple[str, list[str], list[str]]:
     """Pure merge of the ledger's current text with `rows` (this workflow's `runs`
     table). Returns ``(new_text, appended_ids, resolved_ids)``.
