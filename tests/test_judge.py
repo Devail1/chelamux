@@ -728,7 +728,17 @@ def test_a_stale_clean_verdicts_PR_comment_also_names_both_shas(tmp_path):
     (clean) arm's own `if stale_head:` prefix at all.
 
     Disable the clean branch's `if stale_head:` prefix (e.g. `if False and stale_head:`) and
-    this goes red: the clean verdict posts with no mention that it was superseded."""
+    this goes red: the clean verdict posts with no mention that it was superseded.
+
+    ⚖️⏱️ CMX-246 rework round 5, finding 1: also pins the `judge.stale_head` EVENT for this
+    same clean arm, not just the PR comment. The log/event announcement block above the
+    `if blocking:`/`else:` split is written once and meant to cover BOTH arms — but until now
+    only `test_a_stale_verdict_announces_both_shas_on_the_PR_and_in_the_event_log` (which
+    always takes the `if blocking:` arm) ever read `event_log`. Gate that whole block on
+    `stale_head and blocking` and this test still saw its PR comment (the clean arm's own,
+    separate `if stale_head:` prefix at line ~1432 is untouched by that mutation) while `chela
+    events` records nothing at all for a superseded CLEAN verdict — this goes red only with
+    the event-log assertions below."""
     task_id = "abc123"
     judged_sha = "oldsha000001"
     live_sha = "newsha000002"
@@ -756,6 +766,20 @@ def test_a_stale_clean_verdicts_PR_comment_also_names_both_shas(tmp_path):
     assert f"a newer commit, `{live_sha[:12]}`," in posted[0]
     assert f"this verdict is for `{live_sha[:12]}`" not in posted[0]
     assert f"a newer commit, `{judged_sha[:12]}`," not in posted[0]
+
+    # ⚖️⏱️ CMX-246 rework round 5, finding 1: the CLEAN arm gets a `judge.stale_head` event
+    # too — this is the only test that ever spends a CLEAN, stale verdict AND reads
+    # `event_log`, so it is the only guard on `if stale_head:` (vs. `if stale_head and
+    # blocking:`) for the whole announcement block.
+    events = event_log.read(types=["judge.stale_head"])["events"]
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["task_id"] == task_id
+    assert payload["judged_sha"] == judged_sha
+    assert payload["live_head_sha"] == live_sha
+    assert payload["verdict"] == judge.J_CLEAN
+    assert (f"verdict for {judged_sha[:12]} superseded by {live_sha[:12]}"
+            in events[0]["summary"])
 
 
 def test_the_PRs_live_head_is_reread_right_before_the_verdict_is_spent_not_the_stale_in_memory_row(
