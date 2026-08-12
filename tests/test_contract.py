@@ -25,6 +25,14 @@ from chela.judge import J_BLOCKED, J_BLOCKED_RACE, J_CANNOT_VERIFY, J_RUNNING
 from chela.personas import lease
 
 
+def test_git_timeout_is_the_shared_network_timeout_not_its_own_constant():
+    """CMX-262 rework: ``contract.GIT_TIMEOUT`` bounds ``gh pr merge`` — a round-trip to
+    GitHub, exactly the class ``dispatcher.GIT_NET_TIMEOUT_SECONDS`` governs — so it must be
+    THAT constant, not a third one that happens to equal it today and silently drifts the
+    next time either is tuned."""
+    assert contract.GIT_TIMEOUT is dispatcher.GIT_NET_TIMEOUT_SECONDS
+
+
 @pytest.fixture(autouse=True)
 def _own_runs_db(tmp_path, monkeypatch):
     """A runs DB per test (``dispatcher.DB_PATH`` is latched at import — see conftest).

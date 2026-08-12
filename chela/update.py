@@ -49,7 +49,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from chela import config, hooks, notify
-from chela.dispatcher import GIT_NET_TIMEOUT_SECONDS, GIT_TIMEOUT_SECONDS, _git, _git_ok, _git_out
+from chela.dispatcher import (
+    GIT_NET_TIMEOUT_SECONDS,
+    GIT_TIMEOUT_SECONDS,
+    GitTimeout,
+    _git,
+    _git_ok,
+    _git_out,
+)
 
 log = logging.getLogger(__name__)
 
@@ -188,7 +195,10 @@ def commits_behind(repo: Path | None = None, *, fetch: bool = True) -> UpdateSta
     """
     repo = repo or repo_root()
     if fetch:
-        fetch_cp = _git(repo, "fetch", timeout=GIT_NET_TIMEOUT_SECONDS)
+        try:
+            fetch_cp = _git(repo, "fetch", timeout=GIT_NET_TIMEOUT_SECONDS, raise_on_timeout=True)
+        except GitTimeout as e:
+            return UpdateStatus(ok=False, error=str(e))
         if not _git_ok(fetch_cp):
             err = fetch_cp.stderr.strip() if fetch_cp is not None else "git fetch failed to run"
             return UpdateStatus(ok=False, error=f"git fetch failed: {err}")
@@ -535,7 +545,11 @@ def apply(repo: Path | None = None) -> ApplyResult:
                             plugin_updated=plugin_updated, plugin_error=plugin_error)
 
     if not rewrite_recovered:
-        pull_cp = _git(repo, "pull", "--ff-only", timeout=GIT_NET_TIMEOUT_SECONDS)
+        try:
+            pull_cp = _git(repo, "pull", "--ff-only", timeout=GIT_NET_TIMEOUT_SECONDS,
+                            raise_on_timeout=True)
+        except GitTimeout as e:
+            return ApplyResult(ok=False, step="pull", behind_before=status.behind, error=str(e))
         if not _git_ok(pull_cp):
             err = pull_cp.stderr.strip() if pull_cp is not None else "git pull failed to run"
             return ApplyResult(ok=False, step="pull", behind_before=status.behind, error=err)

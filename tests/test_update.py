@@ -405,6 +405,66 @@ def test_fetch_and_pull_use_the_network_timeout_not_the_local_one(
     assert seen_timeouts["pull"] == update.GIT_NET_TIMEOUT_SECONDS
 
 
+# --- CMX-262: a fetch/pull timeout must say it's a timeout, not "failed to run" ------
+
+def test_fetch_timeout_names_itself_as_a_timeout(checkout, monkeypatch):
+    """A timeout must name itself as a timeout — "git fetch failed to run" sends an
+    adopter hunting for a git problem they do not have. Blank/generic wording here is
+    the regression this guards against."""
+    real_git = update._git
+
+    def raise_on_fetch(repo, *args, **kwargs):
+        if args and args[0] == "fetch" and kwargs.get("raise_on_timeout"):
+            raise update.GitTimeout(
+                f"git fetch timed out after {kwargs['timeout']:.0f}s — this looks like a "
+                "slow network link, not a problem with the repo itself"
+            )
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(update, "_git", raise_on_fetch)
+
+    status = update.commits_behind(checkout, fetch=True)
+
+    assert status.ok is False
+    assert "timed out" in status.error
+    assert str(int(update.GIT_NET_TIMEOUT_SECONDS)) in status.error
+
+
+def test_pull_timeout_names_itself_as_a_timeout(checkout, upstream, monkeypatch):
+    _commit(upstream, "new.txt", "new\n")
+    real_git = update._git
+
+    def raise_on_pull(repo, *args, **kwargs):
+        if args and args[0] == "pull" and kwargs.get("raise_on_timeout"):
+            raise update.GitTimeout(
+                f"git pull timed out after {kwargs['timeout']:.0f}s — this looks like a "
+                "slow network link, not a problem with the repo itself"
+            )
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(update, "_git", raise_on_pull)
+
+    result = update.apply(checkout)
+
+    assert result.ok is False
+    assert result.step == "pull"
+    assert "timed out" in result.error
+    assert str(int(update.GIT_NET_TIMEOUT_SECONDS)) in result.error
+
+
+def test_non_timeout_fetch_failure_does_not_claim_to_be_a_timeout(checkout, monkeypatch):
+    """Negative control: a plain (non-timeout) git failure must not be mislabeled as a
+    timeout — only an actual hang gets the timeout wording."""
+    monkeypatch.setattr(update, "_git",
+                         lambda repo, *a, **k: _FakeCP(returncode=1, stderr="fatal: no route"))
+
+    status = update.commits_behind(checkout, fetch=True)
+
+    assert status.ok is False
+    assert "timed out" not in status.error
+    assert "fatal: no route" in status.error
+
+
 def test_happy_path_restarts_only_running_chela_services(checkout, upstream, monkeypatch):
     _commit(upstream, "new.txt", "new\n")
     restart_calls = []

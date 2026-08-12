@@ -79,7 +79,9 @@ AUTONOMOUS_BASE = config.dashboard_setting("merge_base", "CHELA_MERGE_BASE", "de
 # that even a misconfigured CHELA_MERGE_BASE=main is refused as a hard-line violation.
 FORBIDDEN_BASES = frozenset({"main", "master", "production", "prod", "release", "stable"})
 
-GIT_TIMEOUT = 60
+# ``gh pr merge`` is a round-trip to GitHub, not a local op — share dispatcher's network
+# timeout rather than redefining it here, so the two never drift apart (CMX-262).
+GIT_TIMEOUT = dispatcher.GIT_NET_TIMEOUT_SECONDS
 
 
 def _actor(explicit: str | None = None) -> str:
