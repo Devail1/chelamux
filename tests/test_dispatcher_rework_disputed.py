@@ -77,7 +77,9 @@ def _parse_escalation(last_error: str) -> tuple[str, str, list[str]]:
 
 def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
     with dispatcher._db() as conn:
-        _row(conn)
+        # rework_count=2 (not the field's default of 1) so the round-number pin below
+        # actually reads the row instead of merely matching a hardcoded literal.
+        _row(conn, rework_count=2)
     gh: list[list[str]] = []
     gh_inputs: list[str] = []
 
@@ -94,13 +96,13 @@ def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
     assert result["ok"] is True
     assert result["status"] == "needs_human"
     assert result["comment_posted"] is True
-    assert result["rework_count"] == 1          # unchanged — the round was already spent
+    assert result["rework_count"] == 2          # unchanged — the round was already spent
     assert result["max_reworks"] == dispatcher.max_reworks()
     kill.assert_called_once_with("cmx-1")        # the window is killed, same as task-finished
 
     run = dispatcher.resolve_run("abc123")
     assert run["status"] == "needs_human"
-    assert run["rework_count"] == 1
+    assert run["rework_count"] == 2
     assert "the verdict describes code" in run["last_error"]
     # the headline itself — not just the agent's reason it's prefixed onto — must tell a
     # human this is a DISPUTE, that nothing was pushed, and which round it was. Every
