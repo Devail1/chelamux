@@ -417,6 +417,29 @@ def test_check_no_new_guards_unknown_when_origin_ref_does_not_resolve(tmp_path):
     assert dispatcher.check_no_new_guards("t1") is None
 
 
+def test_check_no_new_guards_unknown_when_diff_command_fails(tmp_path, monkeypatch):
+    # `origin/<base>` resolves fine (unlike the test above) but the subsequent `git diff`
+    # itself fails — a distinct unknown, and it must stay `None`, not collapse into the
+    # confident `False` of "no test files touched".
+    root = tmp_path / "wt"
+    _repo_with_origin(root)
+    (root / "README.md").write_text("hi, updated\n")
+    _git(root, "commit", "-aqm", "a follow-up commit")
+    wf = _workflow_md(tmp_path)
+    _insert_run("t1", root, wf)
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if "diff" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(dispatcher.subprocess, "run", fake_run)
+
+    assert dispatcher.check_no_new_guards("t1") is None
+
+
 def test_check_no_new_guards_unknown_for_unknown_task_id(tmp_path):
     assert dispatcher.check_no_new_guards("no-such-task") is None
 
