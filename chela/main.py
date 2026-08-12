@@ -519,19 +519,39 @@ def cmd_watch(args) -> None:
     ``inbox.json`` were issued by a server that no longer exists, so the inbox refuses to
     push to them (they name other agents now) and holds the queue until a real session says
     "I am here". This is that sentence.
+
+    **No window AT ALL** (not in tmux, ``$CHELA_WID`` unset — the case a MANUAL
+    ``chela restore`` relaunch or a bare ``claude`` in a terminal leaves you in): CMX-255.
+    There is no ``@N`` to register, so this falls back to registering YOUR OWN PROCESS,
+    addressed by its pid over its own peer-messaging socket instead of a tmux window
+    (:func:`chela.orchestrator.self_peer` walks your process ancestry to find it) — the
+    inbox delivers to it exactly as it would a window, minus the tmux-paste fallback (there
+    is no pane to paste into).
     """
     self_wid = orchestrator.self_wid()
     if not args.wid:
         if not self_wid:
-            print("no window id: run this from inside a tmux window (or pass @N to watch it) "
-                  "— a session started outside tmux cannot bind at all, seamlessly or "
-                  "otherwise. If this session used to be the orchestrator, run `chela "
-                  "restore` from ANY shell with tmux on PATH (it needs no window of its "
-                  "own) — it will classify the old registration MANUAL and hand back the "
-                  "exact `cd <cwd> && CHELA_WID=@N claude --resume <sid>` command to "
-                  "relaunch this session properly. That relaunch is the only way back in.",
-                  file=sys.stderr)
-            sys.exit(1)
+            peer = orchestrator.self_peer()
+            if not peer:
+                print("no window id: run this from inside a tmux window (or pass @N to watch "
+                      "it) — a session started outside tmux cannot bind at all, and no claude "
+                      "ancestor process could be found either, so there is no windowless "
+                      "address to register either. If this session used to be the "
+                      "orchestrator, run `chela restore` from ANY shell with tmux on PATH (it "
+                      "needs no window of its own) — it will classify the old registration "
+                      "MANUAL and hand back the exact `cd <cwd> && CHELA_WID=@N claude "
+                      "--resume <sid>` command to relaunch this session properly. That "
+                      "relaunch is the only way back in.", file=sys.stderr)
+                sys.exit(1)
+            result = inbox.register_peer(peer["pid"], peer["session"])
+            queued = result["queued"]
+            ident = (f", session {result['session']}" if result.get("session")
+                     else ", no session identity resolved")
+            print(f"registered pid {result['pid']} as the orchestrator over its own peer "
+                  f"socket (no tmux window){ident}"
+                  + (f"; {queued} queued event(s) will be delivered when you are idle"
+                     if queued else "; nothing queued"))
+            return
         result = inbox.register(self_wid)
         if not result["ok"]:
             print(f"register failed: {result['error']}", file=sys.stderr)
@@ -592,6 +612,18 @@ def cmd_watching(args) -> None:
                   "under a window (CMX-82).")
     elif state == inbox.ADDR_UNSTAMPED:
         print(f"\n! {why}")
+    # CMX-255: the windowless fallback address — checked regardless of the wid state above,
+    # since `deliver` tries it whenever there is no LIVE wid orchestrator (unregistered or
+    # undeliverable), not only when nothing is registered at all.
+    peer = inbox.orchestrator_peer(store)
+    if peer:
+        pstate, pwhy = inbox.peer_state(peer)
+        ident = f", session {peer['session']}" if peer.get("session") else ""
+        print(f"\nwindowless orchestrator: pid {peer['pid']}{ident}  [{pstate}]"
+              + ("  (fallback only — a live wid orchestrator is registered above)"
+                 if orch and state not in inbox.UNDELIVERABLE else ""))
+        if pstate != inbox.PEER_OK:
+            print(f"   {pwhy}")
     if not inbox.enabled():
         print("inbox: DISABLED (CHELA_INBOX_ENABLED=false)")
     names = discovery.get_windows_by_id()

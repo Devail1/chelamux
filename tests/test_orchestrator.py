@@ -82,6 +82,25 @@ def test_self_wid_none_without_env_or_pane(monkeypatch):
     assert orchestrator.self_wid() is None
 
 
+# --- CMX-255: self_peer — the windowless fallback identity ----------------------
+
+def test_self_peer_none_when_no_claude_ancestor_is_found(monkeypatch):
+    monkeypatch.setattr(sessions, "own_claude_pid", lambda pid=None: None)
+    assert orchestrator.self_peer() is None
+
+
+def test_self_peer_reports_the_pid_and_resolved_session(monkeypatch):
+    monkeypatch.setattr(sessions, "own_claude_pid", lambda pid=None: 4242)
+    monkeypatch.setattr(sessions, "session_id_for_pid", lambda pid: "sid-abc" if pid == 4242 else None)
+    assert orchestrator.self_peer() == {"pid": 4242, "session": "sid-abc"}
+
+
+def test_self_peer_reports_no_session_when_it_cannot_be_resolved(monkeypatch):
+    monkeypatch.setattr(sessions, "own_claude_pid", lambda pid=None: 4242)
+    monkeypatch.setattr(sessions, "session_id_for_pid", lambda pid: None)
+    assert orchestrator.self_peer() == {"pid": 4242, "session": None}
+
+
 # --- liveness (shared with the dashboard) --------------------------------------
 
 @pytest.mark.parametrize("running,status,expected", [

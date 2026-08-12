@@ -20,12 +20,13 @@ import json
 import os
 import threading
 import time
+from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from chela import agent_manager, dispatcher, event_log, inbox, judge, sessions, transcripts
+from chela import agent_manager, dispatcher, event_log, inbox, judge, main, sessions, transcripts
 
 # Captured at collection time, before the `no_transcript_evidence` autouse fixture
 # (below) overwrites `sessions.transcript_for_window` on every test — the CMX-191
@@ -2905,3 +2906,380 @@ def test_peer_socket_unreachable_falls_back_to_tmux(store_file, windows, sends, 
 
     assert len(sends) == 1
     assert sends[0][0] == ORCH
+
+
+# --- CMX-255: the windowless orchestrator — a raw pid, no tmux window at all ----------
+#
+# The delivery half of the mechanism CMX-254 deliberately deferred (PR #323's `## Scope`):
+# a session registered via `register_peer` (no `@N` at all) is reachable purely over its
+# own peer socket, addressed by pid — `deliver` falls back to it only when there is no
+# LIVE wid-based orchestrator (never registered, or its address has rotted).
+
+def _peer_status(monkeypatch, mapping: dict):
+    monkeypatch.setattr(inbox.agent_manager, "session_status_map",
+                        lambda: {"by_pid": dict(mapping)})
+
+
+def test_register_peer_records_pid_session_and_started_without_touching_the_wid_address(
+        store_file, windows, monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+
+    result = inbox.register_peer(4242, "sid-abc")
+
+    assert result == {"ok": True, "pid": 4242, "session": "sid-abc", "queued": 0}
+    peer = inbox.orchestrator_peer()
+    assert peer["pid"] == 4242
+    assert peer["session"] == "sid-abc"
+    assert peer["started"] == 1000.0
+    # A completely separate address kind — the wid-based one is untouched.
+    assert inbox.orchestrator_wid() is None
+
+
+def test_register_peer_clears_a_latched_address_alarm(store_file, windows, monkeypatch):
+    """`register_peer` is a THIRD writer of the orchestrator address (alongside `register`
+    and `readdress`/`unregister_dangling`) and must clear the alarm exactly like the other
+    two: a latched `address_alarm_pushed=True` SUPPRESSES the push for the NEXT real outage,
+    so a windowless re-registration after a rotted wid must not leave it latched."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    store = _arm_the_address_alarm(inbox.load())
+    inbox.save(store)
+
+    inbox.register_peer(4242, "sid-abc")
+
+    _assert_address_alarm_cleared(inbox.load(), "register_peer")
+
+
+def test_orchestrator_peer_and_orchestrator_wid_are_independent(
+        store_file, windows, monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    inbox.register(ORCH)
+
+    assert inbox.orchestrator_wid() == ORCH
+    assert inbox.orchestrator_peer()["pid"] == 4242    # neither registration clobbers the other
+
+
+def test_peer_state_ok_when_the_pid_still_matches_its_recorded_start_time(monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    state, why = inbox.peer_state({"pid": 4242, "started": 1000.0})
+    assert (state, why) == (inbox.PEER_OK, "")
+
+
+def test_peer_state_gone_when_nothing_is_running_at_that_pid(monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: None)
+    state, why = inbox.peer_state({"pid": 4242, "started": 1000.0})
+    assert state == inbox.PEER_GONE
+    assert "4242" in why
+
+
+def test_peer_state_stale_when_the_os_reused_the_pid(monkeypatch):
+    """⛔ CMX-48's guard, applied to a pid: a pid the OS handed to a DIFFERENT process
+    since registration is a stranger, not the orchestrator, and must be refused exactly
+    like a dangling wid — never delivered to."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 5000.0)
+    state, why = inbox.peer_state({"pid": 4242, "started": 1000.0})
+    assert state == inbox.PEER_STALE
+    assert "4242" in why
+
+
+def test_delivery_falls_back_to_a_registered_windowless_peer_when_nothing_is_registered_by_wid(
+        store_file, windows, monkeypatch):
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (calls.append((pid, frm, text)),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert len(sent) == 1
+    assert calls == [(4242, "chela-inbox", "📥 hello")]
+    assert inbox.load()["queue"] == []
+
+
+def test_delivery_to_a_windowless_peer_never_falls_back_to_tmux(
+        store_file, windows, sends, monkeypatch):
+    """There is no window, so there is no pane to paste into — a socket failure here
+    must be a genuine drop (held queued), never routed through send_tmux."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    monkeypatch.setattr(inbox.messenger, "send_peer_to_pid",
+                        lambda pid, frm, text: messenger.PeerSendResult(False, None))
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert sends == []                              # tmux never touched
+    assert inbox.load()["queue"]                    # HELD, not dropped
+
+
+def test_delivery_does_not_fall_back_to_the_peer_while_a_healthy_wid_orchestrator_is_busy(
+        store_file, windows, sends, monkeypatch):
+    """A live wid orchestrator that is merely BUSY is left alone exactly as before — it
+    will go idle on its own, so the peer fallback must never race it."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    _registered()
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {ORCH: inbox.BUSY}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried
+    assert sends == []
+    assert inbox.load()["queue"]                     # still queued for the wid orchestrator
+
+
+def test_delivery_falls_back_to_the_peer_when_the_wid_address_has_rotted(
+        store_file, windows, sends, monkeypatch):
+    """The core CMX-255 scenario: a tmux restart dangled the wid address, and the only
+    live registration left is the windowless one — the queue must not simply wait forever
+    for a window that isn't coming back."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    with inbox.locked_store() as st:
+        st["orchestrator"] = ORCH
+        st["orchestrator_epoch"] = "1-1000"           # a dead epoch: current() below disagrees
+        st["orchestrator_name"] = "orchestrator"
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (calls.append(pid), messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {ORCH: inbox.IDLE}, [], now_epoch="2-2000")
+
+    assert len(sent) == 1
+    assert calls == [4242]
+    assert sends == []                                # never typed into the stranger at @1
+    assert inbox.load()["queue"] == []
+
+
+def test_delivery_skips_a_windowless_peer_that_is_busy(store_file, windows, monkeypatch):
+    """⛔ Must prove the BUSY gate itself held the event, not merely that no socket
+    exists for this pid — stub `send_peer_to_pid` to succeed and record its calls, then
+    assert it was never even attempted, the same shape
+    `test_delivery_does_not_fall_back_to_the_peer_while_a_healthy_wid_orchestrator_is_busy`
+    uses for the wid path."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.BUSY})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried — busy gate held it
+    assert inbox.load()["queue"]
+
+
+def test_a_held_receipt_from_the_windowless_peer_is_not_attributed_to_a_fabricated_window_id(
+        store_file, windows, monkeypatch):
+    """The peer-path counterpart to `test_a_held_receipt_holds_the_event_queued_and_records_a_
+    receipt`: the windowless call site passes `event_wid=None` on purpose (`orchestrator_peer`:
+    'a caller that needs an actual window id must never receive one from here'). A held/denied
+    receipt from a windowless session must log under NO window id — never a fabricated
+    `@<pid>` standing in for a real one."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    monkeypatch.setattr(inbox.messenger, "send_peer_to_pid",
+                        lambda pid, frm, text: messenger.PeerSendResult(True, "held"))
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert inbox.load()["queue"]                    # HELD — still queued, not dropped
+    receipts = [e for e in event_log.read()["events"] if e["type"] == "inbox_receipt"]
+    assert len(receipts) == 1
+    assert receipts[0]["payload"]["status"] == "held"
+    assert receipts[0]["wid"] is None                # never a fabricated `@<pid>`
+
+
+def test_delivery_skips_a_stale_windowless_peer(store_file, windows, monkeypatch):
+    """⛔ Must prove the `peer_state` refusal itself held the event, not merely that the
+    REAL (unstubbed) `claude agents --json` cache doesn't happen to say pid 4242 is idle —
+    stub the idle gate to IDLE and `send_peer_to_pid` to succeed and record its calls, so
+    the ONLY thing that can hold the event is the stale refusal, the same shape
+    `test_delivery_skips_a_windowless_peer_that_is_busy` uses for the idle gate."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 9999.0)  # pid reused since
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried — stale gate held it
+    assert inbox.load()["queue"]
+
+
+def test_delivery_skips_a_gone_windowless_peer(store_file, windows, monkeypatch):
+    """The GONE counterpart at the `deliver` call site — `test_peer_state_gone_when_nothing_
+    is_running_at_that_pid` only tests the `peer_state` helper in isolation, not that `deliver`
+    actually consults it. Same discriminating shape as the stale test above."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: None)  # nothing runs there now
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried — gone gate held it
+    assert inbox.load()["queue"]
+
+
+def test_no_delivery_at_all_when_neither_a_wid_nor_a_peer_orchestrator_is_registered(
+        store_file, windows):
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert inbox.load()["queue"]
+
+
+# --- `chela watching` — the windowless registration is the operator's only surface for it --
+
+def test_watching_shows_the_windowless_peer_registration_and_its_state(
+        store_file, windows, monkeypatch, capsys):
+    """Nothing under tests/ used to drive `cmd_watching` with a peer in the store at all —
+    the whole display block (`if peer:`) could be disabled outright and every existing test
+    stayed green."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "windowless orchestrator: pid 4242" in out
+    assert "sid-abc" in out
+    assert "[ok]" in out
+    # ⛔ no wid orchestrator is registered at all — CMX-255's own primary scenario, where the
+    # peer is the SOLE destination. Pins the `orch and` half of the suffix's condition: without
+    # it, the suffix fires on ADDR_NONE (not in UNDELIVERABLE) even though nothing is registered
+    # by wid to actually "fall back" to.
+    assert "(fallback only" not in out
+
+
+def test_watching_reports_why_a_stale_windowless_peer_cannot_be_used(
+        store_file, windows, monkeypatch, capsys):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 9999.0)  # pid reused since
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "[stale]" in out
+    # ⛔ NOT just "4242" — the header line (`windowless orchestrator: pid 4242  [stale]`)
+    # already prints the pid regardless of whether `pwhy` was ever reached, so an assertion
+    # that only looks for the pid can't tell a full diagnosis from a stripped one. Assert on
+    # text only `pwhy` can supply: the actual diagnosis and the `chela watch` remedy.
+    tail = out.split("windowless orchestrator", 1)[1]
+    assert "DIFFERENT process" in tail
+    assert "chela watch" in tail
+
+
+def test_watching_reports_why_a_gone_windowless_peer_cannot_be_used(
+        store_file, windows, monkeypatch, capsys):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: None)  # nothing runs there now
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "[gone]" in out
+    assert "no longer running" in out
+
+
+def test_watching_marks_the_peer_as_fallback_only_when_the_wid_orchestrator_can_still_take_it(
+        store_file, windows, monkeypatch, capsys):
+    """The `(fallback only — ...)` suffix's condition (`orch and state not in UNDELIVERABLE`)
+    is a second, independently-derived copy of `deliver`'s own fallback rule — if the two ever
+    disagree, this tells the operator the peer is a mere fallback while `deliver` is in fact
+    routing there, which is exactly the misreport CMX-254 was raised about."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register(ORCH)                                # a live, healthy wid orchestrator
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    inbox.register_peer(4242, "sid-abc")
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "windowless orchestrator: pid 4242" in out
+    assert "(fallback only — a live wid orchestrator is registered above)" in out
+
+
+def test_watching_does_not_call_the_peer_fallback_only_when_the_wid_address_cannot_take_it(
+        store_file, windows, monkeypatch, capsys):
+    """`deliver` falls through to the windowless peer whenever the wid orchestrator is
+    UNDELIVERABLE (CMX-255's whole point) — here that must read as the peer being the REAL
+    destination, not a mere fallback next to a healthy address."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register(ORCH)
+    _statuses(monkeypatch, {AGENT: inbox.IDLE})         # ORCH absent from a non-empty map: GONE
+    inbox.register_peer(4242, "sid-abc")
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "windowless orchestrator: pid 4242" in out
+    assert "(fallback only" not in out

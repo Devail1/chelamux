@@ -141,9 +141,14 @@ def test_watch_with_no_window_id_points_to_chela_restore(monkeypatch, capsys):
     `chela watch` at all — `self_wid()` is None, so there is no window to register. The old
     message ("run this from inside a tmux window") is a dead end for exactly that session:
     it cannot become one without relaunching. The remedy has to be named here, not left for
-    the operator to discover after `chela restore` independently classifies the row MANUAL."""
+    the operator to discover after `chela restore` independently classifies the row MANUAL.
+
+    CMX-255 gave that dead end a real out for a session with a live claude ancestor — the
+    windowless peer registration — so this is the true dead end ONLY when that also fails
+    (no claude ancestor either), which is what's mocked here."""
     from chela import orchestrator
     monkeypatch.setattr(orchestrator, "self_wid", lambda: None)
+    monkeypatch.setattr(orchestrator, "self_peer", lambda: None)
 
     with pytest.raises(SystemExit):
         main.cmd_watch(SimpleNamespace(wid=None, note=""))
@@ -188,6 +193,104 @@ def test_watch_stays_QUIET_when_an_identity_did_resolve(monkeypatch, capsys):
     main.cmd_watch(SimpleNamespace(wid="@7", note=""))
 
     assert "could not resolve a session identity" not in capsys.readouterr().err
+
+
+# --- CMX-255: `chela watch` with NO window at all (not just no --wid) -----------------
+#
+# The dead end PR #323 signposted but did not close: `self_wid()` is None (not in tmux,
+# `$CHELA_WID` unset — the state a MANUAL `chela restore` relaunch or a bare `claude` in a
+# terminal leaves you in). These wire the fallback — registering the caller's own process,
+# addressed by pid over its own peer socket — into the actual CLI dispatch, the same
+# "stub nothing, drive the real command" discipline this file's docstring requires.
+
+def _windowless_env(monkeypatch, *, peer, register_result=None):
+    from chela import inbox, orchestrator
+    monkeypatch.setattr(orchestrator, "self_wid", lambda: None)
+    monkeypatch.setattr(orchestrator, "self_peer", lambda: peer)
+    if register_result is not None:
+        monkeypatch.setattr(inbox, "register_peer", lambda pid, session: register_result)
+
+
+def test_cmd_watch_with_no_window_and_no_claude_ancestor_exits_with_a_clear_message(
+        monkeypatch, capsys):
+    """No tmux pane AND no claude ancestor process — genuinely nothing to register.
+    Must fail loudly, not silently register garbage."""
+    _windowless_env(monkeypatch, peer=None)
+
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_watch(SimpleNamespace(wid=None, note=""))
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "no window id" in err
+    assert "no claude ancestor process could be found" in err
+
+
+def test_cmd_watch_registers_the_windowless_peer_when_there_is_no_tmux_window(
+        monkeypatch, capsys):
+    _windowless_env(
+        monkeypatch, peer={"pid": 4242, "session": "sid-abc"},
+        register_result={"ok": True, "pid": 4242, "session": "sid-abc", "queued": 2})
+
+    main.cmd_watch(SimpleNamespace(wid=None, note=""))
+
+    out = capsys.readouterr().out
+    assert "pid 4242" in out
+    assert "no tmux window" in out
+    assert "sid-abc" in out
+    assert "2 queued" in out
+
+
+def test_cmd_watch_reports_a_windowless_registration_with_no_resolved_session(
+        monkeypatch, capsys):
+    _windowless_env(
+        monkeypatch, peer={"pid": 4242, "session": None},
+        register_result={"ok": True, "pid": 4242, "session": None, "queued": 0})
+
+    main.cmd_watch(SimpleNamespace(wid=None, note=""))
+
+    out = capsys.readouterr().out
+    assert "pid 4242" in out
+    assert "no session identity resolved" in out
+    assert "nothing queued" in out
+
+
+def test_cmd_watch_still_prefers_a_real_window_when_one_exists(monkeypatch, capsys):
+    """The windowless fallback must never shadow the ordinary, far more common path — a
+    real self_wid still goes through inbox.register exactly as before."""
+    from chela import inbox, orchestrator
+
+    def _must_not_be_called():
+        raise AssertionError("self_peer must not even be called")
+
+    monkeypatch.setattr(orchestrator, "self_wid", lambda: "@3")
+    monkeypatch.setattr(orchestrator, "self_peer", _must_not_be_called)
+    monkeypatch.setattr(inbox, "register",
+                        lambda wid: {"ok": True, "orchestrator": wid, "epoch": NOW,
+                                     "session": "sid-xyz", "queued": 0})
+
+    main.cmd_watch(SimpleNamespace(wid=None, note=""))
+
+    assert "registered @3 as the orchestrator" in capsys.readouterr().out
+
+
+def test_cmd_watch_windowless_registration_is_END_TO_END_real(tmp_path, monkeypatch):
+    """🔴 GUARD, not stubbed: `chela watch` with no window must actually call
+    `inbox.register_peer` and persist the registration to a real store — a mutation that
+    swaps the call for a same-shaped fake result (identical printed output, no write) must
+    not survive, and only a real store read can catch that."""
+    from chela import inbox, orchestrator
+    monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
+    monkeypatch.setattr(orchestrator, "self_wid", lambda: None)
+    monkeypatch.setattr(orchestrator, "self_peer", lambda: {"pid": 9999, "session": "sid-e2e"})
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 12345.0)
+
+    main.cmd_watch(SimpleNamespace(wid=None, note=""))
+
+    peer = inbox.orchestrator_peer()
+    assert peer is not None, "the registration never reached the real store"
+    assert peer["pid"] == 9999
+    assert peer["session"] == "sid-e2e"
 
 
 # --- END-TO-END: the real dispatch, over real stores ------------------------------------
