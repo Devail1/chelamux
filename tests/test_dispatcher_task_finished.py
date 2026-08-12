@@ -514,6 +514,37 @@ def test_check_no_new_guards_unknown_when_origin_ref_does_not_resolve(tmp_path):
     assert dispatcher.check_no_new_guards("t1") is None
 
 
+def test_check_no_new_guards_unknown_when_origin_ref_resolves_to_empty_stdout(tmp_path, monkeypatch):
+    """⛔ CMX-250 review round 6, finding 2: ``git rev-parse --verify --quiet <ref>`` exiting
+    0 with EMPTY stdout is not reachable through real git today (a missing ref exits
+    nonzero) — this is belt-and-braces. But drop the ``not resolved.stdout.strip()`` half
+    and ``base_sha`` becomes ``""``; the diff range collapses to ``...HEAD`` (git defaults
+    the empty side to HEAD), the diff comes back empty, and a run that DID add a guard would
+    report the confident ``False`` of "no test files touched" instead of ``None``
+    (unknown) — exactly the misread this function exists to prevent. Force the returncode-0/
+    empty-stdout rev-parse directly, the same monkeypatch shape as the diff-command-failure
+    test below."""
+    root = tmp_path / "wt"
+    _repo_with_origin(root)
+    (root / "tests").mkdir()
+    (root / "tests" / "test_new_thing.py").write_text("def test_x():\n    assert True\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "add a guard")
+    wf = _workflow_md(tmp_path)
+    _insert_run("t1", root, wf)
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(dispatcher.subprocess, "run", fake_run)
+
+    assert dispatcher.check_no_new_guards("t1") is None
+
+
 def test_check_no_new_guards_unknown_when_diff_command_fails(tmp_path, monkeypatch):
     # `origin/<base>` resolves fine (unlike the test above) but the subsequent `git diff`
     # itself fails — a distinct unknown, and it must stay `None`, not collapse into the
@@ -710,6 +741,26 @@ def test_cmd_task_finished_no_new_guards_silent_when_diff_is_clean(capsys):
                        return_value={"ok": True, "task_id": "t1", "pr_url": "https://x/1"}):
         with patch.object(sys, "argv", ["chela", "task-finished", "t1", "--no-new-guards"]):
             main.main()
+    out = capsys.readouterr().out
+    assert "touches tests/" not in out
+    assert "awaiting review" in out
+
+
+def test_cmd_task_finished_no_new_guards_silent_when_diff_is_unknown(capsys):
+    """⛔ CMX-250 review round 6, finding 1: the CLI consumer's half of the None-vs-False
+    invariant. ``dispatcher.check_no_new_guards`` returning ``None`` means "cannot tell" —
+    it must NOT be read as "the diff touches tests/". A mutation from ``if touched_tests:``
+    to ``if touched_tests is not False:`` makes ``None`` trip the same branch as ``True``,
+    falsely telling the agent its diff touches tests/ when the check could not verify that
+    at all."""
+    from chela import main
+
+    with patch.object(dispatcher, "check_no_new_guards", return_value=None) as check, \
+         patch.object(dispatcher, "mark_awaiting_review",
+                       return_value={"ok": True, "task_id": "t1", "pr_url": "https://x/1"}):
+        with patch.object(sys, "argv", ["chela", "task-finished", "t1", "--no-new-guards"]):
+            main.main()
+    check.assert_called_once_with("t1")
     out = capsys.readouterr().out
     assert "touches tests/" not in out
     assert "awaiting review" in out
