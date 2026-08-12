@@ -128,6 +128,14 @@ run_step() {
 # ~/.claude/plugins entry, no chela tmux session — CHELA_DIR/CLAUDE_CONFIG_DIR both point
 # into $WORK, which mktemp guarantees didn't exist before this run.
 
+# Step 1b: prove the CHELA_TMUX_SESSION pin (set above) actually took — not merely that
+# it was exported, but that `config.current_session()` resolves to the guaranteed-
+# nonexistent name and NOT a real session (this box's live `chela` session, or whatever
+# $TMUX_PANE would derive). `chela status` prints the resolved session name verbatim
+# ("No windows found in tmux session '<name>'" / "Agents in tmux session '<name>':"), so
+# tests/test_smoke_fresh_install.py can assert on it directly instead of trusting the export.
+run_step "chela status (verifies the CHELA_TMUX_SESSION pin took effect)" status
+
 # Step 2: plugin render — the scriptable half of "plugin install by the documented path"
 # (see the SCOPE BOUNDARY note above for the interactive half this cannot cover).
 run_step "chela plugin --dir (documented offline-render path)" plugin --dir "$WORK/plugin"
@@ -178,7 +186,30 @@ cat >"$WORK/fixture/TODO.md" <<'EOF'
 
 - [ ] **Fixture task — smoke-fresh-install.sh dispatch --dry-run coverage only.**
 EOF
-cat >"$WORK/fixture/WORKFLOW.md" <<EOF
+# SMOKE_BREAK_DISPATCH_WORKFLOW=1 (test-only, unset in the normal adopter path) writes a
+# WORKFLOW.md missing the required `project_key` instead of a valid one, so
+# `chela.workflow.load_workflow` raises an uncaught ValueError and `chela dispatch
+# --dry-run` produces a genuine Python traceback — exactly the "crashed" case the header
+# comment says this harness catches. tests/test_smoke_fresh_install.py uses this to prove
+# the traceback scan in run_step() actually fails the run instead of merely existing.
+if [ "${SMOKE_BREAK_DISPATCH_WORKFLOW:-0}" = "1" ]; then
+    cat >"$WORK/fixture/WORKFLOW.md" <<EOF
+---
+tracker:
+  kind: markdown
+  path: TODO.md
+workspace:
+  root: $WORK/fixture-workspace
+  base_branch: main
+concurrency:
+  max: 1
+agent:
+  cmd: claude --permission-mode auto
+---
+Fixture prompt for {{task_title}}.
+EOF
+else
+    cat >"$WORK/fixture/WORKFLOW.md" <<EOF
 ---
 project_key: SMOKE
 tracker:
@@ -194,6 +225,7 @@ agent:
 ---
 Fixture prompt for {{task_title}}.
 EOF
+fi
 run_step "chela dispatch --dry-run (fixture tracker)" dispatch "$WORK/fixture/WORKFLOW.md" --dry-run
 
 # Step 7: teardown — assert nothing root-owned is left behind. Nothing this script runs
