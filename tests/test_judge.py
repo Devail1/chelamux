@@ -358,6 +358,17 @@ def test_block_body_step_3_tells_the_rework_agent_to_self_check(tmp_path):
     agent how to come back. If step 3 is reverted to a bare `chela task-finished <task-id>`,
     a rework agent takes the warn-only path and CMX-250's self-check gate never enforces on
     the very round that was blocked — nothing before this test pinned the wording at all.
+
+    ⛔ CMX-258 rework round 7, finding 2 (WIRING): the two substring checks above only pin
+    that the flagged form of the command APPEARS somewhere in the body — they survive
+    softening step 3's imperative ("then `chela task-finished <task-id>
+    --self-check-experiments <path>`") to a bare mandatory command plus a PARENTHETICAL,
+    OPTIONAL mention of the same flagged command ("and `chela task-finished <task-id>`.
+    (Optionally `chela task-finished <task-id> --self-check-experiments <path>`, ...)"),
+    because that parenthetical still contains both substrings verbatim. Pin the adjacency
+    ("then `...`", not "and `...`. (Optionally `...`") and add a direct negative control: the
+    real body never uses the word "optional" to describe this step, so that word appearing
+    at all is proof the mandate was softened.
     """
     survived = judge.Outcome(
         judge.Experiment(guard="g", file="f.py", before="a", after="b"),
@@ -372,6 +383,8 @@ def test_block_body_step_3_tells_the_rework_agent_to_self_check(tmp_path):
 
     assert "--self-check-experiments <path>" in body
     assert "chela task-finished <task-id> --self-check-experiments" in body
+    assert "then `chela task-finished <task-id> --self-check-experiments <path>`" in body
+    assert "optional" not in body.lower()
 
 
 def test_workflow_md_step_6_names_both_task_finished_flags():
@@ -401,6 +414,29 @@ def test_workflow_md_step_6_makes_passing_a_flag_mandatory():
 
     assert "pass ONE of these two flags" in text
     assert "now enforces step 3's outcome instead of trusting it happened" in text
+
+
+def test_workflow_md_step_6_pins_condition_to_flag_pairing():
+    """⛔ CMX-258 rework round 7, finding 1 (WIRING): the two sibling tests above pin that
+    both flag NAMES appear and that passing one is MANDATORY, but neither pins WHICH
+    condition maps to WHICH flag. Swapping the two bullets' condition text ('Added or
+    changed a guard?' <-> 'Added or changed no guard this run?') while leaving each flag
+    attached to its own explanatory sentence sends every guard-adding run onto the
+    report-only `--no-new-guards` path — the gate would never enforce on the runs it exists
+    for — and neither substring check above moves, since both flag names and both mandate
+    phrases still appear somewhere in the file after the swap. Pin the exact adjacency
+    between each condition and its flag instead of just their co-occurrence."""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert (
+        "**Added or changed a guard?** `chela task-finished {{task_id}} "
+        "--self-check-experiments <path>`"
+    ) in text
+    assert (
+        "**Added or changed no guard this run?** `chela task-finished {{task_id}} "
+        "--no-new-guards`"
+    ) in text
 
 
 def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
