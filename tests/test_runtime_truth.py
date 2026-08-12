@@ -739,6 +739,34 @@ def test_node_ipc_env_cannot_verify_when_tmux_is_unreachable(fleet, monkeypatch)
     assert "CANNOT VERIFY tmux.node_ipc_env" in findings[0].title
 
 
+def test_node_ipc_env_detects_node_channel_fd_when_the_sibling_is_absent(fleet, monkeypatch):
+    """⛔ Judge round 3: `_break_tmux_node_ipc_env` (the CORRUPTIONS entry above) always
+    leaks BOTH vars together, so a mutation that drops ``NODE_CHANNEL_FD`` — the one that
+    actually SIGABRTs `node --test` — out of `_NODE_IPC_ENV_VARS` still reports ERROR: the
+    surviving sibling alone is enough to trip that fixture, and nothing notices the fd went
+    blind. Leak ONLY the fd, not the sibling, so detection is attributable to it and it
+    alone."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: {"NODE_CHANNEL_FD": "3"})
+    findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a tmux global env carrying ONLY NODE_CHANNEL_FD must still be ERROR, got "
+        f"{findings}")
+    assert "NODE_CHANNEL_FD" in findings[0].title
+
+
+def test_node_ipc_env_detects_serialization_mode_when_the_fd_is_absent(fleet, monkeypatch):
+    """Complementary half of the guard above: leak ONLY the sibling, not the fd, so a
+    mutation dropping ``NODE_CHANNEL_SERIALIZATION_MODE`` from `_NODE_IPC_ENV_VARS` can't
+    hide behind the fd's detection either."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env",
+                        lambda: {"NODE_CHANNEL_SERIALIZATION_MODE": "json"})
+    findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a tmux global env carrying ONLY NODE_CHANNEL_SERIALIZATION_MODE must still be "
+        f"ERROR, got {findings}")
+    assert "NODE_CHANNEL_SERIALIZATION_MODE" in findings[0].title
+
+
 def test_peer_transport_warns_on_a_stale_socket_file_nothing_is_listening_on(
         fleet, monkeypatch):
     """`.exists()` alone would call this reachable — CMX-224's rework closes exactly this
