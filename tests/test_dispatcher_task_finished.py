@@ -79,9 +79,18 @@ def _repo_with_origin(root: Path, branch: str = "master") -> str:
     """A git repo whose HEAD is also ``refs/remotes/origin/<branch>`` — no real remote
     needed, just a ref :func:`dispatcher.check_no_new_guards` can resolve ``origin/<base
     branch>`` against. Returns the base sha; the caller commits ON TOP of it to build a
-    diff."""
+    diff.
+
+    ⛔ CMX-258 rework round 4, findings 1-2: the base already carries an existing
+    ``tests/test_existing.py`` — a caller that MODIFIES it (rather than adding a brand-new
+    tests/ file) is the only way to distinguish "the diff touches tests/" from "the diff
+    ADDS a file under tests/", since every fixture before this one built its guard as a
+    fresh ADD on top of a base that had no tests/ file at all.
+    """
     root.mkdir(parents=True, exist_ok=True)
     (root / "README.md").write_text("hi\n")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_existing.py").write_text("def test_x():\n    assert True\n")
     _git(root, "init", "-q", "-b", branch)
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "base")
@@ -506,18 +515,25 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
     FOR — round 8's exact task_id-forwarding class, at the one place a human reads it.
     Use a task_id that is NOT the literal "t1" (the same reason the CLI-level forwarding
     tests use "cmx-777"), so a hardcoded `payload={"task_id": "t1", ...}` goes red instead
-    of coincidentally satisfying the assertion because the run under test IS "t1"."""
+    of coincidentally satisfying the assertion because the run under test IS "t1".
+
+    ⛔ CMX-258 rework round 4, findings 1-2: MODIFY the base's existing
+    `tests/test_existing.py` (not just add a new one) — the only way to distinguish
+    'the diff touches tests/' from 'the diff ADDS a file under tests/', which
+    `--diff-filter=A` would also satisfy. And touch a root-level `tests_helper.py` — a path
+    that STARTS WITH "tests" but is NOT under the tests/ directory — so a filter of
+    `startswith("tests")` (missing the trailing separator) wrongly pulls it into `touched`
+    and the `files == ["tests/test_existing.py"]` assertion below catches it.
+    """
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
     root = tmp_path / "wt"
     _repo_with_origin(root)
-    (root / "tests").mkdir()
-    (root / "tests" / "test_new_thing.py").write_text("def test_x():\n    assert True\n")
-    # ⛔ CMX-258 rework round 1, finding 2: the fixture diff must touch a NON-tests/ file
-    # too, so the unfiltered `files` list and the tests/-filtered `touched` list differ —
-    # otherwise a mutation that logs `files` instead of `touched` stays invisible.
-    (root / "chela_thing.py").write_text("x = 1\n")
+    (root / "tests" / "test_existing.py").write_text(
+        "def test_x():\n    assert True\n\n\ndef test_y():\n    assert True\n"
+    )
+    (root / "tests_helper.py").write_text("x = 1\n")
     _git(root, "add", "-A")
-    _git(root, "commit", "-qm", "add a guard")
+    _git(root, "commit", "-qm", "change a guard and touch a tests-prefixed decoy path")
     wf = _workflow_md(tmp_path)
     _insert_run("cmx-778", root, wf)
 
@@ -528,7 +544,7 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
     matches = [e for e in events if e.get("type") == "no_new_guards_mismatch"]
     assert len(matches) == 1
     assert matches[0]["payload"]["task_id"] == "cmx-778"
-    assert matches[0]["payload"]["files"] == ["tests/test_new_thing.py"]
+    assert matches[0]["payload"]["files"] == ["tests/test_existing.py"]
     # ⛔ CMX-250 review round 5, finding 4: the payload alone isn't what a human reads on
     # the dashboard — the event's human-readable summary must say WHAT happened, not be
     # blanked to "". Pin the actual words, not just that the field is non-empty.
@@ -576,7 +592,6 @@ def test_check_no_new_guards_unknown_when_origin_ref_resolves_to_empty_stdout(tm
     test below."""
     root = tmp_path / "wt"
     _repo_with_origin(root)
-    (root / "tests").mkdir()
     (root / "tests" / "test_new_thing.py").write_text("def test_x():\n    assert True\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "add a guard")
@@ -641,7 +656,6 @@ def test_check_no_new_guards_uses_the_runs_own_base_branch_not_a_hardcoded_defau
     diffing against the run's real base and finding the new guard."""
     root = tmp_path / "wt"
     _repo_with_origin(root, branch="trunk")
-    (root / "tests").mkdir()
     (root / "tests" / "test_new_thing.py").write_text("def test_x():\n    assert True\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "add a guard")
@@ -662,7 +676,6 @@ def test_check_no_new_guards_uses_the_row_matching_its_own_task_id(tmp_path, mon
 
     decoy_root = tmp_path / "decoy-wt"
     _repo_with_origin(decoy_root)
-    (decoy_root / "tests").mkdir()
     (decoy_root / "tests" / "test_new_thing.py").write_text("def test_x():\n    assert True\n")
     _git(decoy_root, "add", "-A")
     _git(decoy_root, "commit", "-qm", "decoy touches tests/")

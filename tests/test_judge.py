@@ -387,6 +387,22 @@ def test_workflow_md_step_6_names_both_task_finished_flags():
     assert "--no-new-guards" in text
 
 
+def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
+    """⛔ CMX-258 rework round 4, finding 3 (WIRING): step 3 tells the agent to KEEP the
+    experiments JSON file so step 6 can consume it. If this instruction reverses (an agent
+    told to delete the file instead), following the doc destroys the path before step 6
+    exists — `task-finished --self-check-experiments <path>` can never run, and every run
+    silently falls back to the warn-only `--no-new-guards` path. Nothing before this test
+    pinned step 3's half of the wiring — only step 6's own flag wording, in the sibling test
+    above."""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert "Keep the experiments JSON file" in text
+    assert "do not delete it after step 3" in text
+    assert "step 6 needs its path" in text
+
+
 def test_zero_experiments_is_CANNOT_VERIFY_not_a_clean_bill_of_health(tmp_path):
     root = _project(tmp_path / "repo")
 
