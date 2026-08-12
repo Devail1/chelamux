@@ -591,6 +591,7 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
         pytest.param("tests-helpers/x.py", False, id="starts-with-tests-hyphen"),
         pytest.param("chela/dashboard/widget.test.mjs", True, id="dot-test-mjs-outside-tests-dir"),
         pytest.param("tests/widget.test.mjs", True, id="dot-test-mjs-under-tests-dir"),
+        pytest.param("chela/dashboard/static/app.mjs", False, id="plain-mjs-module-is-not-a-guard"),
         pytest.param("chela/tests/x.py", False, id="nested-tests-dir-outside-top-level"),
         pytest.param("README.md", False, id="no-guard-touched-at-all"),
     ],
@@ -613,6 +614,11 @@ def test_check_no_new_guards_path_classification_table(tmp_path, path, expected)
       from the whole tree (a real one, ``chela/dashboard/static/collab/fit.test.mjs``,
       already lives outside ``tests/``), so a cross-check keyed on ``.py`` files under
       ``tests/`` alone is blind to all of them.
+    * ``chela/dashboard/static/app.mjs`` — the negative control on the EXTENSION axis, round
+      8's blocking finding: a plain ``.mjs`` module (not ``.test.mjs``, not under ``tests/``)
+      must NOT count. Nothing in this repo's suites executes a plain ``.mjs`` file, so
+      widening the clause from ``endswith(".test.mjs")`` to ``endswith(".mjs")`` would
+      misclassify it as a guard while every other row here stayed green.
     * ``chela/tests/x.py`` — a Python file under a NESTED ``tests/`` directory must NOT
       count: pytest's own ``testpaths = ["tests"]`` (``pyproject.toml``) never collects it,
       so mutating it is not protected by anything this repo's suite runs. This resolves the
