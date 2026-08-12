@@ -20,12 +20,13 @@ import json
 import os
 import threading
 import time
+from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from chela import agent_manager, dispatcher, event_log, inbox, judge, sessions, transcripts
+from chela import agent_manager, dispatcher, event_log, inbox, judge, main, sessions, transcripts
 
 # Captured at collection time, before the `no_transcript_evidence` autouse fixture
 # (below) overwrites `sessions.transcript_for_window` on every test — the CMX-191
@@ -3119,16 +3120,54 @@ def test_a_held_receipt_from_the_windowless_peer_is_not_attributed_to_a_fabricat
 
 
 def test_delivery_skips_a_stale_windowless_peer(store_file, windows, monkeypatch):
-    """The pid was reused since registration — refused, same as a dangling wid."""
+    """⛔ Must prove the `peer_state` refusal itself held the event, not merely that the
+    REAL (unstubbed) `claude agents --json` cache doesn't happen to say pid 4242 is idle —
+    stub the idle gate to IDLE and `send_peer_to_pid` to succeed and record its calls, so
+    the ONLY thing that can hold the event is the stale refusal, the same shape
+    `test_delivery_skips_a_windowless_peer_that_is_busy` uses for the idle gate."""
+    from chela import messenger
+
     monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
     inbox.register_peer(4242, "sid-abc")
     monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 9999.0)  # pid reused since
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
 
     with inbox.locked_store() as st:
         st["queue"] = [inbox._event("run_review", "📥 hello", {})]
         sent = inbox.deliver(st, {}, [])
 
     assert sent == []
+    assert peer_calls == []                          # never even tried — stale gate held it
+    assert inbox.load()["queue"]
+
+
+def test_delivery_skips_a_gone_windowless_peer(store_file, windows, monkeypatch):
+    """The GONE counterpart at the `deliver` call site — `test_peer_state_gone_when_nothing_
+    is_running_at_that_pid` only tests the `peer_state` helper in isolation, not that `deliver`
+    actually consults it. Same discriminating shape as the stale test above."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: None)  # nothing runs there now
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried — gone gate held it
     assert inbox.load()["queue"]
 
 
@@ -3140,3 +3179,82 @@ def test_no_delivery_at_all_when_neither_a_wid_nor_a_peer_orchestrator_is_regist
 
     assert sent == []
     assert inbox.load()["queue"]
+
+
+# --- `chela watching` — the windowless registration is the operator's only surface for it --
+
+def test_watching_shows_the_windowless_peer_registration_and_its_state(
+        store_file, windows, monkeypatch, capsys):
+    """Nothing under tests/ used to drive `cmd_watching` with a peer in the store at all —
+    the whole display block (`if peer:`) could be disabled outright and every existing test
+    stayed green."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "windowless orchestrator: pid 4242" in out
+    assert "sid-abc" in out
+    assert "[ok]" in out
+
+
+def test_watching_reports_why_a_stale_windowless_peer_cannot_be_used(
+        store_file, windows, monkeypatch, capsys):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 9999.0)  # pid reused since
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "[stale]" in out
+    assert "4242" in out.split("windowless orchestrator", 1)[1]  # `pwhy` reached the operator
+
+
+def test_watching_reports_why_a_gone_windowless_peer_cannot_be_used(
+        store_file, windows, monkeypatch, capsys):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: None)  # nothing runs there now
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "[gone]" in out
+    assert "no longer running" in out
+
+
+def test_watching_marks_the_peer_as_fallback_only_when_the_wid_orchestrator_can_still_take_it(
+        store_file, windows, monkeypatch, capsys):
+    """The `(fallback only — ...)` suffix's condition (`orch and state not in UNDELIVERABLE`)
+    is a second, independently-derived copy of `deliver`'s own fallback rule — if the two ever
+    disagree, this tells the operator the peer is a mere fallback while `deliver` is in fact
+    routing there, which is exactly the misreport CMX-254 was raised about."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register(ORCH)                                # a live, healthy wid orchestrator
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    inbox.register_peer(4242, "sid-abc")
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "windowless orchestrator: pid 4242" in out
+    assert "(fallback only — a live wid orchestrator is registered above)" in out
+
+
+def test_watching_does_not_call_the_peer_fallback_only_when_the_wid_address_cannot_take_it(
+        store_file, windows, monkeypatch, capsys):
+    """`deliver` falls through to the windowless peer whenever the wid orchestrator is
+    UNDELIVERABLE (CMX-255's whole point) — here that must read as the peer being the REAL
+    destination, not a mere fallback next to a healthy address."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register(ORCH)
+    _statuses(monkeypatch, {AGENT: inbox.IDLE})         # ORCH absent from a non-empty map: GONE
+    inbox.register_peer(4242, "sid-abc")
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "windowless orchestrator: pid 4242" in out
+    assert "(fallback only" not in out
