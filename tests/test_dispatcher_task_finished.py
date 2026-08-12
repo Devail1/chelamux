@@ -276,7 +276,14 @@ def test_cmd_task_finished_refuses_transition_when_self_check_blocks(tmp_path, c
             with pytest.raises(SystemExit) as exc:
                 main.main()
     assert exc.value.code == 1
-    assert "DECORATION" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "DECORATION" in out
+    # ⛔ CMX-250 review round 5, finding 2: the per-outcome print must show WHICH verdict
+    # went with WHICH guard, not just the file/guard text — "SURVIVED" alone already
+    # appears in the unrelated summary line below ("1 guard(s) SURVIVED corruption"), so a
+    # mutation that drops the `[{verdict:8}] ` prefix from the per-outcome loop stayed
+    # invisible to a substring check on "SURVIVED" or on "guard.py: the glyph cue" alone.
+    assert "[SURVIVED] guard.py: the glyph cue" in out
     mark.assert_not_called()      # ⛔ the transition must never happen on a blocked self-check
 
 
@@ -311,6 +318,10 @@ def test_cmd_task_finished_proceeds_when_self_check_is_clean(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "every guard held" in out
     assert "awaiting review" in out
+    # ⛔ CMX-250 review round 5, finding 2 (sibling, KILLED side): "KILLED" appears NOWHERE
+    # else in the clean-path output, so this pins the per-outcome verdict prefix without
+    # depending on the unrelated SURVIVED summary line the blocked-path test can lean on.
+    assert "[KILLED  ] guard.py: the glyph cue" in out
 
 
 def test_cmd_task_finished_no_new_guards_skips_self_check_and_proceeds(capsys):
@@ -371,8 +382,9 @@ def test_cmd_task_finished_end_to_end_blocks_on_a_surviving_guard(tmp_path, caps
     assert "DECORATION" in out
     # ⛔ CMX-250 review round 3, finding 4: which guard survived is the only actionable
     # half of the refusal — the per-outcome print loop must actually run, not just the
-    # blocking COUNT it feeds into.
-    assert "guard.py: the glyph cue" in out
+    # blocking COUNT it feeds into. Round 5, finding 2: the verdict itself must be in that
+    # line too — "SURVIVED" alone is unpinning, since it also appears in the summary line.
+    assert "[SURVIVED] guard.py: the glyph cue" in out
     mark.assert_not_called()
 
 
@@ -394,7 +406,9 @@ def test_cmd_task_finished_end_to_end_proceeds_when_every_guard_holds(tmp_path, 
     out = capsys.readouterr().out
     assert "every guard held" in out
     assert "awaiting review" in out
-    assert "guard.py: the glyph cue" in out
+    # ⛔ CMX-250 review round 5, finding 2: pin the verdict in the per-outcome line, not
+    # just the file/guard text — "KILLED" appears nowhere else on this clean path.
+    assert "[KILLED  ] guard.py: the glyph cue" in out
     mark.assert_called_once_with("t1")
 
 
@@ -412,7 +426,33 @@ def test_cmd_task_finished_end_to_end_refuses_when_self_check_cannot_run(tmp_pat
             with pytest.raises(SystemExit) as exc:
                 main.main()
     assert exc.value.code == 1
-    assert "self-check could not run" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "self-check could not run" in out
+    # ⛔ CMX-250 review round 5, finding 3: the WHY — the actual `check["error"]` text — is
+    # the only actionable half of this refusal; "self-check could not run" alone is a
+    # literal in `main.py` and stays green even if the f-string interpolation is dropped.
+    assert "no-such-experiments.json" in out
+    assert "does not exist" in out
+    mark.assert_not_called()
+
+
+def test_cmd_task_finished_reports_the_exact_error_text_when_self_check_could_not_run(capsys):
+    """⛔ CMX-250 review round 5, finding 3 (sibling): pins the interpolation directly
+    against a mocked `dispatcher.verify_self_check`, independent of whatever wording
+    `judge.load_experiments` happens to use today."""
+    from chela import main
+
+    with patch.object(dispatcher, "verify_self_check",
+                       return_value={"ok": False, "error": "a very specific reason"}), \
+         patch.object(dispatcher, "mark_awaiting_review") as mark:
+        with patch.object(sys, "argv", ["chela", "task-finished", "t1",
+                                         "--self-check-experiments", "e.json"]):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "self-check could not run" in out
+    assert "a very specific reason" in out
     mark.assert_not_called()
 
 
@@ -442,6 +482,12 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
     assert len(matches) == 1
     assert matches[0]["payload"]["task_id"] == "t1"
     assert matches[0]["payload"]["files"] == ["tests/test_new_thing.py"]
+    # ⛔ CMX-250 review round 5, finding 4: the payload alone isn't what a human reads on
+    # the dashboard — the event's human-readable summary must say WHAT happened, not be
+    # blanked to "". Pin the actual words, not just that the field is non-empty.
+    assert "no-new-guards was passed" in matches[0]["summary"]
+    assert "touches tests/" in matches[0]["summary"]
+    assert "1 file(s)" in matches[0]["summary"]
 
 
 def test_check_no_new_guards_false_and_logs_nothing_when_diff_is_clean(tmp_path, monkeypatch):
@@ -600,6 +646,46 @@ def test_check_no_new_guards_diffs_from_the_merge_base_not_a_two_dot_diff(tmp_pa
 
 def test_check_no_new_guards_unknown_for_unknown_task_id(tmp_path):
     assert dispatcher.check_no_new_guards("no-such-task") is None
+
+
+def test_check_no_new_guards_unknown_when_row_has_no_worktree_path(tmp_path):
+    """⛔ CMX-250 review round 5, finding 1: a row CAN exist for this task_id (unlike the
+    test above) while still carrying no ``worktree_path`` — e.g. a run that hasn't been
+    claimed into a worktree yet. That must ALSO come back ``None`` (unknown), never fall
+    through to a ``git`` invocation against an empty path. A mutation that drops the
+    ``not row["worktree_path"]`` half of the guard (leaving only ``row is None``) stays
+    invisible unless a row with a real task_id and a blank worktree_path is inserted."""
+    wf = _workflow_md(tmp_path)
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
+            "worktree_path, branch_name, started_at, attempt, task_number) "
+            "VALUES ('t1', ?, 'do a thing', 'running', 'cmx-1', NULL, 'cmx-1', "
+            "'2026-08-12T10:00:00+00:00', 1, 1)",
+            (str(wf),),
+        )
+        conn.commit()
+
+    assert dispatcher.check_no_new_guards("t1") is None
+
+
+def test_check_no_new_guards_unknown_when_row_has_no_workflow_path(tmp_path):
+    """⛔ CMX-250 review round 5, finding 1 (sibling): the same guard's other half —
+    ``not row["workflow_path"]`` — must ALSO stop the lookup before ``load_workflow`` is
+    ever called with ``None``."""
+    root = tmp_path / "wt"
+    _repo_with_origin(root)
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
+            "worktree_path, branch_name, started_at, attempt, task_number) "
+            "VALUES ('t1', '', 'do a thing', 'running', 'cmx-1', ?, 'cmx-1', "
+            "'2026-08-12T10:00:00+00:00', 1, 1)",
+            (str(root),),
+        )
+        conn.commit()
+
+    assert dispatcher.check_no_new_guards("t1") is None
 
 
 def test_cmd_task_finished_no_new_guards_warns_when_diff_touches_tests(capsys):
