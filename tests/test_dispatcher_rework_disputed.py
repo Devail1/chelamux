@@ -75,11 +75,27 @@ def _parse_escalation(last_error: str) -> tuple[str, str, list[str]]:
 
 # --- (a) the happy path: running (rework) -> needs_human, everything else untouched ------
 
-def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
+@pytest.mark.parametrize(
+    "rework_count,max_reworks_env,prior_rounds",
+    [
+        (1, "4", [1]),
+        (3, "9", [1, 2, 3]),
+    ],
+    ids=["1-of-4-round-2", "3-of-9-round-4"],
+)
+def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment(
+    monkeypatch, rework_count, max_reworks_env, prior_rounds
+):
+    # Two cases, and every quantity that varies (numerator, denominator, prior-review
+    # count, resulting round) is distinct within a case AND across both cases — so no
+    # hardcoded literal (a headline fraction, a review round) can satisfy both.
+    monkeypatch.setenv("CHELA_MAX_REWORKS", max_reworks_env)
+    prior_reviews = [
+        {"round": r, "at": f"t{r}", "body": f"prior issue #{r}", "verdict": "changes_requested"}
+        for r in prior_rounds
+    ]
     with dispatcher._db() as conn:
-        # rework_count=2 (not the field's default of 1) so the round-number pin below
-        # actually reads the row instead of merely matching a hardcoded literal.
-        _row(conn, rework_count=2)
+        _row(conn, rework_count=rework_count, review_history=json.dumps(prior_reviews))
     gh: list[list[str]] = []
     gh_inputs: list[str] = []
 
@@ -96,22 +112,24 @@ def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
     assert result["ok"] is True
     assert result["status"] == "needs_human"
     assert result["comment_posted"] is True
-    assert result["rework_count"] == 2          # unchanged — the round was already spent
-    assert result["max_reworks"] == dispatcher.max_reworks()
+    assert result["rework_count"] == rework_count          # unchanged — the round was already spent
+    assert result["max_reworks"] == int(max_reworks_env)
     kill.assert_called_once_with("cmx-1")        # the window is killed, same as task-finished
 
     run = dispatcher.resolve_run("abc123")
     assert run["status"] == "needs_human"
-    assert run["rework_count"] == 2
+    assert run["rework_count"] == rework_count
     assert "the verdict describes code" in run["last_error"]
     # the headline itself — not just the agent's reason it's prefixed onto — must tell a
     # human this is a DISPUTE, that nothing was pushed, and which round it was. Every
     # sibling escalation pins its own discriminating headline text on top of the reason
     # (tests/test_dispatcher_rework.py:369, :393, :421; tests/test_dispatcher_ci.py:363,
-    # :1626); this is that same pin for the dispute headline.
+    # :1626); this is that same pin for the dispute headline. The expected fraction is
+    # built from the fixture's own inputs, not from `result` — so a headline that
+    # hardcodes any single (numerator, denominator) pair fails at least one case.
     assert "disputed" in run["last_error"]
     assert "nothing was pushed" in run["last_error"]
-    assert f"{result['rework_count']}/{result['max_reworks']}" in run["last_error"]
+    assert f"{rework_count}/{max_reworks_env}" in run["last_error"]
     # the branch/worktree/PR fields are untouched.
     assert run["branch_name"] == "cmx-1"
     assert run["worktree_path"] == "/wt/abc123"
@@ -124,16 +142,19 @@ def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
     assert len(options) >= 2, "one option is not a choice"
 
     reviews = dispatcher.reviews_of(dict(run))
-    assert [r["round"] for r in reviews] == [1, 2]
+    # the new round is len(prior_rounds) + 1 — varied by the fixture, never a constant.
+    assert [r["round"] for r in reviews] == prior_rounds + [len(prior_rounds) + 1]
     assert reviews[-1]["verdict"] == "disputed"
     assert "already fixed" in reviews[-1]["body"]
 
     posted = [c for c in gh if c[:3] == ["gh", "pr", "comment"]]
     assert posted and posted[0][3] == "80"
-    # the durable record on the PR must carry the AGENT'S OWN reason — not a canned
-    # string standing in for it (the reason is what a human resolving the dispute reads).
+    # The PR comment and last_error must carry the exact SAME composed escalation — the
+    # headline, recommendation and options together, byte for byte — not merely overlap
+    # on the bare reason substring (posting just `reason` would also pass a substring
+    # check, since the reason is itself a substring of the composed text).
     posted_body = gh_inputs[gh.index(posted[0])]
-    assert "the verdict describes code that was already fixed last round" in posted_body
+    assert posted_body == run["last_error"]
 
 
 def test_a_failed_pr_comment_does_not_block_the_dispute():
