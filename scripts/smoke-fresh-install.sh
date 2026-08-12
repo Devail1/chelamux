@@ -1,15 +1,28 @@
 #!/usr/bin/env bash
-# smoke-fresh-install.sh — CMX-263: prove `chela update` and `chela doctor` actually work
-# for a brand-new adopter, in an environment nothing else has touched.
+# smoke-fresh-install.sh — CMX-263: prove the documented adopter path actually works,
+# in an environment nothing else has touched.
 #
 # Every install anyone has run this on predates months of changes, so "it worked when I
 # set it up" is not evidence about current `dev`/`main` — this exists so that claim can be
 # checked instead of assumed. It clones a fresh checkout into an isolated temp dir, syncs
-# it, and runs the two commands an adopter reaches for first: `chela doctor` (is my install
-# healthy?) and `chela update` (bring it up to date). Neither command running is enough —
-# an uncaught exception still exits nonzero same as a reported problem would, so this
+# it, and walks the documented adopter order (see README.md / skills/chela-setup): clean
+# env -> plugin render -> first dashboard -> doctor -> update -> dispatch --dry-run ->
+# teardown. Neither a command running nor a non-zero exit is enough on its own — an
+# uncaught exception still exits non-zero same as a reported problem would, so this
 # distinguishes "ran and reported findings" from "crashed" by scanning for a real Python
-# traceback, not just the exit code.
+# traceback, not just the exit code (verified live: a malformed workflow file fed to
+# `chela dispatch --dry-run` produces a genuine traceback, and this harness catches it).
+#
+# SCOPE BOUNDARY — stated, not fudged: this is the CREDENTIAL-FREE path only (install ->
+# setup -> dashboard -> doctor -> update -> dry-run). NOT covered, because it needs live
+# Claude Code credentials that must not be baked into a test: a real dispatched agent
+# launch, a judge run, a real merge. The two documented plugin-install commands
+# (`/plugin marketplace add …` / `/plugin install chela@chela`) are Claude Code REPL slash
+# commands with no headless equivalent, so this exercises the scriptable half of that step
+# instead — `chela plugin --dir`, the same renderer those slash commands install from —
+# and does not claim to cover the interactive half. Do not fake either path to claim
+# coverage; a test that pretends to cover what it does not is worse than one that admits
+# it does not.
 #
 # Usage:
 #   scripts/smoke-fresh-install.sh                          # clones the real GitHub repo
@@ -24,7 +37,16 @@ set -euo pipefail
 SOURCE="${1:-https://github.com/Devail1/chelamux}"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+DASH_PID=""
+cleanup() {
+    if [ -n "$DASH_PID" ] && kill -0 "$DASH_PID" 2>/dev/null; then
+        kill "$DASH_PID" 2>/dev/null || true
+        sleep 1
+        kill -9 "$DASH_PID" 2>/dev/null || true
+    fi
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 CLONE="$WORK/chelamux"
 echo "==> cloning $SOURCE -> $CLONE"
@@ -41,7 +63,7 @@ git clone --quiet "$SOURCE" "$CLONE"
 # script that only overrode CHELA_DIR still had `chela doctor` read the real
 # CHELA_DISPATCH_WORKFLOWS and print this developer's actual dispatched-repo paths. A
 # fresh adopter's shell has none of these set, so this run must not either — strip every
-# inherited `CHELA_*` var before setting the three this script itself needs.
+# inherited `CHELA_*` var before setting the ones this script itself needs.
 while IFS='=' read -r name _; do
     case "$name" in CHELA_*) unset "$name" ;; esac
 done < <(env)
@@ -51,11 +73,28 @@ done < <(env)
 export CHELA_DIR="$WORK/chela-state"
 export CLAUDE_CONFIG_DIR="$WORK/claude-config"
 export CHELA_ENV_FILE=""
+
+# Pin an isolated, guaranteed-nonexistent tmux session name — confirmed live this is NOT
+# optional. Leaving CHELA_TMUX_SESSION merely unset is unsafe here: `config.current_session()`
+# falls back to $TMUX_PANE when unset, and this script itself typically runs INSIDE a real
+# chela-managed tmux pane (an autonomous dispatched agent's own window). On this project's
+# own dev box that fallback resolves to a `webterm_chela__*` mirror session GROUPED with the
+# live `chela` session (same window list) — so an unpinned run would have `chela dashboard`'s
+# /api/agents answer with the box's REAL live fleet instead of a fresh adopter's empty one,
+# exactly the mirror-session trap this project has hit before (see CLAUDE.md). A nonexistent
+# session name makes `tmux list-windows` fail closed to an empty list instead — verified live.
+export CHELA_TMUX_SESSION="smoke-fresh-install-$$-nonexistent"
 mkdir -p "$CHELA_DIR" "$CLAUDE_CONFIG_DIR"
 
 cd "$CLONE"
 
 fail=0
+declare -a not_covered=(
+    "interactive plugin install (/plugin marketplace add, /plugin install chela@chela — Claude Code REPL slash commands, no headless equivalent)"
+    "a live dispatched agent launch (needs real Claude Code credentials)"
+    "a judge run"
+    "a real merge"
+)
 
 echo "==> uv sync --all-extras"
 if ! uv sync --all-extras --quiet; then
@@ -85,13 +124,102 @@ run_step() {
     fi
 }
 
+# Step 1 (clean environment) is the isolation set up above: no ~/.chela, no
+# ~/.claude/plugins entry, no chela tmux session — CHELA_DIR/CLAUDE_CONFIG_DIR both point
+# into $WORK, which mktemp guarantees didn't exist before this run.
+
+# Step 2: plugin render — the scriptable half of "plugin install by the documented path"
+# (see the SCOPE BOUNDARY note above for the interactive half this cannot cover).
+run_step "chela plugin --dir (documented offline-render path)" plugin --dir "$WORK/plugin"
+
+# Step 3: first `chela dashboard` — does it start, and does /api/agents answer 200?
+DASH_PORT=$(( 20000 + (RANDOM % 20000) ))
+echo "==> chela dashboard (background, isolated port $DASH_PORT)"
+CHELA_DASH_HOST=127.0.0.1 CHELA_DASHBOARD_PORT="$DASH_PORT" \
+    uv run chela dashboard >"$WORK/dashboard.log" 2>&1 &
+DASH_PID=$!
+dash_ready=0
+for _ in $(seq 1 30); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$DASH_PORT/api/agents" 2>/dev/null)" = "200" ]; then
+        dash_ready=1
+        break
+    fi
+    if ! kill -0 "$DASH_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+if [ "$dash_ready" -eq 1 ]; then
+    echo "chela dashboard: started, /api/agents -> 200"
+else
+    echo "FAIL: chela dashboard did not answer /api/agents with 200 within 30s" >&2
+    echo "--- dashboard.log ---" >&2
+    cat "$WORK/dashboard.log" >&2 || true
+    fail=1
+fi
+if [ -n "$DASH_PID" ] && kill -0 "$DASH_PID" 2>/dev/null; then
+    kill "$DASH_PID" 2>/dev/null || true
+    sleep 1
+    kill -9 "$DASH_PID" 2>/dev/null || true
+fi
+DASH_PID=""
+
 run_step "chela doctor" doctor
 run_step "chela update --check" update --check
 run_step "chela update" update
 
+# Step 6: `chela dispatch --dry-run` against a small fixture tracker — a self-contained
+# WORKFLOW.md + TODO.md this script writes into $WORK, never the real tracker. dry_run()
+# never touches tmux, hooks, or git (see chela/dispatcher.py::dry_run docstring), so this
+# is safe to run against the isolated $CHELA_DIR set up above.
+mkdir -p "$WORK/fixture"
+cat >"$WORK/fixture/TODO.md" <<'EOF'
+# smoke-fresh-install.sh fixture tracker — not a real work queue.
+
+- [ ] **Fixture task — smoke-fresh-install.sh dispatch --dry-run coverage only.**
+EOF
+cat >"$WORK/fixture/WORKFLOW.md" <<EOF
+---
+project_key: SMOKE
+tracker:
+  kind: markdown
+  path: TODO.md
+workspace:
+  root: $WORK/fixture-workspace
+  base_branch: main
+concurrency:
+  max: 1
+agent:
+  cmd: claude --permission-mode auto
+---
+Fixture prompt for {{task_title}}.
+EOF
+run_step "chela dispatch --dry-run (fixture tracker)" dispatch "$WORK/fixture/WORKFLOW.md" --dry-run
+
+# Step 7: teardown — assert nothing root-owned is left behind. Nothing this script runs
+# invokes Docker (the adopter-fatal case the documented step guards against), so this is
+# necessarily a vacuous pass today; it stays here so a future step that DOES shell out to
+# Docker inherits the assertion instead of silently skipping it.
+root_owned="$(find "$WORK" \! -user "$(id -u)" 2>/dev/null || true)"
+if [ -n "$root_owned" ]; then
+    echo "FAIL: root-owned (or other-uid) remnants left behind:" >&2
+    echo "$root_owned" >&2
+    fail=1
+else
+    echo "==> teardown: no root-owned remnants (no step here shells out to Docker)"
+fi
+
+echo
+echo "==> NOT COVERED by this smoke test (see SCOPE BOUNDARY at the top of this file):"
+for item in "${not_covered[@]}"; do
+    echo "  - $item"
+done
+
 if [ "$fail" -ne 0 ]; then
+    echo
     echo "FAIL: fresh-install smoke test found a problem above" >&2
     exit 1
 fi
 
-echo "PASS: fresh-install smoke test — doctor + update both ran cleanly against a fresh clone"
+echo
+echo "PASS: fresh-install smoke test — plugin render, dashboard, doctor, update, and dispatch --dry-run all ran cleanly against a fresh clone"

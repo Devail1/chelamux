@@ -13,19 +13,30 @@ history lives in `git log`.
 ### Added
 
 - **`scripts/smoke-fresh-install.sh` — a real, isolated fresh-install smoke test for
-  adopters.** Nobody had ever verified end to end that a brand-new clone can `uv sync` and
-  run `chela doctor` / `chela update` without breaking — every install on the maintainer's
-  own box predates months of changes, so "it worked when I set it up" was never actual
-  evidence about current `dev`/`main`. The script does a real `git clone` into an isolated
-  temp dir (defaults to the public GitHub repo; accepts a local path for offline runs),
-  `uv sync --all-extras`, then runs `chela doctor`, `chela update --check`, and
-  `chela update`, failing loudly on an uncaught exception (distinguished from an ordinary
-  reported finding/refusal by scanning for a real traceback, not just a non-zero exit).
-  Strips every inherited `CHELA_*` env var first — a box that already runs a live chela
-  install (this project's own dev machine, notably) otherwise leaks its real
-  `CHELA_DISPATCH_WORKFLOWS`/`CHELA_TMUX_SESSION` into what is supposed to simulate an
-  adopter's untouched shell. `tests/test_smoke_fresh_install.py` runs it for real (offline,
-  against a local clone) as part of the normal suite. (CMX-263)
+  adopters, walking the documented adopter order end to end.** Nobody had ever verified
+  that a brand-new clone can `uv sync` and get through install → plugin render → first
+  dashboard → `chela doctor` → `chela update` → `chela dispatch --dry-run` → teardown
+  without breaking — every install on the maintainer's own box predates months of changes,
+  so "it worked when I set it up" was never actual evidence about current `dev`/`main`. The
+  script does a real `git clone` into an isolated temp dir (defaults to the public GitHub
+  repo; accepts a local path for offline runs), `uv sync --all-extras`, renders the plugin
+  (`chela plugin --dir`, the scriptable half of the documented install — the two
+  `/plugin marketplace add` / `/plugin install` slash commands are Claude Code REPL-only
+  and have no headless equivalent, stated as a scope boundary rather than faked), starts
+  `chela dashboard` on an isolated port and checks `/api/agents` answers 200, runs
+  `chela doctor` / `chela update --check` / `chela update`, runs `chela dispatch --dry-run`
+  against a self-contained fixture tracker, and asserts teardown leaves nothing root-owned
+  behind. Fails loudly on an uncaught exception (distinguished from an ordinary reported
+  finding/refusal by scanning for a real traceback, not just a non-zero exit — verified live
+  against a deliberately malformed fixture workflow). Strips every inherited `CHELA_*` env
+  var and pins `CHELA_TMUX_SESSION` to a guaranteed-nonexistent name — a box that already
+  runs a live chela install (this project's own dev machine, notably) otherwise leaks its
+  real `CHELA_DISPATCH_WORKFLOWS`/`CHELA_TMUX_SESSION` into what is supposed to simulate an
+  adopter's untouched shell, and an unpinned tmux session falls back to this script's own
+  calling pane — which on this box resolves to a `webterm_chela__*` mirror GROUPED with the
+  live `chela` session, so the dashboard step would otherwise read the box's real live
+  fleet. `tests/test_smoke_fresh_install.py` runs it for real (offline, against a local
+  clone) as part of the normal suite. (CMX-263)
 
 ### Changed
 
