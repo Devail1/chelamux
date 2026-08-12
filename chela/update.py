@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from chela import config, hooks, notify
-from chela.dispatcher import GIT_TIMEOUT_SECONDS, _git, _git_ok, _git_out
+from chela.dispatcher import GIT_NET_TIMEOUT_SECONDS, GIT_TIMEOUT_SECONDS, _git, _git_ok, _git_out
 
 log = logging.getLogger(__name__)
 
@@ -57,17 +57,24 @@ log = logging.getLogger(__name__)
 # re-sync or a service restart can legitimately take longer than GIT_TIMEOUT_SECONDS.
 _SHELL_TIMEOUT_SECONDS = 300
 
-# CMX-226: how many of `apply()`'s OWN subprocess calls sit on each side of that split, on
-# its single slowest real path (behind > 0, not diverged, at least one chela-* PM2 service
-# running, exactly one plugin marketplace to refresh — the common case, and the one the
-# original CMX-199 outage was) — recount by reading `apply()` itself if this ever drifts:
-#   git (GIT_TIMEOUT_SECONDS each): `_is_dirty`'s `git status`, the pre-fetch `git
-#   rev-parse @{u}` (`old_upstream`), `commits_behind`'s `fetch` + 2x `rev-parse` + 2x
-#   `rev-list`, and `git pull --ff-only`                                        = 8 calls
+# CMX-226/CMX-262: how many of `apply()`'s OWN subprocess calls sit on each side of that
+# split, on its single slowest real path (behind > 0, not diverged, at least one chela-*
+# PM2 service running, exactly one plugin marketplace to refresh — the common case, and the
+# one the original CMX-199 outage was) — recount by reading `apply()` itself if this ever
+# drifts. Git calls are further split by GIT_TIMEOUT_SECONDS (local, no network round-trip)
+# vs GIT_NET_TIMEOUT_SECONDS (touches the remote, needs the same slack dispatcher.py already
+# gives its own fetch/push calls — a link slow enough to blow a 30s budget on `git fetch`
+# still finishes well inside 60s):
+#   git/local (GIT_TIMEOUT_SECONDS each): `_is_dirty`'s `git status`, the pre-fetch `git
+#   rev-parse @{u}` (`old_upstream`), `commits_behind`'s 2x `rev-parse` + 2x `rev-list`
+#                                                                                 = 6 calls
+#   git/net (GIT_NET_TIMEOUT_SECONDS each): `commits_behind`'s `fetch`, `git pull --ff-only`
+#                                                                                 = 2 calls
 #   shell (_SHELL_TIMEOUT_SECONDS each): `uv sync`, `pm2 jlist` (inside
 #   `_running_pm2_services`), `pm2 restart`, and one marketplace's 2 `claude plugin ...`
 #   calls (`_update_plugin`)                                                    = 5 calls
-_APPLY_GIT_CALLS = 8
+_APPLY_GIT_LOCAL_CALLS = 6
+_APPLY_GIT_NET_CALLS = 2
 _APPLY_SHELL_CALLS = 5
 
 
@@ -89,13 +96,14 @@ def apply_stuck_after_seconds() -> int:
     loose (it already assumes every call runs the full length of its own timeout, which is
     itself pessimistic), just so this doesn't fire on the very first second past it.
 
-    Derived from `GIT_TIMEOUT_SECONDS` / `_SHELL_TIMEOUT_SECONDS` rather than a literal so
-    it tracks them if either ever changes — see `chela.dashboard.app`'s own use of this and
-    the doctor fact (`runtime_truth.py`'s `dashboard.update_lock`) that reports a lock held
-    past it.
+    Derived from `GIT_TIMEOUT_SECONDS` / `GIT_NET_TIMEOUT_SECONDS` / `_SHELL_TIMEOUT_SECONDS`
+    rather than a literal so it tracks them if any ever changes — see `chela.dashboard.app`'s
+    own use of this and the doctor fact (`runtime_truth.py`'s `dashboard.update_lock`) that
+    reports a lock held past it.
     """
     return (
-        _APPLY_GIT_CALLS * GIT_TIMEOUT_SECONDS
+        _APPLY_GIT_LOCAL_CALLS * GIT_TIMEOUT_SECONDS
+        + _APPLY_GIT_NET_CALLS * GIT_NET_TIMEOUT_SECONDS
         + _APPLY_SHELL_CALLS * _SHELL_TIMEOUT_SECONDS
         + _SHELL_TIMEOUT_SECONDS // 2
     )
@@ -180,7 +188,7 @@ def commits_behind(repo: Path | None = None, *, fetch: bool = True) -> UpdateSta
     """
     repo = repo or repo_root()
     if fetch:
-        fetch_cp = _git(repo, "fetch", timeout=GIT_TIMEOUT_SECONDS)
+        fetch_cp = _git(repo, "fetch", timeout=GIT_NET_TIMEOUT_SECONDS)
         if not _git_ok(fetch_cp):
             err = fetch_cp.stderr.strip() if fetch_cp is not None else "git fetch failed to run"
             return UpdateStatus(ok=False, error=f"git fetch failed: {err}")
@@ -527,7 +535,7 @@ def apply(repo: Path | None = None) -> ApplyResult:
                             plugin_updated=plugin_updated, plugin_error=plugin_error)
 
     if not rewrite_recovered:
-        pull_cp = _git(repo, "pull", "--ff-only")
+        pull_cp = _git(repo, "pull", "--ff-only", timeout=GIT_NET_TIMEOUT_SECONDS)
         if not _git_ok(pull_cp):
             err = pull_cp.stderr.strip() if pull_cp is not None else "git pull failed to run"
             return ApplyResult(ok=False, step="pull", behind_before=status.behind, error=err)

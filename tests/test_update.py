@@ -119,7 +119,8 @@ def test_stuck_after_ceiling_is_derived_from_the_timeout_constants():
     comes back" — a formula that quietly stopped matching apply()'s real step count would
     still pass a looser assertion."""
     expected = (
-        update._APPLY_GIT_CALLS * update.GIT_TIMEOUT_SECONDS
+        update._APPLY_GIT_LOCAL_CALLS * update.GIT_TIMEOUT_SECONDS
+        + update._APPLY_GIT_NET_CALLS * update.GIT_NET_TIMEOUT_SECONDS
         + update._APPLY_SHELL_CALLS * update._SHELL_TIMEOUT_SECONDS
         + update._SHELL_TIMEOUT_SECONDS // 2
     )
@@ -132,6 +133,16 @@ def test_stuck_after_ceiling_tracks_git_timeout(monkeypatch):
     baked in at the moment someone last did the arithmetic by hand."""
     baseline = update.apply_stuck_after_seconds()
     monkeypatch.setattr(update, "GIT_TIMEOUT_SECONDS", update.GIT_TIMEOUT_SECONDS + 1000)
+    assert update.apply_stuck_after_seconds() > baseline
+
+
+def test_stuck_after_ceiling_tracks_git_net_timeout(monkeypatch):
+    """CMX-262: `commits_behind`'s fetch and `apply()`'s pull are network round-trips bounded
+    by GIT_NET_TIMEOUT_SECONDS, not GIT_TIMEOUT_SECONDS — same fence as the local-git constant
+    above, proving the ceiling actually reads GIT_NET_TIMEOUT_SECONDS rather than double-
+    counting everything under the local one."""
+    baseline = update.apply_stuck_after_seconds()
+    monkeypatch.setattr(update, "GIT_NET_TIMEOUT_SECONDS", update.GIT_NET_TIMEOUT_SECONDS + 1000)
     assert update.apply_stuck_after_seconds() > baseline
 
 
@@ -363,6 +374,35 @@ def test_happy_path_fetches_then_pulls_ff_only_then_syncs_then_restarts(
     pull_args = next(args for args in git_calls if args and args[0] == "pull")
     assert "--ff-only" in pull_args, "dropping --ff-only would let a non-ff merge through"
     assert sh_kinds == ["uv-sync", "pm2-query"]
+
+
+def test_fetch_and_pull_use_the_network_timeout_not_the_local_one(
+    checkout, upstream, monkeypatch,
+):
+    """CMX-262: `fetch`/`pull` are network round-trips, not local git ops — binding them to
+    GIT_TIMEOUT_SECONDS (30s) refused `chela update` on a link that a bare `git fetch`
+    finished on in 18.3s, while dispatcher.py's own fetch/push calls already get the more
+    generous GIT_NET_TIMEOUT_SECONDS (60s). Reads the actual `timeout` kwarg that reaches
+    `_git`, not just the bookkeeping constants in `apply_stuck_after_seconds` above — those
+    can be correct while the call sites still pass the old constant."""
+    _commit(upstream, "new.txt", "new\n")
+
+    seen_timeouts: dict[str, float] = {}
+    real_git = update._git
+
+    def spy(repo, *args, **kwargs):
+        if args and args[0] in ("fetch", "pull"):
+            seen_timeouts[args[0]] = kwargs.get("timeout")
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(update, "_git", spy)
+    monkeypatch.setattr(update, "_sh", lambda args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS: _FakeCP(stdout="[]"))
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert seen_timeouts["fetch"] == update.GIT_NET_TIMEOUT_SECONDS
+    assert seen_timeouts["pull"] == update.GIT_NET_TIMEOUT_SECONDS
 
 
 def test_happy_path_restarts_only_running_chela_services(checkout, upstream, monkeypatch):
