@@ -124,9 +124,16 @@ function resolvedBody(css, selector) {
 // block (style.css declares it three times; a later same-specificity custom-
 // property declaration wins per the cascade) instead of reading only the
 // first one.
+// CMX-257 round 3: this used to read resolvedBody(css, ':root') — which drops
+// ANY rule inside an @media block, including one whose condition is always
+// true at a real viewport (e.g. `@media (min-width: 0px) { :root { ... } }`).
+// Every numeric legibility floor (GUARD 2/2b/2y-floor) reads :root through
+// this function, so that escape hatch reverted the whole CMX-230 type scale
+// invisibly. resolvedBodyAtDesktop() is defined below GUARD 1's comment block
+// but hoists (function declaration), so it's safe to call here.
 function resolvedRootVars(css) {
     const vars = new Map();
-    for (const [k, v] of declarations(resolvedBody(css, ':root')))
+    for (const [k, v] of declarations(resolvedBodyAtDesktop(css, ':root')))
         if (k.startsWith('--')) vars.set(k, v);
     return vars;
 }
@@ -356,7 +363,13 @@ test('density guard: _setWallDensity cuts off at <=2 panes, and buildWall restor
 // above cssRules), so this is a source-text floor on the same class GUARD 2c
 // already pins, mirroring GUARD 2's numeric-floor discipline.
 test('WIRING: the airy-density rule actually pads the stage — not just an empty class toggle', () => {
-    const stageBody = resolvedBody(CSS, 'body.wall-density-airy #term-stage');
+    // CMX-257 round 3: resolvedBody() drops ANY rule inside an @media block —
+    // including one whose condition is always true at a real desktop
+    // viewport (`@media (min-width: 0px) { ... }`). Every check below reads
+    // stageBody, so a padding-bottom declaration smuggled in through such a
+    // wrapper was invisible to the property-ban loop further down. Same hole,
+    // same fix, as resolvedRootVars() above.
+    const stageBody = resolvedBodyAtDesktop(CSS, 'body.wall-density-airy #term-stage');
     // clamp(MIN, PREFERRED, MAX) — a round neutered the padding by zeroing the
     // vw-based PREFERRED term (clamp(16px, 0vw, 64px)) while leaving both px
     // floors untouched at 16px, so at any real desktop width the clamp just
@@ -411,7 +424,7 @@ test('WIRING: the airy-density rule actually pads the stage — not just an empt
         `at a ${DESKTOP_PX}px desktop width the resolved padding-right margin (${rightMargin}px) is too thin — the clamp's MAX ` +
         `argument (${right[3]}px) has been shrunk toward the floor, so the airy class toggles but produces almost no margin`);
 
-    const gridBody = resolvedBody(CSS, 'body.wall-density-airy #term-stage .grid-stack');
+    const gridBody = resolvedBodyAtDesktop(CSS, 'body.wall-density-airy #term-stage .grid-stack');
     const maxWidth = gridBody.match(/max-width:\s*([0-9.]+)px/);
     assert.ok(maxWidth, 'body.wall-density-airy #term-stage .grid-stack has no max-width rule');
     assert.ok(parseFloat(maxWidth[1]) > 0,
@@ -912,7 +925,106 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
     assert.ok(opacityM, '.side-subhead has no opacity declaration to check');
     assert.ok(parseFloat(opacityM[1]) >= 0.3,
         `.side-subhead's opacity (${opacityM[1]}) has dropped toward invisible — the heading text would render in the DOM but not be readable`);
+
+    // This PR's judge, round 3: text, opacity and font-size can all be exactly
+    // right and the heading can still be entirely absent from the box tree —
+    // `display: none` removes it from rendering (and from the accessibility
+    // tree) with none of the checks above noticing, since none of them read
+    // `display`. That is the invariant both the opacity floor above and the
+    // font-size floor below exist to protect: a heading that is present,
+    // opaque and correctly classed is worthless if it never renders at all.
+    for (const [prop, value] of declarations(subheadBody)) {
+        assert.ok(!(prop === 'display' && value.trim() === 'none'),
+            '.side-subhead has display: none at desktop — the heading text would be present, opaque and correctly ' +
+            'sized, but removed from the box tree entirely, leaving the demoted rows dangling with no heading');
+    }
 });
+
+// --- CMX-257 round 3: resolvedBody()/resolvedBodyAtDesktop() both resolve a
+// selector by matching the exact selector STRING a rule was written with —
+// neither is aware of CSS specificity. The judge found the resulting hole: a
+// higher-specificity top-level selector for the SAME rendered elements
+// (`#side-nav-more .side-item-icon`, specificity 1,1,0 — id + class) wins the
+// real cascade over the guarded `.side-list-secondary .side-item-icon` rule
+// (specificity 0,2,0 — two classes) at every viewport, but a lookup keyed on
+// the literal `.side-list-secondary .side-item-icon` string never sees it, so
+// the demoted rows can render at full primary weight while this test keeps
+// comparing two CSS rules that no longer decide what actually renders.
+//
+// resolveForContext() replicates the slice of the real cascade this file
+// needs: given the target element's own class (its selector's rightmost
+// compound, e.g. `.side-item-icon`) and the set of ancestor id/class tokens
+// available at its real render site (e.g. `#side-nav-more`, `.side-list-
+// secondary`, `.side-item` for a demoted icon; `#side-nav`, `.side-list`,
+// `.side-item` for a primary one), it finds every rule — top-level, or
+// inside an @media condition satisfied at DESKTOP_VIEWPORT_PX, closing the
+// same @media escape hatch resolvedBodyAtDesktop() closes elsewhere in this
+// file — whose selector's rightmost compound is exactly that target class
+// and whose ancestor compounds are ALL satisfied by that token set, computes
+// real CSS specificity (ids*100 + classes/attrs/pseudo-classes*10 +
+// types*1) for each match, and returns the declared value from the
+// highest-specificity match (ties broken by source order, last wins) — the
+// value a browser would actually resolve, regardless of how the winning
+// selector happens to be written.
+function selectorCompounds(selector) {
+    return selector.trim().split(/\s*[>+~]\s*|\s+/).filter(Boolean);
+}
+function compoundTokens(compound) {
+    return [...compound.matchAll(/#[\w-]+|\.[\w-]+/g)].map(m => m[0]);
+}
+function selectorSpecificity(selector) {
+    const ids = (selector.match(/#[\w-]+/g) || []).length;
+    const classlike = (selector.match(/\.[\w-]+|\[[^\]]+\]|:[\w-]+/g) || []).length;
+    const bare = selector.replace(/#[\w-]+|\.[\w-]+|\[[^\]]+\]|:[\w-]+/g, ' ');
+    const types = (bare.match(/[a-zA-Z][\w-]*/g) || []).length;
+    return ids * 100 + classlike * 10 + types;
+}
+function resolveForContext(css, targetCompound, ancestorTokens, prop) {
+    const rules = cssRules(css).filter(r => r.media === null || mediaSatisfiedAtViewport(r.media, DESKTOP_VIEWPORT_PX));
+    let best = null; // { value, spec, idx }
+    rules.forEach((r, idx) => {
+        for (const sel of r.selector.split(',').map(s => s.trim())) {
+            const comps = selectorCompounds(sel);
+            if (comps.length === 0 || comps[comps.length - 1] !== targetCompound) continue;
+            const ancestorsOk = comps.slice(0, -1).every(c =>
+                compoundTokens(c).every(t => ancestorTokens.has(t)));
+            if (!ancestorsOk) continue;
+            const spec = selectorSpecificity(sel);
+            for (const [k, v] of declarations(r.body)) {
+                if (k !== prop) continue;
+                if (!best || spec > best.spec || (spec === best.spec && idx >= best.idx)) best = { value: v, spec, idx };
+            }
+        }
+    });
+    return best ? best.value : null;
+}
+// .side-item-label carries no base font-size of its own (only `flex: 1`) —
+// it inherits from its parent .side-item unless a context-specific rule
+// (`.side-list-secondary .side-item-label`, or a corrupting higher-
+// specificity equivalent) sets one directly. Mirrors real CSS inheritance.
+function resolveLabelFontSizePx(itemAncestors, rowAncestors) {
+    const direct = resolveForContext(CSS, '.side-item-label', itemAncestors, 'font-size');
+    const raw = direct != null ? direct : resolveForContext(CSS, '.side-item', rowAncestors, 'font-size');
+    assert.ok(raw, 'no font-size resolves for .side-item-label in this context, directly or via inheritance from .side-item');
+    const m = raw.match(/^([0-9.]+)px$/);
+    assert.ok(m, `resolved .side-item-label font-size (${raw}) is not a px value`);
+    return parseFloat(m[1]);
+}
+function resolveIconFontSizePx(itemAncestors) {
+    const raw = resolveForContext(CSS, '.side-item-icon', itemAncestors, 'font-size');
+    assert.ok(raw, 'no font-size resolves for .side-item-icon in this context');
+    const m = raw.match(/^([0-9.]+)px$/);
+    assert.ok(m, `resolved .side-item-icon font-size (${raw}) is not a px value`);
+    return parseFloat(m[1]);
+}
+// The DOM's real ancestor chain, per index.html: #side-nav (class="side-list")
+// for the primary rail, #side-nav-more (class="side-list side-list-secondary")
+// for the demoted group — each row is a .side-item, each icon/label a child
+// of that row.
+const PRIMARY_ROW_ANCESTORS = new Set(['#side-nav', '.side-list']);
+const SECONDARY_ROW_ANCESTORS = new Set(['#side-nav-more', '.side-list', '.side-list-secondary']);
+const PRIMARY_ITEM_ANCESTORS = new Set([...PRIMARY_ROW_ANCESTORS, '.side-item']);
+const SECONDARY_ITEM_ANCESTORS = new Set([...SECONDARY_ROW_ANCESTORS, '.side-item']);
 
 // The test above pins that #side-nav-more carries the .side-list-secondary
 // class, but says nothing about what that class rule actually DOES — a judge
@@ -926,28 +1038,17 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
 // still change both together without fighting this guard; only a regression
 // that lets the demoted rows catch up to (or pass) the primary weight fails.
 test('.side-list-secondary actually renders lighter than the primary row — icon and label font-size both strictly smaller', () => {
-    const primaryIconBody = resolvedBody(CSS, '.side-item-icon');
-    const primaryIconSize = primaryIconBody.match(/font-size:\s*([0-9.]+)px/);
-    assert.ok(primaryIconSize, '.side-item-icon has no font-size rule to compare against');
+    const primaryIconSize = resolveIconFontSizePx(PRIMARY_ITEM_ANCESTORS);
+    const secondaryIconSize = resolveIconFontSizePx(SECONDARY_ITEM_ANCESTORS);
+    const primaryLabelSize = resolveLabelFontSizePx(PRIMARY_ITEM_ANCESTORS, PRIMARY_ROW_ANCESTORS);
+    const secondaryLabelSize = resolveLabelFontSizePx(SECONDARY_ITEM_ANCESTORS, SECONDARY_ROW_ANCESTORS);
 
-    const primaryRowBody = resolvedBody(CSS, '.side-item');
-    const primaryLabelSize = primaryRowBody.match(/font-size:\s*([0-9.]+)px/);
-    assert.ok(primaryLabelSize, '.side-item has no font-size rule — .side-item-label inherits from here');
-
-    const secondaryIconBody = resolvedBody(CSS, '.side-list-secondary .side-item-icon');
-    const secondaryIconSize = secondaryIconBody.match(/font-size:\s*([0-9.]+)px/);
-    assert.ok(secondaryIconSize, '.side-list-secondary .side-item-icon has no font-size override');
-
-    const secondaryLabelBody = resolvedBody(CSS, '.side-list-secondary .side-item-label');
-    const secondaryLabelSize = secondaryLabelBody.match(/font-size:\s*([0-9.]+)px/);
-    assert.ok(secondaryLabelSize, '.side-list-secondary .side-item-label has no font-size override');
-
-    assert.ok(parseFloat(secondaryIconSize[1]) < parseFloat(primaryIconSize[1]),
-        `.side-list-secondary .side-item-icon (${secondaryIconSize[1]}px) must render smaller than the primary ` +
-        `.side-item-icon (${primaryIconSize[1]}px) — otherwise the demoted rows read at full primary weight`);
-    assert.ok(parseFloat(secondaryLabelSize[1]) < parseFloat(primaryLabelSize[1]),
-        `.side-list-secondary .side-item-label (${secondaryLabelSize[1]}px) must render smaller than the primary ` +
-        `row's base font-size (${primaryLabelSize[1]}px) — otherwise the demoted rows read at full primary weight`);
+    assert.ok(secondaryIconSize < primaryIconSize,
+        `the demoted .side-item-icon's resolved font-size (${secondaryIconSize}px) must render smaller than the primary ` +
+        `.side-item-icon's (${primaryIconSize}px) — otherwise the demoted rows read at full primary weight`);
+    assert.ok(secondaryLabelSize < primaryLabelSize,
+        `the demoted .side-item-label's resolved font-size (${secondaryLabelSize}px) must render smaller than the primary ` +
+        `row's resolved font-size (${primaryLabelSize}px) — otherwise the demoted rows read at full primary weight`);
 
     // This PR's judge, round 1: a bare `<` lets the demoted rows "catch up" —
     // 17.9px is strictly less than 18px and satisfies both checks above, but
@@ -960,13 +1061,13 @@ test('.side-list-secondary actually renders lighter than the primary row — ico
     // Shipped ratios (15/18 = 0.833, 11/12 = 0.917) clear this with room to
     // spare; the mutated values (17.9/18 = 0.994, 11.9/12 = 0.992) do not.
     const RATIO_CEILING = 0.95;
-    assert.ok(parseFloat(secondaryIconSize[1]) <= parseFloat(primaryIconSize[1]) * RATIO_CEILING,
-        `.side-list-secondary .side-item-icon (${secondaryIconSize[1]}px) is too close to the primary ` +
-        `.side-item-icon (${primaryIconSize[1]}px) — it must be at most ${RATIO_CEILING * 100}% of the primary size, ` +
+    assert.ok(secondaryIconSize <= primaryIconSize * RATIO_CEILING,
+        `the demoted .side-item-icon's resolved font-size (${secondaryIconSize}px) is too close to the primary ` +
+        `.side-item-icon's (${primaryIconSize}px) — it must be at most ${RATIO_CEILING * 100}% of the primary size, ` +
         'not just numerically smaller, or the demoted rows read at full primary weight');
-    assert.ok(parseFloat(secondaryLabelSize[1]) <= parseFloat(primaryLabelSize[1]) * RATIO_CEILING,
-        `.side-list-secondary .side-item-label (${secondaryLabelSize[1]}px) is too close to the primary row's base ` +
-        `font-size (${primaryLabelSize[1]}px) — it must be at most ${RATIO_CEILING * 100}% of the primary size, ` +
+    assert.ok(secondaryLabelSize <= primaryLabelSize * RATIO_CEILING,
+        `the demoted .side-item-label's resolved font-size (${secondaryLabelSize}px) is too close to the primary ` +
+        `row's resolved font-size (${primaryLabelSize}px) — it must be at most ${RATIO_CEILING * 100}% of the primary size, ` +
         'not just numerically smaller, or the demoted rows read at full primary weight');
 });
 
