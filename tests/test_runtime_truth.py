@@ -788,16 +788,44 @@ def test_tmux_global_env_reader_parses_show_environment_output(monkeypatch):
     coverage either, so a mutation that skips every parsed line (`if line.startswith("-")`
     → `if True`) leaves the reader permanently blind while every stubbed detection test
     stays green. Feed it real-shaped output: a normal `KEY=value` line, and a `-KEY`
-    explicitly-unset marker (no `=`) that must NOT be read as a value."""
+    explicitly-unset marker (no `=`) that must NOT be read as a value.
+
+    ⛔ Judge round 5, finding 1: the earlier version of this test stubbed
+    `subprocess.run` with `lambda *a, **k: ...` and never looked at `a` — a mutation
+    that dropped `-g` from the argv (asking tmux's per-SESSION table instead of the
+    GLOBAL one this fact's whole authority rests on) stayed invisible. Capture the
+    call and assert on it directly."""
     monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
     stdout = "TERM=screen-256color\n-NODE_CHANNEL_FD\nNODE_CHANNEL_SERIALIZATION_MODE=json\n"
-    monkeypatch.setattr(
-        subprocess, "run",
-        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=stdout, stderr=""))
+    calls = []
+
+    def _fake_run(*a, **k):
+        calls.append(a[0] if a else k.get("args"))
+        return subprocess.CompletedProcess(a, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
     assert runtime_truth._tmux_global_env() == {
         "TERM": "screen-256color",
         "NODE_CHANNEL_SERIALIZATION_MODE": "json",
     }
+    assert calls == [["tmux", "show-environment", "-g"]], (
+        "must ask tmux for its GLOBAL environment table (-g) — anything less asks "
+        f"only the current session's copy, got {calls}")
+
+
+def test_tmux_global_env_reader_is_none_when_the_tmux_call_itself_fails(monkeypatch):
+    """⛔ Judge round 5, finding 2: neutering the returncode half of the CANNOT VERIFY
+    gate (`if out.returncode != 0 or ...` → `if False and out.returncode != 0 or ...`)
+    left every existing test green, because they all stub `_tmux_global_env` directly
+    and never drive a failing `subprocess.run` through the real function. A tmux that
+    is on PATH but whose `show-environment -g` call fails (no server running, a
+    transient error — non-zero exit, empty stdout) must read as `None` (never asked),
+    not `{}` (asked, and it's clean) — the fact's docstring says this in as many words."""
+    monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="no server"))
+    assert runtime_truth._tmux_global_env() is None
 
 
 def test_peer_transport_warns_on_a_stale_socket_file_nothing_is_listening_on(
