@@ -523,7 +523,13 @@ def cmd_watch(args) -> None:
     self_wid = orchestrator.self_wid()
     if not args.wid:
         if not self_wid:
-            print("no window id: run this from inside a tmux window (or pass @N to watch it)",
+            print("no window id: run this from inside a tmux window (or pass @N to watch it) "
+                  "— a session started outside tmux cannot bind at all, seamlessly or "
+                  "otherwise. If this session used to be the orchestrator, run `chela "
+                  "restore` from ANY shell with tmux on PATH (it needs no window of its "
+                  "own) — it will classify the old registration MANUAL and hand back the "
+                  "exact `cd <cwd> && CHELA_WID=@N claude --resume <sid>` command to "
+                  "relaunch this session properly. That relaunch is the only way back in.",
                   file=sys.stderr)
             sys.exit(1)
         result = inbox.register(self_wid)
@@ -929,7 +935,11 @@ def cmd_whoami(args) -> None:
     if wid:
         print(wid)
     else:
-        print("unknown — not in a tmux pane and $CHELA_WID unset", file=sys.stderr)
+        print("unknown — not in a tmux pane and $CHELA_WID unset. This session cannot bind "
+              "to chela at all until it is relaunched inside tmux — `chela restore` (run "
+              "from any shell with tmux on PATH, no window of its own required) will say "
+              "whether this was a known registration and, if so, hand back the exact "
+              "relaunch command.", file=sys.stderr)
         sys.exit(1)
 
 

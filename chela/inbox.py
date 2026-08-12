@@ -391,12 +391,23 @@ def address_state(store: dict, statuses: dict[str, str],
             f"{epoch.describe(now_epoch)} — the server RESTARTED and renumbered the fleet. "
             f"That id does not name the orchestrator ({name!r}) any more, and may well name "
             "another agent, so nothing will be written to it. Re-register from the "
-            "orchestrator's session: `chela watch` (any dispatch does it for you).")
+            "orchestrator's session: `chela watch` (any dispatch does it for you). "
+            "`chela watch` only works if that session is CURRENTLY running inside a tmux "
+            "window — a session restarted outside tmux (e.g. by hand, after a reboot) "
+            "cannot bind at all, and `chela watch` there fails with 'no window id'. If "
+            "nothing is running that session anywhere, run `chela restore` instead — it "
+            "needs no live window and hands back the exact fix: REVIVABLE re-addresses "
+            "automatically, MANUAL gives the precise `CHELA_WID=@N claude --resume <sid>` "
+            "command to relaunch it, which is the only remedy in that case.")
     if statuses and wid not in statuses:
         return ADDR_GONE, (
             f"tmux has no claude running in {wid} — the session that registered as the "
             "orchestrator is gone. Its queue is intact and will go out to whichever session "
-            "registers next (`chela watch`).")
+            "registers next (`chela watch`). But `chela watch` needs a LIVE session to run "
+            "it from — if the orchestrator process itself is dead (crashed, or never "
+            "relaunched inside tmux), there is none, and `chela restore` is the fallback: "
+            "no live window required, and it hands back the exact relaunch command for a "
+            "session that has to be started by hand.")
     if not stamped and now_epoch:
         return ADDR_UNSTAMPED, (
             f"{wid} carries no tmux epoch (recorded before CMX-77, or pinned with "

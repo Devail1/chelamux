@@ -1539,3 +1539,46 @@ def test_js_suites_walk_never_descends_into_git(tmp_path, monkeypatch):
     assert visited, "the os.walk spy recorded nothing — the walker was never instrumented"
     assert not any(".git" in p.parts for p in visited), (
         f"the walk descended into .git: {[str(p) for p in visited]}")
+
+
+# --- CMX-254: `inbox.address`'s "Fix:" line must not be a dead end --------------------
+#
+# `_break_inbox_address` above already pins the SEVERITY (ERROR) for a dangling/gone
+# orchestrator address. These pin the remedy TEXT: "run `chela watch`" is only
+# runnable from a session that is currently alive inside a tmux window — exactly the
+# thing a dangling/gone address usually means is NOT true. A session restarted outside
+# tmux hits that instruction, tries it, and gets `no window id` back — a second dead
+# end with nothing pointing it to `chela restore`, the tool that needs no live window
+# and hands back the actual fix. Live 2026-08-12: five decisions-inbox events sat
+# undeliverable for about an hour behind exactly this gap.
+
+def _inbox_declared(wid="@1", stamped="OLD-epoch", session=None, queued=2):
+    return {"wid": wid, "epoch": stamped, "session": session,
+            "name": "orchestrator", "queued": queued}
+
+
+def test_inbox_report_dangling_names_chela_restore_as_the_fallback():
+    declared = _inbox_declared()
+    obs = runtime_truth.observed({"epoch": "NEW-epoch", "windows": {}})
+
+    findings = runtime_truth._inbox_report(declared, obs)
+
+    assert len(findings) == 1
+    assert findings[0].level == runtime_truth.ERROR
+    detail = findings[0].detail
+    assert "chela watch" in detail
+    assert "chela restore" in detail
+    assert "outside tmux" in detail
+
+
+def test_inbox_report_gone_names_chela_restore_as_the_fallback():
+    declared = _inbox_declared(stamped="SAME-epoch")
+    obs = runtime_truth.observed({"epoch": "SAME-epoch", "windows": {"@2": "chelamux"}})
+
+    findings = runtime_truth._inbox_report(declared, obs)
+
+    assert len(findings) == 1
+    assert findings[0].level == runtime_truth.ERROR
+    detail = findings[0].detail
+    assert "chela watch" in detail
+    assert "chela restore" in detail

@@ -432,6 +432,32 @@ def test_readdress_is_a_noop_when_a_different_wid_is_registered(store_file, wind
     assert inbox.load()["orchestrator"] == "@2"
 
 
+def test_address_state_dangling_points_past_chela_watch_to_chela_restore():
+    """CMX-254: `chela watch` (the remedy this message names first) only works from a LIVE
+    session — a session restarted outside tmux cannot run it at all (`no window id`). The
+    why-text must not leave a reader stuck on that dead end; it has to name the fallback
+    that works with no live window: `chela restore`."""
+    store = {"orchestrator": "@9", "orchestrator_epoch": "OLD-epoch",
+             "orchestrator_name": "orchestrator"}
+
+    state, why = inbox.address_state(store, {}, "NEW-epoch")
+
+    assert state == inbox.ADDR_DANGLING
+    assert "chela watch" in why
+    assert "chela restore" in why
+    assert "outside tmux" in why
+
+
+def test_address_state_gone_points_past_chela_watch_to_chela_restore():
+    store = {"orchestrator": "@9", "orchestrator_epoch": "SAME-epoch"}
+
+    state, why = inbox.address_state(store, {"@2": "idle"}, "SAME-epoch")
+
+    assert state == inbox.ADDR_GONE
+    assert "chela watch" in why
+    assert "chela restore" in why
+
+
 def test_unregister_dangling_clears_only_when_both_wid_and_epoch_still_match(store_file):
     store = inbox.load()
     store["orchestrator"] = "@9"
