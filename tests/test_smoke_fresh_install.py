@@ -63,6 +63,21 @@ EXPECTED_STEPS = [
 # or the "chela" default — exactly the mirror-session leak this pin exists to prevent).
 PINNED_SESSION_RE = re.compile(r"tmux session '(smoke-fresh-install-\d+-nonexistent)'")
 
+# Mirrors the `not_covered` array literal in scripts/smoke-fresh-install.sh. This is the
+# scope-boundary disclosure the reviewer required the PR to make: what a green run does
+# NOT prove (credential-gated paths that must not be faked to claim coverage). The script's
+# `for item in "${not_covered[@]}"` loop still runs — printing nothing — under `set -u`
+# even if the array is collapsed to `not_covered=()`, so only asserting on the printed
+# items (not just the header line, which prints unconditionally either way) catches that:
+# a green run would otherwise claim to cover strictly more than it does.
+NOT_COVERED_ITEMS = [
+    "interactive plugin install (/plugin marketplace add, /plugin install chela@chela — "
+    "Claude Code REPL slash commands, no headless equivalent)",
+    "a live dispatched agent launch (needs real Claude Code credentials)",
+    "a judge run",
+    "a real merge",
+]
+
 
 def _run(*, env: dict) -> subprocess.CompletedProcess:
     return subprocess.run(
@@ -101,6 +116,23 @@ def test_passes_on_a_real_fresh_clone_of_this_checkout():
         "config.current_session() treats as unset) or the status step didn't run:\n"
         + out.stdout
     )
+
+    # The scope-boundary disclosure: a green run must still say what it does NOT prove.
+    # The header line alone is not enough to assert on — it prints unconditionally even if
+    # the `not_covered` array is collapsed to `=()` — so this checks every item actually
+    # got printed, which is the only thing a `not_covered=()` corruption stops from being
+    # true.
+    assert (
+        "==> NOT COVERED by this smoke test (see SCOPE BOUNDARY at the top of this file):"
+        in out.stdout
+    ), out.stdout
+    for item in NOT_COVERED_ITEMS:
+        assert f"  - {item}" in out.stdout, (
+            f"the NOT COVERED scope-boundary disclosure is missing {item!r} — a future "
+            f"edit could silently empty the `not_covered` array (the header line alone "
+            f"still prints under `set -u` with zero loop iterations) and this green run "
+            f"would then claim to cover strictly more than it does:\n{out.stdout}"
+        )
 
 
 def test_a_real_traceback_from_dispatch_dry_run_fails_the_run():
