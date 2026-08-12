@@ -2626,3 +2626,198 @@ def test_peer_socket_unreachable_falls_back_to_tmux(store_file, windows, sends, 
 
     assert len(sends) == 1
     assert sends[0][0] == ORCH
+
+
+# --- CMX-255: the windowless orchestrator — a raw pid, no tmux window at all ----------
+#
+# The delivery half of the mechanism CMX-254 deliberately deferred (PR #323's `## Scope`):
+# a session registered via `register_peer` (no `@N` at all) is reachable purely over its
+# own peer socket, addressed by pid — `deliver` falls back to it only when there is no
+# LIVE wid-based orchestrator (never registered, or its address has rotted).
+
+def _peer_status(monkeypatch, mapping: dict):
+    monkeypatch.setattr(inbox.agent_manager, "session_status_map",
+                        lambda: {"by_pid": dict(mapping)})
+
+
+def test_register_peer_records_pid_session_and_started_without_touching_the_wid_address(
+        store_file, windows, monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+
+    result = inbox.register_peer(4242, "sid-abc")
+
+    assert result == {"ok": True, "pid": 4242, "session": "sid-abc", "queued": 0}
+    peer = inbox.orchestrator_peer()
+    assert peer["pid"] == 4242
+    assert peer["session"] == "sid-abc"
+    assert peer["started"] == 1000.0
+    # A completely separate address kind — the wid-based one is untouched.
+    assert inbox.orchestrator_wid() is None
+
+
+def test_orchestrator_peer_and_orchestrator_wid_are_independent(
+        store_file, windows, monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    inbox.register(ORCH)
+
+    assert inbox.orchestrator_wid() == ORCH
+    assert inbox.orchestrator_peer()["pid"] == 4242    # neither registration clobbers the other
+
+
+def test_peer_state_ok_when_the_pid_still_matches_its_recorded_start_time(monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    state, why = inbox.peer_state({"pid": 4242, "started": 1000.0})
+    assert (state, why) == (inbox.PEER_OK, "")
+
+
+def test_peer_state_gone_when_nothing_is_running_at_that_pid(monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: None)
+    state, why = inbox.peer_state({"pid": 4242, "started": 1000.0})
+    assert state == inbox.PEER_GONE
+    assert "4242" in why
+
+
+def test_peer_state_stale_when_the_os_reused_the_pid(monkeypatch):
+    """⛔ CMX-48's guard, applied to a pid: a pid the OS handed to a DIFFERENT process
+    since registration is a stranger, not the orchestrator, and must be refused exactly
+    like a dangling wid — never delivered to."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 5000.0)
+    state, why = inbox.peer_state({"pid": 4242, "started": 1000.0})
+    assert state == inbox.PEER_STALE
+    assert "4242" in why
+
+
+def test_delivery_falls_back_to_a_registered_windowless_peer_when_nothing_is_registered_by_wid(
+        store_file, windows, monkeypatch):
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (calls.append((pid, frm, text)),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert len(sent) == 1
+    assert calls == [(4242, "chela-inbox", "📥 hello")]
+    assert inbox.load()["queue"] == []
+
+
+def test_delivery_to_a_windowless_peer_never_falls_back_to_tmux(
+        store_file, windows, sends, monkeypatch):
+    """There is no window, so there is no pane to paste into — a socket failure here
+    must be a genuine drop (held queued), never routed through send_tmux."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    monkeypatch.setattr(inbox.messenger, "send_peer_to_pid",
+                        lambda pid, frm, text: messenger.PeerSendResult(False, None))
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert sends == []                              # tmux never touched
+    assert inbox.load()["queue"]                    # HELD, not dropped
+
+
+def test_delivery_does_not_fall_back_to_the_peer_while_a_healthy_wid_orchestrator_is_busy(
+        store_file, windows, sends, monkeypatch):
+    """A live wid orchestrator that is merely BUSY is left alone exactly as before — it
+    will go idle on its own, so the peer fallback must never race it."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    _registered()
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {ORCH: inbox.BUSY}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried
+    assert sends == []
+    assert inbox.load()["queue"]                     # still queued for the wid orchestrator
+
+
+def test_delivery_falls_back_to_the_peer_when_the_wid_address_has_rotted(
+        store_file, windows, sends, monkeypatch):
+    """The core CMX-255 scenario: a tmux restart dangled the wid address, and the only
+    live registration left is the windowless one — the queue must not simply wait forever
+    for a window that isn't coming back."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    with inbox.locked_store() as st:
+        st["orchestrator"] = ORCH
+        st["orchestrator_epoch"] = "1-1000"           # a dead epoch: current() below disagrees
+        st["orchestrator_name"] = "orchestrator"
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (calls.append(pid), messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {ORCH: inbox.IDLE}, [], now_epoch="2-2000")
+
+    assert len(sent) == 1
+    assert calls == [4242]
+    assert sends == []                                # never typed into the stranger at @1
+    assert inbox.load()["queue"] == []
+
+
+def test_delivery_skips_a_windowless_peer_that_is_busy(store_file, windows, monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.BUSY})
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert inbox.load()["queue"]
+
+
+def test_delivery_skips_a_stale_windowless_peer(store_file, windows, monkeypatch):
+    """The pid was reused since registration — refused, same as a dangling wid."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 9999.0)  # pid reused since
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert inbox.load()["queue"]
+
+
+def test_no_delivery_at_all_when_neither_a_wid_nor_a_peer_orchestrator_is_registered(
+        store_file, windows):
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert inbox.load()["queue"]
