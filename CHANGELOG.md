@@ -12,6 +12,18 @@ history lives in `git log`.
 
 ### Changed
 
+- **A `needs_human` escalation's inbox summary now says WHY, not always "the PR still
+  fails review."** `dispatcher._escalate` has several call sites, each handing
+  `last_error` a DIFFERENT reason — a spent rework budget, checks stuck pending, a dead
+  judge, a rework that couldn't re-attach its worktree — but `inbox.run_events` asserted
+  the first of those for every one of them, so a human paged for a stuck-check or a
+  missing-branch escalation was told a review verdict that never happened. The summary
+  now extracts the actual reason: the first paragraph of `last_error` (the part
+  `dispatcher._format_escalation`, CMX-242, composes as the reason itself — the
+  `Recommendation:`/`Options:` paragraphs that follow it stay in the full `last_error`
+  payload, not pasted into the one line typed at an operator's prompt), excerpted to
+  `SUMMARY_TITLE_CHARS` the same way a judge's cannot-verify reason already is. The
+  `reworks: N · verdicts on the row: M` counts are unchanged. (CMX-247)
 - **A CI job that never ran the suite no longer spends a rework round.** The automatic
   CI-red gate (CMX-69) treated every failing check as evidence about the code, but GitHub
   reports two conclusions — `STARTUP_FAILURE` and `ACTION_REQUIRED` — that mean the job's
