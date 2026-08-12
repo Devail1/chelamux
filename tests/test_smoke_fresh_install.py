@@ -37,15 +37,22 @@ pytestmark = pytest.mark.skipif(
 # a no-op (e.g. `: run_step "chela doctor" doctor`) still lets the rest of the script pass
 # — nothing else notices a skipped step — so this is the guard against exactly that: it is
 # read straight off run_step()'s own echo, not inferred from the overall exit code.
+#
+# Each pattern is matched against a WHOLE line of stdout (re.fullmatch), never as a
+# substring of the concatenated output — "==> chela update" is itself a prefix of the
+# PRECEDING step's line, "==> chela update --check", so a substring check lets a no-op'd
+# `run_step "chela update" update` (e.g. `: run_step ...`) pass unnoticed, fully satisfied
+# by the --check step's own echo. Only the dashboard step has a variable suffix (the
+# isolated port number), hence the regex; every other pattern is an exact literal line.
 EXPECTED_STEPS = [
-    "==> uv sync --all-extras",
-    "==> chela status (verifies the CHELA_TMUX_SESSION pin took effect)",
-    "==> chela plugin --dir (documented offline-render path)",
-    "==> chela dashboard (background, isolated port",
-    "==> chela doctor",
-    "==> chela update --check",
-    "==> chela update",
-    "==> chela dispatch --dry-run (fixture tracker)",
+    re.escape("==> uv sync --all-extras"),
+    re.escape("==> chela status (verifies the CHELA_TMUX_SESSION pin took effect)"),
+    re.escape("==> chela plugin --dir (documented offline-render path)"),
+    re.escape("==> chela dashboard (background, isolated port ") + r"\d+\)",
+    re.escape("==> chela doctor"),
+    re.escape("==> chela update --check"),
+    re.escape("==> chela update"),
+    re.escape("==> chela dispatch --dry-run (fixture tracker)"),
 ]
 
 # The exact shape of the pin set in the script: `smoke-fresh-install-$$-nonexistent`. `chela
@@ -75,9 +82,14 @@ def test_passes_on_a_real_fresh_clone_of_this_checkout():
     assert out.returncode == 0, out.stdout + out.stderr
     assert "PASS: fresh-install smoke test" in out.stdout
 
-    for step in EXPECTED_STEPS:
-        assert step in out.stdout, (
-            f"step {step!r} never ran (its own run_step() echo is missing) — "
+    # Whole-line match (re.fullmatch), not substring: see the EXPECTED_STEPS comment above
+    # for why a substring check is unsafe here (the "chela update" / "chela update --check"
+    # prefix collision).
+    stdout_lines = out.stdout.splitlines()
+    for pattern in EXPECTED_STEPS:
+        assert any(re.fullmatch(pattern, line) for line in stdout_lines), (
+            f"step matching {pattern!r} never ran as its own output line (its run_step() "
+            f"echo is missing, or only appears as a prefix of a different step's line) — "
             f"a no-op'd or skipped step doesn't fail the overall exit code, so this is "
             f"the only thing that would catch it:\n{out.stdout}"
         )
