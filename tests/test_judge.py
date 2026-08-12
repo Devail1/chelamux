@@ -15,6 +15,17 @@ an opinion wearing a fact's clothes, and each one was a real, hand-made mistake 
 The mutation experiments here are REAL: a real git repo, a real production module, a real
 pytest guard, a real `python -m pytest` subprocess. The one thing that is stubbed is
 `gh` — GitHub is not this module's to own.
+
+⚠️ NOT GUARDED: the WORDING of WORKFLOW.md step 6's and judge.block_body's step 3's
+self-check mandate is not machine-verified. A substring assertion cannot distinguish a
+mandate ("you must pass one of these flags") from its negation ("neither flag is
+required") or an arbitrary paraphrase of either — CMX-258 rework rounds 1-16 closed this
+axis for presence, then mandate, then pairing, then negation, at both sites, and each
+fix caught one wording and the next round found another (same class CMX-257 retired for
+CSS values). The BEHAVIOUR those docs describe — that `task-finished` reads and enforces
+`--self-check-experiments`/`--no-new-guards`, and that step 6's flag must point at THE
+SAME experiments file step 3 wrote — IS guarded below, by the tests that exercise the
+flags themselves rather than the prose that describes them.
 """
 from __future__ import annotations
 
@@ -354,52 +365,18 @@ def test_a_cannot_verify_report_blocks_nothing_whatever_its_findings_say(tmp_pat
     assert judge.Report(outcomes=[survived], cannot_verify="the baseline was red").blocking == []
 
 
-def test_block_body_step_3_tells_the_rework_agent_to_self_check(tmp_path):
-    """⛔ CMX-258 rework round 1, finding 3 (WIRING): ``block_body`` is what tells a BLOCKED
-    agent how to come back. If step 3 is reverted to a bare `chela task-finished <task-id>`,
-    a rework agent takes the warn-only path and CMX-250's self-check gate never enforces on
-    the very round that was blocked — nothing before this test pinned the wording at all.
-
-    ⛔ CMX-258 rework round 7, finding 2 (WIRING): the two substring checks above only pin
-    that the flagged form of the command APPEARS somewhere in the body — they survive
-    softening step 3's imperative ("then `chela task-finished <task-id>
-    --self-check-experiments <path>`") to a bare mandatory command plus a PARENTHETICAL,
-    OPTIONAL mention of the same flagged command ("and `chela task-finished <task-id>`.
-    (Optionally `chela task-finished <task-id> --self-check-experiments <path>`, ...)"),
-    because that parenthetical still contains both substrings verbatim. Pin the adjacency
-    ("then `...`", not "and `...`. (Optionally `...`") and add a direct negative control: the
-    real body never uses the word "optional" to describe this step, so that word appearing
-    at all is proof the mandate was softened.
-    """
-    survived = judge.Outcome(
-        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
-        judge.SURVIVED, "it survived",
-        baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""),
-        mutated=judge.SuiteResult(True, 0, 1, 0, 0, ""),
-    )
-    report = judge.Report(outcomes=[survived],
-                           baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""))
-
-    body = judge.block_body(report, "https://x/1", TEST_CMD)
-
-    assert "--self-check-experiments <path>" in body
-    assert "chela task-finished <task-id> --self-check-experiments" in body
-    assert "then `chela task-finished <task-id> --self-check-experiments <path>`" in body
-    assert "optional" not in body.lower()
-
-
 def test_block_body_step_3_binds_the_self_check_flag_to_the_same_experiments_file():
-    """⛔ CMX-258 rework round 12 (judge finding 1, WIRING): the sibling test above pins the
-    flag name, the adjacency, and the absence of "optional" — none of them pin the BINDING
-    half: that the experiments file step 3 names is THE SAME one the judge just proved a
-    guard survived corruption in, not any freshly-written file that happens to come back
-    clean. Softening the parenthetical from "(the same experiments file `chela judge
+    """⛔ CMX-258 rework round 12 (judge finding 1, WIRING): pins the BINDING half of
+    ``block_body`` step 3 — that the experiments file it names is THE SAME one the judge just
+    proved a guard survived corruption in, not any freshly-written file that happens to come
+    back clean. Softening the parenthetical from "(the same experiments file `chela judge
     self-check` uses)" to "(any experiments file)" tells a blocked rework agent it may write
     a NEW experiments file for the round it was blocked on — the gate would then re-verify
     guards the agent chose after the fact instead of the ones the judge just proved were
     decoration, on the exact round that matters most. Same shape as
     ``test_workflow_md_step_6_binds_the_self_check_flag_to_the_same_experiments_file`` below,
-    pinned at ``block_body``'s own call site instead of ``WORKFLOW.md``'s."""
+    pinned at ``block_body``'s own call site instead of ``WORKFLOW.md``'s. (The wording of
+    step 3's mandate itself is NOT machine-verified — see the module docstring.)"""
     survived = judge.Outcome(
         judge.Experiment(guard="g", file="f.py", before="a", after="b"),
         judge.SURVIVED, "it survived",
@@ -414,85 +391,13 @@ def test_block_body_step_3_binds_the_self_check_flag_to_the_same_experiments_fil
     assert "the same experiments file `chela judge self-check` uses" in body
 
 
-def test_workflow_md_step_6_names_both_task_finished_flags():
-    """⛔ CMX-258 review round 2 non-blocking note: WIRING, same shape as
-    ``test_block_body_step_3_tells_the_rework_agent_to_self_check`` above — the repo's own
-    ``WORKFLOW.md`` step 6 is what tells a NORMAL (non-blocked) agent how to call
-    ``task-finished``. If either flag's wording drifts out of step 6, an agent following the
-    doc has no way to know CMX-250's self-check gate exists."""
-    root = Path(__file__).resolve().parent.parent
-    text = (root / "WORKFLOW.md").read_text()
-
-    assert "--self-check-experiments <path>" in text
-    assert "--no-new-guards" in text
-
-
-def test_workflow_md_step_6_makes_passing_a_flag_mandatory():
-    """⛔ CMX-258 rework round 5, finding 1 (WIRING): the sibling test above only pins that
-    both flag NAMES appear somewhere in the file — it survives softening 'pass ONE of these
-    two flags' (mandatory) into 'two optional flags exist' (opt-in), since neither bullet's
-    text (and therefore neither asserted substring) has to move for that. Pin the imperative
-    itself: an agent that reads step 6 must be told to PASS one of the flags, and told that
-    doing so is what makes `task-finished` enforce step 3's outcome instead of trusting it
-    happened. Without this, a doc that never requires either flag leaves every run on the
-    warn-only, always-passing path — the whole feature never fires in production."""
-    root = Path(__file__).resolve().parent.parent
-    text = " ".join((root / "WORKFLOW.md").read_text().split())
-
-    assert "pass ONE of these two flags" in text
-    assert "now enforces step 3's outcome instead of trusting it happened" in text
-
-
-def test_workflow_md_step_6_flag_requirement_is_not_negated_in_place():
-    """⛔ CMX-258 rework round 16, finding 1 (WIRING): the sibling test above pins that both
-    mandate substrings appear, but a substring check can't tell the difference between them
-    appearing IN a mandate and appearing INSIDE a wrapping sentence that negates it — e.g.
-    'you may optionally pass ONE of these two flags ... now enforces step 3's outcome instead
-    of trusting it happened, but neither flag is required — running `chela task-finished
-    {{task_id}}` with no flag at all is fine'. Both pinned substrings above are still literal
-    substrings of that sentence, so that test stays green while step 6 tells every agent no
-    flag is required — the same failure mode `judge.block_body` got a direct negative control
-    for in round 7 (`assert "optional" not in body.lower()`). Close it here: pin the exact
-    sentence boundary (a colon immediately closing the mandate, not a comma opening an escape
-    clause onto it) and a negative control on the word that would make the mandate optional."""
-    root = Path(__file__).resolve().parent.parent
-    text = " ".join((root / "WORKFLOW.md").read_text().split())
-
-    assert "trusting it happened:" in text
-    assert "optional" not in text.lower()
-
-
-def test_workflow_md_step_6_pins_condition_to_flag_pairing():
-    """⛔ CMX-258 rework round 7, finding 1 (WIRING): the two sibling tests above pin that
-    both flag NAMES appear and that passing one is MANDATORY, but neither pins WHICH
-    condition maps to WHICH flag. Swapping the two bullets' condition text ('Added or
-    changed a guard?' <-> 'Added or changed no guard this run?') while leaving each flag
-    attached to its own explanatory sentence sends every guard-adding run onto the
-    report-only `--no-new-guards` path — the gate would never enforce on the runs it exists
-    for — and neither substring check above moves, since both flag names and both mandate
-    phrases still appear somewhere in the file after the swap. Pin the exact adjacency
-    between each condition and its flag instead of just their co-occurrence."""
-    root = Path(__file__).resolve().parent.parent
-    text = " ".join((root / "WORKFLOW.md").read_text().split())
-
-    assert (
-        "**Added or changed a guard?** `chela task-finished {{task_id}} "
-        "--self-check-experiments <path>`"
-    ) in text
-    assert (
-        "**Added or changed no guard this run?** `chela task-finished {{task_id}} "
-        "--no-new-guards`"
-    ) in text
-
-
 def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
     """⛔ CMX-258 rework round 4, finding 3 (WIRING): step 3 tells the agent to KEEP the
     experiments JSON file so step 6 can consume it. If this instruction reverses (an agent
     told to delete the file instead), following the doc destroys the path before step 6
     exists — `task-finished --self-check-experiments <path>` can never run, and every run
-    silently falls back to the warn-only `--no-new-guards` path. Nothing before this test
-    pinned step 3's half of the wiring — only step 6's own flag wording, in the sibling test
-    above."""
+    silently falls back to the warn-only `--no-new-guards` path. Pins step 3's half of the
+    step-3-to-step-6 wiring; the sibling test below pins step 6's half."""
     root = Path(__file__).resolve().parent.parent
     text = " ".join((root / "WORKFLOW.md").read_text().split())
 
@@ -508,32 +413,12 @@ def test_workflow_md_step_6_binds_the_self_check_flag_to_the_same_experiments_fi
     SAME file step 3 wrote, not any freshly-written one that happens to come back clean —
     was unpinned. Softening 'the SAME experiments file from step 3' to 'an experiments file'
     unbinds the gate from the guards this run actually added, which is exactly the
-    prose-that-can-be-skipped failure CMX-250 exists to close."""
+    prose-that-can-be-skipped failure CMX-250 exists to close. (The wording of step 6's
+    mandate to pass a flag at all is NOT machine-verified — see the module docstring.)"""
     root = Path(__file__).resolve().parent.parent
     text = " ".join((root / "WORKFLOW.md").read_text().split())
 
     assert "the SAME experiments file from step 3" in text
-
-
-def test_workflow_md_step_6_no_new_guards_warns_against_dodging_a_failing_self_check():
-    """⛔ CMX-258 rework round 12 (judge finding 2, WIRING): five tests already cover step 6's
-    wiring — both flag names, the mandate to pass one, which condition maps to which flag,
-    step 3 keeping the file, and step 6 naming the SAME file — but none of them pin the
-    `--no-new-guards` bullet's OWN body, the only text that tells an agent this opt-out is
-    not a substitute for a failing self-check. Rewriting it into an explicit invitation to
-    reach for `--no-new-guards` whenever the self-check is inconvenient or failing leaves
-    every one of those five substrings untouched (both bullet HEADERS survive verbatim),
-    while `check_no_new_guards` — the opt-out's only cross-check — is report-only by design
-    and NEVER blocks: an agent following the softened doc slips straight through a gate that
-    still reads as fully enforced on paper."""
-    root = Path(__file__).resolve().parent.parent
-    text = " ".join((root / "WORKFLOW.md").read_text().split())
-
-    assert (
-        "Do not reach for this to dodge a failing self-check; the judge still reads the "
-        "diff and a guard that exists without a matching self-check is exactly the gap "
-        "this closes."
-    ) in text
 
 
 def test_zero_experiments_is_CANNOT_VERIFY_not_a_clean_bill_of_health(tmp_path):
