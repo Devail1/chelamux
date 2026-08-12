@@ -58,6 +58,22 @@ def test_outcome_is_abandoned_when_done_without_a_merged_pr():
     assert dispatcher._run_trial_outcome(_row(status="done", pr_state="open")) == "abandoned"
 
 
+def test_outcome_is_abandoned_when_closed_without_a_merged_pr():
+    # 🔴 GUARD (CMX-265 round 4): `closed` (a PR a human closed WITHOUT merging) is its
+    # own board lane (kanbanlanemodel.js's `archived`), but the docstring above is
+    # explicit that it is NOT a distinct trial outcome — the trial ran and was walked
+    # away from, same as an unmerged `done` row, so the ledger must count it as
+    # "abandoned" too. Narrowing `_run_trial_outcome`'s `("done", "closed")` check back
+    # to just `"done"` would silently drop every closed-not-merged trial to "pending"
+    # forever — this is the assertion that catches it.
+    assert dispatcher._run_trial_outcome(_row(status="closed", pr_state=None)) == "abandoned"
+    assert dispatcher._run_trial_outcome(_row(status="closed", pr_state="open")) == "abandoned"
+    # ⭐ COUNTERWEIGHT: `closed` never wins over an actual merge — a row can be `closed`
+    # for one tick before `pr_state` settles, same reasoning as the `merged`-wins-over-
+    # `running` case above.
+    assert dispatcher._run_trial_outcome(_row(status="closed", pr_state="merged")) == "merged"
+
+
 # --- the pure merge -----------------------------------------------------------
 
 def test_reconcile_appends_one_line_per_new_task_id():

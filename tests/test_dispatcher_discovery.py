@@ -104,6 +104,46 @@ def test_discovery_includes_repo_root_workflow(monkeypatch, tmp_path):
     assert repo_wf in dash._discover_dispatch_workflows([])
 
 
+# --- _runs_for_workflow: closed rides in `recent` alongside done/failed (CMX-265) ---
+
+def test_runs_for_workflow_includes_closed_rows_in_recent():
+    # 🔴 GUARD (CMX-265 round 4): `_runs_for_workflow`'s own docstring says omitting
+    # `closed` from the `recent` filter makes a closed-not-merged row vanish from the
+    # API payload ENTIRELY — narrowing the tuple back to `("done", "failed")` is
+    # exactly that omission, and it must fail this test.
+    wf = "/x/WORKFLOW.md"
+    runs = [
+        _run(wf, task_id="a", status="closed", branch="cmx-1"),
+        _run(wf, task_id="b", status="done", branch="cmx-2"),
+        _run(wf, task_id="c", status="failed", branch="cmx-3"),
+        _run(wf, task_id="d", status="running", branch="cmx-4"),  # negative control
+    ]
+    active, awaiting, recent = dash._runs_for_workflow(runs, wf)
+    recent_ids = {r["task_id"] for r in recent}
+    assert "a" in recent_ids, "a closed-not-merged row never reached the `recent` bucket"
+    assert recent_ids == {"a", "b", "c"}
+    assert {r["task_id"] for r in active} == {"d"}  # running never leaks into recent
+
+
+def test_api_dispatcher_surfaces_a_closed_run_in_recent_runs(monkeypatch, client, tmp_path):
+    """End-to-end (CMX-265 round 4): a closed-not-merged run must reach the
+    ``/api/dispatcher`` JSON payload with its OWN status, not be dropped or coerced
+    into `done` — the frontend's `_kanbanFlatten` is what routes it into the Archived
+    lane, but it can only do that if the status survives the trip here."""
+    _no_repo_workflow(monkeypatch)
+    monkeypatch.setattr(dash, "DISPATCH_WORKFLOWS", [])
+    wf = str((tmp_path / "WORKFLOW.md").resolve())
+    runs = [_run(wf, task_id="closed1", status="closed", branch="cmx-1", task_number=1)]
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: runs)
+
+    resp = client.get("/api/dispatcher")
+    data = resp.get_json()
+    assert len(data["workflows"]) == 1
+    recent = data["workflows"][0]["recent_runs"]
+    assert [r["task_id"] for r in recent] == ["closed1"]
+    assert recent[0]["status"] == "closed"
+
+
 # --- /api/dispatcher end to end ---------------------------------------------
 
 def test_api_run_only_workflow_appears(monkeypatch, client, tmp_path):
