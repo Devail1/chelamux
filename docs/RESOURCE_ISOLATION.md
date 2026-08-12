@@ -178,6 +178,42 @@ and non-chela heavy jobs (backtests, test fans run by hand) are still the operat
 `~/bin/memcap`-style wrapper, and chela's own daemon/dashboard/tmux are deliberately left
 OUTSIDE `chela-agents.slice` — see below.
 
+## What a judge actually costs (measured, not estimated)
+
+Nobody had a number for what a single judge or dispatched agent actually peaks at —
+`concurrency.max`/`JUDGE_MAX_CONCURRENT` were hand-picked without one. This PR does not
+change either value (that decision needs the number below, made separately, on the
+record), but it does put a real measurement in place of the guess.
+
+**What was measured, and why not the judge/agent process directly:** a judge's dominant
+paid-for step (`chela judge self-check`'s `self_check`) IS running this repo's own test
+suite — `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (2826 tests, `-n 4 --dist loadfile`,
+see `pyproject.toml`). A dispatched agent or judge is otherwise a Claude Code CLI process
+talking to a remote API — its own footprint is comparatively small and hard to isolate
+from this worktree without live API credentials and a real dispatch, which a rework agent
+running *inside* a dispatched worktree does not have. The suite run is therefore reported
+as an explicit **proxy for the dominant cost**, not a substitute for "judge alone / agent
+alone / both concurrently."
+
+**Method:** `systemd-run --user --scope --unit=<name> -- bash -c '...'`, then
+`systemctl --user show <name>.scope -p MemoryPeak` — cgroup accounting across the WHOLE
+process tree (the coordinating `pytest` process plus its 4 `xdist` workers), the same
+mechanism `chela-agents.slice` itself uses, so this number is directly comparable to what
+the shared slice would see. Cross-checked with `/usr/bin/time -v`, which undercounts
+because it only reports the coordinating process, not its workers.
+
+| Measurement | Peak |
+|---|---|
+| `systemd-run --scope` cgroup `MemoryPeak` (pytest + all 4 xdist workers) | 769,101,824 bytes (~733 MiB / 0.77 GB) |
+| `/usr/bin/time -v` Maximum resident set size (coordinating process only) | 339,424 KiB (~331 MiB) — undercounts, see above |
+
+**Default stays 0/off.** Even a handful of concurrent judges/agents at ~0.77G each sums
+to a few GB — comfortably under the 19G box the 2026-07-14 incident OOM'd — but this
+worktree's own headroom (dashboard, tmux, the daemon itself, none of which are in the
+slice) isn't something this measurement can see, so an operator still has to pick a
+budget against their own box rather than inherit one baked into chela; the `12G` example
+above is consistent with (well above) this baseline for modest concurrency.
+
 ## Why chela cares (and does not fix all of it)
 
 **chela's supervisor shares a failure domain with the workers it spawns.** The daemon, the
