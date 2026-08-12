@@ -81,6 +81,10 @@ def test_run_is_terminal_tolerates_a_row_missing_pr_state_and_attempt():
     entirely reads as still-pending rather than raising KeyError."""
     assert dispatcher.run_is_terminal({"status": "running"}) is False
     assert dispatcher.run_is_terminal({"status": "done"}) is True
+    # `failed` with no `attempt` key at all must default to attempt 1 (still has
+    # retries left), NOT to an already-exhausted count — a row missing the column
+    # is still-pending, not silently dropped from the restore scan.
+    assert dispatcher.run_is_terminal({"status": "failed"}) is False
 
 
 # --- the pure merge -----------------------------------------------------------
