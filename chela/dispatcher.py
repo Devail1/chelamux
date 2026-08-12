@@ -404,14 +404,33 @@ def resolve_agent_cmd(wf: WorkflowDef, role: str = "coding") -> tuple[str, str]:
     return f"{AGENT_BASE_CMD} --permission-mode {permission_mode} --model {model}", source
 
 
-def _git(repo: Path, *args: str, timeout: float = GIT_TIMEOUT_SECONDS):
-    """Run a git command in `repo`. Returns None if git is missing or hung."""
+class GitTimeout(RuntimeError):
+    """Raised by :func:`_git` when ``raise_on_timeout=True`` and the command hits its
+    timeout. Opt-in and default-off so ``_git``'s ~20 other call sites, which all just
+    treat a ``None`` return as "this failed, don't care why", are untouched — only a
+    caller that needs to tell a timeout apart from every other failure (chela.update's
+    network calls: CMX-262, a timed-out fetch must say so rather than send an adopter
+    hunting for a git problem they don't have) opts in.
+    """
+
+
+def _git(repo: Path, *args: str, timeout: float = GIT_TIMEOUT_SECONDS, raise_on_timeout: bool = False):
+    """Run a git command in `repo`. Returns None if git is missing or hung — unless
+    `raise_on_timeout`, in which case a hang raises :class:`GitTimeout` instead of
+    returning None (a missing git binary still returns None either way)."""
     try:
         return subprocess.run(
             ["git", "-C", str(repo), *args],
             capture_output=True, text=True, timeout=timeout,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired as e:
+        log.warning("git %s timed out in %s after %ss", " ".join(args), repo, timeout)
+        if raise_on_timeout:
+            raise GitTimeout(f"git {' '.join(args)} timed out after {timeout:.0f}s — "
+                              "this looks like a slow network link, not a problem with "
+                              "the repo itself") from e
+        return None
+    except FileNotFoundError as e:
         log.warning("git %s failed in %s: %s", " ".join(args), repo, e)
         return None
 
