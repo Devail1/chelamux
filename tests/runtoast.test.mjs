@@ -19,6 +19,12 @@ test('done and failed transitions fire (secondary)', () => {
   assert.equal(runToastKind('running', 'failed'), 'failed');
 });
 
+test('a PR closed without merging toasts too, and never as "done" (CMX-265)', () => {
+  assert.equal(runToastKind('awaiting_review', 'closed'), 'closed');
+  assert.notEqual(RUN_TOAST_KINDS.closed.icon, RUN_TOAST_KINDS.done.icon);
+  assert.match(RUN_TOAST_KINDS.closed.text, /not merged/i);
+});
+
 test('non-review transitions never toast', () => {
   assert.equal(runToastKind('claimed', 'running'), null);
   assert.equal(runToastKind(undefined, 'running'), null);

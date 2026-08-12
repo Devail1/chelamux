@@ -11,8 +11,8 @@ import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
 // Render: the Board segment of WORK (the global cross-workflow kanban)
 //
 // Flattens the /api/dispatcher payload into a single board, then groups it
-// into 5 Jira-style lanes (Backlog / To Do / In Progress / Review / Done —
-// kanbanlanemodel.js's laneOf()). A lane can hold more than one underlying
+// into 6 Jira-style lanes (Backlog / To Do / In Progress / Review / Done /
+// Archived — kanbanlanemodel.js's laneOf()). A lane can hold more than one underlying
 // status (In Progress = claimed + running; Review = awaiting_review +
 // changes_requested + needs_human + failed), so every non-backlog card also
 // carries its own status pill (STATUS_CHIPS below) — that's what lets a
@@ -44,6 +44,11 @@ const STATUS_CHIPS = {
     needs_human:        { label: '🛑 needs a human',     cls: 'st-needs-human' },
     failed:             { label: '✗ failed',            cls: 'st-failed' },
     done:               { label: '✓ done',              cls: 'st-done' },
+    // A PR a human closed WITHOUT merging (CMX-265) — terminal, but never "shipped".
+    // Its own glyph + word so it can never be mistaken for the "✓ done" pill above,
+    // and its own lane (kanbanlanemodel.js's `archived`) so it can never be counted
+    // as part of Done either.
+    closed:             { label: '⊘ closed, not merged', cls: 'st-closed-unmerged' },
 };
 // What GitHub says about a card's checks. Every one of these is a WORD plus a glyph — the
 // colour is a secondary cue and never the signal (Liav is red-weak, and "is this PR red?"
@@ -62,7 +67,7 @@ const CI_CHIPS = {
 // buckets the user rarely needs open at a glance. Overridden + persisted per
 // user once they tap a caret. Review is deliberately NOT here: a failed run
 // now lives there and must stay visible, not buried behind a collapsed lane.
-const KANBAN_DEFAULT_COLLAPSED = ['backlog', 'done'];
+const KANBAN_DEFAULT_COLLAPSED = ['backlog', 'done', 'archived'];
 
 let _kanbanFilter = 'all';    // workflow path or 'all'
 
@@ -200,15 +205,7 @@ function _kCard(card) {
     // changes_requested/needs_human/failed), so this is what tells two cards in the same
     // lane apart. Text, deliberately: a pill's colour is a secondary cue, never the whole
     // message (Liav is red-weak, here or anywhere).
-    // A `done` card whose PR was closed WITHOUT merging (CMX-265's reconcile path)
-    // must not wear the same "✓ done" pill as a shipped one — that pill is what a
-    // reader actually looks at, and collapsing "shipped" and "rejected" into one
-    // glyph would just move the ghost-in-Review lie into a quieter lane. `pr_state`
-    // already carries the distinction (see taskmodal.js's detail view, which shows
-    // it raw); this is the one place on the board itself that was still silent.
-    const chipMeta = (card.status === 'done' && card.pr_state === 'closed')
-        ? { label: '⊘ closed, not merged', cls: 'st-closed-unmerged' }
-        : STATUS_CHIPS[card.status];
+    const chipMeta = STATUS_CHIPS[card.status];
     const stateChip = chipMeta
         ? `<span class="kanban-state-chip ${chipMeta.cls}">${escHtml(chipMeta.label)}</span>`
         : '';
@@ -492,14 +489,14 @@ function _kCol(key, label, cards) {
 }
 
 function _kanbanFlatten(data) {
-    // Build seven per-status buckets across all workflows: Backlog (BACKLOG.md
-    // bullets, read-only) + six run/task statuses. This is unchanged from the
-    // old 7-column board — _lanesFromBuckets() below is what regroups these
-    // into the 5 rendered lanes, so this function still reads the API exactly
-    // as before. workflow_path is injected onto open_tasks + backlog_items so
-    // cards in those buckets still get a workflow chip (the API exposes it
-    // only at the workflow level).
-    const buckets = { backlog: [], open: [], claimed: [], running: [], awaiting_review: [], failed: [], done: [] };
+    // Build eight per-status buckets across all workflows: Backlog (BACKLOG.md
+    // bullets, read-only) + seven run/task statuses (`closed` — CMX-265 — is the
+    // newest). _lanesFromBuckets() below is what regroups these into the 6
+    // rendered lanes, so this function still reads the API exactly as before.
+    // workflow_path is injected onto open_tasks + backlog_items so cards in
+    // those buckets still get a workflow chip (the API exposes it only at the
+    // workflow level).
+    const buckets = { backlog: [], open: [], claimed: [], running: [], awaiting_review: [], failed: [], done: [], closed: [] };
     const wfs = [];
     for (const wf of (data.workflows || [])) {
         wfs.push(wf.path);
@@ -545,7 +542,7 @@ function _kanbanFlatten(data) {
             buckets.awaiting_review.push({ ...r, status: r.status || 'awaiting_review' });
         }
         for (const r of (wf.recent_runs || [])) {
-            const status = (r.status === 'done' || r.status === 'failed') ? r.status : 'done';
+            const status = (r.status === 'done' || r.status === 'failed' || r.status === 'closed') ? r.status : 'done';
             buckets[status].push({ ...r, status });
         }
     }
@@ -558,6 +555,8 @@ function _kanbanFlatten(data) {
     buckets.failed.sort(byEnded);
     buckets.done.sort(byEnded);
     buckets.done = buckets.done.slice(0, KANBAN_DONE_LIMIT);
+    buckets.closed.sort(byEnded);
+    buckets.closed = buckets.closed.slice(0, KANBAN_DONE_LIMIT);
     return { buckets, workflows: wfs };
 }
 
@@ -569,9 +568,9 @@ function _kanbanFlatten(data) {
 // followed by failed). The LANE each bucket lands in still comes from
 // laneOf() — this array only controls ordering within a lane, never which
 // lane a bucket is assigned to.
-const _KANBAN_BUCKET_ORDER = ['backlog', 'open', 'running', 'claimed', 'awaiting_review', 'failed', 'done'];
+const _KANBAN_BUCKET_ORDER = ['backlog', 'open', 'running', 'claimed', 'awaiting_review', 'failed', 'done', 'closed'];
 
-// Regroups _kanbanFlatten's 7 per-status buckets into the 5 rendered lanes.
+// Regroups _kanbanFlatten's 8 per-status buckets into the 6 rendered lanes.
 // No card is dropped or duplicated: every bucket key above is consumed
 // exactly once, laneOf() covers every one of them (see
 // tests/kanban_lane_model.test.mjs's completeness guard), and each bucket's

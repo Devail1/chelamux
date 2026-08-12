@@ -123,6 +123,9 @@ def test_tick_removes_the_worktree_when_a_PR_merges(ticking, monkeypatch):
     assert summary["reconciled_done"] == 1
     assert not wt_path.exists()  # disk freed immediately, not on some later prune
     assert "cmx-1" in _branches(repo)  # branch left alone (task_number collision guard)
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT status FROM runs WHERE task_id=?", (alpha,)).fetchone()
+    assert row["status"] == "done"  # ⭐ GUARD: a genuinely merged row still lands in `done`
 
 
 def test_tick_leaves_an_awaiting_review_worktree_alone(ticking, monkeypatch):
@@ -142,11 +145,16 @@ def test_tick_leaves_an_awaiting_review_worktree_alone(ticking, monkeypatch):
     assert wt_path.is_dir()          # still needed — a rework may re-spawn into it
 
 
-def test_tick_reconciles_a_closed_PR_to_done_and_frees_the_worktree(ticking, monkeypatch):
+def test_tick_reconciles_a_closed_PR_to_closed_and_frees_the_worktree(ticking, monkeypatch):
     """CMX-265: a PR a human closed WITHOUT merging must not park its row in the
     Review lane forever — `pr_state='closed'` is just as terminal as `'merged'`, and
     only the merged branch used to reconcile out of REVIEW_STATUSES. Unhandled, this
-    was 7 ghost rows sitting in Review with a dead PR and nothing to do about it."""
+    was 7 ghost rows sitting in Review with a dead PR and nothing to do about it.
+
+    Round 2 (PR #334): the target status is `closed`, NOT `done` — Liav overruled round
+    1's `done` argument ("archive them"). A closed-not-merged row must be its own
+    terminal state, distinguishable from genuinely-shipped work, not just a differently
+    coloured pill on the same `done` status."""
     repo = ticking
     wf_path = repo / "WORKFLOW.md"
     alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
@@ -157,17 +165,18 @@ def test_tick_reconciles_a_closed_PR_to_done_and_frees_the_worktree(ticking, mon
 
     summary = dispatcher.tick(wf_path)
 
-    assert summary["reconciled_done"] == 1
+    assert summary["reconciled_closed"] == 1
+    assert summary["reconciled_done"] == 0  # ⭐ GUARD: NOT `done` — that is the whole point
     assert not wt_path.exists()  # disk freed immediately, same as the merged path
     with dispatcher._db() as conn:
         row = conn.execute("SELECT status FROM runs WHERE task_id=?", (alpha,)).fetchone()
-    assert row["status"] == "done"  # off the board's REVIEW_STATUSES list — no longer a ghost
+    assert row["status"] == "closed"  # off the board's REVIEW_STATUSES list — no longer a ghost
 
 
 def test_tick_does_not_fire_after_done_for_a_closed_unmerged_PR(ticking, monkeypatch):
     """The merged-PR path fires `hooks.after_done` — a "shipped" signal a repo may wire
     to a deploy. A closed-without-merging PR is a rejected trial, not shipped work, so
-    reconciling it to `done` must NOT trip that hook."""
+    reconciling it to `closed` must NOT trip that hook."""
     repo = ticking
     wf_path = repo / "WORKFLOW.md"
     alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
@@ -179,8 +188,36 @@ def test_tick_does_not_fire_after_done_for_a_closed_unmerged_PR(ticking, monkeyp
 
     summary = dispatcher.tick(wf_path)
 
-    assert summary["reconciled_done"] == 1
+    assert summary["reconciled_closed"] == 1
     assert fired == []  # no after_done — nothing shipped
+
+
+def test_tick_preserves_review_history_across_the_closed_transition(ticking, monkeypatch):
+    """⭐ GUARD (round 2, PR #334): "NEVER DELETE THE ROWS" — archiving a row means
+    reclassifying its `status`, not touching any of its other columns. `review_history`
+    carries the row's whole audit trail (every rework verdict); it must survive the
+    closed-reconcile UPDATE byte-for-byte, the same way it already survives the
+    merged-reconcile UPDATE."""
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+    worktrees_root = repo.parent / ".chela" / "worktrees"
+    _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root)
+    history = '[{"verdict": "changes_requested", "at": "2026-08-01T00:00:00Z"}]'
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET review_history=? WHERE task_id=?", (history, alpha))
+        conn.commit()
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("closed", "UNKNOWN"))
+
+    summary = dispatcher.tick(wf_path)
+
+    assert summary["reconciled_closed"] == 1
+    with dispatcher._db() as conn:
+        row = conn.execute(
+            "SELECT status, review_history FROM runs WHERE task_id=?", (alpha,)
+        ).fetchone()
+    assert row["status"] == "closed"
+    assert row["review_history"] == history  # untouched by the status-only UPDATE
 
 
 def test_tick_moves_only_the_closed_row_when_open_and_merged_siblings_are_present(ticking, monkeypatch):
@@ -221,22 +258,23 @@ def test_tick_moves_only_the_closed_row_when_open_and_merged_siblings_are_presen
 
     with dispatcher._db() as conn:
         rows = {r["task_id"]: r["status"] for r in conn.execute("SELECT task_id, status FROM runs").fetchall()}
-    assert rows[closed_id] == "done"
-    assert rows[merged_id] == "done"
+    assert rows[closed_id] == "closed"          # ⭐ GUARD: closed, NOT `done` — see round 2
+    assert rows[merged_id] == "done"            # ⭐ GUARD: a genuinely merged row still lands in `done`
     assert rows[open_id] == "awaiting_review"  # ⭐ untouched — the negative control
     assert open_wt.is_dir()                    # its worktree survives too
     assert not closed_wt.exists()
     assert not merged_wt.exists()
-    assert summary["reconciled_done"] == 2      # closed + merged; the open row never counts
+    assert summary["reconciled_done"] == 1      # merged only
+    assert summary["reconciled_closed"] == 1    # closed only; the open row never counts
 
 
 def test_tick_does_not_restrike_or_reclaim_a_closed_unmerged_PRs_task(ticking, monkeypatch):
     """⭐ Mandatory negative control #2: reconciling a closed-without-merging PR to
-    `done` must not re-claim the tracker task — there is nothing to strike (the task
+    `closed` must not re-claim the tracker task — there is nothing to strike (the task
     was rejected, not delivered) and the claim loop must never mistake the
     still-open tracker line for fresh work. Both properties previously lived only in
     a comment; this pins the ACTUAL interaction (the tracker-strike query's
-    `pr_state='merged'` filter, and `done`'s membership in `NOT_CLAIMABLE`) against
+    `pr_state='merged'` filter, and `closed`'s membership in `NOT_CLAIMABLE`) against
     the new branch, so a future change to either guard that breaks this specific
     promise goes red here even if each guard's own test stays green."""
     repo = ticking
@@ -248,7 +286,7 @@ def test_tick_does_not_restrike_or_reclaim_a_closed_unmerged_PRs_task(ticking, m
 
     summary = dispatcher.tick(wf_path)
 
-    assert summary["reconciled_done"] == 1
+    assert summary["reconciled_closed"] == 1
     assert summary["tracker_struck"] == 0
     assert "- [ ] alpha" in (repo / "TODO.md").read_text()  # tracker line still unstruck — nothing to strike
 
@@ -259,7 +297,7 @@ def test_tick_does_not_restrike_or_reclaim_a_closed_unmerged_PRs_task(ticking, m
 
     summary2 = dispatcher.tick(wf_path)
 
-    assert alpha not in spawned_task_ids  # NOT_CLAIMABLE("done") refuses the re-claim
+    assert alpha not in spawned_task_ids  # NOT_CLAIMABLE("closed") refuses the re-claim
     assert summary2["dispatched"] == 0
     with dispatcher._db() as conn:
         n = conn.execute("SELECT COUNT(*) c FROM runs WHERE task_id=?", (alpha,)).fetchone()["c"]

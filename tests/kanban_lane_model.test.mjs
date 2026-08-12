@@ -12,11 +12,11 @@ import assert from 'node:assert/strict';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from '../chela/dashboard/static/js/kanbanlanemodel.js';
 
 // The whole status set the Work board currently renders — every status
-// _kanbanFlatten (kanban.js) can hand a card, across all 5 lanes.
+// _kanbanFlatten (kanban.js) can hand a card, across all 6 lanes.
 const ALL_STATUSES = [
     'backlog', 'open', 'claimed', 'running',
     'awaiting_review', 'changes_requested', 'needs_human', 'failed',
-    'done',
+    'done', 'closed',
 ];
 
 // --- per-status mapping ------------------------------------------------------
@@ -66,6 +66,17 @@ test('laneOf: done -> done', () => {
     assert.equal(laneOf('done'), 'done');
 });
 
+test('laneOf: closed -> archived, never done or review (CMX-265)', () => {
+    // 🔴 GUARD: a `closed` run (a PR a human closed WITHOUT merging) landing in `done`
+    // would mix rejected/superseded work back into the "everything in Done shipped"
+    // lane — the exact bug Liav asked to have fixed. Landing in `review` would just
+    // reopen the original ghost-in-Review bug this whole ticket started from.
+    const lane = laneOf('closed');
+    assert.equal(lane, 'archived');
+    assert.notEqual(lane, 'done');
+    assert.notEqual(lane, 'review');
+});
+
 // --- unknown-status fallback --------------------------------------------------
 
 test('laneOf: an unknown status falls back to review, not hidden in backlog/done', () => {
@@ -82,8 +93,8 @@ test('laneOf: an unknown status falls back to review, not hidden in backlog/done
 
 // --- completeness: every status maps onto exactly the 5 lane keys ------------
 
-test('KANBAN_LANES has exactly the 5 lanes, in order', () => {
-    assert.deepEqual(KANBAN_LANES, ['backlog', 'todo', 'in_progress', 'review', 'done']);
+test('KANBAN_LANES has exactly the 6 lanes, in order', () => {
+    assert.deepEqual(KANBAN_LANES, ['backlog', 'todo', 'in_progress', 'review', 'done', 'archived']);
 });
 
 test('every lane key has a label', () => {
@@ -93,12 +104,12 @@ test('every lane key has a label', () => {
     }
 });
 
-test('completeness: every known status resolves to one of the 5 lane keys, none undefined', () => {
+test('completeness: every known status resolves to one of the 6 lane keys, none undefined', () => {
     // 🔴 GUARD: deleting a status's entry from STATUS_LANE inside
     // kanbanlanemodel.js does NOT throw — laneOf's `|| 'review'` fallback
     // would quietly swallow it into Review. That is an ACCEPTABLE fallback
     // for a genuinely unknown status (see the test above), but this test
-    // pins the full set of 9 KNOWN statuses landing on their real, specific
+    // pins the full set of 10 KNOWN statuses landing on their real, specific
     // lanes — it would only catch a delete if paired with the per-status
     // assertions above going RED too, which is why both exist.
     for (const status of ALL_STATUSES) {
@@ -107,7 +118,7 @@ test('completeness: every known status resolves to one of the 5 lane keys, none 
     }
 });
 
-test('completeness: every one of the 5 lane keys is actually reachable from the known status set', () => {
+test('completeness: every one of the 6 lane keys is actually reachable from the known status set', () => {
     // 🔴 GUARD: deleting a LANE (e.g. dropping 'review' from KANBAN_LANES
     // while STATUS_LANE still points statuses at it) would leave a lane no
     // status can ever land in, or a lane KANBAN_LANES doesn't know about —
@@ -117,5 +128,5 @@ test('completeness: every one of the 5 lane keys is actually reachable from the 
     for (const key of KANBAN_LANES) {
         assert.ok(reached.has(key), `lane "${key}" is unreachable — no known status maps to it`);
     }
-    assert.equal(reached.size, KANBAN_LANES.length, 'every lane key is reachable, and nothing besides the 5 lane keys is produced');
+    assert.equal(reached.size, KANBAN_LANES.length, 'every lane key is reachable, and nothing besides the 6 lane keys is produced');
 });

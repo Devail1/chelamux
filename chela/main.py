@@ -313,7 +313,8 @@ def cmd_run(args) -> None:
                     elif not summary.get("held") and dispatch_held:
                         dispatch_held = False
                         log.info("Work dispatcher resumed — the queue hold was released")
-                    if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
+                    if (summary["dispatched"] or summary["reconciled_done"]
+                            or summary["reconciled_closed"] or summary["reconciled_failed"]):
                         log.info("Dispatch %s: %s", wf_path.name, summary)
                 except Exception:
                     log.exception("Dispatch tick failed for %s", wf_path)
@@ -1135,7 +1136,8 @@ def cmd_dispatch(args) -> None:
     while not stop.stopping:
         try:
             summary = dispatcher.tick(args.workflow)
-            if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
+            if (summary["dispatched"] or summary["reconciled_done"]
+                    or summary["reconciled_closed"] or summary["reconciled_failed"]):
                 log.info("Dispatch tick: %s", summary)
         except Exception:
             log.exception("Dispatch tick failed")
