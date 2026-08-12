@@ -8,7 +8,7 @@ import subprocess
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from chela import critic, epoch, event_log, hold, judge, memcap
@@ -2189,8 +2189,23 @@ def _is_guard_path(path: str) -> bool:
     A path that merely STARTS WITH the letters "tests" without the directory separator
     (``tests_helper.py``, ``tests-helpers/x.py``) is deliberately excluded — it is not under
     the ``tests/`` directory at all.
+
+    ⚖️🔎 CMX-267: rounds 5, 8 and 15 each found a fresh way for the first clause to
+    misclassify a path, and each was closed by hand-adding one more table row on top of a
+    STRING prefix test (``path.startswith("tests/")``) — a test that only ever gave the
+    right answer because every path this function has been fed so far happened to already
+    be normalized ``git diff --name-only`` output. "Is this path under the ``tests/``
+    directory" is a statement about PATH STRUCTURE (its first component), not about which
+    characters happen to appear at the front of the string, and encoding it as the latter
+    means every new path SHAPE (not just every new path VALUE) is a fresh chance to be
+    wrong — a leading ``./``, a doubled separator, anything a future caller other than this
+    module's own ``git diff`` might hand in. Decomposing the path with ``PurePosixPath``
+    and comparing its first PART to ``"tests"`` tests the actual English definition above
+    directly, so there is no boundary left to rediscover by hand: ``tests_helper.py`` has
+    first part ``"tests_helper.py"``, not ``"tests"``, no matter how the string is spelled.
     """
-    return path.startswith("tests/") or path.endswith(".test.mjs")
+    parts = PurePosixPath(path).parts
+    return (parts[:1] == ("tests",)) or path.endswith(".test.mjs")
 
 
 def check_no_new_guards(task_id: str) -> bool | None:

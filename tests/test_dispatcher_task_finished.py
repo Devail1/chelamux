@@ -755,6 +755,35 @@ def test_check_no_new_guards_path_classification_table(tmp_path, path, expected)
     assert dispatcher.check_no_new_guards("t1") is expected
 
 
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        pytest.param("./tests/foo.py", True, id="leading-dot-slash-normalizes-under-tests"),
+        pytest.param("tests", True, id="bare-tests-with-no-nested-path"),
+    ],
+)
+def test_is_guard_path_normalizes_shapes_the_git_diff_fixture_cannot_produce(path, expected):
+    """⛔ CMX-267: rounds 5, 8 and 15 each closed a fresh miss on ``_is_guard_path`` by
+    committing one more path through :func:`_repo_with_origin`'s real git round-trip and
+    adding a table row — but that fixture can only ever produce a path SHAPE that ``git
+    diff --name-only`` itself would emit, and git always normalizes away a leading ``./``
+    before the name ever reaches this function, and never emits a bare ``tests`` line at
+    all (``tests`` is a tracked directory in that fixture's base commit, not a blob, so
+    writing a file AT that path collides with the directory and cannot be committed).
+
+    Both rows here are unreachable through the table above for that reason, yet the string
+    encoding of "is this path under ``tests/``" — ``path.startswith("tests/")`` — gets both
+    of them wrong: ``"./tests/foo.py".startswith("tests/")`` is False (the string does not
+    begin with those six characters, even though the path it denotes is squarely inside the
+    directory), and ``"tests".startswith("tests/")`` is False too (there is no trailing
+    separator to find). A corruption that reverts the ``PurePosixPath``-based check back to
+    a raw prefix string is invisible to every row above and caught only here — call
+    ``_is_guard_path`` directly, the same way the classification table's own docstring cites
+    it, rather than round-tripping through a git commit this shape can never survive.
+    """
+    assert dispatcher._is_guard_path(path) is expected
+
+
 def test_check_no_new_guards_false_and_logs_nothing_when_diff_is_clean(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
     root = tmp_path / "wt"
