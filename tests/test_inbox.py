@@ -2363,13 +2363,41 @@ def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_fil
     # paragraph already exceeds the excerpt limit and would hide a missing split.
     short_with_recommendation = dict(_verdict_run(), task_id="T4", status="needs_human",
                      last_error="rework: no branch\n\nRecommendation: fix it yourself.")
+    # A single-paragraph reason strictly BETWEEN 60 and 90 chars (68). This is the fixture
+    # that pins the excerpt bound to the named SUMMARY_TITLE_CHARS constant (60) rather than
+    # merely "shorter than whatever the fixture happens to be": a limit of 90 would let this
+    # one through untruncated, so the exact-match assertion below only passes at limit=60.
+    boundary_reason = "external approval is stuck on someone who is out of office this week"
+    assert 60 < len(boundary_reason) < 90
+    boundary = dict(_verdict_run(), task_id="T5", status="needs_human",
+                     last_error=boundary_reason)
 
-    inbox.tick({}, runs=[rework_cap, stuck_checks, no_branch, short_with_recommendation])
+    inbox.tick({}, runs=[rework_cap, stuck_checks, no_branch, short_with_recommendation,
+                          boundary])
 
-    by_task = {e["payload"]["task_id"]: e["summary"] for e in inbox.load()["queue"]}
-    assert set(by_task) == {"T1", "T2", "T3", "T4"}
+    by_entry = {e["payload"]["task_id"]: e for e in inbox.load()["queue"]}
+    by_task = {tid: e["summary"] for tid, e in by_entry.items()}
+    assert set(by_task) == {"T1", "T2", "T3", "T4", "T5"}
 
     assert "the PR still fails review" in by_task["T1"]
+
+    # 🔴 GUARD: the payload must carry the FULL last_error, Recommendation/Options included
+    # — the summary excerpts the reason, but the payload is not itself excerpted. If this
+    # key is ever emptied, the excerpt stops being an excerpt and becomes data loss.
+    assert by_entry["T1"]["payload"]["last_error"] == rework_cap["last_error"], (
+        "the payload's last_error must be the run's full, unmodified last_error"
+    )
+    assert by_entry["T2"]["payload"]["last_error"] == stuck_checks["last_error"]
+
+    # 🔴 GUARD: the reason is excerpted to EXACTLY SUMMARY_TITLE_CHARS (60), cut on a word
+    # boundary, and marked with an ellipsis — not "some limit shorter than this fixture"
+    # (caught a mutation to `limit = 90`) and not a raw mid-word slice with no ellipsis
+    # (caught a mutation dropping the `.rsplit(" ", 1)[0] + "…"`). This literal is computed
+    # independently of production code: reason[:60].rsplit(" ", 1)[0] + "…".
+    assert "rework cap reached 2/2 — the PR still fails review.…" in by_task["T1"], (
+        "the reason must be cut at exactly SUMMARY_TITLE_CHARS, on a word boundary, "
+        "with a trailing ellipsis — got a differently-bounded or unmarked cut instead"
+    )
 
     # 🔴 GUARD: the counts must survive alongside the reason — `reworks: N · verdicts on
     # the row: M` are useful on their own and a refactor of the reason must not drop them.
@@ -2412,6 +2440,18 @@ def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_fil
         "a short reason (under SUMMARY_TITLE_CHARS) must still exclude a trailing "
         "Recommendation — this is only provable when the excerpt limit itself can't "
         "be the thing hiding it"
+    )
+
+    # 🔴 GUARD: T5's 68-char reason sits strictly between SUMMARY_TITLE_CHARS (60) and a
+    # too-large limit (90) that would otherwise still pass every other fixture in this test.
+    # At the real limit it must be visibly cut; a widened limit would let it through whole.
+    assert "external approval is stuck on someone who is out of office…" in by_task["T5"], (
+        "a reason longer than SUMMARY_TITLE_CHARS but shorter than 90 chars must still "
+        "be excerpted — this only fails if the limit is not exactly SUMMARY_TITLE_CHARS"
+    )
+    assert boundary_reason not in by_task["T5"], (
+        "the full boundary reason leaked through untruncated — the excerpt limit is "
+        "wider than SUMMARY_TITLE_CHARS"
     )
 
 
