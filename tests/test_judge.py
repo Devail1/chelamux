@@ -1532,6 +1532,11 @@ def test_a_cannot_verify_is_a_bounded_RETRY_not_a_permanent_retirement(tmp_path,
     judge from ever re-running on that commit — it then merged UNJUDGED, silently defeating
     the judge on any flake. Now the SAME head is re-judged up to `judge_max_unknown_retries`
     while it keeps coming back cannot_verify, and only then settles for a human.
+
+    ⚖️🧊 CMX-253: "settles for a human" must be a REAL transition, not a description of
+    where the row silently stays. Once the budget is spent it moves to `needs_human` — see
+    `_escalate_stranded_judge_unknowns` — rather than sitting in `awaiting_review` forever
+    looking exactly like a run still waiting on an ordinary review.
     """
     monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
     wf = _wf(tmp_path)
@@ -1560,7 +1565,9 @@ def test_a_cannot_verify_is_a_bounded_RETRY_not_a_permanent_retirement(tmp_path,
     assert spawns == ["cafe1234"] * 3
     run = dispatcher.resolve_run("abc123")
     assert run["judge_state"] == judge.J_CANNOT_VERIFY
-    assert run["status"] == "awaiting_review"       # ⛔ never merged, never blocked
+    assert run["status"] == "needs_human"           # ⛔ never merged, never blocked —
+    # but NOT stranded in `awaiting_review` either: the budget is spent, so a human is told.
+    assert "could not verify" in (run["last_error"] or "")
 
 
 def test_only_cannot_verify_re_fires_a_real_verdict_and_a_spent_budget_do_not(tmp_path, monkeypatch):
@@ -1594,6 +1601,64 @@ def test_only_cannot_verify_re_fires_a_real_verdict_and_a_spent_budget_do_not(tm
                      judge_sha="cafe1234", judge_state=state, judge_cannot_verify_tries=tries)
         _tick(wf, spawn)
         assert bool(fired) is expect_fire, (state, tries)
+
+
+def test_a_cannot_verify_past_budget_escalates_instead_of_stranding_silently(tmp_path, monkeypatch):
+    """⚖️🧊 CMX-253. Once `judge_cannot_verify_tries` reaches the bound on the SAME
+    `pr_head_sha`, the trigger query never re-selects the row again — and `cannot_verify`
+    never earns a `request_changes` escalation either (it "blocks nothing and approves
+    nothing"). Before this fix nothing else moved the row: it sat in `awaiting_review`
+    forever, presenting as an ordinary run still waiting for review. It must instead move to
+    `needs_human`, with the judge's own last detail carried into `last_error` for the human
+    who picks it up.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+
+    def spawn(w, row, sha, conn):
+        return True    # never reached — the budget is already spent
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None,
+                 judge_sha="cafe1234", judge_state=judge.J_CANNOT_VERIFY,
+                 judge_cannot_verify_tries=2, judge_detail="a flake")
+
+    result = _tick(wf, spawn)
+    assert result["judge_stranded"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert run["judge_state"] == judge.J_CANNOT_VERIFY   # the verdict itself is untouched
+    assert "a flake" in run["last_error"]
+    assert "cafe1234"[:12] in run["last_error"]
+
+
+def test_a_fresh_commit_resets_the_budget_instead_of_escalating(tmp_path, monkeypatch):
+    """A `cannot_verify` past budget on an OLD head must not strand the run once a rework (or
+    a human push) lands a new commit — the new `pr_head_sha` no longer matches `judge_sha`,
+    so this is a fresh judgement, not a spent retry, and the trigger picks it up instead of
+    `_escalate_stranded_judge_unknowns`."""
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+
+    spawned: list[str] = []
+
+    def spawn(w, row, sha, conn):
+        spawned.append(sha)
+        conn.execute("UPDATE runs SET judge_sha=?, judge_state=? WHERE task_id=?",
+                     (sha, judge.J_RUNNING, row["task_id"]))
+        conn.commit()
+        return True
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None,
+                 judge_sha="cafe1234", judge_state=judge.J_CANNOT_VERIFY,
+                 judge_cannot_verify_tries=2, judge_detail="a flake")
+
+    result = _tick(wf, spawn, sha="f00dbabe")
+    assert result["judge_stranded"] == 0
+    assert spawned == ["f00dbabe"]
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"
 
 
 def test_spawn_judge_resets_the_unknown_count_on_a_new_sha_and_bumps_it_on_a_retry(tmp_path):

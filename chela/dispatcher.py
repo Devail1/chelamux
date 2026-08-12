@@ -2892,7 +2892,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
-        "judged": 0, "judge_lost": 0,
+        "judged": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
@@ -2970,6 +2970,7 @@ def tick(workflow_path: str | Path) -> dict:
         "ci_infra_failed": 0,
         "judged": 0,
         "judge_lost": 0,
+        "judge_stranded": 0,
         "trial_ledger": 0,
         "disk_budget_exceeded": False,
         "blocked": blocked,
@@ -3562,6 +3563,20 @@ def tick(workflow_path: str | Path) -> dict:
         # VERIFY — it does NOT block and it does NOT approve; the run stays exactly where it
         # was, and a human is told why.
         summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
+
+        # 1e′. ⚖️🧊 CMX-253: a `cannot_verify` that SPENT its retry budget on the CURRENT
+        # head is stranded, not waiting. The trigger query in STEP 3a′ below re-fires a
+        # `cannot_verify` only while `judge_cannot_verify_tries < judge_max_unknown_retries()`
+        # — bounded on purpose (CMX-81), so one flake costs a retry, not an infinite loop.
+        # But once `tries` reaches that bound on the SAME `pr_head_sha`, no arm of that
+        # trigger's OR can ever become true again short of a new commit, and `cannot_verify`
+        # "blocks nothing and approves nothing" (judge.py), so it never earns a
+        # `request_changes` escalation either. The row then sits in `awaiting_review`
+        # forever, indistinguishable from an ordinary "waiting for review" run, while no
+        # verdict will ever come. ⛔ Alongside 1d/1e, ABOVE the hold/blocked returns: this
+        # is not a claim — it starts no agent, takes no slot — and it is the transition
+        # that stops the row from silently presenting as reviewable when it is not.
+        summary["judge_stranded"] = _escalate_stranded_judge_unknowns(conn, wf)
 
         # 1f. 📊 THE TRIAL LEDGER (CMX-105) — opt-in, and BEFORE the prune below: a died
         # or abandoned row must get its ledger line while it still exists in `runs`, or
@@ -4756,6 +4771,54 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             "NOT sent back; it is a human's now.", row["task_id"], reason,
         )
     return handed_over
+
+
+def _escalate_stranded_judge_unknowns(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
+    """⚖️🧊 CMX-253. Hand a `cannot_verify` that spent its retry budget on the CURRENT head
+    to a human — it will never be judged again on this commit, and it must not sit in
+    `awaiting_review` pretending otherwise.
+
+    The trigger query in STEP 3a′ re-fires a `cannot_verify` only while
+    ``judge_cannot_verify_tries < judge_max_unknown_retries()`` (CMX-81's bounded retry: a
+    flake costs a retry, not an infinite loop). But once ``tries`` reaches that bound on the
+    SAME ``pr_head_sha``, no arm of that trigger's ``OR`` can ever become true again short of
+    a new commit — and `cannot_verify` blocks nothing and approves nothing (it can never earn
+    a `request_changes` escalation the way a real verdict does). Nothing else ever moves the
+    row, so it was previously stranded PERMANENTLY AND SILENTLY: an ordinary-looking
+    `awaiting_review` row that no verdict will ever reach. Observed live 2026-08-12 on three
+    runs (#316, #319, #320) after a host reboot, each parked at ``tries == max``.
+
+    ⛔ Matches the trigger's own guard exactly (``judge_sha=pr_head_sha`` and
+    ``tries >= max``), so a row is escalated here if and only if the trigger query would
+    never re-select it again. A fresh commit changes ``pr_head_sha`` and falls out of this
+    query on the very next tick — the trigger's first ``OR`` arm (``judge_sha != pr_head_sha``)
+    picks it back up for a brand-new judgement instead.
+    """
+    escalated = 0
+    for row in conn.execute(
+        "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
+        "AND judge_state=? AND judge_sha IS NOT NULL AND judge_sha=pr_head_sha "
+        "AND COALESCE(judge_cannot_verify_tries, 0) >= ?",
+        (str(wf.path), judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
+    ).fetchall():
+        tries = row["judge_cannot_verify_tries"] or 0
+        _escalate(
+            conn, row,
+            f"the judge could not verify this PR on {(row['pr_head_sha'] or '')[:12]} after "
+            f"{tries} attempt(s) ({row['judge_detail'] or 'no detail recorded'}) — it will "
+            "never be judged on this commit. The PR was NOT reviewed adversarially and it "
+            "was NOT sent back; branch, worktree and PR are preserved.",
+            recommendation="Fix whatever kept the judge from running (see judge_detail above) "
+                            "and push a new commit to get a fresh judgement, or review the PR "
+                            "by hand and merge or close it.",
+            options=[
+                "Push a new commit to reset the judge retry budget",
+                "Review the PR by hand and merge or close it",
+                "Abandon the task",
+            ],
+        )
+        escalated += 1
+    return escalated
 
 
 def list_runs() -> list[dict]:
