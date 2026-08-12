@@ -2331,6 +2331,70 @@ def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
     assert len(summary) < len(_LONG_DETAIL) + 200
 
 
+# --- CMX-247: the needs_human summary must say WHY, not always the same fixed guess ------
+#
+# `dispatcher._escalate` is the only writer of `needs_human`, and its call sites hand it
+# DIFFERENT reasons — a spent rework budget, checks stuck pending, a rework that could not
+# re-attach its worktree. Before this, `inbox.run_needs_human` always said "the PR still
+# fails review", which is only true for the first of those.
+
+def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_file, windows,
+                                                                        sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    rework_cap = dict(_verdict_run(), task_id="T1", status="needs_human",
+                      last_error="rework cap reached (2/2) — the PR still fails review. "
+                                 "Branch, worktree and PR are preserved.\n\n"
+                                 "Recommendation: fix it yourself and `chela reopen`.")
+    stuck_checks = dict(_verdict_run(), task_id="T2", status="needs_human",
+                        last_error="the checks on this PR have not settled in 6h — they "
+                                   "are not running, they are STUCK.\n\n"
+                                   "Recommendation: approve the pending gate.")
+    no_branch = dict(_verdict_run(), task_id="T3", status="needs_human",
+                     last_error="rework: the run row has no branch — nothing to re-enter")
+
+    inbox.tick({}, runs=[rework_cap, stuck_checks, no_branch])
+
+    by_task = {e["payload"]["task_id"]: e["summary"] for e in inbox.load()["queue"]}
+    assert set(by_task) == {"T1", "T2", "T3"}
+
+    assert "the PR still fails review" in by_task["T1"]
+
+    assert "checks on this PR have not settled" in by_task["T2"]
+    assert "the PR still fails review" not in by_task["T2"], (
+        "a run escalated for STUCK CHECKS must not be told it 'still fails review' — "
+        "that sentence is a claim about a review verdict that never happened"
+    )
+
+    assert "no branch" in by_task["T3"]
+    assert "the PR still fails review" not in by_task["T3"], (
+        "a run escalated for a MISSING BRANCH must not be told it 'still fails review'"
+    )
+
+    # Only the reason (first paragraph) reaches the summary — Recommendation/Options stay
+    # in the payload's last_error, not pasted into the one line typed at the prompt.
+    assert "Recommendation:" not in by_task["T1"]
+    assert "Recommendation:" not in by_task["T2"]
+
+
+def test_run_needs_human_reason_falls_back_when_last_error_is_empty(store_file, windows,
+                                                                     sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    bare = dict(_verdict_run(), status="needs_human", last_error=None)
+    inbox.tick({}, runs=[bare])
+
+    summary = inbox.load()["queue"][0]["summary"]
+    assert "no reason recorded" in summary
+    assert "the PR still fails review" not in summary
+
+
 # --- the single-run blind spot -----------------------------------------------------------
 #
 # 🔴 GUARDS (CMX-197 round 9). EVERY judge test on this branch drives exactly ONE run, so
