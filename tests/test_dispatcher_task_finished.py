@@ -233,6 +233,15 @@ def test_verify_self_check_unknown_task_id_errors(tmp_path):
 
 
 def test_verify_self_check_missing_worktree_path_errors(tmp_path):
+    """⛔ CMX-258 rework round 15, finding 3: round 5 finding 3's rule — 'the WHY is the only
+    actionable half of this refusal' — applied to this arm the same way it was already
+    applied to the sibling ``no run found for task_id {task_id}`` arm two lines above. Pin
+    the full sentence, not just that the field name ``worktree_path`` appears somewhere in
+    it: `main.py` prints ``result["error"]`` verbatim as the agent's sole output before exit
+    1, so blanking the message down to the bare word ``worktree_path`` (still satisfying
+    ``"worktree_path" in result["error"]``) would tell the agent nothing about why the
+    self-check could not run — indistinguishable from a malformed path or a bad flag value.
+    """
     wf = _workflow_md(tmp_path)
     with dispatcher._db() as conn:
         conn.execute(
@@ -247,7 +256,9 @@ def test_verify_self_check_missing_worktree_path_errors(tmp_path):
     result = dispatcher.verify_self_check("t1", str(tmp_path / "e.json"))
 
     assert not result["ok"]
-    assert "worktree_path" in result["error"]
+    assert result["error"] == (
+        "run has no worktree_path on record — cannot self-check"
+    )
 
 
 def test_verify_self_check_uses_the_row_matching_its_own_task_id(tmp_path):
@@ -670,6 +681,10 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
         pytest.param("tests/widget.test.mjs", True, id="dot-test-mjs-under-tests-dir"),
         pytest.param("chela/dashboard/static/app.mjs", False, id="plain-mjs-module-is-not-a-guard"),
         pytest.param("chela/tests/x.py", False, id="nested-tests-dir-outside-top-level"),
+        pytest.param("tests/e2e_interop.mjs", True, id="under-tests-dir-non-py-non-dot-test-mjs"),
+        pytest.param(
+            "chela/dashboard/static/latest.mjs", False, id="ends-with-test-mjs-no-dot-separator"
+        ),
         pytest.param("README.md", False, id="no-guard-touched-at-all"),
     ],
 )
@@ -700,6 +715,20 @@ def test_check_no_new_guards_path_classification_table(tmp_path, path, expected)
       count: pytest's own ``testpaths = ["tests"]`` (``pyproject.toml``) never collects it,
       so mutating it is not protected by anything this repo's suite runs. This resolves the
       axis round 5's own note called "undecided by design" — decided here, not accidentally.
+    * ``tests/e2e_interop.mjs`` — round 15's blocking finding: a real path under the
+      top-level ``tests/`` directory that is neither a ``.py`` file nor a ``.test.mjs``
+      suite. This is the row that pins the ``tests/`` clause to "anything under ``tests/``",
+      not "any ``.py`` file under ``tests/``" — narrowing it to ``.py`` only left every other
+      row in this table green while making a run that rewrites this file (or the sibling
+      ``tests/term_font_atlas_harness.mjs``, both real and both driven by python suites)
+      pass ``--no-new-guards`` silently.
+    * ``chela/dashboard/static/latest.mjs`` — round 15's other blocking finding, the
+      extension-axis twin of the ``tests_helper.py`` row above: a path that ends in the
+      letters ``test.mjs`` WITHOUT the separator dot before them must NOT count, the same
+      way ``tests_helper.py`` merely starting with "tests" must not count. Dropping the dot
+      from ``endswith(".test.mjs")`` down to ``endswith("test.mjs")`` is invisible to every
+      other row (none of them end in "test.mjs" without the separator), but wrongly flags a
+      plain module like this one as a guard.
     * ``README.md`` — the negative control: a diff that touches no guard at all must report
       no mismatch.
     """
