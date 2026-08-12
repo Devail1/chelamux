@@ -128,6 +128,47 @@ def test_tick_leaves_an_awaiting_review_worktree_alone(ticking, monkeypatch):
     assert wt_path.is_dir()          # still needed — a rework may re-spawn into it
 
 
+def test_tick_reconciles_a_closed_PR_to_done_and_frees_the_worktree(ticking, monkeypatch):
+    """CMX-265: a PR a human closed WITHOUT merging must not park its row in the
+    Review lane forever — `pr_state='closed'` is just as terminal as `'merged'`, and
+    only the merged branch used to reconcile out of REVIEW_STATUSES. Unhandled, this
+    was 7 ghost rows sitting in Review with a dead PR and nothing to do about it."""
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+    worktrees_root = repo.parent / ".chela" / "worktrees"
+    wt_path = _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root)
+    assert wt_path.is_dir()
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("closed", "UNKNOWN"))
+
+    summary = dispatcher.tick(wf_path)
+
+    assert summary["reconciled_done"] == 1
+    assert not wt_path.exists()  # disk freed immediately, same as the merged path
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT status FROM runs WHERE task_id=?", (alpha,)).fetchone()
+    assert row["status"] == "done"  # off the board's REVIEW_STATUSES list — no longer a ghost
+
+
+def test_tick_does_not_fire_after_done_for_a_closed_unmerged_PR(ticking, monkeypatch):
+    """The merged-PR path fires `hooks.after_done` — a "shipped" signal a repo may wire
+    to a deploy. A closed-without-merging PR is a rejected trial, not shipped work, so
+    reconciling it to `done` must NOT trip that hook."""
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+    worktrees_root = repo.parent / ".chela" / "worktrees"
+    _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root)
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("closed", "UNKNOWN"))
+    fired = []
+    monkeypatch.setattr(dispatcher, "_fire_after_done", lambda wf: fired.append(wf))
+
+    summary = dispatcher.tick(wf_path)
+
+    assert summary["reconciled_done"] == 1
+    assert fired == []  # no after_done — nothing shipped
+
+
 def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticking):
     """`row["task_id"] not in open_ids and status in REVIEW_STATUSES` → done: the other
     `tick()` path that reaches `done` without a fresh `pr_state` read this tick."""

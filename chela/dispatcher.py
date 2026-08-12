@@ -3255,6 +3255,31 @@ def tick(workflow_path: str | Path) -> dict:
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (PR merged)", row["task_id"])
                 continue
+            if row["status"] in RECONCILE_MERGE_STATUSES and row["pr_state"] == "closed":
+                # A human closed the PR WITHOUT merging — a rejected trial, not shipped
+                # work (`_run_trial_outcome` already calls this exact shape "abandoned":
+                # `done` with a non-`merged` pr_state). Left unhandled, the row parks in
+                # the Review lane forever: nothing else ever moves a review-state row
+                # off `pr_state='closed'`, since it is terminal and phase 0 above stops
+                # refreshing it. Reconcile it here so it leaves Review the same tick the
+                # close is observed (CMX-265 — 7 closed PRs stuck in Review, ghosts that
+                # made a 5-item queue read as 12).
+                #
+                # Deliberately NOT the merged branch above: no `merged_in_tick` (that
+                # counter exists to fire hooks.after_done, a merge-only signal — firing
+                # it for a rejected PR would be a false "shipped" event) and no tracker
+                # strike expectation (there is nothing to strike; the task was rejected,
+                # not delivered).
+                if row["window_name"]:
+                    _kill_window(row["window_name"])
+                conn.execute(
+                    "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
+                )
+                conn.commit()
+                _cleanup_worktree_on_done(wf.path.parent, row)
+                summary["reconciled_done"] += 1
+                log.info("Task %s done (PR closed without merging)", row["task_id"])
+                continue
             if row["task_id"] not in open_ids and row["status"] in REVIEW_STATUSES:
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
