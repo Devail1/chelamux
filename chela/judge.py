@@ -397,9 +397,21 @@ def _no_color_env() -> dict[str, str]:
     popping it — not merely leaving it — is what makes this effective on that box; setting
     only ``NO_COLOR`` and leaving ``FORCE_COLOR`` in place would still colour some runners
     that check ``FORCE_COLOR`` first.
+
+    ⛔ CMX-252: a judge spawned into a tmux window has ALSO been observed carrying
+    ``NODE_CHANNEL_FD`` — a leftover IPC-channel fd number from whatever forked the window's
+    ancestry (pm2 forks its managed processes through Node's own ``child_process.fork``,
+    IPC channel included, even for a non-Node target). If that inherited fd number happens
+    to resolve to something open-but-wrong in a freshly spawned ``node`` process (stdin, in
+    the reproduction: ``NODE_CHANNEL_FD=0 node --test x.test.mjs`` aborts with SIGABRT
+    before a single test runs), every ``node --test`` invocation ``judge.test_cmd`` shells
+    out to dies the same way — every JS suite fails, on every PR, for a reason that has
+    nothing to do with the PR. Popped for the same reason as ``FORCE_COLOR``: the judge's
+    own inherited environment is not the PR's suite to run under uncritically.
     """
     env = dict(os.environ)
     env.pop("FORCE_COLOR", None)
+    env.pop("NODE_CHANNEL_FD", None)
     env["NO_COLOR"] = "1"
     env["PY_COLORS"] = "0"
     return env

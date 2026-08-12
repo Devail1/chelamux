@@ -50,6 +50,21 @@ _SUITES = js_suites()
 _IDS = [str(p.relative_to(ROOT)) for p in _SUITES]
 
 
+def _clean_env() -> dict[str, str]:
+    """CMX-252: strip ``NODE_CHANNEL_FD`` before spawning ``node``.
+
+    A leaked IPC-channel fd number (tmux/pm2's own fork ancestry, not this process's) can
+    make ``node --test`` abort with SIGABRT before running a single test if that fd number
+    happens to resolve to something open-but-wrong in the child (stdin reproduces it: see
+    ``chela/judge.py``'s ``_no_color_env``). This suite must not depend on the caller having
+    scrubbed it — it is run directly by plain ``uv run pytest -q`` too, not only via the
+    judge's ``test_cmd``.
+    """
+    env = dict(os.environ)
+    env.pop("NODE_CHANNEL_FD", None)
+    return env
+
+
 def _node_or_skip(suites: list[Path]) -> str:
     node = shutil.which("node")
     if node:
@@ -91,7 +106,8 @@ def test_js_suite(suite: Path):
     node = _node_or_skip([suite])
     _jsdom_or_skip(suite)
     proc = subprocess.run(
-        [node, "--test", str(suite)], capture_output=True, timeout=120, cwd=str(ROOT)
+        [node, "--test", str(suite)], capture_output=True, timeout=120, cwd=str(ROOT),
+        env=_clean_env(),
     )
     if proc.returncode != 0:
         pytest.fail(
