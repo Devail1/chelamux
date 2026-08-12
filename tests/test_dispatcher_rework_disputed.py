@@ -59,15 +59,31 @@ def _gh_router(comment_ok=True):
     return _run
 
 
+def _parse_escalation(last_error: str) -> tuple[str, str, list[str]]:
+    """Split a composed ``last_error`` back into (reason, recommendation, options) — the
+    inverse of ``dispatcher._format_escalation``. Same idiom as
+    tests/test_dispatcher_rework.py and tests/test_dispatcher_ci.py."""
+    reason, sep, rest = last_error.partition("\n\nRecommendation: ")
+    if not sep:
+        return last_error, "", []
+    recommendation, sep2, rest2 = rest.partition("\n\nOptions:\n")
+    if not sep2:
+        return reason, recommendation, []
+    options = [line[len("  - "):] for line in rest2.split("\n") if line.startswith("  - ")]
+    return reason, recommendation, options
+
+
 # --- (a) the happy path: running (rework) -> needs_human, everything else untouched ------
 
 def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
     with dispatcher._db() as conn:
         _row(conn)
     gh: list[list[str]] = []
+    gh_inputs: list[str] = []
 
     def _run(cmd, *a, **k):
         gh.append(cmd)
+        gh_inputs.append(k.get("input") or "")
         return _gh_router()(cmd, *a, **k)
 
     with patch.object(dispatcher.subprocess, "run", side_effect=_run), \
@@ -91,6 +107,12 @@ def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
     assert run["worktree_path"] == "/wt/abc123"
     assert run["pr_url"] == "https://github.com/o/r/pull/80"
 
+    # CMX-242: an automatic escalation must not hand a human a bare "I quit" — it must
+    # carry a next step, same as every sibling _escalate call site.
+    _, recommendation, options = _parse_escalation(run["last_error"])
+    assert recommendation.strip(), "an automatic escalation must carry a non-empty recommendation"
+    assert options, "an automatic escalation must carry actionable options"
+
     reviews = dispatcher.reviews_of(dict(run))
     assert len(reviews) == 2
     assert reviews[-1]["verdict"] == "disputed"
@@ -98,6 +120,10 @@ def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
 
     posted = [c for c in gh if c[:3] == ["gh", "pr", "comment"]]
     assert posted and posted[0][3] == "80"
+    # the durable record on the PR must carry the AGENT'S OWN reason — not a canned
+    # string standing in for it (the reason is what a human resolving the dispute reads).
+    posted_body = gh_inputs[gh.index(posted[0])]
+    assert "the verdict describes code that was already fixed last round" in posted_body
 
 
 def test_a_failed_pr_comment_does_not_block_the_dispute():
