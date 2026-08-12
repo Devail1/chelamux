@@ -777,10 +777,12 @@ def judge_max_unknown_retries() -> int:
     BOUNDED retry, never permanently retire the commit from judgment: without this a single
     transient failure lets a green PR merge UNJUDGED, silently defeating the judge on any
     flake. This bounds the retries beyond the first attempt; a new head sha is a fresh
-    judgement and resets the count. Past the cap the run is left in ``awaiting_review`` for a
-    human, exactly where a settled cannot-verify leaves it — the loop surfaces rather than
-    spins (``max_reworks`` / ``rooms.MAX_HOPS`` are the same idea). ``0`` disables the retry:
-    the first cannot-verify is final.
+    judgement and resets the count. ⚖️🧊 CMX-253: past the cap the run is escalated to
+    ``needs_human`` (see ``_escalate_stranded_judge_unknowns`` in dispatcher.py) — the loop
+    surfaces rather than spins (``max_reworks`` / ``rooms.MAX_HOPS`` are the same idea).
+    Leaving it in ``awaiting_review`` instead used to strand it permanently and silently:
+    nothing else ever moves a spent-budget ``cannot_verify`` off that status. ``0`` disables
+    the retry: the first cannot-verify is final (and escalates immediately).
 
     Read per call, never latched at import: a policy knob an operator turns on a running
     daemon, and a garbage value degrades to the default rather than crashing the tick. A
