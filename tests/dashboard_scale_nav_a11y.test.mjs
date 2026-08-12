@@ -50,26 +50,83 @@ function cssBlocks(css) {
     const re = /([^{}]+)\{([^{}]*)\}/g;
     let m;
     while ((m = re.exec(noComments))) {
-        blocks.push({ selector: m[1].trim(), body: m[2] });
+        blocks.push({ selector: m[1].trim(), body: m[2], start: m.index });
     }
     return blocks;
 }
+
+// The byte ranges of every top-level @media/@supports block, so a rule found
+// by cssBlocks (which is flat and has no notion of nesting) can be told apart
+// as "inside a conditional override" vs "top-level".
+function atRuleRanges(css) {
+    const noComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const ranges = [];
+    const re = /@(?:media|supports)[^{]*\{/g;
+    let m;
+    while ((m = re.exec(noComments))) {
+        let depth = 1;
+        let i = re.lastIndex;
+        while (i < noComments.length && depth > 0) {
+            if (noComments[i] === '{') depth++;
+            else if (noComments[i] === '}') depth--;
+            i++;
+        }
+        ranges.push([m.index, i]);
+    }
+    return ranges;
+}
+
 // The BASE (first-declared, top-level) rule body for `selector` — a selector
 // like `.gs-head` can legitimately appear again inside a `@media (max-width:
 // 768px)` override with its own SMALLER literal (tests/wallnav.test.mjs's
 // CMX-133 test guards that pair's relationship); this file only cares about
 // the base desktop rule that carries the token.
+//
+// CMX-230 round 10: this used to return found[0] unconditionally, so it only
+// ever inspected the FIRST occurrence of `selector` in the file. A SECOND
+// top-level (non-@media) rule for the same selector, appended anywhere later
+// in the stylesheet, wins the browser cascade over the tokenised base rule —
+// but every assertion built on blockFor() kept reading found[0] and stayed
+// green. A media-qualified duplicate (the documented desktop/mobile pair) is
+// fine; a second top-level one is the cascade hole this closes.
 function blockFor(css, selector) {
+    const ranges = atRuleRanges(css);
     const found = cssBlocks(css).filter(b =>
         b.selector.split(',').map(s => s.trim()).includes(selector));
     assert.ok(found.length >= 1, `no CSS rule found for selector ${selector}`);
-    return found[0].body;
+    const topLevel = found.filter(b => !ranges.some(([s, e]) => b.start >= s && b.start < e));
+    assert.ok(topLevel.length >= 1,
+        `no TOP-LEVEL (non-@media/@supports) CSS rule found for selector ${selector} — every occurrence is inside a conditional override`);
+    assert.equal(topLevel.length, 1,
+        `${topLevel.length} top-level CSS rules found for selector ${selector} — a later top-level duplicate would win the cascade over ` +
+        'the tokenised one this file reads, and blockFor() used to only ever inspect the first');
+    return topLevel[0].body;
+}
+function allRootBodies(css) {
+    return [...css.matchAll(/:root\s*\{([^}]*)\}/g)].map(m => m[1]);
+}
+// CMX-230 round 10: style.css declares :root three times (the main token
+// block, plus two later top-level blocks). A later same-specificity custom-
+// property declaration wins the cascade over an earlier one, so a guarded
+// token re-declared in either later block silently overrides the value every
+// floor here checks — but rootTokenPx() and the line-height floor tests used
+// to read only the FIRST :root block via a single `css.match(...)`. Read
+// every :root block in source order and take the LAST declaration of `name`,
+// mirroring which one the browser actually applies.
+function lastRootValue(css, name) {
+    let value = null;
+    const re = new RegExp('--' + name + ':\\s*([^;]+);');
+    for (const body of allRootBodies(css)) {
+        const m = body.match(re);
+        if (m) value = m[1].trim();
+    }
+    return value;
 }
 function rootTokenPx(css, name) {
-    const root = css.match(/:root\s*\{([^}]*)\}/);
-    assert.ok(root, ':root block not found');
-    const m = root[1].match(new RegExp('--' + name + ':\\s*([0-9.]+)px'));
-    assert.ok(m, `--${name} not declared as a px value on :root`);
+    const value = lastRootValue(css, name);
+    assert.ok(value !== null, `--${name} not declared on any :root block`);
+    const m = value.match(/^([0-9.]+)px$/);
+    assert.ok(m, `--${name} (${value}) is not declared as a bare px value`);
     return parseFloat(m[1]);
 }
 
@@ -143,11 +200,10 @@ test('type scale: every sidebar-card rule\'s font-size is the --card-font-size t
 test('minimum legibility floor: --wall-pane-font-size and --wall-pane-line-height are above the pre-CMX-230 floor', () => {
     const fs = rootTokenPx(CSS, 'wall-pane-font-size');
     assert.ok(fs >= 11, `--wall-pane-font-size (${fs}px) has dropped back toward the old 10px pane text`);
-    const root = CSS.match(/:root\s*\{([^}]*)\}/)[1];
-    const lh = root.match(/--wall-pane-line-height:\s*([0-9.]+)/);
-    assert.ok(lh, '--wall-pane-line-height not declared on :root');
-    assert.ok(parseFloat(lh[1]) >= 1.45,
-        `--wall-pane-line-height (${lh[1]}) has dropped back toward the old 1.3 leading`);
+    const lh = lastRootValue(CSS, 'wall-pane-line-height');
+    assert.ok(lh, '--wall-pane-line-height not declared on any :root block');
+    assert.ok(parseFloat(lh) >= 1.45,
+        `--wall-pane-line-height (${lh}) has dropped back toward the old 1.3 leading`);
 });
 
 // --- GUARD 2z: GUARD 1 checks every wall/pane rule's font-size is a var() token;
@@ -223,11 +279,10 @@ test('type scale: .ar-title and .ar-sub read line-height from --card-line-height
 // regression-to-a-prior-worse-value for this floor to catch — but an unenforced
 // token can still be dropped to 1 with every other guard here green.
 test('minimum legibility floor: --card-line-height is above the same floor GUARD 2 sets for --wall-pane-line-height', () => {
-    const root = CSS.match(/:root\s*\{([^}]*)\}/)[1];
-    const lh = root.match(/--card-line-height:\s*([0-9.]+)/);
-    assert.ok(lh, '--card-line-height not declared on :root');
-    assert.ok(parseFloat(lh[1]) >= 1.45,
-        `--card-line-height (${lh[1]}) has dropped below the legibility floor`);
+    const lh = lastRootValue(CSS, 'card-line-height');
+    assert.ok(lh, '--card-line-height not declared on any :root block');
+    assert.ok(parseFloat(lh) >= 1.45,
+        `--card-line-height (${lh}) has dropped below the legibility floor`);
 });
 
 // --- GUARD 2c: "air in the chrome" at low densities (the CMX-230 comment above
@@ -469,7 +524,16 @@ test('wall pane footer completeness: model + spend + branch + context% + tokens 
 // #0d1117 text-on-accent contrast colour). Adding a second accent-ish hue
 // (another --ok-*/--green/--yellow/--red/--orange token, or a fresh hex) to
 // any `.active` rule must fail here.
-const NEUTRAL_VAR_RE = /--(text(-dim)?|bg|surface(-2)?|border|room-accent)\b/;
+// CMX-230 round 10: --room-accent used to be allowlisted here as a
+// "neutral", but it isn't one — it's the per-room hue token (set inline per
+// wall tile, style.css's .gs-room block), not a text/surface/border colour,
+// and it is never declared anywhere near the sidebar/.active rules this
+// guard scans. Allowlisting it bought a corruption a free pass: pointing
+// `.side-item.active .side-item-icon` at var(--room-accent) satisfied this
+// test while the token resolves to nothing there, silently dropping the
+// "you are here" cue instead of giving it a second hue. Tightened, not
+// loosened — no shipped .active rule references --room-accent today.
+const NEUTRAL_VAR_RE = /--(text(-dim)?|bg|surface(-2)?|border)\b/;
 const NEUTRAL_HEX_RE = /#0d1117\b/;
 // CMX-230 round 8: the var()/hex scans above key on NOTATION, not hue — a
 // colour written as rgb()/rgba()/hsl()/hsla() is invisible to both regexes.
@@ -517,8 +581,19 @@ test('single accent: every .active rule\'s highlight colour is --accent (or a ne
         const vars = [...b.body.matchAll(/var\(\s*--([\w-]+)/g)].map(m => '--' + m[1]);
         const hexes = [...b.body.matchAll(/#[0-9a-fA-F]{3,6}\b/g)].map(m => m[0]);
         const functional = [...b.body.matchAll(/\b(?:rgb|rgba|hsl|hsla)\([^)]*\)/g)].map(m => m[0]);
-        const keywords = [...b.body.matchAll(/:\s*([a-zA-Z-]+)\s*;/g)]
-            .map(m => m[1].toLowerCase())
+        // CMX-230 round 10: the old keyword scan was anchored to `:\s*(word)\s*;` —
+        // i.e. it only caught a keyword that was the ENTIRE declaration value.
+        // A keyword written as an ARGUMENT inside another function (e.g.
+        // `background: color-mix(in srgb, orange 13%, transparent);`) is not
+        // "the entire value is one keyword", so it slipped past this scan AND
+        // the var()/hex/functional ones above (color-mix isn't in the
+        // functional list either) — every loop ran zero times and the block
+        // passed vacuously. Search the whole block body for any
+        // CSS_COLOR_KEYWORDS token at a word boundary, wherever it appears,
+        // the same way the var() scan above already searches the whole body
+        // rather than anchoring to a specific declaration shape.
+        const keywords = [...b.body.matchAll(/[a-zA-Z-]+/g)]
+            .map(m => m[0].toLowerCase())
             .filter(v => CSS_COLOR_KEYWORDS.has(v));
         for (const k of keywords) {
             assert.fail(`${b.selector} { ${b.body.trim().slice(0, 60)}... } references bare colour keyword "${k}" — ` +

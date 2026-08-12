@@ -259,13 +259,25 @@ test('CMX-230: renderNav actually SPLITS the sidebar — primary views in #side-
     const primaryIds = idsIn('#side-nav');
     const secondaryIds = idsIn('#side-nav-more');
 
-    assert.deepEqual(primaryIds.sort(), ['feed', 'terminals', 'work'].sort(),
+    assert.deepEqual([...primaryIds].sort(), ['feed', 'terminals', 'work'].sort(),
         '#side-nav must render exactly the 3 primary views — a full un-split dump (or an empty split) breaks this');
-    assert.deepEqual(secondaryIds.sort(), ['knowledge', 'agents', 'personas', 'cost'].sort(),
+    assert.deepEqual([...secondaryIds].sort(), ['knowledge', 'agents', 'personas', 'cost'].sort(),
         '#side-nav-more must render exactly the 4 demoted views — an empty #side-nav-more means the split never ran');
 
     for (const id of secondaryIds) assert.ok(!primaryIds.includes(id), `${id} must not ALSO render into #side-nav`);
     for (const id of primaryIds) assert.ok(!secondaryIds.includes(id), `${id} must not ALSO render into #side-nav-more`);
+
+    // CMX-230 round 10: both deepEquals above .sort() each side before
+    // comparing, so they are order-blind by construction — a renderNav that
+    // reverses the primary list before painting it
+    // (`primaryNavViews(...).reverse().map(...)`), the exact rail-order flip
+    // a judge round produced, leaves both sorted comparisons green while the
+    // shipped rail reads Work/Wall/Feed. viewreg.js's own comment states the
+    // order is an invariant of the split ("Both read from the SAME navViews
+    // list (same order...)"), and index.html names the rail literally
+    // "Feed/Wall/Work". Pin the UNSORTED primary order too.
+    assert.deepEqual(primaryIds, ['feed', 'terminals', 'work'],
+        '#side-nav must render the primary rail in Feed/Wall/Work order — a reversed (or otherwise reordered) render stays invisible to a sorted comparison');
 });
 
 // --- 1d. 🔴 the EXPANDED sidebar icons are sized to MATCH the collapsed rail ------
