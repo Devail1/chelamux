@@ -2047,6 +2047,37 @@ def _fire_after_done(wf: WorkflowDef) -> None:
         log.exception("after_done hook failed to start")
 
 
+def verify_self_check(task_id: str, experiments_path: str) -> dict:
+    """⚖️🔎 CMX-250. The gate `chela task-finished --self-check-experiments` uses to make
+    Done Criteria #3 an outcome that BINDS, not a command an agent may or may not have run.
+
+    Looks the run up by ``task_id`` (never trusts a bare ``--cwd`` the caller could point
+    anywhere) and re-runs :func:`chela.judge.run_self_check` against ITS worktree, right
+    now — not whatever the agent saw the last time it happened to invoke `self-check` by
+    hand, which may predate edits made since. A guard that was clean a few edits ago and
+    is decoration now must still block.
+    """
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None:
+        return {"ok": False, "error": f"no run found for task_id {task_id}"}
+    worktree_path = row["worktree_path"]
+    if not worktree_path:
+        return {"ok": False, "error": "run has no worktree_path on record — cannot self-check"}
+
+    result = judge.run_self_check(
+        worktree_path, experiments_path, workflow_path=row["workflow_path"],
+    )
+    if not result.get("ok"):
+        return result
+    return {
+        "ok": True,
+        "blocking": result["blocking"],
+        "cannot_verify": result["cannot_verify"],
+        "outcomes": result.get("outcomes") or [],
+    }
+
+
 def mark_awaiting_review(task_id: str) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
