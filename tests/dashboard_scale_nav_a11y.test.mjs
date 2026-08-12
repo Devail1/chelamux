@@ -138,6 +138,42 @@ function resolvedRootTokenPx(css, name) {
     return parseFloat(m[1]);
 }
 
+// --- CMX-257 round 2: resolvedBody() (round 11's fix, above) deliberately
+// excludes ANY rule sitting inside an @media block, reasoning a selector's
+// legitimate narrow-viewport override (e.g. .gs-head/.pane-subtitle's real
+// CMX-133 mobile bar) must not be folded into the desktop rule it guards.
+// The judge found the converse hole: an @media condition that is ALWAYS true
+// at a real desktop width (`@media (min-width: 0px)`) is still, textually,
+// "inside an @media block" — so resolvedBody() excludes it too, and a bare
+// font-size literal smuggled in through it is invisible to every check that
+// calls resolvedBody(). Reusing tests/wallnav.test.mjs's CMX-130
+// activeOnMobile discipline but inverted for a real desktop viewport:
+// resolvedBodyAtDesktop() folds in every rule (base OR @media) whose
+// condition is actually satisfied at DESKTOP_VIEWPORT_PX, in source order —
+// so a genuine `max-width: 768px` mobile override (never satisfied at
+// desktop) still stays excluded, exactly as resolvedBody() intended, while
+// an always-true wrapper like `min-width: 0px` no longer offers an escape.
+const DESKTOP_VIEWPORT_PX = 1920;
+function mediaSatisfiedAtViewport(mediaCondition, viewportPx) {
+    const negated = /(^|\s)not\b/i.test(mediaCondition);
+    const minM = mediaCondition.match(/min-width:\s*([0-9.]+)px/);
+    const maxM = mediaCondition.match(/max-width:\s*([0-9.]+)px/);
+    let ok = true;
+    if (minM) ok = ok && (negated ? viewportPx < parseFloat(minM[1]) : viewportPx >= parseFloat(minM[1]));
+    if (maxM) ok = ok && (negated ? viewportPx > parseFloat(maxM[1]) : viewportPx <= parseFloat(maxM[1]));
+    return ok;
+}
+function resolvedBodyAtDesktop(css, selector) {
+    const all = cssRules(css).filter(r =>
+        r.selector.split(',').map(s => s.trim()).includes(selector));
+    const active = all.filter(r => r.media === null || mediaSatisfiedAtViewport(r.media, DESKTOP_VIEWPORT_PX));
+    assert.ok(active.length >= 1,
+        `no CSS rule for selector ${selector} is active at a ${DESKTOP_VIEWPORT_PX}px desktop viewport`);
+    const props = new Map();
+    for (const r of active) for (const [k, v] of declarations(r.body)) props.set(k, v);
+    return [...props].map(([k, v]) => `${k}: ${v};`).join(' ');
+}
+
 // --- GUARD 1: the type scale is TOKENISED — no bare font-size literal survives
 // in the wall/pane/card rules (CMX-230 objective 1). Corrupting any ONE of
 // these back to a bare `font-size: Npx` literal removes the single lever the
@@ -161,14 +197,15 @@ const WALL_PANE_SM_ALLOWED = new Set(['.gs-state']);
 
 test('type scale: every wall/pane rule\'s font-size is a var() token, not a bare px literal', () => {
     for (const sel of WALL_PANE_SELECTORS) {
-        // resolvedBody() (round 11) resolves last-declaration-wins across
-        // EVERY top-level rule for `sel`, so a second `font-size:` — whether
-        // a duplicate declaration in this block (round 9) or a whole second
-        // top-level rule elsewhere in the sheet (round 10's .pane-subtitle
-        // hole) — is already collapsed to the value that actually wins; the
-        // checks below see the resolved value directly, with no separate
-        // "declared exactly once" bookkeeping needed.
-        const body = resolvedBody(CSS, sel);
+        // resolvedBodyAtDesktop() (CMX-257 round 2) resolves last-declaration-
+        // wins across every rule for `sel` that is ACTIVE at a real desktop
+        // viewport — whether a duplicate declaration in this block (round 9),
+        // a whole second top-level rule elsewhere in the sheet (round 10's
+        // .pane-subtitle hole), or a bare literal smuggled in through an
+        // always-true @media wrapper (this PR's round-1 .pane-subtitle hole)
+        // — so the checks below see the value that actually wins on a real
+        // screen, with no separate "declared exactly once" bookkeeping needed.
+        const body = resolvedBodyAtDesktop(CSS, sel);
         assert.match(body, /font-size:\s*var\(--wall-pane-font-size(-sm)?\)/,
             `${sel} must set font-size from a --wall-pane-font-size* token`);
         assert.doesNotMatch(body, /font-size:\s*[0-9.]+px/,
@@ -187,7 +224,7 @@ test('type scale: every wall/pane rule\'s font-size is a var() token, not a bare
 
 test('type scale: every sidebar-card rule\'s font-size is the --card-font-size token, not a bare px literal', () => {
     for (const sel of CARD_SELECTORS) {
-        const body = resolvedBody(CSS, sel);
+        const body = resolvedBodyAtDesktop(CSS, sel);
         assert.match(body, /font-size:\s*var\(--card-font-size\)/,
             `${sel} must set font-size from --card-font-size`);
         assert.doesNotMatch(body, /font-size:\s*[0-9.]+px/,
@@ -220,7 +257,7 @@ test('minimum legibility floor: --wall-pane-font-size and --wall-pane-line-heigh
 const LINE_HEIGHT_SELECTORS = ['.pane-subtitle', '.pane-recap'];
 test('type scale: .pane-subtitle and .pane-recap read line-height from --wall-pane-line-height, not a bare literal', () => {
     for (const sel of LINE_HEIGHT_SELECTORS) {
-        const body = resolvedBody(CSS, sel);
+        const body = resolvedBodyAtDesktop(CSS, sel);
         assert.match(body, /line-height:\s*var\(--wall-pane-line-height\)/,
             `${sel} must set line-height from var(--wall-pane-line-height)`);
         assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
@@ -253,7 +290,7 @@ test('minimum legibility floor: --card-font-size and --wall-pane-font-size-sm ar
 const CARD_LINE_HEIGHT_SELECTORS = ['.ar-title', '.ar-sub'];
 test('type scale: .ar-title and .ar-sub read line-height from --card-line-height, not a bare literal', () => {
     for (const sel of CARD_LINE_HEIGHT_SELECTORS) {
-        const body = resolvedBody(CSS, sel);
+        const body = resolvedBodyAtDesktop(CSS, sel);
         assert.match(body, /line-height:\s*var\(--card-line-height\)/,
             `${sel} must set line-height from var(--card-line-height)`);
         assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
@@ -820,6 +857,39 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
         '#side-nav-more must carry .side-list-secondary — without it the demoted group renders at full primary weight, ' +
         'visually a 7-item rail again, even though the split itself still works');
 
+    // CMX-257 round 2: the checks above only prove #side-nav (the primary
+    // rail) and #side-nav-more (the demoted group) both exist and the latter
+    // is styled — neither pins WHERE the .side-subhead "More" heading sits
+    // relative to them. A judge round moved .side-subhead ABOVE #side-nav
+    // (heading the PRIMARY 3-item rail "More" while the four demoted rows
+    // dangle unlabelled underneath #side-nav-more) and every assertion above
+    // stayed green, since none of them read source order. #side-nav must
+    // come first (it renders unlabelled, as the ticket's Navigate section
+    // heading already covers it — see the HTML immediately above this
+    // block), then .side-subhead, then #side-nav-more.
+    const sideNavIdx = html.indexOf('id="side-nav"');
+    const sideSubheadIdx = html.indexOf('class="side-subhead"');
+    const sideNavMoreIdx = html.indexOf('id="side-nav-more"');
+    assert.ok(sideNavIdx !== -1 && sideSubheadIdx !== -1 && sideNavMoreIdx !== -1,
+        'expected to find #side-nav, .side-subhead and #side-nav-more all present in index.html');
+    assert.ok(sideNavIdx < sideSubheadIdx && sideSubheadIdx < sideNavMoreIdx,
+        'the .side-subhead "More" heading must sit BETWEEN #side-nav (primary rail) and #side-nav-more (demoted ' +
+        'group) in source order — otherwise it either heads the primary rail (mislabelling it "More") or leaves ' +
+        'the demoted rows unlabelled');
+
+    // The font-size half of the same "readable heading" claim the opacity
+    // floor below covers: a judge round zeroed .side-subhead's font-size
+    // (opacity untouched at 0.7, text content untouched at "More") and every
+    // check above and below stayed green, since none of them read font-size.
+    // Floored well below the shipped 10px, but far above "renders at zero
+    // width and is invisible no matter what colour or opacity it has".
+    const subheadFontBody = resolvedBodyAtDesktop(CSS, '.side-subhead');
+    const fontSizeM = subheadFontBody.match(/font-size:\s*([0-9.]+)px/);
+    assert.ok(fontSizeM, '.side-subhead has no font-size declaration to check');
+    assert.ok(parseFloat(fontSizeM[1]) >= 8,
+        `.side-subhead's font-size (${fontSizeM[1]}px) has dropped toward invisible — the heading text would be ` +
+        'present, opaque and correctly classed, but unreadable at this size');
+
     // GUARD 4 (index.html) round 9: the container's id/class were pinned above,
     // but nothing asserted the demoted group's own LABEL — style.css's CMX-230
     // comment states the design claim explicitly: "a plain-text subhead
@@ -837,7 +907,7 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
     // and text-content checks above all stay green (none of them touch
     // opacity). Floored well below the shipped 0.7 so a future subtlety pass
     // still has room, but far above "effectively invisible".
-    const subheadBody = resolvedBody(CSS, '.side-subhead');
+    const subheadBody = resolvedBodyAtDesktop(CSS, '.side-subhead');
     const opacityM = subheadBody.match(/opacity:\s*([0-9.]+)/);
     assert.ok(opacityM, '.side-subhead has no opacity declaration to check');
     assert.ok(parseFloat(opacityM[1]) >= 0.3,
@@ -898,4 +968,33 @@ test('.side-list-secondary actually renders lighter than the primary row — ico
         `.side-list-secondary .side-item-label (${secondaryLabelSize[1]}px) is too close to the primary row's base ` +
         `font-size (${primaryLabelSize[1]}px) — it must be at most ${RATIO_CEILING * 100}% of the primary size, ` +
         'not just numerically smaller, or the demoted rows read at full primary weight');
+});
+
+// --- WIRING (CMX-257 round 2): the test above pins that .side-list-secondary
+// .side-item-icon/.side-item-label render smaller than the primary row's own
+// .side-item-icon/.side-item-label — but every one of those checks hangs off
+// the CLASS NAMES the CSS selectors name, never off the markup that actually
+// has to emit them. A judge round renamed the label span nav.js's
+// _navItemHtml emits from `side-item-label` to `side-item-name` (leaving
+// style.css's `.side-list-secondary .side-item-label` selector, and every
+// other guard in this file, untouched) — every demoted row's label span
+// stops matching that selector (and the primary row's own `.side-item`
+// font-size fallback, since it no longer carries a recognised label class
+// either), so the "renders lighter" contract silently stops applying to any
+// real DOM, while the test above keeps comparing two CSS rules that no
+// longer style anything a browser renders. Pin the two class names
+// style.css's demotion rule depends on directly against the markup that has
+// to emit them.
+test('WIRING: nav.js emits the exact .side-item-icon / .side-item-label classes style.css\'s demotion rule depends on', () => {
+    const fn = NAV.slice(NAV.indexOf('function _navItemHtml'));
+    const body = fn.slice(0, fn.indexOf('\nfunction ', 10));
+    assert.match(body, /class="side-item-icon"/,
+        '_navItemHtml no longer emits class="side-item-icon" — style.css\'s ' +
+        '`.side-list-secondary .side-item-icon` demotion rule (and the primary .side-item-icon rule it is compared ' +
+        'against above) would no longer match any rendered nav row');
+    assert.match(body, /class="side-item-label"/,
+        '_navItemHtml no longer emits class="side-item-label" — style.css\'s ' +
+        '`.side-list-secondary .side-item-label` demotion rule (and the primary .side-item font-size it is compared ' +
+        'against above) would no longer match any rendered nav row, so the "renders lighter" guard above would be ' +
+        'comparing two CSS rules that style nothing real');
 });
