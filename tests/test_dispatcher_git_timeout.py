@@ -33,6 +33,12 @@ def test_timeout_raises_when_opted_in():
         with pytest.raises(dispatcher.GitTimeout) as exc_info:
             dispatcher._git(Path("/tmp"), "fetch", timeout=1, raise_on_timeout=True)
     assert "timed out after 1s" in str(exc_info.value)
+    # CMX-262 round 2: the "how long" half is worthless to an adopter without the "why"
+    # half naming a LIKELY CAUSE — a message that stops at "timed out after 1s" still sends
+    # them hunting a repo problem they don't have. Assert on the causal clause verbatim, not
+    # just its presence, so blanking it (leaving the duration intact) goes red.
+    assert ("this looks like a slow network link, not a problem with the repo itself"
+            in str(exc_info.value))
 
 
 def test_missing_binary_still_returns_none_even_when_opted_in():
