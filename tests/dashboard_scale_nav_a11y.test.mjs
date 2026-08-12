@@ -696,6 +696,31 @@ test('nav inventory (CLAIM 3): the demoted group still exists and renders under 
 // that no longer style anything a browser renders. Pin the two class names
 // style.css's demotion rule depends on directly against the markup that has
 // to emit them.
+//
+// --- WIRING (CMX-257 round 15, judge finding 1 on PR #326): pinning
+// nav.js's two item-level classes is only half the selector.
+// `.side-list-secondary .side-item-icon`/`.side-item-label` also needs
+// index.html's #side-nav-more CONTAINER to actually carry
+// `side-list-secondary` — nothing above asserted that (sidebar.test.mjs's
+// fixture hard-codes `class="side-list"` without it, and CLAIM 3 above
+// mounts the real markup but only reads display/visibility/text, never the
+// container's class attribute). Dropping `side-list-secondary` from
+// #side-nav-more silently un-demotes the whole group — identical in kind to
+// the round-2 side-item-label rename this file already guards against, just
+// from the container end of the selector instead of the item end.
+test('WIRING: index.html\'s #side-nav-more container carries the side-list-secondary class style.css\'s demotion rule depends on', () => {
+    const html = src('templates/index.html');
+    const start = html.indexOf('id="side-nav-more"');
+    assert.notEqual(start, -1, 'index.html no longer has a #side-nav-more container for the demoted nav group');
+    const tagStart = html.lastIndexOf('<div', start);
+    const tagEnd = html.indexOf('>', start);
+    const openTag = html.slice(tagStart, tagEnd + 1);
+    assert.match(openTag, /class="[^"]*\bside-list-secondary\b[^"]*"/,
+        '#side-nav-more no longer carries class="side-list-secondary" — style.css\'s ' +
+        '`.side-list-secondary .side-item-icon`/`.side-item-label` demotion rule would no longer match this ' +
+        'container at all, silently un-demoting the whole group back to full prominence');
+});
+
 test('WIRING: nav.js emits the exact .side-item-icon / .side-item-label classes style.css\'s demotion rule depends on', () => {
     const fn = NAV.slice(NAV.indexOf('function _navItemHtml'));
     const body = fn.slice(0, fn.indexOf('\nfunction ', 10));
