@@ -602,6 +602,17 @@ def test_a_stale_verdict_announces_both_shas_on_the_PR_and_in_the_event_log(tmp_
     assert judged_sha[:12] in posted[0]
     assert live_sha[:12] in posted[0]
     assert "SUPERSEDED" in posted[0]
+    # ⚖️⏱️ CMX-246 rework round 4, finding 1: role-pinned, not just containment —
+    # `test_stale_head_notice_names_the_shas_in_the_CORRECT_roles` already pins the
+    # formatter's own argument order in isolation, but nothing upstream of it pinned
+    # which sha the BLOCKING call site (`_stale_head_notice(verified_sha, live_head)`)
+    # actually passes as which argument. Swap the two arguments at that call site and
+    # both shas still land somewhere in `posted[0]` — the plain `in` checks above stay
+    # green — but they land in the WRONG roles, which these next four assertions catch.
+    assert f"this verdict is for `{judged_sha[:12]}`" in posted[0]
+    assert f"a newer commit, `{live_sha[:12]}`," in posted[0]
+    assert f"this verdict is for `{live_sha[:12]}`" not in posted[0]
+    assert f"a newer commit, `{judged_sha[:12]}`," not in posted[0]
 
     events = event_log.read(types=["judge.stale_head"])["events"]
     assert len(events) == 1
@@ -611,6 +622,16 @@ def test_a_stale_verdict_announces_both_shas_on_the_PR_and_in_the_event_log(tmp_
     assert payload["live_head_sha"] == live_sha
     assert judged_sha[:12] in events[0]["summary"]
     assert live_sha[:12] in events[0]["summary"]
+    # ⚖️⏱️ CMX-246 rework round 4, finding 3: role-pinned event summary. The payload
+    # dict assertions above (`payload["judged_sha"]`/`payload["live_head_sha"]`) are
+    # keyed, so they already survive a swap of the two f-string arguments feeding the
+    # human-facing `summary` line — that swap is a SEPARATE piece of code and needs
+    # its own pin. Swap `verified_sha`/`live_head` in the `event_log.append` f-string
+    # and this goes red: the "superseded by" order flips.
+    assert (f"verdict for {judged_sha[:12]} superseded by {live_sha[:12]}"
+            in events[0]["summary"])
+    assert (f"verdict for {live_sha[:12]} superseded by {judged_sha[:12]}"
+            not in events[0]["summary"])
 
 
 def test_a_blocking_verdict_for_the_CURRENT_head_still_spends_a_rework_round(tmp_path):
@@ -726,6 +747,15 @@ def test_a_stale_clean_verdicts_PR_comment_also_names_both_shas(tmp_path):
     assert judged_sha[:12] in posted[0]
     assert live_sha[:12] in posted[0]
     assert "SUPERSEDED" in posted[0]
+    # ⚖️⏱️ CMX-246 rework round 4, finding 2: role-pinned, not just containment — the
+    # twin of the assertions on the blocking branch's own, SEPARATE call site
+    # (`_stale_head_notice(verified_sha, live_head)` under `else:`). Swap the two
+    # arguments there and this test's plain `in` checks above stay green while a
+    # human reading the PR is pointed at the wrong commit.
+    assert f"this verdict is for `{judged_sha[:12]}`" in posted[0]
+    assert f"a newer commit, `{live_sha[:12]}`," in posted[0]
+    assert f"this verdict is for `{live_sha[:12]}`" not in posted[0]
+    assert f"a newer commit, `{judged_sha[:12]}`," not in posted[0]
 
 
 def test_the_PRs_live_head_is_reread_right_before_the_verdict_is_spent_not_the_stale_in_memory_row(
