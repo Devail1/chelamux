@@ -21,6 +21,8 @@ report-only cross-check of ``--no-new-guards`` against the run's own diff.
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import subprocess
 import sys
@@ -942,17 +944,23 @@ def test_cmd_task_finished_no_new_guards_forwards_its_own_task_id_not_a_hardcode
     check.assert_called_once_with("cmx-777")
 
 
-# --- CMX-258 rework round 3: both classes, enumerated exhaustively, in one pass ---------
+# --- CMX-258 rework round 3 (+ round 11's completeness fix) -----------------------------
 #
 # Every finding on this PR since round 8 has been ONE of two invariants, closed one call
 # site per round: (a) a task_id forwarded into a lookup, hardcoded and going unnoticed
 # because every test happened to use the same literal id everywhere; (b) a refusal whose
 # message drops the one fact that made it actionable. `chela/main.py`'s `cmd_task_finished`
-# has exactly six `task-finished:` / self-check print sites (the both-flags rejection, the
+# has SEVEN `task-finished:` / self-check print sites (the both-flags rejection, the
 # self-check-could-not-run refusal, the guards-SURVIVED refusal, the CANNOT-VERIFY refusal,
-# the --no-new-guards tests/-touched notice, and the mark_awaiting_review failure) — this
-# table has one row per site so a 7th site added later must earn a row here, rather than
-# silently escaping both guards the way the third and fourth sites did.
+# the --no-new-guards tests/-touched notice, the neither-flag notice, and the
+# mark_awaiting_review failure) — this table has one row per site.
+#
+# ⛔ Round 10 hand-counted "six" and missed the neither-flag notice — the count itself was
+# the defect, the same class of miss as round 6's nine `.mjs` rows that never varied the
+# deciding axis. `test_task_finished_scenario_table_covers_every_print_exit_site` below
+# derives the site count from `cmd_task_finished`'s own AST instead of trusting a human
+# recount, so an 8th site added later fails that test instead of silently escaping this
+# table the way the 7th did.
 #
 # Two rows double as the mandatory negative controls: "both_flags_at_once" is a refusal
 # that legitimately has no task_id to report (its message is coherent without one, and
@@ -1031,6 +1039,25 @@ _TASK_FINISHED_SCENARIOS = [
         forward=("dispatcher.check_no_new_guards", ("cmx-905",)),
     ),
     dict(
+        name="neither_flag_notice",
+        task_id="cmx-907",
+        argv_extra=[],
+        setup=lambda: {
+            "dispatcher.mark_awaiting_review": dict(return_value={
+                "ok": True, "task_id": "cmx-907", "pr_url": "https://x/1"}),
+        },
+        expect_exit=None,
+        # ⛔ CMX-258 rework round 11 (judge finding 1): this is the SEVENTH
+        # `task-finished` print site — the one an agent dispatched under an older
+        # WORKFLOW.md actually hits, and the only channel that tells it which flag to
+        # pass. Pin both the trigger condition and the actionable half (the two flag
+        # names it should pass next time), not just the bare "not enforced" fact.
+        must_contain=["neither --self-check-experiments nor --no-new-guards",
+                      "Done Criteria #3 was not enforced",
+                      "--self-check-experiments <path>",
+                      "--no-new-guards if this PR truly adds no guards"],
+    ),
+    dict(
         name="mark_awaiting_review_fails",
         task_id="cmx-906",
         argv_extra=[],
@@ -1082,3 +1109,88 @@ def test_cmd_task_finished_every_refusal_names_its_actionable_fact_and_forwards_
     if scenario.get("forward"):
         target, expected_args = scenario["forward"]
         mocks[target].assert_called_once_with(*expected_args)
+
+
+def _is_exit_call(node: ast.AST) -> bool:
+    """``sys.exit(...)`` or a bare ``exit(...)`` — either spelling ends the branch."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (isinstance(func, ast.Attribute) and func.attr == "exit") or (
+        isinstance(func, ast.Name) and func.id == "exit"
+    )
+
+
+def _branch_has_exit(stmts: list[ast.stmt]) -> bool:
+    return any(_is_exit_call(n) for stmt in stmts for n in ast.walk(stmt))
+
+
+def _count_task_finished_sites() -> int:
+    """⛔ CMX-258 rework round 11 (judge finding 1): derive the number of distinguishable
+    ``cmd_task_finished`` print/exit sites from the function's own AST, instead of trusting
+    a hand count — a hand count has now been wrong twice on this run (round 10 said "six"
+    when there were seven; round 6's nine ``.mjs`` table rows never varied the deciding
+    axis).
+
+    A "site" is either of the two shapes every row in ``_TASK_FINISHED_SCENARIOS`` actually
+    has:
+
+    (a) a ``sys.exit(...)`` call. Each one IS a distinguishable refusal — the both-flags
+        rejection, the self-check-could-not-run/guards-SURVIVED/CANNOT-VERIFY refusals, and
+        the mark_awaiting_review failure all end in one.
+    (b) a branch of a top-level ``if``/``elif``/``else`` chain that contains NO
+        ``sys.exit`` anywhere inside it. Such a branch never earns its own exit-based site,
+        so its only content — the notice itself — IS the site (the ``--no-new-guards``
+        tests/-touched notice and the neither-flag notice: both report-only, neither ever
+        exits).
+
+    This falls out to the right answer on the branches that must NOT count: the
+    per-outcome loop print sits inside a branch that also contains three ``sys.exit``
+    calls (already counted via (a), so the branch itself is skipped by (b) to avoid double
+    counting), and the unconditional confirmation prints (self-check success, the
+    ``--no-new-guards`` skip line, the final "awaiting review" line) are continuations of a
+    branch already accounted for by (a) or (b), not branches of their own.
+    """
+    from chela import main
+
+    source = inspect.getsource(main.cmd_task_finished)
+    tree = ast.parse(source)
+    func = tree.body[0]
+    assert isinstance(func, ast.FunctionDef)
+
+    exit_count = sum(1 for n in ast.walk(func) if _is_exit_call(n))
+
+    non_exit_branches = 0
+    for stmt in func.body:
+        if not isinstance(stmt, ast.If):
+            continue
+        node = stmt
+        while True:
+            if not _branch_has_exit(node.body):
+                non_exit_branches += 1
+            if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
+                node = node.orelse[0]
+                continue
+            if node.orelse and not _branch_has_exit(node.orelse):
+                non_exit_branches += 1
+            break
+
+    return exit_count + non_exit_branches
+
+
+def test_task_finished_scenario_table_covers_every_print_exit_site_in_the_function():
+    """⛔ CMX-258 rework round 11 (judge finding 1, ⭐⭐): make the table's completeness
+    CHECKABLE rather than trusted. ``_count_task_finished_sites`` walks
+    ``cmd_task_finished``'s own AST (see its docstring for exactly what counts as a site);
+    this test asserts ``_TASK_FINISHED_SCENARIOS`` has one row per site it finds. An 8th
+    site added to ``cmd_task_finished`` later — another ``sys.exit``, or another
+    non-exiting ``elif``/``else`` branch — then fails THIS test instead of silently
+    escaping the table the way the 7th (the neither-flag notice) escaped round 10's hand
+    count.
+    """
+    found = _count_task_finished_sites()
+    assert len(_TASK_FINISHED_SCENARIOS) == found, (
+        f"cmd_task_finished has {found} print/exit site(s) by AST walk, but "
+        f"_TASK_FINISHED_SCENARIOS has {len(_TASK_FINISHED_SCENARIOS)} row(s) — "
+        "add (or remove) a row so the table matches the code, not a hand count."
+    )
