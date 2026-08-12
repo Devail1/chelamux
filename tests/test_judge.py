@@ -443,6 +443,25 @@ def test_workflow_md_step_6_makes_passing_a_flag_mandatory():
     assert "now enforces step 3's outcome instead of trusting it happened" in text
 
 
+def test_workflow_md_step_6_flag_requirement_is_not_negated_in_place():
+    """⛔ CMX-258 rework round 16, finding 1 (WIRING): the sibling test above pins that both
+    mandate substrings appear, but a substring check can't tell the difference between them
+    appearing IN a mandate and appearing INSIDE a wrapping sentence that negates it — e.g.
+    'you may optionally pass ONE of these two flags ... now enforces step 3's outcome instead
+    of trusting it happened, but neither flag is required — running `chela task-finished
+    {{task_id}}` with no flag at all is fine'. Both pinned substrings above are still literal
+    substrings of that sentence, so that test stays green while step 6 tells every agent no
+    flag is required — the same failure mode `judge.block_body` got a direct negative control
+    for in round 7 (`assert "optional" not in body.lower()`). Close it here: pin the exact
+    sentence boundary (a colon immediately closing the mandate, not a comma opening an escape
+    clause onto it) and a negative control on the word that would make the mandate optional."""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert "trusting it happened:" in text
+    assert "optional" not in text.lower()
+
+
 def test_workflow_md_step_6_pins_condition_to_flag_pairing():
     """⛔ CMX-258 rework round 7, finding 1 (WIRING): the two sibling tests above pin that
     both flag NAMES appear and that passing one is MANDATORY, but neither pins WHICH

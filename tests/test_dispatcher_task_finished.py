@@ -679,6 +679,10 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
         pytest.param("tests-helpers/x.py", False, id="starts-with-tests-hyphen"),
         pytest.param("chela/dashboard/widget.test.mjs", True, id="dot-test-mjs-outside-tests-dir"),
         pytest.param("tests/widget.test.mjs", True, id="dot-test-mjs-under-tests-dir"),
+        pytest.param(
+            "landing/widget.test.mjs", True,
+            id="dot-test-mjs-outside-tests-and-chela-dirs",
+        ),
         pytest.param("chela/dashboard/static/app.mjs", False, id="plain-mjs-module-is-not-a-guard"),
         pytest.param("chela/tests/x.py", False, id="nested-tests-dir-outside-top-level"),
         pytest.param("tests/e2e_interop.mjs", True, id="under-tests-dir-non-py-non-dot-test-mjs"),
@@ -700,12 +704,18 @@ def test_check_no_new_guards_path_classification_table(tmp_path, path, expected)
       named) all count.
     * ``tests_helper.py`` / ``tests-helpers/x.py`` — two shapes of "merely starts with the
       letters tests" must NOT count; neither is under the ``tests/`` directory.
-    * ``chela/dashboard/widget.test.mjs`` / ``tests/widget.test.mjs`` — a ``*.test.mjs`` JS
-      suite counts as a guard everywhere in the repo, not just under ``tests/`` — this is
-      round 6's blocking finding: ``tests/test_js_suites.py`` globs and runs ``*.test.mjs``
-      from the whole tree (a real one, ``chela/dashboard/static/collab/fit.test.mjs``,
-      already lives outside ``tests/``), so a cross-check keyed on ``.py`` files under
-      ``tests/`` alone is blind to all of them.
+    * ``chela/dashboard/widget.test.mjs`` / ``tests/widget.test.mjs`` / ``landing/widget.test.mjs``
+      — a ``*.test.mjs`` JS suite counts as a guard everywhere in the repo, not just under
+      ``tests/`` — this is round 6's blocking finding: ``tests/test_js_suites.py`` globs and
+      runs ``*.test.mjs`` from the whole tree (a real one,
+      ``chela/dashboard/static/collab/fit.test.mjs``, already lives outside ``tests/``), so a
+      cross-check keyed on ``.py`` files under ``tests/`` alone is blind to all of them. The
+      ``landing/`` row is round 16's blocking finding: the other two rows sit under
+      ``tests/`` or ``chela/`` respectively, so narrowing the clause from "anywhere in the
+      repo" to "anywhere under ``chela/``" (``path.startswith("chela/") and
+      path.endswith(".test.mjs")``) left both green — ``landing/`` is a real top-level
+      directory in this repo that is neither, so it is the row that pins the clause to the
+      whole tree, not one subtree of it.
     * ``chela/dashboard/static/app.mjs`` — the negative control on the EXTENSION axis, round
       8's blocking finding: a plain ``.mjs`` module (not ``.test.mjs``, not under ``tests/``)
       must NOT count. Nothing in this repo's suites executes a plain ``.mjs`` file, so
