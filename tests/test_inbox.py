@@ -2372,12 +2372,35 @@ def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_fil
     boundary = dict(_verdict_run(), task_id="T5", status="needs_human",
                      last_error=boundary_reason)
 
+    # 🔴 GUARD (judge round 3): a real `_escalate` reason is routinely MULTI-LINE within its
+    # own first paragraph — dispatcher.py:4302 interpolates raw git stderr, which wraps. This
+    # first paragraph has an embedded "\n" but no "\n\n" before the Recommendation, so
+    # splitting on a single "\n" (wrong) silently drops the second line while splitting on
+    # "\n\n" (right) keeps it. Every other fixture above has a single-line first paragraph,
+    # so none of them can tell "\n" and "\n\n" apart.
+    multiline_first_line = "rework: could not attach a worktree for cmx-247"
+    multiline_second_line = "fatal: 'cmx-247' is already checked out at '/tmp/other-wt'"
+    multiline_paragraph = multiline_first_line + "\n" + multiline_second_line
+    multiline_reason = dict(_verdict_run(), task_id="T6", status="needs_human",
+                             last_error=multiline_paragraph +
+                             "\n\nRecommendation: remove the stale worktree and retry.")
+
+    # 🔴 GUARD (judge round 3): rework_count and len(review_history) are two DIFFERENT facts
+    # that must each keep their own label. The only prior fixture (T1) sets both to 2, so
+    # swapping the two interpolations is invisible there. Here they differ (1 vs 3), so a
+    # swap surfaces as "reworks: 3 · verdicts on the row: 1" instead of the correct order.
+    mismatched_counts = dict(_verdict_run(), task_id="T7", status="needs_human", rework_count=1,
+                              review_history=json.dumps([{"verdict": "BLOCKING"},
+                                                          {"verdict": "CANNOT_VERIFY"},
+                                                          {"verdict": "BLOCKING"}]),
+                              last_error="the checks on this PR never settled")
+
     inbox.tick({}, runs=[rework_cap, stuck_checks, no_branch, short_with_recommendation,
-                          boundary])
+                          boundary, multiline_reason, mismatched_counts])
 
     by_entry = {e["payload"]["task_id"]: e for e in inbox.load()["queue"]}
     by_task = {tid: e["summary"] for tid, e in by_entry.items()}
-    assert set(by_task) == {"T1", "T2", "T3", "T4", "T5"}
+    assert set(by_task) == {"T1", "T2", "T3", "T4", "T5", "T6", "T7"}
 
     assert "the PR still fails review" in by_task["T1"]
 
@@ -2453,6 +2476,36 @@ def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_fil
         "the full boundary reason leaked through untruncated — the excerpt limit is "
         "wider than SUMMARY_TITLE_CHARS"
     )
+
+    # 🔴 GUARD: the split must be on the PARAGRAPH boundary ("\n\n"), not the first line
+    # ("\n") — this is the exact excerpt the production code computes for the multi-line
+    # fixture above: reason[:60].rsplit(" ", 1)[0] + "…" where reason is BOTH lines joined
+    # by a single space (via the whitespace collapse). Splitting on "\n" instead would stop
+    # at `multiline_first_line` alone (47 chars, no ellipsis) and never reach "fatal:".
+    assert "rework: could not attach a worktree for cmx-247 fatal:…" in by_task["T6"], (
+        "the excerpt must include content from the SECOND line of the first paragraph — "
+        "this only fails if the reason was split on the first newline instead of the "
+        "first blank line"
+    )
+    assert "fatal:" in by_task["T6"], (
+        "the second line of the first paragraph never reached the summary — the reason "
+        "was split on '\\n' instead of '\\n\\n'"
+    )
+
+    # 🔴 GUARD: reworks and verdicts-on-the-row are two different facts with different
+    # numbers here (1 vs 3) — a swap of the two interpolations produces the numbers under
+    # the wrong labels instead of failing outright, so an exact-match on each label is
+    # required to catch it.
+    assert "reworks: 1" in by_task["T7"], (
+        "the rework count (1) must appear under the 'reworks' label — got the verdict "
+        "count instead, meaning the two interpolations were swapped"
+    )
+    assert "verdicts on the row: 3" in by_task["T7"], (
+        "the verdict-history count (3) must appear under the 'verdicts on the row' "
+        "label — got the rework count instead, meaning the two interpolations were swapped"
+    )
+    assert "reworks: 3" not in by_task["T7"]
+    assert "verdicts on the row: 1" not in by_task["T7"]
 
 
 def test_run_needs_human_reason_falls_back_when_last_error_is_empty(store_file, windows,
