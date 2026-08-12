@@ -247,20 +247,37 @@ test('density guard: _setWallDensity cuts off at <=2 panes, and buildWall restor
 // already pins, mirroring GUARD 2's numeric-floor discipline.
 test('WIRING: the airy-density rule actually pads the stage — not just an empty class toggle', () => {
     const stageBody = blockFor(CSS, 'body.wall-density-airy #term-stage');
-    const left = stageBody.match(/padding-left:\s*clamp\(([0-9.]+)px/);
-    const right = stageBody.match(/padding-right:\s*clamp\(([0-9.]+)px/);
-    assert.ok(left, 'body.wall-density-airy #term-stage has no padding-left: clamp(...) rule');
-    assert.ok(right, 'body.wall-density-airy #term-stage has no padding-right: clamp(...) rule');
+    // clamp(MIN, PREFERRED, MAX) — a round neutered the padding by zeroing the
+    // vw-based PREFERRED term (clamp(16px, 0vw, 64px)) while leaving both px
+    // floors untouched at 16px, so at any real desktop width the clamp just
+    // resolves to its 16px minimum forever — a flat edge-to-edge nub, not the
+    // scaling margin the ticket wants. Capturing only the first (MIN) argument
+    // can't see that: this pins all three clamp() arguments.
+    const left = stageBody.match(/padding-left:\s*clamp\(([0-9.]+)px,\s*([0-9.]+)vw,\s*([0-9.]+)px\)/);
+    const right = stageBody.match(/padding-right:\s*clamp\(([0-9.]+)px,\s*([0-9.]+)vw,\s*([0-9.]+)px\)/);
+    assert.ok(left, 'body.wall-density-airy #term-stage has no padding-left: clamp(MINpx, PREFERREDvw, MAXpx) rule');
+    assert.ok(right, 'body.wall-density-airy #term-stage has no padding-right: clamp(MINpx, PREFERREDvw, MAXpx) rule');
     assert.ok(parseFloat(left[1]) > 0,
         `body.wall-density-airy #term-stage's padding-left clamp floor (${left[1]}px) has been zeroed — the airy class toggles but produces no margin`);
     assert.ok(parseFloat(right[1]) > 0,
         `body.wall-density-airy #term-stage's padding-right clamp floor (${right[1]}px) has been zeroed — the airy class toggles but produces no margin`);
+    assert.ok(parseFloat(left[2]) > 0,
+        `body.wall-density-airy #term-stage's padding-left clamp PREFERRED term (${left[2]}vw) has been zeroed — desktop widths would collapse to the ${left[1]}px floor forever, effectively dense again`);
+    assert.ok(parseFloat(right[2]) > 0,
+        `body.wall-density-airy #term-stage's padding-right clamp PREFERRED term (${right[2]}vw) has been zeroed — desktop widths would collapse to the ${right[1]}px floor forever, effectively dense again`);
 
     const gridBody = blockFor(CSS, 'body.wall-density-airy #term-stage .grid-stack');
     const maxWidth = gridBody.match(/max-width:\s*([0-9.]+)px/);
     assert.ok(maxWidth, 'body.wall-density-airy #term-stage .grid-stack has no max-width rule');
     assert.ok(parseFloat(maxWidth[1]) > 0,
         `the centred max-width column (${maxWidth[1]}px) has been zeroed — panes would stretch edge-to-edge again`);
+    // A floor alone lets the cap be raised instead of zeroed — at any real
+    // viewport a 100000px cap never binds, so margin: 0 auto has no slack and
+    // the wall stretches edge-to-edge again just as surely as a 0px cap does.
+    // Pin an actual ceiling too, generous enough for a deliberate future
+    // redesign but well below "never binds".
+    assert.ok(parseFloat(maxWidth[1]) <= 1920,
+        `the centred max-width column (${maxWidth[1]}px) is so large it never binds at any real viewport — panes would stretch edge-to-edge again just as if it were zeroed`);
 
     // The floors above pin the padding and the max-width, but this rule's own
     // failure message calls the result "the centred max-width column" without
@@ -494,4 +511,40 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
     assert.match(html, /class="side-list side-list-secondary"\s+id="side-nav-more"/,
         '#side-nav-more must carry .side-list-secondary — without it the demoted group renders at full primary weight, ' +
         'visually a 7-item rail again, even though the split itself still works');
+});
+
+// The test above pins that #side-nav-more carries the .side-list-secondary
+// class, but says nothing about what that class rule actually DOES — a judge
+// round set .side-list-secondary's two overrides to the PRIMARY row's own
+// values (.side-item-icon: 18px, .side-item's inherited 12px label size),
+// which renders the four demoted rows pixel-identical to Feed/Wall/Work
+// while the class attribute, the split and GUARD 7 all stayed untouched and
+// green. Pin the DECLARATIONS, not just their presence — and pin them
+// RELATIVE to the primary row's own base font-sizes (parsed from the same
+// stylesheet), not as frozen px literals, so a future type-scale pass can
+// still change both together without fighting this guard; only a regression
+// that lets the demoted rows catch up to (or pass) the primary weight fails.
+test('.side-list-secondary actually renders lighter than the primary row — icon and label font-size both strictly smaller', () => {
+    const primaryIconBody = blockFor(CSS, '.side-item-icon');
+    const primaryIconSize = primaryIconBody.match(/font-size:\s*([0-9.]+)px/);
+    assert.ok(primaryIconSize, '.side-item-icon has no font-size rule to compare against');
+
+    const primaryRowBody = blockFor(CSS, '.side-item');
+    const primaryLabelSize = primaryRowBody.match(/font-size:\s*([0-9.]+)px/);
+    assert.ok(primaryLabelSize, '.side-item has no font-size rule — .side-item-label inherits from here');
+
+    const secondaryIconBody = blockFor(CSS, '.side-list-secondary .side-item-icon');
+    const secondaryIconSize = secondaryIconBody.match(/font-size:\s*([0-9.]+)px/);
+    assert.ok(secondaryIconSize, '.side-list-secondary .side-item-icon has no font-size override');
+
+    const secondaryLabelBody = blockFor(CSS, '.side-list-secondary .side-item-label');
+    const secondaryLabelSize = secondaryLabelBody.match(/font-size:\s*([0-9.]+)px/);
+    assert.ok(secondaryLabelSize, '.side-list-secondary .side-item-label has no font-size override');
+
+    assert.ok(parseFloat(secondaryIconSize[1]) < parseFloat(primaryIconSize[1]),
+        `.side-list-secondary .side-item-icon (${secondaryIconSize[1]}px) must render smaller than the primary ` +
+        `.side-item-icon (${primaryIconSize[1]}px) — otherwise the demoted rows read at full primary weight`);
+    assert.ok(parseFloat(secondaryLabelSize[1]) < parseFloat(primaryLabelSize[1]),
+        `.side-list-secondary .side-item-label (${secondaryLabelSize[1]}px) must render smaller than the primary ` +
+        `row's base font-size (${primaryLabelSize[1]}px) — otherwise the demoted rows read at full primary weight`);
 });

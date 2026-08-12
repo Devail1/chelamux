@@ -967,6 +967,38 @@ test('branch + context render inside the bottom .term-ctx-bar, and the live poll
     await terminals.termTick();
 });
 
+// 15c — CMX-230 round 7: the wall .gs-ctx chip's warn/danger class is a REAL DOM
+// reinforcement, not just source text `_applyTermContext` happens to contain.
+// Test 15 above only ever polls at used_pct: 42 (ctxLevel 'ok', no severity
+// class at all), so wrapping the `ctxChip.className = ...` assignment in
+// `if (false)` — dead code, byte-identical string still present — left the
+// chip stuck on whatever class `_ctxBarHTML` painted it with initially, and
+// nothing here would have noticed: `ctx-danger`/`ctx-warn` appeared zero times
+// in this file. This drives termTick at a used_pct that actually crosses both
+// thresholds and reads the class back off the rendered node, mirroring
+// sidebar.test.mjs's `.ar-ctx` danger-class check (its wall counterpart).
+test('the wall .gs-ctx chip carries a REAL danger/warn class off a live poll crossing the threshold — CMX-230', async () => {
+    const wid = '@1';
+    const ctxBar = tile(wid).querySelector('.term-ctx-bar');
+    const ctxChip = ctxBar.querySelector('.gs-ctx');
+
+    CTX = [{ window_id: wid, used_pct: 85, used: '170.0K', total: '200K', estimated: false, branch: 'cmx-230' }];
+    await terminals.termTick();
+    assert.ok(ctxChip.classList.contains('ctx-danger'),
+        'crossing 80% must add ctx-danger as a rendered class, not just paint the text');
+    assert.equal(ctxChip.classList.contains('ctx-warn'), false, 'danger and warn must be mutually exclusive');
+
+    CTX = [{ window_id: wid, used_pct: 65, used: '130.0K', total: '200K', estimated: false, branch: 'cmx-230' }];
+    await terminals.termTick();
+    assert.ok(ctxChip.classList.contains('ctx-warn'),
+        'crossing 60% (and not 80%) must add ctx-warn as a rendered class');
+    assert.equal(ctxChip.classList.contains('ctx-danger'), false,
+        'a stale ctx-danger class must not survive a poll that dropped back under 80%');
+
+    CTX = [];   // leave the fixture as other tests expect it (real shape: an array)
+    await terminals.termTick();
+});
+
 // 15b — THE BOTTOM BAR'S ORDER IS CONSTANT REGARDLESS OF BRANCH PRESENCE (CMX-127,
 // supersedes CMX-124). CMX-119 put № last, after context; a branch-less pane
 // (`.gs-branch` hidden) then let `justify-content: space-between` slide `.gs-ctx` left
