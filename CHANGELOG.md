@@ -10,6 +10,23 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/smoke-fresh-install.sh` — a real, isolated fresh-install smoke test for
+  adopters.** Nobody had ever verified end to end that a brand-new clone can `uv sync` and
+  run `chela doctor` / `chela update` without breaking — every install on the maintainer's
+  own box predates months of changes, so "it worked when I set it up" was never actual
+  evidence about current `dev`/`main`. The script does a real `git clone` into an isolated
+  temp dir (defaults to the public GitHub repo; accepts a local path for offline runs),
+  `uv sync --all-extras`, then runs `chela doctor`, `chela update --check`, and
+  `chela update`, failing loudly on an uncaught exception (distinguished from an ordinary
+  reported finding/refusal by scanning for a real traceback, not just a non-zero exit).
+  Strips every inherited `CHELA_*` env var first — a box that already runs a live chela
+  install (this project's own dev machine, notably) otherwise leaks its real
+  `CHELA_DISPATCH_WORKFLOWS`/`CHELA_TMUX_SESSION` into what is supposed to simulate an
+  adopter's untouched shell. `tests/test_smoke_fresh_install.py` runs it for real (offline,
+  against a local clone) as part of the normal suite. (CMX-263)
+
 ### Changed
 
 - **A CI job that never ran the suite no longer spends a rework round.** The automatic
