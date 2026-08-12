@@ -200,7 +200,15 @@ function _kCard(card) {
     // changes_requested/needs_human/failed), so this is what tells two cards in the same
     // lane apart. Text, deliberately: a pill's colour is a secondary cue, never the whole
     // message (Liav is red-weak, here or anywhere).
-    const chipMeta = STATUS_CHIPS[card.status];
+    // A `done` card whose PR was closed WITHOUT merging (CMX-265's reconcile path)
+    // must not wear the same "✓ done" pill as a shipped one — that pill is what a
+    // reader actually looks at, and collapsing "shipped" and "rejected" into one
+    // glyph would just move the ghost-in-Review lie into a quieter lane. `pr_state`
+    // already carries the distinction (see taskmodal.js's detail view, which shows
+    // it raw); this is the one place on the board itself that was still silent.
+    const chipMeta = (card.status === 'done' && card.pr_state === 'closed')
+        ? { label: '⊘ closed, not merged', cls: 'st-closed-unmerged' }
+        : STATUS_CHIPS[card.status];
     const stateChip = chipMeta
         ? `<span class="kanban-state-chip ${chipMeta.cls}">${escHtml(chipMeta.label)}</span>`
         : '';

@@ -2236,6 +2236,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-state-chip.st-needs-human  { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); font-weight: 600; }
 .kanban-state-chip.st-failed       { color: var(--red); border-color: rgba(248, 81, 73, 0.55); background: rgba(248, 81, 73, 0.14); font-weight: 600; }
 .kanban-state-chip.st-done         { color: var(--text-dim); }
+.kanban-state-chip.st-closed-unmerged { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
 
 /* The CI chip (CMX-69): what GitHub's checks say about this card's PR. The glyph and the
    WORD carry the state; the colour only agrees with them. A red-weak reader must be able

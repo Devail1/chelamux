@@ -80,16 +80,30 @@ def _branches(repo_path: Path) -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
-def _seed_run_with_worktree(repo: Path, wf_path: Path, task_id: str, worktrees_root: Path) -> Path:
-    """An `awaiting_review` run whose branch has a REAL, live worktree attached."""
-    wt_path, _ = worktree.ensure_worktree(repo, task_id, "dev", "CMX", 1, worktrees_root)
+def _seed_run_with_worktree(
+    repo: Path,
+    wf_path: Path,
+    task_id: str,
+    worktrees_root: Path,
+    task_number: int = 1,
+    pr_url: str = "https://github.com/o/r/pull/1",
+) -> Path:
+    """An `awaiting_review` run whose branch has a REAL, live worktree attached.
+
+    `task_number` must be distinct per call within a test that seeds more than one
+    row at once — it drives the branch name (`worktree.ensure_worktree` treats the
+    SAME number as the SAME branch and reuses one worktree for it), so two rows on
+    the same number would collapse onto one directory instead of two independent
+    runs.
+    """
+    wt_path, _ = worktree.ensure_worktree(repo, task_id, "dev", "CMX", task_number, worktrees_root)
     with dispatcher._db() as conn:
         conn.execute(
             "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
             "worktree_path, branch_name, started_at, attempt, pr_url, pr_state) "
             "VALUES (?,?,?,'awaiting_review',?,?,?,?,?,?,?)",
-            (task_id, str(wf_path), "t", "@9", str(wt_path), "cmx-1",
-             dispatcher._now(), 1, "https://github.com/o/r/pull/1", "open"),
+            (task_id, str(wf_path), "t", f"@{8 + task_number}", str(wt_path), f"cmx-{task_number}",
+             dispatcher._now(), 1, pr_url, "open"),
         )
         conn.commit()
     return wt_path
@@ -167,6 +181,89 @@ def test_tick_does_not_fire_after_done_for_a_closed_unmerged_PR(ticking, monkeyp
 
     assert summary["reconciled_done"] == 1
     assert fired == []  # no after_done — nothing shipped
+
+
+def test_tick_moves_only_the_closed_row_when_open_and_merged_siblings_are_present(ticking, monkeypatch):
+    """⭐ Mandatory negative control #1: a `pr_state='open'` row sitting in Review in
+    the SAME tick as a closed one must stay put. The two tests above only ever seed a
+    single `pr_state='closed'` row each, so they cannot tell "reconcile closed PRs"
+    apart from "reconcile every row in RECONCILE_MERGE_STATUSES" — widen the new
+    branch's condition to drop the `pr_state == "closed"` check and both would still
+    go green. Bundling closed + open + merged into ONE fixture is what makes that
+    corruption show up: the open row's assertions go red while the closed/merged ones
+    stay green, so this guard fails for the reason it exists."""
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    (repo / "TODO.md").write_text("- [ ] alpha\n- [ ] beta\n- [ ] gamma\n")
+    subprocess.run(["git", "-C", str(repo), "commit", "-am", "add gamma"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "push"], check=True, capture_output=True)
+    tasks = {t.title: t.id for t in _source(repo).list_open_tasks()}
+    worktrees_root = repo.parent / ".chela" / "worktrees"
+
+    closed_id, open_id, merged_id = tasks["alpha"], tasks["beta"], tasks["gamma"]
+    closed_wt = _seed_run_with_worktree(
+        repo, wf_path, closed_id, worktrees_root, task_number=1, pr_url="https://github.com/o/r/pull/1"
+    )
+    open_wt = _seed_run_with_worktree(
+        repo, wf_path, open_id, worktrees_root, task_number=2, pr_url="https://github.com/o/r/pull/2"
+    )
+    merged_wt = _seed_run_with_worktree(
+        repo, wf_path, merged_id, worktrees_root, task_number=3, pr_url="https://github.com/o/r/pull/3"
+    )
+    by_url = {
+        "https://github.com/o/r/pull/1": ("closed", "UNKNOWN"),
+        "https://github.com/o/r/pull/2": ("open", "MERGEABLE"),
+        "https://github.com/o/r/pull/3": ("merged", "MERGEABLE"),
+    }
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: by_url[url])
+
+    summary = dispatcher.tick(wf_path)
+
+    with dispatcher._db() as conn:
+        rows = {r["task_id"]: r["status"] for r in conn.execute("SELECT task_id, status FROM runs").fetchall()}
+    assert rows[closed_id] == "done"
+    assert rows[merged_id] == "done"
+    assert rows[open_id] == "awaiting_review"  # ⭐ untouched — the negative control
+    assert open_wt.is_dir()                    # its worktree survives too
+    assert not closed_wt.exists()
+    assert not merged_wt.exists()
+    assert summary["reconciled_done"] == 2      # closed + merged; the open row never counts
+
+
+def test_tick_does_not_restrike_or_reclaim_a_closed_unmerged_PRs_task(ticking, monkeypatch):
+    """⭐ Mandatory negative control #2: reconciling a closed-without-merging PR to
+    `done` must not re-claim the tracker task — there is nothing to strike (the task
+    was rejected, not delivered) and the claim loop must never mistake the
+    still-open tracker line for fresh work. Both properties previously lived only in
+    a comment; this pins the ACTUAL interaction (the tracker-strike query's
+    `pr_state='merged'` filter, and `done`'s membership in `NOT_CLAIMABLE`) against
+    the new branch, so a future change to either guard that breaks this specific
+    promise goes red here even if each guard's own test stays green."""
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+    worktrees_root = repo.parent / ".chela" / "worktrees"
+    _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root)
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("closed", "UNKNOWN"))
+
+    summary = dispatcher.tick(wf_path)
+
+    assert summary["reconciled_done"] == 1
+    assert summary["tracker_struck"] == 0
+    assert "- [ ] alpha" in (repo / "TODO.md").read_text()  # tracker line still unstruck — nothing to strike
+
+    spawned_task_ids: list[str] = []
+    monkeypatch.setattr(
+        dispatcher, "_spawn", lambda wf, task, attempt, conn: spawned_task_ids.append(task.id) or False
+    )
+
+    summary2 = dispatcher.tick(wf_path)
+
+    assert alpha not in spawned_task_ids  # NOT_CLAIMABLE("done") refuses the re-claim
+    assert summary2["dispatched"] == 0
+    with dispatcher._db() as conn:
+        n = conn.execute("SELECT COUNT(*) c FROM runs WHERE task_id=?", (alpha,)).fetchone()["c"]
+    assert n == 1  # one row for this task_id, forever — no duplicate spawned alongside it
 
 
 def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticking):

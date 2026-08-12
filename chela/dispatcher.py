@@ -3270,6 +3270,37 @@ def tick(workflow_path: str | Path) -> dict:
                 # it for a rejected PR would be a false "shipped" event) and no tracker
                 # strike expectation (there is nothing to strike; the task was rejected,
                 # not delivered).
+                #
+                # ⭐ WHY `status='done'` and not a new terminal status (e.g. `abandoned`,
+                # `closed`) for the RUN row: `status` here tracks the RUN's lifecycle — is
+                # there still something for the dispatcher to DO with this row (poll it,
+                # nudge it, judge it, dispatch it)? — not a verdict on the PR. Once the
+                # window is killed and the worktree freed, there is nothing left to do,
+                # which is exactly the run-level meaning `done` already has (see
+                # `NOT_CLAIMABLE`, `_prune_done_rows`'s retention window, the kanban lane
+                # map's `done` bucket). The PR's own outcome is a SEPARATE axis, already
+                # carried orthogonally by `pr_state` — `_run_trial_outcome` (above in this
+                # file) already reads `status=='done' and pr_state != 'merged'` as
+                # `"abandoned"` for the trial ledger, so this is reusing an established
+                # distinction, not inventing a new overloaded one.
+                #
+                # A new backend status was considered and rejected: it would need its own
+                # entry in `NOT_CLAIMABLE`, `RECONCILE_MERGE_STATUSES`, and the kanban
+                # board's `STATUS_LANE` map (`kanbanlanemodel.js`) — and that map's own
+                # documented fallback sends an UNLISTED status to Review, "visible", not
+                # 'done' — so a half-wired new status would silently reopen the exact
+                # ghost-in-Review bug this PR fixes, just via a different code path.
+                #
+                # What WAS missing, and is now fixed: the one place a human actually reads
+                # this — the Kanban card's own status pill — used to render a rejected PR
+                # with the identical "✓ done" pill as a shipped one. That is the "quieter
+                # lie in a quieter lane" this comment exists to not leave silent. Fixed at
+                # the presentation layer instead, where `pr_state` already lives:
+                # `kanban.js`'s `_kCard` now special-cases `status=='done' and
+                # pr_state=='closed'` to a distinct "⊘ closed, not merged" pill
+                # (`st-closed-unmerged` in `style.css`) — `pr_state` is the axis that was
+                # always meant to carry this, and now it does at the one surface that
+                # matters.
                 if row["window_name"]:
                     _kill_window(row["window_name"])
                 conn.execute(
