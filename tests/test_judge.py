@@ -2034,6 +2034,34 @@ def test_a_stale_no_verdict_flag_is_cleared_by_the_next_real_verdict(tmp_path, m
         (judge.J_RUNNING, 1, 0)   # ⛔ this genuine cannot_verify DOES cost a retry
 
 
+def test_a_stale_no_verdict_flag_is_cleared_by_the_no_sha_branch_too(tmp_path):
+    """⚖️🕳️ CMX-253 Objective 2, mirror of `test_a_stale_no_verdict_flag_is_cleared_by_the_
+    next_real_verdict` for `set_judge_state`'s OTHER branch. That test pins the `sha=` branch,
+    which is the one `judge.judge_run`'s real verdict calls take — but the no-sha branch is
+    not dead code: `judge.judge_run` itself calls `set_judge_state(task_id, J_CANNOT_VERIFY,
+    "the workflow could not be read")` with NO `sha` (chela/judge.py:1396) when the WORKFLOW.md
+    it was pointed at no longer parses. A row reaped as no-verdict by `_judge_watchdog` and
+    then re-run against a workflow that has since gone unreadable takes exactly this branch,
+    and must clear the stale flag the same as the sha branch does.
+
+    Seen to go red: swap `judge_no_verdict=?` for `judge_no_verdict=COALESCE(judge_no_verdict,
+    ?)` in `set_judge_state`'s no-sha UPDATE — the 1 survives this write.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        # Same starting state as the sha-branch test: a prior attempt was reaped as
+        # no-verdict, leaving the flag set.
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), judge_sha="cafe1234",
+                 judge_state=judge.J_CANNOT_VERIFY, judge_cannot_verify_tries=0,
+                 judge_no_verdict=1)
+
+    # judge.judge_run's unreadable-workflow path: no `sha=` kwarg at all.
+    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "the workflow could not be read")
+    run = dispatcher.resolve_run("abc123")
+    assert run["judge_no_verdict"] == 0          # ⛔ the stale reboot flag must not survive
+    assert run["judge_sha"] == "cafe1234"        # no-sha branch never touches judge_sha
+
+
 def _fake_tmux_new_window(target_id: str):
     """Fake `subprocess.run` good enough to drive `_launch_agent`'s real tmux half:
     `tmux new-window` reports `target_id`, everything else (send-keys, …) is a no-op."""
