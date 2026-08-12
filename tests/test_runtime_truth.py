@@ -767,6 +767,39 @@ def test_node_ipc_env_detects_serialization_mode_when_the_fd_is_absent(fleet, mo
     assert "NODE_CHANNEL_SERIALIZATION_MODE" in findings[0].title
 
 
+def test_tmux_global_env_reader_is_none_not_empty_when_tmux_cannot_be_asked(monkeypatch):
+    """⛔ Judge round 4, finding 1: every other test of this fact stubs `_tmux_global_env`
+    itself, so the tri-state its OWN docstring promises (`None` = never asked, `{}` = asked
+    and clean) was asserted nowhere. Drive the real function: with no tmux on PATH, it must
+    return `None`, and must never even reach `subprocess.run` to get there — a mutation that
+    turns "cannot ask" into "asked, and it's clean" makes doctor go GREEN on a box it never
+    looked at."""
+    monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: None)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError(
+            "tmux cannot be asked — subprocess.run must not run")))
+    assert runtime_truth._tmux_global_env() is None
+
+
+def test_tmux_global_env_reader_parses_show_environment_output(monkeypatch):
+    """⛔ Judge round 4, finding 2: the read half of this fact — turning real
+    `tmux show-environment -g` stdout into the dict the fact scans — has no direct
+    coverage either, so a mutation that skips every parsed line (`if line.startswith("-")`
+    → `if True`) leaves the reader permanently blind while every stubbed detection test
+    stays green. Feed it real-shaped output: a normal `KEY=value` line, and a `-KEY`
+    explicitly-unset marker (no `=`) that must NOT be read as a value."""
+    monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    stdout = "TERM=screen-256color\n-NODE_CHANNEL_FD\nNODE_CHANNEL_SERIALIZATION_MODE=json\n"
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=stdout, stderr=""))
+    assert runtime_truth._tmux_global_env() == {
+        "TERM": "screen-256color",
+        "NODE_CHANNEL_SERIALIZATION_MODE": "json",
+    }
+
+
 def test_peer_transport_warns_on_a_stale_socket_file_nothing_is_listening_on(
         fleet, monkeypatch):
     """`.exists()` alone would call this reachable — CMX-224's rework closes exactly this
