@@ -74,6 +74,35 @@ def test_outcome_is_abandoned_when_closed_without_a_merged_pr():
     assert dispatcher._run_trial_outcome(_row(status="closed", pr_state="merged")) == "merged"
 
 
+# --- run_is_terminal — the plain yes/no twin CMX-261's `chela.restore` fix consumes ------
+
+def test_run_is_terminal_matches_every_case_run_trial_outcome_calls_terminal():
+    """Same three conditions, asserted pairwise against `_run_trial_outcome` so the two
+    can never silently drift apart."""
+    rows = [
+        _row(status="running"), _row(status="claimed"),
+        _row(status="awaiting_review", pr_state="merged"),
+        _row(status="running", pr_state="merged"),
+        _row(status="failed", attempt=1), _row(status="failed", attempt=2),
+        _row(status="failed", attempt=dispatcher.MAX_ATTEMPTS),
+        _row(status="done", pr_state=None), _row(status="done", pr_state="open"),
+    ]
+    for row in rows:
+        assert dispatcher.run_is_terminal(row) == (dispatcher._run_trial_outcome(row) is not None), row
+
+
+def test_run_is_terminal_tolerates_a_row_missing_pr_state_and_attempt():
+    """Unlike `_run_trial_outcome` (bracket access, a real `runs` row is guaranteed every
+    column), this reads with `.get()` — a lighter-weight dict missing the columns
+    entirely reads as still-pending rather than raising KeyError."""
+    assert dispatcher.run_is_terminal({"status": "running"}) is False
+    assert dispatcher.run_is_terminal({"status": "done"}) is True
+    # `failed` with no `attempt` key at all must default to attempt 1 (still has
+    # retries left), NOT to an already-exhausted count — a row missing the column
+    # is still-pending, not silently dropped from the restore scan.
+    assert dispatcher.run_is_terminal({"status": "failed"}) is False
+
+
 # --- the pure merge -----------------------------------------------------------
 
 def test_reconcile_appends_one_line_per_new_task_id():

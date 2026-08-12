@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from chela import critic, epoch, event_log, hold, judge
+from chela import critic, epoch, event_log, hold, judge, memcap
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -407,14 +407,33 @@ def resolve_agent_cmd(wf: WorkflowDef, role: str = "coding") -> tuple[str, str]:
     return f"{AGENT_BASE_CMD} --permission-mode {permission_mode} --model {model}", source
 
 
-def _git(repo: Path, *args: str, timeout: float = GIT_TIMEOUT_SECONDS):
-    """Run a git command in `repo`. Returns None if git is missing or hung."""
+class GitTimeout(RuntimeError):
+    """Raised by :func:`_git` when ``raise_on_timeout=True`` and the command hits its
+    timeout. Opt-in and default-off so ``_git``'s ~20 other call sites, which all just
+    treat a ``None`` return as "this failed, don't care why", are untouched — only a
+    caller that needs to tell a timeout apart from every other failure (chela.update's
+    network calls: CMX-262, a timed-out fetch must say so rather than send an adopter
+    hunting for a git problem they don't have) opts in.
+    """
+
+
+def _git(repo: Path, *args: str, timeout: float = GIT_TIMEOUT_SECONDS, raise_on_timeout: bool = False):
+    """Run a git command in `repo`. Returns None if git is missing or hung — unless
+    `raise_on_timeout`, in which case a hang raises :class:`GitTimeout` instead of
+    returning None (a missing git binary still returns None either way)."""
     try:
         return subprocess.run(
             ["git", "-C", str(repo), *args],
             capture_output=True, text=True, timeout=timeout,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired as e:
+        log.warning("git %s timed out in %s after %ss", " ".join(args), repo, timeout)
+        if raise_on_timeout:
+            raise GitTimeout(f"git {' '.join(args)} timed out after {timeout:.0f}s — "
+                              "this looks like a slow network link, not a problem with "
+                              "the repo itself") from e
+        return None
+    except FileNotFoundError as e:
         log.warning("git %s failed in %s: %s", " ".join(args), repo, e)
         return None
 
@@ -862,6 +881,24 @@ def _run_trial_outcome(row: sqlite3.Row) -> str | None:
     if row["status"] in ("done", "closed"):
         return "abandoned"
     return None
+
+
+def run_is_terminal(row) -> bool:
+    """Plain yes/no twin of :func:`_run_trial_outcome`, for callers (``chela.restore``)
+    that only need to know whether a `runs` row will ever move again — not which of
+    merged/died/abandoned it stopped on. Same three conditions, deliberately kept in
+    sync with that function rather than calling it: this one reads with ``.get()`` so a
+    lighter-weight dict than a real `runs` row (missing ``pr_state``/``attempt``
+    entirely) reads as still-pending rather than raising, since a row's `task-finished`
+    kills its tmux window as the LAST step of a trial — the window address going dead is
+    the expected, permanent shape of every closed trial, not evidence anything needs
+    fixing.
+    """
+    if row.get("pr_state") == "merged":
+        return True
+    if row.get("status") == "failed" and (row.get("attempt") or 1) >= MAX_ATTEMPTS:
+        return True
+    return row.get("status") == "done"
 
 
 def reconcile_trial_ledger(existing_text: str, rows: list[sqlite3.Row]) -> tuple[str, list[str], list[str]]:
@@ -4310,6 +4347,11 @@ def _launch_agent(
         socket_arg = messaging_socket_launch_arg(target_id)
         if socket_arg:
             agent_cmd = f"{agent_cmd} {socket_arg}"
+    # 🧠🔒 CMX-264: put this agent (coding agent OR judge — both funnel through this one
+    # function) into the SHARED memory slice, when CHELA_MEMORY_SLICE_BUDGET is on and a
+    # working `systemd --user` session confirms it is ready. A no-op (returns agent_cmd
+    # unchanged) whenever the rail is off or unavailable — see chela/memcap.py.
+    agent_cmd = memcap.wrap_launch_cmd(agent_cmd)
     log.info("Launching %s with %r (source: %s)", task_id, agent_cmd, cmd_source)
     # CMX-115: strip daemon-only secrets from THIS window's shell before anything else
     # runs in it — must land before the CHELA_WID export and the agent command below,

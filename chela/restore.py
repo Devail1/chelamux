@@ -19,9 +19,12 @@ human happens to go looking at the exact right file.
 * the dispatcher's ``runs`` table — ``window_id``/``window_epoch`` and
   ``judge_window_id``/``judge_window_epoch``. :func:`chela.telegram.reconcile.dispatched_window_ids`
   already treats a dangling one as "not dispatched" for Telegram-binding purposes, but that
-  is a side effect of one consumer, not a report: the run row itself keeps whatever status
+  is a side effect of one consumer, not a report: a still-open run row keeps whatever status
   it had (often ``running``) forever, with no flag anywhere saying its window address is
-  dead.
+  dead. CMX-261: a row whose trial is already OVER (:func:`chela.dispatcher.run_is_terminal`)
+  is excluded from this scan entirely — ``task-finished`` kills the window as a run's last
+  step, so a closed row's dangling stamp is the expected, permanent shape of every completed
+  task, not something a hard tmux death left behind.
 * ``session-ids.json`` — ``wid -> {session_id, epoch}``. :func:`chela.sessionids.session_id_for`
   quietly returns ``None`` for a dangling entry; the entry itself is never listed, counted,
   or cleaned.
@@ -73,7 +76,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chela import epoch, inbox, roster, sessionids, sessions
+from chela import dispatcher, epoch, inbox, roster, sessionids, sessions
 
 
 @dataclass(frozen=True)
@@ -106,9 +109,22 @@ def scan_runs(runs: list[dict], now_epoch: str | None) -> list[Orphan]:
     A row can orphan on either half independently — an agent's window can die with the
     server while its judge has not spawned yet, or vice versa — so both are checked, and a
     row that orphans on both surfaces twice, once per address.
+
+    ⛔ A row whose trial is already OVER (:func:`chela.dispatcher.run_is_terminal` —
+    merged, ``done``, or ``failed`` past every retry) is skipped even when its window
+    stamp is dangling. ``chela task-finished`` kills the agent's tmux window as the LAST
+    step of a run, so a closed row's window address is EXPECTED to go dead the moment the
+    tmux epoch it was stamped under rolls over — forever, on every row chela has ever
+    dispatched. Counting those permanently and reporting them as something ``chela
+    restore`` can act on is a false positive with no fix: neither :func:`plan` nor
+    :func:`apply` has ever classified this store (see the module docstring), so a
+    terminal row's dangling stamp can never be resolved by running the very command this
+    scan tells the operator to run.
     """
     out = []
     for row in runs or []:
+        if dispatcher.run_is_terminal(row):
+            continue
         task = row.get("task_id") or "?"
         wid = str(row.get("window_id") or "").strip()
         if wid and epoch.is_dangling(row.get("window_epoch"), now_epoch):
