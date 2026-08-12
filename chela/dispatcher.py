@@ -1095,6 +1095,23 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `judge_max_unknown_retries`.
         ("judge_cannot_verify_tries",
          "ALTER TABLE runs ADD COLUMN judge_cannot_verify_tries INTEGER"),
+        # ⚖️🕳️ CMX-253 Objective 2. Did the CURRENT `judge_state` come from a judge that
+        # actually ran and reported, or from one that never got the chance to (its tmux
+        # window vanished — host reboot, tmux death — before it published anything)? Those
+        # are NOT the same "unknown": a `cannot_verify` VERDICT (no `test_cmd`, a corrupt
+        # experiments file, a real mutation-battery flake) is the judge doing its job and
+        # coming up empty — that costs a `judge_cannot_verify_tries` retry, same as always.
+        # A vanished window is the judge never having run AT ALL — counting that against the
+        # SAME bounded budget means a string of host reboots (observed live 2026-08-12, seven
+        # in a row) burns the whole retry budget on attempts that told us nothing, and the PR
+        # escalates to `needs_human` for an environment hiccup instead of quietly getting
+        # re-judged once the box is back. `_judge_watchdog` sets this to 1 ONLY on its
+        # window-disappeared branch (never on a timeout — a judge that ran past
+        # `JUDGE_TIMEOUT_SECONDS` DID get a chance to run, and "stuck, not thinking" stays a
+        # counted unknown, exactly as CMX-81 always treated it). `set_judge_state` clears it
+        # back to 0 on every other write, so it always describes the CURRENT `judge_state`,
+        # never a stale prior one.
+        ("judge_no_verdict", "ALTER TABLE runs ADD COLUMN judge_no_verdict INTEGER"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
         # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
@@ -2756,7 +2773,8 @@ def retry(ident: str, reason: str = "") -> dict:
     }
 
 
-def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None) -> None:
+def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None,
+                     no_verdict: bool = False) -> None:
     """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE (besides ``sha``).
 
     The judge's only way to change a run's STATUS is :func:`request_changes` — the one
@@ -2772,17 +2790,25 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
     a stale commit, and the per-sha trigger would immediately re-spawn a redundant judge on
     the very sha this call just verified. Every normal caller passes nothing and this column
     is untouched, exactly as before.
+
+    ``no_verdict``, when True, also stamps ``judge_no_verdict=1`` — ⚖️🕳️ CMX-253 Objective 2:
+    this call is recording that a judge NEVER RAN, not that one ran and came up empty (see
+    ``judge_no_verdict``'s column comment). Every normal caller passes nothing, which clears
+    it back to 0 — the column always describes the state THIS call just wrote, never a stale
+    prior one.
     """
     with _db() as conn:
         if sha:
             conn.execute(
-                "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=? WHERE task_id=?",
-                (state, (detail or "")[:2000], sha, task_id),
+                "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=?, "
+                "judge_no_verdict=? WHERE task_id=?",
+                (state, (detail or "")[:2000], sha, int(no_verdict), task_id),
             )
         else:
             conn.execute(
-                "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
-                (state, (detail or "")[:2000], task_id),
+                "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=? "
+                "WHERE task_id=?",
+                (state, (detail or "")[:2000], int(no_verdict), task_id),
             )
         conn.commit()
 
@@ -2892,7 +2918,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
-        "judged": 0, "judge_lost": 0,
+        "judged": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
@@ -2970,6 +2996,7 @@ def tick(workflow_path: str | Path) -> dict:
         "ci_infra_failed": 0,
         "judged": 0,
         "judge_lost": 0,
+        "judge_stranded": 0,
         "trial_ledger": 0,
         "disk_budget_exceeded": False,
         "blocked": blocked,
@@ -3562,6 +3589,20 @@ def tick(workflow_path: str | Path) -> dict:
         # VERIFY — it does NOT block and it does NOT approve; the run stays exactly where it
         # was, and a human is told why.
         summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
+
+        # 1e′. ⚖️🧊 CMX-253: a `cannot_verify` that SPENT its retry budget on the CURRENT
+        # head is stranded, not waiting. The trigger query in STEP 3a′ below re-fires a
+        # `cannot_verify` only while `judge_cannot_verify_tries < judge_max_unknown_retries()`
+        # — bounded on purpose (CMX-81), so one flake costs a retry, not an infinite loop.
+        # But once `tries` reaches that bound on the SAME `pr_head_sha`, no arm of that
+        # trigger's OR can ever become true again short of a new commit, and `cannot_verify`
+        # "blocks nothing and approves nothing" (judge.py), so it never earns a
+        # `request_changes` escalation either. The row then sits in `awaiting_review`
+        # forever, indistinguishable from an ordinary "waiting for review" run, while no
+        # verdict will ever come. ⛔ Alongside 1d/1e, ABOVE the hold/blocked returns: this
+        # is not a claim — it starts no agent, takes no slot — and it is the transition
+        # that stops the row from silently presenting as reviewable when it is not.
+        summary["judge_stranded"] = _escalate_stranded_judge_unknowns(conn, wf)
 
         # 1f. 📊 THE TRIAL LEDGER (CMX-105) — opt-in, and BEFORE the prune below: a died
         # or abandoned row must get its ledger line while it still exists in `runs`, or
@@ -4626,12 +4667,21 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
     # already proved the bump stays under `judge_max_unknown_retries`). Any other same-head
     # re-launch keeps the running total. Counting retries HERE, not on the verdict, keeps one
     # writer whatever ended the judge — the watchdog, a launch failure, or `chela judge run`.
+    # ⚖️🕳️ CMX-253 Objective 2: EXCEPT when that `cannot_verify` is `judge_no_verdict` — the
+    # judge never got to run at all (its window vanished: host reboot, tmux death), so
+    # re-launching it is not a retry of a failed attempt, it is the FIRST attempt. Counting
+    # it would burn the whole bounded budget on a string of reboots that told us nothing
+    # about the PR and escalate it to a human for an environment hiccup (see that column's
+    # comment for the live incident this fixes).
     same_sha = row["judge_sha"] == sha
     prior = (row["judge_cannot_verify_tries"] or 0) if same_sha else 0
-    tries = prior + 1 if (same_sha and row["judge_state"] == judge.J_CANNOT_VERIFY) else prior
+    retried_unknown = (
+        same_sha and row["judge_state"] == judge.J_CANNOT_VERIFY and not row["judge_no_verdict"]
+    )
+    tries = prior + 1 if retried_unknown else prior
     conn.execute(
         "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=?, "
-        "judge_cannot_verify_tries=? WHERE task_id=?",
+        "judge_cannot_verify_tries=?, judge_no_verdict=0 WHERE task_id=?",
         (sha, judge.J_RUNNING, _now(), "", tries, task_id),
     )
     conn.commit()
@@ -4738,9 +4788,14 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             "not thinking" if timed_out else
             "the judge's window disappeared before it published a verdict"
         )
+        # ⚖️🕳️ CMX-253 Objective 2: a TIMEOUT judge got a chance to run and stayed stuck —
+        # that is still a counted unknown, same as CMX-81 always treated it. A judge whose
+        # window just VANISHED (host reboot, tmux death) never got that chance at all, so it
+        # must not spend the same bounded retry budget a real attempt would; see
+        # `judge_no_verdict`'s column comment.
         conn.execute(
-            "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
-            (judge.J_CANNOT_VERIFY, reason, row["task_id"]),
+            "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=? WHERE task_id=?",
+            (judge.J_CANNOT_VERIFY, reason, int(not timed_out), row["task_id"]),
         )
         conn.commit()
         if alive:
@@ -4756,6 +4811,54 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             "NOT sent back; it is a human's now.", row["task_id"], reason,
         )
     return handed_over
+
+
+def _escalate_stranded_judge_unknowns(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
+    """⚖️🧊 CMX-253. Hand a `cannot_verify` that spent its retry budget on the CURRENT head
+    to a human — it will never be judged again on this commit, and it must not sit in
+    `awaiting_review` pretending otherwise.
+
+    The trigger query in STEP 3a′ re-fires a `cannot_verify` only while
+    ``judge_cannot_verify_tries < judge_max_unknown_retries()`` (CMX-81's bounded retry: a
+    flake costs a retry, not an infinite loop). But once ``tries`` reaches that bound on the
+    SAME ``pr_head_sha``, no arm of that trigger's ``OR`` can ever become true again short of
+    a new commit — and `cannot_verify` blocks nothing and approves nothing (it can never earn
+    a `request_changes` escalation the way a real verdict does). Nothing else ever moves the
+    row, so it was previously stranded PERMANENTLY AND SILENTLY: an ordinary-looking
+    `awaiting_review` row that no verdict will ever reach. Observed live 2026-08-12 on three
+    runs (#316, #319, #320) after a host reboot, each parked at ``tries == max``.
+
+    ⛔ Matches the trigger's own guard exactly (``judge_sha=pr_head_sha`` and
+    ``tries >= max``), so a row is escalated here if and only if the trigger query would
+    never re-select it again. A fresh commit changes ``pr_head_sha`` and falls out of this
+    query on the very next tick — the trigger's first ``OR`` arm (``judge_sha != pr_head_sha``)
+    picks it back up for a brand-new judgement instead.
+    """
+    escalated = 0
+    for row in conn.execute(
+        "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
+        "AND judge_state=? AND judge_sha IS NOT NULL AND judge_sha=pr_head_sha "
+        "AND COALESCE(judge_cannot_verify_tries, 0) >= ?",
+        (str(wf.path), judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
+    ).fetchall():
+        tries = row["judge_cannot_verify_tries"] or 0
+        _escalate(
+            conn, row,
+            f"the judge could not verify this PR on {(row['pr_head_sha'] or '')[:12]} after "
+            f"{tries} attempt(s) ({row['judge_detail'] or 'no detail recorded'}) — it will "
+            "never be judged on this commit. The PR was NOT reviewed adversarially and it "
+            "was NOT sent back; branch, worktree and PR are preserved.",
+            recommendation="Fix whatever kept the judge from running (see judge_detail above) "
+                            "and push a new commit to get a fresh judgement, or review the PR "
+                            "by hand and merge or close it.",
+            options=[
+                "Push a new commit to reset the judge retry budget",
+                "Review the PR by hand and merge or close it",
+                "Abandon the task",
+            ],
+        )
+        escalated += 1
+    return escalated
 
 
 def list_runs() -> list[dict]:
