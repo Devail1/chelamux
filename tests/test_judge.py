@@ -779,6 +779,107 @@ def test_the_PRs_live_head_is_reread_right_before_the_verdict_is_spent_not_the_s
     assert "newsha000002"[:12] in posted[0]
 
 
+def test_a_blocking_verdict_with_an_unreadable_LIVE_head_still_charges(tmp_path):
+    """⚖️⏱️ CMX-246 rework round 3, finding 1: an UNKNOWN live head is not positive staleness
+    evidence — same conservatism as `test_a_blocking_verdict_with_unreadable_shas_fails_
+    CLOSED_and_still_charges`, but that test leaves BOTH operands unset, so it cannot tell
+    `stale_head = bool(verified_sha and live_head and verified_sha != live_head)` apart from
+    `bool(verified_sha and verified_sha != live_head)` — drop the `live_head and` conjunct and
+    both still evaluate `False` there, because `verified_sha` is also `None`.
+
+    Here `verified_sha` IS known (the run's `pr_head_sha` at the top of the call) and only the
+    LIVE re-read comes back unreadable — the PR's head goes missing mid-run, standing in for a
+    live read that fails. Drop the `live_head and` conjunct and this goes red: `None !=
+    verified_sha` is True, so a genuinely blocking verdict for a head this call cannot
+    re-confirm gets silently discarded as 'stale' instead of charged."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=None, pr_head_sha="knownsha0001")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    real_run_experiments = judge.run_experiments
+
+    def _blank_the_live_head_mid_run(*a, **kw):
+        with dispatcher._db() as conn:
+            conn.execute("UPDATE runs SET pr_head_sha=? WHERE task_id=?", (None, task_id))
+            conn.commit()
+        return real_run_experiments(*a, **kw)
+
+    posted: list[str] = []
+    with patch.object(judge, "run_experiments", side_effect=_blank_the_live_head_mid_run), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED             # NOT J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "changes_requested"            # the carrier turned — round charged
+    assert run["judge_state"] == judge.J_BLOCKED
+    assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
+    assert "SUPERSEDED" not in posted[0]
+
+
+def test_a_blocking_verdict_with_an_unreadable_JUDGED_sha_still_charges(tmp_path):
+    """⚖️⏱️ CMX-246 rework round 3, finding 2: the twin of the test above — an UNKNOWN judged
+    sha is not positive staleness evidence either. `verified_sha` stays `None` for this whole
+    call (both `judge_sha` and the run's `pr_head_sha` at call-start are unset), while the
+    LIVE re-read comes back KNOWN partway through, standing in for a PR that only just
+    acquired a head. Drop the `verified_sha and` conjunct (e.g. `stale_head = bool(live_head
+    and verified_sha != live_head)`) and this goes red: `None != live_head` is always True, so
+    a genuinely blocking verdict whose own judged sha could not be read gets silently
+    discarded as 'stale' instead of charged."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=None, pr_head_sha=None)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    real_run_experiments = judge.run_experiments
+
+    def _reveal_the_live_head_mid_run(*a, **kw):
+        with dispatcher._db() as conn:
+            conn.execute(
+                "UPDATE runs SET pr_head_sha=? WHERE task_id=?", ("nowknown0001", task_id),
+            )
+            conn.commit()
+        return real_run_experiments(*a, **kw)
+
+    posted: list[str] = []
+    with patch.object(judge, "run_experiments", side_effect=_reveal_the_live_head_mid_run), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED             # NOT J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "changes_requested"            # the carrier turned — round charged
+    assert run["judge_state"] == judge.J_BLOCKED
+    assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
+    assert "SUPERSEDED" not in posted[0]
+
+
+def test_stale_head_notice_names_the_shas_in_the_CORRECT_roles():
+    """⚖️⏱️ CMX-246 rework round 3, finding 3: `_stale_head_notice` must say the JUDGED sha
+    "this verdict is for" and the LIVE head is "a newer commit" — swapped, a human is pointed
+    at the wrong commit, which is the exact hand-triage this ticket exists to stop. The
+    end-to-end stale-head tests above only assert both shas appear `in` the posted comment
+    body, which is blind to which sha lands in which role — swap the two f-string arguments
+    and every one of those still passes.
+
+    Swap `judged_sha`/`live_head` in the two f-strings and this goes red: `judged_sha` no
+    longer appears right after "this verdict is for", and `live_head` no longer appears right
+    after "a newer commit,"."""
+    notice = judge._stale_head_notice("judgedsha0001", "livehead0002")
+
+    assert "this verdict is for `judgedsha000`" in notice
+    assert "a newer commit, `livehead0002`," in notice
+    assert "this verdict is for `livehead0002`" not in notice
+    assert "a newer commit, `judgedsha000`," not in notice
+
+
 def test_a_clean_run_is_LEFT_ALONE_the_judge_never_merges_and_never_approves(tmp_path):
     result, run, posted = _judge_run(tmp_path, REAL_GUARD_TEST, {"experiments": [_exp()]})
 
