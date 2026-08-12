@@ -312,8 +312,13 @@ def test_the_tick_respawns_into_the_existing_worktree_and_branch(tmp_path):
     assert "gh pr view 80 --comments" in prompts[0]
     assert "test-1" in prompts[0]
     # CMX-248 (re-scope of CMX-244): the escape hatch is unreachable if nobody tells the
-    # agent it exists — the prompt must name the actual command, not just describe the problem.
-    assert "chela rework-disputed abc123" in prompts[0]
+    # agent it exists — the prompt must name the actual command, not just describe the
+    # problem. Assert the FULL rendered invocation, including the required `reason`
+    # positional's opening quote: a prefix check like `"...abc123" in prompt` stays green
+    # even if `reason` is dropped from the taught command, which then exits 2 with
+    # "the following arguments are required: reason" — restoring the deadlock this ticket
+    # exists to end.
+    assert 'chela rework-disputed abc123 "<why there is nothing to push>"' in prompts[0]
 
 
 def test_a_missing_worktree_is_recreated_from_the_branch(tmp_path):
@@ -1065,8 +1070,10 @@ def test_a_stuck_rework_is_re_nudged_with_its_REWORK_prompt_not_the_first_dispat
     assert "fresh dispatch" not in sent[0]
     # CMX-248 (re-scope of CMX-244): _renudge_prompt re-renders from the same template as
     # the initial spawn — the dispute escape hatch must survive a re-nudge, or a re-nudged
-    # agent never learns it.
-    assert "chela rework-disputed abc123" in sent[0]
+    # agent never learns it. Assert the FULL rendered invocation (through the reason
+    # argument's opening quote) — a prefix match would stay green even with the required
+    # `reason` positional dropped from the taught command.
+    assert 'chela rework-disputed abc123 "<why there is nothing to push>"' in sent[0]
 
 
 # --- (h) 🔴 changes_requested is not a silent state, and a HOLD must not freeze the exit ---

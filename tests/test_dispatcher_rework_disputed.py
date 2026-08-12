@@ -208,12 +208,16 @@ def test_dispute_on_a_missing_task_id_is_refused():
 # --- (c) the CLI wires straight through to the dispatcher function ----------------------
 
 def test_cli_rework_disputed_prints_needs_human_on_success(capsys):
+    # A distinct, non-default task id — and a SECOND row left alone, so a CLI that
+    # hardcoded some other id (e.g. the fixture default `abc123`) would either miss
+    # this row entirely or disturb the control row instead.
     with dispatcher._db() as conn:
-        _row(conn)
+        _row(conn, task_id="cli-success-77")
+        _row(conn, task_id="cli-success-control")
     from chela import main as main_mod
 
     class Args:
-        task_id = "abc123"
+        task_id = "cli-success-77"
         reason = "already fixed last round"
 
     with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router()), \
@@ -225,9 +229,11 @@ def test_cli_rework_disputed_prints_needs_human_on_success(capsys):
     assert "needs_human" in out
     # the CLI must forward the AGENT's own reason, not a canned one — a human reads
     # this to resolve the dispute, so a constant string here would defeat the point.
-    run = dispatcher.resolve_run("abc123")
+    run = dispatcher.resolve_run("cli-success-77")
     assert "already fixed last round" in run["last_error"]
     assert "already fixed last round" in dispatcher.reviews_of(dict(run))[-1]["body"]
+    # the run named in args.task_id moved — the OTHER row did not.
+    assert dispatcher.resolve_run("cli-success-control")["status"] == "running"
 
 
 def test_cli_rework_disputed_exits_nonzero_on_refusal(capsys):
@@ -244,22 +250,28 @@ def test_cli_rework_disputed_exits_nonzero_on_refusal(capsys):
 
 
 def test_chela_rework_disputed_reaches_the_dispatcher_end_to_end():
-    """``chela rework-disputed abc123 "reason"`` must actually parse AND reach
+    """``chela rework-disputed cli-e2e-99 "reason"`` must actually parse AND reach
     ``dispatcher.mark_rework_disputed`` — the dispatch call-site is the guard here. Mutate
     ``elif args.command == "rework-disputed": …`` to anything else and this fails: a
     subparser that parses but is never wired is silent, same idiom as `retry`/`reopen`
-    (tests/test_dispatcher_retry.py, tests/test_dispatcher_reopen.py)."""
+    (tests/test_dispatcher_retry.py, tests/test_dispatcher_reopen.py).
+
+    The task id here (`cli-e2e-99`) is distinct from the success test's (`cli-success-77`)
+    and from the fixture default (`abc123`) — and a second, untouched row pins that the
+    argv-carried id is the one that actually moves."""
     import sys
 
     from chela import main
 
     with dispatcher._db() as conn:
-        _row(conn)
+        _row(conn, task_id="cli-e2e-99")
+        _row(conn, task_id="cli-e2e-control")
     with patch.object(dispatcher.subprocess, "run", side_effect=_gh_router()), \
          patch.object(dispatcher, "_kill_window"), \
-         patch.object(sys, "argv", ["chela", "rework-disputed", "abc123", "nothing to fix"]):
+         patch.object(sys, "argv", ["chela", "rework-disputed", "cli-e2e-99", "nothing to fix"]):
         main.main()
 
-    run = dispatcher.resolve_run("abc123")
+    run = dispatcher.resolve_run("cli-e2e-99")
     assert run["status"] == "needs_human"
     assert dispatcher.reviews_of(dict(run))[-1]["verdict"] == "disputed"
+    assert dispatcher.resolve_run("cli-e2e-control")["status"] == "running"
