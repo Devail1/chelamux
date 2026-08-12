@@ -224,6 +224,30 @@ def test_verify_self_check_missing_worktree_path_errors(tmp_path):
     assert "worktree_path" in result["error"]
 
 
+def test_verify_self_check_uses_the_row_matching_its_own_task_id(tmp_path):
+    """⛔ CMX-250 review round 4, finding 1: every test above inserts exactly ONE run, so
+    nothing proves the lookup actually FILTERS by ``task_id`` rather than fetching any row
+    in the table. Insert a decoy run FIRST whose guard SURVIVES, then the real run "t1"
+    whose guard is KILLED — a neutered ``WHERE task_id=?`` (e.g. ``... OR 1=1``) fetches
+    whichever row the table returns first (the decoy, inserted first) and reports a
+    surviving guard for a run that never had one."""
+    wf = _workflow_md(tmp_path)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+
+    decoy_root = _project(tmp_path / "decoy-wt", guard_test=FAKE_GUARD_TEST)
+    _insert_run("decoy", decoy_root, wf)
+
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    _insert_run("t1", root, wf)
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["blocking"] == 0
+    assert [o["verdict"] for o in result["outcomes"]] == ["KILLED"]
+
+
 # --- cmd_task_finished CLI: flag validation and gating ---------------------------------
 
 
@@ -498,6 +522,80 @@ def test_check_no_new_guards_uses_the_runs_own_base_branch_not_a_hardcoded_defau
     _insert_run("t1", root, wf)
 
     assert dispatcher.check_no_new_guards("t1") is True
+
+
+def test_check_no_new_guards_uses_the_row_matching_its_own_task_id(tmp_path, monkeypatch):
+    """⛔ CMX-250 review round 4, finding 2: the sibling of ``verify_self_check``'s own-row
+    gap at the other call site. Insert a decoy run FIRST whose diff touches ``tests/``,
+    then the real run "t1" whose diff is a clean docs-only change — a neutered
+    ``WHERE task_id=?`` fetches the decoy's row (inserted first) and reports/logs a
+    mismatch for a run that never touched a test file."""
+    monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
+    wf = _workflow_md(tmp_path)
+
+    decoy_root = tmp_path / "decoy-wt"
+    _repo_with_origin(decoy_root)
+    (decoy_root / "tests").mkdir()
+    (decoy_root / "tests" / "test_new_thing.py").write_text("def test_x():\n    assert True\n")
+    _git(decoy_root, "add", "-A")
+    _git(decoy_root, "commit", "-qm", "decoy touches tests/")
+    _insert_run("decoy", decoy_root, wf)
+
+    root = tmp_path / "wt"
+    _repo_with_origin(root)
+    (root / "README.md").write_text("hi, updated\n")
+    _git(root, "commit", "-aqm", "t1's own docs-only change")
+    _insert_run("t1", root, wf)
+
+    result = dispatcher.check_no_new_guards("t1")
+
+    assert result is False
+    assert not (tmp_path / "events.jsonl").exists()
+
+
+def test_check_no_new_guards_diffs_from_the_merge_base_not_a_two_dot_diff(tmp_path):
+    """⛔ CMX-250 review round 4, finding 3: in every test above ``origin/<base_branch>`` is
+    a strict ancestor of HEAD, so ``base_sha..HEAD`` (two-dot) and ``base_sha...HEAD``
+    (three-dot / merge-base) give identical results — the three-dot is unmeasured. In real
+    dispatch, origin's base branch almost always advances PAST the run's own branch point.
+    Here origin/master gains its own ``tests/`` file AFTER the run branched off, while the
+    run's own commit only ever touches ``README.md``. A two-dot diff compares raw trees and
+    would attribute origin's newer tests/ file to this run (a false positive, exactly the
+    cry-wolf failure the report-only design exists to avoid); the correct merge-base diff
+    must see only the run's own guard-free change."""
+    root = tmp_path / "wt"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "README.md").write_text("hi\n")
+    _git(root, "init", "-q", "-b", "master")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "base")
+    base_sha = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    _git(root, "update-ref", "refs/remotes/origin/master", base_sha)
+
+    # origin advances independently of the run, adding a guard the run never saw.
+    _git(root, "checkout", "-q", "-b", "origin-advance")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_new_thing.py").write_text("def test_x():\n    assert True\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "origin adds a guard after the run branched")
+    origin_sha = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    _git(root, "update-ref", "refs/remotes/origin/master", origin_sha)
+    _git(root, "checkout", "-q", "master")
+
+    # the run's own commit, on top of the ORIGINAL base, touches only README.md.
+    (root / "README.md").write_text("hi, updated by the run\n")
+    _git(root, "commit", "-aqm", "run's own docs-only change")
+
+    wf = _workflow_md(tmp_path)
+    _insert_run("t1", root, wf)
+
+    assert dispatcher.check_no_new_guards("t1") is False
 
 
 def test_check_no_new_guards_unknown_for_unknown_task_id(tmp_path):
