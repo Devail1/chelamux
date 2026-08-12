@@ -136,6 +136,19 @@ run_step() {
 # tests/test_smoke_fresh_install.py can assert on it directly instead of trusting the export.
 run_step "chela status (verifies the CHELA_TMUX_SESSION pin took effect)" status
 
+# Step 1c (test-only, SMOKE_BREAK_HOLD_TTL=1, unset in the normal adopter path): a genuine
+# `chela dispatch --pause --ttl <garbage>` — hold.parse_ttl() raises ValueError, cmd_dispatch_hold
+# catches it and does `raise SystemExit(2)`, so this is real production code cleanly exiting
+# 2 with NO traceback (verified live: `error: --ttl not a duration: ...`, rc=2). This is the
+# other half of run_step()'s "ran vs. crashed" contract: the traceback scan above catches an
+# uncaught exception, and this exercises the `rc -gt 1` branch right next to it — a command
+# that ran to completion, didn't crash, but still reported more than "findings" (rc 1) or
+# "clean" (rc 0). tests/test_smoke_fresh_install.py uses this to prove that branch actually
+# fails the run instead of merely existing.
+if [ "${SMOKE_BREAK_HOLD_TTL:-0}" = "1" ]; then
+    run_step "chela dispatch --pause (bad --ttl, exercises rc>1)" dispatch --pause --ttl not-a-duration
+fi
+
 # Step 2: plugin render — the scriptable half of "plugin install by the documented path"
 # (see the SCOPE BOUNDARY note above for the interactive half this cannot cover).
 run_step "chela plugin --dir (documented offline-render path)" plugin --dir "$WORK/plugin"

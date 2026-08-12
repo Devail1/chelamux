@@ -111,6 +111,30 @@ def test_a_real_traceback_from_dispatch_dry_run_fails_the_run():
     assert "PASS: fresh-install smoke test" not in out.stdout
 
 
+def test_a_clean_nonzero_exit_above_one_fails_the_run():
+    """🔴 Pins the OTHER half of run_step()'s "ran vs. crashed" contract — the `rc -gt 1`
+    branch, right next to the traceback scan. `chela dispatch --pause --ttl not-a-duration`
+    is real production code (chela.hold.parse_ttl raises ValueError, cmd_dispatch_hold
+    catches it and does `raise SystemExit(2)`): it runs to completion, prints a clean
+    `error: --ttl ...` message, and exits 2 — no traceback anywhere. SMOKE_BREAK_HOLD_TTL=1
+    makes the script run exactly that as an extra step. If the `[ "$rc" -gt 1 ]` branch is
+    neutered (e.g. `if false && [ "$rc" -gt 1 ]`), this clean-but-bad exit is indistinguishable
+    from success and the script wrongly reports PASS."""
+    env = dict(os.environ)
+    env["SMOKE_BREAK_HOLD_TTL"] = "1"
+
+    out = _run(env=env)
+
+    assert "==> chela dispatch --pause (bad --ttl, exercises rc>1)" in out.stdout, out.stdout
+    assert "Traceback (most recent call last):" not in out.stdout, out.stdout
+    assert "error: --ttl not a duration" in out.stdout, out.stdout
+    assert "FAIL: chela dispatch --pause (bad --ttl, exercises rc>1) exited 2" in out.stderr, (
+        out.stdout + out.stderr
+    )
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "PASS: fresh-install smoke test" not in out.stdout
+
+
 def test_strips_inherited_chela_env_so_a_live_install_never_leaks_in():
     """A calling shell that already runs chela for real (CHELA_DISPATCH_WORKFLOWS pointing
     at real repos, as this project's own dev machine does) must not have any of that leak
