@@ -1802,7 +1802,50 @@ def cmd_task_finished(args) -> None:
     awaiting_review (so the dispatcher won't re-dispatch the task) and kills the
     agent's tmux window. The row flips to `done` automatically on the next tick
     after the user merges the PR (which removes the TODO line from the base branch).
+
+    ⚖️🔎 CMX-250: ``--self-check-experiments`` closes the gap CMX-249 left open — Done
+    Criteria #3 ("run `chela judge self-check` before committing") was prose an agent could
+    silently skip, and skipping it had NO effect on anything downstream. Pass the same
+    experiments file here and this re-runs `judge.run_self_check` against the run's own
+    worktree ONE more time and REFUSES the transition (exit 1) if a guard SURVIVED
+    corruption or the check CANNOT VERIFY — the outcome now binds, not just the invocation.
+    ``--no-new-guards`` is the honest opt-out for a run that added none. Passing neither
+    is still accepted (a run dispatched under an older WORKFLOW.md never learned these
+    flags exist) but prints a loud warning — nothing downstream reads it, on purpose: an
+    old, in-flight agent must not be broken by a check it was never told to run.
     """
+    experiments = getattr(args, "self_check_experiments", None)
+    no_new_guards = getattr(args, "no_new_guards", False)
+    if experiments and no_new_guards:
+        print("task-finished: pass at most one of --self-check-experiments / --no-new-guards")
+        sys.exit(2)
+
+    if experiments:
+        check = dispatcher.verify_self_check(args.task_id, experiments)
+        if not check.get("ok"):
+            print(f"task-finished: self-check could not run — {check.get('error', 'unknown error')}")
+            sys.exit(1)
+        for outcome in check.get("outcomes") or []:
+            print(f"  [{outcome['verdict']:8}] {outcome['file']}: {outcome['guard'][:70]}")
+        if check["blocking"]:
+            print(f"⚖️ {check['blocking']} guard(s) SURVIVED corruption — this is "
+                  "DECORATION, not a guard. Fix it, then call task-finished again.")
+            sys.exit(1)
+        if check["cannot_verify"]:
+            print(f"⚖️ self-check CANNOT VERIFY — {check['cannot_verify']}")
+            print("   Nothing was blocked and nothing was cleared. task-finished refuses "
+                  "until this resolves.")
+            sys.exit(1)
+        print(f"✓ self-check: every guard held ({len(check['outcomes'])} experiment(s)) — "
+              "proceeding.")
+    elif no_new_guards:
+        print("task-finished: --no-new-guards — skipping self-check.")
+    else:
+        print("⚠ task-finished: neither --self-check-experiments nor --no-new-guards was "
+              "given — Done Criteria #3 was not enforced for this run. Pass "
+              "--self-check-experiments <path> (or --no-new-guards if this PR truly adds "
+              "no guards) next time.")
+
     result = dispatcher.mark_awaiting_review(args.task_id)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
@@ -2620,6 +2663,18 @@ def main() -> None:
         help="Mark a dispatcher run as awaiting_review and kill its tmux window",
     )
     p_tf.add_argument("task_id")
+    p_tf.add_argument(
+        "--self-check-experiments", metavar="PATH",
+        help="⚖️🔎 CMX-250: the SAME {guard, file, before, after} experiments file used "
+             "with `chela judge self-check` (Done Criteria #3). Re-verified against this "
+             "run's worktree now, and task-finished REFUSES the transition if a guard "
+             "survives corruption or the check cannot verify.",
+    )
+    p_tf.add_argument(
+        "--no-new-guards", action="store_true",
+        help="This run added or changed no test/guard — the honest opt-out from "
+             "--self-check-experiments.",
+    )
 
     # rework-disputed — the rework agent's "nothing to push" escape hatch
     # (CMX-248, re-scope of CMX-244)
