@@ -276,6 +276,38 @@ def test_verify_self_check_uses_the_row_matching_its_own_task_id(tmp_path):
     assert [o["verdict"] for o in result["outcomes"]] == ["KILLED"]
 
 
+def test_verify_self_check_uses_the_runs_own_judge_test_cmd_not_a_hardcoded_default(tmp_path):
+    """⛔ CMX-258 rework round 12 (judge finding 3, MUTATION): the self-check must be measured
+    against THE RUN'S OWN ``judge.test_cmd`` — read from its own WORKFLOW.md via
+    ``workflow_path`` — not an ambient default a caller could hardcode instead.
+    ``run_self_check``'s own docstring says this is exactly why: 'a self-check that comes
+    back clean was measured against the exact suite the judge will later measure against,
+    not a narrower one an agent could pick to always pass'. Point this run's own
+    ``judge.test_cmd`` at a command that never runs pytest at all and always fails; a
+    hardcoded ``sys.executable -m pytest -q`` fallback would instead run the REAL (green)
+    suite and report zero blocking — an outcome indistinguishable from every other test in
+    this file, since they all happen to use that exact command as their own ``TEST_CMD``
+    too. The baseline-red message interpolates the command it ran, so asserting the bogus
+    command appears in ``cannot_verify`` is the direct proof this run's own test_cmd was
+    used, not a substitute for it."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    bogus_cmd = f'"{sys.executable}" -c "import sys; sys.exit(7)"'
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(
+        "---\nproject_key: TEST\njudge:\n  test_cmd: " + json.dumps(bogus_cmd) +
+        "\n  suite_timeout_seconds: 120\n---\nbody\n"
+    )
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+    _insert_run("t1", root, wf)
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert bogus_cmd in result["cannot_verify"]
+    assert "NOT GREEN before any mutation" in result["cannot_verify"]
+
+
 # --- cmd_task_finished CLI: flag validation and gating ---------------------------------
 
 

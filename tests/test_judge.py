@@ -388,6 +388,32 @@ def test_block_body_step_3_tells_the_rework_agent_to_self_check(tmp_path):
     assert "optional" not in body.lower()
 
 
+def test_block_body_step_3_binds_the_self_check_flag_to_the_same_experiments_file():
+    """⛔ CMX-258 rework round 12 (judge finding 1, WIRING): the sibling test above pins the
+    flag name, the adjacency, and the absence of "optional" — none of them pin the BINDING
+    half: that the experiments file step 3 names is THE SAME one the judge just proved a
+    guard survived corruption in, not any freshly-written file that happens to come back
+    clean. Softening the parenthetical from "(the same experiments file `chela judge
+    self-check` uses)" to "(any experiments file)" tells a blocked rework agent it may write
+    a NEW experiments file for the round it was blocked on — the gate would then re-verify
+    guards the agent chose after the fact instead of the ones the judge just proved were
+    decoration, on the exact round that matters most. Same shape as
+    ``test_workflow_md_step_6_binds_the_self_check_flag_to_the_same_experiments_file`` below,
+    pinned at ``block_body``'s own call site instead of ``WORKFLOW.md``'s."""
+    survived = judge.Outcome(
+        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+        judge.SURVIVED, "it survived",
+        baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+        mutated=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+    )
+    report = judge.Report(outcomes=[survived],
+                           baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""))
+
+    body = judge.block_body(report, "https://x/1", TEST_CMD)
+
+    assert "the same experiments file `chela judge self-check` uses" in body
+
+
 def test_workflow_md_step_6_names_both_task_finished_flags():
     """⛔ CMX-258 review round 2 non-blocking note: WIRING, same shape as
     ``test_block_body_step_3_tells_the_rework_agent_to_self_check`` above — the repo's own
@@ -468,6 +494,27 @@ def test_workflow_md_step_6_binds_the_self_check_flag_to_the_same_experiments_fi
     text = " ".join((root / "WORKFLOW.md").read_text().split())
 
     assert "the SAME experiments file from step 3" in text
+
+
+def test_workflow_md_step_6_no_new_guards_warns_against_dodging_a_failing_self_check():
+    """⛔ CMX-258 rework round 12 (judge finding 2, WIRING): five tests already cover step 6's
+    wiring — both flag names, the mandate to pass one, which condition maps to which flag,
+    step 3 keeping the file, and step 6 naming the SAME file — but none of them pin the
+    `--no-new-guards` bullet's OWN body, the only text that tells an agent this opt-out is
+    not a substitute for a failing self-check. Rewriting it into an explicit invitation to
+    reach for `--no-new-guards` whenever the self-check is inconvenient or failing leaves
+    every one of those five substrings untouched (both bullet HEADERS survive verbatim),
+    while `check_no_new_guards` — the opt-out's only cross-check — is report-only by design
+    and NEVER blocks: an agent following the softened doc slips straight through a gate that
+    still reads as fully enforced on paper."""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert (
+        "Do not reach for this to dodge a failing self-check; the judge still reads the "
+        "diff and a guard that exists without a matching self-check is exactly the gap "
+        "this closes."
+    ) in text
 
 
 def test_zero_experiments_is_CANNOT_VERIFY_not_a_clean_bill_of_health(tmp_path):
