@@ -456,6 +456,32 @@ def test_cmd_task_finished_reports_the_exact_error_text_when_self_check_could_no
     mark.assert_not_called()
 
 
+def test_cmd_task_finished_self_check_forwards_its_own_task_id_not_a_hardcoded_one(capsys):
+    """⛔ CMX-250 round 8, finding 1 (closed up front on re-scope, quoted verbatim):
+    ``cmd_task_finished`` must self-check THE RUN IT WAS INVOKED FOR — the CLI's
+    forwarding of its own ``task_id`` into ``verify_self_check``.
+
+        -         check = dispatcher.verify_self_check(args.task_id, experiments)
+        +         check = dispatcher.verify_self_check("t1", experiments)
+
+    Every other test in this file invokes ``task-finished`` with the literal ``"t1"``, so a
+    hardcoded ``"t1"`` in production satisfies every one of them — including
+    ``check.assert_called_once_with("t1")`` above. Use a task_id that is NOT ``"t1"`` so the
+    mutation goes red."""
+    from chela import main
+
+    with patch.object(dispatcher, "verify_self_check",
+                       return_value={"ok": True, "blocking": 0, "cannot_verify": "",
+                                     "outcomes": []}) as verify, \
+         patch.object(dispatcher, "mark_awaiting_review",
+                       return_value={"ok": True, "task_id": "cmx-777",
+                                     "pr_url": "https://x/1"}):
+        with patch.object(sys, "argv", ["chela", "task-finished", "cmx-777",
+                                         "--self-check-experiments", "e.json"]):
+            main.main()
+    verify.assert_called_once_with("cmx-777", "e.json")
+
+
 # --- dispatcher.check_no_new_guards -----------------------------------------------------
 #
 # ⚖️🔎 CMX-250 review round 1, finding 2: `--no-new-guards` was a bare self-declaration
@@ -764,3 +790,25 @@ def test_cmd_task_finished_no_new_guards_silent_when_diff_is_unknown(capsys):
     out = capsys.readouterr().out
     assert "touches tests/" not in out
     assert "awaiting review" in out
+
+
+def test_cmd_task_finished_no_new_guards_forwards_its_own_task_id_not_a_hardcoded_one(capsys):
+    """⛔ CMX-250 round 8, finding 2 (closed up front on re-scope, quoted verbatim): the
+    ``--no-new-guards`` cross-check must read THE RUN IT WAS INVOKED FOR — the same
+    task_id-forwarding gap as finding 1, at the sibling call site.
+
+        -         touched_tests = dispatcher.check_no_new_guards(args.task_id)
+        +         touched_tests = dispatcher.check_no_new_guards("t1")
+
+    Same shape as the sibling test above: every other ``--no-new-guards`` test uses the
+    literal ``"t1"``, so a task_id that is NOT ``"t1"`` is required to catch a hardcoded
+    forward."""
+    from chela import main
+
+    with patch.object(dispatcher, "check_no_new_guards", return_value=False) as check, \
+         patch.object(dispatcher, "mark_awaiting_review",
+                       return_value={"ok": True, "task_id": "cmx-777",
+                                     "pr_url": "https://x/1"}):
+        with patch.object(sys, "argv", ["chela", "task-finished", "cmx-777", "--no-new-guards"]):
+            main.main()
+    check.assert_called_once_with("cmx-777")
