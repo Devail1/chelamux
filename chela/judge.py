@@ -408,10 +408,16 @@ def _no_color_env() -> dict[str, str]:
     out to dies the same way — every JS suite fails, on every PR, for a reason that has
     nothing to do with the PR. Popped for the same reason as ``FORCE_COLOR``: the judge's
     own inherited environment is not the PR's suite to run under uncritically.
+
+    ``NODE_CHANNEL_SERIALIZATION_MODE`` — the sibling var Node sets alongside the fd to say
+    how to (de)serialize what crosses it — is popped too, even though it is inert on its own
+    once the fd is gone: a fixture that only ever checks the fd cannot tell a full scrub
+    apart from a regression that scrubs only the fd, so both are cleared together.
     """
     env = dict(os.environ)
     env.pop("FORCE_COLOR", None)
     env.pop("NODE_CHANNEL_FD", None)
+    env.pop("NODE_CHANNEL_SERIALIZATION_MODE", None)
     env["NO_COLOR"] = "1"
     env["PY_COLORS"] = "0"
     return env
