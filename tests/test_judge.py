@@ -697,6 +697,88 @@ def test_a_clean_verdict_for_a_head_that_no_longer_exists_never_overwrites_judge
     assert run["judge_sha"] == "oldsha000001"            # untouched
 
 
+def test_a_stale_clean_verdicts_PR_comment_also_names_both_shas(tmp_path):
+    """⚖️⏱️ CMX-246 rework, finding 2: `test_a_clean_verdict_for_a_head_that_no_longer_exists_
+    never_overwrites_judge_state` above pins the DB-side half of the clean-stale path
+    (`judge_state`/`judge_sha` left untouched) but never reads `posted` — so it cannot catch
+    the announcement being dropped from the CLEAN branch's comment specifically. The blocking
+    branch's notice is covered by `test_a_stale_verdict_announces_both_shas_on_the_PR_and_in_
+    the_event_log`, which always takes the `if blocking:` arm — it cannot exercise the `else:`
+    (clean) arm's own `if stale_head:` prefix at all.
+
+    Disable the clean branch's `if stale_head:` prefix (e.g. `if False and stale_head:`) and
+    this goes red: the clean verdict posts with no mention that it was superseded."""
+    task_id = "abc123"
+    judged_sha = "oldsha000001"
+    live_sha = "newsha000002"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=judged_sha, pr_head_sha=live_sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    posted: list[str] = []
+    with patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD
+    assert posted
+    assert judged_sha[:12] in posted[0]
+    assert live_sha[:12] in posted[0]
+    assert "SUPERSEDED" in posted[0]
+
+
+def test_the_PRs_live_head_is_reread_right_before_the_verdict_is_spent_not_the_stale_in_memory_row(
+    tmp_path,
+):
+    """⚖️⏱️ CMX-246 rework, finding 1: `run` is fetched ONCE at the top of `judge_run`, before
+    the (possibly minutes-long) mutation battery runs. Every existing stale-head test sets the
+    run row's `pr_head_sha` BEFORE calling `judge_run` — so `run` (captured at the very start)
+    already carries the "new" head, and a mutation that swaps the live re-read
+    (`dispatcher.resolve_run(task_id)`) for the stale in-memory `run` is invisible to them: both
+    would read the same value.
+
+    Here the new commit lands DURING the call — from inside `run_experiments`, standing in for
+    a real commit landing on the PR while this judge's suite is still running — exactly the
+    window CMX-246 exists to cover. `run` was captured before that update, so only a genuine
+    live re-read observes the new head.
+
+    Swap `live_run = dispatcher.resolve_run(task_id)` for `live_run = run` and this goes red:
+    `live_head` reads the pre-update sha, matches `verified_sha`, `stale_head` is wrongly
+    `False`, and the round is charged for a commit the PR no longer presents as its head."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=None, pr_head_sha="oldsha000001")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    real_run_experiments = judge.run_experiments
+
+    def _land_a_new_commit_mid_run(*a, **kw):
+        with dispatcher._db() as conn:
+            conn.execute(
+                "UPDATE runs SET pr_head_sha=? WHERE task_id=?", ("newsha000002", task_id),
+            )
+            conn.commit()
+        return real_run_experiments(*a, **kw)
+
+    posted: list[str] = []
+    with patch.object(judge, "run_experiments", side_effect=_land_a_new_commit_mid_run), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["pr_head_sha"] == "newsha000002"      # the mid-run update really landed
+    assert run["status"] == "awaiting_review"         # never moved to changes_requested
+    assert (run["rework_count"] or 0) == 0             # ⛔ no round spent
+    assert not dispatcher.reviews_of(run)              # request_changes was never called
+    assert posted and "oldsha000001"[:12] in posted[0]
+    assert "newsha000002"[:12] in posted[0]
+
+
 def test_a_clean_run_is_LEFT_ALONE_the_judge_never_merges_and_never_approves(tmp_path):
     result, run, posted = _judge_run(tmp_path, REAL_GUARD_TEST, {"experiments": [_exp()]})
 
@@ -1675,6 +1757,37 @@ def test_cmd_judge_prints_the_blocked_race_verdict_distinctly(capsys):
     out = capsys.readouterr().out
     assert "SURVIVED corruption, but the run had already moved on" in out
     assert "This needs a human look NOW" in out
+    assert "every guard held" not in out
+
+
+def test_cmd_judge_prints_the_stale_head_notice_not_every_guard_held(capsys):
+    """⚖️⏱️ CMX-246 rework, finding 3: `chela judge run`'s CLI print branch for `J_STALE_HEAD`
+    is a dead ``elif`` away from silently falling through to the ``else`` — which prints
+    "every guard held. The run stays awaiting_review", exactly what a human would read as
+    "nothing needs their attention" for a run whose verdict was actually just discarded as
+    superseded. Same drive-the-real-argparse-dispatch pattern as the `J_BLOCKED_RACE` CLI
+    test above.
+
+    Disable ``elif state == judge.J_STALE_HEAD:`` (e.g. ``elif False and state == ...:``) and
+    this goes red: it falls to the ``else`` branch and prints "every guard held" instead of
+    the supersession notice."""
+    from unittest.mock import patch
+
+    from chela import main
+
+    fake = {
+        "ok": False, "task_id": "cmx-99", "state": judge.J_STALE_HEAD, "outcomes": [],
+        "error": "verdict was for 'oldsha000001', but the PR's head is now 'newsha000002' — "
+                 "discarded, no round spent",
+        "comment_posted": True,
+    }
+    with patch.object(main.judge, "judge_run", return_value=fake):
+        with patch.object(sys, "argv",
+                           ["chela", "judge", "run", "cmx-99", "--experiments", "x.json"]):
+            main.main()
+    out = capsys.readouterr().out
+    assert "no rework round was spent" in out
+    assert "a fresh judge covers the new head" in out
     assert "every guard held" not in out
 
 
