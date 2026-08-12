@@ -1095,6 +1095,23 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `judge_max_unknown_retries`.
         ("judge_cannot_verify_tries",
          "ALTER TABLE runs ADD COLUMN judge_cannot_verify_tries INTEGER"),
+        # ⚖️🕳️ CMX-253 Objective 2. Did the CURRENT `judge_state` come from a judge that
+        # actually ran and reported, or from one that never got the chance to (its tmux
+        # window vanished — host reboot, tmux death — before it published anything)? Those
+        # are NOT the same "unknown": a `cannot_verify` VERDICT (no `test_cmd`, a corrupt
+        # experiments file, a real mutation-battery flake) is the judge doing its job and
+        # coming up empty — that costs a `judge_cannot_verify_tries` retry, same as always.
+        # A vanished window is the judge never having run AT ALL — counting that against the
+        # SAME bounded budget means a string of host reboots (observed live 2026-08-12, seven
+        # in a row) burns the whole retry budget on attempts that told us nothing, and the PR
+        # escalates to `needs_human` for an environment hiccup instead of quietly getting
+        # re-judged once the box is back. `_judge_watchdog` sets this to 1 ONLY on its
+        # window-disappeared branch (never on a timeout — a judge that ran past
+        # `JUDGE_TIMEOUT_SECONDS` DID get a chance to run, and "stuck, not thinking" stays a
+        # counted unknown, exactly as CMX-81 always treated it). `set_judge_state` clears it
+        # back to 0 on every other write, so it always describes the CURRENT `judge_state`,
+        # never a stale prior one.
+        ("judge_no_verdict", "ALTER TABLE runs ADD COLUMN judge_no_verdict INTEGER"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
         # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
@@ -2756,7 +2773,8 @@ def retry(ident: str, reason: str = "") -> dict:
     }
 
 
-def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None) -> None:
+def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None,
+                     no_verdict: bool = False) -> None:
     """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE (besides ``sha``).
 
     The judge's only way to change a run's STATUS is :func:`request_changes` — the one
@@ -2772,17 +2790,25 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
     a stale commit, and the per-sha trigger would immediately re-spawn a redundant judge on
     the very sha this call just verified. Every normal caller passes nothing and this column
     is untouched, exactly as before.
+
+    ``no_verdict``, when True, also stamps ``judge_no_verdict=1`` — ⚖️🕳️ CMX-253 Objective 2:
+    this call is recording that a judge NEVER RAN, not that one ran and came up empty (see
+    ``judge_no_verdict``'s column comment). Every normal caller passes nothing, which clears
+    it back to 0 — the column always describes the state THIS call just wrote, never a stale
+    prior one.
     """
     with _db() as conn:
         if sha:
             conn.execute(
-                "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=? WHERE task_id=?",
-                (state, (detail or "")[:2000], sha, task_id),
+                "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=?, "
+                "judge_no_verdict=? WHERE task_id=?",
+                (state, (detail or "")[:2000], sha, int(no_verdict), task_id),
             )
         else:
             conn.execute(
-                "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
-                (state, (detail or "")[:2000], task_id),
+                "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=? "
+                "WHERE task_id=?",
+                (state, (detail or "")[:2000], int(no_verdict), task_id),
             )
         conn.commit()
 
@@ -4641,12 +4667,21 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
     # already proved the bump stays under `judge_max_unknown_retries`). Any other same-head
     # re-launch keeps the running total. Counting retries HERE, not on the verdict, keeps one
     # writer whatever ended the judge — the watchdog, a launch failure, or `chela judge run`.
+    # ⚖️🕳️ CMX-253 Objective 2: EXCEPT when that `cannot_verify` is `judge_no_verdict` — the
+    # judge never got to run at all (its window vanished: host reboot, tmux death), so
+    # re-launching it is not a retry of a failed attempt, it is the FIRST attempt. Counting
+    # it would burn the whole bounded budget on a string of reboots that told us nothing
+    # about the PR and escalate it to a human for an environment hiccup (see that column's
+    # comment for the live incident this fixes).
     same_sha = row["judge_sha"] == sha
     prior = (row["judge_cannot_verify_tries"] or 0) if same_sha else 0
-    tries = prior + 1 if (same_sha and row["judge_state"] == judge.J_CANNOT_VERIFY) else prior
+    retried_unknown = (
+        same_sha and row["judge_state"] == judge.J_CANNOT_VERIFY and not row["judge_no_verdict"]
+    )
+    tries = prior + 1 if retried_unknown else prior
     conn.execute(
         "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=?, "
-        "judge_cannot_verify_tries=? WHERE task_id=?",
+        "judge_cannot_verify_tries=?, judge_no_verdict=0 WHERE task_id=?",
         (sha, judge.J_RUNNING, _now(), "", tries, task_id),
     )
     conn.commit()
@@ -4753,9 +4788,14 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             "not thinking" if timed_out else
             "the judge's window disappeared before it published a verdict"
         )
+        # ⚖️🕳️ CMX-253 Objective 2: a TIMEOUT judge got a chance to run and stayed stuck —
+        # that is still a counted unknown, same as CMX-81 always treated it. A judge whose
+        # window just VANISHED (host reboot, tmux death) never got that chance at all, so it
+        # must not spend the same bounded retry budget a real attempt would; see
+        # `judge_no_verdict`'s column comment.
         conn.execute(
-            "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
-            (judge.J_CANNOT_VERIFY, reason, row["task_id"]),
+            "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=? WHERE task_id=?",
+            (judge.J_CANNOT_VERIFY, reason, int(not timed_out), row["task_id"]),
         )
         conn.commit()
         if alive:

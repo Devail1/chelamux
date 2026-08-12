@@ -1698,6 +1698,92 @@ def test_spawn_judge_resets_the_unknown_count_on_a_new_sha_and_bumps_it_on_a_ret
     assert _state() == ("f00dbabe", judge.J_RUNNING, 0)
 
 
+def test_a_vanished_judge_window_does_not_spend_a_retry(tmp_path, monkeypatch):
+    """⚖️🕳️ CMX-253 Objective 2. A judge whose window vanished (host reboot, tmux death)
+    before it published a verdict never got to run at all — re-launching it is the FIRST
+    attempt on this commit, not a retry of a failed one. Counting it against
+    `judge_cannot_verify_tries` would burn the whole bounded budget on a string of reboots
+    that told us nothing about the PR (observed live 2026-08-12, seven reboots in a row).
+
+    Seen to go red: revert `_spawn_judge`'s `judge_no_verdict` check (or `_judge_watchdog`'s
+    stamping of it) and this fails — `judge_cannot_verify_tries` becomes 1, exactly the
+    stranding bug CMX-253 Objective 2 exists to close.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    def _spawn(sha):
+        with dispatcher._db() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+            with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+                 patch.object(dispatcher, "render_prompt", return_value="x"), \
+                 patch.object(dispatcher, "_judge_vars", return_value={}), \
+                 patch.object(dispatcher, "_launch_agent", return_value=None):
+                assert dispatcher._spawn_judge(wf, row, sha, conn) is True
+
+    def _state():
+        r = dispatcher.resolve_run("abc123")
+        return r["judge_state"], r["judge_cannot_verify_tries"], r["judge_no_verdict"]
+
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+    # The judge's window vanishes before it ever published anything — no lock file on disk
+    # either (a real host reboot leaves nothing behind), so the watchdog reaps it.
+    with dispatcher._db() as conn:
+        with patch.object(judge, "judge_lock_live", return_value=False):
+            handed_over = dispatcher._judge_watchdog(conn, wf, live_windows=set())
+        conn.commit()
+    assert handed_over == 1
+    state, tries, no_verdict = _state()
+    assert state == judge.J_CANNOT_VERIFY
+    assert no_verdict == 1
+    assert tries == 0                    # untouched by the vanish itself
+
+    # Re-launching the SAME sha must NOT count this as a spent retry.
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+
+def test_a_genuine_cannot_verify_verdict_still_spends_a_retry(tmp_path, monkeypatch):
+    """⚖️🕳️ CMX-253 Objective 2, negative control. A `cannot_verify` the judge actually
+    PRODUCED (it ran, and came back with an unknown — `set_judge_state`'s default,
+    `judge_no_verdict=False`) is unchanged by this fix and still costs a bounded retry, same
+    as CMX-81 always did. Without this control, a fix that stopped counting `cannot_verify`
+    ENTIRELY (rather than only the no-verdict case) would still pass the vanished-window test
+    above."""
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    def _spawn(sha):
+        with dispatcher._db() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+            with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+                 patch.object(dispatcher, "render_prompt", return_value="x"), \
+                 patch.object(dispatcher, "_judge_vars", return_value={}), \
+                 patch.object(dispatcher, "_launch_agent", return_value=None):
+                assert dispatcher._spawn_judge(wf, row, sha, conn) is True
+
+    def _state():
+        r = dispatcher.resolve_run("abc123")
+        return r["judge_state"], r["judge_cannot_verify_tries"], r["judge_no_verdict"]
+
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+    # The judge actually ran and reported an unknown — e.g. `judge.judge_run` writing
+    # `report.cannot_verify` through its normal path. `no_verdict` defaults False.
+    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "no judge.test_cmd configured")
+    assert _state() == (judge.J_CANNOT_VERIFY, 0, 0)
+
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 1, 0)   # ⛔ this one DOES cost a retry
+
+
 def _fake_tmux_new_window(target_id: str):
     """Fake `subprocess.run` good enough to drive `_launch_agent`'s real tmux half:
     `tmux new-window` reports `target_id`, everything else (send-keys, …) is a no-op."""
