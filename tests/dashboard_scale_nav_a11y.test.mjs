@@ -117,9 +117,27 @@
 // NOT REMOVAL" is a DOM fact (does the demoted row still occupy space and
 // paint under #side-nav-more, not just does the container exist), which
 // jsdom resolves truthfully the same way it does for .side-subhead
-// immediately above it — see the SIDE_SECTION_FIXTURE render test below,
-// which now also asserts on the fixture's own .side-item row instead of
-// stopping at the container.
+// immediately above it (round 14 below narrows this further, but keeps it
+// guarded — it never moved to NOT GUARDED).
+//
+// CMX-257 round 14 — FINAL NARROWING (human directive on PR #326, superseding
+// rounds 1-13's growing enumeration of .side-subhead/demoted-group aspects):
+// by round 13, .side-subhead alone had drawn findings across TEN rounds —
+// hiding, text-present, opacity-exists, opacity-readable, position, renders,
+// readable-heading, entity-blank, same-row-styling, and round 13's own
+// human-authored enumerated list turning out to have a gap itself (a
+// corrupted `color: transparent` satisfied every item on that list, since
+// none of them read colour). Each round closed the SPECIFIC aspect named and
+// the next round found another aspect of the SAME element — proof the
+// element has an unbounded number of visual aspects, not that the guard was
+// nearly complete. CLAIM 3 is now reduced to the ONE DOM fact views.js's own
+// comment actually claims — the four demoted views still EXIST and RENDER
+// (occupy space, are not display:none/visibility:hidden) under a heading
+// that itself exists and carries real text — asserted in one consolidated
+// test below. Everything else about .side-subhead and the demoted group
+// (precise opacity/font-size/colour values, exact source position/ordering,
+// and any font-size/weight COMPARISON to the primary rail's own rows) moves
+// to NOT GUARDED, item (v) below.
 //
 // NOT GUARDED here — verified instead by manual greyscale capture (per the
 // round-6 directive: "I verified it live on an isolated dashboard... a
@@ -176,6 +194,18 @@
 // allowlist still only parsed hex/rgb(), and failed OPEN — silently skipped —
 // on anything else, e.g. a bare hsl() literal) — the greyscale capture at
 // 1/2/4/6 densities is its acceptance check.
+// — round 14, FINAL narrowing of CLAIM 3 —
+// (v) .side-subhead's and the demoted group's own precise STYLING: the exact
+// opacity/font-size/colour values the heading and rows render with beyond
+// "not display:none, not visibility:hidden" (asserted below), the exact
+// source POSITION/ordering of .side-subhead relative to #side-nav and
+// #side-nav-more, and any font-size/weight COMPARISON between the demoted
+// rows and the primary rail's own rows ("renders lighter than primary" —
+// same CSS-value-comparison class as (ii) above, which this subsumes) — the
+// greyscale capture at 1/2/4/6 densities is its acceptance check. What stays
+// guarded is the one DOM fact below: the four demoted views still exist and
+// render under a heading that itself exists and carries real text —
+// "RE-PARENTING, NOT REMOVAL", views.js's own claim.
 //
 // Run: node --test tests/dashboard_scale_nav_a11y.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
@@ -233,28 +263,6 @@ function mountWithRealCss(bodyHtml, extraBodyAttrs, cssOverride) {
 // notation/selector-shape angle a text-and-DOM test cannot honestly close.
 // Moved to the NOT GUARDED block at the top of this file; the acceptance
 // check is the manual greyscale capture, not another resolver.
-
-// Shared "this element occupies space and paints" assertion, now against
-// jsdom's own resolved computed style instead of a hand-rolled property scan
-// — display/visibility/opacity/font-size are all properties jsdom resolves
-// honestly without needing `vw` (confirmed empirically). Used by the nav
-// "actually renders" fixture below.
-function assertRendersVisibly(win, el, label) {
-    const cs = win.getComputedStyle(el);
-    assert.notEqual(cs.display, 'none', `${label} has display: none at desktop — removed from the box tree entirely`);
-    assert.ok(!/^(hidden|collapse)$/.test(cs.visibility),
-        `${label} has visibility: ${cs.visibility} — invisible but still occupying box-tree space`);
-    assert.ok(parseFloat(cs.opacity) >= 0.3, `${label}'s opacity (${cs.opacity}) has dropped toward invisible`);
-    // Fail CLOSED, not open: a length jsdom reports in a non-px notation (e.g. an
-    // em/rem value that never gets resolved to px, such as `0.001em` on a 16px
-    // root) must not silently skip this floor — it must fail it. Round 12's
-    // mutation found the open form (`if (fs) { ... }`) lets exactly that through:
-    // the heading is present, correctly classed, correctly ordered, and renders
-    // as nothing.
-    const fs = cs.fontSize.match(/^([0-9.]+)px$/);
-    assert.ok(fs, `${label}'s font-size (${cs.fontSize}) is not a resolved px length — cannot confirm it is readable`);
-    assert.ok(parseFloat(fs[1]) >= 8, `${label}'s font-size (${cs.fontSize}) has dropped toward unreadable`);
-}
 
 // --- GUARD 2c: "air in the chrome" at low densities — _setWallDensity's own
 // cutoff is pinned at `<= 2` (style.css's comment's claim, made true). Round
@@ -586,112 +594,74 @@ test('nav inventory: a view with NO tier field defaults to primary, per viewreg.
         'an untiered view must NOT land in secondaryNavViews — only tier === \'secondary\' may demote it');
 });
 
-// --- index.html carries the #side-nav-more container the demoted group renders
-// into (nav.js's renderNav guards on it, so a missing container degrades
-// silently to "those 4 views vanish from the sidebar" rather than a crash —
-// this is the guard that actually catches that).
-// The id-only match below caught a missing render target, but not a demoted-
-// looking-primary regression: index.html's own comment says the four
-// re-parented views are "just visually demoted (.side-list-secondary,
-// style.css)", and style.css styles .side-list-secondary specifically so the
-// primary 3-item rail "reads as the nav, this as its footnote". A judge round
-// dropped the class while keeping the id, the container, the split and every
-// nav row identical — the demoted group renders at full primary weight again,
-// the exact regression objective 3 exists to prevent — and the id-only match
-// stayed green. This asserts the SAME element carries both.
-test('index.html declares #side-nav-more — the demoted group\'s render target, styled as demoted', () => {
+// --- CLAIM 3 (nav demotion), reduced to ONE structural fact — CMX-257 round
+// 14 (human directive on PR #326, FINAL narrowing, superseding rounds 1-13):
+// .side-subhead and the demoted group had drawn findings across TEN rounds —
+// collapsed-rail hiding, text-present, opacity-exists, opacity-readable,
+// position, renders-at-all, readable-heading, entity-blank, same-row-styling,
+// and finally the round-13 human-authored enumeration itself turning out to
+// have its own gap (a corrupted `color: transparent` satisfied every item on
+// that list). Each round closed the SPECIFIC visual aspect named and the next
+// round found another aspect of the SAME element — an unbounded surface, not
+// a converging guard. The fix is not a longer enumeration, it's a shorter
+// one: guard exactly the DOM fact views.js's own comment makes a claim
+// about — "RE-PARENTING, NOT REMOVAL" — and move every other visual/
+// positional aspect of .side-subhead and the demoted group (styling, weight,
+// opacity, exact position, row-shape parity with the primary rail) to NOT
+// GUARDED at the top of this file, with the manual greyscale capture at
+// 1/2/4/6 densities as its acceptance check.
+//
+// Mounted against the REAL index.html nav section (not a hand-copied
+// fixture — a hand fixture drifts from production silently, as the round-13
+// non-blocking note found) with the REAL style.css cascade, so jsdom's own
+// getComputedStyle decides what actually renders. Production ships
+// #side-nav-more empty (renderNav populates it at runtime); one row shaped
+// exactly as nav.js's _navItemHtml emits it (icon span + label span) is
+// injected so this test can ask the one CSS-side question sidebar.test.mjs
+// cannot: does real style.css hide what renderNav puts there. Whether
+// renderNav puts the real Knowledge/Agents/Personas/Cost ids and label text
+// there at all is already proven, with no stylesheet mounted, by
+// sidebar.test.mjs's real-renderNav tests — that half is not re-proven here.
+const NAV_SECTION_HTML = (() => {
     const html = src('templates/index.html');
-    assert.match(html, /id="side-nav-more"/, 'index.html no longer has a #side-nav-more container for the demoted nav group');
-    assert.match(html, /class="side-list side-list-secondary"\s+id="side-nav-more"/,
-        '#side-nav-more must carry .side-list-secondary — without it the demoted group renders at full primary weight, ' +
-        'visually a 7-item rail again, even though the split itself still works');
+    const start = html.indexOf('<section class="side-section">');
+    const end = html.indexOf('</section>', start) + '</section>'.length;
+    return html.slice(start, end);
+})();
 
-    // CMX-257 round 2: the checks above only prove #side-nav (the primary
-    // rail) and #side-nav-more (the demoted group) both exist and the latter
-    // is styled — neither pins WHERE the .side-subhead "More" heading sits
-    // relative to them. A judge round moved .side-subhead ABOVE #side-nav
-    // (heading the PRIMARY 3-item rail "More" while the four demoted rows
-    // dangle unlabelled underneath #side-nav-more) and every assertion above
-    // stayed green, since none of them read source order. #side-nav must
-    // come first (it renders unlabelled, as the ticket's Navigate section
-    // heading already covers it — see the HTML immediately above this
-    // block), then .side-subhead, then #side-nav-more.
-    const sideNavIdx = html.indexOf('id="side-nav"');
-    const sideSubheadIdx = html.indexOf('class="side-subhead"');
-    const sideNavMoreIdx = html.indexOf('id="side-nav-more"');
-    assert.ok(sideNavIdx !== -1 && sideSubheadIdx !== -1 && sideNavMoreIdx !== -1,
-        'expected to find #side-nav, .side-subhead and #side-nav-more all present in index.html');
-    assert.ok(sideNavIdx < sideSubheadIdx && sideSubheadIdx < sideNavMoreIdx,
-        'the .side-subhead "More" heading must sit BETWEEN #side-nav (primary rail) and #side-nav-more (demoted ' +
-        'group) in source order — otherwise it either heads the primary rail (mislabelling it "More") or leaves ' +
-        'the demoted rows unlabelled');
+test('nav inventory (CLAIM 3): the demoted group still exists and renders under a heading — re-parenting, not removal', () => {
+    const rowHtml = '<div class="side-item"><span class="side-item-icon"></span><span class="side-item-label">Knowledge</span></div>';
+    const bodyHtml = `<div class="app"><aside class="sidebar">${NAV_SECTION_HTML}</aside></div>`
+        .replace('id="side-nav-more"></div>', `id="side-nav-more">${rowHtml}</div>`);
+    const win = mountWithRealCss(bodyHtml);
 
-    // GUARD 4 (index.html) round 9: the container's id/class were pinned above,
-    // but nothing asserted the demoted group's own LABEL — style.css's CMX-230
-    // comment states the design claim explicitly: "a plain-text subhead
-    // instead of the Navigate section's uppercase label". Blanking the text
-    // leaves four unlabelled rows dangling under the 3-item rail with no
-    // heading telling a reader they are a separate, demoted group, while the
-    // container id/class, the split and every other guard here stay green.
-    assert.match(html, /<div class="side-subhead">\S[^<]*<\/div>/,
-        'the .side-subhead label text is missing/blank — the demoted nav group would render with no heading at all');
-
-    // Round 12: the regex above is a SOURCE-TEXT `\S` check, so it classifies
-    // characters, not rendered content — an HTML entity for whitespace (e.g.
-    // `&nbsp;`) is non-whitespace as source text and satisfies `\S`, while a
-    // browser (and jsdom) renders U+00A0 as nothing a reader can see. Parse the
-    // REAL shipped markup and read the REAL element's textContent back instead
-    // of matching the string: JS's String#trim() strips U+00A0 along with
-    // ordinary whitespace, so an entity-blanked heading fails this the way it
-    // visually fails for a person, while "More" passes.
-    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`);
-    const subhead = dom.window.document.querySelector('.side-subhead');
-    assert.ok(subhead, 'index.html no longer has a .side-subhead element to read text from');
+    const subhead = win.document.querySelector('.side-subhead');
+    assert.ok(subhead, 'index.html no longer has a .side-subhead heading for the demoted nav group');
     assert.notEqual(subhead.textContent.trim(), '',
         'the .side-subhead renders with no visible text (its content trims to nothing, e.g. an &nbsp; entity) — ' +
         'the demoted nav group would render with no readable heading at all');
-});
+    const subheadCs = win.getComputedStyle(subhead);
+    assert.notEqual(subheadCs.display, 'none', 'the .side-subhead heading has display: none — removed from the box tree entirely');
+    assert.ok(!/^(hidden|collapse)$/.test(subheadCs.visibility),
+        `the .side-subhead heading has visibility: ${subheadCs.visibility} — invisible but still occupying box-tree space`);
 
-// round 9: .side-subhead alone drew FIVE separate findings before round 6's
-// consolidation and one more after it (a `font-size: 0` that the old
-// property-scan's px-only regex SKIPPED — a valid unitless zero — rather than
-// failed, the strongest possible version of the exact regression this guard
-// exists to catch). #side-nav-more (the demoted group's actual render target
-// — views.js's own "RE-PARENTING, NOT REMOVAL" must-never) shares the same
-// element and failure mode. Both are mounted via the REAL style.css in jsdom
-// (assertRendersVisibly, defined near the top of this file), against the
-// real ancestor markup — per templates/index.html, both sit directly inside
-// `<section class="side-section">`, itself inside `<aside class="sidebar">`,
-// itself inside `<div class="app">` — so jsdom's own cascade/specificity
-// (verified honest for display/visibility/opacity/font-size) decides what
-// actually renders, closing the ancestor-scoped-override hole a literal
-// selector-string lookup missed AND the font-size:0 regex-skip hole in the
-// same fixture.
-//
-// round 11: the checks above stopped at #side-nav-more, the CONTAINER — they
-// never read the fixture's own `.side-item` row (Knowledge/Agents/Personas/
-// Cost's real shape) that already sits inside it. A rule hiding just the
-// ROWS (`.side-list-secondary .side-item { display: none; }`) left the
-// container rendering an empty box and both checks above green, while
-// "RE-PARENTING, NOT REMOVAL" silently became removal for every demoted view.
-// The row assertion below closes that: `assert.ok(row, ...)` fails if the row
-// is gone from the DOM entirely (genuinely removed, not just re-parented),
-// and assertRendersVisibly (display/visibility/opacity/font-size) fails if
-// it's still in the DOM but hidden — the two ways "still renders somewhere"
-// can be violated.
-const SIDE_SECTION_FIXTURE = `<div class="app"><aside class="sidebar"><section class="side-section">
-  <div class="side-list" id="side-nav"></div>
-  <div class="side-subhead">More</div>
-  <div class="side-list side-list-secondary" id="side-nav-more"><div class="side-item"><span class="side-item-icon"></span><span class="side-item-label">x</span></div></div>
-</section></aside></div>`;
-test('.side-subhead, #side-nav-more and its demoted row all actually render — occupy space and paint, not just exist in the markup', () => {
-    const win = mountWithRealCss(SIDE_SECTION_FIXTURE);
-    assertRendersVisibly(win, win.document.querySelector('.side-subhead'), 'the demoted nav group\'s "More" heading');
-    assertRendersVisibly(win, win.document.getElementById('side-nav-more'), 'the demoted nav group\'s render target');
     const row = win.document.querySelector('#side-nav-more .side-item');
-    assert.ok(row, 'the demoted nav group\'s own row (e.g. Knowledge/Agents/Personas/Cost) is missing from the DOM ' +
-        'entirely — "RE-PARENTING, NOT REMOVAL" (views.js) means the row must still exist under #side-nav-more, not vanish');
-    assertRendersVisibly(win, row, 'the demoted nav group\'s own row — re-parented under #side-nav-more, not removed');
+    assert.ok(row, 'index.html no longer has a #side-nav-more container for the demoted nav group to render into');
+    const rowCs = win.getComputedStyle(row);
+    assert.notEqual(rowCs.display, 'none',
+        'the demoted row has display: none — "RE-PARENTING, NOT REMOVAL" (views.js) means it must still render, not vanish');
+    assert.ok(!/^(hidden|collapse)$/.test(rowCs.visibility),
+        `the demoted row has visibility: ${rowCs.visibility} — invisible but still occupying box-tree space`);
+
+    const label = row.querySelector('.side-item-label');
+    assert.ok(label, 'the demoted row has no .side-item-label span at all — re-parenting has become removal of the accessibility cue');
+    assert.notEqual(label.textContent.trim(), '',
+        'the demoted row\'s label has no real text — re-parenting has become removal of the accessibility cue');
+    const labelCs = win.getComputedStyle(label);
+    assert.notEqual(labelCs.display, 'none',
+        'the demoted row\'s label has display: none — re-parenting has become removal of the accessibility cue');
+    assert.ok(!/^(hidden|collapse)$/.test(labelCs.visibility),
+        `the demoted row's label has visibility: ${labelCs.visibility} — invisible but still occupying box-tree space`);
 });
 
 // --- CMX-257 round 10 (human directive on PR #326, superseding round 8/9):
