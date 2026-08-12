@@ -1990,6 +1990,39 @@ def cmd_judge(args) -> None:
               "the judge never merges.")
 
 
+def cmd_judge_self_check(args) -> None:
+    """⚖️🔎 CMX-249: the CHECK, not the habit. Runs the judge's own apply/parse/run/restore
+    mechanics against ``--cwd`` (default: here) — the mechanical form of Done Criteria #3
+    ("corrupt each guard and watch it go RED"), so an agent does not have to do that by hand.
+
+    Exit codes: ``0`` every guard KILLED (safe to commit), ``1`` a guard SURVIVED corruption
+    (this is decoration — fix it before committing), ``2`` CANNOT VERIFY (no experiments, a
+    red baseline, or an unprovisionable env — not a verdict either way).
+    """
+    result = judge.run_self_check(
+        args.cwd, args.experiments, workflow_path=args.workflow, test_cmd=args.test_cmd,
+    )
+    if not result.get("ok"):
+        print(f"self-check: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+
+    for outcome in result.get("outcomes") or []:
+        print(f"  [{outcome['verdict']:8}] {outcome['file']}: {outcome['guard'][:70]}")
+        print(f"             {outcome['reason']}")
+
+    if result["blocking"]:
+        print(f"⚖️ {result['blocking']} guard(s) SURVIVED corruption — this is DECORATION, "
+              "not a guard: it asserts something other than what it claims. Fix it before "
+              "you commit.")
+        sys.exit(1)
+    if result["cannot_verify"]:
+        print(f"⚠ CANNOT VERIFY — {result['cannot_verify']}")
+        print("   Nothing was blocked and nothing was cleared.")
+        sys.exit(2)
+    print(f"✓ every guard held ({len(result['outcomes'])} experiment(s), all KILLED) — "
+          "safe to commit.")
+
+
 def cmd_update(args) -> None:
     """``chela update`` — pull the checkout, re-sync deps, restart services. ``--check``
     only reports how far behind it is; it changes nothing.
@@ -2427,6 +2460,29 @@ def main() -> None:
         "--no-cleanup", action="store_true",
         help="Keep the judge worktree and the tmux window (debugging a judge run by hand)",
     )
+    p_jcheck = judge_sub.add_parser(
+        "self-check",
+        help="⚖️🔎 Run the judge's own mutation mechanics against YOUR OWN worktree, before "
+             "you commit — the mechanical form of 'corrupt each guard and watch it go RED'",
+    )
+    p_jcheck.add_argument(
+        "--experiments", required=True, metavar="PATH",
+        help="JSON you write: {\"experiments\": [{guard, file, before, after, kind}], "
+             "\"notes\": [...]}. chela runs them; it does not trust them",
+    )
+    p_jcheck.add_argument(
+        "--workflow", metavar="PATH",
+        help="WORKFLOW.md to read `judge.test_cmd` (and `suite_timeout_seconds`) from — the "
+             "same suite the real judge will measure against. Optional if --test-cmd is given",
+    )
+    p_jcheck.add_argument(
+        "--test-cmd", metavar="CMD",
+        help="Run this suite command instead of reading one from --workflow",
+    )
+    p_jcheck.add_argument(
+        "--cwd", metavar="DIR", default=".",
+        help="Worktree to mutate in place (default: the current directory)",
+    )
 
     # merge — the AUTONOMOUS merge gate: the escalation contract enforced in code
     p_merge = sub.add_parser(
@@ -2668,6 +2724,8 @@ def main() -> None:
     elif args.command == "judge":
         if args.judge_cmd == "run":
             cmd_judge(args)
+        elif args.judge_cmd == "self-check":
+            cmd_judge_self_check(args)
         else:
             p_judge.print_help()
     elif args.command == "merge":
