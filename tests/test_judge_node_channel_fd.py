@@ -101,3 +101,31 @@ def test_clean_env_strips_node_channel_serialization_mode_too(monkeypatch):
     monkeypatch.delenv("NODE_CHANNEL_FD", raising=False)
     monkeypatch.setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
     assert "NODE_CHANNEL_SERIALIZATION_MODE" not in test_js_suites._clean_env()
+
+
+def test_clean_env_is_a_targeted_pop_not_an_environment_rebuild(monkeypatch):
+    """⛔ CMX-260 lift, closing PR #321's round 6 finding 1 — the one finding the
+    orchestrator called out by name when re-scoping this ticket, because it was the exact
+    negative control asked for in round-1 review and still missing five rounds later: a
+    "scrub" reimplemented as `{k: v for k, v in os.environ.items() if k not in (...)}` with
+    PATH/HOME in that exclusion tuple drops them from every `node --test` child's
+    environment — and every OTHER test of `_clean_env` passes, because they only assert the
+    two IPC vars are ABSENT, which an empty dict satisfies best of all.
+
+    Guards the positive half (the two IPC vars are gone) and the negative half (PATH/HOME
+    still reach the child) in ONE test, per the orchestrator's own generalised instruction:
+    "where a finding has a positive and a negative half, guard BOTH in one test."
+    """
+    import test_js_suites
+
+    monkeypatch.setenv("NODE_CHANNEL_FD", _POISON_FD)
+    monkeypatch.setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("HOME", "/home/example")
+
+    env = test_js_suites._clean_env()
+
+    assert "NODE_CHANNEL_FD" not in env
+    assert "NODE_CHANNEL_SERIALIZATION_MODE" not in env
+    assert env.get("PATH") == "/usr/bin:/bin", "PATH must still reach the node child"
+    assert env.get("HOME") == "/home/example", "HOME must still reach the node child"

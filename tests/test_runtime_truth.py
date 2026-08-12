@@ -794,13 +794,20 @@ def test_tmux_global_env_reader_parses_show_environment_output(monkeypatch):
     `subprocess.run` with `lambda *a, **k: ...` and never looked at `a` — a mutation
     that dropped `-g` from the argv (asking tmux's per-SESSION table instead of the
     GLOBAL one this fact's whole authority rests on) stayed invisible. Capture the
-    call and assert on it directly."""
+    call and assert on it directly.
+
+    ⛔ CMX-260 lift, closing PR #321's round 6 finding 2 (never fixed before the PR was
+    re-scoped): the earlier fake handed back a `str` `stdout` regardless of the kwargs it
+    was called with — strictly more forgiving than the real `subprocess.run` API, so
+    dropping `text=True` from the call (`out.stdout` then a raw `bytes` object) left the
+    reader permanently blind (`isinstance(out.stdout, str)` is False forever) with every
+    test here still green. Assert the kwargs directly, not just the positional argv."""
     monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
     stdout = "TERM=screen-256color\n-NODE_CHANNEL_FD\nNODE_CHANNEL_SERIALIZATION_MODE=json\n"
     calls = []
 
     def _fake_run(*a, **k):
-        calls.append(a[0] if a else k.get("args"))
+        calls.append((a[0] if a else k.get("args"), k))
         return subprocess.CompletedProcess(a, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -808,9 +815,14 @@ def test_tmux_global_env_reader_parses_show_environment_output(monkeypatch):
         "TERM": "screen-256color",
         "NODE_CHANNEL_SERIALIZATION_MODE": "json",
     }
-    assert calls == [["tmux", "show-environment", "-g"]], (
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ["tmux", "show-environment", "-g"], (
         "must ask tmux for its GLOBAL environment table (-g) — anything less asks "
-        f"only the current session's copy, got {calls}")
+        f"only the current session's copy, got {argv}")
+    assert kwargs.get("text") is True, (
+        "must request text=True — a raw bytes stdout fails `isinstance(out.stdout, str)` "
+        f"and the fact would report CANNOT VERIFY on every real box, forever; got {kwargs}")
 
 
 def test_tmux_global_env_reader_is_none_when_the_tmux_call_itself_fails(monkeypatch):
