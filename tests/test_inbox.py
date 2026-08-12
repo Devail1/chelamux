@@ -2449,6 +2449,19 @@ def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_fil
     assert "the PR still fails review" not in by_task["T3"], (
         "a run escalated for a MISSING BRANCH must not be told it 'still fails review'"
     )
+    # 🔴 GUARD (judge round 4): a reason that FITS under SUMMARY_TITLE_CHARS must reach the
+    # summary VERBATIM and UNMARKED — no trailing "…". The ellipsis is this PR's own signal
+    # that the reason was cut; slapping it on every reason (even ones that fit whole) makes
+    # the signal lie about completeness in exactly the way CMX-247 exists to prevent. An
+    # exact match (not a substring) is required to catch a mutation that appends "…" to a
+    # reason that already fits — a substring check like "no branch" in ... cannot see it.
+    # (Not also asserting "…" not in by_task["T3"] as a whole-line check: TRACKER_LINE — the
+    # fixture title every task shares — already carries a literal "…" of its own, so that
+    # check would fail for reasons that have nothing to do with the reason excerpt.)
+    assert "· rework: the run row has no branch — nothing to re-enter —" in by_task["T3"], (
+        "a reason that fits under SUMMARY_TITLE_CHARS must reach the summary unchanged, "
+        "with no ellipsis appended"
+    )
 
     # Only the reason (first paragraph) reaches the summary — Recommendation/Options stay
     # in the payload's last_error, not pasted into the one line typed at the prompt.
@@ -2463,6 +2476,13 @@ def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_fil
         "a short reason (under SUMMARY_TITLE_CHARS) must still exclude a trailing "
         "Recommendation — this is only provable when the excerpt limit itself can't "
         "be the thing hiding it"
+    )
+    # 🔴 GUARD (judge round 4): same as T3's guard above, but on the OTHER fixture that
+    # exercises the short (`len(reason) <= limit`) path — an exact match, since "no branch"
+    # in ... would stay green even if a mutation appended "…" to this fixture's reason too.
+    assert "· rework: no branch —" in by_task["T4"], (
+        "a reason that fits under SUMMARY_TITLE_CHARS must reach the summary unchanged, "
+        "with no ellipsis appended"
     )
 
     # 🔴 GUARD: T5's 68-char reason sits strictly between SUMMARY_TITLE_CHARS (60) and a
