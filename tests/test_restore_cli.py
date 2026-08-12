@@ -141,9 +141,14 @@ def test_watch_with_no_window_id_points_to_chela_restore(monkeypatch, capsys):
     `chela watch` at all — `self_wid()` is None, so there is no window to register. The old
     message ("run this from inside a tmux window") is a dead end for exactly that session:
     it cannot become one without relaunching. The remedy has to be named here, not left for
-    the operator to discover after `chela restore` independently classifies the row MANUAL."""
+    the operator to discover after `chela restore` independently classifies the row MANUAL.
+
+    CMX-255 gave that dead end a real out for a session with a live claude ancestor — the
+    windowless peer registration — so this is the true dead end ONLY when that also fails
+    (no claude ancestor either), which is what's mocked here."""
     from chela import orchestrator
     monkeypatch.setattr(orchestrator, "self_wid", lambda: None)
+    monkeypatch.setattr(orchestrator, "self_peer", lambda: None)
 
     with pytest.raises(SystemExit):
         main.cmd_watch(SimpleNamespace(wid=None, note=""))

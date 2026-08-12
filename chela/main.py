@@ -534,8 +534,9 @@ def cmd_watch(args) -> None:
             peer = orchestrator.self_peer()
             if not peer:
                 print("no window id: run this from inside a tmux window (or pass @N to watch "
-                      "it) — and no claude ancestor process could be found either, so there "
-                      "is no windowless address to register. If this session used to be the "
+                      "it) — a session started outside tmux cannot bind at all, and no claude "
+                      "ancestor process could be found either, so there is no windowless "
+                      "address to register either. If this session used to be the "
                       "orchestrator, run `chela restore` from ANY shell with tmux on PATH (it "
                       "needs no window of its own) — it will classify the old registration "
                       "MANUAL and hand back the exact `cd <cwd> && CHELA_WID=@N claude "
