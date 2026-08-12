@@ -44,6 +44,18 @@ def test_no_color_env_strips_node_channel_fd(monkeypatch):
     assert "NODE_CHANNEL_FD" not in judge._no_color_env()
 
 
+def test_no_color_env_strips_node_channel_serialization_mode(monkeypatch):
+    """The sibling var Node sets alongside the fd. Inert on its own once the fd is gone —
+    so a BEHAVIOURAL guard (does `node --test` survive?) can never tell a scrub that pops
+    only the fd apart from one that pops both. Only a direct check of the returned env dict
+    can, which is what this is: set ONLY the serialization-mode var (not the fd) so a
+    regression that dropped this half of the scrub is caught even when the fd happens to be
+    absent from the caller's own environment."""
+    monkeypatch.delenv("NODE_CHANNEL_FD", raising=False)
+    monkeypatch.setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
+    assert "NODE_CHANNEL_SERIALIZATION_MODE" not in judge._no_color_env()
+
+
 def test_no_color_env_is_a_no_op_when_node_channel_fd_is_absent(monkeypatch):
     """⭐ COUNTERWEIGHT. A box that never had the leak keeps behaving exactly as before —
     this is a targeted pop, not a broader env rebuild that could drop something real."""
@@ -77,3 +89,15 @@ def test_test_js_suite_itself_survives_a_leaked_node_channel_fd(monkeypatch):
 
     monkeypatch.setenv("NODE_CHANNEL_FD", _POISON_FD)
     test_js_suites.test_js_suite(ROOT / "tests" / "cost.test.mjs")
+
+
+def test_clean_env_strips_node_channel_serialization_mode_too(monkeypatch):
+    """Same reasoning as `_no_color_env`'s counterpart above, for the OTHER `node --test`
+    call site (`tests/test_js_suites.py`'s own subprocess.run). Inert on its own once the
+    fd is gone, so only a direct env-dict check — not a behavioural one — can tell a
+    one-var scrub apart from the two-var scrub this call site is supposed to do."""
+    import test_js_suites
+
+    monkeypatch.delenv("NODE_CHANNEL_FD", raising=False)
+    monkeypatch.setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
+    assert "NODE_CHANNEL_SERIALIZATION_MODE" not in test_js_suites._clean_env()

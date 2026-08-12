@@ -346,6 +346,71 @@ def _session_report(session: str, obs: Observation) -> list[Finding]:
     return out
 
 
+# --- fact: tmux's GLOBAL environment, and Node's leaked IPC vars ---------------------
+
+# CMX-252: pm2 forks its managed processes through Node's own `child_process.fork` (IPC
+# channel included) even when the target isn't a Node program, so these leak into whatever
+# tmux server starts under that ancestry — and from there into tmux's GLOBAL environment,
+# the table every new window in EVERY session inherits from. A `node --test` child that
+# inherits a stale fd number can SIGABRT before running a single test (`chela/judge.py`'s
+# `_no_color_env` has the full reproduction). `dispatcher._new_window` scrubs this table on
+# every spawn it makes, but it can be reintroduced by a tmux server started later by another
+# node-parented ancestor (a `pm2 restart`, a reboot) — this fact is what makes that state
+# LOUD instead of the multi-hour, judge-blamed-the-PR hunt it was before it existed.
+_NODE_IPC_ENV_VARS = ("NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE")
+
+
+def _tmux_global_env() -> dict[str, str] | None:
+    """tmux's GLOBAL environment table, read straight from the owner. ``None`` when tmux
+    cannot be asked at all (mirrors :func:`_tmux_or_unverifiable`) — never an empty dict,
+    which would read as "asked, and it's clean" instead of "never asked"."""
+    if _tmux_or_unverifiable() is None:
+        return None
+    out = subprocess.run(
+        ["tmux", "show-environment", "-g"], capture_output=True, text=True,
+    )
+    if out.returncode != 0 or not isinstance(out.stdout, str):
+        return None
+    env: dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        if line.startswith("-"):
+            continue                          # an explicitly-unset marker, not a value
+        key, sep, value = line.partition("=")
+        if sep:
+            env[key] = value
+    return env
+
+
+def _node_ipc_env_read() -> Observation:
+    env = _tmux_global_env()
+    if env is None:
+        return cannot_verify("tmux is not on PATH, so chela cannot read its global "
+                             "environment table — the one every window it spawns "
+                             "inherits from.")
+    return observed({var: env[var] for var in _NODE_IPC_ENV_VARS if var in env})
+
+
+def _node_ipc_env_report(_declared: None, obs: Observation) -> list[Finding]:
+    leaked: dict[str, str] = obs.value
+    if not leaked:
+        return [Finding(OK, "tmux's global environment carries no leaked Node IPC vars")]
+    names = sorted(leaked)
+    unset_cmd = " && ".join(f"tmux set-environment -gu {n}" for n in names)
+    return [Finding(
+        ERROR,
+        f"tmux's GLOBAL environment carries {', '.join(names)} — every window chela "
+        "spawns from here on inherits it",
+        f"{', '.join(f'{k}={v!r}' for k, v in sorted(leaked.items()))}. CMX-252: a leaked "
+        "NODE_CHANNEL_FD can make `node --test` SIGABRT before running a single test, "
+        "which reads as an unrelated red suite on whatever PR a judge happens to be "
+        "looking at — the failure mode this fact exists to make loud instead of a "
+        "multi-hour, judge-blamed-the-PR hunt. `dispatcher._new_window` scrubs this table "
+        "on every window it spawns, so seeing this means a NEW tmux server has started "
+        "since the last spawn (pm2 restart, a reboot) under a node-parented ancestor. "
+        f"Clear it now: `{unset_cmd}`.",
+    )]
+
+
 def _in_flight_runs() -> dict[str, dict]:
     """``{task_id: {wid, epoch}}`` for every run that CLAIMS a live tmux window.
 
@@ -2674,6 +2739,16 @@ def facts() -> list[Fact]:
             # the operator and the dispatcher, which both read the exit code. Loud, not
             # fatal — but never silent.
             unverifiable_level=WARN,
+        ),
+        Fact(
+            name="tmux.node_ipc_env",
+            declared_by="nothing — chela never sets these; a clean spawn path requires "
+                        "their absence, not any particular value",
+            owned_by="tmux's GLOBAL environment — the table every window chela spawns, "
+                     "in ANY session, inherits from",
+            declare=lambda: None,
+            read_back=_node_ipc_env_read,
+            report=_node_ipc_env_report,
         ),
         Fact(
             name="dashboard.port",

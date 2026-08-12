@@ -1997,6 +1997,35 @@ def _kill_windows_named(window_name: str) -> None:
             )
 
 
+# CMX-252: Node's own IPC-channel markers. pm2 forks its managed processes through Node's
+# `child_process.fork` (IPC channel included) even when the target isn't a Node program, so
+# these leak into the environment of whatever tmux server that ancestry starts — and from
+# there into EVERY window's environment, tmux's global environment being the table new
+# windows inherit from. A `node --test` child that inherits a stale fd number can SIGABRT
+# before running a single test (see chela/judge.py's `_no_color_env`). Scrubbing only the
+# two known `node --test` call sites (the judge's test_cmd, tests/test_js_suites.py) fixes
+# those two call sites; scrubbing here, at the one place chela spawns ANY agent or judge
+# window, fixes the class — a future `npm`/build-step/tooling call in a spawned window is
+# covered without having to know it exists yet.
+_NODE_IPC_ENV_VARS = ("NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE")
+
+
+def _scrub_node_ipc_env() -> None:
+    """Unset the leaked Node IPC vars from tmux's GLOBAL environment (server-wide, not just
+    this session) so no window created after this call — in any session — inherits them.
+
+    Best-effort and idempotent: `set-environment -gu` on a var that was never set is a
+    silent no-op, so this is safe to call before every window spawn rather than once at
+    startup — which matters because the poisoned value can be reintroduced by a fresh tmux
+    server started later by another node-parented ancestor (pm2 restart, a reboot).
+    """
+    for var in _NODE_IPC_ENV_VARS:
+        subprocess.run(
+            ["tmux", "set-environment", "-gu", var],
+            capture_output=True,
+        )
+
+
 def _new_window(window_name: str, cwd: str) -> str:
     """Create a fresh tmux window and return its @id (e.g. "@7").
 
@@ -2007,6 +2036,7 @@ def _new_window(window_name: str, cwd: str) -> str:
     pane. Falls back to the bare window_name if the id can't be parsed (e.g.
     under a subprocess mock that returns no stdout).
     """
+    _scrub_node_ipc_env()
     # Trailing ':' forces session resolution; a bare session name is ambiguous
     # to tmux when a window shares that name, making it target that window's
     # index and fail with "index N in use".

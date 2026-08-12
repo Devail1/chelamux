@@ -101,6 +101,11 @@ def fleet(tmp_path, monkeypatch, request):
     # its agent.
     monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "cmx-66"})
+    # tmux.node_ipc_env: the global environment table carries no leaked Node IPC vars —
+    # the state `dispatcher._new_window`'s scrub is supposed to leave behind after every
+    # spawn. A real `tmux show-environment -g` call here would depend on the test host's
+    # own tmux server, same reason session_exists/get_windows_by_id are stubbed above.
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: {})
     monkeypatch.setattr(epoch, "current", lambda: EPOCH)
     monkeypatch.setattr(runtime_truth, "_in_flight_runs",
                         lambda: {"CMX-66": {"wid": "@1", "epoch": EPOCH}})
@@ -246,6 +251,16 @@ def _break_tmux_session(tmp_path, monkeypatch):
     """tmux has no such session — every window lookup in the fleet resolves to nothing."""
     monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: False)
     return doctor.WARN
+
+
+def _break_tmux_node_ipc_env(tmp_path, monkeypatch):
+    """CMX-252: a tmux server started under a node-parented ancestor (pm2 restart, a
+    reboot) reintroduces the leaked IPC vars into the GLOBAL environment — the table
+    `dispatcher._new_window`'s scrub cleared, but a NEW server never went through."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env",
+                        lambda: {"NODE_CHANNEL_FD": "3",
+                                 "NODE_CHANNEL_SERIALIZATION_MODE": "json"})
+    return doctor.ERROR
 
 
 def _break_dashboard_port(tmp_path, monkeypatch):
@@ -542,6 +557,7 @@ CORRUPTIONS = {
     "env.file": _break_env_file,
     "env.running": _break_env_running,
     "tmux.session": _break_tmux_session,
+    "tmux.node_ipc_env": _break_tmux_node_ipc_env,
     "dashboard.port": _break_dashboard_port,
     "dashboard.update_lock": _break_update_apply_lock,
     "plugin.rendered": _break_plugin_rendered,
@@ -710,6 +726,17 @@ def test_gh_missing_entirely_is_cannot_verify_not_a_pass(fleet, monkeypatch):
     assert findings, "an unaskable gh produced no finding at all"
     assert all(f.level == doctor.ERROR for f in findings)
     assert "CANNOT VERIFY dispatch.gh_auth" in findings[0].title
+
+
+def test_node_ipc_env_cannot_verify_when_tmux_is_unreachable(fleet, monkeypatch):
+    """Same failure mode as `dispatch.gh_auth` / `pr.checks`: an owner that could not be
+    asked is UNKNOWN, never a silent pass — a doctor that reads a missing tmux as "no
+    leaked vars, all clear" would be exactly the bug this fact exists to catch."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: None)
+    findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert findings, "an unreadable tmux global environment produced no finding at all"
+    assert all(f.level == doctor.ERROR for f in findings)
+    assert "CANNOT VERIFY tmux.node_ipc_env" in findings[0].title
 
 
 def test_peer_transport_warns_on_a_stale_socket_file_nothing_is_listening_on(
