@@ -917,10 +917,33 @@ def run_experiments(
         )
         return report
 
+    outcomes, contamination = _apply_experiments(worktree, test_cmd, items, baseline, timeout)
+    report.outcomes.extend(outcomes)
+    if contamination:
+        report.cannot_verify = contamination
+    return report
+
+
+def _apply_experiments(
+    worktree: Path, test_cmd: str, items: list, baseline: SuiteResult, timeout: float,
+) -> tuple[list[Outcome], str]:
+    """Apply, adjudicate, and restore every ``items`` entry against an already-green
+    ``baseline``. Shared by :func:`run_experiments` (the judge's PR pass, a throwaway
+    detached checkout) and :func:`self_check` (an agent's own worktree, before it commits) —
+    the mechanics of proving a mutation landed, still parses, and gets restored do not change
+    with who is asking; only what happens BEFORE this (a dirty-worktree gate the judge needs
+    and self-check must not have — see :func:`self_check`) differs.
+
+    Returns ``(outcomes, contamination)``. ``contamination`` is ``""`` unless a mutation could
+    not be restored, in which case it names why and the caller must treat the WHOLE report as
+    ``cannot_verify`` — the outcomes already collected were measured before the contamination
+    and are returned anyway, but nothing after it is trustworthy.
+    """
+    outcomes: list[Outcome] = []
     for raw_exp in items:
         exp, why = Experiment.parse(raw_exp)
         if exp is None:
-            report.outcomes.append(Outcome(
+            outcomes.append(Outcome(
                 Experiment(guard=str(raw_exp)[:120], file="?", before="", after=""),
                 INVALID, f"the experiment is malformed ({why})", baseline, None, "",
             ))
@@ -931,7 +954,7 @@ def run_experiments(
         except ValueError:
             # ⛔ `../../etc/hosts`. The judge writes to the filesystem; it writes INSIDE the
             # throwaway worktree or it does not write.
-            report.outcomes.append(Outcome(
+            outcomes.append(Outcome(
                 exp, INVALID, f"{exp.file} is outside the judge worktree", baseline, None, "",
             ))
             continue
@@ -940,7 +963,7 @@ def run_experiments(
         try:
             parses, parse_detail = parse_check(path) if applied else (True, "")
             mutated = run_suite(test_cmd, worktree, timeout) if applied else None
-            report.outcomes.append(
+            outcomes.append(
                 adjudicate(exp, applied, reason, parses, parse_detail, baseline, mutated)
             )
         finally:
@@ -975,20 +998,19 @@ def run_experiments(
             # would be about a codebase nobody wrote. Stop, and take the WHOLE report down
             # with it — including the findings already in hand, which were measured before
             # the contamination but are not worth the risk of being wrong about. This is the
-            # one path where `cannot_verify` and `outcomes` are both non-empty, and it is
-            # exactly why `Report.blocking` refuses to block on a cannot-verify report
-            # whatever its outcomes look like.
-            report.cannot_verify = (
-                f"{exp.file} could NOT be restored after its mutation — the judge worktree is "
+            # one path where the caller's `cannot_verify` and `outcomes` end up both
+            # non-empty, and it is exactly why `Report.blocking` refuses to block on a
+            # cannot-verify report whatever its outcomes look like.
+            log.error("judge: could not restore %s — abandoning the whole report (%s)", path,
+                      restore_detail or "no further detail")
+            return outcomes, (
+                f"{exp.file} could NOT be restored after its mutation — the worktree is "
                 "contaminated and every measurement after this point would be about code "
                 f"nobody wrote{': ' + restore_detail if restore_detail else ''}. ⛔ Nothing was "
                 "blocked and nothing was cleared."
             )
-            log.error("judge: could not restore %s — abandoning the whole report (%s)", path,
-                      restore_detail or "no further detail")
-            break
 
-    return report
+    return outcomes, ""
 
 
 # --- the verdict: what gets written, and where -------------------------------
@@ -1145,6 +1167,139 @@ def load_experiments(path: str | Path) -> tuple[dict, str]:
     if not isinstance(raw, dict):
         return {}, f"{p} must be a JSON object with an `experiments` list"
     return raw, ""
+
+
+# --- the CHECK, not the habit --------------------------------------------------------------
+#
+# ⚖️🔎 CMX-249. WORKFLOW.md's Done Criteria used to tell every dispatched agent, in prose, to
+# "corrupt each guard and watch it go RED" BY HAND before it commits — and a full night of
+# judge findings was almost entirely this: the exact defect class the prose warns against,
+# surviving anyway. Prose is a habit; it depends on the agent remembering to run it, doing
+# the apply/parse/restore correctly by itself, and picking the same suite the judge will
+# later measure against. It is also *slower and less exact* by hand than by machine — every
+# one of the mistakes documented at the top of this module (an unapplied `sed`, an
+# unbalanced brace) was made BY HAND. :func:`self_check` is the CHECK: the identical
+# apply_mutation / parse_check / run_suite / adjudicate mechanics the judge itself runs
+# against a PR, invoked here on demand, against the tree an agent is about to commit — so
+# "does this guard discriminate?" is one command (``chela judge self-check``), not a memory.
+
+
+def self_check(
+    worktree: Path, test_cmd: str, raw: dict, *, timeout: float = SUITE_TIMEOUT_SECONDS,
+) -> Report:
+    """Run the judge's own mutation mechanics against YOUR OWN worktree, before you commit.
+
+    Deliberately UNLIKE :func:`run_experiments` in two ways, both because this runs on a
+    worktree an agent is actively editing, not a throwaway detached checkout of somebody
+    else's already-pushed PR:
+
+    * **NO git-dirty gate.** Uncommitted tracked changes are the entire point — the guard
+      about to be committed IS the uncommitted edit. ``run_experiments`` refuses a dirty
+      worktree because a stray edit there is an unknown confound in someone ELSE's PR; here
+      there is no "someone else", and :func:`_apply_experiments` restores each mutated file
+      after measuring it exactly as it does for the judge, so the surrounding uncommitted
+      work is never touched.
+    * **NO base_branch diagnosis on a red baseline.** ``_diagnose_red_baseline`` checks out
+      ``base_branch`` and back with ``git checkout --detach`` — safe on the judge's throwaway
+      worktree, NOT safe here: run against a tree carrying uncommitted work, a mid-diagnosis
+      checkout is exactly the kind of hard-to-reverse git operation that risks that work. A
+      red baseline is reported plainly instead, with no branch-hopping.
+
+    Everything else — the green-baseline requirement, the experiment cap, provisioning the
+    suite env, and the apply/parse/run/restore/adjudicate loop itself — is the same mechanism
+    :func:`run_experiments` uses, because a guard that can't discriminate doesn't discriminate
+    any less for being caught early.
+    """
+    report = Report()
+    items = raw.get("experiments") if isinstance(raw, dict) else None
+    notes = raw.get("notes") if isinstance(raw, dict) else None
+    report.notes = [n for n in notes if isinstance(n, dict)] if isinstance(notes, list) else []
+
+    if not isinstance(items, list) or not items:
+        report.cannot_verify = (
+            "no experiments were given — nothing was corrupted, so nothing was proven. ⛔ "
+            "Unknown is not a pass: write at least one {guard, file, before, after} "
+            "experiment per guard you added or changed, corrupting the invariant it claims "
+            "to protect."
+        )
+        return report
+
+    if len(items) > MAX_EXPERIMENTS:
+        report.dropped = len(items) - MAX_EXPERIMENTS
+        items = items[:MAX_EXPERIMENTS]
+
+    env_problem = provision_suite_env(worktree)
+    if env_problem:
+        report.cannot_verify = (
+            f"the worktree could not be PROVISIONED to run the suite: {env_problem}"
+        )
+        return report
+
+    baseline = run_suite(test_cmd, worktree, timeout)
+    report.baseline = baseline
+    if not baseline.green:
+        why = baseline.detail or _last_meaningful_line(baseline.tail)
+        named = _failing_test_names(baseline.tail)
+        which = f" — failing: {', '.join(named)}" if named else ""
+        report.cannot_verify = (
+            f"the suite is NOT GREEN before any mutation (`{test_cmd}` exited "
+            f"{baseline.exit_code}{': ' + why if why else ''}{which}). Fix your own suite "
+            "before mutating it — a red baseline measures nothing, here or when the judge "
+            "measures it later."
+        )
+        return report
+
+    outcomes, contamination = _apply_experiments(worktree, test_cmd, items, baseline, timeout)
+    report.outcomes.extend(outcomes)
+    if contamination:
+        report.cannot_verify = contamination
+    return report
+
+
+def run_self_check(
+    worktree: str | Path, experiments_path: str | Path, *,
+    workflow_path: str | Path | None = None, test_cmd: str | None = None,
+    timeout: float | None = None,
+) -> dict:
+    """``chela judge self-check``'s entry point: load the experiments file an agent wrote,
+    resolve the suite to measure against, run :func:`self_check`, and return a JSON-friendly
+    dict shaped like :func:`judge_run`'s (``ok``/``state``/``outcomes``/``cannot_verify``).
+
+    The suite comes from ``--test-cmd`` if given, else ``judge.test_cmd`` in ``--workflow``
+    (the SAME ``WORKFLOW.md`` key :func:`judge_test_cmd` reads for the real judge) — so a
+    self-check that comes back clean was measured against the exact suite the judge will
+    later measure against, not a narrower one an agent could pick to always pass.
+    """
+    worktree = Path(worktree).resolve()
+    raw, err = load_experiments(experiments_path)
+    if err:
+        return {"ok": False, "error": err}
+
+    cmd = test_cmd.strip() if isinstance(test_cmd, str) and test_cmd.strip() else None
+    to = timeout
+    if workflow_path and (cmd is None or to is None):
+        from chela import workflow as workflow_mod
+
+        try:
+            wf = workflow_mod.load_workflow(workflow_path)
+        except Exception as e:      # a WORKFLOW.md that does not parse
+            return {"ok": False, "error": f"{workflow_path} could not be read: {e}"}
+        cmd = cmd or judge_test_cmd(wf)
+        to = to if to is not None else judge_suite_timeout(wf)
+    if not cmd:
+        return {"ok": False, "error": "no suite to run — pass --test-cmd, or --workflow "
+                                       "pointing at a WORKFLOW.md with `judge.test_cmd` set"}
+    if to is None:
+        to = SUITE_TIMEOUT_SECONDS
+
+    report = self_check(worktree, cmd, raw, timeout=to)
+    blocking = report.blocking
+    return {
+        "ok": True, "state": report.state, "blocking": len(blocking),
+        "outcomes": [o.as_dict() for o in report.outcomes],
+        "cannot_verify": report.cannot_verify, "notes": len(report.notes),
+        "dropped": report.dropped,
+    }
 
 
 def _reprovision_worktree(wf, worktree: Path, sha: str, base_branch: str) -> str:

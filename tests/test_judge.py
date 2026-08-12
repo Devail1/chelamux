@@ -1543,3 +1543,151 @@ def test_taskmodal_judge_badge_key_matches_j_blocked_race_value():
         f"_JUDGE_BADGE has no key matching judge.J_BLOCKED_RACE ({judge.J_BLOCKED_RACE!r}) — "
         f"the Python↔JS judge_state contract has drifted. _JUDGE_BADGE keys: {sorted(keys)}"
     )
+
+
+# --- (i) CMX-249: self_check — the CHECK, not the habit -----------------------------------
+
+
+def test_self_check_survived_and_killed_match_run_experiments(tmp_path):
+    """The mechanics :func:`self_check` shares with :func:`run_experiments` via
+    ``_apply_experiments`` must produce the SAME verdicts on the same fixtures."""
+    fake_root = _project(tmp_path / "fake", guard_test=FAKE_GUARD_TEST)
+    report = judge.self_check(fake_root, TEST_CMD, {"experiments": [_exp()]}, timeout=120)
+    assert [o.verdict for o in report.outcomes] == [judge.SURVIVED]
+    assert report.state == judge.J_BLOCKED
+    assert (fake_root / "guard.py").read_text() == GUARD_PY   # restored
+
+    real_root = _project(tmp_path / "real", guard_test=REAL_GUARD_TEST)
+    report = judge.self_check(real_root, TEST_CMD, {"experiments": [_exp()]}, timeout=120)
+    assert [o.verdict for o in report.outcomes] == [judge.KILLED]
+    assert report.state == judge.J_CLEAN
+
+
+def test_self_check_runs_on_a_worktree_WITH_UNCOMMITTED_TRACKED_CHANGES(tmp_path):
+    """⛔ The whole reason self_check exists: it runs BEFORE the agent commits, so the guard
+    it is about to mutate IS an uncommitted tracked edit. Unlike `run_experiments`
+    (`test_a_dirty_worktree_verifies_NOTHING`), that must NOT make this cannot_verify — and
+    the uncommitted edit itself must survive the mutate/restore cycle untouched."""
+    root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
+    dirty_source = GUARD_PY + "\n# an in-progress edit, not yet committed\n"
+    (root / "guard.py").write_text(dirty_source)
+
+    report = judge.self_check(root, TEST_CMD, {"experiments": [_exp()]}, timeout=120)
+
+    assert not report.cannot_verify
+    assert [o.verdict for o in report.outcomes] == [judge.SURVIVED]
+    assert (root / "guard.py").read_text() == dirty_source     # the in-progress edit survives
+
+
+def test_self_check_with_no_experiments_is_cannot_verify(tmp_path):
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+
+    report = judge.self_check(root, TEST_CMD, {"experiments": []}, timeout=120)
+
+    assert report.cannot_verify
+    assert "nothing was corrupted" in report.cannot_verify
+    assert report.state == judge.J_CANNOT_VERIFY
+
+
+def test_self_check_on_a_red_baseline_does_not_touch_git(tmp_path):
+    """⛔ `run_experiments`' red-baseline diagnosis (`_diagnose_red_baseline`) checks out
+    `base_branch` and back — safe on a throwaway detached worktree, NOT safe on a tree an
+    agent is actively editing. self_check must report the red baseline plainly, with no
+    branch-hopping: none of `_diagnose_red_baseline`'s own phrasing (its `origin/<ref>` case,
+    or its base_branch-less case, `"the workflow names no ``workspace.base_branch``"`) may
+    appear, because self_check must never call it at all, not even with base_branch=""."""
+    root = _project(tmp_path / "repo", guard_test="def test_broken():\n    assert False\n")
+
+    report = judge.self_check(root, TEST_CMD, {"experiments": [_exp()]}, timeout=120)
+
+    assert report.cannot_verify
+    assert "NOT GREEN" in report.cannot_verify
+    assert "origin/" not in report.cannot_verify
+    assert "base_branch" not in report.cannot_verify
+    assert report.outcomes == []
+
+
+def _workflow_md(tmp_path: Path, test_cmd: str) -> Path:
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\nproject_key: TEST\njudge:\n  test_cmd: " + json.dumps(test_cmd) +
+        "\n  suite_timeout_seconds: 120\n---\nbody\n"
+    )
+    return p
+
+
+def test_run_self_check_reads_test_cmd_from_the_workflow(tmp_path):
+    root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+    wf_path = _workflow_md(tmp_path, TEST_CMD)
+
+    result = judge.run_self_check(root, exp_path, workflow_path=wf_path)
+
+    assert result["ok"]
+    assert result["state"] == judge.J_BLOCKED
+    assert result["blocking"] == 1
+
+
+def test_run_self_check_explicit_test_cmd_wins_over_the_workflow(tmp_path):
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+    # A workflow that names a suite which cannot possibly be this one — proves --test-cmd,
+    # not the workflow, is what ran.
+    wf_path = _workflow_md(tmp_path, "false")
+
+    result = judge.run_self_check(root, exp_path, workflow_path=wf_path, test_cmd=TEST_CMD)
+
+    assert result["ok"]
+    assert result["state"] == judge.J_CLEAN
+
+
+def test_run_self_check_with_no_test_cmd_and_no_workflow_errors(tmp_path):
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+
+    result = judge.run_self_check(tmp_path, exp_path)
+
+    assert not result["ok"]
+    assert "no suite to run" in result["error"]
+
+
+def test_run_self_check_missing_experiments_file_errors(tmp_path):
+    result = judge.run_self_check(tmp_path, tmp_path / "nope.json", test_cmd=TEST_CMD)
+
+    assert not result["ok"]
+    assert "does not exist" in result["error"]
+
+
+def test_cmd_judge_self_check_cli_exits_nonzero_on_a_survived_guard(tmp_path, capsys):
+    """Drive the real argparse dispatch (as `test_cmd_judge_prints_the_blocked_race_verdict_
+    distinctly` does above) so a corrupted `elif args.judge_cmd == "self-check":` — or a
+    corrupted exit-code branch inside `cmd_judge_self_check` — turns this red."""
+    root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+
+    from chela import main
+
+    with patch.object(sys, "argv", ["chela", "judge", "self-check", "--experiments",
+                                     str(exp_path), "--test-cmd", TEST_CMD, "--cwd", str(root)]):
+        with pytest.raises(SystemExit) as exc:
+            main.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "SURVIVED corruption" in out
+    assert "DECORATION" in out
+
+
+def test_cmd_judge_self_check_cli_exits_zero_when_every_guard_is_killed(tmp_path, capsys):
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+
+    from chela import main
+
+    with patch.object(sys, "argv", ["chela", "judge", "self-check", "--experiments",
+                                     str(exp_path), "--test-cmd", TEST_CMD, "--cwd", str(root)]):
+        main.main()      # the clean path never calls sys.exit — falling through IS exit 0
+    assert "safe to commit" in capsys.readouterr().out
