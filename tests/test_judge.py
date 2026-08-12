@@ -1632,6 +1632,35 @@ def test_a_cannot_verify_past_budget_escalates_instead_of_stranding_silently(tmp
     assert "cafe1234"[:12] in run["last_error"]
 
 
+def test_a_row_already_moved_on_is_not_re_escalated_every_tick(tmp_path, monkeypatch):
+    """⚖️🧊 CMX-253 Objective 1, negative control. `_escalate_stranded_judge_unknowns` must
+    be scoped to `status='awaiting_review'` — a row that already left that status (escalated
+    to `needs_human` on a prior tick, or since merged/closed) still matches every OTHER arm
+    of the query forever (same `judge_state`, same `judge_sha=pr_head_sha`, `tries` still at
+    the bound), so a query that dropped the status filter would re-`_escalate` it on EVERY
+    subsequent tick — clobbering `last_error`/`ended_at` on a run a human (or the merge path)
+    already resolved, and re-notifying the inbox for a decision that was already made."""
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+
+    def spawn(w, row, sha, conn):
+        return True    # never reached — status is not awaiting_review
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), status="merged",
+                 pr_head_sha="cafe1234", judge_sha="cafe1234",
+                 judge_state=judge.J_CANNOT_VERIFY, judge_cannot_verify_tries=2,
+                 judge_detail="a flake", ended_at="2026-07-14T11:00:00+00:00",
+                 last_error="already resolved, do not touch")
+
+    result = _tick(wf, spawn)
+    assert result["judge_stranded"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "merged"                       # ⛔ not clobbered back to needs_human
+    assert run["ended_at"] == "2026-07-14T11:00:00+00:00"  # ⛔ untouched
+    assert run["last_error"] == "already resolved, do not touch"
+
+
 def test_a_fresh_commit_resets_the_budget_instead_of_escalating(tmp_path, monkeypatch):
     """A `cannot_verify` past budget on an OLD head must not strand the run once a rework (or
     a human push) lands a new commit — the new `pr_head_sha` no longer matches `judge_sha`,
@@ -2011,6 +2040,11 @@ def test_the_hold_still_expires_once_the_judge_TIMES_OUT(tmp_path):
     run = dispatcher.resolve_run("abc123")
     assert run["judge_state"] == judge.J_CANNOT_VERIFY
     assert "did not finish" in run["judge_detail"]
+    # ⚖️🕳️ CMX-253 Objective 2, negative control. A judge that TIMED OUT DID get a chance to
+    # run — it is stuck, not thinking, and that is still a counted unknown (CMX-81's bounded
+    # retry must see it). Only a window that VANISHED before it ever ran is exempt; conflating
+    # the two would let a permanently wedged judge dodge the retry budget forever.
+    assert run["judge_no_verdict"] == 0
 
 
 @pytest.mark.parametrize("delta,expect_alive", [
