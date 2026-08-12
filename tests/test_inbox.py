@@ -2345,7 +2345,9 @@ def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_fil
     store["orchestrator"] = ORCH
     inbox.save(store)
 
-    rework_cap = dict(_verdict_run(), task_id="T1", status="needs_human",
+    rework_cap = dict(_verdict_run(), task_id="T1", status="needs_human", rework_count=2,
+                      review_history=json.dumps([{"verdict": "BLOCKING"},
+                                                  {"verdict": "BLOCKING"}]),
                       last_error="rework cap reached (2/2) — the PR still fails review. "
                                  "Branch, worktree and PR are preserved.\n\n"
                                  "Recommendation: fix it yourself and `chela reopen`.")
@@ -2355,13 +2357,36 @@ def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_fil
                                    "Recommendation: approve the pending gate.")
     no_branch = dict(_verdict_run(), task_id="T3", status="needs_human",
                      last_error="rework: the run row has no branch — nothing to re-enter")
+    # A SHORT first paragraph with a Recommendation attached: short enough that the
+    # excerpt limit (60 chars) never kicks in, so this fixture is only clean if the
+    # "\n\n" split itself is doing the work — unlike T1/T2 above, where the first
+    # paragraph already exceeds the excerpt limit and would hide a missing split.
+    short_with_recommendation = dict(_verdict_run(), task_id="T4", status="needs_human",
+                     last_error="rework: no branch\n\nRecommendation: fix it yourself.")
 
-    inbox.tick({}, runs=[rework_cap, stuck_checks, no_branch])
+    inbox.tick({}, runs=[rework_cap, stuck_checks, no_branch, short_with_recommendation])
 
     by_task = {e["payload"]["task_id"]: e["summary"] for e in inbox.load()["queue"]}
-    assert set(by_task) == {"T1", "T2", "T3"}
+    assert set(by_task) == {"T1", "T2", "T3", "T4"}
 
     assert "the PR still fails review" in by_task["T1"]
+
+    # 🔴 GUARD: the counts must survive alongside the reason — `reworks: N · verdicts on
+    # the row: M` are useful on their own and a refactor of the reason must not drop them.
+    assert "reworks: 2" in by_task["T1"], (
+        "the rework count must still be in the summary alongside the reason"
+    )
+    assert "verdicts on the row: 2" in by_task["T1"], (
+        "the verdict-history count must still be in the summary alongside the reason"
+    )
+
+    # 🔴 GUARD: the reason is EXCERPTED — the whole first paragraph must not be pasted
+    # whole into the one line typed at the prompt (mirrors the cannot_verify excerpt
+    # guard above, for this call site).
+    assert "Branch, worktree and PR are preserved" not in by_task["T1"], (
+        "the whole first paragraph was pasted into the summary instead of being "
+        "excerpted to SUMMARY_TITLE_CHARS"
+    )
 
     assert "checks on this PR have not settled" in by_task["T2"]
     assert "the PR still fails review" not in by_task["T2"], (
@@ -2378,6 +2403,16 @@ def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_fil
     # in the payload's last_error, not pasted into the one line typed at the prompt.
     assert "Recommendation:" not in by_task["T1"]
     assert "Recommendation:" not in by_task["T2"]
+
+    # 🔴 GUARD: same rule, but with a reason SHORT enough that the excerpt limit alone
+    # cannot be hiding a missing "\n\n" split (T1/T2's first paragraphs are both already
+    # over SUMMARY_TITLE_CHARS, so they'd stay clean even without the split).
+    assert "no branch" in by_task["T4"]
+    assert "Recommendation:" not in by_task["T4"], (
+        "a short reason (under SUMMARY_TITLE_CHARS) must still exclude a trailing "
+        "Recommendation — this is only provable when the excerpt limit itself can't "
+        "be the thing hiding it"
+    )
 
 
 def test_run_needs_human_reason_falls_back_when_last_error_is_empty(store_file, windows,
