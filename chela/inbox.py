@@ -999,7 +999,19 @@ def run_events(runs: list[dict], seen: dict[str, str],
         # (clean or cannot_verify) — not on every transient `running`/retry sample, which
         # would just be noise.
         judge_state = run.get("judge_state") or ""
-        mark = f"{status}:{judge_state}" if status == "awaiting_review" else status
+        # ⚖️🔔 CMX-229 Objective 1: `cannot_verify` is tracked even OFF `awaiting_review` —
+        # see the branch below for why (the CAS-refused race, measured live on CMX-227).
+        # ⚖️🧊 CMX-239: `J_BLOCKED_RACE` is tracked unconditionally, for the same reason —
+        # it is the SAME CAS-refused race, for a verdict `judge.judge_run` records as its
+        # OWN distinct value (never plain `J_BLOCKED`, see its CMX-239 comment) precisely
+        # so it can never be confused with an ordinary blocked run that later moved on, and
+        # so this branch can raise it at full severity instead of a shrug.
+        mark = (
+            f"{status}:{judge_state}"
+            if status == "awaiting_review" or judge_state in (
+                judge.J_CANNOT_VERIFY, judge.J_BLOCKED_RACE)
+            else status
+        )
         prev_mark = seen.get(task_id)
         # Was the run already SITTING in awaiting_review as of the last mark? (Not just
         # "is judge_state new" — a fresh task_id, or one arriving straight from a
@@ -1022,7 +1034,63 @@ def run_events(runs: list[dict], seen: dict[str, str],
                    "pr_url": run.get("pr_url"),
                    "pr_state": run.get("pr_state"), "attempt": run.get("attempt"),
                    "started_at": run.get("started_at"), "ended_at": run.get("ended_at")}
-        if status == "awaiting_review" and judge_state in (judge.J_CLEAN, judge.J_CANNOT_VERIFY):
+        if judge_state == judge.J_CANNOT_VERIFY and status != "awaiting_review":
+            # ⚖️🔔 CMX-229 Objective 1. `chela/judge.py`'s CAS-refused path: the run left
+            # `awaiting_review` (a human merged it, CI got there first, a fresh review sent
+            # it back) WHILE the judge was still working, so `request_changes`'s own CAS
+            # correctly refused to resurrect the row — but `set_judge_state` still recorded
+            # CANNOT_VERIFY on it, and the `awaiting_review`-gated branch below NEVER fires
+            # again for a row that has already moved on. Measured live on CMX-227: `chela
+            # events --type run_judge_cannot_verify` showed nothing for that run — the
+            # state sat in the row and the inbox never fired; the only reason anyone knew
+            # is that a human happened to look. Every OTHER judge outcome only matters
+            # while still `awaiting_review` (a clean verdict is moot once merged, a rework
+            # verdict is superseded by the next dispatch) — but "the judge could not do its
+            # job" is, if anything, MORE urgent once the code already shipped: it is the
+            # one case nothing else will ever surface.
+            payload["judge_state"] = judge_state
+            payload["judge_detail"] = run.get("judge_detail")
+            payload["judge_sha"] = run.get("judge_sha")
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            detail = str(run.get("judge_detail") or "")[:140]
+            out.append(_event(
+                "run_judge_cannot_verify",
+                f"⚖️ {label} — judge CANNOT VERIFY (the run already moved to {status!r} "
+                f"while it was working) — needs a human look"
+                f"{': ' + detail if detail else ''} — {ref}"
+                f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif judge_state == judge.J_BLOCKED_RACE:
+            # ⚖️🧊 CMX-239. The twin of the CANNOT_VERIFY branch above, for the CAS-refused
+            # race on a BLOCKING verdict: the run left `awaiting_review` (a human merged it,
+            # or CI got there first) WHILE the judge was mid-run, so `request_changes`'s CAS
+            # correctly refused to send it back — but `judge.judge_run` records this as its
+            # OWN state (`J_BLOCKED_RACE`, never plain `J_BLOCKED` — that value also sits on
+            # a row long after an ORDINARY blocked run settles, through rework rounds and
+            # even an eventual `needs_human` escalation, so reusing it here would make that
+            # unrelated later status change misread as this race — see judge.py's comment).
+            # No status check needed: `J_BLOCKED_RACE` is set from exactly one place and
+            # means exactly one thing, unlike `J_CANNOT_VERIFY` above (which also arises
+            # from an ordinary settle while still `awaiting_review`). Ordinarily a `blocked`
+            # verdict IS a `changes_requested` transition (`request_changes` sets both
+            # atomically) — reaching this branch means that transition was refused, so a
+            # guard SURVIVED CORRUPTION on a commit that already shipped, or is about to,
+            # with nobody told. That is a strictly more urgent outcome than "cannot verify":
+            # the judge did its job and the answer was bad.
+            payload["judge_state"] = judge_state
+            payload["judge_detail"] = run.get("judge_detail")
+            payload["judge_sha"] = run.get("judge_sha")
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            detail = str(run.get("judge_detail") or "")[:140]
+            out.append(_event(
+                "run_judge_blocked_race",
+                f"⚖️⚠️ {label} — a guard SURVIVED CORRUPTION but the run already moved to "
+                f"{status!r} before it could be sent back — needs a human look NOW "
+                f"(check whether this already shipped)"
+                f"{': ' + detail if detail else ''} — {ref}"
+                f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif status == "awaiting_review" and judge_state in (judge.J_CLEAN, judge.J_CANNOT_VERIFY):
             # The judge settled while `status` sat still. This is the ONLY place either
             # verdict becomes visible to the orchestrator — `comment_body` already posted
             # it to the PR, but a PR comment is not a push, and CMX-195/196 both sat mute
@@ -1163,10 +1231,19 @@ def stale_reason(event: dict, runs: list[dict],
     a supplied map but resolves to nothing (the live read failed) is treated the same
     way: best-effort, like every other GitHub read in this codebase — it does not itself
     manufacture staleness, it only catches an ACTUAL, OBSERVED mismatch.
+
+    ⚖️🔔 CMX-229 Objective 1 (and ⚖️🧊 CMX-239's twin, ``run_judge_blocked_race``):
+    ``run_judge_cannot_verify`` is handled SEPARATELY from its sibling ``run_judge_clean``
+    — it is a judge outcome that must reach someone regardless of what happened to the run
+    afterward (see :func:`run_events`'s matching comment), so it is exempt from the
+    status/pr_state rot below on purpose. Only the live-head supersession check still
+    applies to it. ``run_judge_blocked_race`` — the SAME CAS-refused race, but for a
+    CONFIRMED blocking finding rather than an unknown — gets the identical treatment: it
+    is strictly the more urgent of the two, never the less.
     """
     kind = event.get("kind")
     if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested",
-                     "run_judge_clean", "run_judge_cannot_verify"):
+                     "run_judge_clean", "run_judge_cannot_verify", "run_judge_blocked_race"):
         return None
     payload = event.get("payload") or {}
     task_id = payload.get("task_id")
@@ -1176,7 +1253,27 @@ def stale_reason(event: dict, runs: list[dict],
     if run is None:
         return "run row is gone"
     status, pr_state = run.get("status"), run.get("pr_state")
-    if kind in ("run_review", "run_judge_clean", "run_judge_cannot_verify"):
+    if kind in ("run_judge_cannot_verify", "run_judge_blocked_race"):
+        # ⚖️🔔 CMX-229 Objective 1 / ⚖️🧊 CMX-239. Unlike `run_review`/`run_judge_clean`,
+        # neither "the judge could not verify this commit" nor "a guard SURVIVED
+        # corruption" is superseded by whatever happened to the run afterward — it is not a
+        # request to go look at `awaiting_review` (there may be nothing there to look at any
+        # more), it is a fact about a commit. Dropping it once the run left `awaiting_review`
+        # (or `changes_requested`, for the blocking twin) or its PR merged/closed is exactly
+        # the failure CMX-229 closed for the unknown case and CMX-239 closes for the
+        # confirmed one: that is the CAS-refused race (CMX-227, measured live) where the run
+        # moves on WHILE the judge is still working, and the resulting verdict is the one
+        # record that a SURVIVED-mutation finding might exist, undetected, on a commit
+        # already shipped. Only a genuinely superseded commit (a newer head already judged)
+        # rots this claim.
+        if live_heads is not None:
+            judged_sha = payload.get("judge_sha")
+            live_sha = live_heads.get(task_id)
+            if judged_sha and live_sha and live_sha != judged_sha:
+                return (f"PR head moved past the judged commit ({judged_sha[:12]} -> "
+                        f"{live_sha[:12]}) — the verdict no longer applies to the current head")
+        return None
+    if kind in ("run_review", "run_judge_clean"):
         if status != "awaiting_review":
             # Includes the rework loop's own transition: an `awaiting_review` event that
             # was still queued when the reviewer sent the PR back is a claim about a run
@@ -1188,7 +1285,7 @@ def stale_reason(event: dict, runs: list[dict],
             # The row can lag the PR by a reconcile tick: pr_state is refreshed before
             # awaiting_review → done. A merged PR is not awaiting review either way.
             return f"PR is {pr_state}"
-        if kind in ("run_judge_clean", "run_judge_cannot_verify") and live_heads is not None:
+        if kind == "run_judge_clean" and live_heads is not None:
             judged_sha = payload.get("judge_sha")
             live_sha = live_heads.get(task_id)
             if judged_sha and live_sha and live_sha != judged_sha:

@@ -19,6 +19,8 @@ pytest guard, a real `python -m pytest` subprocess. The one thing that is stubbe
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +28,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chela import dispatcher, judge
+from chela import dispatcher, event_log, judge
 
 TEST_CMD = f'"{sys.executable}" -m pytest -q'
 
@@ -507,7 +509,13 @@ def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_p
     refuses to resurrect the row — but that refusal must not also swallow the ONE record
     that a guard SURVIVED corruption. Before this fix the comment posted from INSIDE
     `request_changes`, past its own status check and CAS, so this exact race silently
-    dropped it — while a clean verdict (no such gate) always posted. Inverted severity."""
+    dropped it — while a clean verdict (no such gate) always posted. Inverted severity.
+
+    ⚖️🧊 CMX-239: the run ROW's `judge_state` must not repeat that same inversion one layer
+    down. It used to record `J_CANNOT_VERIFY` here — downgrading a CONFIRMED finding (a
+    guard SURVIVED corruption) to the same shrug-tier state as a launch failure. It must
+    record `J_BLOCKED_RACE`: unambiguous, and never confusable with an ordinary blocked run
+    that later moved on (see `inbox.py`'s `J_BLOCKED_RACE` handling)."""
     task_id = "abc123"
     repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
     with dispatcher._db() as conn:
@@ -519,11 +527,411 @@ def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_p
                       side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
         result = judge.judge_run(task_id, exp_file, cleanup=False)
 
-    assert result["state"] == judge.J_CANNOT_VERIFY      # the run ROW was not resurrected
+    assert result["state"] == judge.J_BLOCKED_RACE       # NOT cannot_verify — a CONFIRMED find
     run = dispatcher.resolve_run(task_id)
     assert run["status"] == "done"                        # untouched — no resurrection
+    assert run["judge_state"] == judge.J_BLOCKED_RACE
     assert posted and "SURVIVED" in posted[0]             # …but the finding still reached the PR
     assert "colourblind glyph cue" in posted[0]
+
+
+def test_a_blocking_verdict_for_a_head_that_no_longer_exists_does_not_spend_a_rework_round(tmp_path):
+    """⚖️⏱️ CMX-246: this judge was launched to judge `oldsha000001`, but by the time its
+    mutation battery finishes (minutes later), a newer commit has landed on the PR —
+    `pr_head_sha` now reads `newsha000002`. The once-per-sha trigger already re-spawns a
+    fresh judge for the new head on its own; THIS verdict is about a commit that no longer
+    exists as the PR's live head. It must not spend a round of `CHELA_MAX_REWORKS` for a
+    finding the newer commit may have already fixed — at the cap, that would escalate the
+    run to `needs_human` for work that is already done.
+
+    Corrupt `stale_head` to `False` (the mismatch is never detected) and this goes red: the
+    stale verdict spends a round through `request_changes` exactly as an ordinary blocking
+    verdict would."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha="oldsha000001", pr_head_sha="newsha000002")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    posted: list[str] = []
+    with patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["ok"] is False
+    assert result["state"] == judge.J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "awaiting_review"          # never moved to changes_requested
+    assert (run["rework_count"] or 0) == 0              # ⛔ no round spent
+    assert not dispatcher.reviews_of(run)               # request_changes was never called
+    assert run["judge_sha"] == "oldsha000001"           # untouched — never overwritten
+    assert posted and "SURVIVED" in posted[0]           # the finding still reached the PR
+    assert "oldsha000001"[:12] in posted[0]              # ⚖️⏱️ CMX-246 Objective 2: both
+    assert "newsha000002"[:12] in posted[0]              # shas, named, in the PR comment itself
+
+
+def test_a_stale_verdict_announces_both_shas_on_the_PR_and_in_the_event_log(tmp_path):
+    """⚖️⏱️ CMX-246 Objective 2: not charging a stale verdict fixes the rework budget, but a
+    human still cannot tell a stale verdict from a live one without diffing the verdict's
+    timestamp against the PR's commit history by hand — which is exactly what motivated this
+    ticket (CMX-230, CMX-240 twice, CMX-243). Both the PR comment and the durable event log
+    must name the judged sha AND the PR's live head, loudly, so nobody re-triages a
+    superseded finding as if it were current.
+
+    The fixture is CMX-240's real pair: the judge's verdict was for the commit landed at
+    23:04:30Z; a newer commit, `32caded`, superseded it at 23:19:38Z — the actual incident
+    that wrote this ticket, not a hypothetical one.
+
+    Corrupt the notice (drop either sha from the PR comment, or from the event payload) and
+    this goes red."""
+    task_id = "abc123"
+    judged_sha = "23h04m30scmx240"      # the commit this judge's verdict was actually for
+    live_sha = "32caded"                # the real CMX-240 sha that superseded it at 23:19:38Z
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=judged_sha, pr_head_sha=live_sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    posted: list[str] = []
+    with patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD
+    assert posted
+    assert judged_sha[:12] in posted[0]
+    assert live_sha[:12] in posted[0]
+    assert "SUPERSEDED" in posted[0]
+    # ⚖️⏱️ CMX-246 rework round 4, finding 1: role-pinned, not just containment —
+    # `test_stale_head_notice_names_the_shas_in_the_CORRECT_roles` already pins the
+    # formatter's own argument order in isolation, but nothing upstream of it pinned
+    # which sha the BLOCKING call site (`_stale_head_notice(verified_sha, live_head)`)
+    # actually passes as which argument. Swap the two arguments at that call site and
+    # both shas still land somewhere in `posted[0]` — the plain `in` checks above stay
+    # green — but they land in the WRONG roles, which these next four assertions catch.
+    assert f"this verdict is for `{judged_sha[:12]}`" in posted[0]
+    assert f"a newer commit, `{live_sha[:12]}`," in posted[0]
+    assert f"this verdict is for `{live_sha[:12]}`" not in posted[0]
+    assert f"a newer commit, `{judged_sha[:12]}`," not in posted[0]
+
+    events = event_log.read(types=["judge.stale_head"])["events"]
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["task_id"] == task_id
+    assert payload["judged_sha"] == judged_sha
+    assert payload["live_head_sha"] == live_sha
+    assert judged_sha[:12] in events[0]["summary"]
+    assert live_sha[:12] in events[0]["summary"]
+    # ⚖️⏱️ CMX-246 rework round 4, finding 3: role-pinned event summary. The payload
+    # dict assertions above (`payload["judged_sha"]`/`payload["live_head_sha"]`) are
+    # keyed, so they already survive a swap of the two f-string arguments feeding the
+    # human-facing `summary` line — that swap is a SEPARATE piece of code and needs
+    # its own pin. Swap `verified_sha`/`live_head` in the `event_log.append` f-string
+    # and this goes red: the "superseded by" order flips.
+    assert (f"verdict for {judged_sha[:12]} superseded by {live_sha[:12]}"
+            in events[0]["summary"])
+    assert (f"verdict for {live_sha[:12]} superseded by {judged_sha[:12]}"
+            not in events[0]["summary"])
+
+
+def test_a_blocking_verdict_for_the_CURRENT_head_still_spends_a_rework_round(tmp_path):
+    """⚖️⏱️ CMX-246 BLOCKING guard: the ticket's own words are "the risk is that 'don't
+    charge stale' becomes 'don't charge'". This is the ordinary case CMX-246 must not touch —
+    the judge_sha this call actually tested still matches the PR's live head — pinned with
+    EXPLICIT matching shas (not the defaults `_run_row` happens to supply, which would make
+    this incidental coverage rather than a guard).
+
+    Invert `stale_head` (e.g. `stale_head = not bool(...)`) and this goes red: a live,
+    on-target blocking verdict would be treated as superseded and silently discarded instead
+    of spending a rework round — the rework loop would stop counting entirely and a run could
+    never reach `CHELA_MAX_REWORKS` or escalate."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha="samehead0001", pr_head_sha="samehead0001")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    posted: list[str] = []
+    with patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED            # NOT J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "changes_requested"           # the carrier turned
+    assert run["judge_state"] == judge.J_BLOCKED
+    assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
+    assert "SUPERSEDED" not in posted[0]                  # a live verdict gets no stale notice
+
+
+def test_a_blocking_verdict_with_unreadable_shas_fails_CLOSED_and_still_charges(tmp_path):
+    """⚖️⏱️ CMX-246 BLOCKING guard: the ticket was explicit — an UNKNOWN sha (either side
+    unset, or unreadable) is not positive staleness evidence, and must charge the round
+    exactly as today, mirroring `contract.merge`'s CMX-238 conservatism (refuse only on a
+    KNOWN mismatch). Getting this backwards is the worst outcome available: a run whose shas
+    cannot be read would silently stop being charged at all, forever.
+
+    Here `judge_sha` and `pr_head_sha` are both unset, so `verified_sha` (the fallback chain)
+    resolves to `None` — there is no answer to compare against, so this must NOT be treated
+    as stale. Make unknown behave like stale (e.g. treat a falsy `verified_sha`/`live_head` as
+    a match) and this goes red: the round silently stops being spent."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=None, pr_head_sha=None)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    posted: list[str] = []
+    with patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED            # NOT J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "changes_requested"           # the carrier turned — round charged
+    assert run["judge_state"] == judge.J_BLOCKED
+    assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
+
+
+def test_a_clean_verdict_for_a_head_that_no_longer_exists_never_overwrites_judge_state(tmp_path):
+    """The clean-path twin of the test above: a `clean` verdict about a superseded head must
+    not clobber `judge_state`. A second judge spawned for the new head (the per-sha trigger)
+    may already have recorded a DIFFERENT, newer verdict (here `blocked`) on this row — a
+    stale `clean` landing after it would silently erase that finding, and the merge gate
+    would then trust `clean` for a commit it never actually verified.
+
+    Corrupt `stale_head` to `False` and this goes red: `set_judge_state` runs unconditionally
+    and overwrites `judge_state` with the stale `clean`."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha="oldsha000001", pr_head_sha="newsha000002",
+                 judge_state=judge.J_BLOCKED, judge_detail="a newer judge already blocked this")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["judge_state"] == judge.J_BLOCKED        # the NEWER verdict survives, untouched
+    assert run["judge_sha"] == "oldsha000001"            # untouched
+
+
+def test_a_stale_clean_verdicts_PR_comment_also_names_both_shas(tmp_path):
+    """⚖️⏱️ CMX-246 rework, finding 2: `test_a_clean_verdict_for_a_head_that_no_longer_exists_
+    never_overwrites_judge_state` above pins the DB-side half of the clean-stale path
+    (`judge_state`/`judge_sha` left untouched) but never reads `posted` — so it cannot catch
+    the announcement being dropped from the CLEAN branch's comment specifically. The blocking
+    branch's notice is covered by `test_a_stale_verdict_announces_both_shas_on_the_PR_and_in_
+    the_event_log`, which always takes the `if blocking:` arm — it cannot exercise the `else:`
+    (clean) arm's own `if stale_head:` prefix at all.
+
+    Disable the clean branch's `if stale_head:` prefix (e.g. `if False and stale_head:`) and
+    this goes red: the clean verdict posts with no mention that it was superseded.
+
+    ⚖️⏱️ CMX-246 rework round 5, finding 1: also pins the `judge.stale_head` EVENT for this
+    same clean arm, not just the PR comment. The log/event announcement block above the
+    `if blocking:`/`else:` split is written once and meant to cover BOTH arms — but until now
+    only `test_a_stale_verdict_announces_both_shas_on_the_PR_and_in_the_event_log` (which
+    always takes the `if blocking:` arm) ever read `event_log`. Gate that whole block on
+    `stale_head and blocking` and this test still saw its PR comment (the clean arm's own,
+    separate `if stale_head:` prefix at line ~1432 is untouched by that mutation) while `chela
+    events` records nothing at all for a superseded CLEAN verdict — this goes red only with
+    the event-log assertions below."""
+    task_id = "abc123"
+    judged_sha = "oldsha000001"
+    live_sha = "newsha000002"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=judged_sha, pr_head_sha=live_sha)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    posted: list[str] = []
+    with patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD
+    assert posted
+    assert judged_sha[:12] in posted[0]
+    assert live_sha[:12] in posted[0]
+    assert "SUPERSEDED" in posted[0]
+    # ⚖️⏱️ CMX-246 rework round 4, finding 2: role-pinned, not just containment — the
+    # twin of the assertions on the blocking branch's own, SEPARATE call site
+    # (`_stale_head_notice(verified_sha, live_head)` under `else:`). Swap the two
+    # arguments there and this test's plain `in` checks above stay green while a
+    # human reading the PR is pointed at the wrong commit.
+    assert f"this verdict is for `{judged_sha[:12]}`" in posted[0]
+    assert f"a newer commit, `{live_sha[:12]}`," in posted[0]
+    assert f"this verdict is for `{live_sha[:12]}`" not in posted[0]
+    assert f"a newer commit, `{judged_sha[:12]}`," not in posted[0]
+
+    # ⚖️⏱️ CMX-246 rework round 5, finding 1: the CLEAN arm gets a `judge.stale_head` event
+    # too — this is the only test that ever spends a CLEAN, stale verdict AND reads
+    # `event_log`, so it is the only guard on `if stale_head:` (vs. `if stale_head and
+    # blocking:`) for the whole announcement block.
+    events = event_log.read(types=["judge.stale_head"])["events"]
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["task_id"] == task_id
+    assert payload["judged_sha"] == judged_sha
+    assert payload["live_head_sha"] == live_sha
+    assert payload["verdict"] == judge.J_CLEAN
+    assert (f"verdict for {judged_sha[:12]} superseded by {live_sha[:12]}"
+            in events[0]["summary"])
+
+
+def test_the_PRs_live_head_is_reread_right_before_the_verdict_is_spent_not_the_stale_in_memory_row(
+    tmp_path,
+):
+    """⚖️⏱️ CMX-246 rework, finding 1: `run` is fetched ONCE at the top of `judge_run`, before
+    the (possibly minutes-long) mutation battery runs. Every existing stale-head test sets the
+    run row's `pr_head_sha` BEFORE calling `judge_run` — so `run` (captured at the very start)
+    already carries the "new" head, and a mutation that swaps the live re-read
+    (`dispatcher.resolve_run(task_id)`) for the stale in-memory `run` is invisible to them: both
+    would read the same value.
+
+    Here the new commit lands DURING the call — from inside `run_experiments`, standing in for
+    a real commit landing on the PR while this judge's suite is still running — exactly the
+    window CMX-246 exists to cover. `run` was captured before that update, so only a genuine
+    live re-read observes the new head.
+
+    Swap `live_run = dispatcher.resolve_run(task_id)` for `live_run = run` and this goes red:
+    `live_head` reads the pre-update sha, matches `verified_sha`, `stale_head` is wrongly
+    `False`, and the round is charged for a commit the PR no longer presents as its head."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=None, pr_head_sha="oldsha000001")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    real_run_experiments = judge.run_experiments
+
+    def _land_a_new_commit_mid_run(*a, **kw):
+        with dispatcher._db() as conn:
+            conn.execute(
+                "UPDATE runs SET pr_head_sha=? WHERE task_id=?", ("newsha000002", task_id),
+            )
+            conn.commit()
+        return real_run_experiments(*a, **kw)
+
+    posted: list[str] = []
+    with patch.object(judge, "run_experiments", side_effect=_land_a_new_commit_mid_run), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["pr_head_sha"] == "newsha000002"      # the mid-run update really landed
+    assert run["status"] == "awaiting_review"         # never moved to changes_requested
+    assert (run["rework_count"] or 0) == 0             # ⛔ no round spent
+    assert not dispatcher.reviews_of(run)              # request_changes was never called
+    assert posted and "oldsha000001"[:12] in posted[0]
+    assert "newsha000002"[:12] in posted[0]
+
+
+def test_a_blocking_verdict_with_an_unreadable_LIVE_head_still_charges(tmp_path):
+    """⚖️⏱️ CMX-246 rework round 3, finding 1: an UNKNOWN live head is not positive staleness
+    evidence — same conservatism as `test_a_blocking_verdict_with_unreadable_shas_fails_
+    CLOSED_and_still_charges`, but that test leaves BOTH operands unset, so it cannot tell
+    `stale_head = bool(verified_sha and live_head and verified_sha != live_head)` apart from
+    `bool(verified_sha and verified_sha != live_head)` — drop the `live_head and` conjunct and
+    both still evaluate `False` there, because `verified_sha` is also `None`.
+
+    Here `verified_sha` IS known (the run's `pr_head_sha` at the top of the call) and only the
+    LIVE re-read comes back unreadable — the PR's head goes missing mid-run, standing in for a
+    live read that fails. Drop the `live_head and` conjunct and this goes red: `None !=
+    verified_sha` is True, so a genuinely blocking verdict for a head this call cannot
+    re-confirm gets silently discarded as 'stale' instead of charged."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=None, pr_head_sha="knownsha0001")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    real_run_experiments = judge.run_experiments
+
+    def _blank_the_live_head_mid_run(*a, **kw):
+        with dispatcher._db() as conn:
+            conn.execute("UPDATE runs SET pr_head_sha=? WHERE task_id=?", (None, task_id))
+            conn.commit()
+        return real_run_experiments(*a, **kw)
+
+    posted: list[str] = []
+    with patch.object(judge, "run_experiments", side_effect=_blank_the_live_head_mid_run), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED             # NOT J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "changes_requested"            # the carrier turned — round charged
+    assert run["judge_state"] == judge.J_BLOCKED
+    assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
+    assert "SUPERSEDED" not in posted[0]
+
+
+def test_a_blocking_verdict_with_an_unreadable_JUDGED_sha_still_charges(tmp_path):
+    """⚖️⏱️ CMX-246 rework round 3, finding 2: the twin of the test above — an UNKNOWN judged
+    sha is not positive staleness evidence either. `verified_sha` stays `None` for this whole
+    call (both `judge_sha` and the run's `pr_head_sha` at call-start are unset), while the
+    LIVE re-read comes back KNOWN partway through, standing in for a PR that only just
+    acquired a head. Drop the `verified_sha and` conjunct (e.g. `stale_head = bool(live_head
+    and verified_sha != live_head)`) and this goes red: `None != live_head` is always True, so
+    a genuinely blocking verdict whose own judged sha could not be read gets silently
+    discarded as 'stale' instead of charged."""
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=None, pr_head_sha=None)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+
+    real_run_experiments = judge.run_experiments
+
+    def _reveal_the_live_head_mid_run(*a, **kw):
+        with dispatcher._db() as conn:
+            conn.execute(
+                "UPDATE runs SET pr_head_sha=? WHERE task_id=?", ("nowknown0001", task_id),
+            )
+            conn.commit()
+        return real_run_experiments(*a, **kw)
+
+    posted: list[str] = []
+    with patch.object(judge, "run_experiments", side_effect=_reveal_the_live_head_mid_run), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED             # NOT J_STALE_HEAD
+    run = dispatcher.resolve_run(task_id)
+    assert run["status"] == "changes_requested"            # the carrier turned — round charged
+    assert run["judge_state"] == judge.J_BLOCKED
+    assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
+    assert "SUPERSEDED" not in posted[0]
+
+
+def test_stale_head_notice_names_the_shas_in_the_CORRECT_roles():
+    """⚖️⏱️ CMX-246 rework round 3, finding 3: `_stale_head_notice` must say the JUDGED sha
+    "this verdict is for" and the LIVE head is "a newer commit" — swapped, a human is pointed
+    at the wrong commit, which is the exact hand-triage this ticket exists to stop. The
+    end-to-end stale-head tests above only assert both shas appear `in` the posted comment
+    body, which is blind to which sha lands in which role — swap the two f-string arguments
+    and every one of those still passes.
+
+    Swap `judged_sha`/`live_head` in the two f-strings and this goes red: `judged_sha` no
+    longer appears right after "this verdict is for", and `live_head` no longer appears right
+    after "a newer commit,"."""
+    notice = judge._stale_head_notice("judgedsha0001", "livehead0002")
+
+    assert "this verdict is for `judgedsha000`" in notice
+    assert "a newer commit, `livehead0002`," in notice
+    assert "this verdict is for `livehead0002`" not in notice
+    assert "a newer commit, `judgedsha000`," not in notice
 
 
 def test_a_clean_run_is_LEFT_ALONE_the_judge_never_merges_and_never_approves(tmp_path):
@@ -1169,6 +1577,11 @@ def test_only_cannot_verify_re_fires_a_real_verdict_and_a_spent_budget_do_not(tm
     for state, tries, expect_fire in [
         (judge.J_CLEAN, 0, False),          # a real verdict — the judge is done here
         (judge.J_BLOCKED, 0, False),        # a real verdict — it went back through rework
+        # ⚖️🧊 CMX-239: also a real, definitive verdict (a guard SURVIVED corruption) — just
+        # one the run row never recorded because the CAS lost the race. Re-judging the SAME
+        # commit would only re-discover a fact this call already has; it is not an unknown
+        # and must not spend the cannot_verify retry budget re-proving it.
+        (judge.J_BLOCKED_RACE, 0, False),
         (judge.J_CANNOT_VERIFY, 0, True),   # unknown, budget untouched → retry
         (judge.J_CANNOT_VERIFY, 1, True),   # unknown, one retry left → retry
         (judge.J_CANNOT_VERIFY, 2, False),  # budget spent → a human's now
@@ -1385,6 +1798,70 @@ def test_a_judge_that_is_still_working_is_left_alone(tmp_path):
     assert summary["judged"] == 0                   # …and only one judge at a time
 
 
+def _write_live_judge_lock(wf, task_id: str) -> Path:
+    """A real ``.judgelock`` sibling of the judge worktree, naming THIS test process — the
+    same shape :func:`judge._claim_judge_slot` writes, read back by
+    :func:`judge.judge_lock_live` exactly as the watchdog will."""
+    from chela import sessions
+
+    worktree = judge.judge_worktree_path(wf, task_id)
+    lock_path = worktree.parent / f".{worktree.name}.judgelock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    lock_path.write_text(json.dumps(
+        {"pid": pid, "started": sessions.proc_started(pid), "task_id": task_id}
+    ))
+    return lock_path
+
+
+def test_a_missing_judge_window_is_HELD_not_reaped_while_its_lock_is_live(tmp_path):
+    """⚖️🕳️ CMX-229 Objective 2. Measured live on CMX-227: the watchdog reaped a judge's
+    worktree/window off a single tick's tmux snapshot and SIGKILLed it (exit 137) mid-
+    `chela judge run`. `alive=False` here (the window is missing from THIS tick's snapshot)
+    — the old behaviour reaped immediately. With a live judge lock naming a real process,
+    the watchdog must hold instead: no reap, no CANNOT_VERIFY, no worktree removal."""
+    wf = _wf(tmp_path)
+    from chela.dispatcher import _now
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path),
+                 judge_state=judge.J_RUNNING, judge_sha="cafe1234", judge_started_at=_now())
+    lock_path = _write_live_judge_lock(wf, "abc123")
+
+    removed: list[Path] = []
+    with patch.object(dispatcher, "remove_worktree", side_effect=lambda repo, p: removed.append(p) or True):
+        summary = _tick(wf, lambda *a: True, windows=())   # window missing from THIS snapshot
+
+    assert summary["judge_lost"] == 0
+    assert dispatcher.resolve_run("abc123")["judge_state"] == judge.J_RUNNING
+    assert removed == []                              # ⛔ the worktree must not be touched
+    assert lock_path.exists()                          # …and the lock itself is left alone
+
+
+def test_the_hold_still_expires_once_the_judge_TIMES_OUT(tmp_path):
+    """⛔ COUNTERWEIGHT — the hold above must be BOUNDED, not a second, unbounded lock-driven
+    timeout. A judge whose window is missing AND whose own start time is past
+    `JUDGE_TIMEOUT_SECONDS` is reaped regardless of what its lock file still claims — a
+    hold that ignored this bound would leak a wedged watchdog forever on a judge that
+    claimed its lock and then hung."""
+    from datetime import datetime, timedelta, timezone
+
+    wf = _wf(tmp_path)
+    stale_started = (
+        datetime.now(timezone.utc) - timedelta(seconds=dispatcher.JUDGE_TIMEOUT_SECONDS + 60)
+    ).isoformat()
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path),
+                 judge_state=judge.J_RUNNING, judge_sha="cafe1234", judge_started_at=stale_started)
+    _write_live_judge_lock(wf, "abc123")
+
+    summary = _tick(wf, lambda *a: True, windows=())
+
+    assert summary["judge_lost"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["judge_state"] == judge.J_CANNOT_VERIFY
+    assert "did not finish" in run["judge_detail"]
+
+
 @pytest.mark.parametrize("delta,expect_alive", [
     (0.0, True),        # the same process, same reader
     (0.4, True),        # /proc wrote .97, the `ps` fallback read .00 — same process
@@ -1410,3 +1887,237 @@ def test_the_judge_lock_start_time_window_is_exactly_the_fallbacks_resolution(de
     base = 1785703040.97
     with patch.object(sessions, "proc_started", lambda pid: base):
         assert judge._judge_lock_owner_alive({"pid": 4242, "started": base - delta}) is expect_alive
+
+
+def test_cmd_judge_prints_the_blocked_race_verdict_distinctly(capsys):
+    """⚖️🧊 CMX-239 round 2: `chela judge run`'s CLI print branch for `J_BLOCKED_RACE` is a
+    dead ``elif`` away from silently falling through to the ``else`` — which prints "every
+    guard held", the exact opposite of what happened. Drive the real argparse dispatch (the
+    way `test_contract_cli.py` proves the merge/escalate call-sites) so a corrupted
+    ``elif state == judge.J_BLOCKED_RACE:`` turns this red instead of leaving it green.
+    """
+    from unittest.mock import patch
+
+    from chela import main
+
+    fake = {
+        "ok": False, "task_id": "cmx-99", "blocking": 2, "round": 1,
+        "error": "the run moved to merged before the verdict could be written",
+        "state": judge.J_BLOCKED_RACE, "outcomes": [],
+    }
+    with patch.object(main.judge, "judge_run", return_value=fake):
+        with patch.object(sys, "argv",
+                           ["chela", "judge", "run", "cmx-99", "--experiments", "x.json"]):
+            main.main()
+    out = capsys.readouterr().out
+    assert "SURVIVED corruption, but the run had already moved on" in out
+    assert "This needs a human look NOW" in out
+    assert "every guard held" not in out
+
+
+def test_cmd_judge_prints_the_stale_head_notice_not_every_guard_held(capsys):
+    """⚖️⏱️ CMX-246 rework, finding 3: `chela judge run`'s CLI print branch for `J_STALE_HEAD`
+    is a dead ``elif`` away from silently falling through to the ``else`` — which prints
+    "every guard held. The run stays awaiting_review", exactly what a human would read as
+    "nothing needs their attention" for a run whose verdict was actually just discarded as
+    superseded. Same drive-the-real-argparse-dispatch pattern as the `J_BLOCKED_RACE` CLI
+    test above.
+
+    Disable ``elif state == judge.J_STALE_HEAD:`` (e.g. ``elif False and state == ...:``) and
+    this goes red: it falls to the ``else`` branch and prints "every guard held" instead of
+    the supersession notice."""
+    from unittest.mock import patch
+
+    from chela import main
+
+    fake = {
+        "ok": False, "task_id": "cmx-99", "state": judge.J_STALE_HEAD, "outcomes": [],
+        "error": "verdict was for 'oldsha000001', but the PR's head is now 'newsha000002' — "
+                 "discarded, no round spent",
+        "comment_posted": True,
+    }
+    with patch.object(main.judge, "judge_run", return_value=fake):
+        with patch.object(sys, "argv",
+                           ["chela", "judge", "run", "cmx-99", "--experiments", "x.json"]):
+            main.main()
+    out = capsys.readouterr().out
+    assert "no rework round was spent" in out
+    assert "a fresh judge covers the new head" in out
+    assert "every guard held" not in out
+
+
+def test_taskmodal_judge_badge_key_matches_j_blocked_race_value():
+    """⚖️🧊 CMX-239 round 4: the judge corrupted `J_BLOCKED_RACE`'s VALUE (not a call site)
+    and the suite stayed green. `taskmodal.js`'s `_JUDGE_BADGE` is keyed on the literal
+    ``'blocked_race'``, and `tests/taskmodal_judge_badge.test.mjs` only pins that SAME
+    hardcoded literal against itself — it never looks at `judge.py`. Every Python test, in
+    turn, references the SYMBOL `judge.J_BLOCKED_RACE`, never its string value, so neither
+    side of the language boundary would notice the two drifting apart. If they do,
+    `item.judge_state` (populated straight from the DB column `J_BLOCKED_RACE` writes) no
+    longer matches any `_JUDGE_BADGE` key, and `_JUDGE_BADGE[item.judge_state] ||
+    'badge-priority-low'`'s fallback silently degrades a CONFIRMED blocking finding into
+    `cannot_verify`'s low-priority tier.
+
+    This test is the only thing that reads BOTH sides: it takes `judge.J_BLOCKED_RACE`'s
+    live value and requires that exact string to appear as a key in the real
+    `taskmodal.js` source. Corrupt the constant's value in `judge.py` alone (JS untouched)
+    and this goes red, because the JS source no longer has a key matching the new value.
+    """
+    js_path = (Path(__file__).resolve().parent.parent / "chela" / "dashboard" / "static"
+               / "js" / "taskmodal.js")
+    src = js_path.read_text()
+    match = re.search(r"const _JUDGE_BADGE = \{(.*?)\n\};", src, re.DOTALL)
+    assert match, "taskmodal.js's _JUDGE_BADGE object literal not found — did it move or get renamed?"
+    keys = set(re.findall(r"^\s*(\w+):", match.group(1), re.MULTILINE))
+    assert judge.J_BLOCKED_RACE in keys, (
+        f"_JUDGE_BADGE has no key matching judge.J_BLOCKED_RACE ({judge.J_BLOCKED_RACE!r}) — "
+        f"the Python↔JS judge_state contract has drifted. _JUDGE_BADGE keys: {sorted(keys)}"
+    )
+
+
+# --- (i) CMX-249: self_check — the CHECK, not the habit -----------------------------------
+
+
+def test_self_check_survived_and_killed_match_run_experiments(tmp_path):
+    """The mechanics :func:`self_check` shares with :func:`run_experiments` via
+    ``_apply_experiments`` must produce the SAME verdicts on the same fixtures."""
+    fake_root = _project(tmp_path / "fake", guard_test=FAKE_GUARD_TEST)
+    report = judge.self_check(fake_root, TEST_CMD, {"experiments": [_exp()]}, timeout=120)
+    assert [o.verdict for o in report.outcomes] == [judge.SURVIVED]
+    assert report.state == judge.J_BLOCKED
+    assert (fake_root / "guard.py").read_text() == GUARD_PY   # restored
+
+    real_root = _project(tmp_path / "real", guard_test=REAL_GUARD_TEST)
+    report = judge.self_check(real_root, TEST_CMD, {"experiments": [_exp()]}, timeout=120)
+    assert [o.verdict for o in report.outcomes] == [judge.KILLED]
+    assert report.state == judge.J_CLEAN
+
+
+def test_self_check_runs_on_a_worktree_WITH_UNCOMMITTED_TRACKED_CHANGES(tmp_path):
+    """⛔ The whole reason self_check exists: it runs BEFORE the agent commits, so the guard
+    it is about to mutate IS an uncommitted tracked edit. Unlike `run_experiments`
+    (`test_a_dirty_worktree_verifies_NOTHING`), that must NOT make this cannot_verify — and
+    the uncommitted edit itself must survive the mutate/restore cycle untouched."""
+    root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
+    dirty_source = GUARD_PY + "\n# an in-progress edit, not yet committed\n"
+    (root / "guard.py").write_text(dirty_source)
+
+    report = judge.self_check(root, TEST_CMD, {"experiments": [_exp()]}, timeout=120)
+
+    assert not report.cannot_verify
+    assert [o.verdict for o in report.outcomes] == [judge.SURVIVED]
+    assert (root / "guard.py").read_text() == dirty_source     # the in-progress edit survives
+
+
+def test_self_check_with_no_experiments_is_cannot_verify(tmp_path):
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+
+    report = judge.self_check(root, TEST_CMD, {"experiments": []}, timeout=120)
+
+    assert report.cannot_verify
+    assert "nothing was corrupted" in report.cannot_verify
+    assert report.state == judge.J_CANNOT_VERIFY
+
+
+def test_self_check_on_a_red_baseline_does_not_touch_git(tmp_path):
+    """⛔ `run_experiments`' red-baseline diagnosis (`_diagnose_red_baseline`) checks out
+    `base_branch` and back — safe on a throwaway detached worktree, NOT safe on a tree an
+    agent is actively editing. self_check must report the red baseline plainly, with no
+    branch-hopping: none of `_diagnose_red_baseline`'s own phrasing (its `origin/<ref>` case,
+    or its base_branch-less case, `"the workflow names no ``workspace.base_branch``"`) may
+    appear, because self_check must never call it at all, not even with base_branch=""."""
+    root = _project(tmp_path / "repo", guard_test="def test_broken():\n    assert False\n")
+
+    report = judge.self_check(root, TEST_CMD, {"experiments": [_exp()]}, timeout=120)
+
+    assert report.cannot_verify
+    assert "NOT GREEN" in report.cannot_verify
+    assert "origin/" not in report.cannot_verify
+    assert "base_branch" not in report.cannot_verify
+    assert report.outcomes == []
+
+
+def _workflow_md(tmp_path: Path, test_cmd: str) -> Path:
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\nproject_key: TEST\njudge:\n  test_cmd: " + json.dumps(test_cmd) +
+        "\n  suite_timeout_seconds: 120\n---\nbody\n"
+    )
+    return p
+
+
+def test_run_self_check_reads_test_cmd_from_the_workflow(tmp_path):
+    root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+    wf_path = _workflow_md(tmp_path, TEST_CMD)
+
+    result = judge.run_self_check(root, exp_path, workflow_path=wf_path)
+
+    assert result["ok"]
+    assert result["state"] == judge.J_BLOCKED
+    assert result["blocking"] == 1
+
+
+def test_run_self_check_explicit_test_cmd_wins_over_the_workflow(tmp_path):
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+    # A workflow that names a suite which cannot possibly be this one — proves --test-cmd,
+    # not the workflow, is what ran.
+    wf_path = _workflow_md(tmp_path, "false")
+
+    result = judge.run_self_check(root, exp_path, workflow_path=wf_path, test_cmd=TEST_CMD)
+
+    assert result["ok"]
+    assert result["state"] == judge.J_CLEAN
+
+
+def test_run_self_check_with_no_test_cmd_and_no_workflow_errors(tmp_path):
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+
+    result = judge.run_self_check(tmp_path, exp_path)
+
+    assert not result["ok"]
+    assert "no suite to run" in result["error"]
+
+
+def test_run_self_check_missing_experiments_file_errors(tmp_path):
+    result = judge.run_self_check(tmp_path, tmp_path / "nope.json", test_cmd=TEST_CMD)
+
+    assert not result["ok"]
+    assert "does not exist" in result["error"]
+
+
+def test_cmd_judge_self_check_cli_exits_nonzero_on_a_survived_guard(tmp_path, capsys):
+    """Drive the real argparse dispatch (as `test_cmd_judge_prints_the_blocked_race_verdict_
+    distinctly` does above) so a corrupted `elif args.judge_cmd == "self-check":` — or a
+    corrupted exit-code branch inside `cmd_judge_self_check` — turns this red."""
+    root = _project(tmp_path / "repo", guard_test=FAKE_GUARD_TEST)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+
+    from chela import main
+
+    with patch.object(sys, "argv", ["chela", "judge", "self-check", "--experiments",
+                                     str(exp_path), "--test-cmd", TEST_CMD, "--cwd", str(root)]):
+        with pytest.raises(SystemExit) as exc:
+            main.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "SURVIVED corruption" in out
+    assert "DECORATION" in out
+
+
+def test_cmd_judge_self_check_cli_exits_zero_when_every_guard_is_killed(tmp_path, capsys):
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+
+    from chela import main
+
+    with patch.object(sys, "argv", ["chela", "judge", "self-check", "--experiments",
+                                     str(exp_path), "--test-cmd", TEST_CMD, "--cwd", str(root)]):
+        main.main()      # the clean path never calls sys.exit — falling through IS exit 0
+    assert "safe to commit" in capsys.readouterr().out

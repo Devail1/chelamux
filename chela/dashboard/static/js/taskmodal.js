@@ -68,13 +68,16 @@ function _ciChip(item) {
 }
 
 // judge_state is one of chela.judge's J_* values (running/clean/blocked/
-// cannot_verify) — reuse the existing severity-ladder badge classes so a
+// cannot_verify/blocked_race) — reuse the existing severity-ladder badge classes so a
 // blocked judgement reads exactly as loud as a failed run, not a new color.
 const _JUDGE_BADGE = {
     clean: 'badge-on',
     blocked: 'badge-off',
     running: 'badge-awaiting',
     cannot_verify: 'badge-priority-low',
+    // CMX-239: a CONFIRMED blocking finding the run row never recorded (the CAS-refused
+    // race) — as loud as an ordinary `blocked`, never `cannot_verify`'s low-priority tier.
+    blocked_race: 'badge-off',
 };
 
 function _judgeHtml(item) {
@@ -206,7 +209,9 @@ function _unbindTaskModalDismiss() {
 }
 
 // --- Stage 0: ES-module exports ---
-export { openTaskModal, closeTaskModal };
+// `_JUDGE_BADGE` is exported (like dispatcher.js's `_runDisplayId`/`_runPrCell`) so a
+// guard test can pin its severity mapping without driving the full modal DOM.
+export { openTaskModal, closeTaskModal, _JUDGE_BADGE };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

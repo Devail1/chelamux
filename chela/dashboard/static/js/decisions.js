@@ -94,6 +94,11 @@ const DECISION_TYPES = [
     // the one thing that used to be structurally unnotifiable (a BLOCKED verdict
     // already surfaces via `run_changes_requested` above).
     'run_judge_clean', 'run_judge_cannot_verify',
+    // CMX-239: the CAS-refused race for a BLOCKING verdict — the twin of
+    // `run_judge_cannot_verify` above, but for a CONFIRMED finding (a guard survived
+    // corruption) rather than an unknown. Also off the ordinary `run_changes_requested`
+    // path, for the same reason: the run moved before the verdict could send it back.
+    'run_judge_blocked_race',
     'finished', 'blocked', 'died', 'gone_unknown', 'completed_gone',
     'watch_epoch_lost', 'inbox_undeliverable', 'inbox_self_healed',
 ];
