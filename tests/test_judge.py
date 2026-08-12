@@ -374,6 +374,19 @@ def test_block_body_step_3_tells_the_rework_agent_to_self_check(tmp_path):
     assert "chela task-finished <task-id> --self-check-experiments" in body
 
 
+def test_workflow_md_step_6_names_both_task_finished_flags():
+    """⛔ CMX-258 review round 2 non-blocking note: WIRING, same shape as
+    ``test_block_body_step_3_tells_the_rework_agent_to_self_check`` above — the repo's own
+    ``WORKFLOW.md`` step 6 is what tells a NORMAL (non-blocked) agent how to call
+    ``task-finished``. If either flag's wording drifts out of step 6, an agent following the
+    doc has no way to know CMX-250's self-check gate exists."""
+    root = Path(__file__).resolve().parent.parent
+    text = (root / "WORKFLOW.md").read_text()
+
+    assert "--self-check-experiments <path>" in text
+    assert "--no-new-guards" in text
+
+
 def test_zero_experiments_is_CANNOT_VERIFY_not_a_clean_bill_of_health(tmp_path):
     root = _project(tmp_path / "repo")
 

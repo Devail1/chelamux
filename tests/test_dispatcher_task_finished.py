@@ -200,10 +200,16 @@ def test_verify_self_check_forwards_a_nonempty_cannot_verify_even_when_ok(tmp_pa
 
 
 def test_verify_self_check_unknown_task_id_errors(tmp_path):
+    """⛔ CMX-258 review round 2, finding 2: the refusal must say WHICH task_id had no
+    run — round 5 finding 3's 'the WHY is the only actionable half' rule applied to this
+    path. Pinning only the constant 'no run found' leaves the mutation that drops the
+    task_id interpolation (`f"no run found for task_id {task_id}"` →
+    `"no run found for task_id"`) invisible, since the message text is unchanged."""
     result = dispatcher.verify_self_check("no-such-task", str(tmp_path / "e.json"))
 
     assert not result["ok"]
     assert "no run found" in result["error"]
+    assert "no-such-task" in result["error"]
 
 
 def test_verify_self_check_missing_worktree_path_errors(tmp_path):
@@ -495,6 +501,11 @@ def test_cmd_task_finished_self_check_forwards_its_own_task_id_not_a_hardcoded_o
 
 
 def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_path, monkeypatch):
+    """⛔ CMX-258 review round 2, finding 1: the event must name THE RUN IT WAS INVOKED
+    FOR — round 8's exact task_id-forwarding class, at the one place a human reads it.
+    Use a task_id that is NOT the literal "t1" (the same reason the CLI-level forwarding
+    tests use "cmx-777"), so a hardcoded `payload={"task_id": "t1", ...}` goes red instead
+    of coincidentally satisfying the assertion because the run under test IS "t1"."""
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
     root = tmp_path / "wt"
     _repo_with_origin(root)
@@ -507,15 +518,15 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "add a guard")
     wf = _workflow_md(tmp_path)
-    _insert_run("t1", root, wf)
+    _insert_run("cmx-778", root, wf)
 
-    result = dispatcher.check_no_new_guards("t1")
+    result = dispatcher.check_no_new_guards("cmx-778")
 
     assert result is True
     events = event_log.read()["events"]
     matches = [e for e in events if e.get("type") == "no_new_guards_mismatch"]
     assert len(matches) == 1
-    assert matches[0]["payload"]["task_id"] == "t1"
+    assert matches[0]["payload"]["task_id"] == "cmx-778"
     assert matches[0]["payload"]["files"] == ["tests/test_new_thing.py"]
     # ⛔ CMX-250 review round 5, finding 4: the payload alone isn't what a human reads on
     # the dashboard — the event's human-readable summary must say WHAT happened, not be
@@ -523,6 +534,9 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
     assert "no-new-guards was passed" in matches[0]["summary"]
     assert "touches tests/" in matches[0]["summary"]
     assert "1 file(s)" in matches[0]["summary"]
+    # ⛔ CMX-258 review round 2 non-blocking note: the summary leads with the task_id too
+    # — pin both halves of the same unpinned binding in one guard.
+    assert matches[0]["summary"].startswith("cmx-778: ")
 
 
 def test_check_no_new_guards_false_and_logs_nothing_when_diff_is_clean(tmp_path, monkeypatch):
