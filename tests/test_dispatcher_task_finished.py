@@ -581,6 +581,58 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
     assert matches[0]["summary"].startswith("cmx-778: ")
 
 
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        pytest.param("tests/test_added.py", True, id="added-under-tests"),
+        pytest.param("tests/sub/test_nested.py", True, id="nested-under-top-level-tests"),
+        pytest.param("tests/conftest.py", True, id="non-test-underscore-named-under-tests"),
+        pytest.param("tests_helper.py", False, id="starts-with-tests-no-slash"),
+        pytest.param("tests-helpers/x.py", False, id="starts-with-tests-hyphen"),
+        pytest.param("chela/dashboard/widget.test.mjs", True, id="dot-test-mjs-outside-tests-dir"),
+        pytest.param("tests/widget.test.mjs", True, id="dot-test-mjs-under-tests-dir"),
+        pytest.param("chela/tests/x.py", False, id="nested-tests-dir-outside-top-level"),
+        pytest.param("README.md", False, id="no-guard-touched-at-all"),
+    ],
+)
+def test_check_no_new_guards_path_classification_table(tmp_path, path, expected):
+    """⛔ CMX-258 rework round 6: the human retry brief asked for the WHOLE definition
+    ``check_no_new_guards`` cross-checks to be written down and table-tested, instead of one
+    clause being closed per round while an adversary enumerates the next. This is that
+    table — each row commits exactly ONE new/changed path on top of the same clean base and
+    asserts whether it counts as touching a guard, per :func:`dispatcher._is_guard_path`:
+
+    * ``tests/test_added.py`` / ``tests/sub/test_nested.py`` / ``tests/conftest.py`` — three
+      shapes of "under the top-level ``tests/`` directory" (direct, nested, non-``test_``-
+      named) all count.
+    * ``tests_helper.py`` / ``tests-helpers/x.py`` — two shapes of "merely starts with the
+      letters tests" must NOT count; neither is under the ``tests/`` directory.
+    * ``chela/dashboard/widget.test.mjs`` / ``tests/widget.test.mjs`` — a ``*.test.mjs`` JS
+      suite counts as a guard everywhere in the repo, not just under ``tests/`` — this is
+      round 6's blocking finding: ``tests/test_js_suites.py`` globs and runs ``*.test.mjs``
+      from the whole tree (a real one, ``chela/dashboard/static/collab/fit.test.mjs``,
+      already lives outside ``tests/``), so a cross-check keyed on ``.py`` files under
+      ``tests/`` alone is blind to all of them.
+    * ``chela/tests/x.py`` — a Python file under a NESTED ``tests/`` directory must NOT
+      count: pytest's own ``testpaths = ["tests"]`` (``pyproject.toml``) never collects it,
+      so mutating it is not protected by anything this repo's suite runs. This resolves the
+      axis round 5's own note called "undecided by design" — decided here, not accidentally.
+    * ``README.md`` — the negative control: a diff that touches no guard at all must report
+      no mismatch.
+    """
+    root = tmp_path / "wt"
+    _repo_with_origin(root)
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("guard or decoy content\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", f"touch {path}")
+    wf = _workflow_md(tmp_path)
+    _insert_run("t1", root, wf)
+
+    assert dispatcher.check_no_new_guards("t1") is expected
+
+
 def test_check_no_new_guards_false_and_logs_nothing_when_diff_is_clean(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
     root = tmp_path / "wt"

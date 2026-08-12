@@ -2078,11 +2078,37 @@ def verify_self_check(task_id: str, experiments_path: str) -> dict:
     }
 
 
+def _is_guard_path(path: str) -> bool:
+    """⚖️🔎 CMX-258 rework round 6: the DEFINITION ``check_no_new_guards`` cross-checks — "is
+    this diff-touched path a guard?" — written down once, in one place, instead of being
+    re-derived one clause at a time by each review round.
+
+    A path is a guard when it is something the repo's own suites actually execute:
+
+    * anything under the top-level ``tests/`` directory — this is the ONLY place pytest
+      looks (``pyproject.toml``'s ``[tool.pytest.ini_options] testpaths = ["tests"]``), so a
+      Python file nested somewhere else that happens to sit under its own ``tests/``
+      subdirectory (e.g. a hypothetical ``chela/tests/x.py``) is never collected and is
+      therefore NOT a guard by this definition — a decision, not an oversight: nothing
+      pytest runs is protected by a mutation to that file.
+    * any ``*.test.mjs`` file ANYWHERE in the repo — ``tests/test_js_suites.py`` globs the
+      whole tree with ``ROOT.rglob("*.test.mjs")`` and runs every hit under
+      ``CHELA_REQUIRE_JS_TESTS=1``, precisely so a suite like
+      ``chela/dashboard/static/collab/fit.test.mjs`` (real, outside ``tests/`` today) still
+      counts as a guard even though it is not a ``.py`` file and not under ``tests/``.
+
+    A path that merely STARTS WITH the letters "tests" without the directory separator
+    (``tests_helper.py``, ``tests-helpers/x.py``) is deliberately excluded — it is not under
+    the ``tests/`` directory at all.
+    """
+    return path.startswith("tests/") or path.endswith(".test.mjs")
+
+
 def check_no_new_guards(task_id: str) -> bool | None:
     """⚖️🔎 CMX-250 review round 1: whether ``--no-new-guards`` looks WRONG for this run —
-    its diff (vs its own ``base_branch``, read from its own worktree, right now) touches
-    something under ``tests/``. Report-only, on purpose: the opt-out must stay usable for a
-    genuinely guard-free run, so this never refuses the transition — it makes a wrong
+    its diff (vs its own ``base_branch``, read from its own worktree, right now) touches a
+    guard, per :func:`_is_guard_path`. Report-only, on purpose: the opt-out must stay usable
+    for a genuinely guard-free run, so this never refuses the transition — it makes a wrong
     opt-out VISIBLE (an event, plus a loud CLI warning) instead of it being a bare
     self-declaration nothing ever cross-checks, which is exactly how the prose version of
     Done Criteria #3 failed.
@@ -2116,7 +2142,7 @@ def check_no_new_guards(task_id: str) -> bool | None:
     if diff.returncode != 0:
         return None
     files = [f for f in diff.stdout.splitlines() if f.strip()]
-    touched = [f for f in files if f.startswith("tests/")]
+    touched = [f for f in files if _is_guard_path(f)]
     if touched:
         event_log.append(
             "no_new_guards_mismatch",
