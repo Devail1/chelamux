@@ -111,10 +111,10 @@ def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
     # carry a next step, same as every sibling _escalate call site.
     _, recommendation, options = _parse_escalation(run["last_error"])
     assert recommendation.strip(), "an automatic escalation must carry a non-empty recommendation"
-    assert options, "an automatic escalation must carry actionable options"
+    assert len(options) >= 2, "one option is not a choice"
 
     reviews = dispatcher.reviews_of(dict(run))
-    assert len(reviews) == 2
+    assert [r["round"] for r in reviews] == [1, 2]
     assert reviews[-1]["verdict"] == "disputed"
     assert "already fixed" in reviews[-1]["body"]
 
