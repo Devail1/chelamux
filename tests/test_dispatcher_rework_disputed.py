@@ -315,8 +315,11 @@ def _gh_router_head(live_head_sha, comment_ok=True, checks_ok=True):
 
 
 def test_dispute_with_a_moved_head_routes_to_awaiting_review_not_needs_human():
+    # last_error seeded non-NULL (as a real prior rework round would leave it) so that
+    # clearing it on the awaiting_review write is actually observable — a row that was
+    # already NULL would pass this assertion even if the clear were silently dropped.
     with dispatcher._db() as conn:
-        _row(conn, judge_sha="a" * 40)
+        _row(conn, judge_sha="a" * 40, last_error="round 1: fix the wire")
     with patch.object(dispatcher.subprocess, "run",
                        side_effect=_gh_router_head("b" * 40)), \
          patch.object(dispatcher, "_kill_window") as kill:
@@ -337,6 +340,48 @@ def test_dispute_with_a_moved_head_routes_to_awaiting_review_not_needs_human():
     assert run["last_error"] is None
     assert run["rework_count"] == 1               # unchanged — the round was already spent
     assert dispatcher.reviews_of(dict(run))[-1]["verdict"] == "disputed"
+
+
+def test_dispute_races_a_status_change_and_the_cas_refuses_the_stale_row():
+    """The live `gh` read is deliberately done BEFORE the write transaction — a network
+    call must not hold the row lock (same reasoning as `reopen`'s new-commit gate). That
+    opens a window: another tick or CLI call can move the row status while `gh` is still
+    in flight. The CAS re-check inside `with _db()` must refuse to act on a row that is no
+    longer the running-rework row this call started with — not just a row that vanished
+    outright. Simulates the race by mutating the row's status from inside the mocked `gh
+    pr view` call, i.e. exactly in the window between the live-head read and the CAS."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="a" * 40)
+
+    def _run(cmd, *a, **k):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        if cmd[:3] == ["gh", "pr", "view"] and "--json" in cmd:
+            with dispatcher._db() as race_conn:
+                race_conn.execute(
+                    "UPDATE runs SET status='awaiting_review' WHERE task_id=?", ("abc123",),
+                )
+                race_conn.commit()
+            r = R()
+            r.stdout = json.dumps({"headRefOid": "b" * 40, "statusCheckRollup": []})
+            return r
+        return R()
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_run), \
+         patch.object(dispatcher, "_kill_window") as kill:
+        result = dispatcher.mark_rework_disputed("abc123", "the verdict is wrong")
+
+    assert result["ok"] is False
+    assert "moved to" in result["error"]
+    kill.assert_not_called()
+
+    run = dispatcher.resolve_run("abc123")
+    # untouched by mark_rework_disputed's own write — the race's own UPDATE is all that
+    # landed, so this reads back exactly what the racing writer set, not needs_human.
+    assert run["status"] == "awaiting_review"
+    assert run["last_error"] is None
 
 
 def test_dispute_with_an_unmoved_head_still_lands_on_needs_human():
