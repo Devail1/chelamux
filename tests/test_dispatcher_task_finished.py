@@ -369,7 +369,13 @@ def test_cmd_task_finished_no_new_guards_skips_self_check_and_proceeds(capsys):
 
 def test_cmd_task_finished_with_neither_flag_warns_but_still_proceeds(capsys):
     """⛔ Backward compatibility: a run dispatched under an older WORKFLOW.md never learned
-    these flags exist and must not be broken by a gate it was never told to satisfy."""
+    these flags exist and must not be broken by a gate it was never told to satisfy.
+
+    ⛔ CMX-258 rework round 10 (judge finding 1): the bare 'was not enforced' fact was the
+    only thing pinned here — a mutation that strips the notice down to that constant half
+    and drops the actionable half (which flag to pass NEXT time) survived every test. This
+    is the ONLY channel that tells an agent dispatched under an older WORKFLOW.md which
+    flag exists; pin both flag names too, not just the fact that something was skipped."""
     from chela import main
 
     with patch.object(dispatcher, "verify_self_check") as verify, \
@@ -380,6 +386,8 @@ def test_cmd_task_finished_with_neither_flag_warns_but_still_proceeds(capsys):
     verify.assert_not_called()
     out = capsys.readouterr().out
     assert "was not enforced" in out
+    assert "--self-check-experiments <path>" in out
+    assert "--no-new-guards" in out
     assert "awaiting review" in out
 
 
@@ -1013,7 +1021,13 @@ _TASK_FINISHED_SCENARIOS = [
                 "ok": True, "task_id": "cmx-905", "pr_url": "https://x/1"}),
         },
         expect_exit=None,
-        must_contain=["touches tests/", "skipping self-check"],
+        # ⛔ CMX-258 rework round 10 (judge finding 2): "touches tests/" and "skipping
+        # self-check" pin only the bare fact — a mutation that drops WHY it matters (Done
+        # Criteria #3 requires a self-check for this diff) and WHAT happened to that fact
+        # (recorded, not blocked — the entire deterrent, since this path is report-only)
+        # survived. Pin both actionable halves, not just the trigger condition.
+        must_contain=["touches tests/", "skipping self-check", "Done Criteria #3",
+                      "Not blocked, but recorded"],
         forward=("dispatcher.check_no_new_guards", ("cmx-905",)),
     ),
     dict(

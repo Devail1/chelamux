@@ -456,6 +456,20 @@ def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
     assert "step 6 needs its path" in text
 
 
+def test_workflow_md_step_6_binds_the_self_check_flag_to_the_same_experiments_file():
+    """⛔ CMX-258 rework round 10 (judge finding 3, WIRING): the sibling test above pins step
+    3's half of the step-3-to-step-6 wiring ('Keep the experiments JSON file … step 6 needs
+    its path'), but step 6's own half — that `--self-check-experiments` must point at THE
+    SAME file step 3 wrote, not any freshly-written one that happens to come back clean —
+    was unpinned. Softening 'the SAME experiments file from step 3' to 'an experiments file'
+    unbinds the gate from the guards this run actually added, which is exactly the
+    prose-that-can-be-skipped failure CMX-250 exists to close."""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert "the SAME experiments file from step 3" in text
+
+
 def test_zero_experiments_is_CANNOT_VERIFY_not_a_clean_bill_of_health(tmp_path):
     root = _project(tmp_path / "repo")
 
