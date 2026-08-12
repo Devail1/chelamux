@@ -23,12 +23,13 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from chela import dispatcher, event_log, judge
+from chela import dispatcher, event_log, hold, judge
 
 TEST_CMD = f'"{sys.executable}" -m pytest -q'
 
@@ -1659,6 +1660,73 @@ def test_a_row_already_moved_on_is_not_re_escalated_every_tick(tmp_path, monkeyp
     assert run["status"] == "merged"                       # ⛔ not clobbered back to needs_human
     assert run["ended_at"] == "2026-07-14T11:00:00+00:00"  # ⛔ untouched
     assert run["last_error"] == "already resolved, do not touch"
+
+
+def test_a_HELD_workflow_still_escalates_a_stranded_judge_unknown(tmp_path, monkeypatch):
+    """⚖️🧊 CMX-253 Objective 1 placement. `_escalate_stranded_judge_unknowns` sits ABOVE the
+    `blocked`/`hold` returns on purpose — dispatcher.py's own ⛔ comment on step 1e′ says it
+    "starts no agent, takes no slot". Escalation is not a claim, so a paused queue (or a
+    broken WORKFLOW.md) must not also silence the one transition that un-strands a run that
+    already spent its retry budget — the failure mode `test_a_HOLD_pauses_the_rework_but_
+    NEVER_the_escalation` already pins for the 1d rework-cap escalation.
+
+    Every other stranded-judge test drives an ordinary unheld tick, so nothing pinned this
+    placement: gating the 1e′ call behind `blocked or hold.active()` — i.e. moving it
+    conceptually below the hold/blocked returns — would leave the run stuck in
+    `awaiting_review` forever, indistinguishable from one still waiting on review, while the
+    queue is paused.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    held = hold.Hold(reason="rewriting the queue", by="liav", pid=1,
+                      created_at=time.time(), expires_at=time.time() + 3600)
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None,
+                 judge_sha="cafe1234", judge_state=judge.J_CANNOT_VERIFY,
+                 judge_cannot_verify_tries=2, judge_detail="a flake")
+
+    def spawn(w, row, sha, conn):
+        return True    # never reached — the budget is already spent, and the queue is held
+
+    from chela.workflow import WorkflowStatus
+
+    class R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, *a, **k):
+        r = R()
+        if isinstance(cmd, list) and cmd[:2] == ["tmux", "list-windows"]:
+            r.stdout = ""
+        if isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "view"] and "statusCheckRollup,headRefOid" in cmd:
+            r.stdout = json.dumps({"headRefOid": "cafe1234", "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "t", "status": "COMPLETED",
+                 "conclusion": "SUCCESS", "workflowName": "CI",
+                 "detailsUrl": "https://github.com/o/r/actions/runs/1/job/2"}]})
+        elif isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "view"]:
+            r.stdout = json.dumps({"state": "OPEN", "mergeable": "MERGEABLE"})
+        return r
+
+    with patch.object(dispatcher, "load_workflow_cached",
+                      return_value=WorkflowStatus(path=wf.path, workflow=wf, error=None)), \
+         patch.object(dispatcher, "get_source", return_value=_EmptySource()), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
+         patch.object(dispatcher, "_spawn_judge", side_effect=spawn), \
+         patch.object(dispatcher, "remove_worktree", return_value=True), \
+         patch.object(dispatcher, "_failing_log_tail", return_value=""), \
+         patch.object(dispatcher, "_respawn_rework", return_value=False), \
+         patch.object(dispatcher.hold, "expire_if_stale", return_value=None), \
+         patch.object(dispatcher.hold, "active", return_value=held):
+        result = dispatcher.tick(wf.path)
+
+    assert result["held"] is True                     # the queue really was paused
+    assert result["judge_stranded"] == 1               # ⛔ and the escalation still ran
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert "a flake" in run["last_error"]
 
 
 def test_a_fresh_commit_resets_the_budget_instead_of_escalating(tmp_path, monkeypatch):
