@@ -93,6 +93,34 @@
 // that would actually hurt a human (Liav is red-weak) rather than offend a
 // linter.
 //
+// CMX-257 round 11 (human directive on PR #326, superseding round 10 for
+// GUARD 6 specifically): round 10 kept GUARD 6 ("single accent" — every
+// `.active` rule's highlight colour is --accent or a neutral, never a second
+// hue) on the theory that resolving a colour to its actual saturation, rather
+// than pattern-matching its notation, would close the class of holes that
+// defeated rounds 8-10 (rgb(), then rgba()/hsl(), then bare keywords, then a
+// keyword nested inside a function). It didn't: colorToRgb only parses hex
+// and rgb()/rgba(), and silently `continue`s past anything else (a bare
+// hsl() literal, for instance) — failing OPEN, the same shape of hole one
+// notation later. GUARD 6 is a CSS-COLOUR-VALUE assertion, the same class as
+// claims 1-3 above, and the round-9/10 header already explains why that
+// class can't be closed by a text-and-DOM test: CSS colour syntax is
+// open-ended, so a guard that must parse a value to classify it always has
+// one more notation the parser doesn't cover. Moved to NOT GUARDED below,
+// its machinery (the CSS-cascade parser — cssRules/declarations/
+// resolvedRootVars/resolvedBodyAtDesktop/mediaSatisfiedAtViewport — and the
+// colour-classification helpers — hexToRgb/saturation/isNeutralRgb/sameRgb/
+// findVarCalls/resolveVarExpr/colorToRgb/stripVarCalls/CSS_COLOR_KEYWORDS)
+// deleted with it, since GUARD 6 was their only remaining caller once claim
+// 1's type-scale tests left in round 10. Finding 2 in the same round-11
+// verdict is a different kind, and was NOT moved: views.js's "RE-PARENTING,
+// NOT REMOVAL" is a DOM fact (does the demoted row still occupy space and
+// paint under #side-nav-more, not just does the container exist), which
+// jsdom resolves truthfully the same way it does for .side-subhead
+// immediately above it — see the SIDE_SECTION_FIXTURE render test below,
+// which now also asserts on the fixture's own .side-item row instead of
+// stopping at the container.
+//
 // NOT GUARDED here — verified instead by manual greyscale capture (per the
 // round-6 directive: "I verified it live on an isolated dashboard... a
 // greyscale capture showing every status distinguishable with hue fully
@@ -137,7 +165,17 @@
 // CSS-value question the same as (i)/(ii) — the greyscale capture is its
 // acceptance check (the WIRING tests that the horizontal padding actually
 // wins the cascade, and that the .grid-stack column stays capped/centred,
-// stay guarded, below).
+// stay guarded, below);
+// (iv) GUARD 6, single accent (ticket claim 3's colour half): every `.active`
+// rule's highlight colour is --accent or a neutral, never a second hue — CSS
+// colour syntax is open-ended (hex, rgb()/rgba(), hsl()/hsla(), bare
+// keywords, keywords or hues nested inside color-mix()/other functions, and
+// whatever notation comes next), so a guard that has to parse a colour value
+// to classify it always has one more notation it doesn't cover (round 11:
+// resolving var() references to actual saturation instead of a name
+// allowlist still only parsed hex/rgb(), and failed OPEN — silently skipped —
+// on anything else, e.g. a bare hsl() literal) — the greyscale capture at
+// 1/2/4/6 densities is its acceptance check.
 //
 // Run: node --test tests/dashboard_scale_nav_a11y.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
@@ -160,135 +198,6 @@ const NAV = src('static/js/nav.js');
 const KANBAN = src('static/js/kanban.js');
 const VIEWS_SRC = src('static/js/views.js');
 
-// ---------------------------------------------------------------------------
-// A CSS parser that tracks BRACE NESTING (so a rule sitting inside an @media
-// override can be told apart from a top-level one) and RESOLVES same-selector
-// rules the way a browser's cascade would: the LAST declaration of a given
-// property, in source order, wins — whether the duplicate is a second
-// declaration inside ONE block, or a second TOP-LEVEL rule for the same
-// selector living somewhere else in a 3.5k-line stylesheet.
-//
-// CMX-230 round 11 (read before extending this file further): rounds 6-10
-// each closed one INSTANCE of the same hole — a guard that reads only the
-// first matching block/declaration/rule and never asks "what does this
-// actually resolve to" — and each round's fix left the next notation/
-// property/selector-shaped instance of it standing. cssRules()/
-// resolvedRootVars() below resolve the property instead of pattern-matching
-// source text once, closing the whole class instead of one spot at a time.
-// Comments are stripped first so a commented-out example never masquerades
-// as a rule.
-//
-// Still deliberately NOT full cascade-aware (no specificity/media-query
-// evaluation) — a selector's legitimate smaller override living inside an
-// @media block (e.g. .gs-head/.pane-subtitle at narrow widths,
-// tests/wallnav.test.mjs's CMX-133 guard) must NOT be folded into the base
-// desktop rule. Only rules with media === null (top-level) are merged.
-// ---------------------------------------------------------------------------
-function cssRules(css) {
-    const noComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
-    const rules = [];
-    const atStack = [];
-    let buf = '';
-    for (let i = 0; i < noComments.length; i++) {
-        const ch = noComments[i];
-        if (ch === '{') {
-            const header = buf.trim();
-            buf = '';
-            if (header.startsWith('@')) {
-                atStack.push(header);
-                continue;
-            }
-            let depth = 1, j = i + 1;
-            while (j < noComments.length && depth > 0) {
-                if (noComments[j] === '{') depth++;
-                else if (noComments[j] === '}') depth--;
-                j++;
-            }
-            rules.push({
-                selector: header,
-                body: noComments.slice(i + 1, j - 1),
-                media: atStack.length ? atStack[atStack.length - 1] : null,
-            });
-            i = j - 1;
-        } else if (ch === '}') {
-            if (atStack.length) atStack.pop();
-            buf = '';
-        } else {
-            buf += ch;
-        }
-    }
-    return rules;
-}
-
-// Every declaration ("prop, value[, important]" triple) in `body`, in source
-// order. CMX-257 round 8: this used to leave a trailing `!important` INSIDE
-// the returned value string (so a plain numeric-literal regex simply failed
-// to match an important declaration's value rather than recognising it as
-// important) — stripped here into its own boolean so resolveAllForContext()
-// can rank importance the way a real cascade does: importance beats
-// specificity beats source order, not "loses the property entirely".
-function declarations(body) {
-    return [...body.matchAll(/([\w-]+)\s*:\s*([^;]+);/g)]
-        .map(m => {
-            const raw = m[2].trim();
-            const imp = raw.match(/^([\s\S]*?)\s*!\s*important\s*$/i);
-            return imp
-                ? [m[1].trim().toLowerCase(), imp[1].trim(), true]
-                : [m[1].trim().toLowerCase(), raw, false];
-        });
-}
-
-// The RESOLVED custom-property map for :root — merges every TOP-LEVEL :root
-// block (style.css declares it three times; a later same-specificity custom-
-// property declaration wins per the cascade) instead of reading only the
-// first one.
-// CMX-257 round 3: a selector-string-only lookup drops ANY rule inside an
-// @media block, including one whose condition is always true at a real
-// viewport (e.g. `@media (min-width: 0px) { :root { ... } }`). Every numeric
-// legibility floor reads :root through this function, so that escape hatch
-// would revert the whole CMX-230 type scale invisibly. resolvedBodyAtDesktop()
-// is defined below but hoists (function declaration), so it's safe to call
-// here.
-function resolvedRootVars(css) {
-    const vars = new Map();
-    for (const [k, v] of declarations(resolvedBodyAtDesktop(css, ':root')))
-        if (k.startsWith('--')) vars.set(k, v);
-    return vars;
-}
-// --- CMX-257 round 2: a naive selector lookup that only accepts top-level
-// (non-@media) rules deliberately excludes a selector's legitimate narrow-
-// viewport override (e.g. .gs-head/.pane-subtitle's real CMX-133 mobile bar)
-// so it isn't folded into the desktop rule it guards. The judge found the
-// converse hole: an @media condition that is ALWAYS true at a real desktop
-// width (`@media (min-width: 0px)`) is still, textually, "inside an @media
-// block" — so a naive top-level-only lookup excludes it too, and a bare
-// font-size literal smuggled in through it would be invisible. Reusing
-// tests/wallnav.test.mjs's CMX-130 activeOnMobile discipline but inverted for
-// a real desktop viewport: resolvedBodyAtDesktop() folds in every rule (base
-// OR @media) whose condition is actually satisfied at DESKTOP_VIEWPORT_PX, in
-// source order — so a genuine `max-width: 768px` mobile override (never
-// satisfied at desktop) still stays excluded, while an always-true wrapper
-// like `min-width: 0px` no longer offers an escape.
-const DESKTOP_VIEWPORT_PX = 1920;
-function mediaSatisfiedAtViewport(mediaCondition, viewportPx) {
-    const negated = /(^|\s)not\b/i.test(mediaCondition);
-    const minM = mediaCondition.match(/min-width:\s*([0-9.]+)px/);
-    const maxM = mediaCondition.match(/max-width:\s*([0-9.]+)px/);
-    let ok = true;
-    if (minM) ok = ok && (negated ? viewportPx < parseFloat(minM[1]) : viewportPx >= parseFloat(minM[1]));
-    if (maxM) ok = ok && (negated ? viewportPx > parseFloat(maxM[1]) : viewportPx <= parseFloat(maxM[1]));
-    return ok;
-}
-function resolvedBodyAtDesktop(css, selector) {
-    const all = cssRules(css).filter(r =>
-        r.selector.split(',').map(s => s.trim()).includes(selector));
-    const active = all.filter(r => r.media === null || mediaSatisfiedAtViewport(r.media, DESKTOP_VIEWPORT_PX));
-    assert.ok(active.length >= 1,
-        `no CSS rule for selector ${selector} is active at a ${DESKTOP_VIEWPORT_PX}px desktop viewport`);
-    const props = new Map();
-    for (const r of active) for (const [k, v] of declarations(r.body)) props.set(k, v);
-    return [...props].map(([k, v]) => `${k}: ${v};`).join(' ');
-}
 // --- jsdom fixtures: mount the REAL style.css and a concrete, hand-written
 // fragment of REAL markup (mirroring terminals.js's paneHead()/
 // _wallTileHTML()/_ctxBarHTML(), nav.js's _agentRowHtml(), and index.html's
@@ -589,200 +498,6 @@ test('wall pane footer completeness: model + spend + branch + context% + tokens 
     }
 });
 
-// --- GUARD 6: single accent — every `.active` (the "you are here" / current-
-// selection vocabulary) CSS rule may highlight with --accent and neutral
-// colours only. Adding a second accent-ish hue (another --ok-*/--green/
-// --yellow/--red/--orange token, a fresh hex, or the same hue nested inside a
-// function like color-mix()) to any `.active` rule must fail here.
-//
-// CMX-230 round 11 (read before extending this file further): rounds 8-10
-// each patched this guard by NOTATION — allow var()/hex, then rgb()/hsl(),
-// then bare keywords — and each patch left the next notation-shaped hole
-// standing (a keyword nested INSIDE color-mix(), an allowlisted var name
-// --room-accent that is never actually declared as neutral anywhere). Both
-// holes share one root cause: the guard classified colours by how they were
-// WRITTEN, never by what they RESOLVE to. What follows instead resolves
-// every var() reference against the merged :root custom-property map
-// (following fallback chains, e.g. var(--surface-2, var(--surface))) down to
-// a literal colour, then classifies that literal by actual SATURATION — the
-// thing "hue" means — instead of a hand-maintained name/regex allowlist. A
-// var with no :root declaration AND no resolvable fallback (exactly
-// --room-accent's shape: it's the per-room tile override, set inline by JS,
-// never declared on :root) resolves to nothing and fails closed, rather than
-// silently permitting whatever it happens to be named.
-function hexToRgb(hex) {
-    let h = hex.replace('#', '');
-    if (h.length === 3 || h.length === 4) h = [...h].map(c => c + c).join('');
-    if (h.length !== 6 && h.length !== 8) return null;
-    const n = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16));
-    return n.some(Number.isNaN) ? null : n;
-}
-// HSL saturation (0-1) from an [r,g,b] triple (0-255 each).
-function saturation([r, g, b]) {
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    if (max === min) return 0;
-    const l = (max + min) / 2 / 255;
-    return (max - min) / 255 / (1 - Math.abs(2 * l - 1));
-}
-// This theme's own neutrals (--bg/--surface/--border/--text/--text-dim, and
-// the #0d1117 text-on-accent contrast colour) all measure ~0.09-0.30
-// saturation (they carry a faint slate tint, not true greyscale); --accent
-// and every state hue (--green/--yellow/--red/the --ok-* family/--orange)
-// measure 0.49+. 0.35 sits cleanly between the two clusters.
-const HUE_SATURATION_FLOOR = 0.35;
-function isNeutralRgb(rgb) { return !!rgb && saturation(rgb) < HUE_SATURATION_FLOOR; }
-function sameRgb(a, b) { return !!a && !!b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2]; }
-
-// Extracts the inner expression of every OUTER var(...) call in `text`
-// (brace/paren-nesting aware, so var(--x, var(--y)) is one call, not two).
-function findVarCalls(text) {
-    const calls = [];
-    let i = 0;
-    while ((i = text.indexOf('var(', i)) !== -1) {
-        let depth = 1, j = i + 4;
-        const start = j;
-        while (j < text.length && depth > 0) {
-            if (text[j] === '(') depth++;
-            else if (text[j] === ')') depth--;
-            j++;
-        }
-        calls.push(text.slice(start, j - 1));
-        i = j;
-    }
-    return calls;
-}
-// Resolves a var() expression ("--name" or "--name, fallback") against the
-// :root custom-property map, following var() fallback chains, to either a
-// literal colour string or null (unresolvable — no :root declaration and no
-// usable fallback).
-function resolveVarExpr(expr, rootVars, depth) {
-    if (depth > 5) return null;
-    const comma = expr.indexOf(',');
-    const name = (comma === -1 ? expr : expr.slice(0, comma)).trim();
-    const fallback = comma === -1 ? null : expr.slice(comma + 1).trim();
-    if (rootVars.has(name)) return rootVars.get(name);
-    if (fallback == null) return null;
-    const nested = fallback.match(/^var\(([\s\S]*)\)$/);
-    return nested ? resolveVarExpr(nested[1], rootVars, depth + 1) : fallback;
-}
-// Parses a resolved colour literal (hex, or an rgb()/rgba() functional form —
-// this stylesheet's only two colour notations) down to an [r,g,b] triple.
-function colorToRgb(value) {
-    if (!value) return null;
-    const hex = value.match(/#[0-9a-fA-F]{3,8}\b/);
-    if (hex) return hexToRgb(hex[0]);
-    const fn = value.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*[,)]/);
-    if (fn) return [1, 2, 3].map(i => parseFloat(fn[i]));
-    return null;
-}
-// Removes every var(...) call from `text` (balanced, so nested fallbacks are
-// removed whole) — used to keep the bare-keyword scan below from tripping on
-// keyword-shaped substrings of a variable NAME (e.g. "orange" inside a
-// hypothetical --ok-orange reference), which is checked separately via the
-// var-resolution path above.
-function stripVarCalls(text) {
-    let out = '', i = 0;
-    while (i < text.length) {
-        if (text.startsWith('var(', i)) {
-            let depth = 1, j = i + 4;
-            while (j < text.length && depth > 0) {
-                if (text[j] === '(') depth++;
-                else if (text[j] === ')') depth--;
-                j++;
-            }
-            i = j;
-        } else {
-            out += text[i];
-            i++;
-        }
-    }
-    return out;
-}
-// Grayscale/CSS-wide keywords (black/white/gray/transparent/currentColor/...)
-// are neutral by construction (no hue to clash with --accent) and are
-// deliberately NOT in this set — only names that carry an actual hue are.
-const CSS_COLOR_KEYWORDS = new Set([
-    'aliceblue', 'antiquewhite', 'aqua', 'aquamarine', 'azure', 'beige', 'bisque',
-    'blanchedalmond', 'blue', 'blueviolet', 'brown', 'burlywood', 'cadetblue',
-    'chartreuse', 'chocolate', 'coral', 'cornflowerblue', 'cornsilk', 'crimson',
-    'cyan', 'darkblue', 'darkcyan', 'darkgoldenrod', 'darkgreen', 'darkkhaki',
-    'darkmagenta', 'darkolivegreen', 'darkorange', 'darkorchid', 'darkred',
-    'darksalmon', 'darkseagreen', 'darkslateblue', 'darkturquoise', 'darkviolet',
-    'deeppink', 'deepskyblue', 'dodgerblue', 'firebrick', 'floralwhite',
-    'forestgreen', 'fuchsia', 'gold', 'goldenrod', 'green', 'greenyellow',
-    'honeydew', 'hotpink', 'indianred', 'indigo', 'ivory', 'khaki', 'lavender',
-    'lavenderblush', 'lawngreen', 'lemonchiffon', 'lightblue', 'lightcoral',
-    'lightcyan', 'lightgoldenrodyellow', 'lightgreen', 'lightpink', 'lightsalmon',
-    'lightseagreen', 'lightskyblue', 'lightsteelblue', 'lightyellow', 'lime',
-    'limegreen', 'linen', 'magenta', 'maroon', 'mediumaquamarine', 'mediumblue',
-    'mediumorchid', 'mediumpurple', 'mediumseagreen', 'mediumslateblue',
-    'mediumspringgreen', 'mediumturquoise', 'mediumvioletred', 'midnightblue',
-    'mintcream', 'mistyrose', 'moccasin', 'navajowhite', 'navy', 'oldlace',
-    'olive', 'olivedrab', 'orange', 'orangered', 'orchid', 'palegoldenrod',
-    'palegreen', 'paleturquoise', 'palevioletred', 'papayawhip', 'peachpuff',
-    'peru', 'pink', 'plum', 'powderblue', 'purple', 'rebeccapurple', 'red',
-    'rosybrown', 'royalblue', 'saddlebrown', 'salmon', 'sandybrown', 'seagreen',
-    'seashell', 'sienna', 'skyblue', 'slateblue', 'snow', 'springgreen',
-    'steelblue', 'tan', 'teal', 'thistle', 'tomato', 'turquoise', 'violet',
-    'wheat', 'yellow', 'yellowgreen',
-]);
-test('single accent: every .active rule\'s highlight colour is --accent (or a neutral), never a second hue', () => {
-    const activeBlocks = cssRules(CSS).filter(b =>
-        b.selector.split(',').map(s => s.trim()).some(s => /\.active(::|\s|$|\.)/.test(s + ' ')));
-    assert.ok(activeBlocks.length >= 5, 'too few .active rules found — did the selector scan break?');
-
-    const rootVars = resolvedRootVars(CSS);
-    const accentRgb = colorToRgb(resolveVarExpr('--accent', rootVars, 0));
-    assert.ok(accentRgb, '--accent does not resolve to a colour on :root — the reference colour for this whole guard is missing');
-
-    for (const b of activeBlocks) {
-        // 1. Bare colour keywords, anywhere a colour can appear — including
-        // NESTED inside a function like color-mix(in srgb, orange 13%,
-        // transparent). var() calls are stripped first so a variable's own
-        // NAME (checked separately below) never trips this scan.
-        for (const [, rawValue] of declarations(b.body)) {
-            const withoutVars = stripVarCalls(rawValue);
-            for (const m of withoutVars.matchAll(/[a-zA-Z]+/g)) {
-                const w = m[0].toLowerCase();
-                assert.ok(!CSS_COLOR_KEYWORDS.has(w),
-                    `${b.selector} { ${rawValue.trim()} } references bare colour keyword "${w}" — a second accent hue, ` +
-                    'not --accent or a neutral (checked anywhere in the value, including nested inside a function)');
-            }
-        }
-
-        // 2. Every var() reference — resolved through :root (and its
-        // fallback chain, if any) to a literal colour, then classified by
-        // actual saturation rather than by the variable's NAME. A var with
-        // no :root declaration and no resolvable fallback (e.g.
-        // --room-accent) fails closed instead of passing on trust.
-        for (const expr of findVarCalls(b.body)) {
-            const name = expr.split(',')[0].trim();
-            const resolved = resolveVarExpr(expr, rootVars, 0);
-            const rgb = colorToRgb(resolved);
-            assert.ok(rgb, `${b.selector} references var(${expr}) — ${name} has no :root declaration and no ` +
-                'resolvable fallback, so it cannot be verified as --accent or a neutral (it may not even be a valid colour)');
-            assert.ok(sameRgb(rgb, accentRgb) || isNeutralRgb(rgb),
-                `${b.selector} references var(${expr}), which resolves to rgb(${rgb.join(', ')}) — a second accent hue, ` +
-                'not --accent or a neutral');
-        }
-
-        // 3. Raw hex / rgb() / rgba() colours written directly (not via a
-        // var()) — classified the same way as the resolved var() values
-        // above: --accent's own RGB, or low enough saturation to be neutral.
-        const literals = [
-            ...[...b.body.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map(m => m[0]),
-            ...[...b.body.matchAll(/\brgba?\([^)]*\)/g)].map(m => m[0]),
-        ];
-        for (const lit of literals) {
-            const rgb = colorToRgb(lit);
-            if (!rgb) continue; // not a colour literal this test can parse
-            assert.ok(sameRgb(rgb, accentRgb) || isNeutralRgb(rgb),
-                `${b.selector} references ${lit} directly, which resolves to rgb(${rgb.join(', ')}) — a second accent ` +
-                'hue, not --accent or a neutral');
-        }
-    }
-});
-
 // --- GUARD 7: nav inventory — the primary rail is EXACTLY 3 domain objects
 // (Feed/Wall/Work); Knowledge/Agents/Personas/Cost are demoted, not deleted
 // (still enabled, still reachable — see primaryNavViews/secondaryNavViews's
@@ -932,15 +647,31 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
 // actually renders, closing the ancestor-scoped-override hole a literal
 // selector-string lookup missed AND the font-size:0 regex-skip hole in the
 // same fixture.
+//
+// round 11: the checks above stopped at #side-nav-more, the CONTAINER — they
+// never read the fixture's own `.side-item` row (Knowledge/Agents/Personas/
+// Cost's real shape) that already sits inside it. A rule hiding just the
+// ROWS (`.side-list-secondary .side-item { display: none; }`) left the
+// container rendering an empty box and both checks above green, while
+// "RE-PARENTING, NOT REMOVAL" silently became removal for every demoted view.
+// The row assertion below closes that: `assert.ok(row, ...)` fails if the row
+// is gone from the DOM entirely (genuinely removed, not just re-parented),
+// and assertRendersVisibly (display/visibility/opacity/font-size) fails if
+// it's still in the DOM but hidden — the two ways "still renders somewhere"
+// can be violated.
 const SIDE_SECTION_FIXTURE = `<div class="app"><aside class="sidebar"><section class="side-section">
   <div class="side-list" id="side-nav"></div>
   <div class="side-subhead">More</div>
   <div class="side-list side-list-secondary" id="side-nav-more"><div class="side-item"><span class="side-item-icon"></span><span class="side-item-label">x</span></div></div>
 </section></aside></div>`;
-test('.side-subhead and #side-nav-more both actually render — occupy space and paint, not just exist in the markup', () => {
+test('.side-subhead, #side-nav-more and its demoted row all actually render — occupy space and paint, not just exist in the markup', () => {
     const win = mountWithRealCss(SIDE_SECTION_FIXTURE);
     assertRendersVisibly(win, win.document.querySelector('.side-subhead'), 'the demoted nav group\'s "More" heading');
     assertRendersVisibly(win, win.document.getElementById('side-nav-more'), 'the demoted nav group\'s render target');
+    const row = win.document.querySelector('#side-nav-more .side-item');
+    assert.ok(row, 'the demoted nav group\'s own row (e.g. Knowledge/Agents/Personas/Cost) is missing from the DOM ' +
+        'entirely — "RE-PARENTING, NOT REMOVAL" (views.js) means the row must still exist under #side-nav-more, not vanish');
+    assertRendersVisibly(win, row, 'the demoted nav group\'s own row — re-parented under #side-nav-more, not removed');
 });
 
 // --- CMX-257 round 10 (human directive on PR #326, superseding round 8/9):
