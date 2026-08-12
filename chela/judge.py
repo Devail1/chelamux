@@ -1332,8 +1332,10 @@ def run_self_check(
             wf = workflow_mod.load_workflow(workflow_path)
         except Exception as e:      # a WORKFLOW.md that does not parse
             return {"ok": False, "error": f"{workflow_path} could not be read: {e}"}
-        cmd = cmd or judge_test_cmd(wf)
-        to = to if to is not None else judge_suite_timeout(wf)
+        # ONE config, not two independent lookups — see JudgeSuiteConfig's docstring.
+        cfg = judge_suite_config(wf)
+        cmd = cmd or cfg.test_cmd
+        to = to if to is not None else cfg.suite_timeout_seconds
     if not cmd:
         return {"ok": False, "error": "no suite to run — pass --test-cmd, or --workflow "
                                        "pointing at a WORKFLOW.md with `judge.test_cmd` set"}
@@ -1415,7 +1417,9 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         return {"ok": False, "task_id": task_id,
                 "error": f"the workflow {wf_path!r} could not be read"}
 
-    test_cmd = judge_test_cmd(wf)
+    # ONE config, not two independent lookups — see JudgeSuiteConfig's docstring.
+    judge_cfg = judge_suite_config(wf)
+    test_cmd = judge_cfg.test_cmd
     worktree = judge_worktree_path(wf, task_id)
     repo_dir = str(wf.path.parent)
     pr_url = run.get("pr_url")
@@ -1451,12 +1455,12 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
             else:
                 reprovisioned = True
                 report = run_experiments(
-                    worktree, test_cmd, raw, timeout=judge_suite_timeout(wf),
+                    worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                     base_branch=base_branch,
                 )
         else:
             report = run_experiments(
-                worktree, test_cmd, raw, timeout=judge_suite_timeout(wf),
+                worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                 base_branch=base_branch,
             )
         # A worktree this call rebuilt was checked out at the run's CURRENT head — stamp
@@ -1816,6 +1820,31 @@ def judge_suite_timeout(wf) -> float:
         return float(wf.get("judge", "suite_timeout_seconds", default=SUITE_TIMEOUT_SECONDS))
     except (TypeError, ValueError):
         return SUITE_TIMEOUT_SECONDS
+
+
+@dataclass(frozen=True)
+class JudgeSuiteConfig:
+    """The run's ENTIRE ``judge:`` suite config, as ONE value.
+
+    ⚖️🔁 CMX-266, the remainder of CMX-258 (PR #327): that PR's judge kept finding ONE
+    forwarding gap at a time — ``test_cmd`` pinned in rework round 12, ``suite_timeout_seconds``
+    only in round 13, each its own human-granted round. Piecemeal kwargs invite exactly that:
+    every new ``judge.*`` key needs its own parameter threaded through every caller by hand,
+    and the judge finds the ones a round forgot one round at a time. A field that matters to
+    running the suite belongs on THIS struct, and :func:`judge_suite_config` is the ONLY place
+    that builds one — a caller that forwards the struct forwards every field there is, present
+    or future, not whichever ones an earlier round happened to name.
+    """
+
+    test_cmd: str
+    suite_timeout_seconds: float
+
+
+def judge_suite_config(wf) -> JudgeSuiteConfig:
+    """The run's whole judge suite config, read from WORKFLOW.md in one call."""
+    return JudgeSuiteConfig(
+        test_cmd=judge_test_cmd(wf), suite_timeout_seconds=judge_suite_timeout(wf),
+    )
 
 
 def judge_enabled(wf) -> bool:
