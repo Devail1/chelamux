@@ -102,6 +102,14 @@ def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment():
     assert run["status"] == "needs_human"
     assert run["rework_count"] == 1
     assert "the verdict describes code" in run["last_error"]
+    # the headline itself — not just the agent's reason it's prefixed onto — must tell a
+    # human this is a DISPUTE, that nothing was pushed, and which round it was. Every
+    # sibling escalation pins its own discriminating headline text on top of the reason
+    # (tests/test_dispatcher_rework.py:369, :393, :421; tests/test_dispatcher_ci.py:363,
+    # :1626); this is that same pin for the dispute headline.
+    assert "disputed" in run["last_error"]
+    assert "nothing was pushed" in run["last_error"]
+    assert f"{result['rework_count']}/{result['max_reworks']}" in run["last_error"]
     # the branch/worktree/PR fields are untouched.
     assert run["branch_name"] == "cmx-1"
     assert run["worktree_path"] == "/wt/abc123"
