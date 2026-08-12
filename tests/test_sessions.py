@@ -770,3 +770,110 @@ def test_native_status_feed_refuses_ANY_start_time_disagreement_however_small(
         "a tolerance window, and a recycled pid that forked within it would be trusted"
     )
     assert res.path == live
+
+
+# --- CMX-255: own_claude_pid / session_id_for_pid, the windowless resolution path ----
+
+def _fake_ancestry(tmp_path, monkeypatch, chain: dict[int, dict]):
+    """A ``/proc`` fixture tree for a WALK-UP (ppid) resolution, as opposed to
+    :func:`_fake_proc`'s walk-DOWN (children) one. ``chain`` is ``{pid: {"comm", "cmdline",
+    "ppid"}}`` for every pid the walk will actually read."""
+    proc = tmp_path / "proc"
+    for pid, info in chain.items():
+        d = proc / str(pid)
+        d.mkdir(parents=True)
+        (d / "comm").write_text(info["comm"] + "\n")
+        (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in info["cmdline"]) + b"\0")
+        (d / "stat").write_text(
+            f"{pid} ({info['comm']}) S {info['ppid']} " + " ".join(["0"] * 17) + " 500 0 0\n")
+    monkeypatch.setattr(sessions, "PROC", proc)
+    return proc
+
+
+def test_ppid_reads_the_parent_field_off_proc_stat(tmp_path, monkeypatch):
+    _fake_ancestry(tmp_path, monkeypatch, {
+        300: {"comm": "bash", "cmdline": ["bash"], "ppid": 200},
+    })
+    assert sessions._ppid(300) == 200
+
+
+def test_ppid_none_for_an_unreadable_pid(tmp_path, monkeypatch):
+    monkeypatch.setattr(sessions, "PROC", tmp_path / "nonexistent")
+    monkeypatch.setattr(sessions, "_sh", lambda argv: None)
+    assert sessions._ppid(999999) is None
+
+
+def test_own_claude_pid_climbs_past_a_bash_subshell_to_the_claude_ancestor(
+        tmp_path, monkeypatch):
+    """The exact shape a `chela watch` invoked from a Bash-tool call is in: the CLI's own
+    pid's parent is the tool's bash subshell (not claude), and THAT process's parent is the
+    claude session itself. Must not stop at the first ancestor — must climb until one
+    actually looks like claude."""
+    _fake_ancestry(tmp_path, monkeypatch, {
+        300: {"comm": "python3", "cmdline": ["python3", "-m", "chela.main", "watch"],
+             "ppid": 200},
+        200: {"comm": "bash", "cmdline": ["bash", "-c", "uv run chela watch"], "ppid": 100},
+        100: {"comm": "claude", "cmdline": ["claude"], "ppid": 1},
+    })
+    assert sessions.own_claude_pid(300) == 100
+
+
+def test_own_claude_pid_finds_a_wrapped_claude_via_the_tolerant_match(tmp_path, monkeypatch):
+    _fake_ancestry(tmp_path, monkeypatch, {
+        300: {"comm": "bash", "cmdline": ["bash"], "ppid": 100},
+        100: {"comm": "node14", "cmdline": ["node", "/opt/claude/cli.js"], "ppid": 1},
+    })
+    assert sessions.own_claude_pid(300) == 100
+
+
+def test_own_claude_pid_none_when_no_ancestor_looks_like_claude(tmp_path, monkeypatch):
+    """Run from a plain shell, never inside a claude session — the ancestry bottoms out at
+    pid 1 without ever matching, and this must say None rather than pick a stranger."""
+    _fake_ancestry(tmp_path, monkeypatch, {
+        300: {"comm": "bash", "cmdline": ["bash"], "ppid": 1},
+    })
+    assert sessions.own_claude_pid(300) is None
+
+
+def test_own_claude_pid_is_bounded_and_does_not_walk_forever(tmp_path, monkeypatch):
+    """A long, claude-free ancestry chain must give up at ``_MAX_ANCESTRY`` rather than
+    reading forever — proven by a chain deep enough that an unbounded walk would read past
+    the fixture (KeyError) while the bounded one returns None cleanly."""
+    depth = sessions._MAX_ANCESTRY + 5
+    chain = {}
+    for i in range(depth):
+        pid = 1000 + i
+        chain[pid] = {"comm": "bash", "cmdline": ["bash"], "ppid": 1000 + i + 1}
+    # No entry at all for the pid past the walk's own bound — an unbounded walk would
+    # raise (via _ppid's OSError→None path it would just stop early instead), so what
+    # actually pins the bound is the call count, asserted below.
+    _fake_ancestry(tmp_path, monkeypatch, chain)
+    calls = []
+    real_ppid = sessions._ppid
+
+    def counting_ppid(pid):
+        calls.append(pid)
+        return real_ppid(pid)
+    monkeypatch.setattr(sessions, "_ppid", counting_ppid)
+
+    assert sessions.own_claude_pid(1000) is None
+    assert len(calls) == sessions._MAX_ANCESTRY
+
+
+def test_session_id_for_pid_prefers_the_resume_command_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid",
+                        lambda pid: (OTHER, "/should/not/be/used"))
+    _fake_proc(tmp_path, monkeypatch, 500, comm="claude",
+              cmdline=["claude", "--resume", SID], cwd="/home/u")
+    assert sessions.session_id_for_pid(500) == SID
+
+
+def test_session_id_for_pid_falls_back_to_the_native_status_feed(tmp_path, monkeypatch):
+    _fake_proc(tmp_path, monkeypatch, 501, comm="claude", cmdline=["claude"], cwd="/home/u")
+    _native(monkeypatch, {501: (SID, "/home/u")})
+    assert sessions.session_id_for_pid(501) == SID
+
+
+def test_session_id_for_pid_none_when_neither_signal_resolves(tmp_path, monkeypatch):
+    _fake_proc(tmp_path, monkeypatch, 502, comm="claude", cmdline=["claude"], cwd="/home/u")
+    assert sessions.session_id_for_pid(502) is None

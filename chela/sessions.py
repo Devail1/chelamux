@@ -258,6 +258,22 @@ def _comm(pid: int) -> str:
     return os.path.basename(_first_line(_sh(["ps", "-o", "comm=", "-p", str(pid)])))
 
 
+def _ppid(pid: int) -> int | None:
+    """A process's parent pid — /proc's ``stat`` first, ``ps -o ppid=`` as the fallback.
+
+    The upward counterpart of :func:`_children`'s downward walk: :func:`own_claude_pid`
+    climbs ancestry with this the same way :func:`_claude_pid` descends with ``_children``.
+    """
+    try:
+        stat = (PROC / str(pid) / "stat").read_text()
+        fields = stat[stat.rindex(")") + 1:].split()
+        return int(fields[1])          # field 4 overall, 2nd after the comm
+    except (OSError, ValueError, IndexError):
+        pass
+    text = _first_line(_sh(["ps", "-o", "ppid=", "-p", str(pid)]))
+    return int(text) if text.isdigit() else None
+
+
 def _cap_children(pid: int, kids: list[int]) -> list[int]:
     """Keep the newest ``_MAX_CHILDREN`` (CMX-210 — both sources list oldest-first), and
     if that actually cut anything, say so OUT LOUD.
@@ -365,6 +381,60 @@ def _claude_pid(pane_pid: int) -> int | None:
             return None
         frontier = nxt
     return None
+
+
+# A `chela watch` invoked with no window climbs through a Bash-tool subshell, and
+# sometimes an interpreter/launcher wrapper in between, before it reaches the claude
+# process itself — a couple more generations than the downward pane walk (`_MAX_DEPTH`)
+# needs, since it crosses layers `_claude_pid` never has to. Bounded so an oddly-nested
+# launcher (or an init-reparented orphan) can't walk all the way to pid 1.
+_MAX_ANCESTRY = 6
+
+
+def own_claude_pid(pid: int | None = None) -> int | None:
+    """The nearest CLAUDE ancestor of ``pid`` (default: this process) — the pid-resolution
+    half of CMX-255's windowless-orchestrator mechanism.
+
+    A windowless session has no tmux pane for :func:`chela.agent_manager.claude_pid` to
+    walk (that resolver needs a ``#{pane_pid}``, and there is no pane at all) — but a
+    ``chela watch`` invoked FROM inside such a session is, by construction, a descendant
+    of it. Its own process ancestry proves the answer directly instead of guessing at it:
+    no scan of the whole process table, no name/cwd heuristic across unrelated processes,
+    just "is my own parent, or its parent, the claude process that spawned me". None if no
+    ancestor looks like claude within :data:`_MAX_ANCESTRY` generations — e.g. run from a
+    plain shell, never inside a claude session at all.
+    """
+    cur = os.getpid() if pid is None else pid
+    for _ in range(_MAX_ANCESTRY):
+        parent = _ppid(cur)
+        if not parent or parent <= 1:
+            return None
+        if _looks_like_claude(parent):
+            return parent
+        cur = parent
+    return None
+
+
+def session_id_for_pid(pid: int) -> str | None:
+    """Best-effort session identity for a live pid that has no window to resolve it
+    through — the identity half of CMX-255's windowless-orchestrator mechanism.
+
+    Two of :func:`resolve_window`'s four signals apply to a bare pid (the other two — the
+    event log, the cwd — are keyed by WINDOW and have no pid-only form): the process's own
+    ``--resume <sid>`` command line (:func:`_resumed_session`, belongs to it by
+    construction), then the native ``claude agents --json`` feed's cached ``sessionId`` for
+    this pid (:func:`chela.agent_manager.session_and_cwd_for_pid`, CMX-184) — a pure cache
+    read of whatever the caller's own background refresh already keeps warm, never a fetch
+    of its own. None means unresolved, never a guess: the windowless registration still
+    proceeds without an identity, exactly like ``chela watch``'s existing "no session
+    identity" path for the window-addressed case.
+    """
+    resumed = _resumed_session(pid)
+    if resumed:
+        return resumed
+    from chela import agent_manager        # deferred: agent_manager sits above sessions
+    sid, _ = agent_manager.session_and_cwd_for_pid(pid)
+    return sid
 
 
 def _proc_cwd(pid: int) -> str | None:

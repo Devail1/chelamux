@@ -23,12 +23,13 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from chela import dispatcher, event_log, judge
+from chela import dispatcher, event_log, hold, judge
 
 TEST_CMD = f'"{sys.executable}" -m pytest -q'
 
@@ -1634,6 +1635,11 @@ def test_a_cannot_verify_is_a_bounded_RETRY_not_a_permanent_retirement(tmp_path,
     judge from ever re-running on that commit — it then merged UNJUDGED, silently defeating
     the judge on any flake. Now the SAME head is re-judged up to `judge_max_unknown_retries`
     while it keeps coming back cannot_verify, and only then settles for a human.
+
+    ⚖️🧊 CMX-253: "settles for a human" must be a REAL transition, not a description of
+    where the row silently stays. Once the budget is spent it moves to `needs_human` — see
+    `_escalate_stranded_judge_unknowns` — rather than sitting in `awaiting_review` forever
+    looking exactly like a run still waiting on an ordinary review.
     """
     monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
     wf = _wf(tmp_path)
@@ -1662,7 +1668,9 @@ def test_a_cannot_verify_is_a_bounded_RETRY_not_a_permanent_retirement(tmp_path,
     assert spawns == ["cafe1234"] * 3
     run = dispatcher.resolve_run("abc123")
     assert run["judge_state"] == judge.J_CANNOT_VERIFY
-    assert run["status"] == "awaiting_review"       # ⛔ never merged, never blocked
+    assert run["status"] == "needs_human"           # ⛔ never merged, never blocked —
+    # but NOT stranded in `awaiting_review` either: the budget is spent, so a human is told.
+    assert "could not verify" in (run["last_error"] or "")
 
 
 def test_only_cannot_verify_re_fires_a_real_verdict_and_a_spent_budget_do_not(tmp_path, monkeypatch):
@@ -1696,6 +1704,261 @@ def test_only_cannot_verify_re_fires_a_real_verdict_and_a_spent_budget_do_not(tm
                      judge_sha="cafe1234", judge_state=state, judge_cannot_verify_tries=tries)
         _tick(wf, spawn)
         assert bool(fired) is expect_fire, (state, tries)
+
+
+def test_a_cannot_verify_past_budget_escalates_instead_of_stranding_silently(tmp_path, monkeypatch):
+    """⚖️🧊 CMX-253. Once `judge_cannot_verify_tries` reaches the bound on the SAME
+    `pr_head_sha`, the trigger query never re-selects the row again — and `cannot_verify`
+    never earns a `request_changes` escalation either (it "blocks nothing and approves
+    nothing"). Before this fix nothing else moved the row: it sat in `awaiting_review`
+    forever, presenting as an ordinary run still waiting for review. It must instead move to
+    `needs_human`, with the judge's own last detail carried into `last_error` for the human
+    who picks it up.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+
+    def spawn(w, row, sha, conn):
+        return True    # never reached — the budget is already spent
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None,
+                 judge_sha="cafe1234", judge_state=judge.J_CANNOT_VERIFY,
+                 judge_cannot_verify_tries=2, judge_detail="a flake")
+
+    result = _tick(wf, spawn)
+    assert result["judge_stranded"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert run["judge_state"] == judge.J_CANNOT_VERIFY   # the verdict itself is untouched
+    assert "a flake" in run["last_error"]
+    assert "cafe1234"[:12] in run["last_error"]
+
+
+def test_a_row_already_moved_on_is_not_re_escalated_every_tick(tmp_path, monkeypatch):
+    """⚖️🧊 CMX-253 Objective 1, negative control. `_escalate_stranded_judge_unknowns` must
+    be scoped to `status='awaiting_review'` — a row that already left that status (escalated
+    to `needs_human` on a prior tick, or since merged/closed) still matches every OTHER arm
+    of the query forever (same `judge_state`, same `judge_sha=pr_head_sha`, `tries` still at
+    the bound), so a query that dropped the status filter would re-`_escalate` it on EVERY
+    subsequent tick — clobbering `last_error`/`ended_at` on a run a human (or the merge path)
+    already resolved, and re-notifying the inbox for a decision that was already made."""
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+
+    def spawn(w, row, sha, conn):
+        return True    # never reached — status is not awaiting_review
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), status="merged",
+                 pr_head_sha="cafe1234", judge_sha="cafe1234",
+                 judge_state=judge.J_CANNOT_VERIFY, judge_cannot_verify_tries=2,
+                 judge_detail="a flake", ended_at="2026-07-14T11:00:00+00:00",
+                 last_error="already resolved, do not touch")
+
+    result = _tick(wf, spawn)
+    assert result["judge_stranded"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "merged"                       # ⛔ not clobbered back to needs_human
+    assert run["ended_at"] == "2026-07-14T11:00:00+00:00"  # ⛔ untouched
+    assert run["last_error"] == "already resolved, do not touch"
+
+
+def test_a_HELD_workflow_still_escalates_a_stranded_judge_unknown(tmp_path, monkeypatch):
+    """⚖️🧊 CMX-253 Objective 1 placement. `_escalate_stranded_judge_unknowns` sits ABOVE the
+    `blocked`/`hold` returns on purpose — dispatcher.py's own ⛔ comment on step 1e′ says it
+    "starts no agent, takes no slot". Escalation is not a claim, so a paused queue (or a
+    broken WORKFLOW.md) must not also silence the one transition that un-strands a run that
+    already spent its retry budget — the failure mode `test_a_HOLD_pauses_the_rework_but_
+    NEVER_the_escalation` already pins for the 1d rework-cap escalation.
+
+    Every other stranded-judge test drives an ordinary unheld tick, so nothing pinned this
+    placement: gating the 1e′ call behind `blocked or hold.active()` — i.e. moving it
+    conceptually below the hold/blocked returns — would leave the run stuck in
+    `awaiting_review` forever, indistinguishable from one still waiting on review, while the
+    queue is paused.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    held = hold.Hold(reason="rewriting the queue", by="liav", pid=1,
+                      created_at=time.time(), expires_at=time.time() + 3600)
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None,
+                 judge_sha="cafe1234", judge_state=judge.J_CANNOT_VERIFY,
+                 judge_cannot_verify_tries=2, judge_detail="a flake")
+
+    def spawn(w, row, sha, conn):
+        return True    # never reached — the budget is already spent, and the queue is held
+
+    from chela.workflow import WorkflowStatus
+
+    class R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, *a, **k):
+        r = R()
+        if isinstance(cmd, list) and cmd[:2] == ["tmux", "list-windows"]:
+            r.stdout = ""
+        if isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "view"] and "statusCheckRollup,headRefOid" in cmd:
+            r.stdout = json.dumps({"headRefOid": "cafe1234", "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "t", "status": "COMPLETED",
+                 "conclusion": "SUCCESS", "workflowName": "CI",
+                 "detailsUrl": "https://github.com/o/r/actions/runs/1/job/2"}]})
+        elif isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "view"]:
+            r.stdout = json.dumps({"state": "OPEN", "mergeable": "MERGEABLE"})
+        return r
+
+    with patch.object(dispatcher, "load_workflow_cached",
+                      return_value=WorkflowStatus(path=wf.path, workflow=wf, error=None)), \
+         patch.object(dispatcher, "get_source", return_value=_EmptySource()), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
+         patch.object(dispatcher, "_spawn_judge", side_effect=spawn), \
+         patch.object(dispatcher, "remove_worktree", return_value=True), \
+         patch.object(dispatcher, "_failing_log_tail", return_value=""), \
+         patch.object(dispatcher, "_respawn_rework", return_value=False), \
+         patch.object(dispatcher.hold, "expire_if_stale", return_value=None), \
+         patch.object(dispatcher.hold, "active", return_value=held):
+        result = dispatcher.tick(wf.path)
+
+    assert result["held"] is True                     # the queue really was paused
+    assert result["judge_stranded"] == 1               # ⛔ and the escalation still ran
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert "a flake" in run["last_error"]
+
+
+def test_a_BLOCKED_workflow_still_escalates_a_stranded_judge_unknown(tmp_path, monkeypatch):
+    """⚖️🧊 CMX-253 Objective 1 placement, the OTHER half of the HELD test above.
+    `_escalate_stranded_judge_unknowns` sits ABOVE the `blocked` return too, for the identical
+    reason as the hold half: dispatcher.py's own ⛔ comment on step 1e′ says it "starts no
+    agent, takes no slot" — a WORKFLOW.md that stopped parsing freezes NEW dispatch (that is
+    what `blocked` means), but it must not also silence the one transition that un-strands a
+    run that already spent its retry budget.
+
+    Every other stranded-judge test drives an unblocked tick, so nothing pinned this half:
+    gating the 1e′ call behind `blocked or hold.active()` — i.e. moving it conceptually below
+    the hold/blocked returns — would leave the run stuck in `awaiting_review` forever,
+    indistinguishable from one still waiting on review, while the config stays broken.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None,
+                 judge_sha="cafe1234", judge_state=judge.J_CANNOT_VERIFY,
+                 judge_cannot_verify_tries=2, judge_detail="a flake")
+
+    def spawn(w, row, sha, conn):
+        return True    # never reached — the budget is already spent, and dispatch is blocked
+
+    from chela.workflow import WorkflowStatus
+
+    class R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, *a, **k):
+        r = R()
+        if isinstance(cmd, list) and cmd[:2] == ["tmux", "list-windows"]:
+            r.stdout = ""
+        if isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "view"] and "statusCheckRollup,headRefOid" in cmd:
+            r.stdout = json.dumps({"headRefOid": "cafe1234", "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "t", "status": "COMPLETED",
+                 "conclusion": "SUCCESS", "workflowName": "CI",
+                 "detailsUrl": "https://github.com/o/r/actions/runs/1/job/2"}]})
+        elif isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "view"]:
+            r.stdout = json.dumps({"state": "OPEN", "mergeable": "MERGEABLE"})
+        return r
+
+    with patch.object(dispatcher, "load_workflow_cached",
+                      return_value=WorkflowStatus(path=wf.path, workflow=wf,
+                                                   error="WORKFLOW.md: bad yaml at line 4")), \
+         patch.object(dispatcher, "get_source", return_value=_EmptySource()), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
+         patch.object(dispatcher, "_spawn_judge", side_effect=spawn), \
+         patch.object(dispatcher, "remove_worktree", return_value=True), \
+         patch.object(dispatcher, "_failing_log_tail", return_value=""), \
+         patch.object(dispatcher, "_respawn_rework", return_value=False), \
+         patch.object(dispatcher.hold, "expire_if_stale", return_value=None), \
+         patch.object(dispatcher.hold, "active", return_value=None):
+        result = dispatcher.tick(wf.path)
+
+    assert result["blocked"] is True                   # the config really was broken
+    assert result["held"] is False                      # this is the OTHER gate, not a hold
+    assert result["judge_stranded"] == 1                # ⛔ and the escalation still ran
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert "a flake" in run["last_error"]
+
+
+def test_a_running_judge_at_the_retry_bound_is_not_escalated_mid_run(tmp_path, monkeypatch):
+    """⚖️🧊 CMX-253 Objective 1, negative control on the query's OWN `judge_state` clause.
+    `tries == judge_max_unknown_retries()` is the NORMAL state of a run's LAST retry the moment
+    it launches: `_spawn_judge` bumps `judge_cannot_verify_tries` to the bound and flips
+    `judge_state` to `J_RUNNING` in the very same UPDATE. From that instant until the judge
+    publishes, the row matches every OTHER arm of `_escalate_stranded_judge_unknowns`'s query
+    (same workflow, `status='awaiting_review'`, `judge_sha=pr_head_sha`, `tries>=max`) — the
+    `judge_state=J_CANNOT_VERIFY` clause is the only thing standing between a judge that is
+    still actively working and being yanked to `needs_human` out from under it.
+
+    Seen to go red: widen the query's `judge_state=?` clause to match unconditionally (e.g.
+    `AND (judge_state=? OR 1=1)`) — a run mid-final-attempt gets escalated while its judge is
+    still running, on the exact HAPPY path every retry passes through.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None,
+                 judge_sha="cafe1234", judge_state=judge.J_RUNNING,
+                 judge_cannot_verify_tries=2, judge_detail="")
+
+    def spawn(w, row, sha, conn):
+        return True    # never reached — the queue has no fresh work to dispatch this tick
+
+    # The judge's window stays alive across the tick — this is a judge that is genuinely still
+    # running, not a vanished one; `_judge_watchdog` (a different guard) must leave it alone.
+    win = (judge.judge_window_name("test-1"),)
+    result = _tick(wf, spawn, windows=win)
+    assert result["judge_stranded"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"           # ⛔ not yanked out from under the judge
+    assert run["judge_state"] == judge.J_RUNNING
+
+
+def test_a_fresh_commit_resets_the_budget_instead_of_escalating(tmp_path, monkeypatch):
+    """A `cannot_verify` past budget on an OLD head must not strand the run once a rework (or
+    a human push) lands a new commit — the new `pr_head_sha` no longer matches `judge_sha`,
+    so this is a fresh judgement, not a spent retry, and the trigger picks it up instead of
+    `_escalate_stranded_judge_unknowns`."""
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+
+    spawned: list[str] = []
+
+    def spawn(w, row, sha, conn):
+        spawned.append(sha)
+        conn.execute("UPDATE runs SET judge_sha=?, judge_state=? WHERE task_id=?",
+                     (sha, judge.J_RUNNING, row["task_id"]))
+        conn.commit()
+        return True
+
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None,
+                 judge_sha="cafe1234", judge_state=judge.J_CANNOT_VERIFY,
+                 judge_cannot_verify_tries=2, judge_detail="a flake")
+
+    result = _tick(wf, spawn, sha="f00dbabe")
+    assert result["judge_stranded"] == 0
+    assert spawned == ["f00dbabe"]
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"
 
 
 def test_spawn_judge_resets_the_unknown_count_on_a_new_sha_and_bumps_it_on_a_retry(tmp_path):
@@ -1733,6 +1996,205 @@ def test_spawn_judge_resets_the_unknown_count_on_a_new_sha_and_bumps_it_on_a_ret
     # a rework pushes a NEW commit → a fresh judgement, and the count resets to 0.
     _spawn("f00dbabe")
     assert _state() == ("f00dbabe", judge.J_RUNNING, 0)
+
+
+def test_a_vanished_judge_window_does_not_spend_a_retry(tmp_path, monkeypatch):
+    """⚖️🕳️ CMX-253 Objective 2. A judge whose window vanished (host reboot, tmux death)
+    before it published a verdict never got to run at all — re-launching it is the FIRST
+    attempt on this commit, not a retry of a failed one. Counting it against
+    `judge_cannot_verify_tries` would burn the whole bounded budget on a string of reboots
+    that told us nothing about the PR (observed live 2026-08-12, seven reboots in a row).
+
+    Seen to go red: revert `_spawn_judge`'s `judge_no_verdict` check (or `_judge_watchdog`'s
+    stamping of it) and this fails — `judge_cannot_verify_tries` becomes 1, exactly the
+    stranding bug CMX-253 Objective 2 exists to close.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    def _spawn(sha):
+        with dispatcher._db() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+            with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+                 patch.object(dispatcher, "render_prompt", return_value="x"), \
+                 patch.object(dispatcher, "_judge_vars", return_value={}), \
+                 patch.object(dispatcher, "_launch_agent", return_value=None):
+                assert dispatcher._spawn_judge(wf, row, sha, conn) is True
+
+    def _state():
+        r = dispatcher.resolve_run("abc123")
+        return r["judge_state"], r["judge_cannot_verify_tries"], r["judge_no_verdict"]
+
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+    # The judge's window vanishes before it ever published anything — no lock file on disk
+    # either (a real host reboot leaves nothing behind), so the watchdog reaps it.
+    with dispatcher._db() as conn:
+        with patch.object(judge, "judge_lock_live", return_value=False):
+            handed_over = dispatcher._judge_watchdog(conn, wf, live_windows=set())
+        conn.commit()
+    assert handed_over == 1
+    state, tries, no_verdict = _state()
+    assert state == judge.J_CANNOT_VERIFY
+    assert no_verdict == 1
+    assert tries == 0                    # untouched by the vanish itself
+
+    # Re-launching the SAME sha must NOT count this as a spent retry.
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+
+def test_a_genuine_cannot_verify_verdict_still_spends_a_retry(tmp_path, monkeypatch):
+    """⚖️🕳️ CMX-253 Objective 2, negative control. A `cannot_verify` the judge actually
+    PRODUCED (it ran, and came back with an unknown — `set_judge_state`'s default,
+    `judge_no_verdict=False`) is unchanged by this fix and still costs a bounded retry, same
+    as CMX-81 always did. Without this control, a fix that stopped counting `cannot_verify`
+    ENTIRELY (rather than only the no-verdict case) would still pass the vanished-window test
+    above."""
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    def _spawn(sha):
+        with dispatcher._db() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+            with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+                 patch.object(dispatcher, "render_prompt", return_value="x"), \
+                 patch.object(dispatcher, "_judge_vars", return_value={}), \
+                 patch.object(dispatcher, "_launch_agent", return_value=None):
+                assert dispatcher._spawn_judge(wf, row, sha, conn) is True
+
+    def _state():
+        r = dispatcher.resolve_run("abc123")
+        return r["judge_state"], r["judge_cannot_verify_tries"], r["judge_no_verdict"]
+
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+    # The judge actually ran and reported an unknown — e.g. `judge.judge_run` writing
+    # `report.cannot_verify` through its normal path. `no_verdict` defaults False.
+    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "no judge.test_cmd configured")
+    assert _state() == (judge.J_CANNOT_VERIFY, 0, 0)
+
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 1, 0)   # ⛔ this one DOES cost a retry
+
+
+def test_a_stale_no_verdict_flag_is_cleared_by_the_next_real_verdict(tmp_path, monkeypatch):
+    """⚖️🕳️ CMX-253 Objective 2, negative control on `set_judge_state` itself, not on
+    `_spawn_judge`. Its own docstring makes the claim twice: "every normal caller passes
+    nothing, which clears it back to 0 — the column always describes the state THIS call just
+    wrote, never a stale prior one." The reachable route where that matters is a row reaped as
+    no-verdict (`judge_no_verdict=1`, left by `_judge_watchdog` after a vanished window) and
+    then judged FOR REAL by a hand-run `chela judge run` — which writes its verdict through
+    `set_judge_state`, not through `_spawn_judge` (whose own UPDATE unconditionally zeroes the
+    column, so that path can never expose a stale 1). If the stale flag survives this write,
+    the very next `_spawn_judge` on the same commit reads `judge_no_verdict` still truthy and
+    wrongly declines to count a `cannot_verify` the judge really did produce.
+
+    Seen to go red: swap `judge_no_verdict=?` for `judge_no_verdict=COALESCE(judge_no_verdict,
+    ?)` in `set_judge_state`'s SHA UPDATE — the 1 survives the real verdict, and the retry
+    this genuine unknown must spend never gets counted. The SHA branch, not the no-sha one, is
+    what this must pin: every real caller in `judge.judge_run` passes `sha=judged_sha`
+    (chela/judge.py:1568,1576,1603) — the no-sha branch is dead on that path.
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        # A prior attempt on this same commit was reaped as no-verdict — exactly the state
+        # `_judge_watchdog` leaves behind (see test_a_vanished_judge_window_does_not_spend_a_
+        # retry): judge_sha already at this head, tries untouched, the flag set.
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), judge_sha="cafe1234",
+                 judge_state=judge.J_CANNOT_VERIFY, judge_cannot_verify_tries=0,
+                 judge_no_verdict=1)
+
+    # A hand-run `chela judge run` judges the SAME commit for real and comes back cannot_verify
+    # — set_judge_state's `sha=` call, `no_verdict` defaults False, exactly judge.judge_run's
+    # own path (chela/judge.py:1603: `set_judge_state(task_id, report.state, ..., sha=judged_sha)`).
+    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "no judge.test_cmd configured",
+                                sha="cafe1234")
+    run = dispatcher.resolve_run("abc123")
+    assert run["judge_no_verdict"] == 0          # ⛔ the stale reboot flag must not survive
+    assert run["judge_sha"] == "cafe1234"        # sha branch really ran, not the no-sha one
+
+    def _spawn(sha):
+        with dispatcher._db() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+            with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+                 patch.object(dispatcher, "render_prompt", return_value="x"), \
+                 patch.object(dispatcher, "_judge_vars", return_value={}), \
+                 patch.object(dispatcher, "_launch_agent", return_value=None):
+                assert dispatcher._spawn_judge(wf, row, sha, conn) is True
+
+    _spawn("cafe1234")
+    r = dispatcher.resolve_run("abc123")
+    assert (r["judge_state"], r["judge_cannot_verify_tries"], r["judge_no_verdict"]) == \
+        (judge.J_RUNNING, 1, 0)   # ⛔ this genuine cannot_verify DOES cost a retry
+
+
+def test_a_stale_no_verdict_flag_is_cleared_by_the_no_sha_branch_too(tmp_path):
+    """⚖️🕳️ CMX-253 Objective 2, mirror of `test_a_stale_no_verdict_flag_is_cleared_by_the_
+    next_real_verdict` for `set_judge_state`'s OTHER branch. That test pins the `sha=` branch,
+    which is the one `judge.judge_run`'s real verdict calls take — but the no-sha branch is
+    not dead code: `judge.judge_run` itself calls `set_judge_state(task_id, J_CANNOT_VERIFY,
+    "the workflow could not be read")` with NO `sha` (chela/judge.py:1396) when the WORKFLOW.md
+    it was pointed at no longer parses. A row reaped as no-verdict by `_judge_watchdog` and
+    then re-run against a workflow that has since gone unreadable takes exactly this branch,
+    and must clear the stale flag the same as the sha branch does.
+
+    Seen to go red: swap `judge_no_verdict=?` for `judge_no_verdict=COALESCE(judge_no_verdict,
+    ?)` in `set_judge_state`'s no-sha UPDATE — the 1 survives this write.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        # Same starting state as the sha-branch test: a prior attempt was reaped as
+        # no-verdict, leaving the flag set.
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), judge_sha="cafe1234",
+                 judge_state=judge.J_CANNOT_VERIFY, judge_cannot_verify_tries=0,
+                 judge_no_verdict=1)
+
+    # judge.judge_run's unreadable-workflow path: no `sha=` kwarg at all.
+    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "the workflow could not be read")
+    run = dispatcher.resolve_run("abc123")
+    assert run["judge_no_verdict"] == 0          # ⛔ the stale reboot flag must not survive
+    assert run["judge_sha"] == "cafe1234"        # no-sha branch never touches judge_sha
+
+
+@pytest.mark.parametrize("call_kwargs", [
+    pytest.param({"sha": "cafe1234"}, id="sha_branch"),
+    pytest.param({}, id="no_sha_branch"),
+])
+def test_a_genuine_no_verdict_is_not_cleared_by_set_judge_state(tmp_path, call_kwargs):
+    """⚖️🕳️ CMX-253 Objective 2, negative control on the OTHER half of the two tests above.
+    Those two only ever call `set_judge_state` with `no_verdict` defaulting False, so an
+    implementation that always writes ``judge_no_verdict=0`` — ignoring the `no_verdict`
+    argument entirely — would pass both of them and still be wrong: it would silently
+    destroy the flag's meaning, because `_judge_watchdog`'s window-vanished branch (see
+    `judge_no_verdict`'s column comment) depends on a caller being able to SET the flag,
+    not just clear it. This pins the write half on both UPDATE branches: a call that really
+    is reporting "no verdict was produced" (`no_verdict=True`) must land as 1, whether or
+    not `sha=` is given.
+
+    Seen to go red: hardcode either UPDATE's `judge_no_verdict` column to `0` (or to
+    `COALESCE(judge_no_verdict, ?)`, which the two clearing tests above cannot catch when
+    the column starts at 0 — `COALESCE(0, ?)` also returns the stale 0, not the new value).
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), judge_sha="cafe1234",
+                 judge_no_verdict=0)
+
+    dispatcher.set_judge_state(
+        "abc123", judge.J_CANNOT_VERIFY,
+        "the judge's window disappeared before it published a verdict",
+        no_verdict=True, **call_kwargs,
+    )
+    run = dispatcher.resolve_run("abc123")
+    assert run["judge_no_verdict"] == 1          # ⛔ a genuine no-verdict must be recorded
 
 
 def _fake_tmux_new_window(target_id: str):
@@ -1962,6 +2424,11 @@ def test_the_hold_still_expires_once_the_judge_TIMES_OUT(tmp_path):
     run = dispatcher.resolve_run("abc123")
     assert run["judge_state"] == judge.J_CANNOT_VERIFY
     assert "did not finish" in run["judge_detail"]
+    # ⚖️🕳️ CMX-253 Objective 2, negative control. A judge that TIMED OUT DID get a chance to
+    # run — it is stuck, not thinking, and that is still a counted unknown (CMX-81's bounded
+    # retry must see it). Only a window that VANISHED before it ever ran is exempt; conflating
+    # the two would let a permanently wedged judge dodge the retry budget forever.
+    assert run["judge_no_verdict"] == 0
 
 
 @pytest.mark.parametrize("delta,expect_alive", [

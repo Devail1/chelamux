@@ -1095,6 +1095,23 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `judge_max_unknown_retries`.
         ("judge_cannot_verify_tries",
          "ALTER TABLE runs ADD COLUMN judge_cannot_verify_tries INTEGER"),
+        # ⚖️🕳️ CMX-253 Objective 2. Did the CURRENT `judge_state` come from a judge that
+        # actually ran and reported, or from one that never got the chance to (its tmux
+        # window vanished — host reboot, tmux death — before it published anything)? Those
+        # are NOT the same "unknown": a `cannot_verify` VERDICT (no `test_cmd`, a corrupt
+        # experiments file, a real mutation-battery flake) is the judge doing its job and
+        # coming up empty — that costs a `judge_cannot_verify_tries` retry, same as always.
+        # A vanished window is the judge never having run AT ALL — counting that against the
+        # SAME bounded budget means a string of host reboots (observed live 2026-08-12, seven
+        # in a row) burns the whole retry budget on attempts that told us nothing, and the PR
+        # escalates to `needs_human` for an environment hiccup instead of quietly getting
+        # re-judged once the box is back. `_judge_watchdog` sets this to 1 ONLY on its
+        # window-disappeared branch (never on a timeout — a judge that ran past
+        # `JUDGE_TIMEOUT_SECONDS` DID get a chance to run, and "stuck, not thinking" stays a
+        # counted unknown, exactly as CMX-81 always treated it). `set_judge_state` clears it
+        # back to 0 on every other write, so it always describes the CURRENT `judge_state`,
+        # never a stale prior one.
+        ("judge_no_verdict", "ALTER TABLE runs ADD COLUMN judge_no_verdict INTEGER"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
         # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
@@ -1997,6 +2014,35 @@ def _kill_windows_named(window_name: str) -> None:
             )
 
 
+# CMX-252: Node's own IPC-channel markers. pm2 forks its managed processes through Node's
+# `child_process.fork` (IPC channel included) even when the target isn't a Node program, so
+# these leak into the environment of whatever tmux server that ancestry starts — and from
+# there into EVERY window's environment, tmux's global environment being the table new
+# windows inherit from. A `node --test` child that inherits a stale fd number can SIGABRT
+# before running a single test (see chela/judge.py's `_no_color_env`). Scrubbing only the
+# two known `node --test` call sites (the judge's test_cmd, tests/test_js_suites.py) fixes
+# those two call sites; scrubbing here, at the one place chela spawns ANY agent or judge
+# window, fixes the class — a future `npm`/build-step/tooling call in a spawned window is
+# covered without having to know it exists yet.
+_NODE_IPC_ENV_VARS = ("NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE")
+
+
+def _scrub_node_ipc_env() -> None:
+    """Unset the leaked Node IPC vars from tmux's GLOBAL environment (server-wide, not just
+    this session) so no window created after this call — in any session — inherits them.
+
+    Best-effort and idempotent: `set-environment -gu` on a var that was never set is a
+    silent no-op, so this is safe to call before every window spawn rather than once at
+    startup — which matters because the poisoned value can be reintroduced by a fresh tmux
+    server started later by another node-parented ancestor (pm2 restart, a reboot).
+    """
+    for var in _NODE_IPC_ENV_VARS:
+        subprocess.run(
+            ["tmux", "set-environment", "-gu", var],
+            capture_output=True,
+        )
+
+
 def _new_window(window_name: str, cwd: str) -> str:
     """Create a fresh tmux window and return its @id (e.g. "@7").
 
@@ -2007,6 +2053,7 @@ def _new_window(window_name: str, cwd: str) -> str:
     pane. Falls back to the bare window_name if the id can't be parsed (e.g.
     under a subprocess mock that returns no stdout).
     """
+    _scrub_node_ipc_env()
     # Trailing ':' forces session resolution; a bare session name is ambiguous
     # to tmux when a window shares that name, making it target that window's
     # index and fail with "index N in use".
@@ -2201,9 +2248,10 @@ def mark_awaiting_review(task_id: str) -> dict:
 
 
 def mark_rework_disputed(task_id: str, reason: str) -> dict:
-    """⏳🪤 CMX-248 (re-scope of CMX-244). Transition a REWORK IN FLIGHT to ``needs_human``
-    when the agent has NOTHING TO PUSH — the escape hatch for the case ``task-finished``
-    cannot cover.
+    """⏳🪤 CMX-248 (re-scope of CMX-244), 🔀 CMX-251. Transition a REWORK IN FLIGHT to
+    ``needs_human`` — or, when the head has already moved past the disputed verdict,
+    ``awaiting_review`` — when the agent has NOTHING TO PUSH — the escape hatch for the
+    case ``task-finished`` cannot cover.
 
     ``task-finished`` assumes a commit landed: it flips the row to ``awaiting_review``
     so the next tick judges the NEW head. A rework agent that reads the verdict and
@@ -2218,13 +2266,32 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
     moves again.
 
     This is the in-contract alternative: call ``chela rework-disputed <id> "<reason>"``
-    instead of just stopping. It moves the row straight to ``needs_human`` — the same
-    terminal state :func:`_escalate` uses for every other "the automatic loop cannot
-    proceed" case — WITHOUT touching the branch, the worktree, the PR, or
+    instead of just stopping.
+
+    🔀 CMX-251: ``needs_human`` is right ONLY when the head is what the paragraph above
+    always assumed — the SAME commit the disputed verdict actually ruled on. A rework
+    round can push several commits before the agent decides the REMAINING finding is
+    wrong or unfixable: it fixes what it can, pushes, and disputes the rest. In that case
+    the PR's live head has already moved past ``judge_sha`` (the commit the verdict was
+    for), and there is an UN-JUDGED commit sitting on the branch right now — sending that
+    to ``needs_human`` would strand a fixable PR behind a human who has nothing to
+    decide, while ``awaiting_review`` lets the per-sha trigger judge it automatically,
+    exactly like any other fresh push. So: re-read the PR's live head from GitHub (never
+    trusted stale off the row — the same discipline :func:`reopen`'s new-commit gate
+    uses) and compare it to ``judge_sha``. Both must be KNOWN to count as "moved" (an
+    unset sha is not positive evidence — the same conservatism CMX-246's stale-head guard
+    and CMX-238's merge gate already use); anything else falls back to the ordinary
+    ``needs_human`` path below, which is where the rest of this docstring's reasoning
+    still applies verbatim.
+
+    Either way this touches nothing else: never the branch, the worktree, the PR, or
     ``rework_count`` (this round was already spent by :func:`_respawn_rework`; refunding
-    it would let a disputed verdict retry for free). A human resolves it from there:
+    it would let a disputed verdict retry for free — and if the routed-back head goes on
+    to fail review again, ``_respawn_rework`` spends a fresh round for THAT commit same
+    as any other rework). A ``needs_human`` row is resolved by a human from there:
     ``chela retry`` for another automatic round, ``chela reopen`` after fixing it by
-    hand, or closing the PR outright.
+    hand, or closing the PR outright. An ``awaiting_review`` row needs nothing from
+    anyone — the dispatcher's own judge/CI/merge gates take it from here.
 
     Refuses anything that is not a rework actually in flight (``running`` with
     ``rework_count > 0``) — a first dispatch has no verdict to dispute, and a run that
@@ -2237,62 +2304,118 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
             "error": "a disputed rework with no reason is not a dispute — say what you "
                      "found (or didn't find) so a human can judge it",
         }
+    row = resolve_run(task_id)
+    if row is None:
+        return {"ok": False, "error": f"no run found for task_id {task_id}"}
+    if row["status"] != "running" or not _is_rework(row):
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"run is in status {row['status']!r} (rework_count="
+                     f"{row['rework_count'] or 0}) — this is only for a rework IN "
+                     "FLIGHT that has nothing to push; a first dispatch or an "
+                     "already-settled run should use `chela task-finished` or "
+                     "`chela escalate` instead",
+        }
+
+    # 🔀 CMX-251: THE HEAD-MOVED CHECK. A network call, deliberately done before the write
+    # transaction below (never inside `with _db()`) — same reason `reopen`'s new-commit
+    # gate reads live first: a slow `gh` call must not hold the row lock.
+    wf_path = row.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    pr_url = row.get("pr_url")
+    judge_sha = row.get("judge_sha")
+    ci = _read_pr_checks(pr_url, repo_dir)
+    head_moved = bool(judge_sha and ci.head_sha and judge_sha != ci.head_sha)
+
     with _db() as conn:
-        row = conn.execute(
+        # COMPARE-AND-SWAP: the row must still be the running-rework row read above — a
+        # concurrent tick or another CLI call could have moved it in the gap the live gh
+        # read just opened (same discipline as `request_changes`/`reopen`).
+        fresh = conn.execute(
             "SELECT * FROM runs WHERE task_id=?", (task_id,)
         ).fetchone()
-        if row is None:
-            return {"ok": False, "error": f"no run found for task_id {task_id}"}
-        if row["status"] != "running" or not _is_rework(row):
+        if fresh is None or fresh["status"] != "running" or not _is_rework(fresh):
+            current = fresh["status"] if fresh else "gone"
             return {
                 "ok": False, "task_id": task_id,
-                "error": f"run is in status {row['status']!r} (rework_count="
-                         f"{row['rework_count'] or 0}) — this is only for a rework IN "
-                         "FLIGHT that has nothing to push; a first dispatch or an "
-                         "already-settled run should use `chela task-finished` or "
-                         "`chela escalate` instead",
+                "error": f"run moved to {current!r} while the dispute was being written "
+                         "— nothing was changed. Re-read it and decide again.",
             }
-        rework_count = row["rework_count"] or 0
-        reviews = reviews_of(dict(row))
+        rework_count = fresh["rework_count"] or 0
+        reviews = reviews_of(dict(fresh))
         reviews.append({
             "round": len(reviews) + 1, "at": _now(), "body": reason, "verdict": "disputed",
         })
-        text = _format_escalation(
-            f"🔁🚫 Rework round {rework_count}/{max_reworks()} disputed by the agent — "
-            f"nothing was pushed: {reason}",
-            recommendation="Read the agent's reasoning against the verdict. If it's right, "
-                            "`chela retry` to send the same head through the loop again "
-                            "with corrected guidance, or fix it yourself and `chela reopen` "
-                            "once you've pushed a commit. If the original verdict stands, "
-                            "close the PR or redispatch the task.",
-            options=[
-                "chela retry — give the loop another round with new guidance",
-                "Fix it yourself and chela reopen once pushed",
-                "Close the PR / redispatch the task",
-            ],
-        )
-        window_name = row["window_name"]
-        pr_url = row["pr_url"]
-        wf_path = row["workflow_path"]
-        conn.execute(
-            "UPDATE runs SET status='needs_human', ended_at=?, last_error=?, "
-            "review_history=? WHERE task_id=?",
-            (_now(), text, json.dumps(reviews), task_id),
-        )
+        window_name = fresh["window_name"]
+        pr_url = fresh["pr_url"]
+        wf_path = fresh["workflow_path"]
+
+        if head_moved:
+            new_status = "awaiting_review"
+            text = (
+                f"🔀 Rework round {rework_count}/{max_reworks()} disputed by the agent, "
+                f"but the PR's head already moved past the disputed verdict "
+                f"(`{judge_sha[:12]}` → `{ci.head_sha[:12]}`) — routed back to automatic "
+                f"review instead of a human; the new head still goes through the judge "
+                f"and merge gates like any other push. Agent's reasoning: {reason}"
+            )
+            conn.execute(
+                "UPDATE runs SET status='awaiting_review', last_error=NULL, "
+                "review_history=?, pr_head_sha=? WHERE task_id=?",
+                (json.dumps(reviews), ci.head_sha, task_id),
+            )
+        else:
+            new_status = "needs_human"
+            text = _format_escalation(
+                f"🔁🚫 Rework round {rework_count}/{max_reworks()} disputed by the agent — "
+                f"nothing was pushed: {reason}",
+                recommendation="Read the agent's reasoning against the verdict. If it's right, "
+                                "`chela retry` to send the same head through the loop again "
+                                "with corrected guidance, or fix it yourself and `chela reopen` "
+                                "once you've pushed a commit. If the original verdict stands, "
+                                "close the PR or redispatch the task.",
+                options=[
+                    "chela retry — give the loop another round with new guidance",
+                    "Fix it yourself and chela reopen once pushed",
+                    "Close the PR / redispatch the task",
+                ],
+            )
+            conn.execute(
+                "UPDATE runs SET status='needs_human', ended_at=?, last_error=?, "
+                "review_history=? WHERE task_id=?",
+                (_now(), text, json.dumps(reviews), task_id),
+            )
         conn.commit()
         if window_name:
             _kill_window(window_name)
     repo_dir = str(Path(wf_path).parent) if wf_path else None
     posted, detail = _post_pr_comment(pr_url, repo_dir, text)
-    log.warning(
-        "Task %s: rework round %d disputed by the agent — needs_human (%s)",
-        task_id, rework_count, reason,
-    )
+    if head_moved:
+        log.warning(
+            "Task %s: rework round %d disputed by the agent, but the head moved "
+            "(%s -> %s) - routed back to awaiting_review, not needs_human (%s)",
+            task_id, rework_count, judge_sha[:12], ci.head_sha[:12], reason,
+        )
+        event_log.append(
+            "rework.disputed_head_moved",
+            f"{task_id}: disputed rework round {rework_count} routed to awaiting_review — "
+            f"head moved past the judged verdict ({judge_sha[:12]} → {ci.head_sha[:12]})",
+            payload={
+                "task_id": task_id, "pr_url": pr_url, "rework_count": rework_count,
+                "judged_sha": judge_sha, "live_head_sha": ci.head_sha,
+            },
+        )
+    else:
+        log.warning(
+            "Task %s: rework round %d disputed by the agent — needs_human (%s)",
+            task_id, rework_count, reason,
+        )
     return {
-        "ok": True, "task_id": task_id, "status": "needs_human",
-        "branch_name": row["branch_name"], "pr_url": pr_url,
+        "ok": True, "task_id": task_id, "status": new_status,
+        "branch_name": row.get("branch_name"), "pr_url": pr_url,
         "rework_count": rework_count, "max_reworks": max_reworks(),
         "comment_posted": posted, "comment_detail": detail,
+        "head_moved": head_moved,
     }
 
 
@@ -2862,7 +2985,8 @@ def retry(ident: str, reason: str = "") -> dict:
     }
 
 
-def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None) -> None:
+def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None,
+                     no_verdict: bool = False) -> None:
     """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE (besides ``sha``).
 
     The judge's only way to change a run's STATUS is :func:`request_changes` — the one
@@ -2878,17 +3002,25 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
     a stale commit, and the per-sha trigger would immediately re-spawn a redundant judge on
     the very sha this call just verified. Every normal caller passes nothing and this column
     is untouched, exactly as before.
+
+    ``no_verdict``, when True, also stamps ``judge_no_verdict=1`` — ⚖️🕳️ CMX-253 Objective 2:
+    this call is recording that a judge NEVER RAN, not that one ran and came up empty (see
+    ``judge_no_verdict``'s column comment). Every normal caller passes nothing, which clears
+    it back to 0 — the column always describes the state THIS call just wrote, never a stale
+    prior one.
     """
     with _db() as conn:
         if sha:
             conn.execute(
-                "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=? WHERE task_id=?",
-                (state, (detail or "")[:2000], sha, task_id),
+                "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=?, "
+                "judge_no_verdict=? WHERE task_id=?",
+                (state, (detail or "")[:2000], sha, int(no_verdict), task_id),
             )
         else:
             conn.execute(
-                "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
-                (state, (detail or "")[:2000], task_id),
+                "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=? "
+                "WHERE task_id=?",
+                (state, (detail or "")[:2000], int(no_verdict), task_id),
             )
         conn.commit()
 
@@ -2998,7 +3130,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
-        "judged": 0, "judge_lost": 0,
+        "judged": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
@@ -3076,6 +3208,7 @@ def tick(workflow_path: str | Path) -> dict:
         "ci_infra_failed": 0,
         "judged": 0,
         "judge_lost": 0,
+        "judge_stranded": 0,
         "trial_ledger": 0,
         "disk_budget_exceeded": False,
         "blocked": blocked,
@@ -3668,6 +3801,20 @@ def tick(workflow_path: str | Path) -> dict:
         # VERIFY — it does NOT block and it does NOT approve; the run stays exactly where it
         # was, and a human is told why.
         summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
+
+        # 1e′. ⚖️🧊 CMX-253: a `cannot_verify` that SPENT its retry budget on the CURRENT
+        # head is stranded, not waiting. The trigger query in STEP 3a′ below re-fires a
+        # `cannot_verify` only while `judge_cannot_verify_tries < judge_max_unknown_retries()`
+        # — bounded on purpose (CMX-81), so one flake costs a retry, not an infinite loop.
+        # But once `tries` reaches that bound on the SAME `pr_head_sha`, no arm of that
+        # trigger's OR can ever become true again short of a new commit, and `cannot_verify`
+        # "blocks nothing and approves nothing" (judge.py), so it never earns a
+        # `request_changes` escalation either. The row then sits in `awaiting_review`
+        # forever, indistinguishable from an ordinary "waiting for review" run, while no
+        # verdict will ever come. ⛔ Alongside 1d/1e, ABOVE the hold/blocked returns: this
+        # is not a claim — it starts no agent, takes no slot — and it is the transition
+        # that stops the row from silently presenting as reviewable when it is not.
+        summary["judge_stranded"] = _escalate_stranded_judge_unknowns(conn, wf)
 
         # 1f. 📊 THE TRIAL LEDGER (CMX-105) — opt-in, and BEFORE the prune below: a died
         # or abandoned row must get its ledger line while it still exists in `runs`, or
@@ -4303,9 +4450,11 @@ just has nothing new to report. Instead run, as your LAST step:
 
     chela rework-disputed {{task_id}} "<why there is nothing to push>"
 
-which hands the run straight to a human instead of leaving it stuck — the automatic loop
-cannot resolve a disagreement with the verdict on its own. There are only {{max_reworks}}
-rounds either way; after that the run escalates to a human regardless.
+which resolves this instead of leaving it stuck: usually a human, since the automatic
+loop cannot resolve a live disagreement with the verdict on its own — but if you already
+pushed OTHER fixes this round before concluding the rest is wrong or unfixable, the newer
+commit goes back through the ordinary judge/CI pass automatically instead. There are only
+{{max_reworks}} rounds either way; after that the run escalates to a human regardless.
 """
 
 
@@ -4732,12 +4881,21 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
     # already proved the bump stays under `judge_max_unknown_retries`). Any other same-head
     # re-launch keeps the running total. Counting retries HERE, not on the verdict, keeps one
     # writer whatever ended the judge — the watchdog, a launch failure, or `chela judge run`.
+    # ⚖️🕳️ CMX-253 Objective 2: EXCEPT when that `cannot_verify` is `judge_no_verdict` — the
+    # judge never got to run at all (its window vanished: host reboot, tmux death), so
+    # re-launching it is not a retry of a failed attempt, it is the FIRST attempt. Counting
+    # it would burn the whole bounded budget on a string of reboots that told us nothing
+    # about the PR and escalate it to a human for an environment hiccup (see that column's
+    # comment for the live incident this fixes).
     same_sha = row["judge_sha"] == sha
     prior = (row["judge_cannot_verify_tries"] or 0) if same_sha else 0
-    tries = prior + 1 if (same_sha and row["judge_state"] == judge.J_CANNOT_VERIFY) else prior
+    retried_unknown = (
+        same_sha and row["judge_state"] == judge.J_CANNOT_VERIFY and not row["judge_no_verdict"]
+    )
+    tries = prior + 1 if retried_unknown else prior
     conn.execute(
         "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=?, "
-        "judge_cannot_verify_tries=? WHERE task_id=?",
+        "judge_cannot_verify_tries=?, judge_no_verdict=0 WHERE task_id=?",
         (sha, judge.J_RUNNING, _now(), "", tries, task_id),
     )
     conn.commit()
@@ -4844,9 +5002,14 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             "not thinking" if timed_out else
             "the judge's window disappeared before it published a verdict"
         )
+        # ⚖️🕳️ CMX-253 Objective 2: a TIMEOUT judge got a chance to run and stayed stuck —
+        # that is still a counted unknown, same as CMX-81 always treated it. A judge whose
+        # window just VANISHED (host reboot, tmux death) never got that chance at all, so it
+        # must not spend the same bounded retry budget a real attempt would; see
+        # `judge_no_verdict`'s column comment.
         conn.execute(
-            "UPDATE runs SET judge_state=?, judge_detail=? WHERE task_id=?",
-            (judge.J_CANNOT_VERIFY, reason, row["task_id"]),
+            "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=? WHERE task_id=?",
+            (judge.J_CANNOT_VERIFY, reason, int(not timed_out), row["task_id"]),
         )
         conn.commit()
         if alive:
@@ -4862,6 +5025,54 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             "NOT sent back; it is a human's now.", row["task_id"], reason,
         )
     return handed_over
+
+
+def _escalate_stranded_judge_unknowns(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
+    """⚖️🧊 CMX-253. Hand a `cannot_verify` that spent its retry budget on the CURRENT head
+    to a human — it will never be judged again on this commit, and it must not sit in
+    `awaiting_review` pretending otherwise.
+
+    The trigger query in STEP 3a′ re-fires a `cannot_verify` only while
+    ``judge_cannot_verify_tries < judge_max_unknown_retries()`` (CMX-81's bounded retry: a
+    flake costs a retry, not an infinite loop). But once ``tries`` reaches that bound on the
+    SAME ``pr_head_sha``, no arm of that trigger's ``OR`` can ever become true again short of
+    a new commit — and `cannot_verify` blocks nothing and approves nothing (it can never earn
+    a `request_changes` escalation the way a real verdict does). Nothing else ever moves the
+    row, so it was previously stranded PERMANENTLY AND SILENTLY: an ordinary-looking
+    `awaiting_review` row that no verdict will ever reach. Observed live 2026-08-12 on three
+    runs (#316, #319, #320) after a host reboot, each parked at ``tries == max``.
+
+    ⛔ Matches the trigger's own guard exactly (``judge_sha=pr_head_sha`` and
+    ``tries >= max``), so a row is escalated here if and only if the trigger query would
+    never re-select it again. A fresh commit changes ``pr_head_sha`` and falls out of this
+    query on the very next tick — the trigger's first ``OR`` arm (``judge_sha != pr_head_sha``)
+    picks it back up for a brand-new judgement instead.
+    """
+    escalated = 0
+    for row in conn.execute(
+        "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
+        "AND judge_state=? AND judge_sha IS NOT NULL AND judge_sha=pr_head_sha "
+        "AND COALESCE(judge_cannot_verify_tries, 0) >= ?",
+        (str(wf.path), judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
+    ).fetchall():
+        tries = row["judge_cannot_verify_tries"] or 0
+        _escalate(
+            conn, row,
+            f"the judge could not verify this PR on {(row['pr_head_sha'] or '')[:12]} after "
+            f"{tries} attempt(s) ({row['judge_detail'] or 'no detail recorded'}) — it will "
+            "never be judged on this commit. The PR was NOT reviewed adversarially and it "
+            "was NOT sent back; branch, worktree and PR are preserved.",
+            recommendation="Fix whatever kept the judge from running (see judge_detail above) "
+                            "and push a new commit to get a fresh judgement, or review the PR "
+                            "by hand and merge or close it.",
+            options=[
+                "Push a new commit to reset the judge retry budget",
+                "Review the PR by hand and merge or close it",
+                "Abandon the task",
+            ],
+        )
+        escalated += 1
+    return escalated
 
 
 def list_runs() -> list[dict]:
