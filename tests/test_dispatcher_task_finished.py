@@ -21,8 +21,6 @@ report-only cross-check of ``--no-new-guards`` against the run's own diff.
 """
 from __future__ import annotations
 
-import ast
-import inspect
 import json
 import subprocess
 import sys
@@ -1013,7 +1011,7 @@ def test_cmd_task_finished_no_new_guards_forwards_its_own_task_id_not_a_hardcode
     check.assert_called_once_with("cmx-777")
 
 
-# --- CMX-258 rework round 3 (+ round 11's completeness fix) -----------------------------
+# --- CMX-258 rework round 3 -------------------------------------------------------------
 #
 # Every finding on this PR since round 8 has been ONE of two invariants, closed one call
 # site per round: (a) a task_id forwarded into a lookup, hardcoded and going unnoticed
@@ -1025,22 +1023,16 @@ def test_cmd_task_finished_no_new_guards_forwards_its_own_task_id_not_a_hardcode
 # neither-flag notice, and the mark_awaiting_review failure) — this table has one row per
 # site.
 #
-# ⛔ Round 10 hand-counted "six" and missed the neither-flag notice — the count itself was
-# the defect, the same class of miss as round 6's nine `.mjs` rows that never varied the
-# deciding axis. `test_task_finished_scenario_table_covers_every_print_exit_site` below
-# derives the site count from `cmd_task_finished`'s own AST instead of trusting a human
-# recount, so an 8th site added later fails that test instead of silently escaping this
-# table the way the 7th did.
-#
-# ⛔ Round 13 (judge finding 2): the AST walk itself undercounted — it only ever varied
-# TOP-LEVEL if/elif/else branches, so a branch with more than one distinguishable notice
-# (the `--no-new-guards` branch has both the conditional tests/-touched notice AND an
-# unconditional "skipping self-check" line) was still only one site, and a THIRD nested
-# notice added to that same branch later would not move the count at all.
-# `_count_notice_sites` now walks each notice branch for its own nested, non-exiting `if`s
-# (each one its own site) plus whatever unconditional print remains — bringing the table to
-# EIGHT rows: the `no_new_guards_skip_line` row below is the "skipping self-check" line's
-# own row, split out of what `no_new_guards_mismatch_notice` used to cover alone.
+# ⛔ Round 14: this table is HAND-MAINTAINED, deliberately, and NOT backed by an automated
+# completeness check. Rounds 11 and 13 each tried to derive the site count from
+# `cmd_task_finished`'s own AST so a missing row would fail a test instead of silently
+# escaping the table; both walkers undercounted sites they were never taught to recognize
+# (round 11 missed a nested notice `if`, round 13's fix still missed a nested `if`/`else`
+# and any notice inside a branch that also exits) and STILL reported "the table covers
+# every site" while it didn't. A completeness check that can certify incompleteness is
+# worse than no check — it launders exactly the trust a hand count never claimed. If you
+# add or change a `task-finished:` / self-check print or exit site in `cmd_task_finished`,
+# add or update the matching row here BY HAND; nothing enforces that for you.
 #
 # Two rows double as the mandatory negative controls: "both_flags_at_once" is a refusal
 # that legitimately has no task_id to report (its message is coherent without one, and
@@ -1212,124 +1204,3 @@ def test_cmd_task_finished_every_refusal_names_its_actionable_fact_and_forwards_
         mocks[target].assert_called_once_with(*expected_args)
 
 
-def _is_exit_call(node: ast.AST) -> bool:
-    """``sys.exit(...)`` or a bare ``exit(...)`` — either spelling ends the branch."""
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    return (isinstance(func, ast.Attribute) and func.attr == "exit") or (
-        isinstance(func, ast.Name) and func.id == "exit"
-    )
-
-
-def _branch_has_exit(stmts: list[ast.stmt]) -> bool:
-    return any(_is_exit_call(n) for stmt in stmts for n in ast.walk(stmt))
-
-
-def _is_print_call(node: ast.AST) -> bool:
-    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print"
-
-
-def _count_notice_sites(stmts: list[ast.stmt]) -> int:
-    """⛔ CMX-258 rework round 13 (judge finding 2): the number of distinguishable NOTICES
-    inside one non-exiting top-level branch — round 11's ``(b)`` treated the whole branch as
-    a single site, which is only correct when the branch has exactly one message to print.
-    The ``--no-new-guards`` branch already has two: a nested ``if touched_tests:`` notice
-    (conditional — only fires on a mismatch) and an unconditional "skipping self-check" line
-    that prints regardless. Collapsing both into one site meant an agent could see EITHER
-    message with only one table row's assertions actually exercised against it, and a THIRD
-    nested notice (e.g. a ``touched_tests is None`` "could not cross-check" line) could be
-    added to the branch without changing the site count at all — invisible to
-    ``test_task_finished_scenario_table_covers_every_print_exit_site_in_the_function``.
-
-    Each direct child statement of the branch that is itself a non-exiting ``if`` with no
-    ``elif``/``else`` of its own (``not stmt.orelse``) is its OWN site — a nested notice,
-    distinguishable from its siblings by the condition that guards it. Everything else in
-    the branch that is NOT such a nested ``if`` is the branch's "always reached" remainder;
-    if any of it contains a ``print(...)`` call, that remainder is one more site (the
-    unconditional line). A branch with no nested notice ``if`` at all (the neither-flag
-    ``else``) falls out to exactly 1, matching round 11's original count.
-    """
-    sites = 0
-    leftover_has_print = False
-    for stmt in stmts:
-        if isinstance(stmt, ast.If) and not stmt.orelse and not _branch_has_exit(stmt.body):
-            sites += 1
-        elif any(_is_print_call(n) for n in ast.walk(stmt)):
-            leftover_has_print = True
-    return sites + (1 if leftover_has_print else 0)
-
-
-def _count_task_finished_sites() -> int:
-    """⛔ CMX-258 rework round 11 (judge finding 1), extended round 13 (judge finding 2):
-    derive the number of distinguishable ``cmd_task_finished`` print/exit sites from the
-    function's own AST, instead of trusting a hand count — a hand count has now been wrong
-    twice on this run (round 10 said "six" when there were seven; round 6's nine ``.mjs``
-    table rows never varied the deciding axis).
-
-    A "site" is either of the two shapes every row in ``_TASK_FINISHED_SCENARIOS`` actually
-    has:
-
-    (a) a ``sys.exit(...)`` call. Each one IS a distinguishable refusal — the both-flags
-        rejection, the self-check-could-not-run/guards-SURVIVED/CANNOT-VERIFY refusals, and
-        the mark_awaiting_review failure all end in one.
-    (b) within a branch of a top-level ``if``/``elif``/``else`` chain that contains NO
-        ``sys.exit`` anywhere inside it, each notice :func:`_count_notice_sites` finds — a
-        nested non-exiting ``if`` with no ``elif``/``else`` of its own is its own site (a
-        conditional notice), and whatever unconditional ``print(...)`` remains alongside it
-        is one more (round 11 treated the whole branch as one site; round 13 found that
-        undercounts a branch with more than one distinguishable message — see
-        ``_count_notice_sites`` for why).
-
-    This falls out to the right answer on the branches that must NOT count: the
-    per-outcome loop print sits inside a branch that also contains three ``sys.exit``
-    calls (already counted via (a), so the branch itself is skipped by (b) to avoid double
-    counting), and the final "awaiting review" line is a continuation of a branch already
-    accounted for by (a), not a branch of its own.
-    """
-    from chela import main
-
-    source = inspect.getsource(main.cmd_task_finished)
-    tree = ast.parse(source)
-    func = tree.body[0]
-    assert isinstance(func, ast.FunctionDef)
-
-    exit_count = sum(1 for n in ast.walk(func) if _is_exit_call(n))
-
-    non_exit_sites = 0
-    for stmt in func.body:
-        if not isinstance(stmt, ast.If):
-            continue
-        node = stmt
-        while True:
-            if not _branch_has_exit(node.body):
-                non_exit_sites += _count_notice_sites(node.body)
-            if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
-                node = node.orelse[0]
-                continue
-            if node.orelse and not _branch_has_exit(node.orelse):
-                non_exit_sites += _count_notice_sites(node.orelse)
-            break
-
-    return exit_count + non_exit_sites
-
-
-def test_task_finished_scenario_table_covers_every_print_exit_site_in_the_function():
-    """⛔ CMX-258 rework round 11 (judge finding 1, ⭐⭐), extended round 13 (judge finding
-    2): make the table's completeness CHECKABLE rather than trusted. ``_count_task_finished_sites``
-    walks ``cmd_task_finished``'s own AST (see its docstring, and ``_count_notice_sites``'s,
-    for exactly what counts as a site — now including a nested notice ``if`` one level
-    inside a non-exiting branch, not just top-level branches); this test asserts
-    ``_TASK_FINISHED_SCENARIOS`` has one row per site it finds. A 9th site added to
-    ``cmd_task_finished`` later — another ``sys.exit``, another non-exiting ``elif``/``else``
-    branch, or another nested notice ``if`` inside an existing one — then fails THIS test
-    instead of silently escaping the table the way the 7th (the neither-flag notice) escaped
-    round 10's hand count, or the way an 8th nested notice would have escaped round 11's
-    top-level-only AST walk.
-    """
-    found = _count_task_finished_sites()
-    assert len(_TASK_FINISHED_SCENARIOS) == found, (
-        f"cmd_task_finished has {found} print/exit site(s) by AST walk, but "
-        f"_TASK_FINISHED_SCENARIOS has {len(_TASK_FINISHED_SCENARIOS)} row(s) — "
-        "add (or remove) a row so the table matches the code, not a hand count."
-    )
