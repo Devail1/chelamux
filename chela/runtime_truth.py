@@ -2157,7 +2157,13 @@ def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
             "no wid). This is the 2026-07-14 outage exactly: five finished PRs went "
             "unreviewed because the queue was addressed to a window that no longer existed "
             "and nothing said so." + heal + " Fix: run `chela watch` in the orchestrator's "
-            "session — the queue is intact and goes out on its next idle tick.",
+            "session — the queue is intact and goes out on its next idle tick. That only "
+            "works if that session is CURRENTLY running inside a tmux window: one launched "
+            "outside tmux (by hand, e.g. after a reboot) cannot bind at all, and `chela "
+            "watch` there fails with 'no window id'. If nothing is running that session "
+            "anywhere, run `chela restore` instead — no live window required; it hands back "
+            "the exact fix (REVIVABLE re-addresses automatically, MANUAL gives the precise "
+            "relaunch command), which is the only remedy once the orchestrator is gone.",
         )]
 
     if wid not in live:
@@ -2166,7 +2172,11 @@ def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
             f"the decisions inbox is addressed to {wid}, and tmux has no such window",
             f"The session that registered as the orchestrator is gone. {queued} event(s) are "
             "queued behind that address and nothing is delivering them." + heal + " Register "
-            "the session that is doing the orchestrating: `chela watch`.",
+            "the session that is doing the orchestrating: `chela watch` — but that needs a "
+            "LIVE session to run it from. If the orchestrator process itself is dead "
+            "(crashed, or never relaunched inside tmux), there is none, and `chela restore` "
+            "is the fallback: no live window required, and it hands back the exact relaunch "
+            "command for a session that has to be started by hand.",
         )]
 
     if not stamped:

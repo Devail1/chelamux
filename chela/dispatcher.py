@@ -2095,9 +2095,10 @@ def mark_awaiting_review(task_id: str) -> dict:
 
 
 def mark_rework_disputed(task_id: str, reason: str) -> dict:
-    """⏳🪤 CMX-248 (re-scope of CMX-244). Transition a REWORK IN FLIGHT to ``needs_human``
-    when the agent has NOTHING TO PUSH — the escape hatch for the case ``task-finished``
-    cannot cover.
+    """⏳🪤 CMX-248 (re-scope of CMX-244), 🔀 CMX-251. Transition a REWORK IN FLIGHT to
+    ``needs_human`` — or, when the head has already moved past the disputed verdict,
+    ``awaiting_review`` — when the agent has NOTHING TO PUSH — the escape hatch for the
+    case ``task-finished`` cannot cover.
 
     ``task-finished`` assumes a commit landed: it flips the row to ``awaiting_review``
     so the next tick judges the NEW head. A rework agent that reads the verdict and
@@ -2112,13 +2113,32 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
     moves again.
 
     This is the in-contract alternative: call ``chela rework-disputed <id> "<reason>"``
-    instead of just stopping. It moves the row straight to ``needs_human`` — the same
-    terminal state :func:`_escalate` uses for every other "the automatic loop cannot
-    proceed" case — WITHOUT touching the branch, the worktree, the PR, or
+    instead of just stopping.
+
+    🔀 CMX-251: ``needs_human`` is right ONLY when the head is what the paragraph above
+    always assumed — the SAME commit the disputed verdict actually ruled on. A rework
+    round can push several commits before the agent decides the REMAINING finding is
+    wrong or unfixable: it fixes what it can, pushes, and disputes the rest. In that case
+    the PR's live head has already moved past ``judge_sha`` (the commit the verdict was
+    for), and there is an UN-JUDGED commit sitting on the branch right now — sending that
+    to ``needs_human`` would strand a fixable PR behind a human who has nothing to
+    decide, while ``awaiting_review`` lets the per-sha trigger judge it automatically,
+    exactly like any other fresh push. So: re-read the PR's live head from GitHub (never
+    trusted stale off the row — the same discipline :func:`reopen`'s new-commit gate
+    uses) and compare it to ``judge_sha``. Both must be KNOWN to count as "moved" (an
+    unset sha is not positive evidence — the same conservatism CMX-246's stale-head guard
+    and CMX-238's merge gate already use); anything else falls back to the ordinary
+    ``needs_human`` path below, which is where the rest of this docstring's reasoning
+    still applies verbatim.
+
+    Either way this touches nothing else: never the branch, the worktree, the PR, or
     ``rework_count`` (this round was already spent by :func:`_respawn_rework`; refunding
-    it would let a disputed verdict retry for free). A human resolves it from there:
+    it would let a disputed verdict retry for free — and if the routed-back head goes on
+    to fail review again, ``_respawn_rework`` spends a fresh round for THAT commit same
+    as any other rework). A ``needs_human`` row is resolved by a human from there:
     ``chela retry`` for another automatic round, ``chela reopen`` after fixing it by
-    hand, or closing the PR outright.
+    hand, or closing the PR outright. An ``awaiting_review`` row needs nothing from
+    anyone — the dispatcher's own judge/CI/merge gates take it from here.
 
     Refuses anything that is not a rework actually in flight (``running`` with
     ``rework_count > 0``) — a first dispatch has no verdict to dispute, and a run that
@@ -2131,62 +2151,118 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
             "error": "a disputed rework with no reason is not a dispute — say what you "
                      "found (or didn't find) so a human can judge it",
         }
+    row = resolve_run(task_id)
+    if row is None:
+        return {"ok": False, "error": f"no run found for task_id {task_id}"}
+    if row["status"] != "running" or not _is_rework(row):
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"run is in status {row['status']!r} (rework_count="
+                     f"{row['rework_count'] or 0}) — this is only for a rework IN "
+                     "FLIGHT that has nothing to push; a first dispatch or an "
+                     "already-settled run should use `chela task-finished` or "
+                     "`chela escalate` instead",
+        }
+
+    # 🔀 CMX-251: THE HEAD-MOVED CHECK. A network call, deliberately done before the write
+    # transaction below (never inside `with _db()`) — same reason `reopen`'s new-commit
+    # gate reads live first: a slow `gh` call must not hold the row lock.
+    wf_path = row.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    pr_url = row.get("pr_url")
+    judge_sha = row.get("judge_sha")
+    ci = _read_pr_checks(pr_url, repo_dir)
+    head_moved = bool(judge_sha and ci.head_sha and judge_sha != ci.head_sha)
+
     with _db() as conn:
-        row = conn.execute(
+        # COMPARE-AND-SWAP: the row must still be the running-rework row read above — a
+        # concurrent tick or another CLI call could have moved it in the gap the live gh
+        # read just opened (same discipline as `request_changes`/`reopen`).
+        fresh = conn.execute(
             "SELECT * FROM runs WHERE task_id=?", (task_id,)
         ).fetchone()
-        if row is None:
-            return {"ok": False, "error": f"no run found for task_id {task_id}"}
-        if row["status"] != "running" or not _is_rework(row):
+        if fresh is None or fresh["status"] != "running" or not _is_rework(fresh):
+            current = fresh["status"] if fresh else "gone"
             return {
                 "ok": False, "task_id": task_id,
-                "error": f"run is in status {row['status']!r} (rework_count="
-                         f"{row['rework_count'] or 0}) — this is only for a rework IN "
-                         "FLIGHT that has nothing to push; a first dispatch or an "
-                         "already-settled run should use `chela task-finished` or "
-                         "`chela escalate` instead",
+                "error": f"run moved to {current!r} while the dispute was being written "
+                         "— nothing was changed. Re-read it and decide again.",
             }
-        rework_count = row["rework_count"] or 0
-        reviews = reviews_of(dict(row))
+        rework_count = fresh["rework_count"] or 0
+        reviews = reviews_of(dict(fresh))
         reviews.append({
             "round": len(reviews) + 1, "at": _now(), "body": reason, "verdict": "disputed",
         })
-        text = _format_escalation(
-            f"🔁🚫 Rework round {rework_count}/{max_reworks()} disputed by the agent — "
-            f"nothing was pushed: {reason}",
-            recommendation="Read the agent's reasoning against the verdict. If it's right, "
-                            "`chela retry` to send the same head through the loop again "
-                            "with corrected guidance, or fix it yourself and `chela reopen` "
-                            "once you've pushed a commit. If the original verdict stands, "
-                            "close the PR or redispatch the task.",
-            options=[
-                "chela retry — give the loop another round with new guidance",
-                "Fix it yourself and chela reopen once pushed",
-                "Close the PR / redispatch the task",
-            ],
-        )
-        window_name = row["window_name"]
-        pr_url = row["pr_url"]
-        wf_path = row["workflow_path"]
-        conn.execute(
-            "UPDATE runs SET status='needs_human', ended_at=?, last_error=?, "
-            "review_history=? WHERE task_id=?",
-            (_now(), text, json.dumps(reviews), task_id),
-        )
+        window_name = fresh["window_name"]
+        pr_url = fresh["pr_url"]
+        wf_path = fresh["workflow_path"]
+
+        if head_moved:
+            new_status = "awaiting_review"
+            text = (
+                f"🔀 Rework round {rework_count}/{max_reworks()} disputed by the agent, "
+                f"but the PR's head already moved past the disputed verdict "
+                f"(`{judge_sha[:12]}` → `{ci.head_sha[:12]}`) — routed back to automatic "
+                f"review instead of a human; the new head still goes through the judge "
+                f"and merge gates like any other push. Agent's reasoning: {reason}"
+            )
+            conn.execute(
+                "UPDATE runs SET status='awaiting_review', last_error=NULL, "
+                "review_history=?, pr_head_sha=? WHERE task_id=?",
+                (json.dumps(reviews), ci.head_sha, task_id),
+            )
+        else:
+            new_status = "needs_human"
+            text = _format_escalation(
+                f"🔁🚫 Rework round {rework_count}/{max_reworks()} disputed by the agent — "
+                f"nothing was pushed: {reason}",
+                recommendation="Read the agent's reasoning against the verdict. If it's right, "
+                                "`chela retry` to send the same head through the loop again "
+                                "with corrected guidance, or fix it yourself and `chela reopen` "
+                                "once you've pushed a commit. If the original verdict stands, "
+                                "close the PR or redispatch the task.",
+                options=[
+                    "chela retry — give the loop another round with new guidance",
+                    "Fix it yourself and chela reopen once pushed",
+                    "Close the PR / redispatch the task",
+                ],
+            )
+            conn.execute(
+                "UPDATE runs SET status='needs_human', ended_at=?, last_error=?, "
+                "review_history=? WHERE task_id=?",
+                (_now(), text, json.dumps(reviews), task_id),
+            )
         conn.commit()
         if window_name:
             _kill_window(window_name)
     repo_dir = str(Path(wf_path).parent) if wf_path else None
     posted, detail = _post_pr_comment(pr_url, repo_dir, text)
-    log.warning(
-        "Task %s: rework round %d disputed by the agent — needs_human (%s)",
-        task_id, rework_count, reason,
-    )
+    if head_moved:
+        log.warning(
+            "Task %s: rework round %d disputed by the agent, but the head moved "
+            "(%s -> %s) - routed back to awaiting_review, not needs_human (%s)",
+            task_id, rework_count, judge_sha[:12], ci.head_sha[:12], reason,
+        )
+        event_log.append(
+            "rework.disputed_head_moved",
+            f"{task_id}: disputed rework round {rework_count} routed to awaiting_review — "
+            f"head moved past the judged verdict ({judge_sha[:12]} → {ci.head_sha[:12]})",
+            payload={
+                "task_id": task_id, "pr_url": pr_url, "rework_count": rework_count,
+                "judged_sha": judge_sha, "live_head_sha": ci.head_sha,
+            },
+        )
+    else:
+        log.warning(
+            "Task %s: rework round %d disputed by the agent — needs_human (%s)",
+            task_id, rework_count, reason,
+        )
     return {
-        "ok": True, "task_id": task_id, "status": "needs_human",
-        "branch_name": row["branch_name"], "pr_url": pr_url,
+        "ok": True, "task_id": task_id, "status": new_status,
+        "branch_name": row.get("branch_name"), "pr_url": pr_url,
         "rework_count": rework_count, "max_reworks": max_reworks(),
         "comment_posted": posted, "comment_detail": detail,
+        "head_moved": head_moved,
     }
 
 
@@ -4197,9 +4273,11 @@ just has nothing new to report. Instead run, as your LAST step:
 
     chela rework-disputed {{task_id}} "<why there is nothing to push>"
 
-which hands the run straight to a human instead of leaving it stuck — the automatic loop
-cannot resolve a disagreement with the verdict on its own. There are only {{max_reworks}}
-rounds either way; after that the run escalates to a human regardless.
+which resolves this instead of leaving it stuck: usually a human, since the automatic
+loop cannot resolve a live disagreement with the verdict on its own — but if you already
+pushed OTHER fixes this round before concluding the rest is wrong or unfixable, the newer
+commit goes back through the ordinary judge/CI pass automatically instead. There are only
+{{max_reworks}} rounds either way; after that the run escalates to a human regardless.
 """
 
 

@@ -432,6 +432,32 @@ def test_readdress_is_a_noop_when_a_different_wid_is_registered(store_file, wind
     assert inbox.load()["orchestrator"] == "@2"
 
 
+def test_address_state_dangling_points_past_chela_watch_to_chela_restore():
+    """CMX-254: `chela watch` (the remedy this message names first) only works from a LIVE
+    session — a session restarted outside tmux cannot run it at all (`no window id`). The
+    why-text must not leave a reader stuck on that dead end; it has to name the fallback
+    that works with no live window: `chela restore`."""
+    store = {"orchestrator": "@9", "orchestrator_epoch": "OLD-epoch",
+             "orchestrator_name": "orchestrator"}
+
+    state, why = inbox.address_state(store, {}, "NEW-epoch")
+
+    assert state == inbox.ADDR_DANGLING
+    assert "chela watch" in why
+    assert "chela restore" in why
+    assert "outside tmux" in why
+
+
+def test_address_state_gone_points_past_chela_watch_to_chela_restore():
+    store = {"orchestrator": "@9", "orchestrator_epoch": "SAME-epoch"}
+
+    state, why = inbox.address_state(store, {"@2": "idle"}, "SAME-epoch")
+
+    assert state == inbox.ADDR_GONE
+    assert "chela watch" in why
+    assert "chela restore" in why
+
+
 def test_unregister_dangling_clears_only_when_both_wid_and_epoch_still_match(store_file):
     store = inbox.load()
     store["orchestrator"] = "@9"
@@ -2329,6 +2355,259 @@ def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
         "belongs in the payload, which already carries it in full"
     )
     assert len(summary) < len(_LONG_DETAIL) + 200
+
+
+# --- CMX-247: the needs_human summary must say WHY, not always the same fixed guess ------
+#
+# `dispatcher._escalate` is the only writer of `needs_human`, and its call sites hand it
+# DIFFERENT reasons — a spent rework budget, checks stuck pending, a rework that could not
+# re-attach its worktree. Before this, `inbox.run_needs_human` always said "the PR still
+# fails review", which is only true for the first of those.
+
+def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_file, windows,
+                                                                        sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    rework_cap = dict(_verdict_run(), task_id="T1", status="needs_human", rework_count=2,
+                      review_history=json.dumps([{"verdict": "BLOCKING"},
+                                                  {"verdict": "BLOCKING"}]),
+                      last_error="rework cap reached (2/2) — the PR still fails review. "
+                                 "Branch, worktree and PR are preserved.\n\n"
+                                 "Recommendation: fix it yourself and `chela reopen`.")
+    stuck_checks = dict(_verdict_run(), task_id="T2", status="needs_human",
+                        last_error="the checks on this PR have not settled in 6h — they "
+                                   "are not running, they are STUCK.\n\n"
+                                   "Recommendation: approve the pending gate.")
+    no_branch = dict(_verdict_run(), task_id="T3", status="needs_human",
+                     last_error="rework: the run row has no branch — nothing to re-enter")
+    # A SHORT first paragraph with a Recommendation attached: short enough that the
+    # excerpt limit (60 chars) never kicks in, so this fixture is only clean if the
+    # "\n\n" split itself is doing the work — unlike T1/T2 above, where the first
+    # paragraph already exceeds the excerpt limit and would hide a missing split.
+    short_with_recommendation = dict(_verdict_run(), task_id="T4", status="needs_human",
+                     last_error="rework: no branch\n\nRecommendation: fix it yourself.")
+    # A single-paragraph reason strictly BETWEEN 60 and 90 chars (68). This is the fixture
+    # that pins the excerpt bound to the named SUMMARY_TITLE_CHARS constant (60) rather than
+    # merely "shorter than whatever the fixture happens to be": a limit of 90 would let this
+    # one through untruncated, so the exact-match assertion below only passes at limit=60.
+    boundary_reason = "external approval is stuck on someone who is out of office this week"
+    assert 60 < len(boundary_reason) < 90
+    boundary = dict(_verdict_run(), task_id="T5", status="needs_human",
+                     last_error=boundary_reason)
+
+    # 🔴 GUARD (judge round 3): a real `_escalate` reason is routinely MULTI-LINE within its
+    # own first paragraph — dispatcher.py:4302 interpolates raw git stderr, which wraps. This
+    # first paragraph has an embedded "\n" but no "\n\n" before the Recommendation, so
+    # splitting on a single "\n" (wrong) silently drops the second line while splitting on
+    # "\n\n" (right) keeps it. Every other fixture above has a single-line first paragraph,
+    # so none of them can tell "\n" and "\n\n" apart.
+    multiline_first_line = "rework: could not attach a worktree for cmx-247"
+    multiline_second_line = "fatal: 'cmx-247' is already checked out at '/tmp/other-wt'"
+    multiline_paragraph = multiline_first_line + "\n" + multiline_second_line
+    multiline_reason = dict(_verdict_run(), task_id="T6", status="needs_human",
+                             last_error=multiline_paragraph +
+                             "\n\nRecommendation: remove the stale worktree and retry.")
+
+    # 🔴 GUARD (judge round 3): rework_count and len(review_history) are two DIFFERENT facts
+    # that must each keep their own label. The only prior fixture (T1) sets both to 2, so
+    # swapping the two interpolations is invisible there. Here they differ (1 vs 3), so a
+    # swap surfaces as "reworks: 3 · verdicts on the row: 1" instead of the correct order.
+    mismatched_counts = dict(_verdict_run(), task_id="T7", status="needs_human", rework_count=1,
+                              review_history=json.dumps([{"verdict": "BLOCKING"},
+                                                          {"verdict": "CANNOT_VERIFY"},
+                                                          {"verdict": "BLOCKING"}]),
+                              last_error="the checks on this PR never settled")
+
+    # 🔴 GUARD (judge round 5): `_format_escalation` takes `recommendation` and `options`
+    # INDEPENDENTLY (dispatcher.py:4238) — a real escalation can carry an Options: block
+    # with NO Recommendation: at all. Every fixture above that has a trailing block pairs
+    # it with "Recommendation:", so keying the paragraph split on that literal (instead of
+    # the bare "\n\n" boundary) is invisible to all of them. This fixture is short enough
+    # to stay under SUMMARY_TITLE_CHARS if — and only if — the split actually fires on the
+    # blank line; a split keyed on "Recommendation:" leaves the Options: block attached and
+    # pushes the joined string past the excerpt limit.
+    options_only = dict(_verdict_run(), task_id="T8", status="needs_human",
+                         last_error="budget approval never arrived\n\n"
+                                    "Options:\n  - ping finance on slack\n"
+                                    "  - approve manually via `chela reopen`")
+
+    inbox.tick({}, runs=[rework_cap, stuck_checks, no_branch, short_with_recommendation,
+                          boundary, multiline_reason, mismatched_counts, options_only])
+
+    by_entry = {e["payload"]["task_id"]: e for e in inbox.load()["queue"]}
+    by_task = {tid: e["summary"] for tid, e in by_entry.items()}
+    assert set(by_task) == {"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"}
+
+    # 🔴 GUARD (judge round 5): an Options:-only escalation (no Recommendation: paragraph)
+    # must still have its trailing block excluded from the summary — exact match, since the
+    # Options: block sits early enough in the joined string that a substring check on the
+    # reason alone would stay green even with the whole block pasted in.
+    assert "· budget approval never arrived —" in by_task["T8"], (
+        "the reason must reach the summary unchanged when the paragraph split works — "
+        "this only fails if the split is keyed on 'Recommendation:' instead of the bare "
+        "paragraph boundary, in which case an Options:-only last_error never splits at all"
+    )
+    assert "Options:" not in by_task["T8"], (
+        "an Options: block with no Recommendation: leaked into the summary — the "
+        "paragraph split must key on the blank line, not the literal 'Recommendation:'"
+    )
+    assert "ping finance" not in by_task["T8"]
+
+    assert "the PR still fails review" in by_task["T1"]
+
+    # 🔴 GUARD: the payload must carry the FULL last_error, Recommendation/Options included
+    # — the summary excerpts the reason, but the payload is not itself excerpted. If this
+    # key is ever emptied, the excerpt stops being an excerpt and becomes data loss.
+    assert by_entry["T1"]["payload"]["last_error"] == rework_cap["last_error"], (
+        "the payload's last_error must be the run's full, unmodified last_error"
+    )
+    assert by_entry["T2"]["payload"]["last_error"] == stuck_checks["last_error"]
+
+    # 🔴 GUARD: the reason is excerpted to EXACTLY SUMMARY_TITLE_CHARS (60), cut on a word
+    # boundary, and marked with an ellipsis — not "some limit shorter than this fixture"
+    # (caught a mutation to `limit = 90`) and not a raw mid-word slice with no ellipsis
+    # (caught a mutation dropping the `.rsplit(" ", 1)[0] + "…"`). This literal is computed
+    # independently of production code: reason[:60].rsplit(" ", 1)[0] + "…".
+    assert "rework cap reached 2/2 — the PR still fails review.…" in by_task["T1"], (
+        "the reason must be cut at exactly SUMMARY_TITLE_CHARS, on a word boundary, "
+        "with a trailing ellipsis — got a differently-bounded or unmarked cut instead"
+    )
+
+    # 🔴 GUARD: the counts must survive alongside the reason — `reworks: N · verdicts on
+    # the row: M` are useful on their own and a refactor of the reason must not drop them.
+    assert "reworks: 2" in by_task["T1"], (
+        "the rework count must still be in the summary alongside the reason"
+    )
+    assert "verdicts on the row: 2" in by_task["T1"], (
+        "the verdict-history count must still be in the summary alongside the reason"
+    )
+
+    # 🔴 GUARD: the reason is EXCERPTED — the whole first paragraph must not be pasted
+    # whole into the one line typed at the prompt (mirrors the cannot_verify excerpt
+    # guard above, for this call site).
+    assert "Branch, worktree and PR are preserved" not in by_task["T1"], (
+        "the whole first paragraph was pasted into the summary instead of being "
+        "excerpted to SUMMARY_TITLE_CHARS"
+    )
+
+    assert "checks on this PR have not settled" in by_task["T2"]
+    assert "the PR still fails review" not in by_task["T2"], (
+        "a run escalated for STUCK CHECKS must not be told it 'still fails review' — "
+        "that sentence is a claim about a review verdict that never happened"
+    )
+
+    assert "no branch" in by_task["T3"]
+    assert "the PR still fails review" not in by_task["T3"], (
+        "a run escalated for a MISSING BRANCH must not be told it 'still fails review'"
+    )
+    # 🔴 GUARD (judge round 4): a reason that FITS under SUMMARY_TITLE_CHARS must reach the
+    # summary VERBATIM and UNMARKED — no trailing "…". The ellipsis is this PR's own signal
+    # that the reason was cut; slapping it on every reason (even ones that fit whole) makes
+    # the signal lie about completeness in exactly the way CMX-247 exists to prevent. An
+    # exact match (not a substring) is required to catch a mutation that appends "…" to a
+    # reason that already fits — a substring check like "no branch" in ... cannot see it.
+    # (Not also asserting "…" not in by_task["T3"] as a whole-line check: TRACKER_LINE — the
+    # fixture title every task shares — already carries a literal "…" of its own, so that
+    # check would fail for reasons that have nothing to do with the reason excerpt.)
+    assert "· rework: the run row has no branch — nothing to re-enter —" in by_task["T3"], (
+        "a reason that fits under SUMMARY_TITLE_CHARS must reach the summary unchanged, "
+        "with no ellipsis appended"
+    )
+
+    # Only the reason (first paragraph) reaches the summary — Recommendation/Options stay
+    # in the payload's last_error, not pasted into the one line typed at the prompt.
+    assert "Recommendation:" not in by_task["T1"]
+    assert "Recommendation:" not in by_task["T2"]
+
+    # 🔴 GUARD: same rule, but with a reason SHORT enough that the excerpt limit alone
+    # cannot be hiding a missing "\n\n" split (T1/T2's first paragraphs are both already
+    # over SUMMARY_TITLE_CHARS, so they'd stay clean even without the split).
+    assert "no branch" in by_task["T4"]
+    assert "Recommendation:" not in by_task["T4"], (
+        "a short reason (under SUMMARY_TITLE_CHARS) must still exclude a trailing "
+        "Recommendation — this is only provable when the excerpt limit itself can't "
+        "be the thing hiding it"
+    )
+    # 🔴 GUARD (judge round 4): same as T3's guard above, but on the OTHER fixture that
+    # exercises the short (`len(reason) <= limit`) path — an exact match, since "no branch"
+    # in ... would stay green even if a mutation appended "…" to this fixture's reason too.
+    assert "· rework: no branch —" in by_task["T4"], (
+        "a reason that fits under SUMMARY_TITLE_CHARS must reach the summary unchanged, "
+        "with no ellipsis appended"
+    )
+
+    # 🔴 GUARD: T5's 68-char reason sits strictly between SUMMARY_TITLE_CHARS (60) and a
+    # too-large limit (90) that would otherwise still pass every other fixture in this test.
+    # At the real limit it must be visibly cut; a widened limit would let it through whole.
+    assert "external approval is stuck on someone who is out of office…" in by_task["T5"], (
+        "a reason longer than SUMMARY_TITLE_CHARS but shorter than 90 chars must still "
+        "be excerpted — this only fails if the limit is not exactly SUMMARY_TITLE_CHARS"
+    )
+    assert boundary_reason not in by_task["T5"], (
+        "the full boundary reason leaked through untruncated — the excerpt limit is "
+        "wider than SUMMARY_TITLE_CHARS"
+    )
+
+    # 🔴 GUARD: the split must be on the PARAGRAPH boundary ("\n\n"), not the first line
+    # ("\n") — this is the exact excerpt the production code computes for the multi-line
+    # fixture above: reason[:60].rsplit(" ", 1)[0] + "…" where reason is BOTH lines joined
+    # by a single space (via the whitespace collapse). Splitting on "\n" instead would stop
+    # at `multiline_first_line` alone (47 chars, no ellipsis) and never reach "fatal:".
+    assert "rework: could not attach a worktree for cmx-247 fatal:…" in by_task["T6"], (
+        "the excerpt must include content from the SECOND line of the first paragraph — "
+        "this only fails if the reason was split on the first newline instead of the "
+        "first blank line"
+    )
+    assert "fatal:" in by_task["T6"], (
+        "the second line of the first paragraph never reached the summary — the reason "
+        "was split on '\\n' instead of '\\n\\n'"
+    )
+
+    # 🔴 GUARD: reworks and verdicts-on-the-row are two different facts with different
+    # numbers here (1 vs 3) — a swap of the two interpolations produces the numbers under
+    # the wrong labels instead of failing outright, so an exact-match on each label is
+    # required to catch it.
+    assert "reworks: 1" in by_task["T7"], (
+        "the rework count (1) must appear under the 'reworks' label — got the verdict "
+        "count instead, meaning the two interpolations were swapped"
+    )
+    assert "verdicts on the row: 3" in by_task["T7"], (
+        "the verdict-history count (3) must appear under the 'verdicts on the row' "
+        "label — got the rework count instead, meaning the two interpolations were swapped"
+    )
+    assert "reworks: 3" not in by_task["T7"]
+    assert "verdicts on the row: 1" not in by_task["T7"]
+
+
+def test_run_needs_human_reason_falls_back_when_last_error_is_empty(store_file, windows,
+                                                                     sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    bare = dict(_verdict_run(), task_id="T1", status="needs_human", last_error=None)
+    # 🔴 GUARD (judge round 5): the production code deliberately tests the READABLE reason
+    # (`if not reason`, after coercion) rather than `last_error is None` — a row can reach
+    # `needs_human` with `last_error=""` (or a first paragraph that collapses to nothing
+    # but whitespace), and that must fall back exactly like a null column does. No fixture
+    # anywhere else in this file sets `last_error=""`, so an `is None` check is invisible
+    # to all of them.
+    empty_string = dict(_verdict_run(), task_id="T2", status="needs_human", last_error="")
+    whitespace_only = dict(_verdict_run(), task_id="T3", status="needs_human",
+                            last_error="   \n\n  ")
+    inbox.tick({}, runs=[bare, empty_string, whitespace_only])
+
+    by_task = {e["payload"]["task_id"]: e["summary"] for e in inbox.load()["queue"]}
+    assert set(by_task) == {"T1", "T2", "T3"}
+    for tid in ("T1", "T2", "T3"):
+        assert "no reason recorded" in by_task[tid], (
+            f"{tid} has no readable reason and must fall back — got {by_task[tid]!r}"
+        )
+        assert "the PR still fails review" not in by_task[tid]
 
 
 # --- the single-run blind spot -----------------------------------------------------------

@@ -398,12 +398,23 @@ def address_state(store: dict, statuses: dict[str, str],
             f"{epoch.describe(now_epoch)} — the server RESTARTED and renumbered the fleet. "
             f"That id does not name the orchestrator ({name!r}) any more, and may well name "
             "another agent, so nothing will be written to it. Re-register from the "
-            "orchestrator's session: `chela watch` (any dispatch does it for you).")
+            "orchestrator's session: `chela watch` (any dispatch does it for you). "
+            "`chela watch` only works if that session is CURRENTLY running inside a tmux "
+            "window — a session restarted outside tmux (e.g. by hand, after a reboot) "
+            "cannot bind at all, and `chela watch` there fails with 'no window id'. If "
+            "nothing is running that session anywhere, run `chela restore` instead — it "
+            "needs no live window and hands back the exact fix: REVIVABLE re-addresses "
+            "automatically, MANUAL gives the precise `CHELA_WID=@N claude --resume <sid>` "
+            "command to relaunch it, which is the only remedy in that case.")
     if statuses and wid not in statuses:
         return ADDR_GONE, (
             f"tmux has no claude running in {wid} — the session that registered as the "
             "orchestrator is gone. Its queue is intact and will go out to whichever session "
-            "registers next (`chela watch`).")
+            "registers next (`chela watch`). But `chela watch` needs a LIVE session to run "
+            "it from — if the orchestrator process itself is dead (crashed, or never "
+            "relaunched inside tmux), there is none, and `chela restore` is the fallback: "
+            "no live window required, and it hands back the exact relaunch command for a "
+            "session that has to be started by hand.")
     if not stamped and now_epoch:
         return ADDR_UNSTAMPED, (
             f"{wid} carries no tmux epoch (recorded before CMX-77, or pinned with "
@@ -1209,11 +1220,14 @@ def run_events(runs: list[dict], seen: dict[str, str],
         # absorbed. `fresh[task_id]` is already updated above, so this transition itself
         # never re-fires.
         elif status == "needs_human":
-            # The rework loop gave up (CMX-68): the PR was sent back MAX_REWORKS times and
-            # still fails review. This is the one run state a human MUST see — the loop is
-            # bounded precisely so it surfaces here instead of spinning — so it carries the
-            # HISTORY: every verdict this run ever received, not just the last thing said.
-            # Nothing has been thrown away: the branch, the worktree and the PR are intact.
+            # A run reaches `needs_human` through several DISTINCT `dispatcher._escalate`
+            # call sites — the rework loop spending its budget ("the PR still fails
+            # review"), but just as often a judge that died mid-review, checks stuck
+            # pending forever, or a rework that could not even re-attach its worktree
+            # (branch gone, git error). This is the one run state a human MUST see, so it
+            # carries the HISTORY: every verdict this run ever received, not just the last
+            # thing said. Nothing has been thrown away: the branch, the worktree and the
+            # PR are intact.
             reviews = _reviews(run)
             payload["rework_count"] = run.get("rework_count") or 0
             payload["reviews"] = reviews
@@ -1221,12 +1235,13 @@ def run_events(runs: list[dict], seen: dict[str, str],
             payload["worktree_path"] = run.get("worktree_path")
             pr = run.get("pr_url")
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            reason = _needs_human_reason(run)
             out.append(_event(
                 "run_needs_human",
                 # No parens, no `(s)`: the summary is sanitized before it is typed at a
                 # prompt (_event), and bracket punctuation comes back out mid-word.
                 f"📥 {label} NEEDS A HUMAN — reworks: {payload['rework_count']} · verdicts "
-                f"on the row: {len(reviews)} · the PR still fails review — {ref}"
+                f"on the row: {len(reviews)} · {reason} — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "changes_requested":
             # ⛔ NOT a silent state (CMX-68 review). A run sits here waiting for a dispatcher
@@ -1256,6 +1271,30 @@ def run_events(runs: list[dict], seen: dict[str, str],
                               f"📥 {label} FAILED{' — ' + err[0][:120] if err else ''}"
                               f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
     return out, fresh
+
+
+def _needs_human_reason(run: dict) -> str:
+    """Why THIS run reached ``needs_human`` — from its own ``last_error``, never a guess.
+
+    ``dispatcher._escalate`` is the only writer of ``last_error`` on this transition, and
+    every one of its call sites hands it a DIFFERENT ``reason`` — a spent rework budget, a
+    dead judge, checks stuck pending, a rework that couldn't re-attach its worktree. It is
+    formatted by ``dispatcher._format_escalation`` as ``reason`` optionally followed by
+    ``"\\n\\nRecommendation: ..."`` and ``"\\n\\nOptions:\\n  - ..."`` (CMX-242) — only the
+    first paragraph is the reason itself, so that's the part that belongs in a one-line
+    summary; the rest is already in the payload (``last_error``) for anyone who opens the
+    event. A row with no ``last_error`` at all (hand-written in a test, or an escalation
+    path that changes shape later) still gets an honest summary instead of silently
+    re-asserting the one specific cause this replaces (CMX-247).
+    """
+    reason = str(run.get("last_error") or "").split("\n\n", 1)[0]
+    reason = " ".join(reason.split())
+    if not reason:
+        return "the loop gave up — no reason recorded"
+    limit = SUMMARY_TITLE_CHARS
+    if len(reason) <= limit:
+        return reason
+    return reason[:limit].rsplit(" ", 1)[0] + "…"
 
 
 def _reviews(run: dict) -> list[dict]:
