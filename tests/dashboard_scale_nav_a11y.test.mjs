@@ -18,6 +18,43 @@
 // already carried a non-hue cue before this ticket; what's new here is the
 // guard, not the cue.
 //
+// CMX-257 round 6 — STRATEGY CHANGE (human directive on PR #326, superseding
+// round 4's individual findings): 16+ judge rounds across #298+#326 kept
+// re-litigating the SAME unbounded surface — these guards used to parse
+// style.css as TEXT and pin arbitrary declarations one property at a time
+// (.side-subhead alone drew FIVE separate findings: collapsed-rail hiding,
+// text-present, opacity-exists, opacity-value, and — round 6 — visibility).
+// That is not a guard gap, it's an infinite one: CSS has effectively
+// unlimited ways to make an element invisible or a value wrong, and pinning
+// them one mutation at a time never converges. What follows guards the
+// ticket's four claims ONCE each, at the level of RESOLVED EFFECT (the actual
+// number/behaviour a browser would compute), not by enumerating properties:
+//   1. type scale — every wall/pane/card text selector's RESOLVED font-size/
+//      line-height comes from the --wall-pane-*/--card-* tokens and never
+//      sits below the pre-CMX-230 legibility floor (see "TYPE SCALE" below).
+//   2. airy density — the class actually widens the stage at a real desktop
+//      width, not just toggles (see "WIRING: the airy-density rule" below).
+//   3. nav inventory — the primary rail is exactly the 3 domain objects, the
+//      4 demoted views are present (not deleted) and actually render — occupy
+//      space and paint — under the More subhead (see "nav inventory" /
+//      ".side-subhead and #side-nav-more" below).
+//   4. non-hue cue — every real status family carries a glyph/word, not just
+//      colour; this is the accessibility hard requirement and the one claim
+//      here that must never regress (see "GUARD 3" below).
+// A handful of adjacent, already-converged guards (GUARD 4/5/6/7, the
+// .side-list-secondary weight/wiring pair) are kept as-is: they weren't the
+// source of the recurring findings and already assert a resolved value or a
+// real function's behaviour, not a property-presence scan.
+// NOT GUARDED here — verified instead by manual greyscale capture (per the
+// round-6 directive: "I verified it live on an isolated dashboard... a
+// greyscale capture showing every status distinguishable with hue fully
+// removed"), and deliberately not re-litigated property-by-property in this
+// file: exact opacity/spacing/padding VALUES beyond the specific floors and
+// margins asserted below, font weights, precise source order beyond what's
+// asserted explicitly (#side-nav < .side-subhead < #side-nav-more), and a
+// bare-literal value that happens to already clear a floor (detokenisation
+// that doesn't also regress the number is out of scope for this file).
+//
 // Run: node --test tests/dashboard_scale_nav_a11y.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
 import { test } from 'node:test';
@@ -51,10 +88,10 @@ const VIEWS_SRC = src('static/js/views.js');
 // first matching block/declaration/rule and never asks "what does this
 // actually resolve to" — and each round's fix left the next notation/
 // property/selector-shaped instance of it standing. cssRules()/
-// resolvedBody()/resolvedRootVars() below resolve the property instead of
-// pattern-matching source text once, closing the whole class instead of one
-// spot at a time. Comments are stripped first so a commented-out example
-// never masquerades as a rule.
+// resolvedRootVars() below resolve the property instead of pattern-matching
+// source text once, closing the whole class instead of one spot at a time.
+// Comments are stripped first so a commented-out example never masquerades
+// as a rule.
 //
 // Still deliberately NOT full cascade-aware (no specificity/media-query
 // evaluation) — a selector's legitimate smaller override living inside an
@@ -104,33 +141,17 @@ function declarations(body) {
         .map(m => [m[1].trim().toLowerCase(), m[2].trim()]);
 }
 
-// The RESOLVED style for `selector`: every TOP-LEVEL (non-@media) rule whose
-// selector list includes it, merged in source order with last-declaration-
-// wins per property — the same value a browser computes whether the
-// duplicate is a second declaration in one block or a second top-level rule
-// elsewhere in the sheet. Returned as a synthetic "prop: value;" string so
-// regex-based assertions below keep working, but now against the value that
-// actually WINS, not the first one written.
-function resolvedBody(css, selector) {
-    const rules = cssRules(css).filter(r => r.media === null &&
-        r.selector.split(',').map(s => s.trim()).includes(selector));
-    assert.ok(rules.length >= 1, `no top-level CSS rule found for selector ${selector}`);
-    const props = new Map();
-    for (const r of rules) for (const [k, v] of declarations(r.body)) props.set(k, v);
-    return [...props].map(([k, v]) => `${k}: ${v};`).join(' ');
-}
-
 // The RESOLVED custom-property map for :root — merges every TOP-LEVEL :root
 // block (style.css declares it three times; a later same-specificity custom-
 // property declaration wins per the cascade) instead of reading only the
 // first one.
-// CMX-257 round 3: this used to read resolvedBody(css, ':root') — which drops
-// ANY rule inside an @media block, including one whose condition is always
-// true at a real viewport (e.g. `@media (min-width: 0px) { :root { ... } }`).
-// Every numeric legibility floor (GUARD 2/2b/2y-floor) reads :root through
-// this function, so that escape hatch reverted the whole CMX-230 type scale
-// invisibly. resolvedBodyAtDesktop() is defined below GUARD 1's comment block
-// but hoists (function declaration), so it's safe to call here.
+// CMX-257 round 3: a selector-string-only lookup drops ANY rule inside an
+// @media block, including one whose condition is always true at a real
+// viewport (e.g. `@media (min-width: 0px) { :root { ... } }`). Every numeric
+// legibility floor reads :root through this function, so that escape hatch
+// would revert the whole CMX-230 type scale invisibly. resolvedBodyAtDesktop()
+// is defined below but hoists (function declaration), so it's safe to call
+// here.
 function resolvedRootVars(css) {
     const vars = new Map();
     for (const [k, v] of declarations(resolvedBodyAtDesktop(css, ':root')))
@@ -145,21 +166,20 @@ function resolvedRootTokenPx(css, name) {
     return parseFloat(m[1]);
 }
 
-// --- CMX-257 round 2: resolvedBody() (round 11's fix, above) deliberately
-// excludes ANY rule sitting inside an @media block, reasoning a selector's
-// legitimate narrow-viewport override (e.g. .gs-head/.pane-subtitle's real
-// CMX-133 mobile bar) must not be folded into the desktop rule it guards.
-// The judge found the converse hole: an @media condition that is ALWAYS true
-// at a real desktop width (`@media (min-width: 0px)`) is still, textually,
-// "inside an @media block" — so resolvedBody() excludes it too, and a bare
-// font-size literal smuggled in through it is invisible to every check that
-// calls resolvedBody(). Reusing tests/wallnav.test.mjs's CMX-130
-// activeOnMobile discipline but inverted for a real desktop viewport:
-// resolvedBodyAtDesktop() folds in every rule (base OR @media) whose
-// condition is actually satisfied at DESKTOP_VIEWPORT_PX, in source order —
-// so a genuine `max-width: 768px` mobile override (never satisfied at
-// desktop) still stays excluded, exactly as resolvedBody() intended, while
-// an always-true wrapper like `min-width: 0px` no longer offers an escape.
+// --- CMX-257 round 2: a naive selector lookup that only accepts top-level
+// (non-@media) rules deliberately excludes a selector's legitimate narrow-
+// viewport override (e.g. .gs-head/.pane-subtitle's real CMX-133 mobile bar)
+// so it isn't folded into the desktop rule it guards. The judge found the
+// converse hole: an @media condition that is ALWAYS true at a real desktop
+// width (`@media (min-width: 0px)`) is still, textually, "inside an @media
+// block" — so a naive top-level-only lookup excludes it too, and a bare
+// font-size literal smuggled in through it would be invisible. Reusing
+// tests/wallnav.test.mjs's CMX-130 activeOnMobile discipline but inverted for
+// a real desktop viewport: resolvedBodyAtDesktop() folds in every rule (base
+// OR @media) whose condition is actually satisfied at DESKTOP_VIEWPORT_PX, in
+// source order — so a genuine `max-width: 768px` mobile override (never
+// satisfied at desktop) still stays excluded, while an always-true wrapper
+// like `min-width: 0px` no longer offers an escape.
 const DESKTOP_VIEWPORT_PX = 1920;
 function mediaSatisfiedAtViewport(mediaCondition, viewportPx) {
     const negated = /(^|\s)not\b/i.test(mediaCondition);
@@ -180,142 +200,187 @@ function resolvedBodyAtDesktop(css, selector) {
     for (const r of active) for (const [k, v] of declarations(r.body)) props.set(k, v);
     return [...props].map(([k, v]) => `${k}: ${v};`).join(' ');
 }
+// Same resolution as resolvedBodyAtDesktop(), but tolerant of a selector with
+// NO matching rule at all (returns '' instead of failing an assertion) —
+// correct for an element like #side-nav-more that has no rule of its own and
+// is styled only via its .side-list-secondary class: "no override" means
+// "renders with browser/inherited defaults", not "this test is broken".
+function resolvedBodyAtDesktopOrEmpty(css, selector) {
+    const all = cssRules(css).filter(r =>
+        r.selector.split(',').map(s => s.trim()).includes(selector));
+    const active = all.filter(r => r.media === null || mediaSatisfiedAtViewport(r.media, DESKTOP_VIEWPORT_PX));
+    const props = new Map();
+    for (const r of active) for (const [k, v] of declarations(r.body)) props.set(k, v);
+    return [...props].map(([k, v]) => `${k}: ${v};`).join(' ');
+}
 
-// --- GUARD 1: the type scale is TOKENISED — no bare font-size literal survives
-// in the wall/pane/card rules (CMX-230 objective 1). Corrupting any ONE of
-// these back to a bare `font-size: Npx` literal removes the single lever the
-// ticket demanded and must fail here. .pane-recap::after (the chevron glyph)
-// and .gs-idx (a fixed-box numeric badge, tightly coupled to --term-ctx-bar-h's
-// own px math — see the big comment above .gs-idx in style.css) are
-// deliberately EXCLUDED: neither is prose text, and gs-idx's box geometry is a
-// separate, already-guarded lever (tests/wallnav.test.mjs's CMX-129 test).
+// A single SHARED "this element occupies space and paints" assertion — round
+// 6's replacement for the incremental per-property pins .side-subhead alone
+// drew across five separate judge findings (display:none ban, then opacity
+// floor, then font-size floor, then — this round — a `visibility: hidden`
+// that none of the previous three ever read, since each one only checked the
+// ONE property the previous round's mutation happened to use). Rather than
+// add a sixth property-shaped patch, this checks every recognised way this
+// stylesheet's cascade can make a resolved rule invisible in ONE assertion,
+// applied identically to every "must actually render" element instead of
+// bespoke floors per element. Deliberately NOT exhaustive of every CSS
+// invisibility trick (see the NOT GUARDED note at the top of this file) —
+// narrow enough to converge, wide enough to close the specific class of hole
+// (display/visibility/opacity/content-visibility/clip/zeroed-box) this file's
+// judge history has actually hit.
+function assertRendersVisibly(css, selector, label) {
+    const body = resolvedBodyAtDesktopOrEmpty(css, selector);
+    const decls = new Map(declarations(body));
+    assert.notEqual(decls.get('display'), 'none',
+        `${label} (${selector}) has display: none at desktop — removed from the box tree entirely`);
+    const vis = decls.get('visibility');
+    assert.ok(!vis || !/^(hidden|collapse)$/.test(vis),
+        `${label} (${selector}) has visibility: ${vis} — invisible but still occupying box-tree space`);
+    const cv = decls.get('content-visibility');
+    assert.ok(!cv || cv !== 'hidden',
+        `${label} (${selector}) has content-visibility: hidden — skipped from rendering entirely`);
+    const op = decls.get('opacity');
+    if (op != null) {
+        assert.ok(parseFloat(op) >= 0.3,
+            `${label} (${selector})'s opacity (${op}) has dropped toward invisible`);
+    }
+    const clip = decls.get('clip-path');
+    assert.ok(!clip || !/circle\(\s*0|inset\(\s*100%|polygon\(\s*0%?\s*,?\s*0%?\s*,?\s*0%?\s*,?\s*0%?\s*\)/.test(clip),
+        `${label} (${selector})'s clip-path (${clip}) fully clips the box to nothing`);
+    const h = decls.get('height'), mh = decls.get('max-height'), ov = decls.get('overflow');
+    const zeroBox = (h && /^0(px)?$/.test(h)) || (mh && /^0(px)?$/.test(mh));
+    assert.ok(!(zeroBox && ov === 'hidden'),
+        `${label} (${selector}) has a zeroed height/max-height with overflow: hidden — clipped away to nothing`);
+    const fs = decls.get('font-size');
+    if (fs != null) {
+        const m = fs.match(/^([0-9.]+)px$/);
+        if (m) {
+            assert.ok(parseFloat(m[1]) >= 8,
+                `${label} (${selector})'s font-size (${fs}) has dropped toward unreadable`);
+        }
+    }
+}
+
+// --- TYPE SCALE (ticket claim 1, round-6 consolidation): six separate GUARD
+// tests (1/2/2b/2y/2y-floor/2z, round history above) each pinned ONE property
+// or ONE token in isolation — "is font-size a var()?", "is the token's :root
+// value above a floor?", "does line-height consume its own token?" — as
+// separate assertions added one judge round at a time. This collapses them
+// into two tests, one per selector family, each asserting the thing that
+// actually matters at RESOLVED EFFECT: the real font-size/line-height a
+// browser computes for that selector, in px/ratio, must (a) come from the
+// expected token and (b) never sit below the pre-CMX-230 legibility floor.
+// A bare-literal revert, a wrong-token swap (e.g. .pane-subtitle repointed to
+// the .gs-state-only `-sm` escape hatch) and a shrunk :root token are all the
+// SAME failure mode here — "the resolved number is wrong or ungoverned" — so
+// one assertion per selector/property catches all three instead of three
+// separate GUARD tests per selector.
+//
+// .pane-recap::after (the chevron glyph) and .gs-idx (a fixed-box numeric
+// badge, tightly coupled to --term-ctx-bar-h's own px math) are deliberately
+// EXCLUDED: neither is prose text, and gs-idx's box geometry is a separate,
+// already-guarded lever (tests/wallnav.test.mjs's CMX-129 test). .ar-ctx is a
+// fixed-height pill badge (border-radius: 999px), not prose, so it keeps its
+// own bare `line-height: 15px` by design and is excluded from the
+// line-height check (font-size still applies to it, same as the other card
+// selectors).
 const WALL_PANE_SELECTORS = ['.gs-head', '.pane-subtitle', '.pane-recap', '.gs-state', '.term-ctx-bar'];
 const CARD_SELECTORS = ['.ar-title', '.ar-sub', '.ar-ctx'];
-
-// GUARD 1's font-size regex used to accept EITHER --wall-pane-font-size or its
-// `-sm` escape hatch for all five WALL_PANE_SELECTORS. style.css declares
-// --wall-pane-font-size-sm as "the .gs-state pill only", but nothing enforced
-// that scope — a judge round repointed .pane-subtitle (prose text the ticket
-// explicitly fixes at the big token) to the `-sm` token instead, and this test
-// still passed because the `-sm` alternation was permitted everywhere. Only
-// .gs-state may read the `-sm` token; the other four must read the base token
-// with no alternation, mirroring CARD_SELECTORS's exact-one-token discipline.
+const WALL_PANE_LINE_HEIGHT_SELECTORS = ['.pane-subtitle', '.pane-recap'];
+const CARD_LINE_HEIGHT_SELECTORS = ['.ar-title', '.ar-sub'];
+// Only .gs-state may read the `-sm` escape hatch style.css scopes to it; the
+// other four wall/pane selectors must read the base token.
 const WALL_PANE_SM_ALLOWED = new Set(['.gs-state']);
+// Real DOM ancestor chain each card selector renders under (nav.js's
+// _agentRowHtml: .agent-row > .ar-main > .ar-top > .ar-ctx, and .agent-row >
+// .ar-main > .ar-title/.ar-sub directly) — used to resolve font-size the way
+// a browser's cascade actually would (highest real specificity wins), not by
+// literal selector-string lookup. CMX-257 round 6: a higher-specificity
+// `.ar-main .ar-title, .ar-main .ar-sub { font-size: 9px; }` rule reverts the
+// card type scale while the plain `.ar-title`/`.ar-sub` rules keep their
+// tokenised declarations untouched — a literal-string lookup (as GUARD 1
+// used) never sees the override that actually wins on a real screen.
+const CARD_ANCESTORS = {
+    '.ar-title': new Set(['.agent-row', '.ar-main']),
+    '.ar-sub': new Set(['.agent-row', '.ar-main']),
+    '.ar-ctx': new Set(['.agent-row', '.ar-main', '.ar-top']),
+};
 
-test('type scale: every wall/pane rule\'s font-size is a var() token, not a bare px literal', () => {
+// Resolves a font-size/line-height declaration VALUE (either "var(--name)" or
+// a bare "Npx"/ratio literal) to a { num, tokenName } pair, following the
+// var() through the resolved :root map. tokenName is null for a bare literal
+// (still resolvable — the floor still applies — but not token-sourced).
+function resolvedNumberViaToken(rawValue, rootVars) {
+    const v = rawValue.trim();
+    const varM = v.match(/^var\((--[\w-]+)\)$/);
+    if (varM) {
+        const tokenName = varM[1];
+        const tokenVal = rootVars.get(tokenName);
+        assert.ok(tokenVal, `${tokenName} not resolvable from :root`);
+        const m = tokenVal.match(/^([0-9.]+)(px)?$/);
+        assert.ok(m, `${tokenName} (${tokenVal}) is not a plain numeric value`);
+        return { num: parseFloat(m[1]), tokenName };
+    }
+    const lit = v.match(/^([0-9.]+)(px)?$/);
+    assert.ok(lit, `unresolvable value "${v}"`);
+    return { num: parseFloat(lit[1]), tokenName: null };
+}
+
+test('type scale: wall/pane text resolves font-size from --wall-pane-font-size* tokens, never below the legibility floor', () => {
+    const rootVars = resolvedRootVars(CSS);
     for (const sel of WALL_PANE_SELECTORS) {
-        // resolvedBodyAtDesktop() (CMX-257 round 2) resolves last-declaration-
-        // wins across every rule for `sel` that is ACTIVE at a real desktop
-        // viewport — whether a duplicate declaration in this block (round 9),
-        // a whole second top-level rule elsewhere in the sheet (round 10's
-        // .pane-subtitle hole), or a bare literal smuggled in through an
-        // always-true @media wrapper (this PR's round-1 .pane-subtitle hole)
-        // — so the checks below see the value that actually wins on a real
-        // screen, with no separate "declared exactly once" bookkeeping needed.
         const body = resolvedBodyAtDesktop(CSS, sel);
-        assert.match(body, /font-size:\s*var\(--wall-pane-font-size(-sm)?\)/,
-            `${sel} must set font-size from a --wall-pane-font-size* token`);
-        assert.doesNotMatch(body, /font-size:\s*[0-9.]+px/,
-            `${sel} has reverted to a bare font-size px literal — the type scale has no single lever again`);
-
+        const m = body.match(/font-size:\s*([^;]+);/);
+        assert.ok(m, `${sel} has no resolved font-size`);
+        const wantToken = WALL_PANE_SM_ALLOWED.has(sel) ? '--wall-pane-font-size-sm' : '--wall-pane-font-size';
+        const { num, tokenName } = resolvedNumberViaToken(m[1], rootVars);
+        assert.equal(tokenName, wantToken,
+            `${sel} must set font-size: var(${wantToken}) — resolved to "${m[1].trim()}" instead ` +
+            '(a bare literal, or the wrong token, reads the same as a revert)');
         if (WALL_PANE_SM_ALLOWED.has(sel)) {
-            assert.match(body, /font-size:\s*var\(--wall-pane-font-size-sm\)/,
-                `${sel} is the one selector style.css scopes the -sm token to — it must actually use it`);
+            assert.ok(num > 10, `${sel}'s resolved font-size (${num}px, via ${tokenName}) has dropped to (or below) the old 10px pill text`);
         } else {
-            assert.doesNotMatch(body, /font-size:\s*var\(--wall-pane-font-size-sm\)/,
-                `${sel} must read the base --wall-pane-font-size token, not the -sm escape hatch style.css scopes to .gs-state only — ` +
-                `this is the 11px legibility floor GUARD 2 relies on GUARD 1 to enforce at every use site`);
+            assert.ok(num >= 11, `${sel}'s resolved font-size (${num}px, via ${tokenName}) has dropped back toward the old <11px pane text`);
         }
     }
 });
 
-test('type scale: every sidebar-card rule\'s font-size is the --card-font-size token, not a bare px literal', () => {
+test('type scale: .pane-subtitle/.pane-recap resolve line-height from --wall-pane-line-height, above the legibility floor', () => {
+    const rootVars = resolvedRootVars(CSS);
+    for (const sel of WALL_PANE_LINE_HEIGHT_SELECTORS) {
+        const body = resolvedBodyAtDesktop(CSS, sel);
+        const m = body.match(/line-height:\s*([^;]+);/);
+        assert.ok(m, `${sel} has no resolved line-height`);
+        const { num, tokenName } = resolvedNumberViaToken(m[1], rootVars);
+        assert.equal(tokenName, '--wall-pane-line-height',
+            `${sel} must set line-height: var(--wall-pane-line-height) — resolved to "${m[1].trim()}" instead`);
+        assert.ok(num >= 1.45, `${sel}'s resolved line-height (${num}) has dropped back toward the old 1.3 leading`);
+    }
+});
+
+test('type scale: sidebar-card text resolves font-size from --card-font-size, specificity-aware, never below the legibility floor', () => {
+    const rootVars = resolvedRootVars(CSS);
     for (const sel of CARD_SELECTORS) {
-        const body = resolvedBodyAtDesktop(CSS, sel);
-        assert.match(body, /font-size:\s*var\(--card-font-size\)/,
-            `${sel} must set font-size from --card-font-size`);
-        assert.doesNotMatch(body, /font-size:\s*[0-9.]+px/,
-            `${sel} has reverted to a bare font-size px literal`);
+        const raw = resolveForContext(CSS, sel, CARD_ANCESTORS[sel], 'font-size');
+        assert.ok(raw, `no font-size resolves for ${sel} in its real card context`);
+        const { num, tokenName } = resolvedNumberViaToken(raw, rootVars);
+        assert.equal(tokenName, '--card-font-size',
+            `${sel} must resolve font-size from var(--card-font-size) at its real render site — resolved to ` +
+            `"${raw.trim()}" instead (a higher-specificity rule for the same rendered element may be winning)`);
+        assert.ok(num >= 11, `${sel}'s resolved font-size (${num}px) has dropped back toward the old 9-10px card text`);
     }
 });
 
-// --- GUARD 2: minimum-legibility floor. Lowering the pane font-size or
-// line-height token back toward the pre-CMX-230 values (10px / 1.3) must fail.
-// round 11: reads the RESOLVED :root — style.css declares :root three times
-// (a later same-specificity custom-property declaration wins), so a floor
-// token re-declared in the second or third block is no longer invisible.
-test('minimum legibility floor: --wall-pane-font-size and --wall-pane-line-height are above the pre-CMX-230 floor', () => {
-    const fs = resolvedRootTokenPx(CSS, 'wall-pane-font-size');
-    assert.ok(fs >= 11, `--wall-pane-font-size (${fs}px) has dropped back toward the old 10px pane text`);
-    const lh = resolvedRootVars(CSS).get('--wall-pane-line-height');
-    assert.ok(lh, '--wall-pane-line-height not declared on :root');
-    assert.ok(parseFloat(lh) >= 1.45,
-        `--wall-pane-line-height (${lh}) has dropped back toward the old 1.3 leading`);
-});
-
-// --- GUARD 2z: GUARD 1 checks every wall/pane rule's font-size is a var() token;
-// GUARD 2 floors --wall-pane-line-height's own :root declaration. Neither asserts
-// that any rule actually CONSUMES the line-height token at its use site — a judge
-// round reverted .pane-recap's line-height to the exact pre-CMX-230 literal (1.3)
-// while leaving the :root token declared at 1.5 and .pane-recap's font-size still
-// tokenised, and both guards stayed green. This pins the two selectors that ship
-// prose text needing real leading (.pane-subtitle, .pane-recap) to read
-// line-height FROM the token, not a bare literal.
-const LINE_HEIGHT_SELECTORS = ['.pane-subtitle', '.pane-recap'];
-test('type scale: .pane-subtitle and .pane-recap read line-height from --wall-pane-line-height, not a bare literal', () => {
-    for (const sel of LINE_HEIGHT_SELECTORS) {
-        const body = resolvedBodyAtDesktop(CSS, sel);
-        assert.match(body, /line-height:\s*var\(--wall-pane-line-height\)/,
-            `${sel} must set line-height from var(--wall-pane-line-height)`);
-        assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
-            `${sel} has reverted to a bare line-height literal — the leading token has no effect at its use site`);
-    }
-});
-
-// --- GUARD 2b: the legibility floor also covers the two tokens GUARD 2 does not
-// reach. --card-font-size (the sidebar-card scale — the ticket's HEADLINE objective
-// is raising 9-10px card text to 11.5px) and --wall-pane-font-size-sm (the .gs-state
-// pill's own escape hatch, exempt from GUARD 2's >= 11px floor by construction) can
-// both be shrunk back toward or below their pre-CMX-230 values while GUARD 1's
-// "is it a var()" check and every other guard here stay green.
-test('minimum legibility floor: --card-font-size and --wall-pane-font-size-sm are above the pre-CMX-230 floor', () => {
-    const card = resolvedRootTokenPx(CSS, 'card-font-size');
-    assert.ok(card >= 11, `--card-font-size (${card}px) has dropped back toward the old 9-10px card text`);
-    const sm = resolvedRootTokenPx(CSS, 'wall-pane-font-size-sm');
-    assert.ok(sm > 10, `--wall-pane-font-size-sm (${sm}px) has dropped back to (or below) the old 10px pill text`);
-});
-
-// --- GUARD 2y: mirrors GUARD 2z, one surface over. --card-line-height
-// (style.css:29) is consumed at its use site by .ar-title and .ar-sub — the two
-// CARD_SELECTORS that carry flowing prose. .ar-ctx is a fixed-height pill badge
-// (border-radius: 999px, padding for a chip shape), not prose, and keeps its own
-// bare `line-height: 15px` by design — the same non-prose exemption GUARD 1's
-// comment grants .gs-idx and .pane-recap::after among the wall/pane selectors —
-// so it is deliberately excluded here rather than folded in. Reverting either
-// prose selector's line-height to a bare literal, the exact corruption GUARD 2z
-// already guards against for .pane-subtitle/.pane-recap, must fail here too.
-const CARD_LINE_HEIGHT_SELECTORS = ['.ar-title', '.ar-sub'];
-test('type scale: .ar-title and .ar-sub read line-height from --card-line-height, not a bare literal', () => {
+test('type scale: .ar-title/.ar-sub resolve line-height from --card-line-height, specificity-aware, above the legibility floor', () => {
+    const rootVars = resolvedRootVars(CSS);
     for (const sel of CARD_LINE_HEIGHT_SELECTORS) {
-        const body = resolvedBodyAtDesktop(CSS, sel);
-        assert.match(body, /line-height:\s*var\(--card-line-height\)/,
-            `${sel} must set line-height from var(--card-line-height)`);
-        assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
-            `${sel} has reverted to a bare line-height literal — the card leading token has no effect at its use site`);
+        const raw = resolveForContext(CSS, sel, CARD_ANCESTORS[sel], 'line-height');
+        assert.ok(raw, `no line-height resolves for ${sel} in its real card context`);
+        const { num, tokenName } = resolvedNumberViaToken(raw, rootVars);
+        assert.equal(tokenName, '--card-line-height',
+            `${sel} must resolve line-height from var(--card-line-height) at its real render site — resolved to "${raw.trim()}" instead`);
+        assert.ok(num >= 1.45, `${sel}'s resolved line-height (${num}) has dropped below the legibility floor`);
     }
-});
-
-// --- GUARD 2y-floor: mirrors GUARD 2's numeric floor for the one CMX-230 :root
-// token GUARD 2/2b leave unfloored. --card-line-height was NAMED at the body
-// default (1.5), not raised from a worse prior value the way
-// --wall-pane-line-height was (1.3 -> 1.5), so there is no
-// regression-to-a-prior-worse-value for this floor to catch — but an unenforced
-// token can still be dropped to 1 with every other guard here green.
-test('minimum legibility floor: --card-line-height is above the same floor GUARD 2 sets for --wall-pane-line-height', () => {
-    const lh = resolvedRootVars(CSS).get('--card-line-height');
-    assert.ok(lh, '--card-line-height not declared on :root');
-    assert.ok(parseFloat(lh) >= 1.45,
-        `--card-line-height (${lh}) has dropped below the legibility floor`);
 });
 
 // --- GUARD 2c: "air in the chrome" at low densities (the CMX-230 comment above
@@ -346,10 +411,21 @@ test('density guard: _setWallDensity cuts off at <=2 panes, and buildWall restor
 
     const build = TERMINALS.slice(TERMINALS.indexOf('function buildWall'));
     const buildBody = build.slice(0, build.indexOf('\nfunction ', 10));
-    assert.match(buildBody, /if\s*\(\s*_wallPreset\s*\)\s*_setWallDensity\(_wallPreset\.cols,\s*_wallPreset\.rows\);/,
+    // round 6: a substring match (the form this used to be) still matches the
+    // SAME text when it's wrapped in a dead outer branch — `if (false) if
+    // (_wallPreset) _setWallDensity(...)` contains the exact byte sequence
+    // `if (_wallPreset) _setWallDensity(...)` as a substring, so the old regex
+    // stayed green under that mutation. Anchored to the FULL LINE (^...$/m):
+    // whatever comes right after the line's leading whitespace must be this
+    // statement and nothing else, so any wrapper on the same line — `if
+    // (false)`, `if (0)`, `if (null)`, any of them — pushes the statement off
+    // the start of the line and the match fails. Closes the wrap as a class,
+    // not just the one spelling the judge tried.
+    assert.match(buildBody, /^\s*if\s*\(\s*_wallPreset\s*\)\s*_setWallDensity\(_wallPreset\.cols,\s*_wallPreset\.rows\);\s*$/m,
         'buildWall must call _setWallDensity(_wallPreset.cols, _wallPreset.rows) unconditionally when _wallPreset ' +
-        'is set — not from behind a dead `if (false && ...)` — so a reload sitting on a 1/2-col preset is airy on ' +
-        'its own first paint, independent of applyGridLayout\'s later call');
+        'is set, as its OWN statement — not from behind a dead `if (false) ...` (or any other) wrapper on the same ' +
+        'line — so a reload sitting on a 1/2-col preset is airy on its own first paint, independent of ' +
+        'applyGridLayout\'s later call');
 });
 
 // --- WIRING: the "air in the chrome" feature must actually PRODUCE air, not just
@@ -890,19 +966,6 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
         'group) in source order — otherwise it either heads the primary rail (mislabelling it "More") or leaves ' +
         'the demoted rows unlabelled');
 
-    // The font-size half of the same "readable heading" claim the opacity
-    // floor below covers: a judge round zeroed .side-subhead's font-size
-    // (opacity untouched at 0.7, text content untouched at "More") and every
-    // check above and below stayed green, since none of them read font-size.
-    // Floored well below the shipped 10px, but far above "renders at zero
-    // width and is invisible no matter what colour or opacity it has".
-    const subheadFontBody = resolvedBodyAtDesktop(CSS, '.side-subhead');
-    const fontSizeM = subheadFontBody.match(/font-size:\s*([0-9.]+)px/);
-    assert.ok(fontSizeM, '.side-subhead has no font-size declaration to check');
-    assert.ok(parseFloat(fontSizeM[1]) >= 8,
-        `.side-subhead's font-size (${fontSizeM[1]}px) has dropped toward invisible — the heading text would be ` +
-        'present, opaque and correctly classed, but unreadable at this size');
-
     // GUARD 4 (index.html) round 9: the container's id/class were pinned above,
     // but nothing asserted the demoted group's own LABEL — style.css's CMX-230
     // comment states the design claim explicitly: "a plain-text subhead
@@ -912,37 +975,26 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
     // container id/class, the split and every other guard here stay green.
     assert.match(html, /<div class="side-subhead">\S[^<]*<\/div>/,
         'the .side-subhead label text is missing/blank — the demoted nav group would render with no heading at all');
-
-    // This PR's judge, round 1: the text above can be present in the markup
-    // and still be invisible — .side-subhead sets `opacity: 0.7` in style.css,
-    // and nothing here ever reads that value. Zeroing it renders the demoted
-    // group with no heading a reader can actually see, while the id, class
-    // and text-content checks above all stay green (none of them touch
-    // opacity). Floored well below the shipped 0.7 so a future subtlety pass
-    // still has room, but far above "effectively invisible".
-    const subheadBody = resolvedBodyAtDesktop(CSS, '.side-subhead');
-    const opacityM = subheadBody.match(/opacity:\s*([0-9.]+)/);
-    assert.ok(opacityM, '.side-subhead has no opacity declaration to check');
-    assert.ok(parseFloat(opacityM[1]) >= 0.3,
-        `.side-subhead's opacity (${opacityM[1]}) has dropped toward invisible — the heading text would render in the DOM but not be readable`);
-
-    // This PR's judge, round 3: text, opacity and font-size can all be exactly
-    // right and the heading can still be entirely absent from the box tree —
-    // `display: none` removes it from rendering (and from the accessibility
-    // tree) with none of the checks above noticing, since none of them read
-    // `display`. That is the invariant both the opacity floor above and the
-    // font-size floor below exist to protect: a heading that is present,
-    // opaque and correctly classed is worthless if it never renders at all.
-    for (const [prop, value] of declarations(subheadBody)) {
-        assert.ok(!(prop === 'display' && value.trim() === 'none'),
-            '.side-subhead has display: none at desktop — the heading text would be present, opaque and correctly ' +
-            'sized, but removed from the box tree entirely, leaving the demoted rows dangling with no heading');
-    }
 });
 
-// --- CMX-257 round 3: resolvedBody()/resolvedBodyAtDesktop() both resolve a
-// selector by matching the exact selector STRING a rule was written with —
-// neither is aware of CSS specificity. The judge found the resulting hole: a
+// round 6: .side-subhead alone drew FIVE separate findings across this file's
+// history (display:none, opacity, font-size, and — this round — visibility)
+// because each fix pinned only the ONE property the previous mutation used.
+// #side-nav-more (the demoted group's actual render target — views.js's own
+// "RE-PARENTING, NOT REMOVAL" must-never) has the SAME failure mode and, until
+// now, no visibility guard at all: hiding it in CSS deletes Knowledge/Agents/
+// Personas/Cost from the shipped sidebar with every markup-level guard above
+// still green, since none of them read a stylesheet. One shared assertion
+// (assertRendersVisibly, defined near the top of this file) applied to both
+// elements closes the class instead of adding a sixth property-shaped patch.
+test('.side-subhead and #side-nav-more both actually render — occupy space and paint, not just exist in the markup', () => {
+    assertRendersVisibly(CSS, '.side-subhead', 'the demoted nav group\'s "More" heading');
+    assertRendersVisibly(CSS, '#side-nav-more', 'the demoted nav group\'s render target');
+});
+
+// --- CMX-257 round 3: resolvedBodyAtDesktop() resolves a selector by matching
+// the exact selector STRING a rule was written with — it is not aware of CSS
+// specificity. The judge found the resulting hole: a
 // higher-specificity top-level selector for the SAME rendered elements
 // (`#side-nav-more .side-item-icon`, specificity 1,1,0 — id + class) wins the
 // real cascade over the guarded `.side-list-secondary .side-item-icon` rule
