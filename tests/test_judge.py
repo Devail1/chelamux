@@ -2062,6 +2062,39 @@ def test_a_stale_no_verdict_flag_is_cleared_by_the_no_sha_branch_too(tmp_path):
     assert run["judge_sha"] == "cafe1234"        # no-sha branch never touches judge_sha
 
 
+@pytest.mark.parametrize("call_kwargs", [
+    pytest.param({"sha": "cafe1234"}, id="sha_branch"),
+    pytest.param({}, id="no_sha_branch"),
+])
+def test_a_genuine_no_verdict_is_not_cleared_by_set_judge_state(tmp_path, call_kwargs):
+    """⚖️🕳️ CMX-253 Objective 2, negative control on the OTHER half of the two tests above.
+    Those two only ever call `set_judge_state` with `no_verdict` defaulting False, so an
+    implementation that always writes ``judge_no_verdict=0`` — ignoring the `no_verdict`
+    argument entirely — would pass both of them and still be wrong: it would silently
+    destroy the flag's meaning, because `_judge_watchdog`'s window-vanished branch (see
+    `judge_no_verdict`'s column comment) depends on a caller being able to SET the flag,
+    not just clear it. This pins the write half on both UPDATE branches: a call that really
+    is reporting "no verdict was produced" (`no_verdict=True`) must land as 1, whether or
+    not `sha=` is given.
+
+    Seen to go red: hardcode either UPDATE's `judge_no_verdict` column to `0` (or to
+    `COALESCE(judge_no_verdict, ?)`, which the two clearing tests above cannot catch when
+    the column starts at 0 — `COALESCE(0, ?)` also returns the stale 0, not the new value).
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), judge_sha="cafe1234",
+                 judge_no_verdict=0)
+
+    dispatcher.set_judge_state(
+        "abc123", judge.J_CANNOT_VERIFY,
+        "the judge's window disappeared before it published a verdict",
+        no_verdict=True, **call_kwargs,
+    )
+    run = dispatcher.resolve_run("abc123")
+    assert run["judge_no_verdict"] == 1          # ⛔ a genuine no-verdict must be recorded
+
+
 def _fake_tmux_new_window(target_id: str):
     """Fake `subprocess.run` good enough to drive `_launch_agent`'s real tmux half:
     `tmux new-window` reports `target_id`, everything else (send-keys, …) is a no-op."""
