@@ -2787,16 +2787,56 @@ def test_delivery_falls_back_to_the_peer_when_the_wid_address_has_rotted(
 
 
 def test_delivery_skips_a_windowless_peer_that_is_busy(store_file, windows, monkeypatch):
+    """⛔ Must prove the BUSY gate itself held the event, not merely that no socket
+    exists for this pid — stub `send_peer_to_pid` to succeed and record its calls, then
+    assert it was never even attempted, the same shape
+    `test_delivery_does_not_fall_back_to_the_peer_while_a_healthy_wid_orchestrator_is_busy`
+    uses for the wid path."""
+    from chela import messenger
+
     monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
     inbox.register_peer(4242, "sid-abc")
     _peer_status(monkeypatch, {4242: inbox.BUSY})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
 
     with inbox.locked_store() as st:
         st["queue"] = [inbox._event("run_review", "📥 hello", {})]
         sent = inbox.deliver(st, {}, [])
 
     assert sent == []
+    assert peer_calls == []                          # never even tried — busy gate held it
     assert inbox.load()["queue"]
+
+
+def test_a_held_receipt_from_the_windowless_peer_is_not_attributed_to_a_fabricated_window_id(
+        store_file, windows, monkeypatch):
+    """The peer-path counterpart to `test_a_held_receipt_holds_the_event_queued_and_records_a_
+    receipt`: the windowless call site passes `event_wid=None` on purpose (`orchestrator_peer`:
+    'a caller that needs an actual window id must never receive one from here'). A held/denied
+    receipt from a windowless session must log under NO window id — never a fabricated
+    `@<pid>` standing in for a real one."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    monkeypatch.setattr(inbox.messenger, "send_peer_to_pid",
+                        lambda pid, frm, text: messenger.PeerSendResult(True, "held"))
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert inbox.load()["queue"]                    # HELD — still queued, not dropped
+    receipts = [e for e in event_log.read()["events"] if e["type"] == "inbox_receipt"]
+    assert len(receipts) == 1
+    assert receipts[0]["payload"]["status"] == "held"
+    assert receipts[0]["wid"] is None                # never a fabricated `@<pid>`
 
 
 def test_delivery_skips_a_stale_windowless_peer(store_file, windows, monkeypatch):
