@@ -578,6 +578,81 @@ def test_peer_socket_path_none_when_nothing_exists(tmp_path, monkeypatch):
     assert messenger._peer_socket_path("@1", 555) is None
 
 
+# --- CMX-255: peer_socket_path_for_pid / send_peer_to_pid — the windowless address ----
+# No window id anywhere in these: a windowless session was never launched with
+# --messaging-socket-path, so only the legacy pid-derived guess ever applies to it.
+
+def test_peer_socket_path_for_pid_finds_the_xdg_runtime_dir_guess(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    sock_dir = tmp_path / "cc-socks"
+    sock_dir.mkdir()
+    sock_file = sock_dir / "777.sock"
+    sock_file.touch()
+    assert messenger.peer_socket_path_for_pid(777) == sock_file
+
+
+def test_peer_socket_path_for_pid_never_checks_the_deterministic_window_keyed_path(
+        tmp_path, monkeypatch):
+    # A pid that happens to numerically match a window's deterministic socket file must
+    # NOT be matched by it — that path is chela's own window-keyed launch flag, and a
+    # windowless session was never launched with it.
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
+    det_dir = tmp_path / "socks"
+    det_dir.mkdir()
+    (det_dir / "777.sock").touch()
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "elsewhere"))
+    assert messenger.peer_socket_path_for_pid(777) is None
+
+
+def test_peer_socket_path_for_pid_none_when_nothing_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert messenger.peer_socket_path_for_pid(777) is None
+
+
+def test_send_peer_to_pid_false_when_no_socket_file():
+    with patch.object(messenger, "peer_socket_path_for_pid", return_value=None):
+        assert (messenger.send_peer_to_pid(777, "chela-inbox", "hi")
+                == messenger.PeerSendResult(False, None))
+
+
+def test_send_peer_to_pid_delivers_expected_ndjson_over_a_real_socket(tmp_path):
+    sock_path = tmp_path / "777.sock"
+    received, t = _fake_peer_target(sock_path)
+    try:
+        with patch.object(messenger, "peer_socket_path_for_pid", return_value=sock_path):
+            result = messenger.send_peer_to_pid(777, "chela-inbox", "hi")
+    finally:
+        t.join(timeout=2)
+
+    assert result == messenger.PeerSendResult(True, "sent")
+    payload = json.loads(received["data"].rstrip("\n"))
+    assert payload["message"] == {"role": "user", "content": "hi"}
+    assert _UUID4_RE.match(payload["msg_id"])
+
+
+def test_send_peer_to_pid_reports_an_adverse_receipt(tmp_path):
+    sock_path = tmp_path / "778.sock"
+    received, t = _fake_peer_target(sock_path, reply_status="denied")
+    try:
+        with patch.object(messenger, "peer_socket_path_for_pid", return_value=sock_path):
+            result = messenger.send_peer_to_pid(778, "chela-inbox", "hi")
+    finally:
+        t.join(timeout=2)
+    assert result == messenger.PeerSendResult(True, "denied")
+
+
+def test_send_peer_to_pid_false_when_socket_refuses_connection(tmp_path):
+    sock_path = tmp_path / "779.sock"
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    server.close()  # bound, then abandoned: a file with nobody listening
+    with patch.object(messenger, "peer_socket_path_for_pid", return_value=sock_path):
+        assert (messenger.send_peer_to_pid(779, "chela-inbox", "hi")
+                == messenger.PeerSendResult(False, None))
+
+
 # --- peer_socket_reachable / peer_transport_kind — CMX-224's rework ------------
 #
 # `_peer_socket_path` is existence-only: a stale socket FILE surviving its process

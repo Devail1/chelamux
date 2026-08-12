@@ -381,6 +381,24 @@ def messaging_socket_launch_arg(window_id: str) -> str | None:
     return f"--messaging-socket-path {path}"
 
 
+def _default_peer_socket_candidates(pid: int) -> list[Path]:
+    """The legacy pid-derived guess locations Claude Code binds to when given no explicit
+    ``--messaging-socket-path`` (newest build first): ``$XDG_RUNTIME_DIR/cc-socks/<pid>.sock``
+    and ``$TMPDIR-or-/tmp/cc-socks-<uid>/<pid>.sock`` — read off OUR OWN environment,
+    standing in for the target's (see :func:`_peer_socket_path`'s docstring for why that
+    holds today). Extracted so a windowless send (:func:`peer_socket_path_for_pid`) can use
+    exactly this half of :func:`_peer_socket_candidate` without the window-keyed
+    deterministic path, which never applies to a session with no window at all.
+    """
+    candidates = []
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        candidates.append(Path(runtime_dir) / "cc-socks" / f"{pid}.sock")
+    tmp_dir = os.environ.get("TMPDIR") or "/tmp"
+    candidates.append(Path(tmp_dir) / f"cc-socks-{os.getuid()}" / f"{pid}.sock")
+    return candidates
+
+
 def _peer_socket_candidate(window_id: str, pid: int) -> tuple[Path, str] | None:
     """Like :func:`_peer_socket_path`, but also names WHICH family the path came from —
     ``"deterministic"`` (chela-owned, keyed on the window) or ``"default"`` (the legacy
@@ -393,15 +411,26 @@ def _peer_socket_candidate(window_id: str, pid: int) -> tuple[Path, str] | None:
     deterministic = deterministic_peer_socket_path(window_id)
     if deterministic.exists():
         return deterministic, "deterministic"
-    candidates = []
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime_dir:
-        candidates.append(Path(runtime_dir) / "cc-socks" / f"{pid}.sock")
-    tmp_dir = os.environ.get("TMPDIR") or "/tmp"
-    candidates.append(Path(tmp_dir) / f"cc-socks-{os.getuid()}" / f"{pid}.sock")
-    for path in candidates:
+    for path in _default_peer_socket_candidates(pid):
         if path.exists():
             return path, "default"
+    return None
+
+
+def peer_socket_path_for_pid(pid: int) -> Path | None:
+    """The Unix socket a WINDOWLESS pid's Claude Code session listens on, if any —
+    existence-only, the pid-addressed counterpart of :func:`_peer_socket_path` used by
+    :func:`send_peer_to_pid` (CMX-255).
+
+    Only ever the legacy pid-derived guess (:func:`_default_peer_socket_candidates`): the
+    chela-owned deterministic path (:func:`deterministic_peer_socket_path`) is keyed on a
+    WINDOW id chela's own dispatcher assigned at launch via ``--messaging-socket-path``, and
+    a windowless session — by definition never dispatched into a window — was never launched
+    with that flag, so that path can never apply to it.
+    """
+    for path in _default_peer_socket_candidates(pid):
+        if path.exists():
+            return path
     return None
 
 
@@ -515,16 +544,10 @@ def send_peer(window_id: str, from_agent: str, content: str) -> PeerSendResult:
     own fully-formatted, already-attributed prompt (rooms' :func:`build_prompt`) use
     this without a nested double-wrap.
 
-    One line of newline-delimited JSON, ``{"type": "user", "message": {"role":
-    "user", "content": ...}, "from": "uds:<our reply socket>", "msg_id": <uuid4>}`` —
-    the wire format Claude Code's own ``uds-messaging`` listener parses (verified
-    against the running ``claude`` binary). ``msg_id`` MUST be a real UUID: a
-    non-UUID id comes back on a receipt with ``orig_msg_id`` ABSENT, breaking
-    correlation silently (measured). ``from`` must be OUR OWN listening socket, in
-    the SAME DIRECTORY as the target's socket, or the receipt is skipped silently
-    (also measured) — so a reply socket is bound here for this one send and
-    unlinked when we're done listening on it, never reused across sends (a stale
-    reply path could otherwise correlate a LATER receipt to the wrong call).
+    Resolves ``window_id`` to a pid via the tmux pane it lives in
+    (:func:`chela.agent_manager.claude_pid`), then hands off to :func:`_send_over_socket`
+    (the wire format, receipt correlation, and reply-socket lifecycle are documented
+    there) — the same body :func:`send_peer_to_pid` shares for a windowless target.
     """
     from chela import agent_manager  # deferred: agent_manager imports send_tmux from us
 
@@ -534,7 +557,47 @@ def send_peer(window_id: str, from_agent: str, content: str) -> PeerSendResult:
     sock_path = _peer_socket_path(window_id, pid)
     if sock_path is None:
         return PeerSendResult(False, None)
+    return _send_over_socket(sock_path, content, target_desc=f"{window_id} (pid {pid})")
 
+
+def send_peer_to_pid(pid: int, from_agent: str, content: str) -> PeerSendResult:
+    """Like :func:`send_peer`, but addressed by a raw pid with no tmux window at all —
+    the delivery half of CMX-255's windowless-orchestrator mechanism (the pid-resolution
+    half, finding whose pid to use in the first place, is :func:`chela.sessions.own_claude_pid`
+    at registration time; this only ever ADDRESSES an already-known pid).
+
+    Looks up ONLY the legacy pid-derived socket (:func:`peer_socket_path_for_pid`) — a
+    windowless session was never launched with ``--messaging-socket-path`` (chela's own
+    dispatcher is the only thing that ever sets it, keyed on a window id it assigned), so
+    the chela-owned deterministic path :func:`send_peer` checks first never applies here.
+    There is no tmux fallback for this call: with no window, there is no pane to paste
+    into, so ``handed_off=False`` here means genuinely undeliverable, not "try send_tmux
+    next" — the caller (:func:`chela.inbox.deliver`) treats it that way.
+    """
+    sock_path = peer_socket_path_for_pid(pid)
+    if sock_path is None:
+        return PeerSendResult(False, None)
+    return _send_over_socket(sock_path, content, target_desc=f"pid {pid}")
+
+
+def _send_over_socket(sock_path: Path, content: str, *, target_desc: str) -> PeerSendResult:
+    """Shared body of :func:`send_peer`/:func:`send_peer_to_pid` once a socket path has
+    been resolved: connect, hand off ``content`` as one line of newline-delimited JSON —
+    ``{"type": "user", "message": {"role": "user", "content": ...}, "from": "uds:<our
+    reply socket>", "msg_id": <uuid4>}``, the wire format Claude Code's own
+    ``uds-messaging`` listener parses (verified against the running ``claude`` binary) —
+    then listen briefly for a receipt. ``content`` is sent EXACTLY as given — no
+    ``[from] `` wrapping is added here (unlike the old contract): callers that want
+    attribution add it themselves before calling, the same contract :func:`send_tmux`
+    already has.
+
+    ``msg_id`` MUST be a real UUID: a non-UUID id comes back on a receipt with
+    ``orig_msg_id`` ABSENT, breaking correlation silently (measured). ``from`` must be OUR
+    OWN listening socket, in the SAME DIRECTORY as the target's socket, or the receipt is
+    skipped silently (also measured) — so a reply socket is bound here for this one send
+    and unlinked when we're done listening on it, never reused across sends (a stale reply
+    path could otherwise correlate a LATER receipt to the wrong call).
+    """
     msg_id = str(uuid.uuid4())
     # The reply socket's FILENAME only has to be collision-safe for one short-lived
     # listen, not carry the whole msg_id — a 10-hex-char stub keeps the deepest real
@@ -544,7 +607,7 @@ def send_peer(window_id: str, from_agent: str, content: str) -> PeerSendResult:
     if len(str(reply_path).encode()) >= _SUN_PATH_MAX:
         log.warning("reply socket path for %s is %d bytes (>= %d-byte sun_path ceiling) "
                     "— can't listen for a receipt; treating as unreachable so the caller "
-                    "falls back to send_tmux: %s", window_id,
+                    "falls back to send_tmux: %s", target_desc,
                     len(str(reply_path).encode()), _SUN_PATH_MAX, reply_path)
         return PeerSendResult(False, None)
     reply_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -563,14 +626,14 @@ def send_peer(window_id: str, from_agent: str, content: str) -> PeerSendResult:
                 sock.connect(str(sock_path))
                 sock.sendall((json.dumps(payload) + "\n").encode())
         except OSError as e:
-            log.warning("peer socket send to %s (pid %s) failed: %s", window_id, pid, e)
+            log.warning("peer socket send to %s failed: %s", target_desc, e)
             return PeerSendResult(False, None)
 
         reply_server.settimeout(_RECEIPT_WAIT_SECONDS)
         status = _await_receipt(reply_server, msg_id)
         if status in ADVERSE_RECEIPT_STATUSES:
-            log.warning("peer message to %s (pid %s) was %s — handed off but NOT "
-                        "delivered", window_id, pid, status)
+            log.warning("peer message to %s was %s — handed off but NOT delivered",
+                        target_desc, status)
         return PeerSendResult(True, status)
     finally:
         reply_server.close()

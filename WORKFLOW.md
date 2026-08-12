@@ -137,14 +137,20 @@ message.
    `skills/telegram-send` skills.
 2. **Validate — this repo's CI gates on ruff.** Run `uv run ruff check chela tests`
    (MUST pass — pytest-green is NOT sufficient) and `uv run pytest -q`; fix what you broke.
-3. **⚖️ SELF-VERIFY YOUR GUARDS — corrupt each one and watch it go RED.** For every test or
-   guard you added or changed, deliberately break the invariant it *claims* to protect (flip its
-   condition, empty its returned value, delete the production call-site it wires) and re-run the
-   suite. ⛔ **A guard that stays GREEN under its own corruption is DECORATION — it asserts
-   something other than what it claims; fix it before you hand off.** Confirm each mutation
-   actually applied (the file changed) *and still parses* (`node --check` / `py_compile`), then
-   revert it. **This is the exact check the judge will run — catch your own decoration first, or
-   the PR comes straight back.**
+3. **⚖️ SELF-VERIFY YOUR GUARDS — this is a CHECK, not a habit, so run it as one.** For every
+   test or guard you added or changed, write a `{guard, file, before, after}` experiment (the
+   `before` anchor must occur EXACTLY ONCE in `file`; `after` is the invariant broken — flip a
+   condition, empty a returned value, delete the production call-site it wires) into a JSON file:
+   `{"experiments": [{"guard": "...", "file": "...", "before": "...", "after": "..."}]}`. Then run:
+   `chela judge self-check --experiments <path> --workflow WORKFLOW.md` — it applies each
+   mutation FOR you, proves the file actually changed, parse-checks it, re-runs this repo's own
+   suite, and restores the file, exactly as the judge does against your PR. ⛔ **A guard that
+   stays GREEN under its own corruption is DECORATION — it asserts something other than what it
+   claims — and `self-check` exits nonzero (1) when one SURVIVED; fix it and re-run before you
+   hand off.** Doing this by hand invites the exact mistakes the judge exists to catch (a
+   mutation that never applied, one that broke the parse) — let the command make and verify the
+   corruption instead of hand-editing and eyeballing it. **This is the exact check the judge will
+   run — catch your own decoration first, or the PR comes straight back.**
 4. **Commit in the worktree.** Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`). Verify with `git status` +
    `git diff --cached --stat` before committing.

@@ -53,6 +53,37 @@ def test_chela_merge_refusal_exits_nonzero():
     assert ei.value.code == 1
 
 
+def test_chela_merge_refusal_prints_recommendation_and_options(capsys):
+    """stdout is the ONLY surface a CLI caller (the LLM orchestrator in the incident this
+    guards) ever sees a refused ``chela merge`` on — there is no other channel. Mutate the
+    print calls in ``cmd_merge`` to ``if False and recommendation:`` / ``if False and
+    options:`` and this must go red: nothing else in the suite asserts what actually reaches
+    stdout for a refusal that carries a recommendation."""
+    fake = {
+        "ok": False,
+        "task_id": "cmx-84",
+        "tier": "escalate",
+        "error": "base is not dev",
+        "recommendation": "wait for a human to confirm the base",
+        "options": ["wait for a human to confirm the base", "escalate now"],
+    }
+    with patch.object(main.contract, "merge", return_value=fake):
+        with pytest.raises(SystemExit):
+            main.cmd_merge(_MergeArgs())
+    out = capsys.readouterr().out
+    assert "Recommendation: wait for a human to confirm the base" in out, (
+        f"the recommendation must be printed verbatim, not swallowed. Got: {out!r}"
+    )
+    assert "Options:" in out
+    assert "- wait for a human to confirm the base" in out
+    assert "- escalate now" in out
+
+
+class _MergeArgs:
+    run = "cmx-84"
+    reason = ""
+
+
 def test_chela_escalate_reaches_the_contract_path():
     """``chela escalate "<summary>"`` must invoke ``contract.escalate`` — same dispatch guard.
     Mutate the call-site to ``pass`` and this fails: nothing is recorded or pushed."""

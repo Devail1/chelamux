@@ -101,6 +101,11 @@ def fleet(tmp_path, monkeypatch, request):
     # its agent.
     monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "cmx-66"})
+    # tmux.node_ipc_env: the global environment table carries no leaked Node IPC vars —
+    # the state `dispatcher._new_window`'s scrub is supposed to leave behind after every
+    # spawn. A real `tmux show-environment -g` call here would depend on the test host's
+    # own tmux server, same reason session_exists/get_windows_by_id are stubbed above.
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: {})
     monkeypatch.setattr(epoch, "current", lambda: EPOCH)
     monkeypatch.setattr(runtime_truth, "_in_flight_runs",
                         lambda: {"CMX-66": {"wid": "@1", "epoch": EPOCH}})
@@ -158,6 +163,12 @@ def fleet(tmp_path, monkeypatch, request):
     # restore.dead_epoch_rows: nothing orphaned — every stamped row in this fleet
     # (the inbox registration above) matches the running epoch.
     monkeypatch.setattr(runtime_truth, "_restore_scan", lambda now: 0)
+
+    # judge.blocked_race: no run in this fleet is stuck with a CAS-refused BLOCKING
+    # verdict (CMX-239) — same reason _restore_scan is stubbed above: the real
+    # `dispatcher.DB_PATH` is cached at import time against the developer's actual
+    # ~/.chela, not this fixture's temp one.
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {})
 
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
@@ -240,6 +251,16 @@ def _break_tmux_session(tmp_path, monkeypatch):
     """tmux has no such session — every window lookup in the fleet resolves to nothing."""
     monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: False)
     return doctor.WARN
+
+
+def _break_tmux_node_ipc_env(tmp_path, monkeypatch):
+    """CMX-252: a tmux server started under a node-parented ancestor (pm2 restart, a
+    reboot) reintroduces the leaked IPC vars into the GLOBAL environment — the table
+    `dispatcher._new_window`'s scrub cleared, but a NEW server never went through."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env",
+                        lambda: {"NODE_CHANNEL_FD": "3",
+                                 "NODE_CHANNEL_SERIALIZATION_MODE": "json"})
+    return doctor.ERROR
 
 
 def _break_dashboard_port(tmp_path, monkeypatch):
@@ -497,6 +518,19 @@ def _break_restore_dead_epoch(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_judge_blocked_race(tmp_path, monkeypatch):
+    """CMX-239's race landed: a guard SURVIVED corruption but `request_changes`'s CAS was
+    refused, and `judge.judge_run` recorded `J_BLOCKED_RACE` on the row. This is the
+    STANDING half CMX-239 itself did not build — `inbox.run_events` already raised this
+    once, on the tick it happened, but says nothing on any LATER tick while the row sits
+    stuck. `chela doctor` must keep saying so for as long as it stays stuck."""
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {
+        "CMX-239": {"status": "needs_human", "pr_url": "https://github.com/acme/repo/pull/239",
+                    "detail": "a guard SURVIVED corruption", "sha": "deadbeef"},
+    })
+    return doctor.ERROR
+
+
 def _break_update_apply_lock(tmp_path, monkeypatch):
     """CMX-226: the dashboard's update-apply lock has been held far longer than any
     honest `update.apply()` run can take — the process holding it (this test process
@@ -523,6 +557,7 @@ CORRUPTIONS = {
     "env.file": _break_env_file,
     "env.running": _break_env_running,
     "tmux.session": _break_tmux_session,
+    "tmux.node_ipc_env": _break_tmux_node_ipc_env,
     "dashboard.port": _break_dashboard_port,
     "dashboard.update_lock": _break_update_apply_lock,
     "plugin.rendered": _break_plugin_rendered,
@@ -550,6 +585,7 @@ CORRUPTIONS = {
     "agents.native_status_feed": _break_native_status_feed,
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
     "dispatch.unresolved_depends": _break_unresolved_depends,
+    "judge.blocked_race": _break_judge_blocked_race,
 }
 
 
@@ -690,6 +726,118 @@ def test_gh_missing_entirely_is_cannot_verify_not_a_pass(fleet, monkeypatch):
     assert findings, "an unaskable gh produced no finding at all"
     assert all(f.level == doctor.ERROR for f in findings)
     assert "CANNOT VERIFY dispatch.gh_auth" in findings[0].title
+
+
+def test_node_ipc_env_cannot_verify_when_tmux_is_unreachable(fleet, monkeypatch):
+    """Same failure mode as `dispatch.gh_auth` / `pr.checks`: an owner that could not be
+    asked is UNKNOWN, never a silent pass — a doctor that reads a missing tmux as "no
+    leaked vars, all clear" would be exactly the bug this fact exists to catch."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: None)
+    findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert findings, "an unreadable tmux global environment produced no finding at all"
+    assert all(f.level == doctor.ERROR for f in findings)
+    assert "CANNOT VERIFY tmux.node_ipc_env" in findings[0].title
+
+
+def test_node_ipc_env_detects_node_channel_fd_when_the_sibling_is_absent(fleet, monkeypatch):
+    """⛔ Judge round 3: `_break_tmux_node_ipc_env` (the CORRUPTIONS entry above) always
+    leaks BOTH vars together, so a mutation that drops ``NODE_CHANNEL_FD`` — the one that
+    actually SIGABRTs `node --test` — out of `_NODE_IPC_ENV_VARS` still reports ERROR: the
+    surviving sibling alone is enough to trip that fixture, and nothing notices the fd went
+    blind. Leak ONLY the fd, not the sibling, so detection is attributable to it and it
+    alone."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: {"NODE_CHANNEL_FD": "3"})
+    findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a tmux global env carrying ONLY NODE_CHANNEL_FD must still be ERROR, got "
+        f"{findings}")
+    assert "NODE_CHANNEL_FD" in findings[0].title
+
+
+def test_node_ipc_env_detects_serialization_mode_when_the_fd_is_absent(fleet, monkeypatch):
+    """Complementary half of the guard above: leak ONLY the sibling, not the fd, so a
+    mutation dropping ``NODE_CHANNEL_SERIALIZATION_MODE`` from `_NODE_IPC_ENV_VARS` can't
+    hide behind the fd's detection either."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env",
+                        lambda: {"NODE_CHANNEL_SERIALIZATION_MODE": "json"})
+    findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a tmux global env carrying ONLY NODE_CHANNEL_SERIALIZATION_MODE must still be "
+        f"ERROR, got {findings}")
+    assert "NODE_CHANNEL_SERIALIZATION_MODE" in findings[0].title
+
+
+def test_tmux_global_env_reader_is_none_not_empty_when_tmux_cannot_be_asked(monkeypatch):
+    """⛔ Judge round 4, finding 1: every other test of this fact stubs `_tmux_global_env`
+    itself, so the tri-state its OWN docstring promises (`None` = never asked, `{}` = asked
+    and clean) was asserted nowhere. Drive the real function: with no tmux on PATH, it must
+    return `None`, and must never even reach `subprocess.run` to get there — a mutation that
+    turns "cannot ask" into "asked, and it's clean" makes doctor go GREEN on a box it never
+    looked at."""
+    monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: None)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError(
+            "tmux cannot be asked — subprocess.run must not run")))
+    assert runtime_truth._tmux_global_env() is None
+
+
+def test_tmux_global_env_reader_parses_show_environment_output(monkeypatch):
+    """⛔ Judge round 4, finding 2: the read half of this fact — turning real
+    `tmux show-environment -g` stdout into the dict the fact scans — has no direct
+    coverage either, so a mutation that skips every parsed line (`if line.startswith("-")`
+    → `if True`) leaves the reader permanently blind while every stubbed detection test
+    stays green. Feed it real-shaped output: a normal `KEY=value` line, and a `-KEY`
+    explicitly-unset marker (no `=`) that must NOT be read as a value.
+
+    ⛔ Judge round 5, finding 1: the earlier version of this test stubbed
+    `subprocess.run` with `lambda *a, **k: ...` and never looked at `a` — a mutation
+    that dropped `-g` from the argv (asking tmux's per-SESSION table instead of the
+    GLOBAL one this fact's whole authority rests on) stayed invisible. Capture the
+    call and assert on it directly.
+
+    ⛔ CMX-260 lift, closing PR #321's round 6 finding 2 (never fixed before the PR was
+    re-scoped): the earlier fake handed back a `str` `stdout` regardless of the kwargs it
+    was called with — strictly more forgiving than the real `subprocess.run` API, so
+    dropping `text=True` from the call (`out.stdout` then a raw `bytes` object) left the
+    reader permanently blind (`isinstance(out.stdout, str)` is False forever) with every
+    test here still green. Assert the kwargs directly, not just the positional argv."""
+    monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    stdout = "TERM=screen-256color\n-NODE_CHANNEL_FD\nNODE_CHANNEL_SERIALIZATION_MODE=json\n"
+    calls = []
+
+    def _fake_run(*a, **k):
+        calls.append((a[0] if a else k.get("args"), k))
+        return subprocess.CompletedProcess(a, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert runtime_truth._tmux_global_env() == {
+        "TERM": "screen-256color",
+        "NODE_CHANNEL_SERIALIZATION_MODE": "json",
+    }
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ["tmux", "show-environment", "-g"], (
+        "must ask tmux for its GLOBAL environment table (-g) — anything less asks "
+        f"only the current session's copy, got {argv}")
+    assert kwargs.get("text") is True, (
+        "must request text=True — a raw bytes stdout fails `isinstance(out.stdout, str)` "
+        f"and the fact would report CANNOT VERIFY on every real box, forever; got {kwargs}")
+
+
+def test_tmux_global_env_reader_is_none_when_the_tmux_call_itself_fails(monkeypatch):
+    """⛔ Judge round 5, finding 2: neutering the returncode half of the CANNOT VERIFY
+    gate (`if out.returncode != 0 or ...` → `if False and out.returncode != 0 or ...`)
+    left every existing test green, because they all stub `_tmux_global_env` directly
+    and never drive a failing `subprocess.run` through the real function. A tmux that
+    is on PATH but whose `show-environment -g` call fails (no server running, a
+    transient error — non-zero exit, empty stdout) must read as `None` (never asked),
+    not `{}` (asked, and it's clean) — the fact's docstring says this in as many words."""
+    monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="no server"))
+    assert runtime_truth._tmux_global_env() is None
 
 
 def test_peer_transport_warns_on_a_stale_socket_file_nothing_is_listening_on(
@@ -1155,6 +1303,156 @@ def test_repo_services_current_does_not_apply_to_a_pip_install(monkeypatch):
     assert not runtime_truth.fact("repo.services_current").applies()
 
 
+# --- judge.blocked_race: CMX-240, the STANDING half CMX-239 didn't build ---------------
+#
+# `inbox.run_events` raises `run_judge_blocked_race` once, edge-triggered on the tick the
+# row first lands in `J_BLOCKED_RACE`. If that one notification is missed, nothing else
+# ever says it again — this fact is the ONLY other place a later `chela doctor` run can
+# still find it.
+
+def test_judge_blocked_race_reports_the_stuck_run(fleet, monkeypatch):
+    _break_judge_blocked_race(fleet, monkeypatch)
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert findings and all(f.level == doctor.ERROR for f in findings)
+    assert "CMX-239" in findings[0].title
+    assert "needs_human" in findings[0].title
+    assert "https://github.com/acme/repo/pull/239" in findings[0].detail
+
+
+def test_judge_blocked_race_silent_when_nothing_stuck(fleet):
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_judge_blocked_race_names_every_stuck_row_not_just_the_first(fleet, monkeypatch):
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {
+        "CMX-239": {"status": "needs_human", "pr_url": "https://github.com/acme/repo/pull/239",
+                    "detail": "a guard SURVIVED corruption", "sha": "deadbeef"},
+        "CMX-241": {"status": "awaiting_review", "pr_url": "https://github.com/acme/repo/pull/241",
+                    "detail": "", "sha": None},
+    })
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert len(findings) == 2
+    assert all(f.level == doctor.ERROR for f in findings)
+    titles = {f.title for f in findings}
+    assert any("CMX-239" in t for t in titles)
+    assert any("CMX-241" in t for t in titles)
+
+
+def test_judge_blocked_race_does_not_report_an_ordinary_blocked_run(fleet, monkeypatch):
+    """A run that is merely `judge.J_BLOCKED` (an ordinary rework, no CAS race) is not this
+    fact's business — `judge.blocked_race` fires only for the dedicated CMX-239 state.
+
+    Goes through the REAL `_blocked_race_scan`, not a monkeypatched stand-in: widen the
+    scan's `judge_state` filter to also match `J_BLOCKED` and this must go red."""
+    monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {})
+    findings = [f for f in doctor.check() if f.fact == "judge.blocked_race"]
+    assert findings and findings[0].level == doctor.OK
+
+
+def test_judge_blocked_race_scan_ignores_an_ordinary_blocked_run(tmp_path, monkeypatch):
+    """The real-scan counterpart of the test above: an ordinary `J_BLOCKED` row (a plain
+    rework, no CAS race) must not appear in `_blocked_race_scan`'s output. Widen the scan's
+    `judge_state != judge.J_BLOCKED_RACE` filter to also let `J_BLOCKED` through and this
+    goes red — the mutation the judge caught round 2."""
+    from chela import judge
+
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(),
+                          judge_state=judge.J_BLOCKED)
+    assert scanned == {}, "an ordinary J_BLOCKED row must not be reported as a blocked race"
+
+
+def test_judge_blocked_race_scan_carries_the_row_fields_through(tmp_path, monkeypatch):
+    """Every other test that checks `pr_url` / `detail` / `sha` hands `_blocked_race_scan`'s
+    OUTPUT in directly via the CORRUPTIONS monkeypatch — none of them exercise the real
+    scan's own field extraction (`_blocked_race_scan`, `chela/runtime_truth.py`), which is
+    what `_blocked_race_report` actually renders into the finding an operator reads ("Check
+    whether this already shipped — <pr_url>"). Drop `"pr_url": run.get("pr_url")` (or the
+    `judge_detail` / `judge_sha` reads next to it) down to `None` and this goes red; the
+    CORRUPTIONS-based tests cannot catch it because they replace `_blocked_race_scan`
+    wholesale rather than going through it."""
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row())
+    assert scanned["CMX-239"]["pr_url"] == "https://github.com/acme/repo/pull/239"
+    assert scanned["CMX-239"]["detail"] == "a guard SURVIVED corruption"
+    assert scanned["CMX-239"]["sha"] == "deadbeef"
+
+
+# --- judge.blocked_race must be able to CLEAR — round 2 of CMX-240 review ---------------
+#
+# Round 1 reported every J_BLOCKED_RACE row regardless of status and never gave it a way
+# back to green: a row that reaches a terminal status without being re-judged would have
+# stayed ERROR forever, with no operator action able to resolve it. `_blocked_race_scan`
+# is monkeypatched wholesale by the CORRUPTIONS fixture above (it hands the scan's OUTPUT,
+# never exercising its filtering), so these test the real scan directly against a fake
+# `dispatcher.list_runs()` — the same seam `_blocked_race_scan`'s own docstring names, and
+# the only way to reach `_blocked_race_resolved` without depending on the real
+# `dispatcher.DB_PATH` (cached at import against the developer's actual ~/.chela).
+
+def _blocked_race_row(**over) -> dict:
+    row = {
+        "task_id": "CMX-239", "status": "needs_human",
+        "pr_url": "https://github.com/acme/repo/pull/239",
+        "judge_detail": "a guard SURVIVED corruption",
+        "judge_sha": "deadbeef", "pr_head_sha": "deadbeef",
+    }
+    row.update(over)
+    return row
+
+
+def _scan_with(tmp_path, monkeypatch, row: dict, judge_state=None) -> dict:
+    from chela import judge
+
+    if judge_state is None:
+        judge_state = judge.J_BLOCKED_RACE
+    fake_db = tmp_path / "scheduler.db"
+    fake_db.write_text("")
+    monkeypatch.setattr(dispatcher, "DB_PATH", fake_db)
+    monkeypatch.setattr(dispatcher, "list_runs",
+                        lambda: [{**row, "judge_state": judge_state}])
+    return runtime_truth._blocked_race_scan()
+
+
+def test_judge_blocked_race_clears_once_the_head_moves_past_the_judged_sha(tmp_path, monkeypatch):
+    """The ordinary resolution path: a fresh push superseded the judged commit — dispatcher's
+    own per-sha trigger (`judge_sha != pr_head_sha`) re-judges the new head automatically.
+    The alarm was about `judge_sha`'s commit specifically, and that commit is no longer what
+    the PR's head names, so the row must stop qualifying. Remove `_blocked_race_resolved`'s
+    check and this goes red for the wrong reason: a resolved row keeps reporting."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(pr_head_sha="cafef00d"))
+    assert scanned == {}, "a row whose head moved past judge_sha must clear, not keep reporting"
+
+
+def test_judge_blocked_race_does_not_clear_on_an_unrelated_status_change(tmp_path, monkeypatch):
+    """The counterweight: a genuinely stuck row (head unmoved) must keep reporting no matter
+    how its `status` changes underneath it — status is exactly what round 1 used, and exactly
+    what the ticket named as NOT proof of resolution. Loosen the guard to clear on any status
+    change and this goes red."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(status="done", pr_head_sha="deadbeef"))
+    assert "CMX-239" in scanned
+    assert scanned["CMX-239"]["status"] == "done"
+
+
+def test_judge_blocked_race_does_not_clear_with_no_head_to_compare(tmp_path, monkeypatch):
+    """A row with no `pr_head_sha` on it proves nothing either way — silence must not be
+    read as resolution."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(pr_head_sha=None))
+    assert "CMX-239" in scanned
+
+
+def test_judge_blocked_race_does_not_clear_with_no_judge_sha_to_compare(tmp_path, monkeypatch):
+    """The other half of the same sentence: a row with no `judge_sha` on it (spawn-time
+    stamping never happened, or was wiped) also proves nothing either way, even though
+    `pr_head_sha` is present and would trivially differ from `None`. Drop the `sha and`
+    half of `_blocked_race_resolved`'s check and this goes red: a row with an unknown
+    judged commit would read as resolved just because `None != pr_head_sha`."""
+    scanned = _scan_with(tmp_path, monkeypatch,
+                         _blocked_race_row(judge_sha=None, pr_head_sha="deadbeef"))
+    assert "CMX-239" in scanned
+
+
 # --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------
 
 def test_restore_dead_epoch_rows_reports_the_count(fleet, monkeypatch):
@@ -1369,3 +1667,46 @@ def test_js_suites_walk_never_descends_into_git(tmp_path, monkeypatch):
     assert visited, "the os.walk spy recorded nothing — the walker was never instrumented"
     assert not any(".git" in p.parts for p in visited), (
         f"the walk descended into .git: {[str(p) for p in visited]}")
+
+
+# --- CMX-254: `inbox.address`'s "Fix:" line must not be a dead end --------------------
+#
+# `_break_inbox_address` above already pins the SEVERITY (ERROR) for a dangling/gone
+# orchestrator address. These pin the remedy TEXT: "run `chela watch`" is only
+# runnable from a session that is currently alive inside a tmux window — exactly the
+# thing a dangling/gone address usually means is NOT true. A session restarted outside
+# tmux hits that instruction, tries it, and gets `no window id` back — a second dead
+# end with nothing pointing it to `chela restore`, the tool that needs no live window
+# and hands back the actual fix. Live 2026-08-12: five decisions-inbox events sat
+# undeliverable for about an hour behind exactly this gap.
+
+def _inbox_declared(wid="@1", stamped="OLD-epoch", session=None, queued=2):
+    return {"wid": wid, "epoch": stamped, "session": session,
+            "name": "orchestrator", "queued": queued}
+
+
+def test_inbox_report_dangling_names_chela_restore_as_the_fallback():
+    declared = _inbox_declared()
+    obs = runtime_truth.observed({"epoch": "NEW-epoch", "windows": {}})
+
+    findings = runtime_truth._inbox_report(declared, obs)
+
+    assert len(findings) == 1
+    assert findings[0].level == runtime_truth.ERROR
+    detail = findings[0].detail
+    assert "chela watch" in detail
+    assert "chela restore" in detail
+    assert "outside tmux" in detail
+
+
+def test_inbox_report_gone_names_chela_restore_as_the_fallback():
+    declared = _inbox_declared(stamped="SAME-epoch")
+    obs = runtime_truth.observed({"epoch": "SAME-epoch", "windows": {"@2": "chelamux"}})
+
+    findings = runtime_truth._inbox_report(declared, obs)
+
+    assert len(findings) == 1
+    assert findings[0].level == runtime_truth.ERROR
+    detail = findings[0].detail
+    assert "chela watch" in detail
+    assert "chela restore" in detail

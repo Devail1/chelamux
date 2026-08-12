@@ -21,7 +21,7 @@ import pytest
 
 from chela import config, contract, dispatcher, event_log
 from chela.dispatcher import CI_FAILING, CI_NONE, CI_PASSING, CI_PENDING, CI_UNKNOWN, CIStatus
-from chela.judge import J_BLOCKED, J_CANNOT_VERIFY, J_RUNNING
+from chela.judge import J_BLOCKED, J_BLOCKED_RACE, J_CANNOT_VERIFY, J_RUNNING
 from chela.personas import lease
 
 
@@ -51,6 +51,36 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _assert_actionable(result: dict) -> None:
+    """Structural guard (CMX-242, rework round 1): an ``escalate``-tier refusal must carry
+    a non-empty recommendation and a real menu (≥2 options — one option is not a choice),
+    and the recommendation must actually NAME one of those options (or explicitly opt out
+    with "none of these") rather than a label ("Recommendation:") with nothing useful
+    behind it. Checks the FIELDS on the returned dict, not any rendered/formatted string,
+    so it survives a pure formatting change."""
+    assert result["tier"] == "escalate"
+    recommendation = (result.get("recommendation") or "").strip()
+    options = result.get("options") or []
+    assert recommendation, "an escalate-tier refusal must carry a non-empty recommendation"
+    assert len(options) >= 2, "one option is not a choice"
+    assert (
+        any(o in recommendation for o in options)
+        or recommendation.lower().startswith("none of these")
+    ), "the recommendation must name one of its own options (or explicitly opt out)"
+
+
+def test_actionable_helper_flags_a_recommendation_not_among_its_own_options():
+    """Sanity on the helper itself (the ticket's explicit example): a recommendation naming
+    something that isn't in its own options list must fail this check — proving the helper
+    actually inspects content, not just field presence."""
+    with pytest.raises(AssertionError):
+        _assert_actionable({
+            "tier": "escalate",
+            "recommendation": "do something else entirely",
+            "options": ["do A", "do B"],
+        })
+
+
 def _seed_run(repo: Path, task_id: str = "t1", *, status: str = "awaiting_review",
               judge_state: str | None = "clean", pr_url: str = "https://github.com/o/r/pull/1",
               judge_sha: str | None = None) -> None:
@@ -75,6 +105,9 @@ def test_merge_to_a_production_branch_is_NEVER(repo, base):
         result = contract.merge("t1")
     assert result["ok"] is False
     assert result["tier"] == "never"
+    # CMX-242: a NEVER refusal is a hard line, not a human decision — it must not sprout
+    # options (adding them here → RED).
+    assert "recommendation" not in result and "options" not in result
     squash.assert_not_called()      # ⛔ nothing merged — the hard line held
 
 
@@ -92,6 +125,7 @@ def test_merge_to_an_unlisted_base_is_an_escalation(repo):
          patch.object(contract, "_squash_merge") as squash:
         result = contract.merge("t1")
     assert result["ok"] is False and result["tier"] == "escalate"
+    _assert_actionable(result)      # CMX-242: not just a bare reason
     squash.assert_not_called()
 
 
@@ -102,6 +136,7 @@ def test_an_unreadable_base_is_refused(repo):
          patch.object(contract, "_squash_merge") as squash:
         result = contract.merge("t1")
     assert result["ok"] is False
+    _assert_actionable(result)
     squash.assert_not_called()
 
 
@@ -125,6 +160,7 @@ def test_merge_refuses_a_non_dev_base_even_when_all_else_passes(repo, base):
     assert result["ok"] is False
     assert result["tier"] == "escalate"
     assert result.get("pr_base") == base
+    _assert_actionable(result)
     squash.assert_not_called()      # ⛔ nothing merged — the base gate held
 
 
@@ -135,14 +171,15 @@ def test_merge_refuses_unless_the_judge_is_clean(repo, judge_state):
          patch.object(contract, "_squash_merge") as squash:
         result = contract.merge("t1")
     assert result["ok"] is False
+    _assert_actionable(result)
     squash.assert_not_called()
 
 
-@pytest.mark.parametrize("judge_state", [J_BLOCKED, J_CANNOT_VERIFY, J_RUNNING, None])
+@pytest.mark.parametrize("judge_state", [J_BLOCKED, J_BLOCKED_RACE, J_CANNOT_VERIFY, J_RUNNING, None])
 def test_merge_refuses_a_run_not_judge_clean_even_when_all_else_passes(repo, judge_state):
     """The ``judge_state != J_CLEAN`` gate IN ISOLATION — base ``dev``, CI green, MERGEABLE, so
     the ONLY thing wrong is the judge is not ``clean`` (blocked / cannot_verify / still running /
-    never ran). Each must refuse, tier ``escalate``.
+    never ran / blocked-but-the-CAS-lost-the-race — CMX-239). Each must refuse, tier ``escalate``.
 
     Every other gate is mocked to pass, so this gate is the sole possible refusal: corrupt
     ``if judge_state != J_CLEAN`` to ``if False and …`` and an un-vetted run merges, turning
@@ -158,6 +195,7 @@ def test_merge_refuses_a_run_not_judge_clean_even_when_all_else_passes(repo, jud
     assert result["ok"] is False
     assert result["tier"] == "escalate"
     assert result.get("judge_state") == judge_state
+    _assert_actionable(result)
     squash.assert_not_called()      # ⛔ nothing merged — the judge gate held
 
 
@@ -253,12 +291,20 @@ def test_merge_proceeds_when_the_live_head_sha_is_unset_even_though_judge_sha_is
 
 @pytest.mark.parametrize("ci", [CI_FAILING, CI_PENDING, CI_NONE, CI_UNKNOWN])
 def test_merge_requires_green_CI(repo, ci):
+    """CMX-242: this is THE motivating case — a `chela merge` refused on CI_NONE with no
+    other guidance is exactly what produced this ticket. Every CI refusal now names a
+    recommendation and options, and for CI_NONE specifically the options must name the
+    empty-commit trap (an empty commit changes the sha and makes the judge's clean verdict
+    stale — the one consequence a caller cannot infer from the bare error)."""
     _seed_run(repo)
     with patch.object(contract, "_read_pr_base", return_value="dev"), \
          patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(ci)), \
          patch.object(contract, "_squash_merge") as squash:
         result = contract.merge("t1")
     assert result["ok"] is False and result["ci_state"] == ci
+    _assert_actionable(result)
+    if ci == CI_NONE:
+        assert any("empty commit" in o for o in result["options"])
     squash.assert_not_called()
 
 
@@ -279,6 +325,7 @@ def test_merge_refuses_a_pr_that_is_not_open(repo, pr_state):
     assert result["ok"] is False
     assert result["tier"] == "escalate"
     assert result.get("pr_state") == pr_state
+    _assert_actionable(result)
     squash.assert_not_called()      # ⛔ nothing merged — the open-PR gate held
 
 
@@ -291,6 +338,7 @@ def test_merge_requires_MERGEABLE(repo, mergeable):
          patch.object(contract, "_squash_merge") as squash:
         result = contract.merge("t1")
     assert result["ok"] is False
+    _assert_actionable(result)
     squash.assert_not_called()
 
 
@@ -314,12 +362,40 @@ def test_merge_refuses_a_run_not_awaiting_review_even_when_all_else_passes(repo,
     assert result["ok"] is False
     assert result["tier"] == "escalate"
     assert status in result["error"]      # the refusal names the offending status
+    _assert_actionable(result)
     squash.assert_not_called()      # ⛔ nothing merged — the status gate held
 
 
 def test_merge_refuses_an_unknown_run(repo):
     result = contract.merge("nope")
     assert result["ok"] is False
+    _assert_actionable(result)
+
+
+def test_merge_refuses_a_run_with_no_pr_url(repo):
+    _seed_run(repo, pr_url="")
+    result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "escalate"
+    _assert_actionable(result)
+
+
+def test_merge_refuses_when_the_workflow_repo_dir_is_missing(tmp_path):
+    """`workflow_path`'s parent must be a real dir — a workflow whose repo was deleted (or
+    never existed on this machine) is refused, not crashed into, and still names next steps."""
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
+            "started_at, attempt, pr_url, pr_state, judge_state, branch_name, worktree_path) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("t1", str(tmp_path / "gone" / "WORKFLOW.md"), "t", "awaiting_review", "@9",
+             dispatcher._now(), 1, "https://github.com/o/r/pull/1", "open", "clean", "cmx-1", None),
+        )
+        conn.commit()
+    result = contract.merge("t1")
+    assert result["ok"] is False
+    assert result["tier"] == "escalate"
+    _assert_actionable(result)
 
 
 # --- the happy path: every clause holds → it merges AND logs its justification ---------
@@ -358,6 +434,7 @@ def test_a_gate_that_holds_but_a_merge_that_fails_is_reported(repo):
         result = contract.merge("t1")
     assert result["ok"] is False
     assert "gh pr merge timed out" in result["error"]
+    _assert_actionable(result)
     # A gate-passed-but-merge-failed is auditable too.
     assert event_log.read(types=["orchestrator.merge_failed"])["events"]
 
@@ -402,6 +479,7 @@ def test_auto_orchestrator_merge_is_REFUSED_without_a_live_lease(repo, make_stal
     assert result["ok"] is False
     assert result["tier"] == "escalate"
     assert result.get("actor") == config.AUTO_ORCHESTRATOR_ACTOR
+    _assert_actionable(result)
     squash.assert_not_called()         # ⛔ nothing merged — the unattended orchestrator was stopped
 
 
@@ -419,6 +497,7 @@ def test_auto_orchestrator_actor_is_read_from_the_environment(repo, monkeypatch)
         result = contract.merge("t1")      # no actor= arg — it must come from the env
     assert result["ok"] is False
     assert result["tier"] == "escalate"
+    _assert_actionable(result)
     squash.assert_not_called()
 
 

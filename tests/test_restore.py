@@ -104,6 +104,57 @@ def test_scan_runs_empty():
     assert scan_runs(None, NEW) == []
 
 
+# --- CMX-261: a row whose trial is OVER is not a `chela restore` fixable orphan ---------
+#
+# `chela doctor`'s dead-epoch fact reported 112 stamped rows and pointed at `chela
+# restore` — but `chela restore --apply`, run twice, never moved the count. The rows were
+# all `done`/merged runs: `task-finished` kills the agent's tmux window as its LAST step,
+# so a closed row's window stamp is EXPECTED to go dead the moment the epoch it was
+# stamped under rolls over, and stays that way forever — `restore.plan`/`apply` have never
+# classified this store at all (see the module docstring), so counting a terminal row here
+# names a command that cannot, and never could, fix it.
+
+def test_scan_runs_skips_a_row_whose_pr_MERGED():
+    runs = [{"task_id": "cmx-77", "status": "awaiting_review", "pr_state": "merged",
+             "window_id": "@9", "window_epoch": OLD}]
+    assert scan_runs(runs, NEW) == []
+
+
+def test_scan_runs_skips_a_DONE_row():
+    runs = [{"task_id": "cmx-77", "status": "done", "window_id": "@9",
+             "window_epoch": OLD, "judge_window_id": "@10", "judge_window_epoch": OLD,
+             "judge_state": "clean"}]
+    assert scan_runs(runs, NEW) == []
+
+
+def test_scan_runs_skips_a_FAILED_row_that_exhausted_every_retry():
+    from chela.dispatcher import MAX_ATTEMPTS
+    runs = [{"task_id": "cmx-77", "status": "failed", "attempt": MAX_ATTEMPTS,
+             "window_id": "@9", "window_epoch": OLD}]
+    assert scan_runs(runs, NEW) == []
+
+
+def test_scan_runs_still_flags_a_FAILED_row_with_retries_left():
+    """The counterweight: a `failed` row below MAX_ATTEMPTS may still be re-claimed by
+    the SAME task_id, so its dangling window is real, current-cycle information — not
+    permanent historical noise — and must keep surfacing."""
+    from chela.dispatcher import MAX_ATTEMPTS
+    runs = [{"task_id": "cmx-77", "status": "failed", "attempt": MAX_ATTEMPTS - 1,
+             "window_id": "@9", "window_epoch": OLD}]
+    orphans = scan_runs(runs, NEW)
+    assert orphans == [Orphan("dispatcher.runs", "@9", "cmx-77 (failed)", OLD)]
+
+
+def test_scan_runs_tolerates_a_row_with_no_pr_state_or_attempt_at_all():
+    """A row shaped like the minimal dicts elsewhere in this file (no `pr_state`/
+    `attempt` key at all) must read as still-pending, not raise — `run_is_terminal`
+    reads with `.get()` for exactly this."""
+    runs = [{"task_id": "cmx-77", "status": "running", "window_id": "@9",
+             "window_epoch": OLD}]
+    orphans = scan_runs(runs, NEW)
+    assert orphans == [Orphan("dispatcher.runs", "@9", "cmx-77 (running)", OLD)]
+
+
 # --------------------------------------------------------------------------
 # session-ids.json
 # --------------------------------------------------------------------------

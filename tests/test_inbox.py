@@ -20,12 +20,13 @@ import json
 import os
 import threading
 import time
+from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from chela import agent_manager, dispatcher, event_log, inbox, judge, sessions, transcripts
+from chela import agent_manager, dispatcher, event_log, inbox, judge, main, sessions, transcripts
 
 # Captured at collection time, before the `no_transcript_evidence` autouse fixture
 # (below) overwrites `sessions.transcript_for_window` on every test — the CMX-191
@@ -432,6 +433,32 @@ def test_readdress_is_a_noop_when_a_different_wid_is_registered(store_file, wind
     assert inbox.load()["orchestrator"] == "@2"
 
 
+def test_address_state_dangling_points_past_chela_watch_to_chela_restore():
+    """CMX-254: `chela watch` (the remedy this message names first) only works from a LIVE
+    session — a session restarted outside tmux cannot run it at all (`no window id`). The
+    why-text must not leave a reader stuck on that dead end; it has to name the fallback
+    that works with no live window: `chela restore`."""
+    store = {"orchestrator": "@9", "orchestrator_epoch": "OLD-epoch",
+             "orchestrator_name": "orchestrator"}
+
+    state, why = inbox.address_state(store, {}, "NEW-epoch")
+
+    assert state == inbox.ADDR_DANGLING
+    assert "chela watch" in why
+    assert "chela restore" in why
+    assert "outside tmux" in why
+
+
+def test_address_state_gone_points_past_chela_watch_to_chela_restore():
+    store = {"orchestrator": "@9", "orchestrator_epoch": "SAME-epoch"}
+
+    state, why = inbox.address_state(store, {"@2": "idle"}, "SAME-epoch")
+
+    assert state == inbox.ADDR_GONE
+    assert "chela watch" in why
+    assert "chela restore" in why
+
+
 def test_unregister_dangling_clears_only_when_both_wid_and_epoch_still_match(store_file):
     store = inbox.load()
     store["orchestrator"] = "@9"
@@ -752,6 +779,89 @@ def test_a_cannot_verify_verdict_event_survives_the_run_moving_on(gone_state, st
     assert inbox.stale_reason(event, gone_row) is None, (
         "a run_judge_cannot_verify for an already-merged run is the MOST important case, "
         "not a droppable one"
+    )
+
+
+@pytest.mark.parametrize("gone_state", ["merged", "closed"])
+def test_a_blocked_race_verdict_event_survives_the_run_moving_on(gone_state, store_file):
+    """⚖️🧊 CMX-239 — the twin of the CANNOT_VERIFY test above, for a CONFIRMED blocking
+    finding whose CAS lost the race. "A guard survived corruption" is not a claim about
+    `changes_requested`, it is a claim about a commit — dropping it the moment the run
+    leaves review or its PR merges/closes is strictly worse than dropping the cannot_verify
+    twin: this is a FACT, not an unknown."""
+    event = {"kind": "run_judge_blocked_race", "payload": {"task_id": "T1"}}
+    still_running = [{"task_id": "T1", "status": "running", "pr_state": "open"}]
+    assert inbox.stale_reason(event, still_running) is None
+
+    gone = [{"task_id": "T1", "status": "running", "pr_state": gone_state}]
+    assert inbox.stale_reason(event, gone) is None, (
+        f"a run_judge_blocked_race for a {gone_state} PR must still be delivered"
+    )
+
+    gone_row = [{"task_id": "T1", "status": "done", "pr_state": "merged"}]
+    assert inbox.stale_reason(event, gone_row) is None, (
+        "a run_judge_blocked_race for an already-merged run is the MOST important case, "
+        "not a droppable one — the guard proven to survive corruption may already have shipped"
+    )
+
+
+def test_a_blocked_race_verdict_rots_once_the_head_moves_past_the_judged_commit(store_file):
+    """The one legitimate way a `run_judge_blocked_race` claim goes stale: a newer commit
+    superseded the one the judge actually found blocking. Mirrors `run_judge_cannot_verify`'s
+    live-head check exactly."""
+    event = {"kind": "run_judge_blocked_race",
+             "payload": {"task_id": "T1", "judge_sha": _JUDGE_SHA}}
+    run = [{"task_id": "T1", "status": "done", "pr_state": "merged"}]
+
+    assert inbox.stale_reason(event, run, live_heads={"T1": _JUDGE_SHA}) is None, (
+        "the live head still matches the judged commit — not stale"
+    )
+    reason = inbox.stale_reason(event, run, live_heads={"T1": _SUPERSEDING_SHA})
+    assert reason and "moved past" in reason
+
+
+def test_a_blocked_race_verdicts_payload_carries_the_judged_sha_and_state(
+        store_file, windows, monkeypatch):
+    """⚖️🧊 CMX-239 round 5 — the twin of `test_a_judge_verdicts_payload_carries_the_judged_sha`
+    below, for `J_BLOCKED_RACE`. That test's `JUDGE_KINDS` parametrize does NOT cover this
+    kind on purpose: `_live_judge_heads` never nominates a `blocked_race` run (see its own
+    docstring), so folding this kind into the shared list would silently break every
+    live-head-supersession test that shares it — a gap in `_live_judge_heads` this PR did not
+    write, not something this test should paper over.
+
+    Written standalone, and deriving the event from a REAL run row via `inbox.tick()` — not
+    hand-fed. The test above (`..._rots_once_the_head_moves_past_the_judged_commit`) builds its
+    event dict by hand (`{"payload": {"judge_sha": _JUDGE_SHA}}`), which proves `stale_reason`
+    reads `judge_sha` correctly but says nothing about whether `run_events`'s `J_BLOCKED_RACE`
+    branch ever PUTS the judged sha and verdict into the payload in the first place. A judge
+    run that corrupted `payload["judge_sha"] = None` or `payload["judge_state"] = ""` in that
+    branch survived the full suite before this test existed.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED_RACE)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "run_judge_blocked_race"
+    payload = queued[0]["payload"]
+    # ⭐ The payload is the RECORD `stale_reason`'s live-head supersession check reads (see
+    # the test above) — a blocked_race verdict with no judged commit attached can never be
+    # checked against a live head, and would sail through as un-stale forever.
+    assert payload["judge_sha"] == _JUDGE_SHA, (
+        f"the judged sha did not reach the payload, got {payload['judge_sha']!r}"
+    )
+    # ...and the VERDICT itself has to reach it too — the kind string says a blocked_race
+    # fired, but a consumer reading the record (the dashboard, a replay of the event log)
+    # has only this field to learn the judge's own state string.
+    assert payload["judge_state"] == judge.J_BLOCKED_RACE, (
+        f"the verdict did not reach the payload, got {payload['judge_state']!r}"
+    )
+    assert payload["judge_detail"] == _LONG_DETAIL, (
+        f"the judge detail did not survive into the payload, got {payload['judge_detail']!r}"
     )
 
 
@@ -2128,6 +2238,100 @@ def test_cannot_verify_churn_off_awaiting_review_DOES_reannounce(
     ], "a cannot_verify churn off awaiting_review must re-announce (CMX-229 Objective 1)"
 
 
+@pytest.mark.parametrize("other_status", ["running", "changes_requested", "done", "needs_human"])
+def test_a_blocked_race_verdict_IS_announced_regardless_of_status(
+        other_status, store_file, windows, sends, monkeypatch):
+    """⚖️🧊 CMX-239 — the twin of the CANNOT_VERIFY test above, for `J_BLOCKED_RACE`.
+
+    `judge.judge_run`'s CAS-refused path on a BLOCKING verdict now records `J_BLOCKED_RACE`
+    (not `J_CANNOT_VERIFY`, which would downgrade a CONFIRMED finding to a shrug). It must
+    fire `run_judge_blocked_race` regardless of what the run's status became — including
+    `changes_requested`, since `J_BLOCKED_RACE` (unlike plain `J_BLOCKED`) can only ever
+    mean the row never actually recorded the send-back.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[dict(_verdict_run(judge.J_BLOCKED_RACE), status=other_status)])
+
+    kinds = [e["kind"] for e in inbox.load()["queue"]]
+    assert "run_judge_blocked_race" in kinds, (
+        f"a blocked_race verdict did NOT fire for a run already in {other_status!r}. "
+        f"Queued: {kinds}"
+    )
+
+
+def test_a_blocked_race_verdict_is_never_confused_with_an_ordinary_blocked_run(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-239): plain `J_BLOCKED` — the ORDINARY outcome, left on a row long after
+    it settles (through rework rounds, even through an eventual `needs_human` escalation) —
+    must NEVER trip the `run_judge_blocked_race` branch. Only the judge's own, distinct
+    `J_BLOCKED_RACE` value may. Collapsing the two would make an unrelated LATER status
+    change on an ordinary blocked run misread as the CAS-refused race."""
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    parked = dict(_verdict_run(), status="needs_human", judge_state=judge.J_BLOCKED)
+    inbox.tick({}, runs=[parked])
+
+    kinds = [e["kind"] for e in inbox.load()["queue"]]
+    assert kinds == ["run_needs_human"]
+    assert "run_judge_blocked_race" not in kinds
+
+
+def test_blocked_race_churn_off_its_status_DOES_reannounce(
+        store_file, windows, sends, monkeypatch):
+    """⚖️🧊 CMX-239 — the twin of `test_cannot_verify_churn_off_awaiting_review_DOES_reannounce`.
+    A run parked at `needs_human` whose `judge_state` churns from an ordinary `blocked` to
+    `blocked_race` DOES mint a new mark and DOES re-announce — proving the mark computation
+    (not just the branch dispatch) actually tracks `J_BLOCKED_RACE` off its terminal status."""
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    parked = dict(_verdict_run(), status="needs_human", judge_state=judge.J_BLOCKED)
+    inbox.tick({}, runs=[parked])
+    assert [e["kind"] for e in inbox.load()["queue"]] == ["run_needs_human"]
+
+    inbox.tick({}, runs=[dict(parked, judge_state=judge.J_BLOCKED_RACE)])
+
+    assert [e["kind"] for e in inbox.load()["queue"]] == [
+        "run_needs_human", "run_judge_blocked_race",
+    ], "a blocked_race churn off its status must re-announce (CMX-239)"
+
+
+def test_the_blocked_race_reason_is_EXCERPTED_into_the_summary(
+        store_file, windows, sends, monkeypatch):
+    """🔴 GUARD (CMX-239 round 6): the twin of the CANNOT_VERIFY excerpt guard above, for
+    `J_BLOCKED_RACE`.
+
+    Round 5's judge triaged ~20 of these live and found the ones without an excerpted
+    reason each cost a `gh pr view` to act on — the summary is the one line typed AT the
+    orchestrator's prompt, so a `run_judge_blocked_race` that drops the excerpt is exactly
+    as bad as the CMX-197 round 8 bug this mirrors, and MORE urgent: this branch fires when
+    a guard survived corruption on a commit that may already have shipped.
+    """
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_verdict_run(judge.J_BLOCKED_RACE)])
+
+    summary = inbox.load()["queue"][0]["summary"]
+    assert _LONG_DETAIL[:40] in summary, "an excerpt of the reason must reach the operator"
+    assert _LONG_DETAIL not in summary, (
+        "the WHOLE reason was pasted into a summary that gets typed at the prompt — it "
+        "belongs in the payload, which already carries it in full"
+    )
+    assert len(summary) < len(_LONG_DETAIL) + 200
+
+
 def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
         store_file, windows, sends, monkeypatch):
     """🔴 GUARD (CMX-197 round 8): the summary is one line TYPED AT the prompt.
@@ -2152,6 +2356,259 @@ def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
         "belongs in the payload, which already carries it in full"
     )
     assert len(summary) < len(_LONG_DETAIL) + 200
+
+
+# --- CMX-247: the needs_human summary must say WHY, not always the same fixed guess ------
+#
+# `dispatcher._escalate` is the only writer of `needs_human`, and its call sites hand it
+# DIFFERENT reasons — a spent rework budget, checks stuck pending, a rework that could not
+# re-attach its worktree. Before this, `inbox.run_needs_human` always said "the PR still
+# fails review", which is only true for the first of those.
+
+def test_run_needs_human_summary_reflects_the_actual_escalation_reason(store_file, windows,
+                                                                        sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    rework_cap = dict(_verdict_run(), task_id="T1", status="needs_human", rework_count=2,
+                      review_history=json.dumps([{"verdict": "BLOCKING"},
+                                                  {"verdict": "BLOCKING"}]),
+                      last_error="rework cap reached (2/2) — the PR still fails review. "
+                                 "Branch, worktree and PR are preserved.\n\n"
+                                 "Recommendation: fix it yourself and `chela reopen`.")
+    stuck_checks = dict(_verdict_run(), task_id="T2", status="needs_human",
+                        last_error="the checks on this PR have not settled in 6h — they "
+                                   "are not running, they are STUCK.\n\n"
+                                   "Recommendation: approve the pending gate.")
+    no_branch = dict(_verdict_run(), task_id="T3", status="needs_human",
+                     last_error="rework: the run row has no branch — nothing to re-enter")
+    # A SHORT first paragraph with a Recommendation attached: short enough that the
+    # excerpt limit (60 chars) never kicks in, so this fixture is only clean if the
+    # "\n\n" split itself is doing the work — unlike T1/T2 above, where the first
+    # paragraph already exceeds the excerpt limit and would hide a missing split.
+    short_with_recommendation = dict(_verdict_run(), task_id="T4", status="needs_human",
+                     last_error="rework: no branch\n\nRecommendation: fix it yourself.")
+    # A single-paragraph reason strictly BETWEEN 60 and 90 chars (68). This is the fixture
+    # that pins the excerpt bound to the named SUMMARY_TITLE_CHARS constant (60) rather than
+    # merely "shorter than whatever the fixture happens to be": a limit of 90 would let this
+    # one through untruncated, so the exact-match assertion below only passes at limit=60.
+    boundary_reason = "external approval is stuck on someone who is out of office this week"
+    assert 60 < len(boundary_reason) < 90
+    boundary = dict(_verdict_run(), task_id="T5", status="needs_human",
+                     last_error=boundary_reason)
+
+    # 🔴 GUARD (judge round 3): a real `_escalate` reason is routinely MULTI-LINE within its
+    # own first paragraph — dispatcher.py:4302 interpolates raw git stderr, which wraps. This
+    # first paragraph has an embedded "\n" but no "\n\n" before the Recommendation, so
+    # splitting on a single "\n" (wrong) silently drops the second line while splitting on
+    # "\n\n" (right) keeps it. Every other fixture above has a single-line first paragraph,
+    # so none of them can tell "\n" and "\n\n" apart.
+    multiline_first_line = "rework: could not attach a worktree for cmx-247"
+    multiline_second_line = "fatal: 'cmx-247' is already checked out at '/tmp/other-wt'"
+    multiline_paragraph = multiline_first_line + "\n" + multiline_second_line
+    multiline_reason = dict(_verdict_run(), task_id="T6", status="needs_human",
+                             last_error=multiline_paragraph +
+                             "\n\nRecommendation: remove the stale worktree and retry.")
+
+    # 🔴 GUARD (judge round 3): rework_count and len(review_history) are two DIFFERENT facts
+    # that must each keep their own label. The only prior fixture (T1) sets both to 2, so
+    # swapping the two interpolations is invisible there. Here they differ (1 vs 3), so a
+    # swap surfaces as "reworks: 3 · verdicts on the row: 1" instead of the correct order.
+    mismatched_counts = dict(_verdict_run(), task_id="T7", status="needs_human", rework_count=1,
+                              review_history=json.dumps([{"verdict": "BLOCKING"},
+                                                          {"verdict": "CANNOT_VERIFY"},
+                                                          {"verdict": "BLOCKING"}]),
+                              last_error="the checks on this PR never settled")
+
+    # 🔴 GUARD (judge round 5): `_format_escalation` takes `recommendation` and `options`
+    # INDEPENDENTLY (dispatcher.py:4238) — a real escalation can carry an Options: block
+    # with NO Recommendation: at all. Every fixture above that has a trailing block pairs
+    # it with "Recommendation:", so keying the paragraph split on that literal (instead of
+    # the bare "\n\n" boundary) is invisible to all of them. This fixture is short enough
+    # to stay under SUMMARY_TITLE_CHARS if — and only if — the split actually fires on the
+    # blank line; a split keyed on "Recommendation:" leaves the Options: block attached and
+    # pushes the joined string past the excerpt limit.
+    options_only = dict(_verdict_run(), task_id="T8", status="needs_human",
+                         last_error="budget approval never arrived\n\n"
+                                    "Options:\n  - ping finance on slack\n"
+                                    "  - approve manually via `chela reopen`")
+
+    inbox.tick({}, runs=[rework_cap, stuck_checks, no_branch, short_with_recommendation,
+                          boundary, multiline_reason, mismatched_counts, options_only])
+
+    by_entry = {e["payload"]["task_id"]: e for e in inbox.load()["queue"]}
+    by_task = {tid: e["summary"] for tid, e in by_entry.items()}
+    assert set(by_task) == {"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"}
+
+    # 🔴 GUARD (judge round 5): an Options:-only escalation (no Recommendation: paragraph)
+    # must still have its trailing block excluded from the summary — exact match, since the
+    # Options: block sits early enough in the joined string that a substring check on the
+    # reason alone would stay green even with the whole block pasted in.
+    assert "· budget approval never arrived —" in by_task["T8"], (
+        "the reason must reach the summary unchanged when the paragraph split works — "
+        "this only fails if the split is keyed on 'Recommendation:' instead of the bare "
+        "paragraph boundary, in which case an Options:-only last_error never splits at all"
+    )
+    assert "Options:" not in by_task["T8"], (
+        "an Options: block with no Recommendation: leaked into the summary — the "
+        "paragraph split must key on the blank line, not the literal 'Recommendation:'"
+    )
+    assert "ping finance" not in by_task["T8"]
+
+    assert "the PR still fails review" in by_task["T1"]
+
+    # 🔴 GUARD: the payload must carry the FULL last_error, Recommendation/Options included
+    # — the summary excerpts the reason, but the payload is not itself excerpted. If this
+    # key is ever emptied, the excerpt stops being an excerpt and becomes data loss.
+    assert by_entry["T1"]["payload"]["last_error"] == rework_cap["last_error"], (
+        "the payload's last_error must be the run's full, unmodified last_error"
+    )
+    assert by_entry["T2"]["payload"]["last_error"] == stuck_checks["last_error"]
+
+    # 🔴 GUARD: the reason is excerpted to EXACTLY SUMMARY_TITLE_CHARS (60), cut on a word
+    # boundary, and marked with an ellipsis — not "some limit shorter than this fixture"
+    # (caught a mutation to `limit = 90`) and not a raw mid-word slice with no ellipsis
+    # (caught a mutation dropping the `.rsplit(" ", 1)[0] + "…"`). This literal is computed
+    # independently of production code: reason[:60].rsplit(" ", 1)[0] + "…".
+    assert "rework cap reached 2/2 — the PR still fails review.…" in by_task["T1"], (
+        "the reason must be cut at exactly SUMMARY_TITLE_CHARS, on a word boundary, "
+        "with a trailing ellipsis — got a differently-bounded or unmarked cut instead"
+    )
+
+    # 🔴 GUARD: the counts must survive alongside the reason — `reworks: N · verdicts on
+    # the row: M` are useful on their own and a refactor of the reason must not drop them.
+    assert "reworks: 2" in by_task["T1"], (
+        "the rework count must still be in the summary alongside the reason"
+    )
+    assert "verdicts on the row: 2" in by_task["T1"], (
+        "the verdict-history count must still be in the summary alongside the reason"
+    )
+
+    # 🔴 GUARD: the reason is EXCERPTED — the whole first paragraph must not be pasted
+    # whole into the one line typed at the prompt (mirrors the cannot_verify excerpt
+    # guard above, for this call site).
+    assert "Branch, worktree and PR are preserved" not in by_task["T1"], (
+        "the whole first paragraph was pasted into the summary instead of being "
+        "excerpted to SUMMARY_TITLE_CHARS"
+    )
+
+    assert "checks on this PR have not settled" in by_task["T2"]
+    assert "the PR still fails review" not in by_task["T2"], (
+        "a run escalated for STUCK CHECKS must not be told it 'still fails review' — "
+        "that sentence is a claim about a review verdict that never happened"
+    )
+
+    assert "no branch" in by_task["T3"]
+    assert "the PR still fails review" not in by_task["T3"], (
+        "a run escalated for a MISSING BRANCH must not be told it 'still fails review'"
+    )
+    # 🔴 GUARD (judge round 4): a reason that FITS under SUMMARY_TITLE_CHARS must reach the
+    # summary VERBATIM and UNMARKED — no trailing "…". The ellipsis is this PR's own signal
+    # that the reason was cut; slapping it on every reason (even ones that fit whole) makes
+    # the signal lie about completeness in exactly the way CMX-247 exists to prevent. An
+    # exact match (not a substring) is required to catch a mutation that appends "…" to a
+    # reason that already fits — a substring check like "no branch" in ... cannot see it.
+    # (Not also asserting "…" not in by_task["T3"] as a whole-line check: TRACKER_LINE — the
+    # fixture title every task shares — already carries a literal "…" of its own, so that
+    # check would fail for reasons that have nothing to do with the reason excerpt.)
+    assert "· rework: the run row has no branch — nothing to re-enter —" in by_task["T3"], (
+        "a reason that fits under SUMMARY_TITLE_CHARS must reach the summary unchanged, "
+        "with no ellipsis appended"
+    )
+
+    # Only the reason (first paragraph) reaches the summary — Recommendation/Options stay
+    # in the payload's last_error, not pasted into the one line typed at the prompt.
+    assert "Recommendation:" not in by_task["T1"]
+    assert "Recommendation:" not in by_task["T2"]
+
+    # 🔴 GUARD: same rule, but with a reason SHORT enough that the excerpt limit alone
+    # cannot be hiding a missing "\n\n" split (T1/T2's first paragraphs are both already
+    # over SUMMARY_TITLE_CHARS, so they'd stay clean even without the split).
+    assert "no branch" in by_task["T4"]
+    assert "Recommendation:" not in by_task["T4"], (
+        "a short reason (under SUMMARY_TITLE_CHARS) must still exclude a trailing "
+        "Recommendation — this is only provable when the excerpt limit itself can't "
+        "be the thing hiding it"
+    )
+    # 🔴 GUARD (judge round 4): same as T3's guard above, but on the OTHER fixture that
+    # exercises the short (`len(reason) <= limit`) path — an exact match, since "no branch"
+    # in ... would stay green even if a mutation appended "…" to this fixture's reason too.
+    assert "· rework: no branch —" in by_task["T4"], (
+        "a reason that fits under SUMMARY_TITLE_CHARS must reach the summary unchanged, "
+        "with no ellipsis appended"
+    )
+
+    # 🔴 GUARD: T5's 68-char reason sits strictly between SUMMARY_TITLE_CHARS (60) and a
+    # too-large limit (90) that would otherwise still pass every other fixture in this test.
+    # At the real limit it must be visibly cut; a widened limit would let it through whole.
+    assert "external approval is stuck on someone who is out of office…" in by_task["T5"], (
+        "a reason longer than SUMMARY_TITLE_CHARS but shorter than 90 chars must still "
+        "be excerpted — this only fails if the limit is not exactly SUMMARY_TITLE_CHARS"
+    )
+    assert boundary_reason not in by_task["T5"], (
+        "the full boundary reason leaked through untruncated — the excerpt limit is "
+        "wider than SUMMARY_TITLE_CHARS"
+    )
+
+    # 🔴 GUARD: the split must be on the PARAGRAPH boundary ("\n\n"), not the first line
+    # ("\n") — this is the exact excerpt the production code computes for the multi-line
+    # fixture above: reason[:60].rsplit(" ", 1)[0] + "…" where reason is BOTH lines joined
+    # by a single space (via the whitespace collapse). Splitting on "\n" instead would stop
+    # at `multiline_first_line` alone (47 chars, no ellipsis) and never reach "fatal:".
+    assert "rework: could not attach a worktree for cmx-247 fatal:…" in by_task["T6"], (
+        "the excerpt must include content from the SECOND line of the first paragraph — "
+        "this only fails if the reason was split on the first newline instead of the "
+        "first blank line"
+    )
+    assert "fatal:" in by_task["T6"], (
+        "the second line of the first paragraph never reached the summary — the reason "
+        "was split on '\\n' instead of '\\n\\n'"
+    )
+
+    # 🔴 GUARD: reworks and verdicts-on-the-row are two different facts with different
+    # numbers here (1 vs 3) — a swap of the two interpolations produces the numbers under
+    # the wrong labels instead of failing outright, so an exact-match on each label is
+    # required to catch it.
+    assert "reworks: 1" in by_task["T7"], (
+        "the rework count (1) must appear under the 'reworks' label — got the verdict "
+        "count instead, meaning the two interpolations were swapped"
+    )
+    assert "verdicts on the row: 3" in by_task["T7"], (
+        "the verdict-history count (3) must appear under the 'verdicts on the row' "
+        "label — got the rework count instead, meaning the two interpolations were swapped"
+    )
+    assert "reworks: 3" not in by_task["T7"]
+    assert "verdicts on the row: 1" not in by_task["T7"]
+
+
+def test_run_needs_human_reason_falls_back_when_last_error_is_empty(store_file, windows,
+                                                                     sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    bare = dict(_verdict_run(), task_id="T1", status="needs_human", last_error=None)
+    # 🔴 GUARD (judge round 5): the production code deliberately tests the READABLE reason
+    # (`if not reason`, after coercion) rather than `last_error is None` — a row can reach
+    # `needs_human` with `last_error=""` (or a first paragraph that collapses to nothing
+    # but whitespace), and that must fall back exactly like a null column does. No fixture
+    # anywhere else in this file sets `last_error=""`, so an `is None` check is invisible
+    # to all of them.
+    empty_string = dict(_verdict_run(), task_id="T2", status="needs_human", last_error="")
+    whitespace_only = dict(_verdict_run(), task_id="T3", status="needs_human",
+                            last_error="   \n\n  ")
+    inbox.tick({}, runs=[bare, empty_string, whitespace_only])
+
+    by_task = {e["payload"]["task_id"]: e["summary"] for e in inbox.load()["queue"]}
+    assert set(by_task) == {"T1", "T2", "T3"}
+    for tid in ("T1", "T2", "T3"):
+        assert "no reason recorded" in by_task[tid], (
+            f"{tid} has no readable reason and must fall back — got {by_task[tid]!r}"
+        )
+        assert "the PR still fails review" not in by_task[tid]
 
 
 # --- the single-run blind spot -----------------------------------------------------------
@@ -2449,3 +2906,380 @@ def test_peer_socket_unreachable_falls_back_to_tmux(store_file, windows, sends, 
 
     assert len(sends) == 1
     assert sends[0][0] == ORCH
+
+
+# --- CMX-255: the windowless orchestrator — a raw pid, no tmux window at all ----------
+#
+# The delivery half of the mechanism CMX-254 deliberately deferred (PR #323's `## Scope`):
+# a session registered via `register_peer` (no `@N` at all) is reachable purely over its
+# own peer socket, addressed by pid — `deliver` falls back to it only when there is no
+# LIVE wid-based orchestrator (never registered, or its address has rotted).
+
+def _peer_status(monkeypatch, mapping: dict):
+    monkeypatch.setattr(inbox.agent_manager, "session_status_map",
+                        lambda: {"by_pid": dict(mapping)})
+
+
+def test_register_peer_records_pid_session_and_started_without_touching_the_wid_address(
+        store_file, windows, monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+
+    result = inbox.register_peer(4242, "sid-abc")
+
+    assert result == {"ok": True, "pid": 4242, "session": "sid-abc", "queued": 0}
+    peer = inbox.orchestrator_peer()
+    assert peer["pid"] == 4242
+    assert peer["session"] == "sid-abc"
+    assert peer["started"] == 1000.0
+    # A completely separate address kind — the wid-based one is untouched.
+    assert inbox.orchestrator_wid() is None
+
+
+def test_register_peer_clears_a_latched_address_alarm(store_file, windows, monkeypatch):
+    """`register_peer` is a THIRD writer of the orchestrator address (alongside `register`
+    and `readdress`/`unregister_dangling`) and must clear the alarm exactly like the other
+    two: a latched `address_alarm_pushed=True` SUPPRESSES the push for the NEXT real outage,
+    so a windowless re-registration after a rotted wid must not leave it latched."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    store = _arm_the_address_alarm(inbox.load())
+    inbox.save(store)
+
+    inbox.register_peer(4242, "sid-abc")
+
+    _assert_address_alarm_cleared(inbox.load(), "register_peer")
+
+
+def test_orchestrator_peer_and_orchestrator_wid_are_independent(
+        store_file, windows, monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    inbox.register(ORCH)
+
+    assert inbox.orchestrator_wid() == ORCH
+    assert inbox.orchestrator_peer()["pid"] == 4242    # neither registration clobbers the other
+
+
+def test_peer_state_ok_when_the_pid_still_matches_its_recorded_start_time(monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    state, why = inbox.peer_state({"pid": 4242, "started": 1000.0})
+    assert (state, why) == (inbox.PEER_OK, "")
+
+
+def test_peer_state_gone_when_nothing_is_running_at_that_pid(monkeypatch):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: None)
+    state, why = inbox.peer_state({"pid": 4242, "started": 1000.0})
+    assert state == inbox.PEER_GONE
+    assert "4242" in why
+
+
+def test_peer_state_stale_when_the_os_reused_the_pid(monkeypatch):
+    """⛔ CMX-48's guard, applied to a pid: a pid the OS handed to a DIFFERENT process
+    since registration is a stranger, not the orchestrator, and must be refused exactly
+    like a dangling wid — never delivered to."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 5000.0)
+    state, why = inbox.peer_state({"pid": 4242, "started": 1000.0})
+    assert state == inbox.PEER_STALE
+    assert "4242" in why
+
+
+def test_delivery_falls_back_to_a_registered_windowless_peer_when_nothing_is_registered_by_wid(
+        store_file, windows, monkeypatch):
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (calls.append((pid, frm, text)),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert len(sent) == 1
+    assert calls == [(4242, "chela-inbox", "📥 hello")]
+    assert inbox.load()["queue"] == []
+
+
+def test_delivery_to_a_windowless_peer_never_falls_back_to_tmux(
+        store_file, windows, sends, monkeypatch):
+    """There is no window, so there is no pane to paste into — a socket failure here
+    must be a genuine drop (held queued), never routed through send_tmux."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    monkeypatch.setattr(inbox.messenger, "send_peer_to_pid",
+                        lambda pid, frm, text: messenger.PeerSendResult(False, None))
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert sends == []                              # tmux never touched
+    assert inbox.load()["queue"]                    # HELD, not dropped
+
+
+def test_delivery_does_not_fall_back_to_the_peer_while_a_healthy_wid_orchestrator_is_busy(
+        store_file, windows, sends, monkeypatch):
+    """A live wid orchestrator that is merely BUSY is left alone exactly as before — it
+    will go idle on its own, so the peer fallback must never race it."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    _registered()
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {ORCH: inbox.BUSY}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried
+    assert sends == []
+    assert inbox.load()["queue"]                     # still queued for the wid orchestrator
+
+
+def test_delivery_falls_back_to_the_peer_when_the_wid_address_has_rotted(
+        store_file, windows, sends, monkeypatch):
+    """The core CMX-255 scenario: a tmux restart dangled the wid address, and the only
+    live registration left is the windowless one — the queue must not simply wait forever
+    for a window that isn't coming back."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    with inbox.locked_store() as st:
+        st["orchestrator"] = ORCH
+        st["orchestrator_epoch"] = "1-1000"           # a dead epoch: current() below disagrees
+        st["orchestrator_name"] = "orchestrator"
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (calls.append(pid), messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {ORCH: inbox.IDLE}, [], now_epoch="2-2000")
+
+    assert len(sent) == 1
+    assert calls == [4242]
+    assert sends == []                                # never typed into the stranger at @1
+    assert inbox.load()["queue"] == []
+
+
+def test_delivery_skips_a_windowless_peer_that_is_busy(store_file, windows, monkeypatch):
+    """⛔ Must prove the BUSY gate itself held the event, not merely that no socket
+    exists for this pid — stub `send_peer_to_pid` to succeed and record its calls, then
+    assert it was never even attempted, the same shape
+    `test_delivery_does_not_fall_back_to_the_peer_while_a_healthy_wid_orchestrator_is_busy`
+    uses for the wid path."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.BUSY})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried — busy gate held it
+    assert inbox.load()["queue"]
+
+
+def test_a_held_receipt_from_the_windowless_peer_is_not_attributed_to_a_fabricated_window_id(
+        store_file, windows, monkeypatch):
+    """The peer-path counterpart to `test_a_held_receipt_holds_the_event_queued_and_records_a_
+    receipt`: the windowless call site passes `event_wid=None` on purpose (`orchestrator_peer`:
+    'a caller that needs an actual window id must never receive one from here'). A held/denied
+    receipt from a windowless session must log under NO window id — never a fabricated
+    `@<pid>` standing in for a real one."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    monkeypatch.setattr(inbox.messenger, "send_peer_to_pid",
+                        lambda pid, frm, text: messenger.PeerSendResult(True, "held"))
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert inbox.load()["queue"]                    # HELD — still queued, not dropped
+    receipts = [e for e in event_log.read()["events"] if e["type"] == "inbox_receipt"]
+    assert len(receipts) == 1
+    assert receipts[0]["payload"]["status"] == "held"
+    assert receipts[0]["wid"] is None                # never a fabricated `@<pid>`
+
+
+def test_delivery_skips_a_stale_windowless_peer(store_file, windows, monkeypatch):
+    """⛔ Must prove the `peer_state` refusal itself held the event, not merely that the
+    REAL (unstubbed) `claude agents --json` cache doesn't happen to say pid 4242 is idle —
+    stub the idle gate to IDLE and `send_peer_to_pid` to succeed and record its calls, so
+    the ONLY thing that can hold the event is the stale refusal, the same shape
+    `test_delivery_skips_a_windowless_peer_that_is_busy` uses for the idle gate."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 9999.0)  # pid reused since
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried — stale gate held it
+    assert inbox.load()["queue"]
+
+
+def test_delivery_skips_a_gone_windowless_peer(store_file, windows, monkeypatch):
+    """The GONE counterpart at the `deliver` call site — `test_peer_state_gone_when_nothing_
+    is_running_at_that_pid` only tests the `peer_state` helper in isolation, not that `deliver`
+    actually consults it. Same discriminating shape as the stale test above."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: None)  # nothing runs there now
+    _peer_status(monkeypatch, {4242: inbox.IDLE})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert peer_calls == []                          # never even tried — gone gate held it
+    assert inbox.load()["queue"]
+
+
+def test_no_delivery_at_all_when_neither_a_wid_nor_a_peer_orchestrator_is_registered(
+        store_file, windows):
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
+    assert sent == []
+    assert inbox.load()["queue"]
+
+
+# --- `chela watching` — the windowless registration is the operator's only surface for it --
+
+def test_watching_shows_the_windowless_peer_registration_and_its_state(
+        store_file, windows, monkeypatch, capsys):
+    """Nothing under tests/ used to drive `cmd_watching` with a peer in the store at all —
+    the whole display block (`if peer:`) could be disabled outright and every existing test
+    stayed green."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "windowless orchestrator: pid 4242" in out
+    assert "sid-abc" in out
+    assert "[ok]" in out
+    # ⛔ no wid orchestrator is registered at all — CMX-255's own primary scenario, where the
+    # peer is the SOLE destination. Pins the `orch and` half of the suffix's condition: without
+    # it, the suffix fires on ADDR_NONE (not in UNDELIVERABLE) even though nothing is registered
+    # by wid to actually "fall back" to.
+    assert "(fallback only" not in out
+
+
+def test_watching_reports_why_a_stale_windowless_peer_cannot_be_used(
+        store_file, windows, monkeypatch, capsys):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 9999.0)  # pid reused since
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "[stale]" in out
+    # ⛔ NOT just "4242" — the header line (`windowless orchestrator: pid 4242  [stale]`)
+    # already prints the pid regardless of whether `pwhy` was ever reached, so an assertion
+    # that only looks for the pid can't tell a full diagnosis from a stripped one. Assert on
+    # text only `pwhy` can supply: the actual diagnosis and the `chela watch` remedy.
+    tail = out.split("windowless orchestrator", 1)[1]
+    assert "DIFFERENT process" in tail
+    assert "chela watch" in tail
+
+
+def test_watching_reports_why_a_gone_windowless_peer_cannot_be_used(
+        store_file, windows, monkeypatch, capsys):
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: None)  # nothing runs there now
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "[gone]" in out
+    assert "no longer running" in out
+
+
+def test_watching_marks_the_peer_as_fallback_only_when_the_wid_orchestrator_can_still_take_it(
+        store_file, windows, monkeypatch, capsys):
+    """The `(fallback only — ...)` suffix's condition (`orch and state not in UNDELIVERABLE`)
+    is a second, independently-derived copy of `deliver`'s own fallback rule — if the two ever
+    disagree, this tells the operator the peer is a mere fallback while `deliver` is in fact
+    routing there, which is exactly the misreport CMX-254 was raised about."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register(ORCH)                                # a live, healthy wid orchestrator
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    inbox.register_peer(4242, "sid-abc")
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "windowless orchestrator: pid 4242" in out
+    assert "(fallback only — a live wid orchestrator is registered above)" in out
+
+
+def test_watching_does_not_call_the_peer_fallback_only_when_the_wid_address_cannot_take_it(
+        store_file, windows, monkeypatch, capsys):
+    """`deliver` falls through to the windowless peer whenever the wid orchestrator is
+    UNDELIVERABLE (CMX-255's whole point) — here that must read as the peer being the REAL
+    destination, not a mere fallback next to a healthy address."""
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register(ORCH)
+    _statuses(monkeypatch, {AGENT: inbox.IDLE})         # ORCH absent from a non-empty map: GONE
+    inbox.register_peer(4242, "sid-abc")
+
+    main.cmd_watching(Namespace())
+
+    out = capsys.readouterr().out
+    assert "windowless orchestrator: pid 4242" in out
+    assert "(fallback only" not in out

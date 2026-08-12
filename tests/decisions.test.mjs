@@ -1029,3 +1029,13 @@ test('🔴 GUARD: the decisions panel subscribes to both judge verdict kinds', (
         assert.ok(decisions.DECISION_TYPES.includes(t), `${t} lost its subscription`);
     }
 });
+
+// 🔴 GUARD (CMX-239 round 2): the panel must SUBSCRIBE to the CAS-refused race kind too —
+// `run_judge_blocked_race` is a CONFIRMED finding (a guard survived corruption), not an
+// unknown, so it deserves at least as much visibility as `run_judge_cannot_verify` above.
+// An unsubscribed kind never reaches the scoped /api/log fetch, no matter how correctly
+// inbox.py emits it.
+test('🔴 GUARD: the decisions panel subscribes to the blocked_race verdict kind', () => {
+    assert.ok(decisions.DECISION_TYPES.includes('run_judge_blocked_race'),
+        `run_judge_blocked_race must be subscribed, got: ${decisions.DECISION_TYPES.join(',')}`);
+});

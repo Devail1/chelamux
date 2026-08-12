@@ -346,6 +346,71 @@ def _session_report(session: str, obs: Observation) -> list[Finding]:
     return out
 
 
+# --- fact: tmux's GLOBAL environment, and Node's leaked IPC vars ---------------------
+
+# CMX-252: pm2 forks its managed processes through Node's own `child_process.fork` (IPC
+# channel included) even when the target isn't a Node program, so these leak into whatever
+# tmux server starts under that ancestry — and from there into tmux's GLOBAL environment,
+# the table every new window in EVERY session inherits from. A `node --test` child that
+# inherits a stale fd number can SIGABRT before running a single test (`chela/judge.py`'s
+# `_no_color_env` has the full reproduction). `dispatcher._new_window` scrubs this table on
+# every spawn it makes, but it can be reintroduced by a tmux server started later by another
+# node-parented ancestor (a `pm2 restart`, a reboot) — this fact is what makes that state
+# LOUD instead of the multi-hour, judge-blamed-the-PR hunt it was before it existed.
+_NODE_IPC_ENV_VARS = ("NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE")
+
+
+def _tmux_global_env() -> dict[str, str] | None:
+    """tmux's GLOBAL environment table, read straight from the owner. ``None`` when tmux
+    cannot be asked at all (mirrors :func:`_tmux_or_unverifiable`) — never an empty dict,
+    which would read as "asked, and it's clean" instead of "never asked"."""
+    if _tmux_or_unverifiable() is None:
+        return None
+    out = subprocess.run(
+        ["tmux", "show-environment", "-g"], capture_output=True, text=True,
+    )
+    if out.returncode != 0 or not isinstance(out.stdout, str):
+        return None
+    env: dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        if line.startswith("-"):
+            continue                          # an explicitly-unset marker, not a value
+        key, sep, value = line.partition("=")
+        if sep:
+            env[key] = value
+    return env
+
+
+def _node_ipc_env_read() -> Observation:
+    env = _tmux_global_env()
+    if env is None:
+        return cannot_verify("tmux is not on PATH, so chela cannot read its global "
+                             "environment table — the one every window it spawns "
+                             "inherits from.")
+    return observed({var: env[var] for var in _NODE_IPC_ENV_VARS if var in env})
+
+
+def _node_ipc_env_report(_declared: None, obs: Observation) -> list[Finding]:
+    leaked: dict[str, str] = obs.value
+    if not leaked:
+        return [Finding(OK, "tmux's global environment carries no leaked Node IPC vars")]
+    names = sorted(leaked)
+    unset_cmd = " && ".join(f"tmux set-environment -gu {n}" for n in names)
+    return [Finding(
+        ERROR,
+        f"tmux's GLOBAL environment carries {', '.join(names)} — every window chela "
+        "spawns from here on inherits it",
+        f"{', '.join(f'{k}={v!r}' for k, v in sorted(leaked.items()))}. CMX-252: a leaked "
+        "NODE_CHANNEL_FD can make `node --test` SIGABRT before running a single test, "
+        "which reads as an unrelated red suite on whatever PR a judge happens to be "
+        "looking at — the failure mode this fact exists to make loud instead of a "
+        "multi-hour, judge-blamed-the-PR hunt. `dispatcher._new_window` scrubs this table "
+        "on every window it spawns, so seeing this means a NEW tmux server has started "
+        "since the last spawn (pm2 restart, a reboot) under a node-parented ancestor. "
+        f"Clear it now: `{unset_cmd}`.",
+    )]
+
+
 def _in_flight_runs() -> dict[str, dict]:
     """``{task_id: {wid, epoch}}`` for every run that CLAIMS a live tmux window.
 
@@ -678,6 +743,99 @@ def _checks_report(declared: dict[str, dict], obs: Observation) -> list[Finding]
     if not out:
         out.append(Finding(OK, f"{len(declared)} PR(s) awaiting review: GitHub's checks "
                                "agree with what chela recorded, and none are red"))
+    return out
+
+
+# --- fact: a judge's BLOCKING verdict whose CAS write was refused (CMX-239) ------------
+#
+# CMX-239 gave this race its own state (`judge.J_BLOCKED_RACE`, never plain `J_CANNOT_VERIFY`
+# or `J_BLOCKED` — see that module's own comment for why) and its own urgent inbox event
+# (`run_judge_blocked_race`). But `inbox.run_events` is EDGE-TRIGGERED — keyed off
+# `seen[task_id]`, it fires once, the moment the row's `f"{status}:{judge_state}"` mark first
+# reads this way, and never again while the row sits still. A guard that SURVIVED CORRUPTION
+# on a commit that may already have shipped is exactly the finding CMX-187 taught this module
+# to worry about being missed by whoever happened to be watching at that one moment — and
+# unlike every other CMX-187 fact, there was nowhere a LATER `chela doctor` run could still
+# find it: nothing here reads `judge_state` at all. This closes that — a run stuck in
+# `J_BLOCKED_RACE` is reported every single time doctor runs, for as long as it stays stuck,
+# not just on the tick it happened.
+#
+# ⛔ CMX-240 round 2: this fact reports a row WHATEVER its status (a run that already shipped
+# with a lost blocking verdict is more alarming than one still under review, not less) — but
+# that means `status` can never be what clears it: a row's status changing is not evidence
+# ANYTHING about the verdict was resolved. The one thing that IS evidence: `judge_sha` (the
+# commit the race happened on) no longer being the PR's head. Either an operator ran `chela
+# judge run <task>` by hand — the documented way to clear a stale verdict (see
+# `judge.judge_run`'s own comment) — which stamps a fresh `judge_state` and takes the row out
+# of this scan on its own; or a later push moved `pr_head_sha` past the judged commit, which
+# means the specific commit this alarm was about is no longer what would ship, and
+# dispatcher's own per-sha trigger (`judge_sha != pr_head_sha`) re-judges the new head
+# automatically. A row whose head has NOT moved keeps reporting no matter how many times its
+# `status` changes underneath it — that is the guarantee `_blocked_race_resolved` encodes.
+
+
+def _blocked_race_resolved(row: dict) -> bool:
+    """True once the PR's head has moved past the commit the race was recorded on — the
+    only thing (besides `judge_state` itself changing, which already takes a row out of the
+    scan below) that resolves a `J_BLOCKED_RACE` row. A missing `judge_sha` or `pr_head_sha`
+    proves nothing either way, so it does NOT resolve — silence is not a signal here."""
+    sha = row.get("judge_sha")
+    head = row.get("pr_head_sha")
+    return bool(sha and head and sha != head)
+
+
+def _blocked_race_scan() -> dict[str, dict]:
+    """Every run row whose `judge_state` is `judge.J_BLOCKED_RACE` and that has not since
+    been resolved (see `_blocked_race_resolved`) — the CAS-refused race on a BLOCKING
+    verdict (CMX-239). A module-level function, like `_parked_runs` / `_reviewed_prs`
+    above, so the test suite can hand it a fixed table instead of reaching
+    `dispatcher.DB_PATH` (cached at import time against the real ``~/.chela``, not the
+    fixture's temp one)."""
+    from chela import dispatcher, judge          # lazy: doctor must import cheaply
+
+    if not Path(dispatcher.DB_PATH).exists():
+        return {}
+    out: dict[str, dict] = {}
+    for run in dispatcher.list_runs():
+        if run.get("judge_state") != judge.J_BLOCKED_RACE:
+            continue
+        if _blocked_race_resolved(run):
+            continue
+        out[str(run["task_id"])] = {
+            "status": str(run.get("status")),
+            "pr_url": run.get("pr_url"),
+            "detail": str(run.get("judge_detail") or ""),
+            "sha": run.get("judge_sha"),
+        }
+    return out
+
+
+def _blocked_race_read() -> Observation:
+    return observed(_blocked_race_scan())
+
+
+def _blocked_race_report(_declared: None, obs: Observation) -> list[Finding]:
+    rows: dict[str, dict] = obs.value or {}
+    if not rows:
+        return [Finding(OK, "no run carries a blocked-race judge verdict (CMX-239)")]
+    out: list[Finding] = []
+    for task, row in sorted(rows.items()):
+        pr = row.get("pr_url")
+        ref = f" — {pr}" if pr else " — no PR link on the row"
+        detail = row.get("detail", "")[:140]
+        out.append(Finding(
+            ERROR,
+            f"run {task} has a BLOCKING judge verdict that survived the CAS race "
+            f"(judge.J_BLOCKED_RACE) — the row is stuck at {row.get('status')!r}",
+            "A guard SURVIVED CORRUPTION on "
+            f"{row.get('sha') or 'a commit this row no longer names'}, but "
+            "`request_changes`'s CAS was refused — the run moved out of `awaiting_review` "
+            "(a human merged it, or CI got there first) while the judge was still working, "
+            "so the row was never sent back. `inbox.run_events` raised this once already, "
+            "on the tick it happened (`run_judge_blocked_race`) — if that notification was "
+            "missed, this is the only other place it is ever said again. Check whether this "
+            f"already shipped{ref}.{': ' + detail if detail else ''}",
+        ))
     return out
 
 
@@ -2064,7 +2222,13 @@ def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
             "no wid). This is the 2026-07-14 outage exactly: five finished PRs went "
             "unreviewed because the queue was addressed to a window that no longer existed "
             "and nothing said so." + heal + " Fix: run `chela watch` in the orchestrator's "
-            "session — the queue is intact and goes out on its next idle tick.",
+            "session — the queue is intact and goes out on its next idle tick. That only "
+            "works if that session is CURRENTLY running inside a tmux window: one launched "
+            "outside tmux (by hand, e.g. after a reboot) cannot bind at all, and `chela "
+            "watch` there fails with 'no window id'. If nothing is running that session "
+            "anywhere, run `chela restore` instead — no live window required; it hands back "
+            "the exact fix (REVIVABLE re-addresses automatically, MANUAL gives the precise "
+            "relaunch command), which is the only remedy once the orchestrator is gone.",
         )]
 
     if wid not in live:
@@ -2073,7 +2237,11 @@ def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
             f"the decisions inbox is addressed to {wid}, and tmux has no such window",
             f"The session that registered as the orchestrator is gone. {queued} event(s) are "
             "queued behind that address and nothing is delivering them." + heal + " Register "
-            "the session that is doing the orchestrating: `chela watch`.",
+            "the session that is doing the orchestrating: `chela watch` — but that needs a "
+            "LIVE session to run it from. If the orchestrator process itself is dead "
+            "(crashed, or never relaunched inside tmux), there is none, and `chela restore` "
+            "is the fallback: no live window required, and it hands back the exact relaunch "
+            "command for a session that has to be started by hand.",
         )]
 
     if not stamped:
@@ -2583,6 +2751,16 @@ def facts() -> list[Fact]:
             unverifiable_level=WARN,
         ),
         Fact(
+            name="tmux.node_ipc_env",
+            declared_by="nothing — chela never sets these; a clean spawn path requires "
+                        "their absence, not any particular value",
+            owned_by="tmux's GLOBAL environment — the table every window chela spawns, "
+                     "in ANY session, inherits from",
+            declare=lambda: None,
+            read_back=_node_ipc_env_read,
+            report=_node_ipc_env_report,
+        ),
+        Fact(
             name="dashboard.port",
             declared_by="CHELA_DASHBOARD_PORT (else the default)",
             owned_by="the process that BOUND the socket (it publishes dashboard.port)",
@@ -2782,6 +2960,18 @@ def facts() -> list[Fact]:
             declare=_reviewed_prs,
             read_back=_checks_read,
             report=_checks_report,
+        ),
+        Fact(
+            name="judge.blocked_race",
+            declared_by="nothing — chela never predicts this; a run row's judge_state "
+                        "either records the CAS-refused blocked-race (CMX-239) or it "
+                        "doesn't",
+            owned_by="the dispatcher's runs table — judge_state/judge_detail/judge_sha, "
+                     "set once by judge.judge_run and never revisited once the CAS is "
+                     "refused (CMX-239)",
+            declare=lambda: None,
+            read_back=_blocked_race_read,
+            report=_blocked_race_report,
         ),
         Fact(
             name="relay.transcripts",

@@ -203,8 +203,15 @@ def _empty() -> dict:
     # event still fires the instant the address is seen dead (below), but the phone push waits
     # to see whether the SAME outage is still true after `config.INBOX_ALARM_GRACE_SECONDS` —
     # a reboot/tmux-restart/handoff self-heals in seconds and should never buzz a pocket.
+    # `orchestrator_peer` is CMX-255's windowless address kind: a raw pid + (best-effort)
+    # session identity for a registering session with NO tmux window at all — see
+    # `register_peer`/`orchestrator_peer`/`peer_state` below. Deliberately its own field,
+    # never merged into `orchestrator`: a pid is not a wid, has no epoch to stamp, and a
+    # caller that needs a real window (peek/read/tmux anything) must never receive one from
+    # here — see `orchestrator_peer`'s docstring.
     return {"orchestrator": None, "orchestrator_epoch": None, "orchestrator_session": None,
-            "orchestrator_name": None, "watches": {}, "queue": [], "runs_seen": {},
+            "orchestrator_name": None, "orchestrator_peer": None, "watches": {}, "queue": [],
+            "runs_seen": {},
             "address_alarm": None, "address_alarm_since": None, "address_alarm_pushed": False}
 
 
@@ -391,12 +398,23 @@ def address_state(store: dict, statuses: dict[str, str],
             f"{epoch.describe(now_epoch)} — the server RESTARTED and renumbered the fleet. "
             f"That id does not name the orchestrator ({name!r}) any more, and may well name "
             "another agent, so nothing will be written to it. Re-register from the "
-            "orchestrator's session: `chela watch` (any dispatch does it for you).")
+            "orchestrator's session: `chela watch` (any dispatch does it for you). "
+            "`chela watch` only works if that session is CURRENTLY running inside a tmux "
+            "window — a session restarted outside tmux (e.g. by hand, after a reboot) "
+            "cannot bind at all, and `chela watch` there fails with 'no window id'. If "
+            "nothing is running that session anywhere, run `chela restore` instead — it "
+            "needs no live window and hands back the exact fix: REVIVABLE re-addresses "
+            "automatically, MANUAL gives the precise `CHELA_WID=@N claude --resume <sid>` "
+            "command to relaunch it, which is the only remedy in that case.")
     if statuses and wid not in statuses:
         return ADDR_GONE, (
             f"tmux has no claude running in {wid} — the session that registered as the "
             "orchestrator is gone. Its queue is intact and will go out to whichever session "
-            "registers next (`chela watch`).")
+            "registers next (`chela watch`). But `chela watch` needs a LIVE session to run "
+            "it from — if the orchestrator process itself is dead (crashed, or never "
+            "relaunched inside tmux), there is none, and `chela restore` is the fallback: "
+            "no live window required, and it hands back the exact relaunch command for a "
+            "session that has to be started by hand.")
     if not stamped and now_epoch:
         return ADDR_UNSTAMPED, (
             f"{wid} carries no tmux epoch (recorded before CMX-77, or pinned with "
@@ -469,6 +487,80 @@ def register(by: str) -> dict:
         _clear_address_alarm(store)
         queued = len(store["queue"])
     return {"ok": True, "orchestrator": by, "epoch": now, "session": session, "queued": queued}
+
+
+# --- the windowless orchestrator: a raw pid, no tmux window at all (CMX-255) ----
+
+# What a registered `orchestrator_peer` is WORTH, right now — the pid-addressed counterpart
+# of ADDR_OK/ADDR_DANGLING/ADDR_GONE above, checked by `peer_state`.
+PEER_OK = "ok"           # the registered pid is alive and is still the SAME process
+PEER_STALE = "stale"     # ⛔ the OS reused that pid for a different process since registration
+PEER_GONE = "gone"       # nothing is running at that pid any more
+
+
+def register_peer(pid: int, session: str | None) -> dict:
+    """Register a WINDOWLESS session as the orchestrator, addressed by its own pid rather
+    than a tmux window id — the ``chela watch`` fallback for when
+    :func:`chela.orchestrator.self_wid` is None: no live tmux window exists for this session
+    at all, so there is no ``@N`` for :mod:`chela.epoch` to stamp.
+
+    A SEPARATE address kind from :func:`register`/:func:`watch`'s wid-based one, not a
+    variant of it (see ``orchestrator_peer``'s docstring) — this never touches
+    ``store["orchestrator"]``, so a wid-based registration (if one exists) is untouched and
+    still tried first by :func:`deliver`.
+
+    ``session`` (best-effort, via :func:`chela.sessions.session_id_for_pid`) is recorded for
+    display/audit only: unlike the wid path, delivery here never needs it — the peer socket
+    is reached by ``pid`` alone. ``started`` is the pid's own ``/proc`` fork time
+    (:func:`chela.sessions.proc_started`), recorded now and re-checked by :func:`peer_state`
+    before every delivery — the pid-reuse guard that plays the role :mod:`chela.epoch` plays
+    for a window id: a pid the OS has since handed to a different process is a stranger, not
+    the orchestrator, and CMX-48's "a wrong address is worse than no address" applies to a
+    pid exactly as it does to a wid.
+    """
+    started = sessions.proc_started(pid)
+    with locked_store() as store:
+        store["orchestrator_peer"] = {
+            "pid": pid, "session": session, "started": started, "since": time.time(),
+        }
+        _clear_address_alarm(store)
+        queued = len(store["queue"])
+    return {"ok": True, "pid": pid, "session": session, "queued": queued}
+
+
+def orchestrator_peer(store: dict | None = None) -> dict | None:
+    """The registered windowless-orchestrator record (CMX-255) — ``{"pid", "session",
+    "started", "since"}`` — or None if nothing has registered this way.
+
+    Independent of :func:`orchestrator_wid`: this is a different address KIND (a raw pid,
+    no tmux window at all), never merged into "the" orchestrator address. A caller that
+    needs an actual window id (peek/read/tmux anything) must keep using
+    :func:`orchestrator_wid`, which this never satisfies — and a caller that wants to know
+    whether the fleet has EITHER kind of orchestrator registered must check both.
+    """
+    store = load() if store is None else store
+    return store.get("orchestrator_peer")
+
+
+def peer_state(peer: dict) -> tuple[str, str]:
+    """Is a registered windowless-orchestrator record worth writing to? — ``(state, why)``.
+
+    The pid-addressed counterpart of :func:`address_state`'s wid checks, minus the
+    dangling/unstamped cases (there is no tmux epoch for a pid to be issued by, or stamped
+    against): GONE (the process exited — nothing at that pid any more) or STALE (the OS
+    reused the pid for an unrelated process since registration — refused for the same
+    CMX-48 reason a dangling wid is: a wrong address is worse than no address), else OK.
+    """
+    started_now = sessions.proc_started(peer["pid"])
+    if started_now is None:
+        return PEER_GONE, f"pid {peer['pid']} is no longer running"
+    recorded = peer.get("started")
+    if recorded is not None and abs(started_now - recorded) > 1.0:
+        return PEER_STALE, (
+            f"pid {peer['pid']} is a DIFFERENT process now (started {started_now:.0f}, "
+            f"registered against {recorded:.0f}) — the OS reused the pid since "
+            "registration. Re-register from the live session: `chela watch`.")
+    return PEER_OK, ""
 
 
 def unregister(wid: str) -> dict:
@@ -1001,9 +1093,15 @@ def run_events(runs: list[dict], seen: dict[str, str],
         judge_state = run.get("judge_state") or ""
         # ⚖️🔔 CMX-229 Objective 1: `cannot_verify` is tracked even OFF `awaiting_review` —
         # see the branch below for why (the CAS-refused race, measured live on CMX-227).
+        # ⚖️🧊 CMX-239: `J_BLOCKED_RACE` is tracked unconditionally, for the same reason —
+        # it is the SAME CAS-refused race, for a verdict `judge.judge_run` records as its
+        # OWN distinct value (never plain `J_BLOCKED`, see its CMX-239 comment) precisely
+        # so it can never be confused with an ordinary blocked run that later moved on, and
+        # so this branch can raise it at full severity instead of a shrug.
         mark = (
             f"{status}:{judge_state}"
-            if status == "awaiting_review" or judge_state == judge.J_CANNOT_VERIFY
+            if status == "awaiting_review" or judge_state in (
+                judge.J_CANNOT_VERIFY, judge.J_BLOCKED_RACE)
             else status
         )
         prev_mark = seen.get(task_id)
@@ -1054,6 +1152,36 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"while it was working) — needs a human look"
                 f"{': ' + detail if detail else ''} — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif judge_state == judge.J_BLOCKED_RACE:
+            # ⚖️🧊 CMX-239. The twin of the CANNOT_VERIFY branch above, for the CAS-refused
+            # race on a BLOCKING verdict: the run left `awaiting_review` (a human merged it,
+            # or CI got there first) WHILE the judge was mid-run, so `request_changes`'s CAS
+            # correctly refused to send it back — but `judge.judge_run` records this as its
+            # OWN state (`J_BLOCKED_RACE`, never plain `J_BLOCKED` — that value also sits on
+            # a row long after an ORDINARY blocked run settles, through rework rounds and
+            # even an eventual `needs_human` escalation, so reusing it here would make that
+            # unrelated later status change misread as this race — see judge.py's comment).
+            # No status check needed: `J_BLOCKED_RACE` is set from exactly one place and
+            # means exactly one thing, unlike `J_CANNOT_VERIFY` above (which also arises
+            # from an ordinary settle while still `awaiting_review`). Ordinarily a `blocked`
+            # verdict IS a `changes_requested` transition (`request_changes` sets both
+            # atomically) — reaching this branch means that transition was refused, so a
+            # guard SURVIVED CORRUPTION on a commit that already shipped, or is about to,
+            # with nobody told. That is a strictly more urgent outcome than "cannot verify":
+            # the judge did its job and the answer was bad.
+            payload["judge_state"] = judge_state
+            payload["judge_detail"] = run.get("judge_detail")
+            payload["judge_sha"] = run.get("judge_sha")
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            detail = str(run.get("judge_detail") or "")[:140]
+            out.append(_event(
+                "run_judge_blocked_race",
+                f"⚖️⚠️ {label} — a guard SURVIVED CORRUPTION but the run already moved to "
+                f"{status!r} before it could be sent back — needs a human look NOW "
+                f"(check whether this already shipped)"
+                f"{': ' + detail if detail else ''} — {ref}"
+                f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "awaiting_review" and judge_state in (judge.J_CLEAN, judge.J_CANNOT_VERIFY):
             # The judge settled while `status` sat still. This is the ONLY place either
             # verdict becomes visible to the orchestrator — `comment_body` already posted
@@ -1092,11 +1220,14 @@ def run_events(runs: list[dict], seen: dict[str, str],
         # absorbed. `fresh[task_id]` is already updated above, so this transition itself
         # never re-fires.
         elif status == "needs_human":
-            # The rework loop gave up (CMX-68): the PR was sent back MAX_REWORKS times and
-            # still fails review. This is the one run state a human MUST see — the loop is
-            # bounded precisely so it surfaces here instead of spinning — so it carries the
-            # HISTORY: every verdict this run ever received, not just the last thing said.
-            # Nothing has been thrown away: the branch, the worktree and the PR are intact.
+            # A run reaches `needs_human` through several DISTINCT `dispatcher._escalate`
+            # call sites — the rework loop spending its budget ("the PR still fails
+            # review"), but just as often a judge that died mid-review, checks stuck
+            # pending forever, or a rework that could not even re-attach its worktree
+            # (branch gone, git error). This is the one run state a human MUST see, so it
+            # carries the HISTORY: every verdict this run ever received, not just the last
+            # thing said. Nothing has been thrown away: the branch, the worktree and the
+            # PR are intact.
             reviews = _reviews(run)
             payload["rework_count"] = run.get("rework_count") or 0
             payload["reviews"] = reviews
@@ -1104,12 +1235,13 @@ def run_events(runs: list[dict], seen: dict[str, str],
             payload["worktree_path"] = run.get("worktree_path")
             pr = run.get("pr_url")
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            reason = _needs_human_reason(run)
             out.append(_event(
                 "run_needs_human",
                 # No parens, no `(s)`: the summary is sanitized before it is typed at a
                 # prompt (_event), and bracket punctuation comes back out mid-word.
                 f"📥 {label} NEEDS A HUMAN — reworks: {payload['rework_count']} · verdicts "
-                f"on the row: {len(reviews)} · the PR still fails review — {ref}"
+                f"on the row: {len(reviews)} · {reason} — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "changes_requested":
             # ⛔ NOT a silent state (CMX-68 review). A run sits here waiting for a dispatcher
@@ -1139,6 +1271,30 @@ def run_events(runs: list[dict], seen: dict[str, str],
                               f"📥 {label} FAILED{' — ' + err[0][:120] if err else ''}"
                               f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
     return out, fresh
+
+
+def _needs_human_reason(run: dict) -> str:
+    """Why THIS run reached ``needs_human`` — from its own ``last_error``, never a guess.
+
+    ``dispatcher._escalate`` is the only writer of ``last_error`` on this transition, and
+    every one of its call sites hands it a DIFFERENT ``reason`` — a spent rework budget, a
+    dead judge, checks stuck pending, a rework that couldn't re-attach its worktree. It is
+    formatted by ``dispatcher._format_escalation`` as ``reason`` optionally followed by
+    ``"\\n\\nRecommendation: ..."`` and ``"\\n\\nOptions:\\n  - ..."`` (CMX-242) — only the
+    first paragraph is the reason itself, so that's the part that belongs in a one-line
+    summary; the rest is already in the payload (``last_error``) for anyone who opens the
+    event. A row with no ``last_error`` at all (hand-written in a test, or an escalation
+    path that changes shape later) still gets an honest summary instead of silently
+    re-asserting the one specific cause this replaces (CMX-247).
+    """
+    reason = str(run.get("last_error") or "").split("\n\n", 1)[0]
+    reason = " ".join(reason.split())
+    if not reason:
+        return "the loop gave up — no reason recorded"
+    limit = SUMMARY_TITLE_CHARS
+    if len(reason) <= limit:
+        return reason
+    return reason[:limit].rsplit(" ", 1)[0] + "…"
 
 
 def _reviews(run: dict) -> list[dict]:
@@ -1196,15 +1352,18 @@ def stale_reason(event: dict, runs: list[dict],
     way: best-effort, like every other GitHub read in this codebase — it does not itself
     manufacture staleness, it only catches an ACTUAL, OBSERVED mismatch.
 
-    ⚖️🔔 CMX-229 Objective 1: ``run_judge_cannot_verify`` is handled SEPARATELY from its
-    sibling ``run_judge_clean`` — it is the one judge outcome that must reach someone
-    regardless of what happened to the run afterward (see :func:`run_events`'s matching
-    comment), so it is exempt from the status/pr_state rot below on purpose. Only the
-    live-head supersession check still applies to it.
+    ⚖️🔔 CMX-229 Objective 1 (and ⚖️🧊 CMX-239's twin, ``run_judge_blocked_race``):
+    ``run_judge_cannot_verify`` is handled SEPARATELY from its sibling ``run_judge_clean``
+    — it is a judge outcome that must reach someone regardless of what happened to the run
+    afterward (see :func:`run_events`'s matching comment), so it is exempt from the
+    status/pr_state rot below on purpose. Only the live-head supersession check still
+    applies to it. ``run_judge_blocked_race`` — the SAME CAS-refused race, but for a
+    CONFIRMED blocking finding rather than an unknown — gets the identical treatment: it
+    is strictly the more urgent of the two, never the less.
     """
     kind = event.get("kind")
     if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested",
-                     "run_judge_clean", "run_judge_cannot_verify"):
+                     "run_judge_clean", "run_judge_cannot_verify", "run_judge_blocked_race"):
         return None
     payload = event.get("payload") or {}
     task_id = payload.get("task_id")
@@ -1214,17 +1373,19 @@ def stale_reason(event: dict, runs: list[dict],
     if run is None:
         return "run row is gone"
     status, pr_state = run.get("status"), run.get("pr_state")
-    if kind == "run_judge_cannot_verify":
-        # ⚖️🔔 CMX-229 Objective 1. Unlike `run_review`/`run_judge_clean`, "the judge could
-        # not verify this commit" is NOT superseded by whatever happened to the run
-        # afterward — it is not a request to go look at `awaiting_review` (there may be
-        # nothing there to look at any more), it is a fact about a commit that was never
-        # actually checked. Dropping it once the run left `awaiting_review` or its PR
-        # merged/closed is exactly the failure this objective closes: that is the
-        # CAS-refused race (CMX-227, measured live) where the run moves on WHILE the
-        # judge is still working, and the resulting verdict is the one record that a
-        # SURVIVED-mutation finding might exist, undetected, on a commit already shipped.
-        # Only a genuinely superseded commit (a newer head already judged) rots this claim.
+    if kind in ("run_judge_cannot_verify", "run_judge_blocked_race"):
+        # ⚖️🔔 CMX-229 Objective 1 / ⚖️🧊 CMX-239. Unlike `run_review`/`run_judge_clean`,
+        # neither "the judge could not verify this commit" nor "a guard SURVIVED
+        # corruption" is superseded by whatever happened to the run afterward — it is not a
+        # request to go look at `awaiting_review` (there may be nothing there to look at any
+        # more), it is a fact about a commit. Dropping it once the run left `awaiting_review`
+        # (or `changes_requested`, for the blocking twin) or its PR merged/closed is exactly
+        # the failure CMX-229 closed for the unknown case and CMX-239 closes for the
+        # confirmed one: that is the CAS-refused race (CMX-227, measured live) where the run
+        # moves on WHILE the judge is still working, and the resulting verdict is the one
+        # record that a SURVIVED-mutation finding might exist, undetected, on a commit
+        # already shipped. Only a genuinely superseded commit (a newer head already judged)
+        # rots this claim.
         if live_heads is not None:
             judged_sha = payload.get("judge_sha")
             live_sha = live_heads.get(task_id)
@@ -1416,23 +1577,65 @@ def deliver(store: dict, statuses: dict[str, str],
 
     Returns the events actually delivered (each exactly once — a delivered event is
     popped from the durable queue before we return, so no tick can re-send it).
-    """
-    orch = orchestrator_wid(store)
-    if not orch or not store["queue"]:
-        return []
-    state, why = address_state(store, statuses, now_epoch)
-    if state in UNDELIVERABLE:
-        _undeliverable(store, state, orch, why, len(store["queue"]), alarms)
-        return []
-    if state == ADDR_UNSTAMPED:
-        log.warning("inbox: %s", why)
-    if statuses.get(orch) != IDLE:
-        return []
-    # A real, idle window at the address: whatever it was alarming about is over, and the
-    # next failure — even the same kind — is news again rather than a de-duped repeat.
-    _clear_address_alarm(store)
-    runs = runs or []
 
+    **CMX-255: falls back to a windowless peer registration** (:func:`register_peer`) when
+    there is no LIVE wid-based orchestrator to deliver to at all — nobody has ever run
+    ``chela watch`` from a window (``ADDR_NONE``), or the recorded ``@N`` has rotted
+    (``ADDR_DANGLING``/``ADDR_GONE``) and :func:`_undeliverable` has already shouted about
+    it above. A wid orchestrator that is merely BUSY is left alone exactly as before — it is
+    alive and will go idle on its own, so the peer fallback is never raced against it.
+    """
+    if not store["queue"]:
+        return []
+    runs = runs or []
+    orch = orchestrator_wid(store)
+    if orch:
+        state, why = address_state(store, statuses, now_epoch)
+        if state in UNDELIVERABLE:
+            _undeliverable(store, state, orch, why, len(store["queue"]), alarms)
+            # fall through to the windowless-peer fallback below
+        else:
+            if state == ADDR_UNSTAMPED:
+                log.warning("inbox: %s", why)
+            if statuses.get(orch) != IDLE:
+                return []
+            # A real, idle window at the address: whatever it was alarming about is over,
+            # and the next failure — even the same kind — is news again, not a de-dup repeat.
+            _clear_address_alarm(store)
+            return _deliver_loop(
+                store, runs, live_heads, target_desc=orch, event_wid=orch,
+                send=lambda text: messenger.send_peer(orch, "chela-inbox", text),
+                tmux_fallback=lambda text: messenger.send_tmux(orch, text))
+
+    peer = orchestrator_peer(store)
+    if not peer:
+        return []
+    pstate, pwhy = peer_state(peer)
+    if pstate != PEER_OK:
+        if pstate == PEER_STALE:
+            log.warning("inbox: %s", pwhy)
+        return []
+    pid = peer["pid"]
+    # Native status is pid-keyed (`claude agents --json`), so it needs no window either —
+    # the same idle gate the wid path applies, read a different way. `statuses` (the wid-
+    # keyed view `status_snapshot()` passed in) has nothing for a windowless pid at all.
+    if agent_manager.session_status_map()["by_pid"].get(pid) != IDLE:
+        return []
+    return _deliver_loop(
+        store, runs, live_heads, target_desc=f"pid {pid}", event_wid=None,
+        send=lambda text: messenger.send_peer_to_pid(pid, "chela-inbox", text),
+        tmux_fallback=None)
+
+
+def _deliver_loop(store: dict, runs: list[dict], live_heads: dict[str, str] | None, *,
+                  target_desc: str, event_wid: str | None, send, tmux_fallback) -> list[dict]:
+    """The actual send loop :func:`deliver` runs once it has picked a live address — shared
+    between the wid-based orchestrator and CMX-255's windowless peer fallback, which differ
+    only in HOW a message reaches the target: ``send`` is the peer-socket attempt (already
+    bound to its target — a wid or a raw pid), ``tmux_fallback`` is the pane-paste retry
+    (``None`` for the peer fallback: with no window there is no pane to paste into, so
+    ``send`` failing there means genuinely undeliverable, not "try tmux next").
+    """
     sent: list[dict] = []
     while store["queue"] and len(sent) < MAX_DELIVERIES_PER_TICK:
         event = store["queue"][0]
@@ -1454,26 +1657,26 @@ def deliver(store: dict, statuses: dict[str, str],
         # a tmux refusal): unlike an agent-to-agent room dispatch, this queue's
         # events are merge verdicts the orchestrator must eventually see, so a
         # gate that is transient today is worth retrying on a later tick.
-        peer = messenger.send_peer(orch, "chela-inbox", text)
+        peer = send(text)
         if peer.handed_off and peer.status in messenger.ADVERSE_RECEIPT_STATUSES:
             log.warning("inbox: delivery of %s to %s was %s; holding it queued",
-                        event.get("kind"), orch, peer.status)
+                        event.get("kind"), target_desc, peer.status)
             event_log.append(
-                "inbox_receipt", f"📭 inbox {event.get('kind')} {peer.status} at {orch}",
+                "inbox_receipt", f"📭 inbox {event.get('kind')} {peer.status} at {target_desc}",
                 {"kind": event.get("kind"),
                  "task_id": (event.get("payload") or {}).get("task_id"),
-                 "status": peer.status}, wid=orch,
+                 "status": peer.status}, wid=event_wid,
             )
             break
-        if not (peer.handed_off or messenger.send_tmux(orch, text)):
+        if not (peer.handed_off or (tmux_fallback and tmux_fallback(text))):
             # Includes the unsafe-input-mode refusal: HOLD, never drop. The pane will be
             # back at its prose prompt eventually, and the event is still true.
             log.warning("inbox: delivery of %s to %s refused/failed; holding it queued",
-                        event.get("kind"), orch)
+                        event.get("kind"), target_desc)
             break
         store["queue"].pop(0)
         sent.append(event)
-        log.info("inbox: delivered %s -> %s", event["kind"], orch)
+        log.info("inbox: delivered %s -> %s", event["kind"], target_desc)
     return sent
 
 

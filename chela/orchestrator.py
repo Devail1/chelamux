@@ -56,6 +56,22 @@ def self_wid() -> str | None:
     return None
 
 
+def self_peer() -> dict | None:
+    """``{"pid", "session"}`` for THIS process's own Claude Code ancestor, resolved purely
+    from process ancestry — the identity a windowless session registers under when
+    :func:`self_wid` is None (no ``$CHELA_WID``, no tmux pane at all).
+
+    CMX-255: the delivery half of the mechanism CMX-254 deliberately deferred (see PR #323's
+    ``## Scope`` section). None if no claude ancestor can be found within
+    :func:`chela.sessions.own_claude_pid`'s bound — e.g. run from a plain shell, never
+    inside a claude session.
+    """
+    pid = sessions.own_claude_pid()
+    if pid is None:
+        return None
+    return {"pid": pid, "session": sessions.session_id_for_pid(pid)}
+
+
 def resolve_window(wid: str) -> dict | None:
     """``{wid, name, cwd}`` for a live window id, or None if it isn't live."""
     name = discovery.get_windows_by_id().get(wid)

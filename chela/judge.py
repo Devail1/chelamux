@@ -96,6 +96,28 @@ J_RUNNING = "running"
 J_CLEAN = "clean"
 J_BLOCKED = "blocked"
 J_CANNOT_VERIFY = "cannot_verify"
+# ⚖️🧊 CMX-239: a guard SURVIVED corruption, but `request_changes`'s CAS refused to record
+# it (the run moved out of `awaiting_review` while the judge was still working — a human
+# merged it, or the CI gate got there first). Deliberately its OWN value, never `J_BLOCKED`:
+# `J_BLOCKED` also persists on a row long after it settles (through rework rounds, even
+# through an eventual `needs_human` escalation — see `inbox.run_events`'s guard test), so
+# reusing it here would make a LATER, unrelated status change on an ordinary blocked run
+# misread as this race. This value means exactly one thing and is set from exactly one
+# place: the finding is real, and the run row never moved to reflect it.
+J_BLOCKED_RACE = "blocked_race"
+# ⚖️⏱️ CMX-246: this judge's OWN verdict is for a commit (``judge_sha``, or ``pr_head_sha`` at
+# launch if no judge_sha was stamped yet) that is no longer the PR's live head — a newer
+# commit landed while the mutation battery was still running (it takes minutes; CMX-238's own
+# comment names the exact race: "a judge whose verdict raced a newer commit landing on the PR
+# and lost"). Unlike every other value here, THIS ONE IS NEVER WRITTEN TO THE RUN ROW — it is
+# `judge_run`'s return value only. Writing it would either (a) burn a rework round
+# (`request_changes`) on a finding about code the run has already superseded, which can run
+# the automatic rework loop to its cap and escalate to `needs_human` for work already fixed by
+# the newer commit, or (b) for a clean verdict, overwrite `judge_state` with a stale `clean`
+# that may clobber a DIFFERENT, newer verdict a second judge (spawned for the new head by the
+# per-sha trigger) already recorded. Leaving the row untouched costs nothing: the same
+# per-sha trigger that already re-spawns "once per commit" fires for the new head on its own.
+J_STALE_HEAD = "stale_head"
 
 # A judge that proposes forty mutations is not being thorough, it is re-running the suite
 # forty times. The cap is enforced OUT LOUD (the report says what was dropped) — a silent
@@ -375,9 +397,27 @@ def _no_color_env() -> dict[str, str]:
     popping it — not merely leaving it — is what makes this effective on that box; setting
     only ``NO_COLOR`` and leaving ``FORCE_COLOR`` in place would still colour some runners
     that check ``FORCE_COLOR`` first.
+
+    ⛔ CMX-252: a judge spawned into a tmux window has ALSO been observed carrying
+    ``NODE_CHANNEL_FD`` — a leftover IPC-channel fd number from whatever forked the window's
+    ancestry (pm2 forks its managed processes through Node's own ``child_process.fork``,
+    IPC channel included, even for a non-Node target). If that inherited fd number happens
+    to resolve to something open-but-wrong in a freshly spawned ``node`` process (stdin, in
+    the reproduction: ``NODE_CHANNEL_FD=0 node --test x.test.mjs`` aborts with SIGABRT
+    before a single test runs), every ``node --test`` invocation ``judge.test_cmd`` shells
+    out to dies the same way — every JS suite fails, on every PR, for a reason that has
+    nothing to do with the PR. Popped for the same reason as ``FORCE_COLOR``: the judge's
+    own inherited environment is not the PR's suite to run under uncritically.
+
+    ``NODE_CHANNEL_SERIALIZATION_MODE`` — the sibling var Node sets alongside the fd to say
+    how to (de)serialize what crosses it — is popped too, even though it is inert on its own
+    once the fd is gone: a fixture that only ever checks the fd cannot tell a full scrub
+    apart from a regression that scrubs only the fd, so both are cleared together.
     """
     env = dict(os.environ)
     env.pop("FORCE_COLOR", None)
+    env.pop("NODE_CHANNEL_FD", None)
+    env.pop("NODE_CHANNEL_SERIALIZATION_MODE", None)
     env["NO_COLOR"] = "1"
     env["PY_COLORS"] = "0"
     return env
@@ -908,10 +948,33 @@ def run_experiments(
         )
         return report
 
+    outcomes, contamination = _apply_experiments(worktree, test_cmd, items, baseline, timeout)
+    report.outcomes.extend(outcomes)
+    if contamination:
+        report.cannot_verify = contamination
+    return report
+
+
+def _apply_experiments(
+    worktree: Path, test_cmd: str, items: list, baseline: SuiteResult, timeout: float,
+) -> tuple[list[Outcome], str]:
+    """Apply, adjudicate, and restore every ``items`` entry against an already-green
+    ``baseline``. Shared by :func:`run_experiments` (the judge's PR pass, a throwaway
+    detached checkout) and :func:`self_check` (an agent's own worktree, before it commits) —
+    the mechanics of proving a mutation landed, still parses, and gets restored do not change
+    with who is asking; only what happens BEFORE this (a dirty-worktree gate the judge needs
+    and self-check must not have — see :func:`self_check`) differs.
+
+    Returns ``(outcomes, contamination)``. ``contamination`` is ``""`` unless a mutation could
+    not be restored, in which case it names why and the caller must treat the WHOLE report as
+    ``cannot_verify`` — the outcomes already collected were measured before the contamination
+    and are returned anyway, but nothing after it is trustworthy.
+    """
+    outcomes: list[Outcome] = []
     for raw_exp in items:
         exp, why = Experiment.parse(raw_exp)
         if exp is None:
-            report.outcomes.append(Outcome(
+            outcomes.append(Outcome(
                 Experiment(guard=str(raw_exp)[:120], file="?", before="", after=""),
                 INVALID, f"the experiment is malformed ({why})", baseline, None, "",
             ))
@@ -922,7 +985,7 @@ def run_experiments(
         except ValueError:
             # ⛔ `../../etc/hosts`. The judge writes to the filesystem; it writes INSIDE the
             # throwaway worktree or it does not write.
-            report.outcomes.append(Outcome(
+            outcomes.append(Outcome(
                 exp, INVALID, f"{exp.file} is outside the judge worktree", baseline, None, "",
             ))
             continue
@@ -931,7 +994,7 @@ def run_experiments(
         try:
             parses, parse_detail = parse_check(path) if applied else (True, "")
             mutated = run_suite(test_cmd, worktree, timeout) if applied else None
-            report.outcomes.append(
+            outcomes.append(
                 adjudicate(exp, applied, reason, parses, parse_detail, baseline, mutated)
             )
         finally:
@@ -966,20 +1029,19 @@ def run_experiments(
             # would be about a codebase nobody wrote. Stop, and take the WHOLE report down
             # with it — including the findings already in hand, which were measured before
             # the contamination but are not worth the risk of being wrong about. This is the
-            # one path where `cannot_verify` and `outcomes` are both non-empty, and it is
-            # exactly why `Report.blocking` refuses to block on a cannot-verify report
-            # whatever its outcomes look like.
-            report.cannot_verify = (
-                f"{exp.file} could NOT be restored after its mutation — the judge worktree is "
+            # one path where the caller's `cannot_verify` and `outcomes` end up both
+            # non-empty, and it is exactly why `Report.blocking` refuses to block on a
+            # cannot-verify report whatever its outcomes look like.
+            log.error("judge: could not restore %s — abandoning the whole report (%s)", path,
+                      restore_detail or "no further detail")
+            return outcomes, (
+                f"{exp.file} could NOT be restored after its mutation — the worktree is "
                 "contaminated and every measurement after this point would be about code "
                 f"nobody wrote{': ' + restore_detail if restore_detail else ''}. ⛔ Nothing was "
                 "blocked and nothing was cleared."
             )
-            log.error("judge: could not restore %s — abandoning the whole report (%s)", path,
-                      restore_detail or "no further detail")
-            break
 
-    return report
+    return outcomes, ""
 
 
 # --- the verdict: what gets written, and where -------------------------------
@@ -1030,6 +1092,23 @@ def _notes_section(notes: list[dict]) -> str:
         body = str(note.get("body") or "").strip()
         lines.append(f"- **{title}**" + (f" — {body}" if body else ""))
     return "\n".join(lines) + "\n"
+
+
+def _stale_head_notice(judged_sha: str, live_head: str) -> str:
+    """⚖️⏱️ CMX-246 Objective 2: prefixed onto the PR comment when a verdict is superseded.
+
+    Not charging a stale verdict fixes the rework budget; it does nothing for the human who
+    still has to tell a stale verdict apart from a live one. Without this, the only way to
+    tell is diffing the verdict's timestamp against the PR's commit history by hand — the
+    exact thing that motivated this ticket (CMX-230, CMX-240 twice, CMX-243). Naming both
+    shas here is what stops a human from re-triaging this finding as if it were current.
+    """
+    return (
+        f"> ⚖️⏱️ **SUPERSEDED** — this verdict is for `{judged_sha[:12]}`, but a newer "
+        f"commit, `{live_head[:12]}`, landed on this PR before the judge finished. Shown "
+        "for the record only: no rework round was spent and nothing on the run row moved. "
+        "A fresh judge is already re-checking the new head on its own."
+    )
 
 
 def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
@@ -1138,6 +1217,139 @@ def load_experiments(path: str | Path) -> tuple[dict, str]:
     return raw, ""
 
 
+# --- the CHECK, not the habit --------------------------------------------------------------
+#
+# ⚖️🔎 CMX-249. WORKFLOW.md's Done Criteria used to tell every dispatched agent, in prose, to
+# "corrupt each guard and watch it go RED" BY HAND before it commits — and a full night of
+# judge findings was almost entirely this: the exact defect class the prose warns against,
+# surviving anyway. Prose is a habit; it depends on the agent remembering to run it, doing
+# the apply/parse/restore correctly by itself, and picking the same suite the judge will
+# later measure against. It is also *slower and less exact* by hand than by machine — every
+# one of the mistakes documented at the top of this module (an unapplied `sed`, an
+# unbalanced brace) was made BY HAND. :func:`self_check` is the CHECK: the identical
+# apply_mutation / parse_check / run_suite / adjudicate mechanics the judge itself runs
+# against a PR, invoked here on demand, against the tree an agent is about to commit — so
+# "does this guard discriminate?" is one command (``chela judge self-check``), not a memory.
+
+
+def self_check(
+    worktree: Path, test_cmd: str, raw: dict, *, timeout: float = SUITE_TIMEOUT_SECONDS,
+) -> Report:
+    """Run the judge's own mutation mechanics against YOUR OWN worktree, before you commit.
+
+    Deliberately UNLIKE :func:`run_experiments` in two ways, both because this runs on a
+    worktree an agent is actively editing, not a throwaway detached checkout of somebody
+    else's already-pushed PR:
+
+    * **NO git-dirty gate.** Uncommitted tracked changes are the entire point — the guard
+      about to be committed IS the uncommitted edit. ``run_experiments`` refuses a dirty
+      worktree because a stray edit there is an unknown confound in someone ELSE's PR; here
+      there is no "someone else", and :func:`_apply_experiments` restores each mutated file
+      after measuring it exactly as it does for the judge, so the surrounding uncommitted
+      work is never touched.
+    * **NO base_branch diagnosis on a red baseline.** ``_diagnose_red_baseline`` checks out
+      ``base_branch`` and back with ``git checkout --detach`` — safe on the judge's throwaway
+      worktree, NOT safe here: run against a tree carrying uncommitted work, a mid-diagnosis
+      checkout is exactly the kind of hard-to-reverse git operation that risks that work. A
+      red baseline is reported plainly instead, with no branch-hopping.
+
+    Everything else — the green-baseline requirement, the experiment cap, provisioning the
+    suite env, and the apply/parse/run/restore/adjudicate loop itself — is the same mechanism
+    :func:`run_experiments` uses, because a guard that can't discriminate doesn't discriminate
+    any less for being caught early.
+    """
+    report = Report()
+    items = raw.get("experiments") if isinstance(raw, dict) else None
+    notes = raw.get("notes") if isinstance(raw, dict) else None
+    report.notes = [n for n in notes if isinstance(n, dict)] if isinstance(notes, list) else []
+
+    if not isinstance(items, list) or not items:
+        report.cannot_verify = (
+            "no experiments were given — nothing was corrupted, so nothing was proven. ⛔ "
+            "Unknown is not a pass: write at least one {guard, file, before, after} "
+            "experiment per guard you added or changed, corrupting the invariant it claims "
+            "to protect."
+        )
+        return report
+
+    if len(items) > MAX_EXPERIMENTS:
+        report.dropped = len(items) - MAX_EXPERIMENTS
+        items = items[:MAX_EXPERIMENTS]
+
+    env_problem = provision_suite_env(worktree)
+    if env_problem:
+        report.cannot_verify = (
+            f"the worktree could not be PROVISIONED to run the suite: {env_problem}"
+        )
+        return report
+
+    baseline = run_suite(test_cmd, worktree, timeout)
+    report.baseline = baseline
+    if not baseline.green:
+        why = baseline.detail or _last_meaningful_line(baseline.tail)
+        named = _failing_test_names(baseline.tail)
+        which = f" — failing: {', '.join(named)}" if named else ""
+        report.cannot_verify = (
+            f"the suite is NOT GREEN before any mutation (`{test_cmd}` exited "
+            f"{baseline.exit_code}{': ' + why if why else ''}{which}). Fix your own suite "
+            "before mutating it — a red baseline measures nothing, here or when the judge "
+            "measures it later."
+        )
+        return report
+
+    outcomes, contamination = _apply_experiments(worktree, test_cmd, items, baseline, timeout)
+    report.outcomes.extend(outcomes)
+    if contamination:
+        report.cannot_verify = contamination
+    return report
+
+
+def run_self_check(
+    worktree: str | Path, experiments_path: str | Path, *,
+    workflow_path: str | Path | None = None, test_cmd: str | None = None,
+    timeout: float | None = None,
+) -> dict:
+    """``chela judge self-check``'s entry point: load the experiments file an agent wrote,
+    resolve the suite to measure against, run :func:`self_check`, and return a JSON-friendly
+    dict shaped like :func:`judge_run`'s (``ok``/``state``/``outcomes``/``cannot_verify``).
+
+    The suite comes from ``--test-cmd`` if given, else ``judge.test_cmd`` in ``--workflow``
+    (the SAME ``WORKFLOW.md`` key :func:`judge_test_cmd` reads for the real judge) — so a
+    self-check that comes back clean was measured against the exact suite the judge will
+    later measure against, not a narrower one an agent could pick to always pass.
+    """
+    worktree = Path(worktree).resolve()
+    raw, err = load_experiments(experiments_path)
+    if err:
+        return {"ok": False, "error": err}
+
+    cmd = test_cmd.strip() if isinstance(test_cmd, str) and test_cmd.strip() else None
+    to = timeout
+    if workflow_path and (cmd is None or to is None):
+        from chela import workflow as workflow_mod
+
+        try:
+            wf = workflow_mod.load_workflow(workflow_path)
+        except Exception as e:      # a WORKFLOW.md that does not parse
+            return {"ok": False, "error": f"{workflow_path} could not be read: {e}"}
+        cmd = cmd or judge_test_cmd(wf)
+        to = to if to is not None else judge_suite_timeout(wf)
+    if not cmd:
+        return {"ok": False, "error": "no suite to run — pass --test-cmd, or --workflow "
+                                       "pointing at a WORKFLOW.md with `judge.test_cmd` set"}
+    if to is None:
+        to = SUITE_TIMEOUT_SECONDS
+
+    report = self_check(worktree, cmd, raw, timeout=to)
+    blocking = report.blocking
+    return {
+        "ok": True, "state": report.state, "blocking": len(blocking),
+        "outcomes": [o.as_dict() for o in report.outcomes],
+        "cannot_verify": report.cannot_verify, "notes": len(report.notes),
+        "dropped": report.dropped,
+    }
+
+
 def _reprovision_worktree(wf, worktree: Path, sha: str, base_branch: str) -> str:
     """Rebuild a REAPED judge worktree at ``sha`` — the run's CURRENT head, never the sha a
     stale verdict was recorded against. Returns ``""`` on success, else why it could not.
@@ -1183,7 +1395,7 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     ⛔ It never merges and never approves. A clean run is left in ``awaiting_review``, where
     the orchestrator finds it.
     """
-    from chela import dispatcher, workflow
+    from chela import dispatcher, event_log, workflow
 
     run = dispatcher.resolve_run(ident)
     if run is None:
@@ -1252,14 +1464,65 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         # automatic per-sha trigger does not immediately re-spawn a redundant judge on the
         # very commit this call just verified.
         judged_sha = run.get("pr_head_sha") if reprovisioned else None
+        # ⚖️⏱️ CMX-246: the commit THIS call actually tested — the sha a reprovisioned
+        # worktree was just rebuilt at (never `judge_sha`, which `_reprovision_worktree`
+        # explicitly discards: CMX-201 re-checks the run's CURRENT head, not the sha a stale
+        # verdict names), else `judge_sha` if `_spawn_judge` stamped one before launching this
+        # judge, else the `pr_head_sha` this row had when `judge_run` started (a worktree
+        # already on disk with no stamped `judge_sha` — a manual run outside the dispatcher's
+        # spawn path). Compared below, freshly re-read, against the PR's LIVE head right
+        # before either verdict-writing branch spends anything.
+        verified_sha = judged_sha or run.get("judge_sha") or run.get("pr_head_sha")
 
         blocking = report.blocking
         result = {"ok": True, "task_id": task_id, "state": report.state,
                   "blocking": len(blocking), "outcomes": [o.as_dict() for o in report.outcomes],
                   "cannot_verify": report.cannot_verify, "notes": len(report.notes)}
 
+        # ⚖️⏱️ CMX-246: a judge takes minutes to run its mutation battery. A NEW commit can
+        # land on the PR in that window (the per-sha trigger already re-spawns a fresh judge
+        # for it — this is "once per commit" working as designed), while THIS call is still
+        # mid-run on the OLDER head. Re-read live, right before either branch below would
+        # spend a rework round or overwrite `judge_state`: `run["pr_head_sha"]` above is up to
+        # several minutes stale, and trusting it would let a verdict about a superseded commit
+        # burn a round toward `CHELA_MAX_REWORKS` — and at the cap, escalate the run to
+        # `needs_human` for a finding the newer commit may have already fixed. Both sides must
+        # be KNOWN to count as a mismatch (an unset sha is not positive staleness evidence —
+        # same conservatism as `contract.merge`'s CMX-238 staleness gate).
+        live_run = dispatcher.resolve_run(task_id)
+        live_head = (live_run or {}).get("pr_head_sha")
+        stale_head = bool(verified_sha and live_head and verified_sha != live_head)
+
+        if stale_head:
+            log.warning(
+                "judge: %s verdict is for %s, but the PR's head is now %s — a newer commit "
+                "landed while the judge ran. The finding stays on the PR as a comment, but "
+                "this call must not spend a rework round (or overwrite judge_state) for a "
+                "head that no longer exists; the per-sha trigger re-judges the new head on "
+                "its own.", task_id, verified_sha[:12], live_head[:12],
+            )
+            # ⚖️⏱️ CMX-246 Objective 2: `J_STALE_HEAD` is deliberately never written to the
+            # run row (see its docstring), so `inbox.run_events`'s row-diffing — the ONLY
+            # path an inbox event normally takes — can never see this. This is the durable,
+            # push-side record instead (the same pattern `contract.escalate` and
+            # `dispatcher._respawn_rework`'s reopen-nudge use): a fact a human or `chela
+            # events` can find without diffing a verdict's timestamp against the PR's commit
+            # history by hand.
+            event_log.append(
+                "judge.stale_head",
+                f"{task_id}: judge verdict for {verified_sha[:12]} superseded by "
+                f"{live_head[:12]} — discarded, no rework round spent",
+                payload={
+                    "task_id": task_id, "pr_url": pr_url,
+                    "judged_sha": verified_sha, "live_head_sha": live_head,
+                    "verdict": J_BLOCKED if blocking else report.state,
+                },
+            )
+
         if blocking:
             body = block_body(report, pr_url, test_cmd or "?")
+            if stale_head:
+                body = _stale_head_notice(verified_sha, live_head) + "\n\n" + body
             # ⚖️🕳️ CMX-228: POST FIRST, unconditionally — never behind the CAS below.
             # Before this, the ONLY way this comment reached the PR was inside
             # `request_changes`, past its `status == 'awaiting_review'` check AND its
@@ -1278,18 +1541,55 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
             if not posted:
                 log.warning("judge: %s blocking verdict did NOT post to the PR: %s",
                             task_id, post_detail)
+            if stale_head:
+                # ⚖️⏱️ CMX-246: skip `request_changes` entirely — a stale finding must not
+                # spend a round of `CHELA_MAX_REWORKS` (see `J_STALE_HEAD`'s docstring for the
+                # full reasoning). The comment above still posted, so the finding is not lost;
+                # only the round-spending carrier is refused.
+                result.update(ok=False, state=J_STALE_HEAD,
+                               error=f"verdict was for {verified_sha[:12]!r}, but the PR's "
+                                     f"head is now {live_head[:12]!r} — discarded, no round "
+                                     "spent")
+                result["comment_posted"] = posted
+                return result
             verdict = dispatcher.request_changes(task_id, body, post_comment=False)
             if not verdict.get("ok"):
-                # The CAS refused it: the row moved under us (a human merged it, or the CI gate
-                # got there first). The RUN ROW was not written — but the comment above was
-                # posted regardless, so the finding itself was not lost.
-                log.info("judge: %s found %d blocking finding(s), but the run row was not "
-                         "updated: %s", task_id, len(blocking), verdict.get("error"))
+                # ⚖️🧊 CMX-239: The CAS refused it: the row moved under us (a human merged it,
+                # or the CI gate got there first). The RUN ROW was not written — but the
+                # comment above was posted regardless, so the finding itself was not lost.
+                #
+                # ⛔ This is NOT a `cannot_verify` — the judge DID verify, and a guard
+                # SURVIVED corruption. Recording `J_CANNOT_VERIFY` here (as this used to)
+                # downgrades a confirmed BLOCKING finding to the same shrug-tier "the judge
+                # couldn't do its job" state as a launch failure or a flaky worktree. That is
+                # the inverted-severity bug CMX-228 already fixed for the PR comment — this is
+                # its twin, one layer down: the DB column (and everything that reads it — the
+                # inbox event, `chela status`, the retry trigger) still told the weaker story.
+                # A human skimming "cannot verify, needs a look" reads as an unknown; a run
+                # that already MERGED with a guard proven to survive corruption is not an
+                # unknown, it is the most urgent verdict this judge can produce.
+                #
+                # And it is NOT plain `J_BLOCKED` either — that value also sits on a row long
+                # after it settles (through rework rounds, even through an eventual
+                # `needs_human` escalation once the run genuinely reached `changes_requested`),
+                # so reusing it here would make an unrelated LATER status change on an
+                # ordinary blocked run misread as this race. `J_BLOCKED_RACE` means exactly
+                # one thing — the finding is real and the row never moved to reflect it — and
+                # is what lets `inbox.run_events` raise it at full severity regardless of what
+                # the row became, unambiguously, and what stops the per-sha retry trigger from
+                # wasting another mutation pass re-discovering a verdict that is already
+                # definitive.
+                moved = dispatcher.resolve_run(task_id)
+                log.warning("judge: %s found %d blocking finding(s), but the run row was not "
+                            "updated (already %r): %s", task_id, len(blocking),
+                            moved.get("status") if moved else "gone", verdict.get("error"))
                 dispatcher.set_judge_state(
-                    task_id, J_CANNOT_VERIFY,
-                    f"the run moved while the judge was running: {verdict.get('error')}",
+                    task_id, J_BLOCKED_RACE,
+                    "a guard SURVIVED corruption, but the run moved on before it could be "
+                    f"sent back: {verdict.get('error')}",
+                    sha=judged_sha,
                 )
-                result.update(ok=False, state=J_CANNOT_VERIFY, error=verdict.get("error"))
+                result.update(ok=False, state=J_BLOCKED_RACE, error=verdict.get("error"))
             else:
                 dispatcher.set_judge_state(
                     task_id, J_BLOCKED,
@@ -1302,16 +1602,28 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
             result["comment_posted"] = posted
         else:
             body = comment_body(report, pr_url, test_cmd or "?")
+            if stale_head:
+                body = _stale_head_notice(verified_sha, live_head) + "\n\n" + body
             posted, post_detail = dispatcher._post_pr_comment(pr_url, repo_dir, body)
             if not posted:
                 log.warning("judge: %s clean verdict did NOT post to the PR: %s",
                             task_id, post_detail)
-            dispatcher.set_judge_state(
-                task_id, report.state, report.cannot_verify or "every guard held",
-                sha=judged_sha,
-            )
-            log.info("judge: %s → %s (%d experiment(s))", task_id, report.state,
-                     len(report.outcomes))
+            if stale_head:
+                # ⚖️⏱️ CMX-246: do NOT stamp `judge_state`/`judge_sha` — a second judge
+                # already spawned for the new head (the per-sha trigger) may have already
+                # recorded ITS verdict on this row, and this call's older, stale verdict
+                # (`report.state` here) must never overwrite it. Leaving the row untouched
+                # costs nothing: whatever is on the row now is either that newer verdict, or
+                # still `J_RUNNING` from this call's own launch — either way correct, or about
+                # to be corrected by the trigger on its next tick.
+                result["state"] = J_STALE_HEAD
+            else:
+                dispatcher.set_judge_state(
+                    task_id, report.state, report.cannot_verify or "every guard held",
+                    sha=judged_sha,
+                )
+                log.info("judge: %s → %s (%d experiment(s))", task_id, report.state,
+                         len(report.outcomes))
             result["comment_posted"] = posted
 
         return result
