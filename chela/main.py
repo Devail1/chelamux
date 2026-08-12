@@ -1809,10 +1809,14 @@ def cmd_task_finished(args) -> None:
     experiments file here and this re-runs `judge.run_self_check` against the run's own
     worktree ONE more time and REFUSES the transition (exit 1) if a guard SURVIVED
     corruption or the check CANNOT VERIFY — the outcome now binds, not just the invocation.
-    ``--no-new-guards`` is the honest opt-out for a run that added none. Passing neither
-    is still accepted (a run dispatched under an older WORKFLOW.md never learned these
-    flags exist) but prints a loud warning — nothing downstream reads it, on purpose: an
-    old, in-flight agent must not be broken by a check it was never told to run.
+    ``--no-new-guards`` is the honest opt-out for a run that added none — cross-checked
+    (report-only, never blocking) against the run's own diff: if it touches ``tests/``
+    anyway, this warns loudly and logs an event, so the opt-out stays usable while misuse
+    of it stays visible instead of being a bare, uncheckable self-declaration. Passing
+    neither is still accepted (a run dispatched under an older WORKFLOW.md never learned
+    these flags exist) but prints a loud warning — nothing downstream reads it, on
+    purpose: an old, in-flight agent must not be broken by a check it was never told to
+    run.
     """
     experiments = getattr(args, "self_check_experiments", None)
     no_new_guards = getattr(args, "no_new_guards", False)
@@ -1839,6 +1843,11 @@ def cmd_task_finished(args) -> None:
         print(f"✓ self-check: every guard held ({len(check['outcomes'])} experiment(s)) — "
               "proceeding.")
     elif no_new_guards:
+        touched_tests = dispatcher.check_no_new_guards(args.task_id)
+        if touched_tests:
+            print("⚠ task-finished: --no-new-guards was passed, but this run's diff "
+                  "touches tests/ — Done Criteria #3 says a run that added or changed a "
+                  "guard must self-check it. Not blocked, but recorded.")
         print("task-finished: --no-new-guards — skipping self-check.")
     else:
         print("⚠ task-finished: neither --self-check-experiments nor --no-new-guards was "
@@ -2673,7 +2682,8 @@ def main() -> None:
     p_tf.add_argument(
         "--no-new-guards", action="store_true",
         help="This run added or changed no test/guard — the honest opt-out from "
-             "--self-check-experiments.",
+             "--self-check-experiments. Cross-checked (report-only, never blocking) "
+             "against this run's own diff for tests/ changes.",
     )
 
     # rework-disputed — the rework agent's "nothing to push" escape hatch

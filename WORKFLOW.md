@@ -169,7 +169,8 @@ message.
    - **Added or changed no guard this run?** `chela task-finished {{task_id}} --no-new-guards`
      — the honest opt-out. Do not reach for this to dodge a failing self-check; the judge
      still reads the diff and a guard that exists without a matching self-check is exactly
-     the gap this closes.
+     the gap this closes. It is checked (never blocked, but recorded) against your own
+     diff — passing it on a run that touches `tests/` prints a loud warning.
 
 **Do NOT touch the tracker file.** You do not tick your own checkbox — the dispatcher
 strikes it on `{{base_branch}}` once your PR actually **merges**. It is the file's only

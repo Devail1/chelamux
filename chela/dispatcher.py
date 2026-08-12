@@ -2078,6 +2078,55 @@ def verify_self_check(task_id: str, experiments_path: str) -> dict:
     }
 
 
+def check_no_new_guards(task_id: str) -> bool | None:
+    """⚖️🔎 CMX-250 review round 1: whether ``--no-new-guards`` looks WRONG for this run —
+    its diff (vs its own ``base_branch``, read from its own worktree, right now) touches
+    something under ``tests/``. Report-only, on purpose: the opt-out must stay usable for a
+    genuinely guard-free run, so this never refuses the transition — it makes a wrong
+    opt-out VISIBLE (an event, plus a loud CLI warning) instead of it being a bare
+    self-declaration nothing ever cross-checks, which is exactly how the prose version of
+    Done Criteria #3 failed.
+
+    Returns ``None`` when it cannot tell (no run on record, no worktree_path/workflow_path,
+    the workflow does not parse, or ``base_branch`` does not resolve on origin) — an
+    unknown must never be misread as "no test files touched".
+    """
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return None
+    worktree_path = row["worktree_path"]
+    try:
+        wf = load_workflow(row["workflow_path"])
+    except Exception:
+        return None
+    base_branch = wf.get("workspace", "base_branch", default="master")
+    ref = f"origin/{base_branch}"
+    resolved = subprocess.run(
+        ["git", "-C", worktree_path, "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True, errors="replace",
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return None
+    base_sha = resolved.stdout.strip()
+    diff = subprocess.run(
+        ["git", "-C", worktree_path, "diff", "--name-only", f"{base_sha}...HEAD"],
+        capture_output=True, text=True, errors="replace",
+    )
+    if diff.returncode != 0:
+        return None
+    files = [f for f in diff.stdout.splitlines() if f.strip()]
+    touched = [f for f in files if f.startswith("tests/")]
+    if touched:
+        event_log.append(
+            "no_new_guards_mismatch",
+            f"{task_id}: --no-new-guards was passed but the diff touches tests/ "
+            f"({len(touched)} file(s))",
+            payload={"task_id": task_id, "files": touched},
+        )
+    return bool(touched)
+
+
 def mark_awaiting_review(task_id: str) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
