@@ -39,37 +39,102 @@ const KANBAN = src('static/js/kanban.js');
 const VIEWS_SRC = src('static/js/views.js');
 
 // ---------------------------------------------------------------------------
-// A minimal, non-nested-aware CSS block splitter — good enough for this
-// stylesheet (same honest scoping tests/wallnav.test.mjs's media-aware parser
-// documents: jsdom can't resolve the cascade, so these are source-text facts).
-// Strips comments first so a commented-out example never masquerades as a rule.
+// A CSS parser that tracks BRACE NESTING (so a rule sitting inside an @media
+// override can be told apart from a top-level one) and RESOLVES same-selector
+// rules the way a browser's cascade would: the LAST declaration of a given
+// property, in source order, wins — whether the duplicate is a second
+// declaration inside ONE block, or a second TOP-LEVEL rule for the same
+// selector living somewhere else in a 3.5k-line stylesheet.
+//
+// CMX-230 round 11 (read before extending this file further): rounds 6-10
+// each closed one INSTANCE of the same hole — a guard that reads only the
+// first matching block/declaration/rule and never asks "what does this
+// actually resolve to" — and each round's fix left the next notation/
+// property/selector-shaped instance of it standing. cssRules()/
+// resolvedBody()/resolvedRootVars() below resolve the property instead of
+// pattern-matching source text once, closing the whole class instead of one
+// spot at a time. Comments are stripped first so a commented-out example
+// never masquerades as a rule.
+//
+// Still deliberately NOT full cascade-aware (no specificity/media-query
+// evaluation) — a selector's legitimate smaller override living inside an
+// @media block (e.g. .gs-head/.pane-subtitle at narrow widths,
+// tests/wallnav.test.mjs's CMX-133 guard) must NOT be folded into the base
+// desktop rule. Only rules with media === null (top-level) are merged.
 // ---------------------------------------------------------------------------
-function cssBlocks(css) {
+function cssRules(css) {
     const noComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
-    const blocks = [];
-    const re = /([^{}]+)\{([^{}]*)\}/g;
-    let m;
-    while ((m = re.exec(noComments))) {
-        blocks.push({ selector: m[1].trim(), body: m[2] });
+    const rules = [];
+    const atStack = [];
+    let buf = '';
+    for (let i = 0; i < noComments.length; i++) {
+        const ch = noComments[i];
+        if (ch === '{') {
+            const header = buf.trim();
+            buf = '';
+            if (header.startsWith('@')) {
+                atStack.push(header);
+                continue;
+            }
+            let depth = 1, j = i + 1;
+            while (j < noComments.length && depth > 0) {
+                if (noComments[j] === '{') depth++;
+                else if (noComments[j] === '}') depth--;
+                j++;
+            }
+            rules.push({
+                selector: header,
+                body: noComments.slice(i + 1, j - 1),
+                media: atStack.length ? atStack[atStack.length - 1] : null,
+            });
+            i = j - 1;
+        } else if (ch === '}') {
+            if (atStack.length) atStack.pop();
+            buf = '';
+        } else {
+            buf += ch;
+        }
     }
-    return blocks;
+    return rules;
 }
-// The BASE (first-declared, top-level) rule body for `selector` — a selector
-// like `.gs-head` can legitimately appear again inside a `@media (max-width:
-// 768px)` override with its own SMALLER literal (tests/wallnav.test.mjs's
-// CMX-133 test guards that pair's relationship); this file only cares about
-// the base desktop rule that carries the token.
-function blockFor(css, selector) {
-    const found = cssBlocks(css).filter(b =>
-        b.selector.split(',').map(s => s.trim()).includes(selector));
-    assert.ok(found.length >= 1, `no CSS rule found for selector ${selector}`);
-    return found[0].body;
+
+// Every declaration ("prop: value" pair) in `body`, in source order.
+function declarations(body) {
+    return [...body.matchAll(/([\w-]+)\s*:\s*([^;]+);/g)]
+        .map(m => [m[1].trim().toLowerCase(), m[2].trim()]);
 }
-function rootTokenPx(css, name) {
-    const root = css.match(/:root\s*\{([^}]*)\}/);
-    assert.ok(root, ':root block not found');
-    const m = root[1].match(new RegExp('--' + name + ':\\s*([0-9.]+)px'));
-    assert.ok(m, `--${name} not declared as a px value on :root`);
+
+// The RESOLVED style for `selector`: every TOP-LEVEL (non-@media) rule whose
+// selector list includes it, merged in source order with last-declaration-
+// wins per property — the same value a browser computes whether the
+// duplicate is a second declaration in one block or a second top-level rule
+// elsewhere in the sheet. Returned as a synthetic "prop: value;" string so
+// regex-based assertions below keep working, but now against the value that
+// actually WINS, not the first one written.
+function resolvedBody(css, selector) {
+    const rules = cssRules(css).filter(r => r.media === null &&
+        r.selector.split(',').map(s => s.trim()).includes(selector));
+    assert.ok(rules.length >= 1, `no top-level CSS rule found for selector ${selector}`);
+    const props = new Map();
+    for (const r of rules) for (const [k, v] of declarations(r.body)) props.set(k, v);
+    return [...props].map(([k, v]) => `${k}: ${v};`).join(' ');
+}
+
+// The RESOLVED custom-property map for :root — merges every TOP-LEVEL :root
+// block (style.css declares it three times; a later same-specificity custom-
+// property declaration wins per the cascade) instead of reading only the
+// first one.
+function resolvedRootVars(css) {
+    const vars = new Map();
+    for (const [k, v] of declarations(resolvedBody(css, ':root')))
+        if (k.startsWith('--')) vars.set(k, v);
+    return vars;
+}
+function resolvedRootTokenPx(css, name) {
+    const raw = resolvedRootVars(css).get('--' + name);
+    assert.ok(raw, `--${name} not declared as a top-level :root custom property`);
+    const m = raw.match(/^([0-9.]+)px$/);
+    assert.ok(m, `--${name} (${raw}) is not declared as a px value on :root`);
     return parseFloat(m[1]);
 }
 
@@ -96,20 +161,18 @@ const WALL_PANE_SM_ALLOWED = new Set(['.gs-state']);
 
 test('type scale: every wall/pane rule\'s font-size is a var() token, not a bare px literal', () => {
     for (const sel of WALL_PANE_SELECTORS) {
-        const body = blockFor(CSS, sel);
+        // resolvedBody() (round 11) resolves last-declaration-wins across
+        // EVERY top-level rule for `sel`, so a second `font-size:` — whether
+        // a duplicate declaration in this block (round 9) or a whole second
+        // top-level rule elsewhere in the sheet (round 10's .pane-subtitle
+        // hole) — is already collapsed to the value that actually wins; the
+        // checks below see the resolved value directly, with no separate
+        // "declared exactly once" bookkeeping needed.
+        const body = resolvedBody(CSS, sel);
         assert.match(body, /font-size:\s*var\(--wall-pane-font-size(-sm)?\)/,
             `${sel} must set font-size from a --wall-pane-font-size* token`);
         assert.doesNotMatch(body, /font-size:\s*[0-9.]+px/,
             `${sel} has reverted to a bare font-size px literal — the type scale has no single lever again`);
-        // GUARD 1 round 9: the px-literal check above only catches a REPLACEMENT
-        // literal. A judge round instead ADDED a second font-size declaration
-        // (e.g. `font-size: 0.6rem;`) after the tokenised one — the var() match
-        // and the "no bare px" check both stay true, but the LATER declaration
-        // wins the cascade, so the token never actually decides the rendered
-        // size. Pin the declaration to appear exactly once, in any unit.
-        const count = (body.match(/font-size:/g) || []).length;
-        assert.equal(count, 1,
-            `${sel} declares font-size ${count} times — a second declaration (any unit) wins the cascade over the tokenised one`);
 
         if (WALL_PANE_SM_ALLOWED.has(sel)) {
             assert.match(body, /font-size:\s*var\(--wall-pane-font-size-sm\)/,
@@ -124,30 +187,26 @@ test('type scale: every wall/pane rule\'s font-size is a var() token, not a bare
 
 test('type scale: every sidebar-card rule\'s font-size is the --card-font-size token, not a bare px literal', () => {
     for (const sel of CARD_SELECTORS) {
-        const body = blockFor(CSS, sel);
+        const body = resolvedBody(CSS, sel);
         assert.match(body, /font-size:\s*var\(--card-font-size\)/,
             `${sel} must set font-size from --card-font-size`);
         assert.doesNotMatch(body, /font-size:\s*[0-9.]+px/,
             `${sel} has reverted to a bare font-size px literal`);
-        // GUARD 1 round 9 (see the wall/pane loop above for the full rationale):
-        // a second font-size declaration in a non-px unit wins the cascade
-        // while both checks above stay green.
-        const count = (body.match(/font-size:/g) || []).length;
-        assert.equal(count, 1,
-            `${sel} declares font-size ${count} times — a second declaration (any unit) wins the cascade over the tokenised one`);
     }
 });
 
 // --- GUARD 2: minimum-legibility floor. Lowering the pane font-size or
 // line-height token back toward the pre-CMX-230 values (10px / 1.3) must fail.
+// round 11: reads the RESOLVED :root — style.css declares :root three times
+// (a later same-specificity custom-property declaration wins), so a floor
+// token re-declared in the second or third block is no longer invisible.
 test('minimum legibility floor: --wall-pane-font-size and --wall-pane-line-height are above the pre-CMX-230 floor', () => {
-    const fs = rootTokenPx(CSS, 'wall-pane-font-size');
+    const fs = resolvedRootTokenPx(CSS, 'wall-pane-font-size');
     assert.ok(fs >= 11, `--wall-pane-font-size (${fs}px) has dropped back toward the old 10px pane text`);
-    const root = CSS.match(/:root\s*\{([^}]*)\}/)[1];
-    const lh = root.match(/--wall-pane-line-height:\s*([0-9.]+)/);
+    const lh = resolvedRootVars(CSS).get('--wall-pane-line-height');
     assert.ok(lh, '--wall-pane-line-height not declared on :root');
-    assert.ok(parseFloat(lh[1]) >= 1.45,
-        `--wall-pane-line-height (${lh[1]}) has dropped back toward the old 1.3 leading`);
+    assert.ok(parseFloat(lh) >= 1.45,
+        `--wall-pane-line-height (${lh}) has dropped back toward the old 1.3 leading`);
 });
 
 // --- GUARD 2z: GUARD 1 checks every wall/pane rule's font-size is a var() token;
@@ -161,19 +220,11 @@ test('minimum legibility floor: --wall-pane-font-size and --wall-pane-line-heigh
 const LINE_HEIGHT_SELECTORS = ['.pane-subtitle', '.pane-recap'];
 test('type scale: .pane-subtitle and .pane-recap read line-height from --wall-pane-line-height, not a bare literal', () => {
     for (const sel of LINE_HEIGHT_SELECTORS) {
-        const body = blockFor(CSS, sel);
+        const body = resolvedBody(CSS, sel);
         assert.match(body, /line-height:\s*var\(--wall-pane-line-height\)/,
             `${sel} must set line-height from var(--wall-pane-line-height)`);
         assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
             `${sel} has reverted to a bare line-height literal — the leading token has no effect at its use site`);
-        // GUARD 2z round 9: the literal check above is anchored on a DIGIT, so
-        // a CSS-wide keyword value (`line-height: normal;`) added as a SECOND
-        // declaration slips past it, and the later declaration wins the
-        // cascade over the tokenised one. Pin the declaration count instead of
-        // just its notation.
-        const count = (body.match(/line-height:/g) || []).length;
-        assert.equal(count, 1,
-            `${sel} declares line-height ${count} times — a second declaration (any form, including keywords like "normal") wins the cascade over the tokenised one`);
     }
 });
 
@@ -184,9 +235,9 @@ test('type scale: .pane-subtitle and .pane-recap read line-height from --wall-pa
 // both be shrunk back toward or below their pre-CMX-230 values while GUARD 1's
 // "is it a var()" check and every other guard here stay green.
 test('minimum legibility floor: --card-font-size and --wall-pane-font-size-sm are above the pre-CMX-230 floor', () => {
-    const card = rootTokenPx(CSS, 'card-font-size');
+    const card = resolvedRootTokenPx(CSS, 'card-font-size');
     assert.ok(card >= 11, `--card-font-size (${card}px) has dropped back toward the old 9-10px card text`);
-    const sm = rootTokenPx(CSS, 'wall-pane-font-size-sm');
+    const sm = resolvedRootTokenPx(CSS, 'wall-pane-font-size-sm');
     assert.ok(sm > 10, `--wall-pane-font-size-sm (${sm}px) has dropped back to (or below) the old 10px pill text`);
 });
 
@@ -202,17 +253,11 @@ test('minimum legibility floor: --card-font-size and --wall-pane-font-size-sm ar
 const CARD_LINE_HEIGHT_SELECTORS = ['.ar-title', '.ar-sub'];
 test('type scale: .ar-title and .ar-sub read line-height from --card-line-height, not a bare literal', () => {
     for (const sel of CARD_LINE_HEIGHT_SELECTORS) {
-        const body = blockFor(CSS, sel);
+        const body = resolvedBody(CSS, sel);
         assert.match(body, /line-height:\s*var\(--card-line-height\)/,
             `${sel} must set line-height from var(--card-line-height)`);
         assert.doesNotMatch(body, /line-height:\s*[0-9.]+[^;]*;/,
             `${sel} has reverted to a bare line-height literal — the card leading token has no effect at its use site`);
-        // GUARD 2y round 9 (see GUARD 2z above): a second, keyword-form
-        // line-height declaration wins the cascade while the literal-only
-        // check stays green.
-        const count = (body.match(/line-height:/g) || []).length;
-        assert.equal(count, 1,
-            `${sel} declares line-height ${count} times — a second declaration (any form, including keywords like "normal") wins the cascade over the tokenised one`);
     }
 });
 
@@ -223,11 +268,10 @@ test('type scale: .ar-title and .ar-sub read line-height from --card-line-height
 // regression-to-a-prior-worse-value for this floor to catch — but an unenforced
 // token can still be dropped to 1 with every other guard here green.
 test('minimum legibility floor: --card-line-height is above the same floor GUARD 2 sets for --wall-pane-line-height', () => {
-    const root = CSS.match(/:root\s*\{([^}]*)\}/)[1];
-    const lh = root.match(/--card-line-height:\s*([0-9.]+)/);
+    const lh = resolvedRootVars(CSS).get('--card-line-height');
     assert.ok(lh, '--card-line-height not declared on :root');
-    assert.ok(parseFloat(lh[1]) >= 1.45,
-        `--card-line-height (${lh[1]}) has dropped below the legibility floor`);
+    assert.ok(parseFloat(lh) >= 1.45,
+        `--card-line-height (${lh}) has dropped below the legibility floor`);
 });
 
 // --- GUARD 2c: "air in the chrome" at low densities (the CMX-230 comment above
@@ -272,10 +316,10 @@ test('density guard: _setWallDensity cuts off at <=2 panes, and buildWall restor
 // both density guards stayed green while the ticket's actual objective (wide
 // margins at low density — Liav's Xirp comparison) silently regressed to
 // edge-to-edge dense. jsdom can't resolve the cascade (this file's own note
-// above cssBlocks), so this is a source-text floor on the same class GUARD 2c
+// above cssRules), so this is a source-text floor on the same class GUARD 2c
 // already pins, mirroring GUARD 2's numeric-floor discipline.
 test('WIRING: the airy-density rule actually pads the stage — not just an empty class toggle', () => {
-    const stageBody = blockFor(CSS, 'body.wall-density-airy #term-stage');
+    const stageBody = resolvedBody(CSS, 'body.wall-density-airy #term-stage');
     // clamp(MIN, PREFERRED, MAX) — a round neutered the padding by zeroing the
     // vw-based PREFERRED term (clamp(16px, 0vw, 64px)) while leaving both px
     // floors untouched at 16px, so at any real desktop width the clamp just
@@ -314,7 +358,7 @@ test('WIRING: the airy-density rule actually pads the stage — not just an empt
         `at a ${DESKTOP_PX}px desktop width the resolved padding-right margin (${rightMargin}px) is too thin — the clamp's MAX ` +
         `argument (${right[3]}px) has been shrunk toward the floor, so the airy class toggles but produces almost no margin`);
 
-    const gridBody = blockFor(CSS, 'body.wall-density-airy #term-stage .grid-stack');
+    const gridBody = resolvedBody(CSS, 'body.wall-density-airy #term-stage .grid-stack');
     const maxWidth = gridBody.match(/max-width:\s*([0-9.]+)px/);
     assert.ok(maxWidth, 'body.wall-density-airy #term-stage .grid-stack has no max-width rule');
     assert.ok(parseFloat(maxWidth[1]) > 0,
@@ -465,25 +509,116 @@ test('wall pane footer completeness: model + spend + branch + context% + tokens 
 
 // --- GUARD 6: single accent — every `.active` (the "you are here" / current-
 // selection vocabulary) CSS rule may highlight with --accent and neutral
-// tokens only (--text/--text-dim/--bg/--surface/--surface-2/--border, or the
-// #0d1117 text-on-accent contrast colour). Adding a second accent-ish hue
-// (another --ok-*/--green/--yellow/--red/--orange token, or a fresh hex) to
-// any `.active` rule must fail here.
-const NEUTRAL_VAR_RE = /--(text(-dim)?|bg|surface(-2)?|border|room-accent)\b/;
-const NEUTRAL_HEX_RE = /#0d1117\b/;
-// CMX-230 round 8: the var()/hex scans above key on NOTATION, not hue — a
-// colour written as rgb()/rgba()/hsl()/hsla() is invisible to both regexes.
-// That's not hypothetical: `.kanban-nav-chip.active .kanban-nav-count`
-// already carries `rgba(13, 17, 23, 0.18)`, the SAME neutral #0d1117
-// text-on-accent colour in functional form, so the allowlist below matches
-// it (and any alpha) by RGB triple, not by guessing at a fixed string.
-const NEUTRAL_FUNCTIONAL_RE = /^rgba?\(\s*13\s*,\s*17\s*,\s*23\s*(?:,\s*[\d.]+\s*)?\)$/;
-// CMX-230 round 9: the var()/hex/functional scans above key on NOTATION —
-// a colour written as a bare CSS KEYWORD (`color: orange;`) is invisible to
-// all three. Round 8's own comment names --orange as the thing that must
-// fail; a keyword literal of the same hue is the same hole one notation
-// over. Grayscale/CSS-wide keywords are neutral by construction (no hue to
-// clash with --accent), so only they're allowlisted.
+// colours only. Adding a second accent-ish hue (another --ok-*/--green/
+// --yellow/--red/--orange token, a fresh hex, or the same hue nested inside a
+// function like color-mix()) to any `.active` rule must fail here.
+//
+// CMX-230 round 11 (read before extending this file further): rounds 8-10
+// each patched this guard by NOTATION — allow var()/hex, then rgb()/hsl(),
+// then bare keywords — and each patch left the next notation-shaped hole
+// standing (a keyword nested INSIDE color-mix(), an allowlisted var name
+// --room-accent that is never actually declared as neutral anywhere). Both
+// holes share one root cause: the guard classified colours by how they were
+// WRITTEN, never by what they RESOLVE to. What follows instead resolves
+// every var() reference against the merged :root custom-property map
+// (following fallback chains, e.g. var(--surface-2, var(--surface))) down to
+// a literal colour, then classifies that literal by actual SATURATION — the
+// thing "hue" means — instead of a hand-maintained name/regex allowlist. A
+// var with no :root declaration AND no resolvable fallback (exactly
+// --room-accent's shape: it's the per-room tile override, set inline by JS,
+// never declared on :root) resolves to nothing and fails closed, rather than
+// silently permitting whatever it happens to be named.
+function hexToRgb(hex) {
+    let h = hex.replace('#', '');
+    if (h.length === 3 || h.length === 4) h = [...h].map(c => c + c).join('');
+    if (h.length !== 6 && h.length !== 8) return null;
+    const n = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16));
+    return n.some(Number.isNaN) ? null : n;
+}
+// HSL saturation (0-1) from an [r,g,b] triple (0-255 each).
+function saturation([r, g, b]) {
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    if (max === min) return 0;
+    const l = (max + min) / 2 / 255;
+    return (max - min) / 255 / (1 - Math.abs(2 * l - 1));
+}
+// This theme's own neutrals (--bg/--surface/--border/--text/--text-dim, and
+// the #0d1117 text-on-accent contrast colour) all measure ~0.09-0.30
+// saturation (they carry a faint slate tint, not true greyscale); --accent
+// and every state hue (--green/--yellow/--red/the --ok-* family/--orange)
+// measure 0.49+. 0.35 sits cleanly between the two clusters.
+const HUE_SATURATION_FLOOR = 0.35;
+function isNeutralRgb(rgb) { return !!rgb && saturation(rgb) < HUE_SATURATION_FLOOR; }
+function sameRgb(a, b) { return !!a && !!b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2]; }
+
+// Extracts the inner expression of every OUTER var(...) call in `text`
+// (brace/paren-nesting aware, so var(--x, var(--y)) is one call, not two).
+function findVarCalls(text) {
+    const calls = [];
+    let i = 0;
+    while ((i = text.indexOf('var(', i)) !== -1) {
+        let depth = 1, j = i + 4;
+        const start = j;
+        while (j < text.length && depth > 0) {
+            if (text[j] === '(') depth++;
+            else if (text[j] === ')') depth--;
+            j++;
+        }
+        calls.push(text.slice(start, j - 1));
+        i = j;
+    }
+    return calls;
+}
+// Resolves a var() expression ("--name" or "--name, fallback") against the
+// :root custom-property map, following var() fallback chains, to either a
+// literal colour string or null (unresolvable — no :root declaration and no
+// usable fallback).
+function resolveVarExpr(expr, rootVars, depth) {
+    if (depth > 5) return null;
+    const comma = expr.indexOf(',');
+    const name = (comma === -1 ? expr : expr.slice(0, comma)).trim();
+    const fallback = comma === -1 ? null : expr.slice(comma + 1).trim();
+    if (rootVars.has(name)) return rootVars.get(name);
+    if (fallback == null) return null;
+    const nested = fallback.match(/^var\(([\s\S]*)\)$/);
+    return nested ? resolveVarExpr(nested[1], rootVars, depth + 1) : fallback;
+}
+// Parses a resolved colour literal (hex, or an rgb()/rgba() functional form —
+// this stylesheet's only two colour notations) down to an [r,g,b] triple.
+function colorToRgb(value) {
+    if (!value) return null;
+    const hex = value.match(/#[0-9a-fA-F]{3,8}\b/);
+    if (hex) return hexToRgb(hex[0]);
+    const fn = value.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*[,)]/);
+    if (fn) return [1, 2, 3].map(i => parseFloat(fn[i]));
+    return null;
+}
+// Removes every var(...) call from `text` (balanced, so nested fallbacks are
+// removed whole) — used to keep the bare-keyword scan below from tripping on
+// keyword-shaped substrings of a variable NAME (e.g. "orange" inside a
+// hypothetical --ok-orange reference), which is checked separately via the
+// var-resolution path above.
+function stripVarCalls(text) {
+    let out = '', i = 0;
+    while (i < text.length) {
+        if (text.startsWith('var(', i)) {
+            let depth = 1, j = i + 4;
+            while (j < text.length && depth > 0) {
+                if (text[j] === '(') depth++;
+                else if (text[j] === ')') depth--;
+                j++;
+            }
+            i = j;
+        } else {
+            out += text[i];
+            i++;
+        }
+    }
+    return out;
+}
+// Grayscale/CSS-wide keywords (black/white/gray/transparent/currentColor/...)
+// are neutral by construction (no hue to clash with --accent) and are
+// deliberately NOT in this set — only names that carry an actual hue are.
 const CSS_COLOR_KEYWORDS = new Set([
     'aliceblue', 'antiquewhite', 'aqua', 'aquamarine', 'azure', 'beige', 'bisque',
     'blanchedalmond', 'blue', 'blueviolet', 'brown', 'burlywood', 'cadetblue',
@@ -510,32 +645,58 @@ const CSS_COLOR_KEYWORDS = new Set([
     'wheat', 'yellow', 'yellowgreen',
 ]);
 test('single accent: every .active rule\'s highlight colour is --accent (or a neutral), never a second hue', () => {
-    const activeBlocks = cssBlocks(CSS).filter(b =>
+    const activeBlocks = cssRules(CSS).filter(b =>
         b.selector.split(',').map(s => s.trim()).some(s => /\.active(::|\s|$|\.)/.test(s + ' ')));
     assert.ok(activeBlocks.length >= 5, 'too few .active rules found — did the selector scan break?');
+
+    const rootVars = resolvedRootVars(CSS);
+    const accentRgb = colorToRgb(resolveVarExpr('--accent', rootVars, 0));
+    assert.ok(accentRgb, '--accent does not resolve to a colour on :root — the reference colour for this whole guard is missing');
+
     for (const b of activeBlocks) {
-        const vars = [...b.body.matchAll(/var\(\s*--([\w-]+)/g)].map(m => '--' + m[1]);
-        const hexes = [...b.body.matchAll(/#[0-9a-fA-F]{3,6}\b/g)].map(m => m[0]);
-        const functional = [...b.body.matchAll(/\b(?:rgb|rgba|hsl|hsla)\([^)]*\)/g)].map(m => m[0]);
-        const keywords = [...b.body.matchAll(/:\s*([a-zA-Z-]+)\s*;/g)]
-            .map(m => m[1].toLowerCase())
-            .filter(v => CSS_COLOR_KEYWORDS.has(v));
-        for (const k of keywords) {
-            assert.fail(`${b.selector} { ${b.body.trim().slice(0, 60)}... } references bare colour keyword "${k}" — ` +
-                'a second accent hue, not --accent or a neutral');
+        // 1. Bare colour keywords, anywhere a colour can appear — including
+        // NESTED inside a function like color-mix(in srgb, orange 13%,
+        // transparent). var() calls are stripped first so a variable's own
+        // NAME (checked separately below) never trips this scan.
+        for (const [, rawValue] of declarations(b.body)) {
+            const withoutVars = stripVarCalls(rawValue);
+            for (const m of withoutVars.matchAll(/[a-zA-Z]+/g)) {
+                const w = m[0].toLowerCase();
+                assert.ok(!CSS_COLOR_KEYWORDS.has(w),
+                    `${b.selector} { ${rawValue.trim()} } references bare colour keyword "${w}" — a second accent hue, ` +
+                    'not --accent or a neutral (checked anywhere in the value, including nested inside a function)');
+            }
         }
-        for (const v of vars) {
-            assert.ok(v === '--accent' || NEUTRAL_VAR_RE.test(v),
-                `${b.selector} { ${b.body.trim().slice(0, 60)}... } references ${v} — a second accent hue, not --accent or a neutral`);
+
+        // 2. Every var() reference — resolved through :root (and its
+        // fallback chain, if any) to a literal colour, then classified by
+        // actual saturation rather than by the variable's NAME. A var with
+        // no :root declaration and no resolvable fallback (e.g.
+        // --room-accent) fails closed instead of passing on trust.
+        for (const expr of findVarCalls(b.body)) {
+            const name = expr.split(',')[0].trim();
+            const resolved = resolveVarExpr(expr, rootVars, 0);
+            const rgb = colorToRgb(resolved);
+            assert.ok(rgb, `${b.selector} references var(${expr}) — ${name} has no :root declaration and no ` +
+                'resolvable fallback, so it cannot be verified as --accent or a neutral (it may not even be a valid colour)');
+            assert.ok(sameRgb(rgb, accentRgb) || isNeutralRgb(rgb),
+                `${b.selector} references var(${expr}), which resolves to rgb(${rgb.join(', ')}) — a second accent hue, ` +
+                'not --accent or a neutral');
         }
-        for (const h of hexes) {
-            assert.ok(NEUTRAL_HEX_RE.test(h),
-                `${b.selector} references a raw hex colour ${h} outside the neutral text-on-accent allowlist`);
-        }
-        for (const f of functional) {
-            assert.ok(NEUTRAL_FUNCTIONAL_RE.test(f),
-                `${b.selector} { ${b.body.trim().slice(0, 60)}... } references ${f} — a second accent hue written as rgb()/` +
-                'rgba()/hsl()/hsla(), a notation the var()/hex scans above can\'t see');
+
+        // 3. Raw hex / rgb() / rgba() colours written directly (not via a
+        // var()) — classified the same way as the resolved var() values
+        // above: --accent's own RGB, or low enough saturation to be neutral.
+        const literals = [
+            ...[...b.body.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map(m => m[0]),
+            ...[...b.body.matchAll(/\brgba?\([^)]*\)/g)].map(m => m[0]),
+        ];
+        for (const lit of literals) {
+            const rgb = colorToRgb(lit);
+            if (!rgb) continue; // not a colour literal this test can parse
+            assert.ok(sameRgb(rgb, accentRgb) || isNeutralRgb(rgb),
+                `${b.selector} references ${lit} directly, which resolves to rgb(${rgb.join(', ')}) — a second accent ` +
+                'hue, not --accent or a neutral');
         }
     }
 });
@@ -666,19 +827,19 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
 // still change both together without fighting this guard; only a regression
 // that lets the demoted rows catch up to (or pass) the primary weight fails.
 test('.side-list-secondary actually renders lighter than the primary row — icon and label font-size both strictly smaller', () => {
-    const primaryIconBody = blockFor(CSS, '.side-item-icon');
+    const primaryIconBody = resolvedBody(CSS, '.side-item-icon');
     const primaryIconSize = primaryIconBody.match(/font-size:\s*([0-9.]+)px/);
     assert.ok(primaryIconSize, '.side-item-icon has no font-size rule to compare against');
 
-    const primaryRowBody = blockFor(CSS, '.side-item');
+    const primaryRowBody = resolvedBody(CSS, '.side-item');
     const primaryLabelSize = primaryRowBody.match(/font-size:\s*([0-9.]+)px/);
     assert.ok(primaryLabelSize, '.side-item has no font-size rule — .side-item-label inherits from here');
 
-    const secondaryIconBody = blockFor(CSS, '.side-list-secondary .side-item-icon');
+    const secondaryIconBody = resolvedBody(CSS, '.side-list-secondary .side-item-icon');
     const secondaryIconSize = secondaryIconBody.match(/font-size:\s*([0-9.]+)px/);
     assert.ok(secondaryIconSize, '.side-list-secondary .side-item-icon has no font-size override');
 
-    const secondaryLabelBody = blockFor(CSS, '.side-list-secondary .side-item-label');
+    const secondaryLabelBody = resolvedBody(CSS, '.side-list-secondary .side-item-label');
     const secondaryLabelSize = secondaryLabelBody.match(/font-size:\s*([0-9.]+)px/);
     assert.ok(secondaryLabelSize, '.side-list-secondary .side-item-label has no font-size override');
 

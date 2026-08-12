@@ -259,10 +259,20 @@ test('CMX-230: renderNav actually SPLITS the sidebar — primary views in #side-
     const primaryIds = idsIn('#side-nav');
     const secondaryIds = idsIn('#side-nav-more');
 
-    assert.deepEqual(primaryIds.sort(), ['feed', 'terminals', 'work'].sort(),
-        '#side-nav must render exactly the 3 primary views — a full un-split dump (or an empty split) breaks this');
-    assert.deepEqual(secondaryIds.sort(), ['knowledge', 'agents', 'personas', 'cost'].sort(),
-        '#side-nav-more must render exactly the 4 demoted views — an empty #side-nav-more means the split never ran');
+    // CMX-230 round 11: this used to compare primaryIds.sort()/secondaryIds.sort()
+    // against the expected set — order-blind by construction, so a mutation at the
+    // RENDER call site (nav.js: `primaryNavViews(VIEWS, ctx).reverse().map(...)`)
+    // left the shipped rail reading Work/Wall/Feed while every guard, including
+    // tests/dashboard_scale_nav_a11y.test.mjs's GUARD 7 (which only ever checks
+    // primaryNavViews()'s own return order, never the rendered DOM), stayed green.
+    // primaryIds/secondaryIds already come from the REAL rendered DOM in document
+    // order — asserting them UNSORTED closes that hole directly, no separate
+    // render-order guard needed.
+    assert.deepEqual(primaryIds, ['feed', 'terminals', 'work'],
+        '#side-nav must render exactly the 3 primary views, IN ORDER — a full un-split dump, an empty split, or ' +
+        'a reorder at the render call site (e.g. .reverse()) breaks this');
+    assert.deepEqual(secondaryIds, ['knowledge', 'agents', 'personas', 'cost'],
+        '#side-nav-more must render exactly the 4 demoted views, IN ORDER — an empty #side-nav-more means the split never ran');
 
     for (const id of secondaryIds) assert.ok(!primaryIds.includes(id), `${id} must not ALSO render into #side-nav`);
     for (const id of primaryIds) assert.ok(!secondaryIds.includes(id), `${id} must not ALSO render into #side-nav-more`);
