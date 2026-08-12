@@ -245,10 +245,15 @@ function assertRendersVisibly(win, el, label) {
     assert.ok(!/^(hidden|collapse)$/.test(cs.visibility),
         `${label} has visibility: ${cs.visibility} — invisible but still occupying box-tree space`);
     assert.ok(parseFloat(cs.opacity) >= 0.3, `${label}'s opacity (${cs.opacity}) has dropped toward invisible`);
+    // Fail CLOSED, not open: a length jsdom reports in a non-px notation (e.g. an
+    // em/rem value that never gets resolved to px, such as `0.001em` on a 16px
+    // root) must not silently skip this floor — it must fail it. Round 12's
+    // mutation found the open form (`if (fs) { ... }`) lets exactly that through:
+    // the heading is present, correctly classed, correctly ordered, and renders
+    // as nothing.
     const fs = cs.fontSize.match(/^([0-9.]+)px$/);
-    if (fs) {
-        assert.ok(parseFloat(fs[1]) >= 8, `${label}'s font-size (${cs.fontSize}) has dropped toward unreadable`);
-    }
+    assert.ok(fs, `${label}'s font-size (${cs.fontSize}) is not a resolved px length — cannot confirm it is readable`);
+    assert.ok(parseFloat(fs[1]) >= 8, `${label}'s font-size (${cs.fontSize}) has dropped toward unreadable`);
 }
 
 // --- GUARD 2c: "air in the chrome" at low densities — _setWallDensity's own
@@ -630,6 +635,21 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
     // container id/class, the split and every other guard here stay green.
     assert.match(html, /<div class="side-subhead">\S[^<]*<\/div>/,
         'the .side-subhead label text is missing/blank — the demoted nav group would render with no heading at all');
+
+    // Round 12: the regex above is a SOURCE-TEXT `\S` check, so it classifies
+    // characters, not rendered content — an HTML entity for whitespace (e.g.
+    // `&nbsp;`) is non-whitespace as source text and satisfies `\S`, while a
+    // browser (and jsdom) renders U+00A0 as nothing a reader can see. Parse the
+    // REAL shipped markup and read the REAL element's textContent back instead
+    // of matching the string: JS's String#trim() strips U+00A0 along with
+    // ordinary whitespace, so an entity-blanked heading fails this the way it
+    // visually fails for a person, while "More" passes.
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`);
+    const subhead = dom.window.document.querySelector('.side-subhead');
+    assert.ok(subhead, 'index.html no longer has a .side-subhead element to read text from');
+    assert.notEqual(subhead.textContent.trim(), '',
+        'the .side-subhead renders with no visible text (its content trims to nothing, e.g. an &nbsp; entity) — ' +
+        'the demoted nav group would render with no readable heading at all');
 });
 
 // round 9: .side-subhead alone drew FIVE separate findings before round 6's

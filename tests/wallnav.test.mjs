@@ -428,6 +428,16 @@ test('CMX-230: a grid-preset click toggles body.wall-density-airy — on at <=2 
     assert.ok(document.body.classList.contains('wall-density-airy'),
         'applyGridLayout(1,1) must add wall-density-airy — the preset-click density wiring is missing');
 
+    // The 2-pane boundary itself, not just 1-up and 4/6-up either side of it. This is
+    // the SHIPPED DEFAULT preset (terminals.js's default is {cols: 2, rows: 1}, and
+    // WALL_PRESETS' "2 columns" button), so an off-by-one at the applyGridLayout call
+    // site (e.g. passing rows+1 to _setWallDensity) keeps 1-up airy and 4/6-up dense
+    // while silently de-airying the default 2-up wall — exactly the gap a boundary-
+    // adjacent-only test would miss.
+    window.chela.applyGridLayout(2, 1);   // 2-up: airy — the boundary, and the default
+    assert.ok(document.body.classList.contains('wall-density-airy'),
+        'applyGridLayout(2,1) must add wall-density-airy — the 2-pane boundary (and shipped default) must stay airy');
+
     window.chela.applyGridLayout(2, 3);   // 6-up: dense again
     assert.ok(!document.body.classList.contains('wall-density-airy'), 'a 6-pane preset must remove wall-density-airy again');
 });
