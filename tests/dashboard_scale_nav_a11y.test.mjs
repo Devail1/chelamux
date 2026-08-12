@@ -338,6 +338,22 @@ test('WIRING: the airy-density rule actually pads the stage — not just an empt
         `body.wall-density-airy #term-stage's padding-left clamp PREFERRED term (${left[2]}vw) has been zeroed — desktop widths would collapse to the ${left[1]}px floor forever, effectively dense again`);
     assert.ok(parseFloat(right[2]) > 0,
         `body.wall-density-airy #term-stage's padding-right clamp PREFERRED term (${right[2]}vw) has been zeroed — desktop widths would collapse to the ${right[1]}px floor forever, effectively dense again`);
+
+    // This PR's judge, round 1: the checks above pin padding-left/-right, but
+    // nothing here forbids ADDING padding-top/padding-bottom (or the `padding`
+    // shorthand, which sets all four sides at once). style.css's own comment
+    // on this rule states the must-never explicitly: #term-stage's vertical
+    // extent feeds _wallFill's row math via getBoundingClientRect().top, so a
+    // vertical padding change here desyncs that math and either starves the
+    // wall of rows or runs the last row past the fold. A round that added
+    // `padding-bottom: 48px;` alongside the untouched horizontal clamps left
+    // every assertion above green.
+    for (const [prop] of declarations(stageBody)) {
+        assert.ok(prop !== 'padding-top' && prop !== 'padding-bottom' && prop !== 'padding',
+            `body.wall-density-airy #term-stage declares ${prop} — this rule must add HORIZONTAL padding only; ` +
+            '_wallFill computes grid rows off #term-stage\'s own getBoundingClientRect().top, so any vertical ' +
+            'padding here desyncs that math and either starves the wall of rows or runs the last row past the fold');
+    }
     // CMX-230 round 8: MIN and PREFERRED (left[1]/[2]) were pinned above, but MAX
     // (left[3]/right[3]) — the argument that actually decides the desktop margin —
     // was only ever captured, never asserted. A round shrank the cap from 64px to
@@ -813,6 +829,19 @@ test('index.html declares #side-nav-more — the demoted group\'s render target,
     // container id/class, the split and every other guard here stay green.
     assert.match(html, /<div class="side-subhead">\S[^<]*<\/div>/,
         'the .side-subhead label text is missing/blank — the demoted nav group would render with no heading at all');
+
+    // This PR's judge, round 1: the text above can be present in the markup
+    // and still be invisible — .side-subhead sets `opacity: 0.7` in style.css,
+    // and nothing here ever reads that value. Zeroing it renders the demoted
+    // group with no heading a reader can actually see, while the id, class
+    // and text-content checks above all stay green (none of them touch
+    // opacity). Floored well below the shipped 0.7 so a future subtlety pass
+    // still has room, but far above "effectively invisible".
+    const subheadBody = resolvedBody(CSS, '.side-subhead');
+    const opacityM = subheadBody.match(/opacity:\s*([0-9.]+)/);
+    assert.ok(opacityM, '.side-subhead has no opacity declaration to check');
+    assert.ok(parseFloat(opacityM[1]) >= 0.3,
+        `.side-subhead's opacity (${opacityM[1]}) has dropped toward invisible — the heading text would render in the DOM but not be readable`);
 });
 
 // The test above pins that #side-nav-more carries the .side-list-secondary
@@ -849,4 +878,24 @@ test('.side-list-secondary actually renders lighter than the primary row — ico
     assert.ok(parseFloat(secondaryLabelSize[1]) < parseFloat(primaryLabelSize[1]),
         `.side-list-secondary .side-item-label (${secondaryLabelSize[1]}px) must render smaller than the primary ` +
         `row's base font-size (${primaryLabelSize[1]}px) — otherwise the demoted rows read at full primary weight`);
+
+    // This PR's judge, round 1: a bare `<` lets the demoted rows "catch up" —
+    // 17.9px is strictly less than 18px and satisfies both checks above, but
+    // is pixel-identical in practice, the exact "shrunk but nonzero" shape of
+    // hole round 8 closed for the airy-density clamp's MAX argument (17px
+    // reads as ">0" but is a revert). Require a real, RELATIVE gap instead of
+    // a bare inequality — expressed as a ratio so a future type-scale pass
+    // that grows both primary and secondary together still passes, but the
+    // secondary row must stay at or below 95% of the primary row's size.
+    // Shipped ratios (15/18 = 0.833, 11/12 = 0.917) clear this with room to
+    // spare; the mutated values (17.9/18 = 0.994, 11.9/12 = 0.992) do not.
+    const RATIO_CEILING = 0.95;
+    assert.ok(parseFloat(secondaryIconSize[1]) <= parseFloat(primaryIconSize[1]) * RATIO_CEILING,
+        `.side-list-secondary .side-item-icon (${secondaryIconSize[1]}px) is too close to the primary ` +
+        `.side-item-icon (${primaryIconSize[1]}px) — it must be at most ${RATIO_CEILING * 100}% of the primary size, ` +
+        'not just numerically smaller, or the demoted rows read at full primary weight');
+    assert.ok(parseFloat(secondaryLabelSize[1]) <= parseFloat(primaryLabelSize[1]) * RATIO_CEILING,
+        `.side-list-secondary .side-item-label (${secondaryLabelSize[1]}px) is too close to the primary row's base ` +
+        `font-size (${primaryLabelSize[1]}px) — it must be at most ${RATIO_CEILING * 100}% of the primary size, ` +
+        'not just numerically smaller, or the demoted rows read at full primary weight');
 });
