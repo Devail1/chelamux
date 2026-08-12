@@ -94,6 +94,15 @@ before(async () => {
         media: q, matches: PHONE && /max-width:\s*768px/.test(q),
         addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
     });
+    // jsdom ships no canvas, and `getContext('2d')` returns null. The tab-signal
+    // badge (util.js::_drawFavicon) paints one whenever the "needs you" count goes
+    // ABOVE ZERO — which a waiting/yellow agent row below now exercises. A no-op 2D
+    // context keeps the assertions about the SIDEBAR rather than a canvas polyfill
+    // (same stub as tests/walldock.test.mjs).
+    dom.window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
+        get: (_t, k) => (k === 'canvas' ? null : () => {}),
+    });
+    dom.window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,';
     globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;    // main.js arms poll timers a test has no use for
@@ -241,6 +250,32 @@ test('every nav item renders a non-empty lucide SVG — no unicode glyph survive
             `the ${id} nav icon SVG is empty — its lucide name is not in util.js _LUCIDE`);
         for (const g of OLD_GLYPHS)
             assert.ok(!icon.textContent.includes(g), `the old ${g} glyph is still rendered on ${id}`);
+    }
+});
+
+// --- 1c^b. 🔴 the LABEL is real text on every rendered row, primary AND demoted --
+//
+// style.css's own must-never for the demoted group: "Same .side-item row underneath
+// (icon still a real lucide mark, LABEL STILL REAL TEXT — re-parenting must not cost
+// the accessibility cue)". The only prior guard pointed at the label was a WIRING
+// test (dashboard_scale_nav_a11y.test.mjs) matching the CLASS STRING inside
+// _navItemHtml's template — never the text it wraps — so emptying the label span
+// left every nav row (primary and demoted alike) icon-only, and every guard stayed
+// green. This drives the REAL renderNav() and reads .side-item-label.textContent
+// back off the REAL rendered node for every id in both #side-nav and #side-nav-more.
+test('CMX-257: every nav item renders its REAL label as text — re-parenting into the demoted group must not cost it', () => {
+    nav.renderNav();
+    const LABELS = {
+        feed: 'Feed', terminals: 'Wall', work: 'Work',
+        knowledge: 'Knowledge', agents: 'Agents', personas: 'Personas', cost: 'Cost',
+    };
+    for (const [id, label] of Object.entries(LABELS)) {
+        const row = document.querySelector(
+            `#side-nav .side-item[data-view="${id}"], #side-nav-more .side-item[data-view="${id}"]`);
+        assert.ok(row, `the ${id} nav item is missing`);
+        assert.equal(row.querySelector('.side-item-label').textContent, label,
+            `${id}'s .side-item-label lost its real text — icon-only nav rows are exactly the ` +
+            'hue-free-cue regression this ticket exists to protect against');
     }
 });
 
@@ -444,14 +479,27 @@ test('the sidebar is two sections — Launch folded into the launch menu', () =>
 // `_agentRowHtml` (via `renderSidebarAgents`) into a REAL row and read `.ar-state`
 // / `.ar-ctx` back off the rendered node — blanking either value now shows up as
 // an empty text node, not a passing regex.
+// CMX-257 round 12: the two rows above were busy/idle only — the yellow/waiting
+// row (wantsHuman: this codebase's "needs you", the one state a red-weak operator
+// most needs a word for) was never driven through a real render, so blanking
+// `stWord` for `dot === 'yellow'` alone left every waiting row's .ar-state an
+// empty span with only its .waiting colour class, and this test — plus GUARD 3b's
+// source-text match on the untouched _AGENT_STATUS_WORD constant — stayed green.
+// A waiting agent is also rendered inside `.side-triage` (the "Needs you" cluster,
+// see renderSidebarAgents), not the plain project-grouped rows — rowFor() finds it
+// either way since `_agentRowHtml` is the same template for both.
 test('CMX-230: the sidebar row\'s .ar-state renders the real status word, not blank — colour is not the only cue', () => {
     nav.renderSidebarAgents([
         agent('working-one', { session_status: 'busy' }),
         agent('idle-one', { session_status: 'idle' }),
+        agent('waiting-one', { session_status: 'waiting' }),
     ]);
     assert.equal(rowFor('working-one').querySelector('.ar-state').textContent, 'working',
         '.ar-state must carry the real status word, not an empty span the colour class alone would leave');
     assert.equal(rowFor('idle-one').querySelector('.ar-state').textContent, 'idle');
+    assert.equal(rowFor('waiting-one').querySelector('.ar-state').textContent, 'waiting',
+        '.ar-state must carry the real status word for the waiting/yellow row too — leaving it blank for ' +
+        'exactly this state is unreadable to a red-weak viewer who needs the word most');
 });
 
 test('CMX-230: the sidebar row\'s .ar-ctx renders the real percentage number, not blank — colour is not the only cue', () => {
