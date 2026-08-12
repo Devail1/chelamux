@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from chela import critic, epoch, event_log, hold, judge
+from chela import critic, epoch, event_log, hold, judge, memcap
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -4297,6 +4297,11 @@ def _launch_agent(
         socket_arg = messaging_socket_launch_arg(target_id)
         if socket_arg:
             agent_cmd = f"{agent_cmd} {socket_arg}"
+    # 🧠🔒 CMX-264: put this agent (coding agent OR judge — both funnel through this one
+    # function) into the SHARED memory slice, when CHELA_MEMORY_SLICE_BUDGET is on and a
+    # working `systemd --user` session confirms it is ready. A no-op (returns agent_cmd
+    # unchanged) whenever the rail is off or unavailable — see chela/memcap.py.
+    agent_cmd = memcap.wrap_launch_cmd(agent_cmd)
     log.info("Launching %s with %r (source: %s)", task_id, agent_cmd, cmd_source)
     # CMX-115: strip daemon-only secrets from THIS window's shell before anything else
     # runs in it — must land before the CHELA_WID export and the agent command below,

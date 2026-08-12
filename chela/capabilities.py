@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, hold, inbox, notify, update
+from chela import config, hold, inbox, memcap, notify, update
 
 # The state file is written once at startup and deleted on a clean exit. A crash leaves
 # it behind; the pid check in live() is what makes a stale file harmless — same contract
@@ -195,6 +195,31 @@ def effective() -> list[Capability]:
                     "repo from filling the disk"),
             fix="set CHELA_WORKTREE_DISK_BUDGET=20G (or any K/M/G/T byte size) in "
                 f"{config.env_file_path() or '$CHELA_DIR/chela.env'} and restart the daemon",
+        ),
+        # 🧠🔒 CMX-264: the `memcap` analog for memory. A per-job memory ceiling does not
+        # bound the box — see docs/RESOURCE_ISOLATION.md's 2026-07-14 incident, where 4
+        # agents each under their own 6G cap still authorised 24G on a 19G box and the
+        # kernel's global OOM killer took tmux and the orchestrator with it, not the jobs
+        # that caused it. This rail puts every dispatched agent AND judge into one SHARED
+        # cgroup slice so the ceiling applies to their SUM. Off by default (unset/0), same
+        # posture as the disk-budget rail above; further gated on a working
+        # `systemd --user` session, so an operator can turn the knob on and still see
+        # exactly why it isn't taking effect on their box.
+        Capability(
+            key="memory_slice_budget", label="🧠🔒 Shared memory slice",
+            on=bool(config.memory_slice_budget_bytes()) and memcap.available(),
+            detail=(f"dispatched agents and judges launch into one shared "
+                    f"{memcap.SLICE_NAME} capped at "
+                    f"{config.human_size(config.memory_slice_budget_bytes())} TOTAL"
+                    if config.memory_slice_budget_bytes() and memcap.available() else
+                    "CHELA_MEMORY_SLICE_BUDGET is set but `systemd-run` is not on PATH — "
+                    "launching unwrapped, no memory ceiling enforced"
+                    if config.memory_slice_budget_bytes() else
+                    "off — CHELA_MEMORY_SLICE_BUDGET is unset/0, so no rail bounds the "
+                    "combined memory of every dispatched agent and judge"),
+            fix="set CHELA_MEMORY_SLICE_BUDGET=12G (or any K/M/G/T byte size) in "
+                f"{config.env_file_path() or '$CHELA_DIR/chela.env'} — takes effect on "
+                "the next dispatch, no restart required",
         ),
         # 🔀⚠️ CMX-138. The one fully-UNATTENDED merge path in the whole system — see
         # chela.automerge. OFF is the safe, expected state for every install but an operator's

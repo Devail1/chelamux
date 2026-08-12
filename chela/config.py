@@ -429,6 +429,8 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
                  "Critic (pre-dispatch review)", kind="bool", restart_required=True),
     DispatchKnob("worktree_disk_budget_bytes", "CHELA_WORKTREE_DISK_BUDGET", 0, _cast_size,
                  "Worktree disk budget", unit="bytes", kind="size"),
+    DispatchKnob("memory_slice_budget_bytes", "CHELA_MEMORY_SLICE_BUDGET", 0, _cast_size,
+                 "Shared memory slice budget", unit="bytes", kind="size"),
     DispatchKnob("merge_base", "CHELA_MERGE_BASE", "dev", str,
                  "Autonomous merge base branch", kind="text", restart_required=True,
                  check=_check_branch_name),
@@ -1037,6 +1039,31 @@ def worktree_disk_budget_bytes() -> int:
     that is already running. A Dispatch-tab knob (CMX-220) — see DISPATCH_KNOBS above.
     """
     return dispatch_value("worktree_disk_budget_bytes")
+
+
+def memory_slice_budget_bytes() -> int:
+    """The ceiling for the SHARED cgroup slice every dispatched agent and judge launches
+    into (CMX-264) — the `memcap` idea from ``docs/RESOURCE_ISOLATION.md``, now built in
+    rather than left to a personal wrapper outside chela. A per-job memory cap does not
+    bound the box: N agents each under their own ceiling can still authorise N times that
+    ceiling on the machine (measured: 4 agents at 6G each authorised 24G on a 19G box, and
+    the kernel's global OOM killer took tmux and the orchestrator with it). One SHARED
+    slice bounds the SUM instead, so an operator no longer has to hand-tune
+    ``concurrency.max`` down to whatever they hope fits in RAM and cross their fingers.
+
+    ``CHELA_MEMORY_SLICE_BUDGET`` accepts a bare byte count or a K/M/G/T-suffixed size
+    (``"12G"``, ``"500M"``, ...), same parser as :func:`worktree_disk_budget_bytes`. ``0``,
+    unset, or anything that fails to parse means OFF — nobody is forced onto a rail they
+    haven't sized for their own box, and a garbage value degrades to the safe default
+    rather than crashing the tick. Only takes effect on a Linux host with a working
+    ``systemd --user`` session (see :mod:`chela.memcap`); anywhere else this silently
+    stays off and agents launch exactly as they do today.
+
+    Read per call, never latched at import — a policy knob an operator turns on a daemon
+    that is already running. A Dispatch-tab knob (CMX-220 pattern) — see DISPATCH_KNOBS
+    above.
+    """
+    return dispatch_value("memory_slice_budget_bytes")
 
 
 def human_size(n: int) -> str:

@@ -5,9 +5,16 @@
 That sentence is the whole page. Everything below is the incident that proves it, the fix
 that holds, and the way it fails when you push it — which is *not* the way you expect.
 
-Nothing here is implemented in chela. This is a **known, accepted gap** (see
-[Why chela cares](#why-chela-cares-and-does-not-fix-it)) plus the mitigation that runs
-outside it.
+**CMX-264 built the shared-slice half of this into chela itself** (`chela/memcap.py`) —
+every dispatched agent AND judge now launches into one shared cgroup slice
+(`chela-agents.slice`), bounding their SUM rather than trusting an operator to hand-tune
+`concurrency.max` down to whatever they hope fits in RAM. Off by default
+(`CHELA_MEMORY_SLICE_BUDGET` unset/0), Linux + a working `systemd --user` session only —
+see [Built into chela (CMX-264)](#built-into-chela-cmx-264) below. Everything else on this
+page — the personal wrapper's per-job cap, `choom`, the swap-thrashing behaviour, sizing
+concurrency to the working set — is still a **known, accepted gap**: chela does not chase
+*those* out of the box, on purpose (see
+[Why chela cares](#why-chela-cares-and-does-not-fix-it)).
 
 ## The failure mode
 
@@ -39,8 +46,11 @@ live somewhere the job cannot decline to use.
 
 ## The fix: one shared slice, bounding the SUM
 
-The mitigation lives in a personal `~/bin/memcap` wrapper — **not in chela** — and it is
-three guards, in the order that matters:
+The mitigation is three guards, in the order that matters. Guard 1 is now built into chela
+itself for its own fleet (`chela/memcap.py`, CMX-264 — see
+[Built into chela](#built-into-chela-cmx-264) below); guards 2 and 3, and guard 1 for any
+heavy job chela did not launch (a backtest run by hand, a test fan), still live in a
+personal `~/bin/memcap` wrapper outside chela:
 
 **1. A shared cgroup slice — this is the one that actually bounds the box.** Every job,
 however many you fan out, is launched *into the same slice*, so the ceiling applies to
@@ -140,16 +150,81 @@ cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/memcap.s
 exactly like "no OOM kills". That is **cannot verify**, not a pass. This mistake was made
 *during this very incident*, and it is why `journalctl -k` is the command above.
 
-## Why chela cares (and does not fix it)
+## Built into chela (CMX-264)
+
+`chela/memcap.py` puts the **shared-slice half** of the fix above directly on the launch
+path (`dispatcher._launch_agent`, the one function every coding agent AND judge funnels
+through — see its own docstring). Set `CHELA_MEMORY_SLICE_BUDGET` (a bare byte count or a
+K/M/G/T size, e.g. `12G`) and every agent/judge launched after that starts under
+`exec systemd-run --user --scope --collect --slice=chela-agents.slice -- <cmd>` instead of
+running bare. `exec` replaces the pane's shell in place and `systemd-run --scope` forks
+exactly once to realise the scope before exec'ing straight into `<cmd>` — no extra shell
+layer, so the launched process stays the DIRECT child of the (former-shell) pid that
+`agent_manager.claude_pid()`'s `pgrep -P` correlation depends on.
+
+Same posture as `config.worktree_disk_budget_bytes()` (CMX-164): `0`/unset means OFF,
+nobody is forced onto a rail they haven't sized for their own box, and any failure —
+`systemd-run` missing, no `systemd --user` session, no D-Bus, a stale daemon needing a
+reload — degrades to launching **unwrapped** rather than ever blocking a launch. A
+`Capability` (`memory_slice_budget`, dashboard + `chela doctor`) announces whether it is
+actually enforcing right now, not just whether the knob is set.
+
+**What this closes:** the "four correct per-job caps still authorised 24G on a 19G box"
+failure mode above, for chela's own fleet specifically — the slice bounds the SUM of every
+agent and judge chela itself launches. **What it does not close:** everything else on this
+page. The shared slice is still a safety net, not a plan (`concurrency × working-set <
+SLICECAP` still has to hold, see the counterintuitive-swap section above), `choom` biasing
+and non-chela heavy jobs (backtests, test fans run by hand) are still the operator's own
+`~/bin/memcap`-style wrapper, and chela's own daemon/dashboard/tmux are deliberately left
+OUTSIDE `chela-agents.slice` — see below.
+
+## What a judge actually costs (measured, not estimated)
+
+Nobody had a number for what a single judge or dispatched agent actually peaks at —
+`concurrency.max`/`JUDGE_MAX_CONCURRENT` were hand-picked without one. This PR does not
+change either value (that decision needs the number below, made separately, on the
+record), but it does put a real measurement in place of the guess.
+
+**What was measured, and why not the judge/agent process directly:** a judge's dominant
+paid-for step (`chela judge self-check`'s `self_check`) IS running this repo's own test
+suite — `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (2826 tests, `-n 4 --dist loadfile`,
+see `pyproject.toml`). A dispatched agent or judge is otherwise a Claude Code CLI process
+talking to a remote API — its own footprint is comparatively small and hard to isolate
+from this worktree without live API credentials and a real dispatch, which a rework agent
+running *inside* a dispatched worktree does not have. The suite run is therefore reported
+as an explicit **proxy for the dominant cost**, not a substitute for "judge alone / agent
+alone / both concurrently."
+
+**Method:** `systemd-run --user --scope --unit=<name> -- bash -c '...'`, then
+`systemctl --user show <name>.scope -p MemoryPeak` — cgroup accounting across the WHOLE
+process tree (the coordinating `pytest` process plus its 4 `xdist` workers), the same
+mechanism `chela-agents.slice` itself uses, so this number is directly comparable to what
+the shared slice would see. Cross-checked with `/usr/bin/time -v`, which undercounts
+because it only reports the coordinating process, not its workers.
+
+| Measurement | Peak |
+|---|---|
+| `systemd-run --scope` cgroup `MemoryPeak` (pytest + all 4 xdist workers) | 769,101,824 bytes (~733 MiB / 0.77 GB) |
+| `/usr/bin/time -v` Maximum resident set size (coordinating process only) | 339,424 KiB (~331 MiB) — undercounts, see above |
+
+**Default stays 0/off.** Even a handful of concurrent judges/agents at ~0.77G each sums
+to a few GB — comfortably under the 19G box the 2026-07-14 incident OOM'd — but this
+worktree's own headroom (dashboard, tmux, the daemon itself, none of which are in the
+slice) isn't something this measurement can see, so an operator still has to pick a
+budget against their own box rather than inherit one baked into chela; the `12G` example
+above is consistent with (well above) this baseline for modest concurrency.
+
+## Why chela cares (and does not fix all of it)
 
 **chela's supervisor shares a failure domain with the workers it spawns.** The daemon, the
-dashboard, tmux, and every dispatched agent live in the same memory. A dispatched agent
-runs `pytest`, `uv sync`, a backtest — with **nothing bounding it** — and when the box goes
-down it takes the orchestrator with it. The component that would have *noticed* is the
-component that dies.
+dashboard, and tmux itself are NOT put in `chela-agents.slice` alongside the agents/judges
+they supervise — deliberately: the whole point of the shared slice is that the killer
+never has to go global while it holds, and putting the supervisor in the same slice it
+polices would mean a misbehaving agent's memory pressure could itself starve the daemon
+that would otherwise notice and intervene. A dispatched agent runs `pytest`, `uv sync`, a
+backtest — bounded now by the shared ceiling above, but a `chela-agents.slice`
+over-subscribed past what fits in RAM still thrashes on swap for the reasons described
+above, and sizing concurrency to the working set is still on the operator.
 
-That is a **known, accepted gap.** chela does not put agents in cgroups, and this task
-deliberately did not add it: the mitigation is to run heavy work under a shared-slice
-wrapper like the one above, outside chela.
-
-Stated, not built — so that when it bites, it is a documented limit and not a mystery.
+That remaining shape is a **known, accepted gap.** Stated, not built — so that when it
+bites, it is a documented limit and not a mystery.
