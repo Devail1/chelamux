@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -835,3 +836,139 @@ def test_cmd_task_finished_no_new_guards_forwards_its_own_task_id_not_a_hardcode
         with patch.object(sys, "argv", ["chela", "task-finished", "cmx-777", "--no-new-guards"]):
             main.main()
     check.assert_called_once_with("cmx-777")
+
+
+# --- CMX-258 rework round 3: both classes, enumerated exhaustively, in one pass ---------
+#
+# Every finding on this PR since round 8 has been ONE of two invariants, closed one call
+# site per round: (a) a task_id forwarded into a lookup, hardcoded and going unnoticed
+# because every test happened to use the same literal id everywhere; (b) a refusal whose
+# message drops the one fact that made it actionable. `chela/main.py`'s `cmd_task_finished`
+# has exactly six `task-finished:` / self-check print sites (the both-flags rejection, the
+# self-check-could-not-run refusal, the guards-SURVIVED refusal, the CANNOT-VERIFY refusal,
+# the --no-new-guards tests/-touched notice, and the mark_awaiting_review failure) — this
+# table has one row per site so a 7th site added later must earn a row here, rather than
+# silently escaping both guards the way the third and fourth sites did.
+#
+# Two rows double as the mandatory negative controls: "both_flags_at_once" is a refusal
+# that legitimately has no task_id to report (its message is coherent without one, and
+# `must_not_contain` proves nothing was fabricated to fill that gap — "always interpolate
+# an id" cannot pass this row), and "no_new_guards_mismatch_notice" is a forwarded id that
+# IS correct still reaching a successful transition ("reject everything" cannot pass this
+# row, since it must exit 0/fall through, not raise).
+
+_TASK_FINISHED_SCENARIOS = [
+    dict(
+        name="both_flags_at_once",
+        task_id="cmx-901",
+        argv_extra=["--self-check-experiments", "e.json", "--no-new-guards"],
+        setup=lambda: {},
+        expect_exit=2,
+        must_contain=["at most one of"],
+        must_not_contain=["cmx-901"],
+    ),
+    dict(
+        name="self_check_could_not_run",
+        task_id="cmx-902",
+        argv_extra=["--self-check-experiments", "e.json"],
+        setup=lambda: {
+            "dispatcher.verify_self_check": dict(
+                return_value={"ok": False, "error": "widget.json does not exist"}),
+        },
+        expect_exit=1,
+        must_contain=["self-check could not run", "widget.json does not exist"],
+        forward=("dispatcher.verify_self_check", ("cmx-902", "e.json")),
+    ),
+    dict(
+        name="guards_survived",
+        task_id="cmx-903",
+        argv_extra=["--self-check-experiments", "e.json"],
+        setup=lambda: {
+            "dispatcher.verify_self_check": dict(return_value={
+                "ok": True, "blocking": 1, "cannot_verify": "",
+                "outcomes": [{"verdict": "SURVIVED", "file": "g.py", "guard": "the cue"}],
+            }),
+        },
+        expect_exit=1,
+        must_contain=["DECORATION", "[SURVIVED] g.py: the cue"],
+        forward=("dispatcher.verify_self_check", ("cmx-903", "e.json")),
+    ),
+    dict(
+        name="cannot_verify",
+        task_id="cmx-904",
+        argv_extra=["--self-check-experiments", "e.json"],
+        setup=lambda: {
+            "dispatcher.verify_self_check": dict(return_value={
+                "ok": True, "blocking": 0, "cannot_verify": "the suite is NOT GREEN",
+                "outcomes": [],
+            }),
+        },
+        expect_exit=1,
+        must_contain=["CANNOT VERIFY", "the suite is NOT GREEN"],
+        forward=("dispatcher.verify_self_check", ("cmx-904", "e.json")),
+    ),
+    dict(
+        name="no_new_guards_mismatch_notice",
+        task_id="cmx-905",
+        argv_extra=["--no-new-guards"],
+        setup=lambda: {
+            "dispatcher.check_no_new_guards": dict(return_value=True),
+            "dispatcher.mark_awaiting_review": dict(return_value={
+                "ok": True, "task_id": "cmx-905", "pr_url": "https://x/1"}),
+        },
+        expect_exit=None,
+        must_contain=["touches tests/", "skipping self-check"],
+        forward=("dispatcher.check_no_new_guards", ("cmx-905",)),
+    ),
+    dict(
+        name="mark_awaiting_review_fails",
+        task_id="cmx-906",
+        argv_extra=[],
+        setup=lambda: {
+            "dispatcher.mark_awaiting_review": dict(return_value={
+                "ok": False, "error": "run is in status 'done', refusing to transition"}),
+        },
+        expect_exit=1,
+        must_contain=["task-finished:", "run is in status 'done', refusing to transition"],
+        forward=("dispatcher.mark_awaiting_review", ("cmx-906",)),
+    ),
+]
+
+
+@pytest.mark.parametrize("scenario", _TASK_FINISHED_SCENARIOS, ids=lambda s: s["name"])
+def test_cmd_task_finished_every_refusal_names_its_actionable_fact_and_forwards_its_task_id(
+    scenario, capsys,
+):
+    """⛔ CMX-258 rework round 3: one row per ``task-finished:``/self-check print site in
+    ``cmd_task_finished``. Each row asserts BOTH halves the judge kept finding one at a
+    time: the id reaching whichever dispatcher call produced this scenario is
+    ``args.task_id`` itself, never a hardcoded literal (``forward``, using a task_id that is
+    not ``"t1"`` like every sibling forwarding test in this file), and the printed message
+    names the fact that makes it actionable (``must_contain`` / ``must_not_contain``)."""
+    from chela import main
+
+    mocks = {}
+    with ExitStack() as stack:
+        for target, kwargs in scenario["setup"]().items():
+            _module, attr = target.split(".")
+            mock = stack.enter_context(patch.object(dispatcher, attr, **kwargs))
+            mocks[target] = mock
+
+        argv = ["chela", "task-finished", scenario["task_id"], *scenario["argv_extra"]]
+        with patch.object(sys, "argv", argv):
+            if scenario["expect_exit"] is None:
+                main.main()      # falls through — no sys.exit on this scenario's path
+            else:
+                with pytest.raises(SystemExit) as exc:
+                    main.main()
+                assert exc.value.code == scenario["expect_exit"]
+
+    out = capsys.readouterr().out
+    for substring in scenario["must_contain"]:
+        assert substring in out, f"{scenario['name']}: expected {substring!r} in {out!r}"
+    for substring in scenario.get("must_not_contain", []):
+        assert substring not in out, f"{scenario['name']}: unexpected {substring!r} in {out!r}"
+
+    if scenario.get("forward"):
+        target, expected_args = scenario["forward"]
+        mocks[target].assert_called_once_with(*expected_args)
