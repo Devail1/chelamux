@@ -135,6 +135,30 @@ def test_a_clean_nonzero_exit_above_one_fails_the_run():
     assert "PASS: fresh-install smoke test" not in out.stdout
 
 
+def test_a_dashboard_that_never_answers_200_fails_the_run():
+    """🔴 Pins the dashboard readiness loop's own success comparison. SMOKE_BREAK_DASHBOARD=1
+    makes the script occupy the dashboard's isolated port with a bound-but-unlistened socket
+    *before* `chela dashboard` starts, so its own `app.run()` bind raises a genuine
+    `OSError: Address already in use` (a real crash, not a simulated one) and the dashboard
+    process dies without ever answering anything — every curl probe in the readiness loop
+    gets an instant connection-refused ("000"), never "200". If the loop's `= "200"`
+    comparison is neutered into something that is true for whatever curl happens to print
+    (e.g. `!= "<sentinel>"`, true for "000"), the very first failed probe is wrongly treated
+    as success and the script reports PASS with a dead dashboard."""
+    env = dict(os.environ)
+    env["SMOKE_BREAK_DASHBOARD"] = "1"
+
+    out = _run(env=env)
+
+    assert "==> chela dashboard (background, isolated port" in out.stdout, out.stdout
+    assert "chela dashboard: started, /api/agents -> 200" not in out.stdout, out.stdout
+    assert (
+        "FAIL: chela dashboard did not answer /api/agents with 200 within 30s" in out.stderr
+    ), out.stdout + out.stderr
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "PASS: fresh-install smoke test" not in out.stdout
+
+
 def test_strips_inherited_chela_env_so_a_live_install_never_leaks_in():
     """A calling shell that already runs chela for real (CHELA_DISPATCH_WORKFLOWS pointing
     at real repos, as this project's own dev machine does) must not have any of that leak

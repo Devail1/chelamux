@@ -38,11 +38,15 @@ SOURCE="${1:-https://github.com/Devail1/chelamux}"
 
 WORK="$(mktemp -d)"
 DASH_PID=""
+HOG_PID=""
 cleanup() {
     if [ -n "$DASH_PID" ] && kill -0 "$DASH_PID" 2>/dev/null; then
         kill "$DASH_PID" 2>/dev/null || true
         sleep 1
         kill -9 "$DASH_PID" 2>/dev/null || true
+    fi
+    if [ -n "$HOG_PID" ] && kill -0 "$HOG_PID" 2>/dev/null; then
+        kill -9 "$HOG_PID" 2>/dev/null || true
     fi
     rm -rf "$WORK"
 }
@@ -155,6 +159,54 @@ run_step "chela plugin --dir (documented offline-render path)" plugin --dir "$WO
 
 # Step 3: first `chela dashboard` — does it start, and does /api/agents answer 200?
 DASH_PORT=$(( 20000 + (RANDOM % 20000) ))
+
+# Step 3 fixture (test-only, SMOKE_BREAK_DASHBOARD=1, unset in the normal adopter path):
+# genuinely occupies $DASH_PORT *before* `chela dashboard` tries to bind it, so Flask's
+# dev server hits a real `OSError: Address already in use`, prints a real traceback to
+# dashboard.log, and the process actually dies — it never answers anything, let alone a
+# 200. This is the readiness loop's own equivalent of what SMOKE_BREAK_HOLD_TTL /
+# SMOKE_BREAK_DISPATCH_WORKFLOW do for run_step()'s two branches: a genuine failure that
+# only a correct `= "200"` comparison catches. A neutered comparison (e.g. `!=
+# "<sentinel>"`, true for whatever curl prints on a refused connection, such as "000")
+# would treat the very first failed probe as success and wrongly report PASS.
+# tests/test_smoke_fresh_install.py uses this to prove the comparison actually requires a
+# literal 200, not merely "curl produced some output".
+if [ "${SMOKE_BREAK_DASHBOARD:-0}" = "1" ]; then
+    # Must actually listen(), not just bind(): on Linux, SO_REUSEADDR (which werkzeug's
+    # dev server sets too) lets a SECOND bind() to the same port succeed as long as the
+    # first socket never called listen() — verified live, an unlistened bind alone does
+    # NOT make `chela dashboard`'s own bind() fail. Once this fixture listens(), the real
+    # dashboard's bind() gets a genuine EADDRINUSE. Every accepted connection (including
+    # curl's, in the readiness loop below) is closed immediately without a reply, so a
+    # probe gets an instant, real "connection refused" / empty-reply — never a hang.
+    python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $DASH_PORT))
+s.listen(5)
+open('$WORK/dashboard-hog-bound', 'w').close()
+s.settimeout(1)
+while True:
+    try:
+        conn, _ = s.accept()
+        conn.close()
+    except socket.timeout:
+        continue
+" &
+    HOG_PID=$!
+    for _ in $(seq 1 50); do
+        if ! kill -0 "$HOG_PID" 2>/dev/null; then
+            echo "FAIL: SMOKE_BREAK_DASHBOARD fixture process died before binding $DASH_PORT" >&2
+            exit 1
+        fi
+        if [ -f "$WORK/dashboard-hog-bound" ]; then
+            break
+        fi
+        sleep 0.1
+    done
+fi
+
 echo "==> chela dashboard (background, isolated port $DASH_PORT)"
 CHELA_DASH_HOST=127.0.0.1 CHELA_DASHBOARD_PORT="$DASH_PORT" \
     uv run chela dashboard >"$WORK/dashboard.log" 2>&1 &
@@ -184,6 +236,10 @@ if [ -n "$DASH_PID" ] && kill -0 "$DASH_PID" 2>/dev/null; then
     kill -9 "$DASH_PID" 2>/dev/null || true
 fi
 DASH_PID=""
+if [ -n "$HOG_PID" ] && kill -0 "$HOG_PID" 2>/dev/null; then
+    kill -9 "$HOG_PID" 2>/dev/null || true
+fi
+HOG_PID=""
 
 run_step "chela doctor" doctor
 run_step "chela update --check" update --check
