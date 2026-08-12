@@ -75,7 +75,9 @@ def _project(root: Path, guard_test: str = REAL_GUARD_TEST) -> Path:
     return root
 
 
-def _repo_with_origin(root: Path, branch: str = "master") -> str:
+def _repo_with_origin(
+    root: Path, branch: str = "master", extra_base_files: dict[str, str] | None = None,
+) -> str:
     """A git repo whose HEAD is also ``refs/remotes/origin/<branch>`` — no real remote
     needed, just a ref :func:`dispatcher.check_no_new_guards` can resolve ``origin/<base
     branch>`` against. Returns the base sha; the caller commits ON TOP of it to build a
@@ -86,11 +88,19 @@ def _repo_with_origin(root: Path, branch: str = "master") -> str:
     tests/ file) is the only way to distinguish "the diff touches tests/" from "the diff
     ADDS a file under tests/", since every fixture before this one built its guard as a
     fresh ADD on top of a base that had no tests/ file at all.
+
+    ``extra_base_files`` lets a caller seed additional tracked files into the BASE commit
+    (so a later commit can MODIFY or DELETE them to build a diff on those axes) without
+    disturbing every other caller of this helper, which passes nothing.
     """
     root.mkdir(parents=True, exist_ok=True)
     (root / "README.md").write_text("hi\n")
     (root / "tests").mkdir()
     (root / "tests" / "test_existing.py").write_text("def test_x():\n    assert True\n")
+    for rel, content in (extra_base_files or {}).items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
     _git(root, "init", "-q", "-b", branch)
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "base")
@@ -523,17 +533,30 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
     `--diff-filter=A` would also satisfy. And touch a root-level `tests_helper.py` — a path
     that STARTS WITH "tests" but is NOT under the tests/ directory — so a filter of
     `startswith("tests")` (missing the trailing separator) wrongly pulls it into `touched`
-    and the `files == ["tests/test_existing.py"]` assertion below catches it.
+    and the `files == [...]` assertion below catches it.
+
+    ⛔ CMX-258 rework round 5, findings 2-3: the base also carries `tests/conftest.py`
+    (MODIFIED here, not just test_existing.py) — a non-`test_*`-named path under tests/, so
+    a filter narrowed to `startswith("tests/test_")` would silently drop it from `touched`
+    — and `tests/test_doomed.py` (DELETED here) — a `git diff --diff-filter=d` (excluding
+    deletions) would silently drop it too. All three real tests/ paths must show up in the
+    payload for the cross-check to mean "the diff touches tests/" rather than one of those
+    narrower, uncheckable accidents.
     """
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
     root = tmp_path / "wt"
-    _repo_with_origin(root)
+    _repo_with_origin(root, extra_base_files={
+        "tests/conftest.py": "import pytest\n",
+        "tests/test_doomed.py": "def test_doomed():\n    assert True\n",
+    })
     (root / "tests" / "test_existing.py").write_text(
         "def test_x():\n    assert True\n\n\ndef test_y():\n    assert True\n"
     )
+    (root / "tests" / "conftest.py").write_text("import pytest  # changed\n")
+    (root / "tests" / "test_doomed.py").unlink()
     (root / "tests_helper.py").write_text("x = 1\n")
     _git(root, "add", "-A")
-    _git(root, "commit", "-qm", "change a guard and touch a tests-prefixed decoy path")
+    _git(root, "commit", "-qm", "change/delete guards and touch a tests-prefixed decoy path")
     wf = _workflow_md(tmp_path)
     _insert_run("cmx-778", root, wf)
 
@@ -544,13 +567,15 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
     matches = [e for e in events if e.get("type") == "no_new_guards_mismatch"]
     assert len(matches) == 1
     assert matches[0]["payload"]["task_id"] == "cmx-778"
-    assert matches[0]["payload"]["files"] == ["tests/test_existing.py"]
+    assert matches[0]["payload"]["files"] == [
+        "tests/conftest.py", "tests/test_doomed.py", "tests/test_existing.py",
+    ]
     # ⛔ CMX-250 review round 5, finding 4: the payload alone isn't what a human reads on
     # the dashboard — the event's human-readable summary must say WHAT happened, not be
     # blanked to "". Pin the actual words, not just that the field is non-empty.
     assert "no-new-guards was passed" in matches[0]["summary"]
     assert "touches tests/" in matches[0]["summary"]
-    assert "1 file(s)" in matches[0]["summary"]
+    assert "3 file(s)" in matches[0]["summary"]
     # ⛔ CMX-258 review round 2 non-blocking note: the summary leads with the task_id too
     # — pin both halves of the same unpinned binding in one guard.
     assert matches[0]["summary"].startswith("cmx-778: ")

@@ -387,6 +387,22 @@ def test_workflow_md_step_6_names_both_task_finished_flags():
     assert "--no-new-guards" in text
 
 
+def test_workflow_md_step_6_makes_passing_a_flag_mandatory():
+    """⛔ CMX-258 rework round 5, finding 1 (WIRING): the sibling test above only pins that
+    both flag NAMES appear somewhere in the file — it survives softening 'pass ONE of these
+    two flags' (mandatory) into 'two optional flags exist' (opt-in), since neither bullet's
+    text (and therefore neither asserted substring) has to move for that. Pin the imperative
+    itself: an agent that reads step 6 must be told to PASS one of the flags, and told that
+    doing so is what makes `task-finished` enforce step 3's outcome instead of trusting it
+    happened. Without this, a doc that never requires either flag leaves every run on the
+    warn-only, always-passing path — the whole feature never fires in production."""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert "pass ONE of these two flags" in text
+    assert "now enforces step 3's outcome instead of trusting it happened" in text
+
+
 def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
     """⛔ CMX-258 rework round 4, finding 3 (WIRING): step 3 tells the agent to KEEP the
     experiments JSON file so step 6 can consume it. If this instruction reverses (an agent
