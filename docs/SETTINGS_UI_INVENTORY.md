@@ -14,8 +14,10 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
 
 **40** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
-wired the 9-strong "Dispatch / judge / critic policy" group the same way, so those 18 are
-no longer *literal* `os.environ.get("CHELA_…")` call sites — see "WIRED" under Groups 2
+wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
+added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
+was never a literal read to begin with), so those 18 are no longer *literal*
+`os.environ.get("CHELA_…")` call sites — see "WIRED" under Groups 2
 and 3) — every literal `CHELA_*` name a Python module in `chela/` reads straight off
 `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
@@ -133,10 +135,10 @@ at `chela/agent_manager.py` import, same as they always were — a dashboard wri
 either needs that process restarted; the other seven are read per call and take effect
 on the next tick/request with no restart.
 
-### 3. Dispatch / judge / critic policy (9) — WIRED (CMX-220), the Dispatch tab
+### 3. Dispatch / judge / critic policy (10) — WIRED (CMX-220 + CMX-264), the Dispatch tab
 
 **✅ Done.** The second-strongest tab candidate — unlike Group 2, not every member is
-`hot`: four of the nine are latched at some module's own import (the judge/critic
+`hot`: four of the ten are latched at some module's own import (the judge/critic
 fleet-wide kill switches, the dispatcher's own workflow list, the autonomous merge-base
 fallback), so a dashboard write to one of those needs the daemon/dashboard restarted to
 take effect, same shape `status_cmd_timeout_seconds`/`status_ttl_seconds` already modeled
@@ -146,8 +148,9 @@ in Group 2. CMX-220 built `chela.config.DISPATCH_KNOBS` on the same
 knobs (one, `merge_base`, with an extra branch-name safety check since it feeds
 `chela.contract`'s autonomous-merge fallback — the merge-safety gate itself,
 `chela.contract.FORBIDDEN_BASES`/the NEVER-line check, is unconditional and untouched by
-this), and a K/M/G/T-suffixed size — plus a "Dispatch" section in the Settings drawer,
-backed by `GET`/`POST /api/config/dispatch`.
+this), and a K/M/G/T-suffixed size pair (`worktree_disk_budget_bytes`, and CMX-264's
+`memory_slice_budget_bytes`) — plus a "Dispatch" section in the Settings drawer, backed by
+`GET`/`POST /api/config/dispatch`.
 
 Because each is now read via `config.dashboard_setting()` (or, for the four latched
 elsewhere, via `config.dispatch_value()`/a direct `dashboard_setting()` call at that
@@ -163,18 +166,24 @@ kill switch, default `true`; **restart_required**), `CHELA_JUDGE_MAX_UNKNOWN_RET
 (retries on a `cannot_verify` judge verdict, default `2`, `0` allowed), `CHELA_CRITIC`
 (fleet-wide critic/advisory-review kill switch, default `true`; **restart_required**),
 `CHELA_WORKTREE_DISK_BUDGET` (byte/size-suffixed disk ceiling per worktree root, default
-unset/off), `CHELA_MERGE_BASE` (fallback autonomous base branch — per-workflow
-`base_branch` still wins; the NEVER-list is never overridable by this, default `dev`;
-**restart_required**), `CHELA_GATE_WAIT_S` (how long a `PermissionRequest` gate waits for a
-tap, default `90.0`s, `0` allowed — never wait), `CHELA_GATE_MAX_WAITS` (concurrent
-gate-wait slots, default `8`, floor `1` — a `BoundedSemaphore` cannot be sized `0`).
+unset/off), `CHELA_MEMORY_SLICE_BUDGET` (byte/size-suffixed ceiling on the SHARED cgroup
+slice every dispatched agent and judge launches into — CMX-264, `chela/memcap.py`; a
+per-job cap does not bound the box, only a shared one does, see
+`docs/RESOURCE_ISOLATION.md`; default unset/off, and further gated on a working
+`systemd --user` session regardless of the knob), `CHELA_MERGE_BASE` (fallback autonomous
+base branch — per-workflow `base_branch` still wins; the NEVER-list is never overridable
+by this, default `dev`; **restart_required**), `CHELA_GATE_WAIT_S` (how long a
+`PermissionRequest` gate waits for a tap, default `90.0`s, `0` allowed — never wait),
+`CHELA_GATE_MAX_WAITS` (concurrent gate-wait slots, default `8`, floor `1` — a
+`BoundedSemaphore` cannot be sized `0`).
 
-Four of the nine (`CHELA_DISPATCH_WORKFLOWS`/`CHELA_JUDGE`/`CHELA_CRITIC`/`CHELA_MERGE_BASE`)
+Four of the ten (`CHELA_DISPATCH_WORKFLOWS`/`CHELA_JUDGE`/`CHELA_CRITIC`/`CHELA_MERGE_BASE`)
 are resolved once at their owning module's import (`chela/config.py` for the first three,
 `chela/contract.py` for the fourth) — a dashboard write to any of those needs that process
-restarted; the other five (`chela/config.py`'s `max_reworks()`/
-`judge_max_unknown_retries()`/`worktree_disk_budget_bytes()`, `chela/gateanswer.py`'s
-`wait_budget()`/`max_waits()`) are read per call and take effect on the next tick/request.
+restarted; the other six (`chela/config.py`'s `max_reworks()`/
+`judge_max_unknown_retries()`/`worktree_disk_budget_bytes()`/`memory_slice_budget_bytes()`,
+`chela/gateanswer.py`'s `wait_budget()`/`max_waits()`) are read per call and take effect on
+the next tick/request.
 
 ### 4. Unattended-risk switches (3) — `trust-boundary`, keep env-file-only
 
@@ -282,7 +291,7 @@ readout:
 | Candidate tab | Writable knobs | Today |
 |---|---|---|
 | Daemon intervals (Timing) | 9 | **9** (CMX-217) |
-| Dispatch / judge / critic | 9 | **9** (CMX-220) |
+| Dispatch / judge / critic | 10 | **10** (CMX-220 + CMX-264) |
 | Notifications | ~6 of 9 | 0 |
 | Telegram | 3 of 4 | 0 |
 | Terminal wall (+ the 7 shell-only) | ~9 of 12 | 0 |
