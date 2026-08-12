@@ -136,6 +136,36 @@ def test_watch_warns_when_no_session_identity_resolved(monkeypatch, capsys):
     )
 
 
+def test_watch_with_no_window_id_points_to_chela_restore(monkeypatch, capsys):
+    """CMX-254: a session started outside tmux (or with $CHELA_WID unset) cannot run
+    `chela watch` at all — `self_wid()` is None, so there is no window to register. The old
+    message ("run this from inside a tmux window") is a dead end for exactly that session:
+    it cannot become one without relaunching. The remedy has to be named here, not left for
+    the operator to discover after `chela restore` independently classifies the row MANUAL."""
+    from chela import orchestrator
+    monkeypatch.setattr(orchestrator, "self_wid", lambda: None)
+
+    with pytest.raises(SystemExit):
+        main.cmd_watch(SimpleNamespace(wid=None, note=""))
+
+    err = capsys.readouterr().err
+    assert "chela restore" in err, f"the dead end must name the actual remedy. Got: {err!r}"
+    assert "outside tmux" in err
+
+
+def test_whoami_unknown_points_to_chela_restore(monkeypatch, capsys):
+    """The other CLI dead end CMX-254 traced live: `chela whoami` outside tmux said only
+    'unknown' with no next step, while the operator's actual session sat unbindable for an
+    hour with queued decisions events undelivered."""
+    from chela import orchestrator
+    monkeypatch.setattr(orchestrator, "self_wid", lambda: None)
+
+    with pytest.raises(SystemExit):
+        main.cmd_whoami(SimpleNamespace())
+
+    assert "chela restore" in capsys.readouterr().err
+
+
 def test_watch_stays_QUIET_when_the_caller_is_not_REGISTERING_itself(monkeypatch, capsys):
     """🔴 The warning is scoped to a registration. `_identity_of` only runs when a caller
     registers ITSELF as orchestrator (`by=self_wid`); with no self_wid there is no
