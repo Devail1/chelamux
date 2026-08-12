@@ -74,21 +74,21 @@ def _project(root: Path, guard_test: str = REAL_GUARD_TEST) -> Path:
     return root
 
 
-def _repo_with_origin(root: Path) -> str:
-    """A git repo whose HEAD is also ``refs/remotes/origin/master`` — no real remote
+def _repo_with_origin(root: Path, branch: str = "master") -> str:
+    """A git repo whose HEAD is also ``refs/remotes/origin/<branch>`` — no real remote
     needed, just a ref :func:`dispatcher.check_no_new_guards` can resolve ``origin/<base
     branch>`` against. Returns the base sha; the caller commits ON TOP of it to build a
     diff."""
     root.mkdir(parents=True, exist_ok=True)
     (root / "README.md").write_text("hi\n")
-    _git(root, "init", "-q", "-b", "master")
+    _git(root, "init", "-q", "-b", branch)
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "base")
     base_sha = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
-    _git(root, "update-ref", "refs/remotes/origin/master", base_sha)
+    _git(root, "update-ref", f"refs/remotes/origin/{branch}", base_sha)
     return base_sha
 
 
@@ -99,11 +99,12 @@ def _exp(**over) -> dict:
     return exp
 
 
-def _workflow_md(tmp_path: Path) -> Path:
+def _workflow_md(tmp_path: Path, base_branch: str | None = None) -> Path:
     p = tmp_path / "WORKFLOW.md"
+    workspace = f"\nworkspace:\n  base_branch: {base_branch}" if base_branch else ""
     p.write_text(
         "---\nproject_key: TEST\njudge:\n  test_cmd: " + json.dumps(TEST_CMD) +
-        "\n  suite_timeout_seconds: 120\n---\nbody\n"
+        "\n  suite_timeout_seconds: 120" + workspace + "\n---\nbody\n"
     )
     return p
 
@@ -176,6 +177,26 @@ def test_verify_self_check_propagates_error_when_the_check_itself_cannot_run(tmp
 
     assert not result["ok"]
     assert "does not exist" in result["error"]
+
+
+def test_verify_self_check_forwards_a_nonempty_cannot_verify_even_when_ok(tmp_path):
+    """⛔ CMX-250 review round 3, finding 1: when ``run_self_check`` comes back ``ok: True``
+    with a non-empty ``cannot_verify`` (an empty experiments list — nothing was corrupted,
+    so nothing was proven), that value must reach the caller VERBATIM. Every other test
+    here only ever exercises ``cannot_verify == ""``, so a mutation that unconditionally
+    forwards ``""`` regardless of what ``run_self_check`` actually returned stayed
+    invisible — the refusal arm ``main.py`` exits 1 on reads this exact field."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": []}))
+    _insert_run("t1", root, wf)
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["blocking"] == 0
+    assert "no experiments were given" in result["cannot_verify"]
 
 
 def test_verify_self_check_unknown_task_id_errors(tmp_path):
@@ -322,7 +343,12 @@ def test_cmd_task_finished_end_to_end_blocks_on_a_surviving_guard(tmp_path, caps
             with pytest.raises(SystemExit) as exc:
                 main.main()
     assert exc.value.code == 1
-    assert "DECORATION" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "DECORATION" in out
+    # ⛔ CMX-250 review round 3, finding 4: which guard survived is the only actionable
+    # half of the refusal — the per-outcome print loop must actually run, not just the
+    # blocking COUNT it feeds into.
+    assert "guard.py: the glyph cue" in out
     mark.assert_not_called()
 
 
@@ -344,6 +370,7 @@ def test_cmd_task_finished_end_to_end_proceeds_when_every_guard_holds(tmp_path, 
     out = capsys.readouterr().out
     assert "every guard held" in out
     assert "awaiting review" in out
+    assert "guard.py: the glyph cue" in out
     mark.assert_called_once_with("t1")
 
 
@@ -438,6 +465,39 @@ def test_check_no_new_guards_unknown_when_diff_command_fails(tmp_path, monkeypat
     monkeypatch.setattr(dispatcher.subprocess, "run", fake_run)
 
     assert dispatcher.check_no_new_guards("t1") is None
+
+
+def test_check_no_new_guards_unknown_when_workflow_does_not_load(tmp_path):
+    """⛔ CMX-250 review round 3, finding 2: the sibling of round 2's diff-command-failure
+    branch — ``load_workflow`` itself can raise (missing file, unparsable WORKFLOW.md), and
+    that must ALSO come back ``None`` (unknown), never the confident ``False`` of "no test
+    files touched". Round 2 pinned only the diff-command branch of
+    ``except Exception: return None``; this pins the ``load_workflow`` branch of the SAME
+    except clause — a distinct mutation site the same test can't cover."""
+    root = tmp_path / "wt"
+    _repo_with_origin(root)
+    wf = tmp_path / "no-such-WORKFLOW.md"      # never written — load_workflow raises
+    _insert_run("t1", root, wf)
+
+    assert dispatcher.check_no_new_guards("t1") is None
+
+
+def test_check_no_new_guards_uses_the_runs_own_base_branch_not_a_hardcoded_default(tmp_path):
+    """⛔ CMX-250 review round 3, finding 3: the diff must run against THIS run's own
+    ``workspace.base_branch`` — read from its own workflow — not a hardcoded ``"master"``.
+    Only ``origin/trunk`` exists here (no ``origin/master`` at all); a hardcoded ``"master"``
+    can never resolve that ref and would report ``None`` (unknown) instead of correctly
+    diffing against the run's real base and finding the new guard."""
+    root = tmp_path / "wt"
+    _repo_with_origin(root, branch="trunk")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_new_thing.py").write_text("def test_x():\n    assert True\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "add a guard")
+    wf = _workflow_md(tmp_path, base_branch="trunk")
+    _insert_run("t1", root, wf)
+
+    assert dispatcher.check_no_new_guards("t1") is True
 
 
 def test_check_no_new_guards_unknown_for_unknown_task_id(tmp_path):
