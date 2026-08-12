@@ -1943,6 +1943,12 @@ def cmd_judge(args) -> None:
     elif state == judge.J_CANNOT_VERIFY:
         print(f"⚖️ {result['task_id']}: ⚠ CANNOT VERIFY — {result.get('cannot_verify') or result.get('error')}")
         print("   Nothing was blocked and nothing was cleared. This PR is a human's.")
+    elif state == judge.J_STALE_HEAD:
+        # ⚖️⏱️ CMX-246: a newer commit landed on the PR while this judge ran. Discarded on
+        # purpose — no rework round spent, no judge_state overwritten; the per-sha trigger
+        # re-judges the new head on its own.
+        print(f"⚖️ {result['task_id']}: {result.get('error')} — no rework round was spent "
+              "and nothing on the run row was changed; a fresh judge covers the new head.")
     else:
         print(f"⚖️ {result['task_id']}: every guard held. The run stays awaiting_review — "
               "the judge never merges.")
