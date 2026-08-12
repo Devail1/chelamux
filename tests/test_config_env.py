@@ -279,6 +279,13 @@ def test_doctor_is_quiet_when_everything_agrees(chela_dir, monkeypatch):
     # `test_runtime_truth.py`'s uses of this exact monkeypatch.
     monkeypatch.setattr(runtime_truth, "_upstream_synced_status",
                         lambda: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
+    # tmux.node_ipc_env (CMX-252): a real `tmux show-environment -g` call depends on the
+    # test host's own tmux server — and CI has no tmux on PATH at all, which this fact
+    # (unlike tmux.session) reports as CANNOT VERIFY at ERROR, on purpose: a leaked
+    # NODE_CHANNEL_FD is exactly the kind of silent poisoning an unasked owner must never
+    # read as "clean". Stub the seam to the answer a real clean tmux would give, same idiom
+    # `test_runtime_truth.py`'s `fleet` fixture uses for this exact function.
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: {})
     hooks.render_plugin(chela_dir / "plugin", port=5005)
     _install_plugin(hooks.hooks_spec(5005))
     assert _levels(doctor.check(), doctor.ERROR) == []

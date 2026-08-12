@@ -101,6 +101,11 @@ def fleet(tmp_path, monkeypatch, request):
     # its agent.
     monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "cmx-66"})
+    # tmux.node_ipc_env: the global environment table carries no leaked Node IPC vars —
+    # the state `dispatcher._new_window`'s scrub is supposed to leave behind after every
+    # spawn. A real `tmux show-environment -g` call here would depend on the test host's
+    # own tmux server, same reason session_exists/get_windows_by_id are stubbed above.
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: {})
     monkeypatch.setattr(epoch, "current", lambda: EPOCH)
     monkeypatch.setattr(runtime_truth, "_in_flight_runs",
                         lambda: {"CMX-66": {"wid": "@1", "epoch": EPOCH}})
@@ -246,6 +251,16 @@ def _break_tmux_session(tmp_path, monkeypatch):
     """tmux has no such session — every window lookup in the fleet resolves to nothing."""
     monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: False)
     return doctor.WARN
+
+
+def _break_tmux_node_ipc_env(tmp_path, monkeypatch):
+    """CMX-252: a tmux server started under a node-parented ancestor (pm2 restart, a
+    reboot) reintroduces the leaked IPC vars into the GLOBAL environment — the table
+    `dispatcher._new_window`'s scrub cleared, but a NEW server never went through."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env",
+                        lambda: {"NODE_CHANNEL_FD": "3",
+                                 "NODE_CHANNEL_SERIALIZATION_MODE": "json"})
+    return doctor.ERROR
 
 
 def _break_dashboard_port(tmp_path, monkeypatch):
@@ -542,6 +557,7 @@ CORRUPTIONS = {
     "env.file": _break_env_file,
     "env.running": _break_env_running,
     "tmux.session": _break_tmux_session,
+    "tmux.node_ipc_env": _break_tmux_node_ipc_env,
     "dashboard.port": _break_dashboard_port,
     "dashboard.update_lock": _break_update_apply_lock,
     "plugin.rendered": _break_plugin_rendered,
@@ -710,6 +726,118 @@ def test_gh_missing_entirely_is_cannot_verify_not_a_pass(fleet, monkeypatch):
     assert findings, "an unaskable gh produced no finding at all"
     assert all(f.level == doctor.ERROR for f in findings)
     assert "CANNOT VERIFY dispatch.gh_auth" in findings[0].title
+
+
+def test_node_ipc_env_cannot_verify_when_tmux_is_unreachable(fleet, monkeypatch):
+    """Same failure mode as `dispatch.gh_auth` / `pr.checks`: an owner that could not be
+    asked is UNKNOWN, never a silent pass — a doctor that reads a missing tmux as "no
+    leaked vars, all clear" would be exactly the bug this fact exists to catch."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: None)
+    findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert findings, "an unreadable tmux global environment produced no finding at all"
+    assert all(f.level == doctor.ERROR for f in findings)
+    assert "CANNOT VERIFY tmux.node_ipc_env" in findings[0].title
+
+
+def test_node_ipc_env_detects_node_channel_fd_when_the_sibling_is_absent(fleet, monkeypatch):
+    """⛔ Judge round 3: `_break_tmux_node_ipc_env` (the CORRUPTIONS entry above) always
+    leaks BOTH vars together, so a mutation that drops ``NODE_CHANNEL_FD`` — the one that
+    actually SIGABRTs `node --test` — out of `_NODE_IPC_ENV_VARS` still reports ERROR: the
+    surviving sibling alone is enough to trip that fixture, and nothing notices the fd went
+    blind. Leak ONLY the fd, not the sibling, so detection is attributable to it and it
+    alone."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: {"NODE_CHANNEL_FD": "3"})
+    findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a tmux global env carrying ONLY NODE_CHANNEL_FD must still be ERROR, got "
+        f"{findings}")
+    assert "NODE_CHANNEL_FD" in findings[0].title
+
+
+def test_node_ipc_env_detects_serialization_mode_when_the_fd_is_absent(fleet, monkeypatch):
+    """Complementary half of the guard above: leak ONLY the sibling, not the fd, so a
+    mutation dropping ``NODE_CHANNEL_SERIALIZATION_MODE`` from `_NODE_IPC_ENV_VARS` can't
+    hide behind the fd's detection either."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env",
+                        lambda: {"NODE_CHANNEL_SERIALIZATION_MODE": "json"})
+    findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a tmux global env carrying ONLY NODE_CHANNEL_SERIALIZATION_MODE must still be "
+        f"ERROR, got {findings}")
+    assert "NODE_CHANNEL_SERIALIZATION_MODE" in findings[0].title
+
+
+def test_tmux_global_env_reader_is_none_not_empty_when_tmux_cannot_be_asked(monkeypatch):
+    """⛔ Judge round 4, finding 1: every other test of this fact stubs `_tmux_global_env`
+    itself, so the tri-state its OWN docstring promises (`None` = never asked, `{}` = asked
+    and clean) was asserted nowhere. Drive the real function: with no tmux on PATH, it must
+    return `None`, and must never even reach `subprocess.run` to get there — a mutation that
+    turns "cannot ask" into "asked, and it's clean" makes doctor go GREEN on a box it never
+    looked at."""
+    monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: None)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError(
+            "tmux cannot be asked — subprocess.run must not run")))
+    assert runtime_truth._tmux_global_env() is None
+
+
+def test_tmux_global_env_reader_parses_show_environment_output(monkeypatch):
+    """⛔ Judge round 4, finding 2: the read half of this fact — turning real
+    `tmux show-environment -g` stdout into the dict the fact scans — has no direct
+    coverage either, so a mutation that skips every parsed line (`if line.startswith("-")`
+    → `if True`) leaves the reader permanently blind while every stubbed detection test
+    stays green. Feed it real-shaped output: a normal `KEY=value` line, and a `-KEY`
+    explicitly-unset marker (no `=`) that must NOT be read as a value.
+
+    ⛔ Judge round 5, finding 1: the earlier version of this test stubbed
+    `subprocess.run` with `lambda *a, **k: ...` and never looked at `a` — a mutation
+    that dropped `-g` from the argv (asking tmux's per-SESSION table instead of the
+    GLOBAL one this fact's whole authority rests on) stayed invisible. Capture the
+    call and assert on it directly.
+
+    ⛔ CMX-260 lift, closing PR #321's round 6 finding 2 (never fixed before the PR was
+    re-scoped): the earlier fake handed back a `str` `stdout` regardless of the kwargs it
+    was called with — strictly more forgiving than the real `subprocess.run` API, so
+    dropping `text=True` from the call (`out.stdout` then a raw `bytes` object) left the
+    reader permanently blind (`isinstance(out.stdout, str)` is False forever) with every
+    test here still green. Assert the kwargs directly, not just the positional argv."""
+    monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    stdout = "TERM=screen-256color\n-NODE_CHANNEL_FD\nNODE_CHANNEL_SERIALIZATION_MODE=json\n"
+    calls = []
+
+    def _fake_run(*a, **k):
+        calls.append((a[0] if a else k.get("args"), k))
+        return subprocess.CompletedProcess(a, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert runtime_truth._tmux_global_env() == {
+        "TERM": "screen-256color",
+        "NODE_CHANNEL_SERIALIZATION_MODE": "json",
+    }
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ["tmux", "show-environment", "-g"], (
+        "must ask tmux for its GLOBAL environment table (-g) — anything less asks "
+        f"only the current session's copy, got {argv}")
+    assert kwargs.get("text") is True, (
+        "must request text=True — a raw bytes stdout fails `isinstance(out.stdout, str)` "
+        f"and the fact would report CANNOT VERIFY on every real box, forever; got {kwargs}")
+
+
+def test_tmux_global_env_reader_is_none_when_the_tmux_call_itself_fails(monkeypatch):
+    """⛔ Judge round 5, finding 2: neutering the returncode half of the CANNOT VERIFY
+    gate (`if out.returncode != 0 or ...` → `if False and out.returncode != 0 or ...`)
+    left every existing test green, because they all stub `_tmux_global_env` directly
+    and never drive a failing `subprocess.run` through the real function. A tmux that
+    is on PATH but whose `show-environment -g` call fails (no server running, a
+    transient error — non-zero exit, empty stdout) must read as `None` (never asked),
+    not `{}` (asked, and it's clean) — the fact's docstring says this in as many words."""
+    monkeypatch.setattr(runtime_truth, "_tmux_or_unverifiable", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="no server"))
+    assert runtime_truth._tmux_global_env() is None
 
 
 def test_peer_transport_warns_on_a_stale_socket_file_nothing_is_listening_on(
