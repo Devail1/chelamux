@@ -1824,16 +1824,20 @@ def judge_suite_timeout(wf) -> float:
 
 @dataclass(frozen=True)
 class JudgeSuiteConfig:
-    """The run's ENTIRE ``judge:`` suite config, as ONE value.
+    """The run's ENTIRE ``judge:`` suite config, read as ONE value.
 
     ⚖️🔁 CMX-266, the remainder of CMX-258 (PR #327): that PR's judge kept finding ONE
     forwarding gap at a time — ``test_cmd`` pinned in rework round 12, ``suite_timeout_seconds``
-    only in round 13, each its own human-granted round. Piecemeal kwargs invite exactly that:
-    every new ``judge.*`` key needs its own parameter threaded through every caller by hand,
-    and the judge finds the ones a round forgot one round at a time. A field that matters to
-    running the suite belongs on THIS struct, and :func:`judge_suite_config` is the ONLY place
-    that builds one — a caller that forwards the struct forwards every field there is, present
-    or future, not whichever ones an earlier round happened to name.
+    only in round 13, each its own human-granted round. Two independent ``wf.get(...)`` lookups
+    invite exactly that: nothing stops one call site reading the fresh field while another still
+    reads a stale one. :func:`judge_suite_config` is the ONLY place that builds this struct, so
+    every field is read from ONE ``WORKFLOW.md`` walk instead of N separately-drifting ones.
+
+    This struct centralises the READ, not the forwarding: both call sites unpack it back into
+    loose parameters (``cfg.test_cmd``, ``cfg.suite_timeout_seconds``) before it crosses into
+    :func:`self_check`, so a future ``judge.*`` field still has to be added here AND threaded
+    into ``self_check``'s signature and its call sites by hand — this struct does not make that
+    automatic, it only guarantees there is a single source of truth to thread from.
     """
 
     test_cmd: str
