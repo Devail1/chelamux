@@ -275,3 +275,173 @@ def test_chela_rework_disputed_reaches_the_dispatcher_end_to_end():
     assert run["status"] == "needs_human"
     assert dispatcher.reviews_of(dict(run))[-1]["verdict"] == "disputed"
     assert dispatcher.resolve_run("cli-e2e-control")["status"] == "running"
+
+
+# --- (d) CMX-251: a dispute after the HEAD MOVED belongs under review, not needs_human --
+#
+# CMX-248 always landed a dispute on `needs_human` because `awaiting_review` would carry
+# the SAME head the judge already ruled on, unjudged again. That reasoning only holds when
+# the head really is unchanged: a rework round can push several commits before the agent
+# decides the REMAINING finding is wrong/unfixable — it fixes what it can, pushes, and
+# disputes the rest. The PR's live head is then already past `judge_sha`, and routing that
+# to `needs_human` strands a fixable, un-judged commit behind a human who has nothing to
+# decide. These tests pin: `awaiting_review` (not `needs_human`) when the live head (read
+# fresh from `gh`, never trusted stale off the row) differs from `judge_sha`; the ordinary
+# `needs_human` path otherwise — an unmoved head, an unreadable `gh` call, or a row with no
+# `judge_sha` at all (never judged) all fail CLOSED to the pre-CMX-251 behavior.
+
+def _gh_router_head(live_head_sha, comment_ok=True, checks_ok=True):
+    """Route `gh pr view --json …` to a fixed live head sha; `gh pr comment` per comment_ok."""
+    def _run(cmd, *a, **k):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        if cmd[:3] == ["gh", "pr", "view"] and "--json" in cmd:
+            r = R()
+            if not checks_ok:
+                r.returncode = 1
+                r.stderr = "gh pr view failed"
+                return r
+            r.stdout = json.dumps({"headRefOid": live_head_sha, "statusCheckRollup": []})
+            return r
+        if cmd[:3] == ["gh", "pr", "comment"]:
+            r = R()
+            r.returncode = 0 if comment_ok else 1
+            r.stderr = "" if comment_ok else "gh pr comment failed"
+            return r
+        return R()
+    return _run
+
+
+def test_dispute_with_a_moved_head_routes_to_awaiting_review_not_needs_human():
+    # last_error seeded non-NULL (as a real prior rework round would leave it) so that
+    # clearing it on the awaiting_review write is actually observable — a row that was
+    # already NULL would pass this assertion even if the clear were silently dropped.
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="a" * 40, last_error="round 1: fix the wire")
+    with patch.object(dispatcher.subprocess, "run",
+                       side_effect=_gh_router_head("b" * 40)), \
+         patch.object(dispatcher, "_kill_window") as kill:
+        result = dispatcher.mark_rework_disputed(
+            "abc123", "the remaining finding is wrong, but I already pushed a fix for the other one",
+        )
+
+    assert result["ok"] is True
+    assert result["status"] == "awaiting_review"
+    assert result["head_moved"] is True
+    assert result["comment_posted"] is True
+    kill.assert_called_once_with("cmx-1")
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"
+    assert run["pr_head_sha"] == "b" * 40
+    # not an escalation: a human has nothing to decide here.
+    assert run["last_error"] is None
+    assert run["rework_count"] == 1               # unchanged — the round was already spent
+    assert dispatcher.reviews_of(dict(run))[-1]["verdict"] == "disputed"
+
+
+def test_dispute_races_a_status_change_and_the_cas_refuses_the_stale_row():
+    """The live `gh` read is deliberately done BEFORE the write transaction — a network
+    call must not hold the row lock (same reasoning as `reopen`'s new-commit gate). That
+    opens a window: another tick or CLI call can move the row status while `gh` is still
+    in flight. The CAS re-check inside `with _db()` must refuse to act on a row that is no
+    longer the running-rework row this call started with — not just a row that vanished
+    outright. Simulates the race by mutating the row's status from inside the mocked `gh
+    pr view` call, i.e. exactly in the window between the live-head read and the CAS."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="a" * 40)
+
+    def _run(cmd, *a, **k):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        if cmd[:3] == ["gh", "pr", "view"] and "--json" in cmd:
+            with dispatcher._db() as race_conn:
+                race_conn.execute(
+                    "UPDATE runs SET status='awaiting_review' WHERE task_id=?", ("abc123",),
+                )
+                race_conn.commit()
+            r = R()
+            r.stdout = json.dumps({"headRefOid": "b" * 40, "statusCheckRollup": []})
+            return r
+        return R()
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_run), \
+         patch.object(dispatcher, "_kill_window") as kill:
+        result = dispatcher.mark_rework_disputed("abc123", "the verdict is wrong")
+
+    assert result["ok"] is False
+    assert "moved to" in result["error"]
+    kill.assert_not_called()
+
+    run = dispatcher.resolve_run("abc123")
+    # untouched by mark_rework_disputed's own write — the race's own UPDATE is all that
+    # landed, so this reads back exactly what the racing writer set, not needs_human.
+    assert run["status"] == "awaiting_review"
+    assert run["last_error"] is None
+
+
+def test_dispute_with_an_unmoved_head_still_lands_on_needs_human():
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="a" * 40)
+    with patch.object(dispatcher.subprocess, "run",
+                       side_effect=_gh_router_head("a" * 40)), \
+         patch.object(dispatcher, "_kill_window"):
+        result = dispatcher.mark_rework_disputed("abc123", "the verdict is wrong")
+
+    assert result["status"] == "needs_human"
+    assert result["head_moved"] is False
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert run["last_error"] is not None
+
+
+def test_dispute_with_an_unreadable_live_head_fails_closed_to_needs_human():
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="a" * 40)
+    with patch.object(dispatcher.subprocess, "run",
+                       side_effect=_gh_router_head("b" * 40, checks_ok=False)), \
+         patch.object(dispatcher, "_kill_window"):
+        result = dispatcher.mark_rework_disputed("abc123", "the verdict is wrong")
+
+    assert result["status"] == "needs_human"
+    assert result["head_moved"] is False
+    assert dispatcher.resolve_run("abc123")["status"] == "needs_human"
+
+
+def test_dispute_with_no_judge_sha_on_the_row_falls_back_to_needs_human():
+    # A rework triggered by something other than the judge (e.g. a CI failure) may never
+    # have stamped `judge_sha` — an unset sha is not positive "moved" evidence (same
+    # conservatism as CMX-246's stale-head guard), even if the live head reads differently.
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha=None)
+    with patch.object(dispatcher.subprocess, "run",
+                       side_effect=_gh_router_head("b" * 40)), \
+         patch.object(dispatcher, "_kill_window"):
+        result = dispatcher.mark_rework_disputed("abc123", "the verdict is wrong")
+
+    assert result["status"] == "needs_human"
+    assert result["head_moved"] is False
+    assert dispatcher.resolve_run("abc123")["status"] == "needs_human"
+
+
+def test_cli_rework_disputed_prints_awaiting_review_when_the_head_moved(capsys):
+    with dispatcher._db() as conn:
+        _row(conn, task_id="cli-head-moved", judge_sha="a" * 40)
+    from chela import main as main_mod
+
+    class Args:
+        task_id = "cli-head-moved"
+        reason = "already fixed the other finding, this one is wrong"
+
+    with patch.object(dispatcher.subprocess, "run",
+                       side_effect=_gh_router_head("b" * 40)), \
+         patch.object(dispatcher, "_kill_window"):
+        main_mod.cmd_rework_disputed(Args())
+
+    out = capsys.readouterr().out
+    assert "awaiting_review" in out
+    assert "needs_human" not in out

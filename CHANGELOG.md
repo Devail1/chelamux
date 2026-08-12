@@ -12,6 +12,23 @@ history lives in `git log`.
 
 ### Changed
 
+- **`chela rework-disputed` now routes back to `awaiting_review`, not `needs_human`, when
+  the head already moved past the disputed verdict.** CMX-248 always landed a dispute on
+  `needs_human`, reasoning that `awaiting_review` would carry the SAME head the judge
+  already ruled on, unjudged again — right when the head really is unchanged, wrong when
+  it isn't. A rework round can push several commits before the agent decides the
+  REMAINING finding is wrong or unfixable: it fixes what it can, pushes, and disputes the
+  rest. The PR's live head is then already past `judge_sha`, and there is an un-judged
+  commit sitting on the branch right now — sending that to `needs_human` stranded a
+  fixable PR behind a human with nothing to decide. `mark_rework_disputed` now re-reads
+  the PR's live head from GitHub (never trusted stale off the row, same discipline as
+  `chela reopen`'s new-commit gate) and compares it to `judge_sha`; a genuine mismatch
+  routes to `awaiting_review` instead, where the judge/CI/merge gates pick the new head up
+  automatically, same as any other push. An unset sha on either side is not treated as
+  positive "moved" evidence (the same conservatism CMX-246's stale-head guard and
+  CMX-238's merge gate already use) — everything else still falls back to the original
+  `needs_human` behavior unchanged. (CMX-251)
+
 - **A `needs_human` escalation's inbox summary now says WHY, not always "the PR still
   fails review."** `dispatcher._escalate` has several call sites, each handing
   `last_error` a DIFFERENT reason — a spent rework budget, checks stuck pending, a dead
