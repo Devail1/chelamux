@@ -1995,8 +1995,10 @@ def test_a_stale_no_verdict_flag_is_cleared_by_the_next_real_verdict(tmp_path, m
     wrongly declines to count a `cannot_verify` the judge really did produce.
 
     Seen to go red: swap `judge_no_verdict=?` for `judge_no_verdict=COALESCE(judge_no_verdict,
-    ?)` in `set_judge_state`'s no-sha UPDATE — the 1 survives the real verdict, and the retry
-    this genuine unknown must spend never gets counted.
+    ?)` in `set_judge_state`'s SHA UPDATE — the 1 survives the real verdict, and the retry
+    this genuine unknown must spend never gets counted. The SHA branch, not the no-sha one, is
+    what this must pin: every real caller in `judge.judge_run` passes `sha=judged_sha`
+    (chela/judge.py:1568,1576,1603) — the no-sha branch is dead on that path.
     """
     monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
     wf = _wf(tmp_path)
@@ -2009,11 +2011,13 @@ def test_a_stale_no_verdict_flag_is_cleared_by_the_next_real_verdict(tmp_path, m
                  judge_no_verdict=1)
 
     # A hand-run `chela judge run` judges the SAME commit for real and comes back cannot_verify
-    # — set_judge_state's default call, `no_verdict` defaults False, exactly judge.judge_run's
-    # own path.
-    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "no judge.test_cmd configured")
+    # — set_judge_state's `sha=` call, `no_verdict` defaults False, exactly judge.judge_run's
+    # own path (chela/judge.py:1603: `set_judge_state(task_id, report.state, ..., sha=judged_sha)`).
+    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "no judge.test_cmd configured",
+                                sha="cafe1234")
     run = dispatcher.resolve_run("abc123")
     assert run["judge_no_verdict"] == 0          # ⛔ the stale reboot flag must not survive
+    assert run["judge_sha"] == "cafe1234"        # sha branch really ran, not the no-sha one
 
     def _spawn(sha):
         with dispatcher._db() as conn:
