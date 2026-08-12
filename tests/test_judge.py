@@ -353,6 +353,27 @@ def test_a_cannot_verify_report_blocks_nothing_whatever_its_findings_say(tmp_pat
     assert judge.Report(outcomes=[survived], cannot_verify="the baseline was red").blocking == []
 
 
+def test_block_body_step_3_tells_the_rework_agent_to_self_check(tmp_path):
+    """⛔ CMX-258 rework round 1, finding 3 (WIRING): ``block_body`` is what tells a BLOCKED
+    agent how to come back. If step 3 is reverted to a bare `chela task-finished <task-id>`,
+    a rework agent takes the warn-only path and CMX-250's self-check gate never enforces on
+    the very round that was blocked — nothing before this test pinned the wording at all.
+    """
+    survived = judge.Outcome(
+        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+        judge.SURVIVED, "it survived",
+        baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+        mutated=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+    )
+    report = judge.Report(outcomes=[survived],
+                           baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""))
+
+    body = judge.block_body(report, "https://x/1", TEST_CMD)
+
+    assert "--self-check-experiments <path>" in body
+    assert "chela task-finished <task-id> --self-check-experiments" in body
+
+
 def test_zero_experiments_is_CANNOT_VERIFY_not_a_clean_bill_of_health(tmp_path):
     root = _project(tmp_path / "repo")
 

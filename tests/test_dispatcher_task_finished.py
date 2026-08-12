@@ -299,7 +299,12 @@ def test_cmd_task_finished_refuses_transition_when_self_check_cannot_verify(tmp_
             with pytest.raises(SystemExit) as exc:
                 main.main()
     assert exc.value.code == 1
-    assert "CANNOT VERIFY" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "CANNOT VERIFY" in out
+    # ⛔ CMX-258 rework round 1, finding 1: "CANNOT VERIFY" alone is a constant in main.py —
+    # a mutation that drops the interpolated `{check['cannot_verify']}` reason stays
+    # invisible to that substring check. The WHY is the only actionable half; pin it.
+    assert "the suite is NOT GREEN" in out
     mark.assert_not_called()
 
 
@@ -495,6 +500,10 @@ def test_check_no_new_guards_true_and_logs_an_event_when_diff_touches_tests(tmp_
     _repo_with_origin(root)
     (root / "tests").mkdir()
     (root / "tests" / "test_new_thing.py").write_text("def test_x():\n    assert True\n")
+    # ⛔ CMX-258 rework round 1, finding 2: the fixture diff must touch a NON-tests/ file
+    # too, so the unfiltered `files` list and the tests/-filtered `touched` list differ —
+    # otherwise a mutation that logs `files` instead of `touched` stays invisible.
+    (root / "chela_thing.py").write_text("x = 1\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "add a guard")
     wf = _workflow_md(tmp_path)
