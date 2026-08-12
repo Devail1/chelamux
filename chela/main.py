@@ -1811,22 +1811,33 @@ def cmd_task_finished(args) -> None:
 
 
 def cmd_rework_disputed(args) -> None:
-    """⏳🪤 CMX-248 (re-scope of CMX-244). A rework agent's escape hatch for "there is
-    nothing to push."
+    """⏳🪤 CMX-248 (re-scope of CMX-244), 🔀 CMX-251. A rework agent's escape hatch for
+    "there is nothing to push."
 
     Invoked by a reworking agent as its LAST step in place of `task-finished` when it
     concludes the verdict is wrong, already fixed, or otherwise unfixable — i.e. it has no
-    new commit to offer for review. Moves the run straight to `needs_human` (never
-    `awaiting_review`, which would carry the SAME head the judge already ruled on, unjudged
-    again) so a human resolves the disagreement instead of the run sitting in `running`
-    forever with no commit that could ever trigger a fresh judge pass.
+    new commit to offer for review. Usually moves the run straight to `needs_human` so a
+    human resolves the disagreement instead of the run sitting in `running` forever with
+    no commit that could ever trigger a fresh judge pass — `awaiting_review` would
+    otherwise carry the SAME head the judge already ruled on, unjudged again. But when the
+    PR's live head has already moved past that judged head (the agent fixed some findings
+    and pushed before disputing the rest), that reasoning does not hold: the new commit
+    genuinely needs judging, not a human, so `mark_rework_disputed` routes it back to
+    `awaiting_review` instead. Which one happened is read off `result["status"]`, not
+    assumed here.
     """
     result = dispatcher.mark_rework_disputed(args.task_id, args.reason)
     if not result.get("ok"):
         print(f"rework-disputed: {result.get('error', 'unknown error')}")
         sys.exit(1)
-    print(f"🔁🚫 Task {result['task_id']} disputed — needs_human "
-          f"(rework {result.get('rework_count')}/{result.get('max_reworks')})")
+    status = result.get("status", "needs_human")
+    if status == "awaiting_review":
+        print(f"🔀 Task {result['task_id']} disputed — the head already moved past the "
+              "judged verdict, routed back to awaiting_review for automatic re-judging "
+              f"(rework {result.get('rework_count')}/{result.get('max_reworks')})")
+    else:
+        print(f"🔁🚫 Task {result['task_id']} disputed — needs_human "
+              f"(rework {result.get('rework_count')}/{result.get('max_reworks')})")
     if result.get("comment_posted"):
         print(f"  PR comment posted: {result.get('pr_url') or ''}")
     else:
