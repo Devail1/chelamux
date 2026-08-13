@@ -735,6 +735,39 @@ def test_the_REQUIRED_MUTATION_SET_carries_only_the_survivor_not_every_outcome(t
     assert [r["guard"] for r in required] == ["the colourblind glyph cue"]
 
 
+def test_the_REQUIRED_MUTATION_SET_carries_every_survivor_not_just_the_first(tmp_path):
+    """⛔ Rework round 8, findings 1+2: two hops upstream of the stored review entry, both
+    still written assuming a required set of ONE. `judge.judge_run` must hand
+    `request_changes` every survived experiment (`blocking`, not `blocking[:1]`), and
+    `request_changes` must STORE every one of them on the review entry (not
+    `mutations[:1]`) — every other test in this file (including the one directly above,
+    which submits two experiments but only one SURVIVES) still hands both hops a required
+    set of exactly one, so `blocking` and `blocking[:1]` stay indistinguishable everywhere
+    else. These two hops are the PERMANENT-loss ones: truncated here, a survivor is gone
+    from the row before the brief, the enforcement scan, or the print loop ever see it —
+    nothing downstream can recover it.
+
+    Submit TWO experiments that BOTH survive `FAKE_GUARD_TEST` — the glyph cue (as always)
+    and the hue's OFF-state, which the fake guard also never checks (it only asserts
+    `chip("on")["hue"] == "green"`) — and assert `latest_required_mutations` names both, in
+    order, straight off the real `judge_run` → `request_changes` → storage path."""
+    hue_off_before = '    hue = "green" if state == "on" else "grey"'
+    hue_off_after = '    hue = "green" if state == "on" else "green"'
+    result, run, posted = _judge_run(
+        tmp_path, FAKE_GUARD_TEST,
+        {"experiments": [_exp(), _exp(guard="the hue distinguishes on from off",
+                                       before=hue_off_before, after=hue_off_after)]},
+    )
+    assert result["state"] == judge.J_BLOCKED
+    assert result["blocking"] == 2
+    assert len(result["outcomes"]) == 2
+
+    required = dispatcher.latest_required_mutations(run)
+    assert [r["guard"] for r in required] == [
+        "the colourblind glyph cue", "the hue distinguishes on from off",
+    ]
+
+
 def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_path):
     """⚖️🕳️ CMX-228: the run moved out of `awaiting_review` (a human merged it, or CI got
     there first) WHILE the judge was mid-run. `request_changes`'s compare-and-swap correctly

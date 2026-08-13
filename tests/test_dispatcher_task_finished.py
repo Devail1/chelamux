@@ -356,6 +356,31 @@ def test_verify_self_check_flags_only_the_required_mutation_that_was_not_resubmi
     assert [m["guard"] for m in result["missing_required"]] == ["the return line"]
 
 
+def test_verify_self_check_clears_when_the_required_mutation_is_resubmitted_second_in_the_list(tmp_path):
+    """⛔ Rework round 8, finding 3: `submitted_keys` must be built from EVERY submitted
+    experiment, not just the first — the rework brief tells an agent to add any NEW
+    experiments for guards it changed this round ALONGSIDE the required ones, so the
+    required mutation is not necessarily first in the agent's own experiments file. Every
+    fixture in this module up to now puts the required mutation FIRST (often the only
+    entry). Submit the agent's own new experiment first and the required mutation SECOND:
+    this must still clear, or a matcher that only reads `submitted[0]` sees the agent's own
+    experiment, decides the required mutation was never resubmitted, and refuses a
+    resubmission that in fact re-tested the exact case that beat the judge."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()   # the exact mutation that survived last round
+    own_new = _exp(guard="a new experiment the agent added this round",
+                   before='return {"glyph": glyph}', after='return {"glyph": "!"}')
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [own_new, required]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
+
+
 def test_verify_self_check_does_not_flag_a_required_mutation_whose_anchor_is_already_gone(tmp_path):
     """The agent legitimately rewrote the guarded code this round — the old `before` anchor
     no longer occurs anywhere in the file. There is nothing left to re-test, so this must
@@ -639,6 +664,35 @@ def test_cmd_task_finished_refuses_transition_when_a_required_mutation_is_missin
     out = capsys.readouterr().out
     assert "REQUIRED" in out
     assert "guard.py: the glyph cue" in out
+    mark.assert_not_called()
+
+
+def test_cmd_task_finished_prints_every_missing_required_mutation_not_just_the_first(tmp_path, capsys):
+    """⛔ Rework round 8, finding 4: the refusal prints `len(missing)` and then must list
+    THAT MANY missing mutations — a loop that only walks `missing[:1]` contradicts its own
+    count in the same breath, and silently withholds a required mutation the agent is never
+    shown. The refusal test above hands `missing_required` a ONE-item list, so `missing` and
+    `missing[:1]` are the same list there; hand it TWO and assert both guard labels print."""
+    from chela import main
+
+    with patch.object(dispatcher, "verify_self_check",
+                       return_value={"ok": True, "blocking": 0, "cannot_verify": "",
+                                     "outcomes": [{"verdict": "KILLED", "file": "guard.py",
+                                                    "guard": "an unrelated experiment"}],
+                                     "missing_required": [
+                                         {"guard": "the glyph cue", "file": "guard.py"},
+                                         {"guard": "the hue cue", "file": "guard.py"},
+                                     ]}), \
+         patch.object(dispatcher, "mark_awaiting_review") as mark:
+        with patch.object(sys, "argv", ["chela", "task-finished", "t1",
+                                         "--self-check-experiments", str(tmp_path / "e.json")]):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "2 REQUIRED" in out
+    assert "guard.py: the glyph cue" in out
+    assert "guard.py: the hue cue" in out
     mark.assert_not_called()
 
 
