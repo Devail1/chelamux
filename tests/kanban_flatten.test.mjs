@@ -17,6 +17,7 @@
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { KANBAN_LANE_LABELS } from '../chela/dashboard/static/js/kanbanlanemodel.js';
 
 const BODY = `
 <div class="work-pane active" id="work-board" data-seg="board">
@@ -120,4 +121,34 @@ test('renderKanban: a genuinely done run still renders in the done column, not a
         'a genuinely done run leaked into the archived column');
     assert.ok(doneCol.querySelector('.kanban-card-done'),
         'a genuinely done run never reached the done column');
+});
+
+// --- 3. ⭐ GUARD (round 8, PR #334) — the lane HEAD label reaches the DOM ------------
+//
+// tests/kanban_lane_model.test.mjs's "lane label: archived lane says 'Archived' in
+// words" only ever asserted the KANBAN_LANE_LABELS.archived source constant — it
+// never proved that constant reaches the rendered column head. _kCol interpolates
+// `label` straight into `<span class="kanban-col-label">${label}</span>`
+// (kanban.js); emptying that interpolation leaves every lane head on the board
+// wordless — hue and card count are the only cue left, which fails Liav (red-weak)
+// specifically. This renders the REAL board and reads the REAL span's textContent,
+// so it goes red on that exact corruption.
+
+test('renderKanban: the Archived and Done lane heads render their labels as text, distinct from each other', () => {
+    renderKanban(_payload([_run({ status: 'closed' }), _run({ task_id: 't2', status: 'done', pr_state: 'merged' })]));
+
+    const archivedLabel = document.querySelector('.kanban-col-archived .kanban-col-label');
+    const doneLabel = document.querySelector('.kanban-col-done .kanban-col-label');
+    assert.ok(archivedLabel, '.kanban-col-archived has no .kanban-col-label span');
+    assert.ok(doneLabel, '.kanban-col-done has no .kanban-col-label span');
+
+    // 🔴 GUARD: this is the assertion the source-only test above could not make —
+    // if _kCol's `${label}` interpolation is dropped, both spans go empty and this
+    // fails while the source-constant test stays green.
+    assert.equal(archivedLabel.textContent, KANBAN_LANE_LABELS.archived,
+        `archived lane head does not render its label — got: "${archivedLabel.textContent}"`);
+    assert.equal(doneLabel.textContent, KANBAN_LANE_LABELS.done,
+        `done lane head does not render its label — got: "${doneLabel.textContent}"`);
+    assert.notEqual(archivedLabel.textContent, doneLabel.textContent,
+        'archived and done lane heads render identical text — no cue beyond colour');
 });
