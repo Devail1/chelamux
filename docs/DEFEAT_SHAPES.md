@@ -267,3 +267,63 @@ first non-retry entry), but no test had a history where the *latest* substantive
 carried no `mutations` while an *earlier* one did, so a fall-through mutation
 (`if isinstance(raw, list): return [...]`, otherwise keep looping) stayed green. Fixed by
 `test_latest_required_mutations_stops_at_the_latest_verdict_even_when_it_carries_no_findings`.
+
+---
+
+## 11. A per-item loop over a required SET tested with a set of exactly one
+
+**Assertion form:** a function is supposed to check EVERY item in a list against some
+condition and collect the ones that fail — but every fixture that drives it hands it a
+list of length one.
+
+**Mutation that defeats it:** change `continue` (skip this item, keep checking the rest of
+the list) to `break` (stop checking entirely the moment one item passes). On a one-item
+list these are identical — there is nothing left to check either way — so the suite stays
+green. The concrete failure is asymmetric and worse than it looks: with two required items,
+the agent re-tests the EASY one and the loop stops there, silently excusing the hard one it
+never re-tested — which is exactly the "tested something easier instead of the case that
+beat it" recurrence this checking function exists to catch, reached through the plural door
+instead of the singular one every test exercises.
+
+**Guard form that survives:** construct a fixture with at least TWO items in the required
+set — one resubmitted (satisfied), one not — and assert the result names only the one that
+was not resubmitted. A same-cardinality-everywhere fixture (every test uses length one)
+structurally cannot tell `continue` from `break`.
+
+**Found:** `chela/dispatcher.py`'s `_missing_required_mutations` (CMX-269 rework round 6) —
+every fixture in `tests/test_dispatcher_task_finished.py` built its required set via
+`_review_history_with_required(mutation)`, which always wraps exactly one mutation. Fixed by
+`test_verify_self_check_flags_only_the_required_mutation_that_was_not_resubmitted`, which
+hands the function two required mutations and asserts only the unsubmitted one is flagged.
+
+---
+
+## 12. A field pinned at one hop of a round-trip, untested at the next
+
+**Assertion form:** a value is produced by one function, consumed by another, and the two
+are separated by a serialize/render step in between. A test pins the value on the
+*producing* side (e.g. an `as_dict()`/`to_dict()` method includes the field) and a separate
+test pins it on the *consuming* side (a parser reads the field back correctly) — but nothing
+drives an assertion through the hop in the middle, where the value is dumped into a rendered
+text block for a human or another process to copy verbatim.
+
+**Mutation that defeats it:** drop the field only at the render hop (e.g.
+`json.dumps({k: v for k, v in m.items() if k != "field"})` instead of dumping the dict
+as-is). Both the producing-side test and the consuming-side test still pass — neither of
+them touches the render step — so the suite stays green even though the field never survives
+the round trip in practice. The parser on the far end silently defaults the missing field
+back to something else, changing behavior with no visible failure anywhere.
+
+**Guard form that survives:** the fixture driving the render-step test must itself carry the
+field with a distinctive, non-default value, and the assertion must check for that value's
+literal serialized form in the rendered output — not just for OTHER fields the render step
+also happens to preserve.
+
+**Found:** `chela/dispatcher.py`'s `_required_mutations_section` (CMX-269 rework round 6) —
+`Experiment.as_dict` was pinned to emit `kind` (round 2), and `judge.Experiment.parse` reads
+it back, but the render-step tests
+(`test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable_JSON_block`,
+`test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET`) used a fixture dict with no
+`kind` key at all, so a render that stripped `kind` was invisible to both. Fixed by adding
+`"kind": "wiring"` to each fixture and asserting `'"kind": "wiring"'` appears in the rendered
+prompt.

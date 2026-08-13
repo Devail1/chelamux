@@ -194,6 +194,13 @@ def _review_history_with_required(mutation: dict) -> str:
     }])
 
 
+def _review_history_with_required_many(mutations: list[dict]) -> str:
+    return json.dumps([{
+        "round": 1, "at": "t", "body": "two survived",
+        "verdict": "changes_requested", "mutations": mutations,
+    }])
+
+
 def test_verify_self_check_flags_a_required_mutation_missing_from_the_submitted_set(tmp_path):
     """The agent's self-check comes back CLEAN — but only because it tested a different,
     easier experiment than the one the judge actually caught it on last round. That is
@@ -318,6 +325,35 @@ def test_verify_self_check_flags_a_required_mutation_resubmitted_under_a_differe
 
     assert result["ok"]
     assert [m["guard"] for m in result["missing_required"]] == ["the glyph cue"]
+
+
+def test_verify_self_check_flags_only_the_required_mutation_that_was_not_resubmitted(tmp_path):
+    """⛔ Rework round 6, finding 1: ``required`` is a LIST — re-testing ONE of several
+    required mutations must not excuse the others. Every fixture up to now hands
+    ``_missing_required_mutations`` a required set of exactly one, so `continue` (keep
+    checking the rest) and `break` (stop at the first re-submitted one) are
+    indistinguishable everywhere else in this suite. Hand it TWO required mutations — the
+    FIRST resubmitted verbatim, the SECOND never resubmitted at all — and assert only the
+    second comes back as missing. A `break` after the first match would clear the whole set
+    and let the agent skip re-testing the second required case entirely."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required_first = _exp()   # anchored on the glyph line; will BE resubmitted
+    required_second = _exp(
+        guard="the return line", before='    return {"glyph": glyph}',
+        after='    return {}',
+    )   # anchored on a different, still-live line; will NOT be resubmitted
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [required_first]}))
+    _insert_run(
+        "t1", root, wf,
+        review_history=_review_history_with_required_many([required_first, required_second]),
+    )
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert [m["guard"] for m in result["missing_required"]] == ["the return line"]
 
 
 def test_verify_self_check_does_not_flag_a_required_mutation_whose_anchor_is_already_gone(tmp_path):

@@ -1092,7 +1092,7 @@ def test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET(tmp_path):
     dropped from that call."""
     wf = _wf(tmp_path)
     sent: list[str] = []
-    mutation = {"guard": "the glyph cue", "file": "guard.py",
+    mutation = {"guard": "the glyph cue", "kind": "wiring", "file": "guard.py",
                 "before": 'glyph = "*"', "after": 'glyph = ""'}
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="running", rework_count=1,
@@ -1120,6 +1120,9 @@ def test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET(tmp_path):
     assert '"guard": "the glyph cue"' in sent[0]
     assert '"file": "guard.py"' in sent[0]
     assert "copy this JSON into your self-check experiments file" in sent[0]
+    # ⛔ Rework round 6, finding 2: `_renudge_prompt` is the SECOND call site that renders
+    # `_required_mutations_section` — it must not lose `kind` either.
+    assert '"kind": "wiring"' in sent[0]
 
 
 # --- (h) 🔴 changes_requested is not a silent state, and a HOLD must not freeze the exit ---
@@ -1411,7 +1414,7 @@ def test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable
     original_wt.mkdir(parents=True)
     fake = _FakeTmux()
     prompts: list[str] = []
-    mutation = {"guard": "the glyph cue", "file": "guard.py",
+    mutation = {"guard": "the glyph cue", "kind": "wiring", "file": "guard.py",
                 "before": 'glyph = "*"', "after": 'glyph = ""'}
 
     with dispatcher._db() as conn:
@@ -1446,6 +1449,12 @@ def test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable
     # `judge.load_experiments` ("must be a JSON object with an `experiments` list"). Only a
     # structural marker on the envelope itself catches the missing wrapper.
     assert '"experiments": [' in prompts[0]
+    # ⛔ Rework round 6, finding 2: `kind` is pinned through `Experiment.as_dict` (round 2)
+    # but the RENDERED brief is a separate hop — `_required_mutations_section` dumps
+    # `mutations` verbatim, and a fixture with no `kind` at all cannot notice a payload that
+    # strips it. A stripped `kind` defaults back to `"mutation"` on parse
+    # (`judge.Experiment.parse`), silently turning a required WIRING re-test into a plain one.
+    assert '"kind": "wiring"' in prompts[0]
 
 
 def test_the_rework_prompt_has_no_REQUIRED_MUTATION_SET_section_when_the_verdict_carried_none(tmp_path):
