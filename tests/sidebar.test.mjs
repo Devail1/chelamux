@@ -313,6 +313,40 @@ test('CMX-230: renderNav actually SPLITS the sidebar — primary views in #side-
     for (const id of primaryIds) assert.ok(!secondaryIds.includes(id), `${id} must not ALSO render into #side-nav-more`);
 });
 
+// --- 1c⁴. 🔴 CLAIM 3 ("re-parenting, not removal") also covers the active-row cue -
+//
+// views.js's own must-never for the demoted group: "the entries below ... are
+// completely unchanged, so EVERY ONE OF THESE VIEWS STILL WORKS EXACTLY AS IT DID;
+// only which nav list its row lands in changes". The one piece of nav behaviour
+// that IS DOM-position-sensitive is the active-row highlight: _syncSidebarActive
+// (nav.js) sweeps `.side-item` to toggle `.active`. Scoping that sweep to
+// `#side-nav` is a no-op before this PR (every row lived there) and a silent
+// regression after it — selecting a demoted view would leave the WHOLE sidebar
+// with no lit row. This drives the REAL renderNav() + REAL selectView() and reads
+// `.active` back off the REAL rendered rows in BOTH #side-nav and #side-nav-more —
+// a guard that checked only one host would pass a sweep wrongly scoped to the
+// other, which is exactly the corruption this closes.
+test('CMX-257: selecting a view lights its row wherever renderNav actually put it — primary AND demoted', () => {
+    nav.renderNav();
+
+    window.chela.selectView('agents');   // demoted -> #side-nav-more
+    assert.equal(
+        document.querySelector('#side-nav-more .side-item[data-view="agents"]').classList.contains('active'),
+        true,
+        'the demoted row never lit — a sweep scoped away from #side-nav-more leaves every demoted selection dark');
+    assert.equal(
+        document.querySelectorAll('#side-nav .side-item.active').length, 0,
+        'a primary row is lit while a demoted view is selected');
+
+    window.chela.selectView('work');     // primary -> #side-nav
+    assert.equal(
+        document.querySelector('#side-nav .side-item[data-view="work"]').classList.contains('active'),
+        true, 'the primary row never lit');
+    assert.equal(
+        document.querySelector('#side-nav-more .side-item[data-view="agents"]').classList.contains('active'),
+        false, 'the previously-active demoted row is still lit after switching to a primary view');
+});
+
 // --- 1d. 🔴 the EXPANDED sidebar icons are sized to MATCH the collapsed rail ------
 //
 // CMX-85 enlarged the collapsed-rail glyphs; CMX-86 brings the expanded ones up to
