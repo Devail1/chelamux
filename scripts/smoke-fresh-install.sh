@@ -34,6 +34,31 @@
 #                                                             # network for this)
 set -euo pipefail
 
+# CMX-275: the one place this script needs an unused TCP port — ask the kernel for one
+# nobody currently holds, don't guess. Factored into its own function (rather than inlined
+# at the DASH_PORT= call site below) so tests/test_smoke_fresh_install.py can drive the
+# EXACT production code path via `--print-port` below, hundreds of times cheaply, instead of
+# only ever observing it once per full (multi-minute) fresh-install run.
+pick_free_port() {
+    python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1])
+s.close()
+"
+}
+
+# Internal fast-path, not part of the documented adopter usage below: print one
+# kernel-assigned free port and exit, skipping the clone/sync/dashboard/etc. entirely. This
+# is what lets the WIRING guard in tests/test_smoke_fresh_install.py call the real
+# pick_free_port() repeatedly in well under a second instead of paying for a full
+# fresh-install run per sample.
+if [ "${1:-}" = "--print-port" ]; then
+    pick_free_port
+    exit 0
+fi
+
 SOURCE="${1:-https://github.com/Devail1/chelamux}"
 
 WORK="$(mktemp -d)"
@@ -172,13 +197,7 @@ run_step "chela plugin --dir (documented offline-render path)" plugin --dir "$WO
 # what it chose, then release it immediately before starting the real dashboard (a TOCTOU
 # window remains, but it is now milliseconds of bash instead of this dashboard's entire
 # lifetime).
-DASH_PORT=$(python3 -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.bind(('127.0.0.1', 0))
-print(s.getsockname()[1])
-s.close()
-")
+DASH_PORT=$(pick_free_port)
 
 # Step 3 fixture (test-only, SMOKE_BREAK_DASHBOARD=1, unset in the normal adopter path):
 # genuinely occupies $DASH_PORT *before* `chela dashboard` tries to bind it, so Flask's
@@ -200,12 +219,15 @@ if [ "${SMOKE_BREAK_DASHBOARD:-0}" = "1" ]; then
     # curl's, in the readiness loop below) is closed immediately without a reply, so a
     # probe gets an instant, real "connection refused" / empty-reply — never a hang.
     #
-    # $DASH_PORT is a random pick out of a 20000-wide range, not a reservation — some
-    # other process on the box can already hold it (hit live in CI: the fixture's own
-    # bind() raised a genuine `OSError: Address already in use` before it ever got to
-    # listen()). That collision is froth on the port picker, not the thing this fixture
-    # is trying to prove, so retry with a fresh random port a few times before treating
-    # it as this fixture's own failure to bind.
+    # $DASH_PORT is a snapshot of what pick_free_port() saw free a moment ago, not a
+    # reservation — some other process on the box can grab it before this fixture binds it
+    # (hit live in CI: the fixture's own bind() raised a genuine `OSError: Address already in
+    # use` before it ever got to listen()). That collision is froth on the port picker, not
+    # the thing this fixture is trying to prove, so retry with a fresh random port (this
+    # retry path, unlike the real DASH_PORT= pick above, doesn't need to survive
+    # test_dash_port_comes_from_a_kernel_probe_not_an_arithmetic_guess — it only occupies a
+    # port for a doomed-on-purpose fixture, never the one `chela dashboard` binds for real)
+    # a few times before treating it as this fixture's own failure to bind.
     hog_bound=0
     for hog_attempt in $(seq 1 5); do
         rm -f "$WORK/dashboard-hog-bound"

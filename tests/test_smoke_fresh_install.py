@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import socket
 import subprocess
 from pathlib import Path
 
@@ -84,6 +85,21 @@ def _run(*, env: dict) -> subprocess.CompletedProcess:
         ["bash", str(SCRIPT), str(ROOT)],
         capture_output=True, text=True, timeout=600, env=env,
     )
+
+
+# A blind `DASH_PORT=$(( 20000 + (RANDOM % 20000) ))` guess (the pre-CMX-275 line, and the
+# mutation the judge re-applied to prove this file didn't guard it) can ONLY ever produce a
+# value in this band. Read straight from /proc rather than hardcoding "32768-60999" so this
+# stays correct if a box's ephemeral range is ever configured differently.
+GUESS_RANGE = range(20000, 40000)
+
+
+def _ephemeral_port_range() -> tuple[int, int] | None:
+    try:
+        lo, hi = (int(x) for x in Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split())
+    except (FileNotFoundError, ValueError):
+        return None
+    return lo, hi
 
 
 def test_passes_on_a_real_fresh_clone_of_this_checkout():
@@ -221,3 +237,88 @@ def test_strips_inherited_chela_env_so_a_live_install_never_leaks_in():
         + out.stdout
     )
     assert "definitely-not-a-real-session-cmx263" not in out.stdout
+
+
+def test_dash_port_comes_from_a_kernel_probe_not_an_arithmetic_guess():
+    """🔴 WIRING guard (docs/DEFEAT_SHAPES.md #9). The judge re-applied the pre-CMX-275 line
+    — `DASH_PORT=$(( 20000 + (RANDOM % 20000) ))` in place of the real `pick_free_port()`
+    bind-to-0 probe — to a throwaway checkout of this branch and the full suite, including
+    every other test in this file, STILL PASSED: nothing anywhere asserted where the port
+    number actually came from, only that *some* dashboard eventually answered 200.
+
+    A blind arithmetic guess can only ever land in GUESS_RANGE (20000-39999). The real
+    kernel-assigned port is drawn from this box's ephemeral range
+    (/proc/sys/net/ipv4/ip_local_port_range, default 32768-60999 on Linux) — wide enough
+    that most draws land outside GUESS_RANGE entirely. So: call the script's `--print-port`
+    fast path (the exact pick_free_port() function the real DASH_PORT= line calls, not a
+    reimplementation that could quietly drift from it) repeatedly, and require at least one
+    draw to land outside GUESS_RANGE. Under the mutation that is impossible — every draw is
+    confined to GUESS_RANGE by construction, no matter how many samples are taken. Under the
+    real code it is a near-certainty within a handful of samples.
+    """
+    ephemeral = _ephemeral_port_range()
+    if ephemeral is not None:
+        lo, hi = ephemeral
+        outside_width = (hi - lo + 1) - max(0, min(hi, GUESS_RANGE.stop - 1) - max(lo, GUESS_RANGE.start) + 1)
+        if outside_width <= 0:
+            pytest.skip(
+                f"this box's ephemeral port range ({lo}-{hi}) is entirely inside "
+                f"{GUESS_RANGE.start}-{GUESS_RANGE.stop - 1} — a real kernel-assigned port "
+                f"can never land outside GUESS_RANGE here, so this guard can't discriminate "
+                f"a real probe from the arithmetic guess it replaces"
+            )
+
+    samples = []
+    for _ in range(15):
+        out = subprocess.run(
+            ["bash", str(SCRIPT), "--print-port"],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert out.returncode == 0, out.stdout + out.stderr
+        port = int(out.stdout.strip())
+        # "genuinely bindable at that moment" — pick_free_port() released this exact port
+        # right before printing it, so binding it here (immediately, before anything else on
+        # the box can grab it) must succeed. A stale/fabricated value would not reliably do
+        # this.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", port))
+        samples.append(port)
+
+    outside_guess_range = [p for p in samples if p not in GUESS_RANGE]
+    assert outside_guess_range, (
+        f"all {len(samples)} samples from `--print-port` landed inside "
+        f"{GUESS_RANGE.start}-{GUESS_RANGE.stop - 1} — exactly the range a blind "
+        f"`20000 + (RANDOM % 20000)` guess is confined to: {samples}. Either DASH_PORT "
+        f"stopped calling a real bind-to-0 probe, or (see _ephemeral_port_range()) this "
+        f"box's ephemeral range doesn't extend past that band."
+    )
+
+
+def test_dash_port_wiring_calls_the_real_probe_function():
+    """Static half of the CMX-275 WIRING guard (docs/DEFEAT_SHAPES.md #9) — pairs with
+    test_dash_port_comes_from_a_kernel_probe_not_an_arithmetic_guess just above, which drives
+    pick_free_port() through the script's `--print-port` mode: a SEPARATE call site from the
+    one `chela dashboard` actually uses (step 3's `DASH_PORT=$(pick_free_port)`). A mutation
+    that reverts only THAT assignment back to the arithmetic guess — leaving pick_free_port()
+    itself, and `--print-port`'s own call to it, untouched — would defeat the behavioral test
+    without this one (docs/DEFEAT_SHAPES.md shape 7: two callers, one guarded).
+
+    This is a bare source-text match, the shape shape 1 in that same catalog warns is weak —
+    but not for the same reason it's weak there: shape 1 is defeated by wrapping a statement
+    in dead code (`if (false && ...)`) so it never runs while the substring survives. That
+    doesn't apply to a bare variable assignment under this script's own `set -euo pipefail`:
+    there is no way to dead-code `DASH_PORT=$(pick_free_port)` without either leaving it
+    calling the real probe or making `$DASH_PORT` unbound, which crashes the rest of the
+    script outright — a failure every other test in this file already catches. An exact
+    literal match on this one line is therefore the strong form for this specific mutation
+    target, not the weak one.
+    """
+    source = SCRIPT.read_text()
+    assert re.search(r"^DASH_PORT=\$\(pick_free_port\)\s*$", source, re.MULTILINE), (
+        "the production DASH_PORT= assignment (step 3, right before `chela dashboard` "
+        "starts) no longer calls pick_free_port() — either it was reverted to something "
+        "else (e.g. the pre-CMX-275 `$(( 20000 + (RANDOM % 20000) ))` guess) or renamed. "
+        "test_dash_port_comes_from_a_kernel_probe_not_an_arithmetic_guess above only "
+        "exercises the separate `--print-port` call site, so it would not catch this on "
+        "its own:\n" + source
+    )
