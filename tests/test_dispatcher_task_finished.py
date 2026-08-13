@@ -252,6 +252,29 @@ def test_verify_self_check_clears_when_the_required_mutation_is_resubmitted_unde
     assert result["missing_required"] == []
 
 
+def test_verify_self_check_flags_a_required_mutation_resubmitted_with_a_weaker_after(tmp_path):
+    """⛔ Rework round 2, finding 1: matching is ``(file, before, after)`` identity — ALL
+    THREE, not just ``(file, before)``. Resubmit the exact required ``before`` anchor but
+    with a different, weaker ``after`` (a no-op that changes nothing): this is not the case
+    that beat the judge and must still read as MISSING. A matcher that keys on ``(file,
+    before)`` alone would let an agent copy the anchor but neuter the replacement and still
+    pass self-check."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()   # the exact mutation that survived last round
+    # Same file, same `before` anchor, but a WEAKER `after` — a different corruption than
+    # the one that actually beat the judge, not just a reformatting of it.
+    weaker = _exp(guard="the glyph cue", after='    glyph = "*"')
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [weaker]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert [m["guard"] for m in result["missing_required"]] == ["the glyph cue"]
+
+
 def test_verify_self_check_does_not_flag_a_required_mutation_whose_anchor_is_already_gone(tmp_path):
     """The agent legitimately rewrote the guarded code this round — the old `before` anchor
     no longer occurs anywhere in the file. There is nothing left to re-test, so this must

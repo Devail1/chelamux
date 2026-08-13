@@ -573,12 +573,18 @@ def test_a_surviving_guard_sends_the_run_back_through_request_changes(tmp_path):
 
 def test_a_surviving_guard_hands_the_exact_mutation_forward_as_the_REQUIRED_MUTATION_SET(tmp_path):
     """⚖️🎯 CMX-269. The prose verdict is not the only thing a SURVIVED guard produces — the
-    exact ``{guard, file, before, after}`` that beat it must reach `request_changes` as DATA
-    too, verbatim from the judge's own `Experiment`, not reformatted from `block_body`'s
+    exact ``{guard, file, before, after, kind}`` that beat it must reach `request_changes` as
+    DATA too, verbatim from the judge's own `Experiment`, not reformatted from `block_body`'s
     markdown. This is what a rework brief later copies into its REQUIRED MUTATION SET
-    instead of asking the agent to reconstruct it from prose."""
+    instead of asking the agent to reconstruct it from prose.
+
+    ⛔ Rework round 2, finding 2: submit a WIRING-kind experiment and pin ``kind`` through
+    the round-trip too — ``Experiment.parse`` defaults an absent/unrecognised ``kind`` back
+    to ``"mutation"``, so if ``as_dict`` ever stopped emitting it, a required WIRING
+    experiment would silently come back demanding a plain mutation instead — and every
+    assertion here that checks only ``file``/``before``/``after``/``guard`` would stay green."""
     result, run, posted = _judge_run(
-        tmp_path, FAKE_GUARD_TEST, {"experiments": [_exp()]},
+        tmp_path, FAKE_GUARD_TEST, {"experiments": [_exp(kind="wiring")]},
     )
     assert result["state"] == judge.J_BLOCKED
 
@@ -588,6 +594,7 @@ def test_a_surviving_guard_hands_the_exact_mutation_forward_as_the_REQUIRED_MUTA
     assert required[0]["before"] == GLYPH_BEFORE
     assert required[0]["after"] == GLYPH_AFTER
     assert required[0]["guard"] == "the colourblind glyph cue"
+    assert required[0]["kind"] == "wiring"
 
 
 def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_path):
