@@ -425,6 +425,8 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
                  "Judge (adversarial review)", kind="bool", restart_required=True),
     DispatchKnob("judge_max_unknown_retries", "CHELA_JUDGE_MAX_UNKNOWN_RETRIES", 2, int,
                  "Judge cannot-verify retries", floor=0),
+    DispatchKnob("judge_max_concurrent", "CHELA_JUDGE_MAX_CONCURRENT", 1, int,
+                 "Judge max concurrent (per workflow)", floor=1),
     DispatchKnob("critic_enabled", "CHELA_CRITIC", True, _cast_bool,
                  "Critic (pre-dispatch review)", kind="bool", restart_required=True),
     DispatchKnob("worktree_disk_budget_bytes", "CHELA_WORKTREE_DISK_BUDGET", 0, _cast_size,
@@ -791,6 +793,33 @@ def judge_max_unknown_retries() -> int:
     Dispatch-tab knob (CMX-220) — see DISPATCH_KNOBS above.
     """
     return max(0, dispatch_value("judge_max_unknown_retries"))
+
+
+def judge_max_concurrent() -> int:
+    """How many judges may run AT ONCE, per workflow — ``dispatcher.py``'s judge-spawn
+    loop counts ``judge_state='running'`` rows for the workflow and stops claiming past
+    this. Hardcoded to ``1`` with no knob until CMX-278 (measured 2026-08-13 as the
+    single biggest throughput constraint in the system: every awaiting-review PR queues
+    behind one judge at a time, however many workflows fan out ahead of it).
+
+    Default stays ``1`` — raising it is a resource decision, not a throughput one, and it
+    is the operator's to make against their own box: each judge re-runs the whole test
+    suite in its own worktree (``docs/RESOURCE_ISOLATION.md`` measured that run's peak
+    cgroup memory, coordinator + xdist workers together, at ~0.77G), so N concurrent
+    judges is N of those at once, on TOP of whatever else the box is doing (the daemon,
+    dashboard, tmux, any dispatched agents) — none of which live inside
+    ``CHELA_MEMORY_SLICE_BUDGET``'s shared slice either. Raising this without first
+    reading that doc's "never raise the ceiling to make a job fit" section is exactly the
+    2026-07-14 global-OOM mistake it documents, replayed one knob over.
+
+    Floored at 1, not 0: unlike ``max_reworks``/``judge_max_unknown_retries``, 0 here does
+    not mean "disabled" (that is ``judge_enabled=false``) — it would silently wedge every
+    workflow's judge queue forever, indistinguishable from a stuck daemon. Read per call,
+    never latched at import: a policy knob an operator turns on a running daemon, and a
+    garbage value degrades to the default rather than crashing the tick. A Dispatch-tab
+    knob (CMX-220) — see DISPATCH_KNOBS above.
+    """
+    return max(1, dispatch_value("judge_max_concurrent"))
 # ⚖️ The judge (see chela.judge) — the adversarial pass on a PR that reached
 # awaiting_review. The fleet-wide kill switch; a workflow turns it off for itself with
 # `judge: {enabled: false}`, and it is off anyway for any workflow with no `judge.test_cmd`

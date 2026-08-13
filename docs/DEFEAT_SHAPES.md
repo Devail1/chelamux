@@ -181,6 +181,14 @@ each covers.
 - `latest_required_mutations` (CMX-269) is wired into the rework brief at two render paths —
   `_respawn_rework` and `_renudge_prompt`. Both new prompt tests drove `tick`, which reaches
   only one per run state; dropping the argument from the other stayed green.
+- `judge_max_concurrent`'s floor=1 (CMX-278) has two entry paths into the value — the
+  dashboard/`set_dispatch` *write* path, which `validate_dispatch` floors before it ever
+  reaches storage, and the env-file *read* path (`CHELA_JUDGE_MAX_CONCURRENT`), which
+  `dashboard_setting` resolves straight from `os.environ` and never runs through
+  `validate_dispatch` at all. `test_judge_max_concurrent_floor_is_one_not_zero` drove only
+  the write path; mutating the reader's own `max(1, ...)` to `max(0, ...)` — the last guard
+  standing on the second path — left the suite green. Closed by a second test that sets the
+  env var to `"0"` and asserts the reader still returns `1`.
 
 ⭐ The judge caught the second one by proposing **a separate wiring experiment per call site
 rather than guessing which was covered** — which is also the cheapest way to write the guard.

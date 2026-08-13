@@ -1860,11 +1860,11 @@ def api_config_dispatch():
     (bool/text/size, not just positive numbers), each knob's ``kind`` says how
     to validate and render it.
 
-    Four of the nine (``restart_required: true`` in the snapshot) are latched at
+    Four of these (``restart_required: true`` in the snapshot) are latched at
     another module's import (the judge/critic kill switches, the dispatcher's
     workflow list, the autonomous merge base) — a save here persists immediately
     but only takes effect the next time the daemon/dashboard restarts, exactly
-    like the Timing tab's status-feed timeout/TTL pair. The other five are read
+    like the Timing tab's status-feed timeout/TTL pair. The rest are read
     per call and take effect on the next tick.
 
     Same atomic-batch / fail-closed shape as ``/api/config/timing``: every key

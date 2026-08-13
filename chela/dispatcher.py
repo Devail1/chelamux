@@ -17,6 +17,7 @@ from chela.config import (
     TMUX_SESSION,
     dispatch_tick_interval,
     human_size,
+    judge_max_concurrent,
     judge_max_unknown_retries,
     max_reworks,
     worktree_disk_budget_bytes,
@@ -230,9 +231,11 @@ _CI_RUN_ID_RE = re.compile(r"/actions/runs/(\d+)")
 # judging — and a `pending` one has not finished telling us what it is yet.
 JUDGE_TRIGGER_CHECKS = (CI_PASSING, CI_NONE)
 
-# One judge at a time, per workflow. Each experiment re-runs the whole suite in its own
-# worktree, so a fleet of judges is a fleet of test suites competing for the same box.
-JUDGE_MAX_CONCURRENT = 1
+# Judges running at once, per workflow. Each experiment re-runs the whole suite in its own
+# worktree, so a fleet of judges is a fleet of test suites competing for the same box — this
+# was hardcoded to 1 with no knob until CMX-278. Now `config.judge_max_concurrent()`, a
+# Dispatch-tab knob (`CHELA_JUDGE_MAX_CONCURRENT`) — see its own docstring for the measured
+# per-judge memory cost and why the default stays 1. Read per call below, not latched here.
 
 # A judge that has not published a verdict in this long is not thinking, it is stuck. It is
 # killed and its run becomes CANNOT VERIFY — which blocks nothing and approves nothing.
@@ -4207,7 +4210,7 @@ def tick(workflow_path: str | Path) -> dict:
                 (str(wf.path), *JUDGE_TRIGGER_CHECKS,
                  judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
             ).fetchall():
-                if judging >= JUDGE_MAX_CONCURRENT:
+                if judging >= judge_max_concurrent():
                     break        # it waits a tick; each judge re-runs a whole test suite
                 if _spawn_judge(wf, row, row["pr_head_sha"], conn):
                     judging += 1
