@@ -1068,26 +1068,6 @@ body.term-dragging { overflow: hidden; }
 .gs-room:hover { background: color-mix(in srgb, var(--room-accent, var(--accent)) 40%, transparent); }
 /* On-screen key bar: sticky bottom dock, collapsible, grouped + inverted-T D-pad */
 #term-stage { padding-bottom: 4px; }
-
-/* CMX-230: air in the chrome at low densities (Xirp: "their project page is
-   one column with wide margins"; ours "uses every pixel"). Toggled by
-   _setWallDensity (terminals.js) off cols*rows of the active grid preset —
-   1 and 2-pane layouts only; 4/6-up stays exactly as dense as before this
-   ticket (tests/dashboard_scale_nav_a11y.test.mjs's density guard pins the
-   cutoff at <= 2). HORIZONTAL padding + a centred max-width column only —
-   deliberately NOT top/bottom padding: _wallFill (terminals.js) converts the
-   viewport into grid rows off #term-stage's own getBoundingClientRect().top,
-   so a vertical padding change here would desync that math and either
-   starve the wall of rows or run the last row past the fold. Width has no
-   such coupling. */
-body.wall-density-airy #term-stage {
-    padding-left: clamp(16px, 6vw, 64px);
-    padding-right: clamp(16px, 6vw, 64px);
-}
-body.wall-density-airy #term-stage .grid-stack {
-    max-width: 1400px;
-    margin: 0 auto;
-}
 #term-bar {
     flex-direction: column;
     gap: 10px;
