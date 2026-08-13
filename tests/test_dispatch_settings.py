@@ -227,6 +227,20 @@ def test_judge_max_concurrent_floor_is_one_not_zero(mods):
     assert config.set_dispatch("judge_max_concurrent", "1") is None
 
 
+def test_judge_max_concurrent_reader_floors_env_zero_too(mods, monkeypatch):
+    """⚖️ Corrupt (``config.judge_max_concurrent()``'s ``max(1, ...)`` → ``max(0, ...)``)
+    → RED. ``test_judge_max_concurrent_floor_is_one_not_zero`` above only exercises the
+    ``set_dispatch``/dashboard write path, which ``validate_dispatch`` already floors —
+    it cannot catch a reader-side regression. ``CHELA_JUDGE_MAX_CONCURRENT`` is a first-class
+    env-file config path (``dashboard_setting``) that never goes through
+    ``validate_dispatch``, so an env file with ``=0`` reaches ``dispatch_value`` unvalidated;
+    the reader's own ``max(1, ...)`` is the only thing standing between that and the
+    'silently wedge every workflow's judge queue forever' its docstring warns about."""
+    config, _ = mods
+    monkeypatch.setenv("CHELA_JUDGE_MAX_CONCURRENT", "0")
+    assert config.judge_max_concurrent() == 1
+
+
 def test_gate_wait_seconds_zero_is_valid_it_means_never_wait(mods):
     config, _ = mods
     assert config.set_dispatch("gate_wait_seconds", "0") is None
