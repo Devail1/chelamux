@@ -554,6 +554,22 @@ test('nav inventory: primaryNavViews drops a disabled view — the enabled filte
         'primaryNavViews must include the same view once its enabled() check passes');
 });
 
+// The 'disabled view must not resurface in secondaryNavViews either' assertion
+// above is fed a tier: 'primary' fixture — a primary-tier entry can never
+// appear in secondaryNavViews's output regardless of whether the shared
+// enabled() filter runs, so that assertion can never fail and proves nothing
+// about secondaryNavViews's own use of navViews(). This drives a tier:
+// 'secondary' entry through secondaryNavViews directly, so a disabled
+// secondary-tier view (the only shape that could actually resurface there)
+// is the thing under test.
+test('nav inventory: secondaryNavViews drops a disabled view — the enabled filter, not just tier', () => {
+    const entries = [{ id: 'demoted-like', tier: 'secondary', enabled: ctx => !!ctx.terminalsOn }];
+    assert.deepEqual(secondaryNavViews(entries, { terminalsOn: false }).map(v => v.id), [],
+        'secondaryNavViews must drop a disabled secondary-tier view (enabled() false) — this is the ENABLED half of the shared navViews() filter');
+    assert.deepEqual(secondaryNavViews(entries, { terminalsOn: true }).map(v => v.id), ['demoted-like'],
+        'secondaryNavViews must include the same view once its enabled() check passes');
+});
+
 test('nav inventory: Knowledge/Agents/Personas/Cost are demoted (secondary), not deleted', () => {
     const entries = shippedViewEntries().filter(v => !v.virtual);
     const secondary = secondaryNavViews(entries, { terminalsOn: true }).map(v => v.id);
