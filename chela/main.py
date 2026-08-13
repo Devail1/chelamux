@@ -1875,6 +1875,16 @@ def cmd_task_finished(args) -> None:
             sys.exit(1)
         for outcome in check.get("outcomes") or []:
             print(f"  [{outcome['verdict']:8}] {outcome['file']}: {outcome['guard'][:70]}")
+        missing = check.get("missing_required") or []
+        if missing:
+            print(f"⚖️🎯 {len(missing)} REQUIRED mutation(s) from last round's verdict were "
+                  "NOT re-tested — the code they target is still there, but your experiments "
+                  "file does not include them:")
+            for m in missing:
+                print(f"  [MISSING ] {m.get('file')}: {str(m.get('guard') or '')[:70]}")
+            print("   Copy them verbatim from the rework brief's REQUIRED MUTATION SET into "
+                  "your experiments file, then call task-finished again.")
+            sys.exit(1)
         if check["blocking"]:
             print(f"⚖️ {check['blocking']} guard(s) SURVIVED corruption — this is "
                   "DECORATION, not a guard. Fix it, then call task-finished again.")

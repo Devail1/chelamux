@@ -134,14 +134,14 @@ def _own_runs_db(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
 
 
-def _insert_run(task_id: str, worktree_path, workflow_path) -> None:
+def _insert_run(task_id: str, worktree_path, workflow_path, review_history=None) -> None:
     with dispatcher._db() as conn:
         conn.execute(
             "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
-            "worktree_path, branch_name, started_at, attempt, task_number) "
+            "worktree_path, branch_name, started_at, attempt, task_number, review_history) "
             "VALUES (?, ?, 'do a thing', 'running', 'cmx-1', ?, 'cmx-1', "
-            "'2026-08-12T10:00:00+00:00', 1, 1)",
-            (task_id, str(workflow_path), str(worktree_path)),
+            "'2026-08-12T10:00:00+00:00', 1, 1, ?)",
+            (task_id, str(workflow_path), str(worktree_path), review_history),
         )
         conn.commit()
 
@@ -183,6 +183,86 @@ def test_verify_self_check_clears_when_every_guard_holds(tmp_path):
     assert [o["verdict"] for o in result["outcomes"]] == ["KILLED"]
     assert result["outcomes"][0]["file"] == "guard.py"
     assert result["outcomes"][0]["guard"] == "the glyph cue"
+
+
+# --- ⚖️🎯 CMX-269: verify_self_check cross-checks the REQUIRED MUTATION SET --------------
+
+def _review_history_with_required(mutation: dict) -> str:
+    return json.dumps([{
+        "round": 1, "at": "t", "body": "the glyph cue survived",
+        "verdict": "changes_requested", "mutations": [mutation],
+    }])
+
+
+def test_verify_self_check_flags_a_required_mutation_missing_from_the_submitted_set(tmp_path):
+    """The agent's self-check comes back CLEAN — but only because it tested a different,
+    easier experiment than the one the judge actually caught it on last round. That is
+    exactly the recurrence CMX-269 closes: the required mutation's anchor is still live in
+    the file, and it was never re-tested."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()   # the exact mutation that survived last round
+    # A DIFFERENT experiment — same file, an unrelated anchor — the agent chose to submit
+    # instead of the exact case that beat it.
+    other = _exp(guard="an unrelated experiment",
+                 before='return {"glyph": glyph}', after='return {"glyph": "!"}')
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [other]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert [m["guard"] for m in result["missing_required"]] == ["the glyph cue"]
+
+
+def test_verify_self_check_clears_when_the_required_mutation_is_resubmitted_verbatim(tmp_path):
+    """The agent did the right thing: copied the required mutation from the rework brief
+    into its own experiments file, verbatim. Nothing is missing."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [required]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
+
+
+def test_verify_self_check_does_not_flag_a_required_mutation_whose_anchor_is_already_gone(tmp_path):
+    """The agent legitimately rewrote the guarded code this round — the old `before` anchor
+    no longer occurs anywhere in the file. There is nothing left to re-test, so this must
+    not block a real fix on a stale anchor."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp(before="this text does not occur in guard.py anymore",
+                    after="this text does not occur in guard.py anymore either")
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
+
+
+def test_verify_self_check_has_no_missing_required_when_the_run_has_no_prior_verdict(tmp_path):
+    """A first-time `task-finished` (no rework, no prior judge verdict) has nothing to
+    enforce — `missing_required` must default to empty, not error."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+    _insert_run("t1", root, wf)   # no review_history at all
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
 
 
 def test_verify_self_check_propagates_error_when_the_check_itself_cannot_run(tmp_path):
@@ -411,6 +491,30 @@ def test_cmd_task_finished_refuses_transition_when_self_check_cannot_verify(tmp_
     # a mutation that drops the interpolated `{check['cannot_verify']}` reason stays
     # invisible to that substring check. The WHY is the only actionable half; pin it.
     assert "the suite is NOT GREEN" in out
+    mark.assert_not_called()
+
+
+def test_cmd_task_finished_refuses_transition_when_a_required_mutation_is_missing(tmp_path, capsys):
+    """⚖️🎯 CMX-269: a self-check that comes back CLEAN is not enough — if it never re-tested
+    the exact case the judge caught the guard on last round, `task-finished` must still
+    refuse."""
+    from chela import main
+
+    with patch.object(dispatcher, "verify_self_check",
+                       return_value={"ok": True, "blocking": 0, "cannot_verify": "",
+                                     "outcomes": [{"verdict": "KILLED", "file": "guard.py",
+                                                    "guard": "an unrelated experiment"}],
+                                     "missing_required": [{"guard": "the glyph cue",
+                                                            "file": "guard.py"}]}), \
+         patch.object(dispatcher, "mark_awaiting_review") as mark:
+        with patch.object(sys, "argv", ["chela", "task-finished", "t1",
+                                         "--self-check-experiments", str(tmp_path / "e.json")]):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "REQUIRED" in out
+    assert "guard.py: the glyph cue" in out
     mark.assert_not_called()
 
 

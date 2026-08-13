@@ -571,6 +571,25 @@ def test_a_surviving_guard_sends_the_run_back_through_request_changes(tmp_path):
     assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
 
 
+def test_a_surviving_guard_hands_the_exact_mutation_forward_as_the_REQUIRED_MUTATION_SET(tmp_path):
+    """⚖️🎯 CMX-269. The prose verdict is not the only thing a SURVIVED guard produces — the
+    exact ``{guard, file, before, after}`` that beat it must reach `request_changes` as DATA
+    too, verbatim from the judge's own `Experiment`, not reformatted from `block_body`'s
+    markdown. This is what a rework brief later copies into its REQUIRED MUTATION SET
+    instead of asking the agent to reconstruct it from prose."""
+    result, run, posted = _judge_run(
+        tmp_path, FAKE_GUARD_TEST, {"experiments": [_exp()]},
+    )
+    assert result["state"] == judge.J_BLOCKED
+
+    required = dispatcher.latest_required_mutations(run)
+    assert len(required) == 1
+    assert required[0]["file"] == "guard.py"
+    assert required[0]["before"] == GLYPH_BEFORE
+    assert required[0]["after"] == GLYPH_AFTER
+    assert required[0]["guard"] == "the colourblind glyph cue"
+
+
 def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_path):
     """⚖️🕳️ CMX-228: the run moved out of `awaiting_review` (a human merged it, or CI got
     there first) WHILE the judge was mid-run. `request_changes`'s compare-and-swap correctly

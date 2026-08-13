@@ -1268,6 +1268,137 @@ def test_a_legacy_runs_table_migrates_and_its_rows_read_as_never_reworked():
     assert dispatcher.latest_verdict(row) == ""
 
 
+# --- (h) ⚖️🎯 CMX-269: the REQUIRED MUTATION SET travels as DATA, not just prose --------
+
+def test_request_changes_stores_the_required_mutation_set_on_the_review_entry(tmp_path):
+    """`mutations` is the exact `{guard, file, before, after}` that survived — round-tripped
+    through the review entry as JSON, not folded into the prose `body`."""
+    with dispatcher._db() as conn:
+        _row(conn)
+    mutation = {"guard": "the glyph cue", "file": "guard.py",
+                "before": 'glyph = "*"', "after": 'glyph = ""'}
+
+    with patch.object(dispatcher.subprocess, "run"):
+        result = dispatcher.request_changes(
+            "abc123", "the glyph cue survived", mutations=[mutation],
+        )
+
+    assert result["ok"]
+    run = dispatcher.resolve_run("abc123")
+    assert dispatcher.reviews_of(run)[-1]["mutations"] == [mutation]
+    assert dispatcher.latest_required_mutations(run) == [mutation]
+
+
+def test_request_changes_with_no_mutations_records_an_empty_required_set(tmp_path):
+    """A human's free-text review (or `mark_rework_disputed`'s carrier) passes no structured
+    findings — the review entry still gets a `mutations` key, just an empty one, so
+    `latest_required_mutations` never has to special-case a missing key."""
+    with dispatcher._db() as conn:
+        _row(conn)
+    with patch.object(dispatcher.subprocess, "run"):
+        dispatcher.request_changes("abc123", "just fix the typo")
+    run = dispatcher.resolve_run("abc123")
+    assert dispatcher.reviews_of(run)[-1]["mutations"] == []
+    assert dispatcher.latest_required_mutations(run) == []
+
+
+def test_latest_required_mutations_skips_a_retry_entry():
+    """Mirrors `latest_verdict`'s own skip rule (CMX-237): a `retry` entry grants another
+    round without re-reviewing the code, so it must never shadow the real verdict's
+    required set with an empty one."""
+    run = {"review_history": json.dumps([
+        {"round": 1, "at": "t1", "body": "the wire is loose", "verdict": "changes_requested",
+         "mutations": [{"guard": "g", "file": "f.py", "before": "a", "after": "b"}]},
+        {"round": 2, "at": "t2", "body": "asked to keep going", "verdict": "retry"},
+    ])}
+    assert dispatcher.latest_required_mutations(run) == [
+        {"guard": "g", "file": "f.py", "before": "a", "after": "b"},
+    ]
+
+
+def test_latest_required_mutations_defaults_to_empty_for_a_legacy_or_review_less_run():
+    assert dispatcher.latest_required_mutations({"review_history": None}) == []
+    run = {"review_history": json.dumps(
+        [{"round": 1, "at": "t", "body": "no structured findings here",
+          "verdict": "changes_requested"}]
+    )}
+    assert dispatcher.latest_required_mutations(run) == []
+
+
+def test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable_JSON_block(tmp_path):
+    """The rework brief must carry the exact mutation as DATA the agent can copy-paste into
+    its self-check experiments file — not just prose describing it. This is the fix for the
+    recurring defect: prose alone let an agent hand-reconstruct a *different* experiment and
+    still ship a guard defeatable by the exact case that beat it."""
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    original_wt = tmp_path / ".chela" / "wts" / "abc123"
+    original_wt.mkdir(parents=True)
+    fake = _FakeTmux()
+    prompts: list[str] = []
+    mutation = {"guard": "the glyph cue", "file": "guard.py",
+                "before": 'glyph = "*"', "after": 'glyph = ""'}
+
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested",
+             worktree_path=str(original_wt), branch_name="test-1",
+             review_history=json.dumps([{
+                 "round": 1, "at": "t", "body": "the glyph cue survived",
+                 "verdict": "changes_requested", "mutations": [mutation],
+             }]))
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run), \
+         patch.object(dispatcher, "ensure_worktree") as fresh_fork, \
+         patch.object(dispatcher, "attach_worktree", return_value=(original_wt, False)), \
+         patch.object(dispatcher, "send_tmux", side_effect=lambda w, p: prompts.append(p) or True), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")):
+        dispatcher.tick(wf.path)
+
+    assert fresh_fork.call_count == 0
+    assert prompts
+    assert "REQUIRED MUTATION SET" in prompts[0]
+    assert '"guard": "the glyph cue"' in prompts[0]
+    assert '"file": "guard.py"' in prompts[0]
+    assert '"before": "glyph = \\"*\\""' in prompts[0]
+    assert "copy this JSON into your self-check experiments file" in prompts[0]
+
+
+def test_the_rework_prompt_has_no_REQUIRED_MUTATION_SET_section_when_the_verdict_carried_none(tmp_path):
+    """No structured findings on the latest verdict ⇒ the section renders empty — the prompt
+    reads exactly as it did before this existed, not with a dangling empty heading."""
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    original_wt = tmp_path / ".chela" / "wts" / "abc123"
+    original_wt.mkdir(parents=True)
+    fake = _FakeTmux()
+    prompts: list[str] = []
+
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested",
+             worktree_path=str(original_wt), branch_name="test-1",
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "fix the typo",
+                                          "verdict": "changes_requested"}]))
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run), \
+         patch.object(dispatcher, "ensure_worktree"), \
+         patch.object(dispatcher, "attach_worktree", return_value=(original_wt, False)), \
+         patch.object(dispatcher, "send_tmux", side_effect=lambda w, p: prompts.append(p) or True), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")):
+        dispatcher.tick(wf.path)
+
+    assert prompts
+    assert "copy this JSON into your self-check experiments file" not in prompts[0]
+    assert "```json" not in prompts[0]
+
+
 # --- helpers ---------------------------------------------------------------------------
 
 def _status(wf: WorkflowDef):
