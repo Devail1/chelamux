@@ -342,6 +342,31 @@ const WALL_FIXTURE = ups => `<div class="app"><main class="canvas" id="canvas"><
 // of how a future vw-bearing rule is spelled or shaped.
 const DESKTOP_CSS = CSS.replace(/(\d+(?:\.\d+)?)vw/g, (_, n) => `${Number(n) * 19.2}px`);
 
+// CMX-268 rework round 3 (judge finding 1 on PR #338): jsdom's CSSOM PARSES
+// `padding-inline` as a property (confirmed empirically —
+// `getComputedStyle(el).getPropertyValue('padding-inline')` returns the raw
+// declared value) but does NOT expand a CSS Logical Property into the
+// physical paddingLeft/paddingRight longhands the guard below reads —
+// confirmed empirically: `#term-stage { padding-inline: 64px; }` resolves
+// paddingLeft/paddingRight to 0 in jsdom even though it is pixel-identical to
+// `padding-left: 64px; padding-right: 64px;` in a real browser. That gap let
+// the judge's mutation (the same ungated gutters spelled as padding-inline,
+// the idiom someone reaching for logical properties in 2026 most plausibly
+// writes) read 0px on both sides and stay invisible to the guard. Expand
+// every logical padding-inline declaration in the mounted stylesheet to its
+// physical LTR longhands before mounting — a text-level normalisation of the
+// SPELLING, the same technique DESKTOP_CSS already uses for vw units above,
+// not a hand-rolled cascade/logical-property resolver — so it composes
+// correctly regardless of what selector or declaration order the logical
+// spelling appears inside.
+const LOGICAL_PROP_CSS = DESKTOP_CSS
+    .replace(/padding-inline\s*:\s*([^;]+);/g, (_, v) => {
+        const [left, right = left] = v.trim().split(/\s+/);
+        return `padding-left: ${left}; padding-right: ${right};`;
+    })
+    .replace(/padding-inline-start\s*:\s*([^;]+);/g, 'padding-left: $1;')
+    .replace(/padding-inline-end\s*:\s*([^;]+);/g, 'padding-right: $1;');
+
 // CMX-268 rework round 2 (human directive on PR #338, finding 1): the
 // original guard compared the "airy" fixture's resolved padding/max-width
 // against a SEPARATE "base" (no-class) fixture mounted from the SAME
@@ -359,7 +384,7 @@ const DESKTOP_CSS = CSS.replace(/(\d+(?:\.\d+)?)vw/g, (_, n) => `${Number(n) * 1
 // ungated re-add applies regardless of the class and is caught the same way.
 for (const ups of [1, 2]) {
     test(`airy density (REVERTED, CMX-268): at ${ups}-up, #term-stage has no horizontal padding`, () => {
-        const win = mountWithRealCss(WALL_FIXTURE(ups), ' class="wall-density-airy"', DESKTOP_CSS);
+        const win = mountWithRealCss(WALL_FIXTURE(ups), ' class="wall-density-airy"', LOGICAL_PROP_CSS);
         const cs = win.getComputedStyle(win.document.getElementById('term-stage'));
         assert.equal(cs.paddingLeft, '0px',
             `#term-stage's padding-left at ${ups}-up is ${cs.paddingLeft}, not 0px — #term-stage has gained ` +
@@ -370,11 +395,24 @@ for (const ups of [1, 2]) {
     });
 
     test(`airy density (REVERTED, CMX-268): at ${ups}-up, .grid-stack resolves max-width: none — no centred column cap`, () => {
-        const win = mountWithRealCss(WALL_FIXTURE(ups), ' class="wall-density-airy"', DESKTOP_CSS);
+        const win = mountWithRealCss(WALL_FIXTURE(ups), ' class="wall-density-airy"', LOGICAL_PROP_CSS);
         const gridCs = win.getComputedStyle(win.document.querySelector('.grid-stack'));
         assert.equal(gridCs.maxWidth, 'none',
             `.grid-stack's max-width at ${ups}-up is ${gridCs.maxWidth}, not none — .grid-stack has gained a ` +
             'centred-column cap');
+        // CMX-268 rework round 3 (judge finding 2): max-width: none rules out
+        // only ONE spelling of a centred-column cap. The identical visual
+        // outcome — the wall stops filling its stage, centred in a fixed
+        // column — is equally reachable via an explicit `width` (confirmed
+        // empirically: jsdom resolves an unset width to 'auto', and a
+        // rule like `.grid-stack { width: 1400px; margin: 0 auto; }`
+        // resolves width to the literal '1400px', invisible to a max-width-
+        // only check). Assert width stays unconstrained too, so this guards
+        // the OUTCOME ("no cap", by any property that can produce one) —
+        // not just the single property the deleted rule happened to use.
+        assert.equal(gridCs.width, 'auto',
+            `.grid-stack's width at ${ups}-up is ${gridCs.width}, not auto — .grid-stack has gained a fixed/` +
+            'capped width even though max-width is unset, producing the same centred-column regression');
     });
 }
 
