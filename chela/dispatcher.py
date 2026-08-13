@@ -898,7 +898,7 @@ def run_is_terminal(row) -> bool:
         return True
     if row.get("status") == "failed" and (row.get("attempt") or 1) >= MAX_ATTEMPTS:
         return True
-    return row.get("status") == "done"
+    return row.get("status") in ("done", "closed")
 
 
 def reconcile_trial_ledger(existing_text: str, rows: list[sqlite3.Row]) -> tuple[str, list[str], list[str]]:

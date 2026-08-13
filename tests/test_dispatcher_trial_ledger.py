@@ -86,6 +86,12 @@ def test_run_is_terminal_matches_every_case_run_trial_outcome_calls_terminal():
         _row(status="failed", attempt=1), _row(status="failed", attempt=2),
         _row(status="failed", attempt=dispatcher.MAX_ATTEMPTS),
         _row(status="done", pr_state=None), _row(status="done", pr_state="open"),
+        # 🔴 GUARD (CMX-265 round 6): `dev` grew `run_is_terminal` while this ticket's
+        # `closed` outcome was in flight, and its row list predated `closed` as a status
+        # — so it stayed green even after the two functions disagreed on this exact axis.
+        # These three close that blind spot the same way the ledger-side guard above does.
+        _row(status="closed", pr_state=None), _row(status="closed", pr_state="open"),
+        _row(status="closed", pr_state="merged"),
     ]
     for row in rows:
         assert dispatcher.run_is_terminal(row) == (dispatcher._run_trial_outcome(row) is not None), row
