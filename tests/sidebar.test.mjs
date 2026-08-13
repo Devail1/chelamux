@@ -396,6 +396,58 @@ test('CMX-257: selecting a view lights its row wherever renderNav actually put i
         false, 'the previously-active demoted row is still lit after switching to a primary view');
 });
 
+// --- 1c⁵. 🔴 CLAIM 3 also covers _syncSidebarActive's OTHER caller: showAgentDetail --
+//
+// _syncSidebarActive has exactly two callers (grepped): selectView (guarded above)
+// and showAgentDetail, which hardcodes the demoted 'agents' id as the row to light
+// while drilled into a single agent — nav.js:193-195's own must-never: "keep the
+// Agents nav item lit while drilled into a single agent so the sidebar still shows
+// where you are." Nothing above drives that second caller, so `const navView =
+// view === 'agent-detail' ? 'agents' : view;` could be blanked to '' (no row lit)
+// or pointed at the WRONG view id (a primary row lit instead) and 3012 tests would
+// stay green.
+//
+// showAgentDetail itself isn't exported (it's reachable only from inline HTML
+// handlers), so this drives the REAL, user-reachable path to it: `chela.selectAgent`
+// — the sidebar agent row's own onclick — falls through to showAgentDetail whenever
+// the wall can't place the agent (unresolved in `_agentsCache`, which is exactly
+// this case: no fleet has been loaded into this jsdom instance for this name). That
+// is a genuine call site, not a synthetic seam.
+test('CMX-257 round 23: drilling into an agent lights the DEMOTED Agents row, not just via selectView', () => {
+    nav.renderNav();
+
+    // showAgentDetail also fires an unawaited refreshSummary()/checkContext() — real
+    // network calls in production, reaching #hdr-next/#hdr-updated (absent from this
+    // suite's minimal BODY, see its own comment: "only the ids nav.js reaches for")
+    // and expecting an array back from /api/agents/context. Give it both so those
+    // calls resolve quietly instead of throwing into an unhandled rejection AFTER
+    // this test (synchronous) has already returned — the DOM nodes are left in
+    // place (not torn down) for the same reason: their crash would fire from a
+    // microtask that runs after any `finally` here has already executed. An object
+    // response would make checkContext's `for (const a of data)` throw instead.
+    if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
+    if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    try {
+        window.chela.selectAgent('cmx257-round23-ghost-agent');
+    } finally {
+        globalThis.fetch = prevFetch;
+    }
+
+    assert.equal(
+        document.querySelector('#side-nav-more .side-item[data-view="agents"]').classList.contains('active'),
+        true,
+        'drilling into an agent must keep the DEMOTED Agents row lit — blanking the ' +
+        "'agents' literal (or routing it to any other view id) leaves the sidebar with no correct lit row");
+    assert.equal(
+        document.querySelectorAll('#side-nav .side-item.active').length, 0,
+        'a PRIMARY row is lit while drilled into an agent detail — the highlight was routed to the wrong view id');
+    assert.equal(
+        document.querySelectorAll('#side-nav-more .side-item.active').length, 1,
+        'more than one demoted row is lit while drilled into an agent detail');
+});
+
 // --- 1d. 🔴 the EXPANDED sidebar icons are sized to MATCH the collapsed rail ------
 //
 // CMX-85 enlarged the collapsed-rail glyphs; CMX-86 brings the expanded ones up to
