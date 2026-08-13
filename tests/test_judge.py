@@ -2526,6 +2526,37 @@ def test_run_self_check_reads_test_cmd_from_the_workflow(tmp_path):
     assert result["blocking"] == 1
 
 
+def test_run_self_check_forwards_the_ENTIRE_judge_config_in_one_call(tmp_path, monkeypatch):
+    """⚖️🔁 CMX-266, the remainder of CMX-258 / PR #327: that PR's judge found ``test_cmd``
+    unforwarded in rework round 12 and ``suite_timeout_seconds`` unforwarded in round 13 —
+    two separate rounds for two fields of the SAME config. This guard corrupts the ONE
+    accessor (:func:`judge.judge_suite_config`) both fields come from, so a regression to
+    the old "each field sourced by hand, one call site at a time" shape — where a future
+    field can silently stop reaching :func:`judge.self_check` — fails HERE, in one place,
+    instead of waiting for the judge to find each dropped field on its own round."""
+    wf_path = _workflow_md(tmp_path, "some-distinctive-cmd")
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+
+    captured = {}
+
+    def fake_self_check(worktree, test_cmd, raw, *, timeout):
+        captured["test_cmd"] = test_cmd
+        captured["timeout"] = timeout
+        return judge.Report()
+
+    monkeypatch.setattr(judge, "self_check", fake_self_check)
+
+    result = judge.run_self_check(tmp_path, exp_path, workflow_path=wf_path)
+
+    assert result["ok"]
+    # both fields of _workflow_md's `judge:` block, from the ONE JudgeSuiteConfig built by
+    # judge_suite_config — not a test_cmd sourced correctly while timeout falls back to the
+    # module default (or vice versa).
+    assert captured["test_cmd"] == "some-distinctive-cmd"
+    assert captured["timeout"] == 120
+
+
 def test_run_self_check_explicit_test_cmd_wins_over_the_workflow(tmp_path):
     root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
     exp_path = tmp_path / "experiments.json"
