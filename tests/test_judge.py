@@ -391,6 +391,57 @@ def test_block_body_step_3_binds_the_self_check_flag_to_the_same_experiments_fil
     assert "the same experiments file `chela judge self-check` uses" in body
 
 
+def test_block_body_points_the_rework_agent_at_the_defeat_shapes_catalog():
+    """CMX-272: a SURVIVED verdict is exactly the moment a new defeat shape was just measured
+    — the judge's own throwaway checkout is deleted the instant it finishes and can never
+    commit ``docs/DEFEAT_SHAPES.md`` itself, so ``block_body`` is the only place that can hand
+    the catalog off to the agent that DOES have a branch to put an entry on."""
+    survived = judge.Outcome(
+        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+        judge.SURVIVED, "it survived",
+        baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+        mutated=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+    )
+    report = judge.Report(outcomes=[survived],
+                           baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""))
+
+    body = judge.block_body(report, "https://x/1", TEST_CMD)
+
+    assert "docs/DEFEAT_SHAPES.md" in body
+
+
+def test_rework_prompt_points_at_the_defeat_shapes_catalog():
+    """CMX-272: the retry-brief a reworking agent wakes up to (``REWORK_PROMPT``) must point
+    at ``docs/DEFEAT_SHAPES.md`` — otherwise the catalog only ever reaches an agent that
+    happens to already be reading this test file, exactly the reach problem the catalog
+    exists to close."""
+    assert "docs/DEFEAT_SHAPES.md" in dispatcher.REWORK_PROMPT
+
+
+def test_judge_prompt_points_at_the_defeat_shapes_catalog():
+    """CMX-272: the judge agent should reach for an already-catalogued shape before spending
+    a mutation rediscovering one from scratch."""
+    assert "docs/DEFEAT_SHAPES.md" in dispatcher.JUDGE_PROMPT
+
+
+def test_defeat_shapes_catalog_documents_every_seeded_shape():
+    """CMX-272: pins the 6 shapes the catalog was seeded with (all hit live on 2026-08-13) —
+    a doc edit that drops one silently shrinks institutional knowledge back down without
+    anyone noticing."""
+    root = Path(__file__).resolve().parent.parent
+    text = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
+
+    for heading in (
+        "Presence/substring assertion defeated by dead-coding",
+        "Fixture parked on a default value",
+        "Positive-case-only mount (never mounts the OFF state)",
+        "Compound mutation proves the pair, not either half",
+        "Asserting a source constant instead of the rendered value",
+        "Coverage resting on a coincidence in production data",
+    ):
+        assert heading in text, f"missing defeat shape: {heading}"
+
+
 def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
     """⛔ CMX-258 rework round 4, finding 3 (WIRING): step 3 tells the agent to KEEP the
     experiments JSON file so step 6 can consume it. If this instruction reverses (an agent

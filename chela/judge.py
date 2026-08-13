@@ -1156,6 +1156,11 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
         "--self-check-experiments <path>` (the same experiments file `chela judge "
         "self-check` uses) — it re-verifies the fix before this can go back to "
         "awaiting_review.",
+        "4. Check `docs/DEFEAT_SHAPES.md` — if the shape above (what the guard asserted vs. "
+        "what the mutation actually got away with) isn't already catalogued there, add an "
+        "entry as part of this fix. This checkout is thrown away when the judge finishes, so "
+        "it cannot land the entry itself; the agent doing the rework is the one with a "
+        "branch to put it on.",
         "",
         f"_The judge never merges and never approves. PR: {pr_url or '(none on the run row)'}._",
     ]
