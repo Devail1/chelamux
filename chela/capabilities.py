@@ -48,12 +48,22 @@ class Capability:
     fix: str = ""                   # how to turn it on — only meaningful when off
     warn_when_off: bool = False     # OFF is a foot-gun, not a preference: log WARNING
     warn_when_on: bool = False      # ON is the risk (e.g. auto-merge) — log WARNING, not INFO
+    # True only for a capability backed by a knob the running daemon re-reads on every use
+    # (no restart needed — see the non-``restart_required`` ``DispatchKnob`` rows in
+    # config.py, e.g. ``memory_slice_budget_bytes``). For those, "what the daemon published
+    # at boot" is provably NOT "what the daemon is doing right now" the moment an operator
+    # edits the knob live — see :func:`live`, which recomputes exactly these rather than
+    # trusting the stale snapshot. Every other capability (dispatch, judge, ...) is latched
+    # at some module's import, so its boot snapshot IS the running daemon's truth until a
+    # restart — leave those alone.
+    live_reload: bool = False
     extra: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {"key": self.key, "label": self.label, "on": self.on,
                 "detail": self.detail, "fix": self.fix,
                 "warn_when_off": self.warn_when_off, "warn_when_on": self.warn_when_on,
+                "live_reload": self.live_reload,
                 **self.extra}
 
 
@@ -194,7 +204,12 @@ def effective() -> list[Capability]:
                     "off — CHELA_WORKTREE_DISK_BUDGET is unset/0, so no rail stops a heavy "
                     "repo from filling the disk"),
             fix="set CHELA_WORKTREE_DISK_BUDGET=20G (or any K/M/G/T byte size) in "
-                f"{config.env_file_path() or '$CHELA_DIR/chela.env'} and restart the daemon",
+                f"{config.env_file_path() or '$CHELA_DIR/chela.env'} — takes effect on "
+                "the next dispatch, no restart required",
+            # dispatcher.py reads worktree_disk_budget_bytes() fresh on every tick — this
+            # is not a ``restart_required`` DispatchKnob, so the boot-time publish() must
+            # not be trusted as this capability's current state (see live_reload's doc).
+            live_reload=True,
         ),
         # 🧠🔒 CMX-264: the `memcap` analog for memory. A per-job memory ceiling does not
         # bound the box — see docs/RESOURCE_ISOLATION.md's 2026-07-14 incident, where 4
@@ -220,6 +235,11 @@ def effective() -> list[Capability]:
             fix="set CHELA_MEMORY_SLICE_BUDGET=12G (or any K/M/G/T byte size) in "
                 f"{config.env_file_path() or '$CHELA_DIR/chela.env'} — takes effect on "
                 "the next dispatch, no restart required",
+            # memcap.wrap_launch_cmd calls config.memory_slice_budget_bytes() fresh on
+            # every dispatch — not a ``restart_required`` DispatchKnob, so the boot-time
+            # publish() must not be trusted as this capability's current state (see
+            # live_reload's doc on the Capability dataclass above).
+            live_reload=True,
         ),
         # 🔀⚠️ CMX-138. The one fully-UNATTENDED merge path in the whole system — see
         # chela.automerge. OFF is the safe, expected state for every install but an operator's
@@ -328,6 +348,16 @@ def live() -> dict | None:
 
     A file whose pid is gone is stale — the daemon died — and counts as no daemon at all,
     so a crashed instance cannot keep claiming a capability nothing is providing.
+
+    A ``live_reload`` capability (``memory_slice_budget``, ``worktree_disk_budget``) is
+    reconciled against THIS process's current config before returning — measured
+    2026-08-13: a 12G ``CHELA_MEMORY_SLICE_BUDGET`` added to the env file after the daemon
+    booted was already bounding the box (``memcap.wrap_launch_cmd`` re-reads the knob every
+    dispatch, no restart needed — that is the whole point of not marking it
+    ``restart_required``), while ``chela doctor``/the dashboard kept reporting it OFF from
+    the stale boot-time snapshot. Every other capability is latched at some module's
+    import, so its boot snapshot genuinely IS the running daemon's truth until a restart —
+    those are returned exactly as published, unchanged.
     """
     try:
         data = json.loads(state_file().read_text(encoding="utf-8"))
@@ -346,7 +376,15 @@ def live() -> dict | None:
             pass                 # alive, owned by someone else
         except OSError:
             return None
-    return data
+    fresh_by_key = None
+    reconciled = []
+    for cap in caps:
+        if isinstance(cap, dict) and cap.get("live_reload"):
+            if fresh_by_key is None:
+                fresh_by_key = {c.key: c.as_dict() for c in effective()}
+            cap = fresh_by_key.get(cap.get("key"), cap)
+        reconciled.append(cap)
+    return {**data, "capabilities": reconciled}
 
 
 def live_capability(key: str) -> dict | None:

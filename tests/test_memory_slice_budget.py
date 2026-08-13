@@ -93,6 +93,47 @@ def test_capability_reports_off_when_budget_set_but_systemd_run_missing(monkeypa
     assert "systemd-run" in cap.detail
 
 
+# --- capabilities.live(): a live_reload capability must not go stale ----------------------
+#
+# Measured 2026-08-13: the daemon published (boot-time) capabilities with the budget OFF,
+# then an operator added CHELA_MEMORY_SLICE_BUDGET=12G to the env file with no restart —
+# exactly what its own `fix` text promises works (memcap.wrap_launch_cmd re-reads the knob
+# fresh on every dispatch). The 12G slice was actively bounding the box while `chela
+# doctor`/the dashboard still read the stale "OFF" from daemon.json. `dispatch`, by
+# contrast, IS restart_required (config.py's DISPATCH_KNOBS) — its boot snapshot is
+# supposed to freeze until a restart, per test_capabilities.py's round-trip test.
+
+
+def test_memory_slice_budget_reflects_a_post_boot_env_change_not_the_boot_snapshot(
+        monkeypatch):
+    monkeypatch.delenv("CHELA_MEMORY_SLICE_BUDGET", raising=False)
+    monkeypatch.setattr(memcap, "available", lambda: True)
+    capabilities.publish(capabilities.effective(), boot_id="b1")
+    assert capabilities.live_capability("memory_slice_budget")["on"] is False
+
+    # No restart — the operator only edited the env file, which is the whole point of
+    # NOT marking this knob restart_required.
+    monkeypatch.setenv("CHELA_MEMORY_SLICE_BUDGET", "12G")
+    cap = capabilities.live_capability("memory_slice_budget")
+    assert cap["on"] is True
+    assert "12.0G" in cap["detail"]
+
+
+def test_memory_slice_budget_off_going_on_live_does_not_move_a_boot_latched_capability(
+        monkeypatch):
+    """The contrast case: `dispatch` really is frozen until a restart (config.py marks
+    CHELA_DISPATCH_WORKFLOWS restart_required=True) — a live_reload fix must not make
+    every capability chase live config, only the ones that are actually live-reread."""
+    from pathlib import Path
+
+    monkeypatch.setattr(config, "DISPATCH_WORKFLOWS", [])
+    capabilities.publish(capabilities.effective(), boot_id="b1")
+    assert capabilities.live_capability("dispatch")["on"] is False
+
+    monkeypatch.setattr(config, "DISPATCH_WORKFLOWS", [Path("/repo/WORKFLOW.md")])
+    assert capabilities.live_capability("dispatch")["on"] is False
+
+
 # --- chela.memcap: available() --------------------------------------------------------
 
 
