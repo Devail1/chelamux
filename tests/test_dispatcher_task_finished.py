@@ -232,6 +232,26 @@ def test_verify_self_check_clears_when_the_required_mutation_is_resubmitted_verb
     assert result["missing_required"] == []
 
 
+def test_verify_self_check_clears_when_the_required_mutation_is_resubmitted_under_a_renamed_guard(tmp_path):
+    """`_missing_required_mutations` matches on ``(file, before, after)`` — NOT on ``guard``
+    text — precisely so an agent that renamed the ``guard`` label but kept the exact
+    mutation still counts as having re-tested the exact case that beat it. Submit the
+    IDENTICAL (file, before, after) under a DIFFERENT ``guard`` string: this must still
+    clear, or the matcher has silently started keying on prose instead of the anchors."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()
+    resubmitted = _exp(guard="a completely different label for the same case")
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [resubmitted]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
+
+
 def test_verify_self_check_does_not_flag_a_required_mutation_whose_anchor_is_already_gone(tmp_path):
     """The agent legitimately rewrote the guarded code this round — the old `before` anchor
     no longer occurs anywhere in the file. There is nothing left to re-test, so this must

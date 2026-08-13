@@ -1082,6 +1082,46 @@ def test_a_stuck_rework_is_re_nudged_with_its_REWORK_prompt_not_the_first_dispat
     assert 'chela rework-disputed abc123 "<why there is nothing to push>"' in sent[0]
 
 
+def test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET(tmp_path):
+    """⚖️🎯 CMX-269: `_renudge_prompt` re-renders a stuck rework's OWN prompt — a second,
+    independent call site from `_respawn_rework`'s first spawn — and it must wire
+    `latest_required_mutations` into that render too, or an agent that goes idle before the
+    watchdog catches it gets re-seeded a brief with the REQUIRED MUTATION SET silently
+    dropped. Nothing else in this suite drives `_renudge_prompt` with a verdict that carries
+    structured mutations, so this is the only place that would notice the argument being
+    dropped from that call."""
+    wf = _wf(tmp_path)
+    sent: list[str] = []
+    mutation = {"guard": "the glyph cue", "file": "guard.py",
+                "before": 'glyph = "*"', "after": 'glyph = ""'}
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="running", rework_count=1,
+             window_name="test-1", started_at="2020-01-01T00:00:00+00:00",
+             review_history=json.dumps([{
+                 "round": 1, "at": "t", "body": "the glyph cue survived",
+                 "verdict": "changes_requested", "mutations": [mutation],
+             }]))
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source("abc123")), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_tmux_windows", return_value={"test-1"}), \
+         patch.object(dispatcher, "_capture_pane", return_value=""), \
+         patch.object(dispatcher, "_pane_idle_empty_prompt", return_value=True), \
+         patch.object(dispatcher, "_agent_status", return_value="idle"), \
+         patch.object(dispatcher, "_send_seed",
+                      side_effect=lambda w, p, t: sent.append(p) or True), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["watchdog_renudged"] == 1
+    assert sent
+    assert '"guard": "the glyph cue"' in sent[0]
+    assert '"file": "guard.py"' in sent[0]
+    assert "copy this JSON into your self-check experiments file" in sent[0]
+
+
 # --- (h) 🔴 changes_requested is not a silent state, and a HOLD must not freeze the exit ---
 
 def test_a_HOLD_pauses_the_rework_but_NEVER_the_escalation(tmp_path, monkeypatch):
