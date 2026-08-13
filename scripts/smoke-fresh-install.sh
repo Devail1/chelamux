@@ -36,9 +36,14 @@ set -euo pipefail
 
 # CMX-275: the one place this script needs an unused TCP port — ask the kernel for one
 # nobody currently holds, don't guess. Factored into its own function (rather than inlined
-# at the DASH_PORT= call site below) so tests/test_smoke_fresh_install.py can drive the
-# EXACT production code path via `--print-port` below, hundreds of times cheaply, instead of
-# only ever observing it once per full (multi-minute) fresh-install run.
+# at the DASH_PORT= call site below) so it has one call site to read instead of an inlined
+# guess, and so `--print-port` below can invoke the exact production code path directly.
+#
+# docs/DEFEAT_SHAPES.md #10: this is declared NOT GUARDED — no test proves the port this
+# returns came from the kernel rather than from some other free-looking value, because that
+# property only differs from a blind guess under contention, which a unit test doesn't
+# reproduce. See tests/test_smoke_fresh_install.py (search "declared NOT GUARDED") for the
+# full reasoning and what covers the fix instead.
 pick_free_port() {
     python3 -c "
 import socket
@@ -50,10 +55,10 @@ s.close()
 }
 
 # Internal fast-path, not part of the documented adopter usage below: print one
-# kernel-assigned free port and exit, skipping the clone/sync/dashboard/etc. entirely. This
-# is what lets the WIRING guard in tests/test_smoke_fresh_install.py call the real
-# pick_free_port() repeatedly in well under a second instead of paying for a full
-# fresh-install run per sample.
+# kernel-assigned free port and exit, skipping the clone/sync/dashboard/etc. entirely. Not
+# currently driven by any test (see the NOT GUARDED note above `pick_free_port()`) — kept as
+# a manual-verification entry point and in case a genuinely discriminating test becomes
+# feasible later.
 if [ "${1:-}" = "--print-port" ]; then
     pick_free_port
     exit 0
