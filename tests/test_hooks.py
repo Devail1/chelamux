@@ -780,6 +780,23 @@ def test_terminal_timestamps_defaults_off_with_no_env_var_set(monkeypatch):
         importlib.reload(config)  # restore whatever env the rest of the suite expects
 
 
+def test_terminal_timestamps_turns_on_with_the_env_var_set_to_true(monkeypatch):
+    """CMX-277 rework round 4: the mirror of the OFF-default test above. Every other
+    ON-state test in this file monkeypatches the `TERMINAL_TIMESTAMPS` attribute directly,
+    which never exercises the `os.environ.get(...)` parse that actually reads
+    `CHELA_TERMINAL_TIMESTAMPS` — so `TERMINAL_TIMESTAMPS = False and os.environ.get(...)`
+    (a dead-coded knob that can never turn ON, however the env var is set) left every
+    attribute-monkeypatched test green. Reload the real module against a real env var, the
+    same shape as the OFF-default test, so the parse path itself is what's pinned."""
+    monkeypatch.setenv("CHELA_TERMINAL_TIMESTAMPS", "true")
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.TERMINAL_TIMESTAMPS is True
+    finally:
+        monkeypatch.delenv("CHELA_TERMINAL_TIMESTAMPS", raising=False)
+        importlib.reload(config)  # restore whatever env the rest of the suite expects
+
+
 def test_endpoint_will_not_read_an_oversized_body(client):
     resp = client.post("/hooks/PreToolUse", data=b"x" * (hooks.MAX_BODY + 1),
                        content_type="application/json")
