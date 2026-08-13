@@ -414,42 +414,34 @@ test('a pinned pane keeps its exact geometry through a grid-preset reflow', () =
     assert.notEqual(geom(PINNED), before.pinned, 'once unpinned, a reflow may move it again');
 });
 
-// 3b — CMX-230 WIRING: A GRID-PRESET CLICK ACTUALLY TOGGLES "AIR IN THE CHROME"
-// (body.wall-density-airy) at <=2 panes, off above. style.css's density rule and
-// _setWallDensity itself stay untouched by the corruption this guards against —
-// only applyGridLayout's call site is disabled — so a source-text guard on either
-// of those would stay green. This drives the REAL applyGridLayout and reads the
-// REAL body class back.
-test('CMX-230: a grid-preset click toggles body.wall-density-airy — on at <=2 panes, off above', () => {
-    window.chela.applyGridLayout(2, 2);   // 4-up: dense
-    assert.ok(!document.body.classList.contains('wall-density-airy'), 'a 4-pane preset must NOT be airy');
+// 3b — CMX-268 rework round 1 (PR #338): A GRID-PRESET CLICK NEVER TOGGLES
+// body.wall-density-airy ANYMORE — the class, its style.css rule, and
+// _setWallDensity are gone (CMX-268 reverted the treatment: Liav, live on the
+// shipped dashboard, 2026-08-13, "i think the wall was better when it took
+// the full space"). This drives the REAL applyGridLayout at the two
+// densities that used to trigger the treatment (the 1-up boundary and the
+// 2-up boundary, which was also the shipped default) and reads the REAL body
+// class back. This file has no real style.css mounted (CSS above is read
+// only as a source-text string, never put in a `<style>` tag — see the
+// fixtures/setup comment at the top of this file), so it cannot see whether
+// the CSS rule itself is gone; that half is guarded in
+// tests/dashboard_scale_nav_a11y.test.mjs's "CLAIM 2 (airy density),
+// REVERTED" tests instead, which mount the real style.css but never import
+// the real terminals.js. Together the two files catch a half-restore of
+// either piece alone: re-adding ONLY the CSS rule leaves THIS test green
+// (nothing here ever attaches the class for real) but reddens the CSS-side
+// test (whose fixture hardcodes the class itself, independent of this file's
+// toggle line); re-adding ONLY the toggle line below leaves the CSS-side
+// test green but reddens this one on its own.
+test('CMX-268: a grid-preset click never adds body.wall-density-airy — the density treatment was reverted, not just its CSS', () => {
+    window.chela.applyGridLayout(1, 1);   // 1-up: used to be the airiest density
+    assert.ok(!document.body.classList.contains('wall-density-airy'),
+        'applyGridLayout(1,1) added wall-density-airy — the reverted density toggle is back');
 
-    window.chela.applyGridLayout(1, 1);   // 1-up: airy
-    assert.ok(document.body.classList.contains('wall-density-airy'),
-        'applyGridLayout(1,1) must add wall-density-airy — the preset-click density wiring is missing');
-
-    // The 2-pane boundary itself, not just 1-up and 4/6-up either side of it. This is
-    // the SHIPPED DEFAULT preset (terminals.js's default is {cols: 2, rows: 1}, and
-    // WALL_PRESETS' "2 columns" button), so an off-by-one at the applyGridLayout call
-    // site (e.g. passing rows+1 to _setWallDensity) keeps 1-up airy and 4/6-up dense
-    // while silently de-airying the default 2-up wall — exactly the gap a boundary-
-    // adjacent-only test would miss.
-    window.chela.applyGridLayout(2, 1);   // 2-up: airy — the boundary, and the default
-    assert.ok(document.body.classList.contains('wall-density-airy'),
-        'applyGridLayout(2,1) must add wall-density-airy — the 2-pane boundary (and shipped default) must stay airy');
-
-    window.chela.applyGridLayout(2, 3);   // 6-up: dense again
-    assert.ok(!document.body.classList.contains('wall-density-airy'), 'a 6-pane preset must remove wall-density-airy again');
+    window.chela.applyGridLayout(2, 1);   // 2-up: the boundary, and the shipped default preset
+    assert.ok(!document.body.classList.contains('wall-density-airy'),
+        'applyGridLayout(2,1) added wall-density-airy — the reverted density toggle is back');
 });
-
-// buildWall's OWN first-paint restore of wall-density-airy (independent of this
-// test's applyGridLayout call) is guarded in tests/dashboard_scale_nav_a11y.test.mjs
-// instead, as a source-text fact rather than a DOM behaviour: renderTerminals always
-// calls _refitWallForDock() synchronously right after buildWall, and that ALWAYS
-// re-applies the class via the unmutated applyGridLayout — so disabling buildWall's
-// own restore line is unobservable through any real, black-box render path this file
-// can drive (verified empirically before writing the guard the other way). See the
-// GUARD 2c comment there for the full reasoning.
 
 // 4 — THE KEYBOARD SWITCHER. Alt+N jumps to the pane the badge shows; bare N does not.
 test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alone', async () => {

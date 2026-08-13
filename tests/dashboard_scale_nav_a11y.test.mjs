@@ -32,8 +32,14 @@
 //   1. type scale — every wall/pane/card text selector's RESOLVED font-size/
 //      line-height comes from the --wall-pane-*/--card-* tokens and never
 //      sits below the pre-CMX-230 legibility floor (see "TYPE SCALE" below).
-//   2. airy density — the class actually widens the stage at a real desktop
-//      width, not just toggles (see "WIRING: the airy-density rule" below).
+//   2. airy density — REVERTED by CMX-268 (Liav, 2026-08-13: "the wall was
+//      better when it took the full space" — a product call on the shipped
+//      Xirp-style air, not a defect). The wall-density-airy class, its CSS
+//      rule and _setWallDensity are gone. CMX-268 rework round 1 (PR #338):
+//      a pure deletion left no guard against the treatment coming back — see
+//      "CLAIM 2 (airy density), REVERTED" below for the OPPOSITE invariant
+//      (no horizontal padding / no column cap at 1-up and 2-up) plus the
+//      companion class-check in tests/wallnav.test.mjs.
 //   3. nav inventory — the primary rail is exactly the 3 domain objects, the
 //      4 demoted views are present (not deleted) and actually render — occupy
 //      space and paint — under the More subhead (see "nav inventory" /
@@ -150,22 +156,7 @@
 // that doesn't also regress the number is out of scope for this file),
 // EXHAUSTIVE selector coverage across the stylesheet beyond the concrete
 // fixtures enumerated below (the greyscale capture at 1/2/4/6 densities is
-// its acceptance check), the airy-density clamp()'s actual PIXEL margin at a
-// real viewport width using its REAL `6vw` term (jsdom cannot resolve `vw` at
-// all — confirmed empirically: `clamp(16px, 6vw, 64px)` resolves to jsdom's
-// initial-value fallback "0" for the correct rule too, so a corrupted flat
-// 0px override is not honestly distinguishable from the real one on the
-// unmodified stylesheet; the WIRING test below works around this for the
-// cascade-winner question by substituting `6vw`'s literal computed value at
-// DESKTOP_VIEWPORT_PX, but the exact px number a real `vw` produces at an
-// arbitrary viewport is still the greyscale capture's job, not this file's),
-// whether buildWall's persisted-density restore call
-// runs UNCONDITIONALLY on first paint (two rounds of increasingly specific
-// text predicates on the same line converged on a false premise each time —
-// see GUARD 2c below; every real render path this file can drive calls
-// _refitWallForDock -> applyGridLayout moments later regardless, so the call
-// site is behaviourally unobservable from a black-box render, and the
-// greyscale capture is its acceptance check too);
+// its acceptance check);
 // — round 10, removed rather than re-narrowed —
 // (i) TYPE SCALE (ticket claim 1): the --wall-pane-*/--card-* tokens'
 // RESOLVED font-size/line-height at the wall tile / sidebar card text
@@ -177,13 +168,10 @@
 // greyscale capture is its acceptance check (the WIRING test that nav.js
 // still emits the .side-item-icon/.side-item-label classes the demotion rule
 // depends on stays guarded, below);
-// (iii) the airy-density rule (body.wall-density-airy #term-stage) adding
-// HORIZONTAL padding only, never vertical — #term-stage's own row math
-// (_wallFill) depends on this, but which padding EDGES a rule sets is a
-// CSS-value question the same as (i)/(ii) — the greyscale capture is its
-// acceptance check (the WIRING tests that the horizontal padding actually
-// wins the cascade, and that the .grid-stack column stays capped/centred,
-// stay guarded, below);
+// (iii) — REMOVED, not narrowed: CMX-268 reverted the airy-density treatment
+// entirely (wall-density-airy, its style.css rule, and _setWallDensity are
+// gone — see claim 2 above), so there is no rule or class left for this item
+// to describe;
 // (iv) GUARD 6, single accent (ticket claim 3's colour half): every `.active`
 // rule's highlight colour is --accent or a neutral, never a second hue — CSS
 // colour syntax is open-ended (hex, rgb()/rgba(), hsl()/hsla(), bare
@@ -309,115 +297,124 @@ function _activeRailReaches(win, el) {
 // Moved to the NOT GUARDED block at the top of this file; the acceptance
 // check is the manual greyscale capture, not another resolver.
 
-// --- GUARD 2c: "air in the chrome" at low densities — _setWallDensity's own
-// cutoff is pinned at `<= 2` (style.css's comment's claim, made true). Round
-// 9: the OTHER half this test used to assert — that buildWall calls
-// _setWallDensity unconditionally, not from behind dead code — is now in the
-// NOT GUARDED block at the top of this file. Two rounds of increasingly
-// specific text predicates on the same line (round 6's full-line anchor,
-// round 8's preceding-line precondition) each converged on a premise the next
-// mutation falsified, and the call site is genuinely unobservable from any
-// real render path this file can drive (renderTerminals always calls
-// _refitWallForDock -> applyGridLayout moments after buildWall, setting the
-// same class) — a third regex would be the same shape of hole with a new
-// premise, not a fix.
-test('density guard: _setWallDensity toggles wall-density-airy off at <=2 panes', () => {
-    const fn = TERMINALS.slice(TERMINALS.indexOf('function _setWallDensity'));
-    const body = fn.slice(0, fn.indexOf('\nfunction ', 10));
-    assert.match(body, /wall-density-airy['"],\s*cols\s*\*\s*rows\s*<=\s*2\)/,
-        '_setWallDensity must toggle wall-density-airy off `cols * rows <= 2` — the style.css comment\'s claimed cutoff');
-});
-
-// --- WIRING: the "air in the chrome" feature must actually PRODUCE air, not
-// just toggle a class (claim 2). Round 9: the padding-left/-right clamp()'s
-// actual PIXEL margin is `vw`-dependent and jsdom cannot resolve `vw` at all
-// (confirmed empirically — see the NOT GUARDED note at the top of this
-// file), so the exact desktop margin in px is out of scope here. WHICH RULE
-// WINS the cascade — the actual shape of the round-7 judge mutation
-// (`#term-stage:not(.no-air)` outranking the guarded rule on specificity and
-// zeroing the padding outright) — IS still honestly observable: substituting
-// the one unresolvable `6vw` term for its literal computed equivalent AT
-// DESKTOP_VIEWPORT_PX (6% of 1920px = 115.2px) is a mechanical value swap,
-// not a hand-rolled cascade/specificity resolver — the selector text,
-// specificity and clamp() MIN/MAX floors stay byte-identical to production,
-// and jsdom's OWN engine still decides which declaration wins.
-const AIRY_PADDING_CSS = CSS.replace(/clamp\(16px, 6vw, 64px\)/g, 'clamp(16px, 115.2px, 64px)');
-const AIRY_FIXTURE = `<div class="app"><main class="canvas" id="canvas"><div class="panel" id="panel-terminals">
-  <div id="term-stage"><div class="grid-stack"></div></div>
+// --- CLAIM 2 (airy density), REVERTED — CMX-268 rework round 1 (human
+// directive on PR #338): the deletion itself (body.wall-density-airy, its
+// style.css rule, _setWallDensity and both call sites) is correct and
+// untouched by this round. What a pure deletion leaves behind is a hole: no
+// guard tells a future PR the treatment must not come back. This asserts the
+// OPPOSITE of what the deleted WIRING tests used to prove — at the two
+// densities that used to trigger it (1-up, 2-up, the boundary AND the shipped
+// default), #term-stage resolves zero horizontal padding, and .grid-stack
+// resolves max-width: none, i.e. no centred-column cap — asserted as ABSOLUTE
+// values (round 2, see below), not a diff against a second fixture. This is
+// the CSS-side half of the guard: the class is hardcoded onto
+// <body> by hand (real code never sets it post-revert — see the WIRING test
+// in tests/wallnav.test.mjs, which drives the real applyGridLayout and reads
+// the class back), so a judge mutation that re-adds either deleted style.css
+// rule trips THIS test on its own, independent of whether terminals.js's
+// toggle line ever comes back. The class-half (does applyGridLayout ever
+// ADD wall-density-airy for real) belongs next to what used to be test 3b in
+// wallnav.test.mjs instead — that file has no real style.css mounted, so it
+// cannot answer the CSS-side question, and this file has no real terminals.js
+// import, so it cannot answer the JS-side one. Together they cover a
+// half-restore of either piece alone (see wallnav.test.mjs's comment).
+const WALL_FIXTURE = ups => `<div class="app"><main class="canvas" id="canvas"><div class="panel" id="panel-terminals">
+  <div id="term-stage"><div class="grid-stack">${
+    '<div class="grid-stack-item"><div class="grid-stack-item-content"></div></div>'.repeat(ups)
+}</div></div>
 </div></main></div>`;
-test('WIRING: the airy-density rule\'s horizontal padding is won by the real selector, not a higher-specificity override', () => {
-    const win = mountWithRealCss(AIRY_FIXTURE, ' class="wall-density-airy"', AIRY_PADDING_CSS);
-    const cs = win.getComputedStyle(win.document.getElementById('term-stage'));
-    const px = v => {
-        const m = v.match(/([0-9.]+)px/);
-        return m ? parseFloat(m[1]) : NaN;
-    };
-    // At DESKTOP_VIEWPORT_PX the PREFERRED term (115.2px) exceeds the 64px MAX,
-    // so the clamp resolves to its 64px ceiling — a floor well below that (32px,
-    // the same generous-but-real floor the old vw-based version used) still
-    // fails hard against the round-7 mutation's flat 0.
-    assert.ok(px(cs.paddingLeft) >= 32,
-        `#term-stage's resolved padding-left (${cs.paddingLeft}) is too thin at a desktop width — a higher-specificity ` +
-        'override (or a zeroed clamp) is winning the cascade instead of the airy-density rule');
-    assert.ok(px(cs.paddingRight) >= 32,
-        `#term-stage's resolved padding-right (${cs.paddingRight}) is too thin at a desktop width — a higher-specificity ` +
-        'override (or a zeroed clamp) is winning the cascade instead of the airy-density rule');
 
-    // CMX-257 round 18 (judge finding 1): the assertions above only mount
-    // `wall-density-airy` ON, so they prove the class turns the air ON and say
-    // nothing about the absence of the class keeping it OFF — which is exactly
-    // why descoping the selector from `body.wall-density-airy #term-stage` to
-    // plain `body #term-stage` stayed green through the whole suite. style.css's
-    // own must-never ("1 and 2-pane layouts only; 4/6-up stays exactly as dense
-    // as before this ticket") IS the OFF case; mount the same fixture with NO
-    // body class and pin that the padding stays thin.
-    const winOff = mountWithRealCss(AIRY_FIXTURE, '', AIRY_PADDING_CSS);
-    const csOff = winOff.getComputedStyle(winOff.document.getElementById('term-stage'));
-    assert.ok(px(csOff.paddingLeft) < 32,
-        `#term-stage's padding-left without wall-density-airy is ${csOff.paddingLeft} — the airy-density rule is firing ` +
-        'unconditionally, not gated on the class');
-    assert.ok(px(csOff.paddingRight) < 32,
-        `#term-stage's padding-right without wall-density-airy is ${csOff.paddingRight} — the airy-density rule is firing ` +
-        'unconditionally, not gated on the class');
-});
-// CMX-257 round 10 (human directive on PR #326, superseding round 9): "which
-// padding edges the airy-density rule sets" (i.e. horizontal-only, never
-// vertical) used to be pinned as a literal-selector source-text read here —
-// finding 3 across rounds 3/7/10, always the same shape: the same padding
-// added under a differently-spelled selector is invisible to a text match.
-// Moved to the NOT GUARDED block at the top of this file; the acceptance
-// check is the manual greyscale capture, not another selector-text pin.
-test('WIRING: the airy-density .grid-stack column stays capped (max-width), centred (margin: 0 auto), and the cap is never overridden by min-width', () => {
-    const win = mountWithRealCss(AIRY_FIXTURE, ' class="wall-density-airy"');
-    const cs = win.getComputedStyle(win.document.querySelector('.grid-stack'));
-    // A shrunk-but-nonzero cap (e.g. 17px) would still pass a bare ">0" floor;
-    // pin the actual shipped value instead.
-    assert.equal(cs.maxWidth, '1400px',
-        `the centred max-width column resolved to ${cs.maxWidth}, not the shipped 1400px — either zeroed/shrunk or overridden by a higher-specificity rule`);
-    assert.equal(cs.marginLeft, 'auto', `margin-left resolved to ${cs.marginLeft}, not auto — without it the capped column is left-anchored, not centred`);
-    assert.equal(cs.marginRight, 'auto', `margin-right resolved to ${cs.marginRight}, not auto — without it the capped column is left-anchored, not centred`);
-    // Per CSS 2.1 §10.4, min-width overrides max-width when they conflict — a
-    // min-width: 100% override left every check above green in a real judge
-    // mutation (max-width was even present, just never binding) while the cap
-    // never actually took effect at any viewport.
-    assert.equal(cs.minWidth, 'auto',
-        `min-width resolved to ${cs.minWidth}, not auto — per CSS 2.1 §10.4 it overrides max-width when they conflict, so the capped column would never bind at any viewport`);
+// jsdom cannot resolve `vw` at all (confirmed empirically — same finding the
+// removed WIRING test worked around, see the NOT GUARDED note at the top of
+// this file): any `Nvw` term falls back to jsdom's initial-value 0px,
+// indistinguishable from an honest 0px. CMX-268 rework round 2 (human
+// directive on PR #338, finding 2): the original substitution string-matched
+// the exact deleted literal `clamp(16px, 6vw, 64px)`, so a re-add that is
+// byte-different but pixel-identical in a browser (different whitespace, a
+// different clamp() shape, a bare `width: 6vw` instead of a clamp() term at
+// all) would silently read 0px and never trip the guard below. Generalise
+// instead: replace EVERY `Nvw` occurrence anywhere in the real stylesheet
+// with its resolved pixel value at a 1920px desktop viewport (1vw = 19.2px)
+// before mounting. This is a value swap on the unit itself, not a
+// hand-rolled resolver, and it composes correctly with whatever CSS
+// function the vw term sits inside (clamp() still computes its own
+// min/max against the substituted literal), so it stays correct regardless
+// of how a future vw-bearing rule is spelled or shaped.
+const DESKTOP_CSS = CSS.replace(/(\d+(?:\.\d+)?)vw/g, (_, n) => `${Number(n) * 19.2}px`);
 
-    // CMX-257 round 18 (judge finding 2): same missing half as the padding
-    // test above — mount the fixture with NO body class and pin that the cap
-    // and centring never apply. Without this, descoping the selector from
-    // `body.wall-density-airy #term-stage .grid-stack` to plain
-    // `body #term-stage .grid-stack` caps/centres the wall's grid at EVERY
-    // density, including 4/6-up, and nothing here notices.
-    const winOff = mountWithRealCss(AIRY_FIXTURE, '');
-    const csOff = winOff.getComputedStyle(winOff.document.querySelector('.grid-stack'));
-    assert.equal(csOff.maxWidth, 'none',
-        `.grid-stack's max-width without wall-density-airy is ${csOff.maxWidth}, not none — the cap is firing unconditionally, not gated on the class`);
-    assert.notEqual(csOff.marginLeft, 'auto',
-        `.grid-stack's margin-left without wall-density-airy resolved to auto — the centring is firing unconditionally, not gated on the class`);
-    assert.notEqual(csOff.marginRight, 'auto',
-        `.grid-stack's margin-right without wall-density-airy resolved to auto — the centring is firing unconditionally, not gated on the class`);
-});
+// CMX-268 rework round 3 (judge finding 1 on PR #338): jsdom's CSSOM PARSES
+// `padding-inline` as a property (confirmed empirically —
+// `getComputedStyle(el).getPropertyValue('padding-inline')` returns the raw
+// declared value) but does NOT expand a CSS Logical Property into the
+// physical paddingLeft/paddingRight longhands the guard below reads —
+// confirmed empirically: `#term-stage { padding-inline: 64px; }` resolves
+// paddingLeft/paddingRight to 0 in jsdom even though it is pixel-identical to
+// `padding-left: 64px; padding-right: 64px;` in a real browser. That gap let
+// the judge's mutation (the same ungated gutters spelled as padding-inline,
+// the idiom someone reaching for logical properties in 2026 most plausibly
+// writes) read 0px on both sides and stay invisible to the guard. Expand
+// every logical padding-inline declaration in the mounted stylesheet to its
+// physical LTR longhands before mounting — a text-level normalisation of the
+// SPELLING, the same technique DESKTOP_CSS already uses for vw units above,
+// not a hand-rolled cascade/logical-property resolver — so it composes
+// correctly regardless of what selector or declaration order the logical
+// spelling appears inside.
+const LOGICAL_PROP_CSS = DESKTOP_CSS
+    .replace(/padding-inline\s*:\s*([^;]+);/g, (_, v) => {
+        const [left, right = left] = v.trim().split(/\s+/);
+        return `padding-left: ${left}; padding-right: ${right};`;
+    })
+    .replace(/padding-inline-start\s*:\s*([^;]+);/g, 'padding-left: $1;')
+    .replace(/padding-inline-end\s*:\s*([^;]+);/g, 'padding-right: $1;');
+
+// CMX-268 rework round 2 (human directive on PR #338, finding 1): the
+// original guard compared the "airy" fixture's resolved padding/max-width
+// against a SEPARATE "base" (no-class) fixture mounted from the SAME
+// stylesheet. Any horizontal padding added to #term-stage UNGATED (no class
+// involved at all — the natural shape of a real regression, and exactly the
+// judge's mutation) moves both fixtures equally, so the differential
+// cancels and the assertion holds no matter how wide the gutters get. The
+// fix is to assert the ABSOLUTE resolved value instead: #term-stage never
+// carries horizontal padding and .grid-stack never carries a max-width,
+// full stop — read off computed style, with no reference to
+// wall-density-airy anywhere in the assertion itself. The class is still
+// hardcoded onto <body> when mounting (real code never sets it post-revert
+// — see the WIRING test in tests/wallnav.test.mjs) purely so a class-gated
+// re-add of the deleted rule is ALSO exercised by this same fixture; an
+// ungated re-add applies regardless of the class and is caught the same way.
+for (const ups of [1, 2]) {
+    test(`airy density (REVERTED, CMX-268): at ${ups}-up, #term-stage has no horizontal padding`, () => {
+        const win = mountWithRealCss(WALL_FIXTURE(ups), ' class="wall-density-airy"', LOGICAL_PROP_CSS);
+        const cs = win.getComputedStyle(win.document.getElementById('term-stage'));
+        assert.equal(cs.paddingLeft, '0px',
+            `#term-stage's padding-left at ${ups}-up is ${cs.paddingLeft}, not 0px — #term-stage has gained ` +
+            'horizontal padding');
+        assert.equal(cs.paddingRight, '0px',
+            `#term-stage's padding-right at ${ups}-up is ${cs.paddingRight}, not 0px — #term-stage has gained ` +
+            'horizontal padding');
+    });
+
+    test(`airy density (REVERTED, CMX-268): at ${ups}-up, .grid-stack resolves max-width: none — no centred column cap`, () => {
+        const win = mountWithRealCss(WALL_FIXTURE(ups), ' class="wall-density-airy"', LOGICAL_PROP_CSS);
+        const gridCs = win.getComputedStyle(win.document.querySelector('.grid-stack'));
+        assert.equal(gridCs.maxWidth, 'none',
+            `.grid-stack's max-width at ${ups}-up is ${gridCs.maxWidth}, not none — .grid-stack has gained a ` +
+            'centred-column cap');
+        // CMX-268 rework round 3 (judge finding 2): max-width: none rules out
+        // only ONE spelling of a centred-column cap. The identical visual
+        // outcome — the wall stops filling its stage, centred in a fixed
+        // column — is equally reachable via an explicit `width` (confirmed
+        // empirically: jsdom resolves an unset width to 'auto', and a
+        // rule like `.grid-stack { width: 1400px; margin: 0 auto; }`
+        // resolves width to the literal '1400px', invisible to a max-width-
+        // only check). Assert width stays unconstrained too, so this guards
+        // the OUTCOME ("no cap", by any property that can produce one) —
+        // not just the single property the deleted rule happened to use.
+        assert.equal(gridCs.width, 'auto',
+            `.grid-stack's width at ${ups}-up is ${gridCs.width}, not auto — .grid-stack has gained a fixed/` +
+            'capped width even though max-width is unset, producing the same centred-column regression');
+    });
+}
 
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
 // span (or the text it carries) and leaving only the colour class must fail.
