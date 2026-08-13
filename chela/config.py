@@ -936,6 +936,17 @@ STATUS_LINE = os.environ.get("CHELA_STATUS_LINE", "true").strip().lower() not in
     "false", "0", "no", "off",
 )
 
+# Live-terminal message timestamps (CMX-277, correcting CMX-270's "not feasible"
+# verdict — see docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md): the UserPromptSubmit/Stop hook
+# responses stamp a `systemMessage` line into the agent's own transcript, which is what
+# the wall's ttyd tile mirrors byte-for-byte. ON by default; the spike's own "what
+# remains unverified" section flags version-dependent flakiness upstream
+# (anthropics/claude-code#50542, observed on 2.1.114), so CHELA_TERMINAL_TIMESTAMPS=false
+# is the escape hatch if a pinned Claude Code version renders it badly.
+TERMINAL_TIMESTAMPS = os.environ.get("CHELA_TERMINAL_TIMESTAMPS", "true").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+
 # Embedded ttyd terminal wall on/off (read by the dashboard and the ttyd
 # supervisor in scripts/agent-terminals.sh). The wall — the flagship feature —
 # is ON by default, but it serves writable shells, so the dashboard gates it on

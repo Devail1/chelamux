@@ -642,6 +642,28 @@ def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
     assert "$CHELA_WID" not in command.replace("${CHELA_WID:-}", "")
 
 
+# --- live terminal timestamps (CMX-277) -------------------------------------------
+
+def test_timestamp_events_are_exactly_the_two_message_boundaries():
+    """Prompt-sent and reply-finished — the two boundaries the feature is about."""
+    assert hooks.TIMESTAMP_EVENTS == frozenset({"UserPromptSubmit", "Stop"})
+
+
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
+def test_timestamp_response_carries_the_proven_persistent_envelope(event):
+    """Bare ``{"systemMessage": ...}`` was reported flashing and vanishing within about a
+    second (anthropics/claude-code#50542); pairing it with ``continue``/``suppressOutput``
+    is what made it persist. Losing either field regresses to the flaky bare shape."""
+    resp = hooks.timestamp_response(event)
+
+    assert resp["continue"] is True
+    assert resp["suppressOutput"] is False
+    msg = resp["systemMessage"]
+    assert msg.startswith("🕐 ")
+    stamp = msg.removeprefix("🕐 ")
+    assert len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"  # HH:MM:SS
+
+
 # --- the endpoint ----------------------------------------------------------------
 
 def test_endpoint_appends_and_answers_nothing_that_nobody_answered(client):
@@ -685,6 +707,35 @@ def test_endpoint_does_not_fail_a_blocked_agent(client):
 def test_endpoint_rejects_an_unknown_event(client):
     assert client.post("/hooks/DropTables", json=_body()).status_code == 404
     assert event_log.read()["events"] == []
+
+
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
+def test_endpoint_stamps_a_timestamp_on_the_message_boundaries(client, event):
+    resp = client.post(f"/hooks/{event}", json=_body(hook_event_name=event))
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["continue"] is True
+    assert body["suppressOutput"] is False
+    assert body["systemMessage"].startswith("🕐 ")
+
+    # Still an ordinary ingested event, same as every other hook.
+    events = event_log.read()["events"]
+    assert len(events) == 1
+    assert events[0]["type"] == hooks.event_type(event)
+
+
+def test_the_timestamp_can_be_turned_off(client, monkeypatch):
+    """``CHELA_TERMINAL_TIMESTAMPS=false`` is the escape hatch the spike's own
+    "what remains unverified" section calls for — a pinned Claude Code version that
+    renders the field badly must be able to turn it off without code changes."""
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", False)
+
+    resp = client.post("/hooks/Stop", json=_body(hook_event_name="Stop"))
+
+    assert resp.get_json() == {}
+    # The escape hatch mutes the visible line only — the event is still logged.
+    assert event_log.read()["events"][0]["type"] == "hook.stop"
 
 
 def test_endpoint_will_not_read_an_oversized_body(client):
