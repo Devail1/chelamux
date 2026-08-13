@@ -665,6 +665,20 @@ def test_timestamp_response_carries_the_proven_persistent_envelope(event):
     assert len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"  # HH:MM:SS
 
 
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
+def test_timestamp_response_asks_the_module_clock_not_a_fixed_string(event, monkeypatch):
+    """A fixed string like ``"00:00:00"`` satisfies the HH:MM:SS shape check above just as
+    well as a real clock — that gap is exactly what let a frozen-clock mutation survive
+    (docs/DEFEAT_SHAPES.md). Monkeypatching ``hooks.time.strftime`` and asserting the exact
+    rendered value pins the mechanism (the module's own clock was asked), not just the
+    shape of whatever answer it gave."""
+    monkeypatch.setattr(hooks.time, "strftime", lambda fmt: "12:34:56")
+
+    resp = hooks.timestamp_response(event)
+
+    assert resp["systemMessage"] == "🕐 12:34:56"
+
+
 # --- the endpoint ----------------------------------------------------------------
 
 def test_endpoint_appends_and_answers_nothing_that_nobody_answered(client):
