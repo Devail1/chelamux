@@ -108,6 +108,97 @@ def ensure_slice(budget_bytes: int) -> bool:
         return False
 
 
+def _list_user_slices() -> list[str]:
+    """Every currently-loaded ``systemd --user`` slice unit name. Best-effort — an empty
+    list on any host without a working ``systemd --user`` session (no exception ever
+    escapes), same posture as :func:`available`/:func:`ensure_slice`.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "list-units", "--type=slice", "--state=active",
+             "--no-legend", "--plain", "--no-pager"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    names = []
+    for line in result.stdout.splitlines():
+        first = line.split(maxsplit=1)[:1]
+        if first and first[0].endswith(".slice"):
+            names.append(first[0])
+    return names
+
+
+def _slice_memory(unit: str) -> tuple[int | None, int | None]:
+    """``(max_bytes, current_bytes)`` for one active slice, straight from ``systemctl
+    show`` — the same property ``docs/RESOURCE_ISOLATION.md``'s own "Verify, don't
+    assume" section checks by hand. ``max_bytes`` is ``None`` for ``infinity``/unset (no
+    ceiling); ``current_bytes`` is ``None`` only when the property could not be read at
+    all — never a guessed 0.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show", unit, "-p", "MemoryMax", "-p", "MemoryCurrent"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    values = dict(line.partition("=")[::2] for line in result.stdout.splitlines() if "=" in line)
+
+    def _finite(raw: str | None) -> int | None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None    # "infinity", "[not set]", empty, or missing entirely
+
+    return _finite(values.get("MemoryMax")), _finite(values.get("MemoryCurrent"))
+
+
+def live_bound() -> dict | None:
+    """The tightest memory ceiling any ACTIVE ``systemd --user`` slice is enforcing on
+    this box right now, whoever created it — CMX-264's own ``chela-agents.slice``, or
+    anything else sharing this ``systemd --user`` session (an operator's personal
+    ``~/bin/memcap``-style wrapper, see ``docs/RESOURCE_ISOLATION.md``'s own
+    ``memcap.slice`` convention).
+
+    CMX-280: a slice bounding a completely SEPARATE set of jobs still eats into the
+    SAME box's total RAM — the incident this closes measured a `memcap.slice` holding
+    10 of 12 GiB (an operator's own heavy jobs, unrelated to chela), leaving ~1.2 GiB
+    of headroom for chela's own dispatched agents even though
+    ``CHELA_MEMORY_SLICE_BUDGET`` was unset the whole time. A dispatched agent is not
+    literally inside that slice's cgroup — chela never wrapped it there — but the RAM
+    it ate is RAM chela's agents cannot have either, on the same box. Reporting "off"
+    in that state answers "did chela turn this on?", not "is a bound in force?"
+    (CMX-280) — this answers the second question, so ``chela doctor``/the dashboard can
+    say what an operator would otherwise have to run ``systemctl --user show
+    memcap.slice`` by hand to find out.
+
+    Best-effort, never raises — degrades to ``None`` on any host without a working
+    ``systemd --user`` session. Returns ``None`` when no active slice sets a finite
+    ``MemoryMax``. Otherwise picks the slice with the LEAST headroom (``max_bytes -
+    current_bytes``, or ``max_bytes`` alone when occupancy is unreadable) — the one
+    actually worth an operator's attention — as ``{"unit": str, "max_bytes": int,
+    "current_bytes": int | None, "chela_owned": bool}``.
+    """
+    tightest: tuple[int, str, int, int | None] | None = None
+    for unit in _list_user_slices():
+        max_bytes, current_bytes = _slice_memory(unit)
+        if max_bytes is None:
+            continue
+        headroom = max_bytes if current_bytes is None else max_bytes - current_bytes
+        if tightest is None or headroom < tightest[0]:
+            tightest = (headroom, unit, max_bytes, current_bytes)
+    if tightest is None:
+        return None
+    _, unit, max_bytes, current_bytes = tightest
+    return {
+        "unit": unit,
+        "max_bytes": max_bytes,
+        "current_bytes": current_bytes,
+        "chela_owned": unit == SLICE_NAME,
+    }
+
+
 def wrap_launch_cmd(cmd: str) -> str:
     """Prefix ``cmd`` so the pane's own shell launches it into the shared slice —
     ``exec`` REPLACES the shell in place (same pid, same parent/child shape the tmux
