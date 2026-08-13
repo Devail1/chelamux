@@ -142,6 +142,32 @@ test('knMd: switching list kind mid-run (bullet then numbered, no blank line) cl
     );
 });
 
+// --- knInline's own rules — bold + links (round 3, PR #350) ----------------
+//
+// Every guard above that reaches knInline only ever does so through `` `code` ``
+// (the briefHtml exact-output fixture) or list structure (the three tests just
+// above) — nothing anywhere fed knMd/knInline a `**bold**` span or a `[text](href)`
+// link, so both of knInline's other two rules, and knLink's branch on `href`,
+// were free to break with the full suite staying green. This one fixture pins
+// all three at once: a bold span mid-line, an external link, an in-bundle `.md`
+// link (knLink's rewritten branch — CMX-279 deleted the Knowledge concept
+// browser this used to route `.md` targets to), and a `#anchor` link (the ONE
+// case that must NOT become a clickable link, since there is nothing left in
+// the app for it to open).
+test('knMd: a bold span, an external link, an in-bundle .md link, and a #anchor link all render via knInline/knLink', () => {
+    const src = '- ship **the wall** now\n'
+        + '- see [docs](https://example.com/x) and [notes](foo.md) but not [here](#anchor)';
+    assert.equal(
+        knowledge.knMd(src),
+        '<ul class="kn-ul">'
+        + '<li>ship <strong>the wall</strong> now</li>'
+        + '<li>see <a href="https://example.com/x" target="_blank" rel="noopener">docs</a>'
+        + ' and <a href="foo.md" target="_blank" rel="noopener">notes</a>'
+        + ' but not here</li>'
+        + '</ul>',
+    );
+});
+
 // --- displayTitle: display-only concise header, never the parsed title -----
 
 test('displayTitle: a leading bold span becomes the display title, trailing text dropped', () => {
