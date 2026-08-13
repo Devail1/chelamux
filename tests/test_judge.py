@@ -478,17 +478,32 @@ def test_defeat_shapes_catalog_documents_every_seeded_shape():
         "Asserting a source constant instead of the rendered value",
         "Coverage resting on a coincidence in production data",
     )
-    assert len(sections) == len(headings), (
-        f"expected {len(headings)} numbered defeat-shape sections, found {len(sections)}"
+    # ⛔ CMX-272's original spelling was `len(sections) == len(headings)`, which pinned the
+    # catalog at EXACTLY six sections — directly contradicting the feature it guards. The
+    # file's own "How this file grows" contract tells a reworking agent to "add a section for
+    # it as part of the same fix"; under an equality check the FIRST agent to obey that
+    # instruction reddens CI. Found the hard way: this PR added shapes 7 and 8 and broke it.
+    # The real invariant is that the seeded shapes never SHRINK away, so assert a floor and
+    # let the catalog grow.
+    assert len(sections) >= len(headings), (
+        f"the catalog shrank: expected at least {len(headings)} numbered defeat-shape "
+        f"sections, found {len(sections)}"
     )
     # The doc's own "Each entry:" spec (see "How this file grows" above) names exactly these
-    # three required fields — "Found:" is present on 5 of 6 entries but not mandated by the
+    # three required fields — "Found:" is present on most entries but not mandated by the
     # spec, so it is not required here.
+    REQUIRED_FIELDS = ("**Assertion form:**", "**Mutation that defeats it:**",
+                       "**Guard form that survives:**")
+    # The seeded six must still be present, in order, at the head of the file.
     for heading, section in zip(headings, sections):
         assert section.startswith(heading), f"missing defeat shape: {heading}"
-        for field in ("**Assertion form:**", "**Mutation that defeats it:**",
-                      "**Guard form that survives:**"):
-            assert field in section, f"{heading!r} is missing its {field} field"
+    # ⭐ Every section — including ones added after seeding — must carry the spec's fields.
+    # This is the half that makes growth SAFE rather than merely allowed: a new entry that
+    # is a heading with no body is exactly the stub this test was written to catch.
+    for section in sections:
+        title = section.splitlines()[0] if section.strip() else "<empty section>"
+        for field in REQUIRED_FIELDS:
+            assert field in section, f"{title!r} is missing its {field} field"
 
 
 def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
