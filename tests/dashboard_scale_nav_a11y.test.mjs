@@ -35,8 +35,11 @@
 //   2. airy density — REVERTED by CMX-268 (Liav, 2026-08-13: "the wall was
 //      better when it took the full space" — a product call on the shipped
 //      Xirp-style air, not a defect). The wall-density-airy class, its CSS
-//      rule and _setWallDensity are gone; this claim and its guards no
-//      longer exist in this file.
+//      rule and _setWallDensity are gone. CMX-268 rework round 1 (PR #338):
+//      a pure deletion left no guard against the treatment coming back — see
+//      "CLAIM 2 (airy density), REVERTED" below for the OPPOSITE invariant
+//      (no horizontal padding / no column cap at 1-up and 2-up) plus the
+//      companion class-check in tests/wallnav.test.mjs.
 //   3. nav inventory — the primary rail is exactly the 3 domain objects, the
 //      4 demoted views are present (not deleted) and actually render — occupy
 //      space and paint — under the More subhead (see "nav inventory" /
@@ -293,6 +296,70 @@ function _activeRailReaches(win, el) {
 // notation/selector-shape angle a text-and-DOM test cannot honestly close.
 // Moved to the NOT GUARDED block at the top of this file; the acceptance
 // check is the manual greyscale capture, not another resolver.
+
+// --- CLAIM 2 (airy density), REVERTED — CMX-268 rework round 1 (human
+// directive on PR #338): the deletion itself (body.wall-density-airy, its
+// style.css rule, _setWallDensity and both call sites) is correct and
+// untouched by this round. What a pure deletion leaves behind is a hole: no
+// guard tells a future PR the treatment must not come back. This asserts the
+// OPPOSITE of what the deleted WIRING tests used to prove — at the two
+// densities that used to trigger it (1-up, 2-up, the boundary AND the shipped
+// default), #term-stage carries no horizontal padding beyond the base
+// layout's, and .grid-stack resolves max-width: none, i.e. no centred-column
+// cap. This is the CSS-side half of the guard: the class is hardcoded onto
+// <body> by hand (real code never sets it post-revert — see the WIRING test
+// in tests/wallnav.test.mjs, which drives the real applyGridLayout and reads
+// the class back), so a judge mutation that re-adds either deleted style.css
+// rule trips THIS test on its own, independent of whether terminals.js's
+// toggle line ever comes back. The class-half (does applyGridLayout ever
+// ADD wall-density-airy for real) belongs next to what used to be test 3b in
+// wallnav.test.mjs instead — that file has no real style.css mounted, so it
+// cannot answer the CSS-side question, and this file has no real terminals.js
+// import, so it cannot answer the JS-side one. Together they cover a
+// half-restore of either piece alone (see wallnav.test.mjs's comment).
+const WALL_FIXTURE = ups => `<div class="app"><main class="canvas" id="canvas"><div class="panel" id="panel-terminals">
+  <div id="term-stage"><div class="grid-stack">${
+    '<div class="grid-stack-item"><div class="grid-stack-item-content"></div></div>'.repeat(ups)
+}</div></div>
+</div></main></div>`;
+
+// jsdom cannot resolve `vw` at all (confirmed empirically — same finding the
+// removed WIRING test worked around, see the NOT GUARDED note at the top of
+// this file): a clamp() with a vw term falls back to jsdom's initial-value
+// 0px, indistinguishable from an honest 0px. If style.css's exact deleted
+// `clamp(16px, 6vw, 64px)` term were re-added, BOTH the "base" and "airy"
+// fixtures below would silently read padding-left/right as 0px and this test
+// would stay green regardless. Mechanically substitute that one literal vw
+// term for its value at a 1920px desktop viewport (6% of 1920 = 115.2px,
+// clamped to the 64px ceiling) before mounting — a value swap on the exact
+// deleted string, not a hand-rolled resolver; every other selector and the
+// clamp() min/max floors stay byte-identical to whatever style.css really
+// contains. A no-op against today's CSS (the string isn't there — the rule
+// is deleted).
+const DESKTOP_CSS = CSS.replace(/clamp\(16px, 6vw, 64px\)/g, 'clamp(16px, 115.2px, 64px)');
+
+for (const ups of [1, 2]) {
+    test(`airy density (REVERTED, CMX-268): at ${ups}-up, #term-stage has no horizontal padding beyond the base layout's`, () => {
+        const base = mountWithRealCss(WALL_FIXTURE(ups), '', DESKTOP_CSS);
+        const airy = mountWithRealCss(WALL_FIXTURE(ups), ' class="wall-density-airy"', DESKTOP_CSS);
+        const baseCs = base.getComputedStyle(base.document.getElementById('term-stage'));
+        const airyCs = airy.getComputedStyle(airy.document.getElementById('term-stage'));
+        assert.equal(airyCs.paddingLeft, baseCs.paddingLeft,
+            `#term-stage's padding-left at ${ups}-up (${airyCs.paddingLeft}) does not match the base layout's ` +
+            `(${baseCs.paddingLeft}) — the deleted airy-density horizontal padding rule is back`);
+        assert.equal(airyCs.paddingRight, baseCs.paddingRight,
+            `#term-stage's padding-right at ${ups}-up (${airyCs.paddingRight}) does not match the base layout's ` +
+            `(${baseCs.paddingRight}) — the deleted airy-density horizontal padding rule is back`);
+    });
+
+    test(`airy density (REVERTED, CMX-268): at ${ups}-up, .grid-stack resolves max-width: none — no centred column cap`, () => {
+        const airy = mountWithRealCss(WALL_FIXTURE(ups), ' class="wall-density-airy"', DESKTOP_CSS);
+        const gridCs = airy.getComputedStyle(airy.document.querySelector('.grid-stack'));
+        assert.equal(gridCs.maxWidth, 'none',
+            `.grid-stack's max-width at ${ups}-up is ${gridCs.maxWidth}, not none — the deleted airy-density ` +
+            'centred-column cap (max-width: 1400px; margin: 0 auto) is back');
+    });
+}
 
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
 // span (or the text it carries) and leaving only the colour class must fail.

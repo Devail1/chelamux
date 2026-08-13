@@ -414,6 +414,35 @@ test('a pinned pane keeps its exact geometry through a grid-preset reflow', () =
     assert.notEqual(geom(PINNED), before.pinned, 'once unpinned, a reflow may move it again');
 });
 
+// 3b — CMX-268 rework round 1 (PR #338): A GRID-PRESET CLICK NEVER TOGGLES
+// body.wall-density-airy ANYMORE — the class, its style.css rule, and
+// _setWallDensity are gone (CMX-268 reverted the treatment: Liav, live on the
+// shipped dashboard, 2026-08-13, "i think the wall was better when it took
+// the full space"). This drives the REAL applyGridLayout at the two
+// densities that used to trigger the treatment (the 1-up boundary and the
+// 2-up boundary, which was also the shipped default) and reads the REAL body
+// class back. This file has no real style.css mounted (CSS above is read
+// only as a source-text string, never put in a `<style>` tag — see the
+// fixtures/setup comment at the top of this file), so it cannot see whether
+// the CSS rule itself is gone; that half is guarded in
+// tests/dashboard_scale_nav_a11y.test.mjs's "CLAIM 2 (airy density),
+// REVERTED" tests instead, which mount the real style.css but never import
+// the real terminals.js. Together the two files catch a half-restore of
+// either piece alone: re-adding ONLY the CSS rule leaves THIS test green
+// (nothing here ever attaches the class for real) but reddens the CSS-side
+// test (whose fixture hardcodes the class itself, independent of this file's
+// toggle line); re-adding ONLY the toggle line below leaves the CSS-side
+// test green but reddens this one on its own.
+test('CMX-268: a grid-preset click never adds body.wall-density-airy — the density treatment was reverted, not just its CSS', () => {
+    window.chela.applyGridLayout(1, 1);   // 1-up: used to be the airiest density
+    assert.ok(!document.body.classList.contains('wall-density-airy'),
+        'applyGridLayout(1,1) added wall-density-airy — the reverted density toggle is back');
+
+    window.chela.applyGridLayout(2, 1);   // 2-up: the boundary, and the shipped default preset
+    assert.ok(!document.body.classList.contains('wall-density-airy'),
+        'applyGridLayout(2,1) added wall-density-airy — the reverted density toggle is back');
+});
+
 // 4 — THE KEYBOARD SWITCHER. Alt+N jumps to the pane the badge shows; bare N does not.
 test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alone', async () => {
     const idx = wid => tile(wid).querySelector('.gs-idx');
