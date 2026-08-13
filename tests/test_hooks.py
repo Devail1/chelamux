@@ -24,13 +24,14 @@ Fully programmatic: no tmux, no Claude Code, no daemon.
 """
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from chela import event_log, hooks, messenger, rooms, sessions, transcripts
+from chela import config, event_log, hooks, messenger, rooms, sessions, transcripts
 from chela.dashboard import app as dash
 
 REPO = Path(__file__).resolve().parent.parent
@@ -710,7 +711,11 @@ def test_endpoint_rejects_an_unknown_event(client):
 
 
 @pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
-def test_endpoint_stamps_a_timestamp_on_the_message_boundaries(client, event):
+def test_endpoint_stamps_a_timestamp_on_the_message_boundaries(client, monkeypatch, event):
+    """``CHELA_TERMINAL_TIMESTAMPS`` defaults OFF (adopter-facing, unverified rendering
+    reliability across Claude Code versions) — exercise the stamping path by opting in
+    explicitly, the same way an adopter who wants it would."""
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
     resp = client.post(f"/hooks/{event}", json=_body(hook_event_name=event))
 
     assert resp.status_code == 200
@@ -736,6 +741,22 @@ def test_the_timestamp_can_be_turned_off(client, monkeypatch):
     assert resp.get_json() == {}
     # The escape hatch mutes the visible line only — the event is still logged.
     assert event_log.read()["events"][0]["type"] == "hook.stop"
+
+
+def test_terminal_timestamps_defaults_off_with_no_env_var_set(monkeypatch):
+    """CMX-277's rework round: this writes a visible line at every message boundary in
+    EVERY adopter's terminal, on a mechanism whose own spike names rendering reliability
+    across Claude Code versions as unverified — so it must ship OFF, opt-in per install,
+    not on-by-default-with-an-escape-hatch. Reloads the real module against a clean env,
+    not just a monkeypatched attribute, so a `"true"` fallback string reintroduced into
+    :data:`chela.config.TERMINAL_TIMESTAMPS`'s ``os.environ.get`` default is caught here
+    even though every other test in this file monkeypatches the attribute directly."""
+    monkeypatch.delenv("CHELA_TERMINAL_TIMESTAMPS", raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.TERMINAL_TIMESTAMPS is False
+    finally:
+        importlib.reload(config)  # restore whatever env the rest of the suite expects
 
 
 def test_endpoint_will_not_read_an_oversized_body(client):

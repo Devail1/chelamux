@@ -241,7 +241,7 @@ host." A dashboard writing its own bind host is a process editing the boundary t
 | `CHELA_TERMINALS_EXPOSE` | `false` | `trust-boundary` | Serve the writable wall on a non-loopback bind — RCE risk, opt-in |
 | `CHELA_TERM_COLS` | `120` | `hot` | Shared collab grid geometry (columns) |
 | `CHELA_TERM_ROWS` | `30` | `hot` | Shared collab grid geometry (rows) |
-| `CHELA_TERMINAL_TIMESTAMPS` | `true` | `hot` | Stamp a `systemMessage` timestamp into the live terminal transcript at the UserPromptSubmit/Stop hooks (CMX-277) — escape hatch for a pinned Claude Code version that renders the field badly |
+| `CHELA_TERMINAL_TIMESTAMPS` | `false` | `hot` | Stamp a `systemMessage` timestamp into the live terminal transcript at the UserPromptSubmit/Stop hooks (CMX-277) — OFF by default (adopter-facing, rendering reliability unverified across Claude Code versions); opt in per-install |
 | `CHELA_WALL_TILE_DISPATCHED` | `false` | `hot` | Give dispatcher-spawned agents a full tile eagerly vs minimized |
 
 A "Terminal wall" tab is the clearest case where scoping to the Python-side 58 alone would
