@@ -134,14 +134,14 @@ def _own_runs_db(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
 
 
-def _insert_run(task_id: str, worktree_path, workflow_path) -> None:
+def _insert_run(task_id: str, worktree_path, workflow_path, review_history=None) -> None:
     with dispatcher._db() as conn:
         conn.execute(
             "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
-            "worktree_path, branch_name, started_at, attempt, task_number) "
+            "worktree_path, branch_name, started_at, attempt, task_number, review_history) "
             "VALUES (?, ?, 'do a thing', 'running', 'cmx-1', ?, 'cmx-1', "
-            "'2026-08-12T10:00:00+00:00', 1, 1)",
-            (task_id, str(workflow_path), str(worktree_path)),
+            "'2026-08-12T10:00:00+00:00', 1, 1, ?)",
+            (task_id, str(workflow_path), str(worktree_path), review_history),
         )
         conn.commit()
 
@@ -183,6 +183,235 @@ def test_verify_self_check_clears_when_every_guard_holds(tmp_path):
     assert [o["verdict"] for o in result["outcomes"]] == ["KILLED"]
     assert result["outcomes"][0]["file"] == "guard.py"
     assert result["outcomes"][0]["guard"] == "the glyph cue"
+
+
+# --- ⚖️🎯 CMX-269: verify_self_check cross-checks the REQUIRED MUTATION SET --------------
+
+def _review_history_with_required(mutation: dict) -> str:
+    return json.dumps([{
+        "round": 1, "at": "t", "body": "the glyph cue survived",
+        "verdict": "changes_requested", "mutations": [mutation],
+    }])
+
+
+def _review_history_with_required_many(mutations: list[dict]) -> str:
+    return json.dumps([{
+        "round": 1, "at": "t", "body": "two survived",
+        "verdict": "changes_requested", "mutations": mutations,
+    }])
+
+
+def test_verify_self_check_flags_a_required_mutation_missing_from_the_submitted_set(tmp_path):
+    """The agent's self-check comes back CLEAN — but only because it tested a different,
+    easier experiment than the one the judge actually caught it on last round. That is
+    exactly the recurrence CMX-269 closes: the required mutation's anchor is still live in
+    the file, and it was never re-tested."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()   # the exact mutation that survived last round
+    # A DIFFERENT experiment — same file, an unrelated anchor — the agent chose to submit
+    # instead of the exact case that beat it.
+    other = _exp(guard="an unrelated experiment",
+                 before='return {"glyph": glyph}', after='return {"glyph": "!"}')
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [other]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert [m["guard"] for m in result["missing_required"]] == ["the glyph cue"]
+
+
+def test_verify_self_check_clears_when_the_required_mutation_is_resubmitted_verbatim(tmp_path):
+    """The agent did the right thing: copied the required mutation from the rework brief
+    into its own experiments file, verbatim. Nothing is missing."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [required]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
+
+
+def test_verify_self_check_clears_when_the_required_mutation_is_resubmitted_under_a_renamed_guard(tmp_path):
+    """`_missing_required_mutations` matches on ``(file, before, after)`` — NOT on ``guard``
+    text — precisely so an agent that renamed the ``guard`` label but kept the exact
+    mutation still counts as having re-tested the exact case that beat it. Submit the
+    IDENTICAL (file, before, after) under a DIFFERENT ``guard`` string: this must still
+    clear, or the matcher has silently started keying on prose instead of the anchors."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()
+    resubmitted = _exp(guard="a completely different label for the same case")
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [resubmitted]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
+
+
+def test_verify_self_check_flags_a_required_mutation_resubmitted_with_a_weaker_after(tmp_path):
+    """⛔ Rework round 2, finding 1: matching is ``(file, before, after)`` identity — ALL
+    THREE, not just ``(file, before)``. Resubmit the exact required ``before`` anchor but
+    with a different, weaker ``after`` (a no-op that changes nothing): this is not the case
+    that beat the judge and must still read as MISSING. A matcher that keys on ``(file,
+    before)`` alone would let an agent copy the anchor but neuter the replacement and still
+    pass self-check."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()   # the exact mutation that survived last round
+    # Same file, same `before` anchor, but a WEAKER `after` — a different corruption than
+    # the one that actually beat the judge, not just a reformatting of it.
+    weaker = _exp(guard="the glyph cue", after='    glyph = "*"')
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [weaker]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert [m["guard"] for m in result["missing_required"]] == ["the glyph cue"]
+
+
+def test_verify_self_check_flags_a_required_mutation_resubmitted_under_a_different_before(tmp_path):
+    """⛔ Rework round 3, finding 1: the symmetric gap to the weaker-``after`` test above — the
+    SAME ``after`` resubmitted under a DIFFERENT, easier ``before`` anchor is not a re-test of
+    the exact case that beat the judge either. A matcher loosened to key on ``(file, after)``
+    alone (dropping ``before``) would let an agent keep the required corruption's replacement
+    text but re-anchor it somewhere the mutation never lived, and still pass self-check."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()   # the exact mutation that survived last round
+    # Same file, same `after`, but a DIFFERENT `before` anchor — not the case that beat the
+    # judge, just a resubmission wearing its replacement text.
+    retargeted = _exp(guard="the glyph cue", before='    return {"glyph": glyph}')
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [retargeted]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert [m["guard"] for m in result["missing_required"]] == ["the glyph cue"]
+
+
+def test_verify_self_check_flags_a_required_mutation_resubmitted_under_a_different_file(tmp_path):
+    """⛔ Rework round 4, finding 1: matching is ``(file, before, after)`` identity — all
+    THREE components, including ``file``, not just the two anchors. Resubmit the exact
+    required ``before``/``after`` pair but re-anchored in a DIFFERENT file: this is not the
+    case that beat the judge and must still read as MISSING. A matcher loosened to key on
+    ``(before, after)`` alone (dropping ``file``) would let an agent copy the required
+    anchor text verbatim but re-anchor it in an unrelated file and still pass self-check."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()   # the exact mutation that survived last round, anchored in guard.py
+    # Same `before`/`after`, but a DIFFERENT file — not the case that beat the judge, just
+    # the identical anchor text wearing someone else's filename.
+    retargeted = _exp(guard="the glyph cue", file="test_guard.py")
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [retargeted]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert [m["guard"] for m in result["missing_required"]] == ["the glyph cue"]
+
+
+def test_verify_self_check_flags_only_the_required_mutation_that_was_not_resubmitted(tmp_path):
+    """⛔ Rework round 6, finding 1: ``required`` is a LIST — re-testing ONE of several
+    required mutations must not excuse the others. Every fixture up to now hands
+    ``_missing_required_mutations`` a required set of exactly one, so `continue` (keep
+    checking the rest) and `break` (stop at the first re-submitted one) are
+    indistinguishable everywhere else in this suite. Hand it TWO required mutations — the
+    FIRST resubmitted verbatim, the SECOND never resubmitted at all — and assert only the
+    second comes back as missing. A `break` after the first match would clear the whole set
+    and let the agent skip re-testing the second required case entirely."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required_first = _exp()   # anchored on the glyph line; will BE resubmitted
+    required_second = _exp(
+        guard="the return line", before='    return {"glyph": glyph}',
+        after='    return {}',
+    )   # anchored on a different, still-live line; will NOT be resubmitted
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [required_first]}))
+    _insert_run(
+        "t1", root, wf,
+        review_history=_review_history_with_required_many([required_first, required_second]),
+    )
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert [m["guard"] for m in result["missing_required"]] == ["the return line"]
+
+
+def test_verify_self_check_clears_when_the_required_mutation_is_resubmitted_second_in_the_list(tmp_path):
+    """⛔ Rework round 8, finding 3: `submitted_keys` must be built from EVERY submitted
+    experiment, not just the first — the rework brief tells an agent to add any NEW
+    experiments for guards it changed this round ALONGSIDE the required ones, so the
+    required mutation is not necessarily first in the agent's own experiments file. Every
+    fixture in this module up to now puts the required mutation FIRST (often the only
+    entry). Submit the agent's own new experiment first and the required mutation SECOND:
+    this must still clear, or a matcher that only reads `submitted[0]` sees the agent's own
+    experiment, decides the required mutation was never resubmitted, and refuses a
+    resubmission that in fact re-tested the exact case that beat the judge."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()   # the exact mutation that survived last round
+    own_new = _exp(guard="a new experiment the agent added this round",
+                   before='return {"glyph": glyph}', after='return {"glyph": "!"}')
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [own_new, required]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
+
+
+def test_verify_self_check_does_not_flag_a_required_mutation_whose_anchor_is_already_gone(tmp_path):
+    """The agent legitimately rewrote the guarded code this round — the old `before` anchor
+    no longer occurs anywhere in the file. There is nothing left to re-test, so this must
+    not block a real fix on a stale anchor."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp(before="this text does not occur in guard.py anymore",
+                    after="this text does not occur in guard.py anymore either")
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
+
+
+def test_verify_self_check_has_no_missing_required_when_the_run_has_no_prior_verdict(tmp_path):
+    """A first-time `task-finished` (no rework, no prior judge verdict) has nothing to
+    enforce — `missing_required` must default to empty, not error."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+    _insert_run("t1", root, wf)   # no review_history at all
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert result["missing_required"] == []
 
 
 def test_verify_self_check_propagates_error_when_the_check_itself_cannot_run(tmp_path):
@@ -411,6 +640,59 @@ def test_cmd_task_finished_refuses_transition_when_self_check_cannot_verify(tmp_
     # a mutation that drops the interpolated `{check['cannot_verify']}` reason stays
     # invisible to that substring check. The WHY is the only actionable half; pin it.
     assert "the suite is NOT GREEN" in out
+    mark.assert_not_called()
+
+
+def test_cmd_task_finished_refuses_transition_when_a_required_mutation_is_missing(tmp_path, capsys):
+    """⚖️🎯 CMX-269: a self-check that comes back CLEAN is not enough — if it never re-tested
+    the exact case the judge caught the guard on last round, `task-finished` must still
+    refuse."""
+    from chela import main
+
+    with patch.object(dispatcher, "verify_self_check",
+                       return_value={"ok": True, "blocking": 0, "cannot_verify": "",
+                                     "outcomes": [{"verdict": "KILLED", "file": "guard.py",
+                                                    "guard": "an unrelated experiment"}],
+                                     "missing_required": [{"guard": "the glyph cue",
+                                                            "file": "guard.py"}]}), \
+         patch.object(dispatcher, "mark_awaiting_review") as mark:
+        with patch.object(sys, "argv", ["chela", "task-finished", "t1",
+                                         "--self-check-experiments", str(tmp_path / "e.json")]):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "REQUIRED" in out
+    assert "guard.py: the glyph cue" in out
+    mark.assert_not_called()
+
+
+def test_cmd_task_finished_prints_every_missing_required_mutation_not_just_the_first(tmp_path, capsys):
+    """⛔ Rework round 8, finding 4: the refusal prints `len(missing)` and then must list
+    THAT MANY missing mutations — a loop that only walks `missing[:1]` contradicts its own
+    count in the same breath, and silently withholds a required mutation the agent is never
+    shown. The refusal test above hands `missing_required` a ONE-item list, so `missing` and
+    `missing[:1]` are the same list there; hand it TWO and assert both guard labels print."""
+    from chela import main
+
+    with patch.object(dispatcher, "verify_self_check",
+                       return_value={"ok": True, "blocking": 0, "cannot_verify": "",
+                                     "outcomes": [{"verdict": "KILLED", "file": "guard.py",
+                                                    "guard": "an unrelated experiment"}],
+                                     "missing_required": [
+                                         {"guard": "the glyph cue", "file": "guard.py"},
+                                         {"guard": "the hue cue", "file": "guard.py"},
+                                     ]}), \
+         patch.object(dispatcher, "mark_awaiting_review") as mark:
+        with patch.object(sys, "argv", ["chela", "task-finished", "t1",
+                                         "--self-check-experiments", str(tmp_path / "e.json")]):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "2 REQUIRED" in out
+    assert "guard.py: the glyph cue" in out
+    assert "guard.py: the hue cue" in out
     mark.assert_not_called()
 
 

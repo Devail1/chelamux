@@ -306,3 +306,195 @@ judge's mutations: the behavioral test's band check was defeated by a guess draw
 leaving `DASH_PORT=$(pick_free_port)` in place and overriding `$DASH_PORT` on the next line.
 Resolved round 3 by declaring the gap `NOT GUARDED` in `tests/test_smoke_fresh_install.py`
 rather than writing a third proxy.
+
+---
+
+## 11. Substring assertions on a nested payload never pin its wrapping envelope
+
+**Assertion form:** the guard builds a structured payload (`{"experiments": [...]}`) and only
+ever asserts substrings that live *inside* the inner list — a field name, a value, a piece of
+surrounding prose — never anything that depends on the outer envelope actually being there.
+
+**Mutation that defeats it:** strip the envelope and serialize the inner list directly
+(`json.dumps(mutations)` instead of `json.dumps({"experiments": mutations})`). Every
+substring the guard checks (`'"guard": "..."'`, `'"file": "..."'`, `'"before": ...'`, the
+surrounding instructional text) is still a substring of the un-enveloped JSON, so the suite
+stays green — even though the payload a downstream reader expects (a JSON *object* with an
+`experiments` key) no longer parses as one. The concrete failure lands one step later, outside
+the test: `judge.load_experiments` rejects a bare array with "must be a JSON object with an
+`experiments` list", so an agent that copies the (silently wrong) rendered block verbatim, as
+instructed, spends a round on a formatting error the brief itself caused.
+
+**Guard form that survives:** assert on the structural marker that only the correct envelope
+produces — e.g. `'"experiments": [' in rendered` — not just on substrings that would survive
+either shape.
+
+**Found:** `chela/dispatcher.py`'s `_required_mutations_section` (CMX-269 rework round 5) —
+`test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable_JSON_block`
+asserted `'"guard": "the glyph cue"'`, `'"file": "guard.py"'` and similar field-level
+substrings, none of which distinguish `json.dumps({"experiments": mutations})` from
+`json.dumps(mutations)`. Fixed by adding `'"experiments": [' in prompts[0]`.
+
+---
+
+## 12. A "stop, don't fall through" rule untested because every fixture has the property everywhere
+
+**Assertion form:** a function is supposed to STOP at the first (or most recent) matching
+entry in a sequence and return based on that entry alone — never falling through to consult
+an older entry, even when the matching entry itself carries nothing useful. Every test fixture
+that exercises the loop gives *every* candidate entry the same shape (all carry the payload,
+or only one entry exists at all).
+
+**Mutation that defeats it:** change `return X` (unconditional, first match) to `if <X is
+non-empty/present>: return X` — i.e. keep scanning past a matching-but-empty entry instead of
+stopping there. Every existing test either has a single relevant entry, or has multiple
+entries that all carry the payload, so "stop at the first match" and "keep scanning until you
+find a match with the payload" produce identical results on every fixture in the suite.
+
+**Guard form that survives:** construct a fixture where the *most recent* matching entry
+deliberately lacks the property (empty/absent), while an *older* one has it — and assert the
+function returns the empty/absent result, not the older entry's. This is the one shape a
+same-value-everywhere fixture structurally cannot exercise.
+
+**Found:** `chela/dispatcher.py`'s `latest_required_mutations` (CMX-269 rework round 5) — the
+function already stopped correctly (`return [...] if isinstance(raw, list) else []` on the
+first non-retry entry), but no test had a history where the *latest* substantive verdict
+carried no `mutations` while an *earlier* one did, so a fall-through mutation
+(`if isinstance(raw, list): return [...]`, otherwise keep looping) stayed green. Fixed by
+`test_latest_required_mutations_stops_at_the_latest_verdict_even_when_it_carries_no_findings`.
+
+---
+
+## 13. A per-item loop over a required SET tested with a set of exactly one
+
+**Assertion form:** a function is supposed to check EVERY item in a list against some
+condition and collect the ones that fail — but every fixture that drives it hands it a
+list of length one.
+
+**Mutation that defeats it:** change `continue` (skip this item, keep checking the rest of
+the list) to `break` (stop checking entirely the moment one item passes). On a one-item
+list these are identical — there is nothing left to check either way — so the suite stays
+green. The concrete failure is asymmetric and worse than it looks: with two required items,
+the agent re-tests the EASY one and the loop stops there, silently excusing the hard one it
+never re-tested — which is exactly the "tested something easier instead of the case that
+beat it" recurrence this checking function exists to catch, reached through the plural door
+instead of the singular one every test exercises.
+
+**Guard form that survives:** construct a fixture with at least TWO items in the required
+set — one resubmitted (satisfied), one not — and assert the result names only the one that
+was not resubmitted. A same-cardinality-everywhere fixture (every test uses length one)
+structurally cannot tell `continue` from `break`.
+
+**Found:** `chela/dispatcher.py`'s `_missing_required_mutations` (CMX-269 rework round 6) —
+every fixture in `tests/test_dispatcher_task_finished.py` built its required set via
+`_review_history_with_required(mutation)`, which always wraps exactly one mutation. Fixed by
+`test_verify_self_check_flags_only_the_required_mutation_that_was_not_resubmitted`, which
+hands the function two required mutations and asserts only the unsubmitted one is flagged.
+
+---
+
+## 14. A field pinned at one hop of a round-trip, untested at the next
+
+**Assertion form:** a value is produced by one function, consumed by another, and the two
+are separated by a serialize/render step in between. A test pins the value on the
+*producing* side (e.g. an `as_dict()`/`to_dict()` method includes the field) and a separate
+test pins it on the *consuming* side (a parser reads the field back correctly) — but nothing
+drives an assertion through the hop in the middle, where the value is dumped into a rendered
+text block for a human or another process to copy verbatim.
+
+**Mutation that defeats it:** drop the field only at the render hop (e.g.
+`json.dumps({k: v for k, v in m.items() if k != "field"})` instead of dumping the dict
+as-is). Both the producing-side test and the consuming-side test still pass — neither of
+them touches the render step — so the suite stays green even though the field never survives
+the round trip in practice. The parser on the far end silently defaults the missing field
+back to something else, changing behavior with no visible failure anywhere.
+
+**Guard form that survives:** the fixture driving the render-step test must itself carry the
+field with a distinctive, non-default value, and the assertion must check for that value's
+literal serialized form in the rendered output — not just for OTHER fields the render step
+also happens to preserve.
+
+**Found:** `chela/dispatcher.py`'s `_required_mutations_section` (CMX-269 rework round 6) —
+`Experiment.as_dict` was pinned to emit `kind` (round 2), and `judge.Experiment.parse` reads
+it back, but the render-step tests
+(`test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable_JSON_block`,
+`test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET`) used a fixture dict with no
+`kind` key at all, so a render that stripped `kind` was invisible to both. Fixed by adding
+`"kind": "wiring"` to each fixture and asserting `'"kind": "wiring"'` appears in the rendered
+prompt.
+
+---
+
+## 15. A list rendered verbatim, tested with a list of exactly one — the render-side mirror of shape 13
+
+**Assertion form:** the same shape as #11 (a required SET tested with a set of length one) —
+but on the OTHER side of a check/render pair. Shape 11 was the *enforcement* side deciding
+which items in the set are satisfied; this is the *render* side deciding which items in the
+same set reach the agent's brief as copy-pasteable data. A one-item fixture cannot
+distinguish "dump the whole list" from "dump only the first item" — `mutations` and
+`mutations[:1]` produce byte-identical output when `len(mutations) == 1`.
+
+**Mutation that defeats it:** truncate the list before serializing it —
+`json.dumps({"experiments": mutations[:1]}, indent=2)` instead of `mutations`. On a one-item
+fixture this is invisible. The concrete failure is worse than a silent gap because the two
+sides of the pair are coupled: the judge blocks with two survivors, the brief renders only
+the first, the agent copies the JSON exactly as instructed, and shape 13's own fix —
+correctly — flags the second as missing. The agent is then refused for omitting a mutation
+it was never shown, with no way to discover what it is: an unescapable refuse-loop produced
+by fixing one side of a pair and not the other.
+
+**Guard form that survives:** construct a fixture with at least TWO items in the required
+set and assert that BOTH appear in the rendered output by their distinguishing fields — not
+just that "a" required-mutation section exists, and not just fields the first item alone
+would already satisfy.
+
+**Found:** `chela/dispatcher.py`'s `_required_mutations_section`, at both call sites that
+render it (CMX-269 rework round 7) — the same two tests fixed for shape 14
+(`test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable_JSON_block`,
+`test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET`) still built their
+`mutations` list with exactly one entry, so round 6's enforcement-side fix for shape 13 had
+no render-side counterpart. Fixed by giving each fixture a second, distinct mutation and
+asserting both survivors' `guard` and `file` values appear in the rendered prompt.
+
+---
+
+## 16. The same one-item fixture, independently, at every hop a list-shaped value passes through
+
+**Assertion form:** a value that is a LIST travels through several functions on its way from
+where it is produced to where it is finally acted on — extracted from a report, stored on a
+row, read back, rendered into text, scanned against another list, printed. Shapes 13 and 15
+each pin ONE hop of a chain like this. This shape is what happens when nobody asks the
+question at the level of the whole chain: every hop was written assuming a list of length
+one, every hop's test fixture independently happens to use a list of length one, and each
+hop gets discovered and fixed on its own round, one at a time, because nothing forces the
+question "does EVERY hop this value passes through make the same assumption?" to be asked
+once, up front, for the whole pipeline.
+
+**Mutation that defeats it:** truncate to `[:1]` at any hop not yet separately pinned.
+Because each hop is independently guarded (or not) by its own fixture, fixing hop N tells
+you nothing about hop N+1 — shape 13's fix (the enforcement-side scan) shipped in round 6 and
+shape 15's fix (the render step) shipped in round 7, and FOUR more hops on the exact same
+pipeline — the extraction from the judge's own report, the storage on the review row, the
+submitted-side of the enforcement scan, and the final print loop — were still open in round
+8, each because its own test suite's fixtures, built independently by different rounds,
+happened to use a one-item list too.
+
+**Guard form that survives:** don't fix hops as they're found one at a time. When a
+list-shaped value is discovered to have this defect at ANY hop, walk the value's entire
+journey — every function that receives it, stores it, or passes it on — and give every
+fixture along the WHOLE chain a two-item list in the same pass, not just the hop the current
+finding named.
+
+**Found:** the REQUIRED MUTATION SET's seven-hop journey (CMX-269): `judge.judge_run`
+extracting `blocking` from its own report (shape unfixed until round 8),
+`dispatcher.request_changes` storing it on the review entry (unfixed until round 8),
+`latest_required_mutations` reading it back (pinned from the start — every multi-item
+fixture reaches it), `_required_mutations_section` rendering it into the brief (shape 15,
+round 7), `_missing_required_mutations`'s required-side loop (shape 13, round 6), the same
+function's submitted-side `submitted_keys` (unfixed until round 8), and
+`main.cmd_task_finished`'s print loop (unfixed until round 8). Two rounds each closed one
+hop; round 8 closed the remaining four in a single pass —
+`test_the_REQUIRED_MUTATION_SET_carries_every_survivor_not_just_the_first` (one test,
+closing the source and storage hops together, since both sit on the same call chain),
+`test_verify_self_check_clears_when_the_required_mutation_is_resubmitted_second_in_the_list`,
+and `test_cmd_task_finished_prints_every_missing_required_mutation_not_just_the_first`.

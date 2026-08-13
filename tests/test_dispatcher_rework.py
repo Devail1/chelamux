@@ -1082,6 +1082,56 @@ def test_a_stuck_rework_is_re_nudged_with_its_REWORK_prompt_not_the_first_dispat
     assert 'chela rework-disputed abc123 "<why there is nothing to push>"' in sent[0]
 
 
+def test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET(tmp_path):
+    """⚖️🎯 CMX-269: `_renudge_prompt` re-renders a stuck rework's OWN prompt — a second,
+    independent call site from `_respawn_rework`'s first spawn — and it must wire
+    `latest_required_mutations` into that render too, or an agent that goes idle before the
+    watchdog catches it gets re-seeded a brief with the REQUIRED MUTATION SET silently
+    dropped. Nothing else in this suite drives `_renudge_prompt` with a verdict that carries
+    structured mutations, so this is the only place that would notice the argument being
+    dropped from that call."""
+    wf = _wf(tmp_path)
+    sent: list[str] = []
+    mutation = {"guard": "the glyph cue", "kind": "wiring", "file": "guard.py",
+                "before": 'glyph = "*"', "after": 'glyph = ""'}
+    second_mutation = {"guard": "the second survivor", "kind": "mutation",
+                        "file": "other_guard.py", "before": "x = 1", "after": "x = 2"}
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="running", rework_count=1,
+             window_name="test-1", started_at="2020-01-01T00:00:00+00:00",
+             review_history=json.dumps([{
+                 "round": 1, "at": "t", "body": "the glyph cue survived",
+                 "verdict": "changes_requested", "mutations": [mutation, second_mutation],
+             }]))
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source("abc123")), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_tmux_windows", return_value={"test-1"}), \
+         patch.object(dispatcher, "_capture_pane", return_value=""), \
+         patch.object(dispatcher, "_pane_idle_empty_prompt", return_value=True), \
+         patch.object(dispatcher, "_agent_status", return_value="idle"), \
+         patch.object(dispatcher, "_send_seed",
+                      side_effect=lambda w, p, t: sent.append(p) or True), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["watchdog_renudged"] == 1
+    assert sent
+    assert '"guard": "the glyph cue"' in sent[0]
+    assert '"file": "guard.py"' in sent[0]
+    assert "copy this JSON into your self-check experiments file" in sent[0]
+    # ⛔ Rework round 6, finding 2: `_renudge_prompt` is the SECOND call site that renders
+    # `_required_mutations_section` — it must not lose `kind` either.
+    assert '"kind": "wiring"' in sent[0]
+    # ⛔ Rework round 7, finding 1 (defeat shape #13 in docs/DEFEAT_SHAPES.md): this is the
+    # SECOND call site's copy of the same one-survivor fixture gap — a truncated render would
+    # be just as invisible here as in the first call site's test.
+    assert '"guard": "the second survivor"' in sent[0]
+    assert '"file": "other_guard.py"' in sent[0]
+
+
 # --- (h) 🔴 changes_requested is not a silent state, and a HOLD must not freeze the exit ---
 
 def test_a_HOLD_pauses_the_rework_but_NEVER_the_escalation(tmp_path, monkeypatch):
@@ -1266,6 +1316,193 @@ def test_a_legacy_runs_table_migrates_and_its_rows_read_as_never_reworked():
     assert (row["rework_count"] or 0) == 0
     assert dispatcher.reviews_of(row) == []
     assert dispatcher.latest_verdict(row) == ""
+
+
+# --- (h) ⚖️🎯 CMX-269: the REQUIRED MUTATION SET travels as DATA, not just prose --------
+
+def test_request_changes_stores_the_required_mutation_set_on_the_review_entry(tmp_path):
+    """`mutations` is the exact `{guard, file, before, after}` that survived — round-tripped
+    through the review entry as JSON, not folded into the prose `body`."""
+    with dispatcher._db() as conn:
+        _row(conn)
+    mutation = {"guard": "the glyph cue", "file": "guard.py",
+                "before": 'glyph = "*"', "after": 'glyph = ""'}
+
+    with patch.object(dispatcher.subprocess, "run"):
+        result = dispatcher.request_changes(
+            "abc123", "the glyph cue survived", mutations=[mutation],
+        )
+
+    assert result["ok"]
+    run = dispatcher.resolve_run("abc123")
+    assert dispatcher.reviews_of(run)[-1]["mutations"] == [mutation]
+    assert dispatcher.latest_required_mutations(run) == [mutation]
+
+
+def test_request_changes_with_no_mutations_records_an_empty_required_set(tmp_path):
+    """A human's free-text review (or `mark_rework_disputed`'s carrier) passes no structured
+    findings — the review entry still gets a `mutations` key, just an empty one, so
+    `latest_required_mutations` never has to special-case a missing key."""
+    with dispatcher._db() as conn:
+        _row(conn)
+    with patch.object(dispatcher.subprocess, "run"):
+        dispatcher.request_changes("abc123", "just fix the typo")
+    run = dispatcher.resolve_run("abc123")
+    assert dispatcher.reviews_of(run)[-1]["mutations"] == []
+    assert dispatcher.latest_required_mutations(run) == []
+
+
+def test_latest_required_mutations_skips_a_retry_entry():
+    """Mirrors `latest_verdict`'s own skip rule (CMX-237): a `retry` entry grants another
+    round without re-reviewing the code, so it must never shadow the real verdict's
+    required set with an empty one."""
+    run = {"review_history": json.dumps([
+        {"round": 1, "at": "t1", "body": "the wire is loose", "verdict": "changes_requested",
+         "mutations": [{"guard": "g", "file": "f.py", "before": "a", "after": "b"}]},
+        {"round": 2, "at": "t2", "body": "asked to keep going", "verdict": "retry"},
+    ])}
+    assert dispatcher.latest_required_mutations(run) == [
+        {"guard": "g", "file": "f.py", "before": "a", "after": "b"},
+    ]
+
+
+def test_latest_required_mutations_returns_the_most_recent_substantive_verdicts_set():
+    """⛔ Rework round 4, finding 2: mirrors `latest_verdict`'s reversed-iteration for the
+    identical reason — a multi-round rework must be handed the CURRENT round's required
+    set, not a stale one from an earlier round the judge no longer cares about. Two
+    `changes_requested` entries, each carrying a DIFFERENT required mutation: the second
+    (more recent) one must win, not the first one encountered in iteration order."""
+    run = {"review_history": json.dumps([
+        {"round": 1, "at": "t1", "body": "the wire is loose", "verdict": "changes_requested",
+         "mutations": [{"guard": "g1", "file": "f.py", "before": "a", "after": "b"}]},
+        {"round": 2, "at": "t2", "body": "a different guard survived this time",
+         "verdict": "changes_requested",
+         "mutations": [{"guard": "g2", "file": "f.py", "before": "c", "after": "d"}]},
+    ])}
+    assert dispatcher.latest_required_mutations(run) == [
+        {"guard": "g2", "file": "f.py", "before": "c", "after": "d"},
+    ]
+
+
+def test_latest_required_mutations_defaults_to_empty_for_a_legacy_or_review_less_run():
+    assert dispatcher.latest_required_mutations({"review_history": None}) == []
+    run = {"review_history": json.dumps(
+        [{"round": 1, "at": "t", "body": "no structured findings here",
+          "verdict": "changes_requested"}]
+    )}
+    assert dispatcher.latest_required_mutations(run) == []
+
+
+def test_latest_required_mutations_stops_at_the_latest_verdict_even_when_it_carries_no_findings():
+    """⛔ Rework round 5, finding 2 (defeat shape #8 in docs/DEFEAT_SHAPES.md): every earlier
+    test either has one substantive entry, or has every entry carry a `mutations` list — so
+    "stop at the most recent substantive verdict" and "keep scanning older entries until one
+    has `mutations`" were indistinguishable. Here round 1 carries a required set and round 2
+    (the most recent, a human's free-text `changes_requested` or `mark_rework_disputed`'s
+    carrier) carries none — the round-2 verdict is what's live, so nothing is required,
+    NOT round 1's stale set."""
+    run = {"review_history": json.dumps([
+        {"round": 1, "at": "t1", "body": "the wire is loose", "verdict": "changes_requested",
+         "mutations": [{"guard": "g", "file": "f.py", "before": "a", "after": "b"}]},
+        {"round": 2, "at": "t2", "body": "just fix the typo",
+         "verdict": "changes_requested"},
+    ])}
+    assert dispatcher.latest_required_mutations(run) == []
+
+
+def test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable_JSON_block(tmp_path):
+    """The rework brief must carry the exact mutation as DATA the agent can copy-paste into
+    its self-check experiments file — not just prose describing it. This is the fix for the
+    recurring defect: prose alone let an agent hand-reconstruct a *different* experiment and
+    still ship a guard defeatable by the exact case that beat it."""
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    original_wt = tmp_path / ".chela" / "wts" / "abc123"
+    original_wt.mkdir(parents=True)
+    fake = _FakeTmux()
+    prompts: list[str] = []
+    mutation = {"guard": "the glyph cue", "kind": "wiring", "file": "guard.py",
+                "before": 'glyph = "*"', "after": 'glyph = ""'}
+    second_mutation = {"guard": "the second survivor", "kind": "mutation",
+                        "file": "other_guard.py", "before": "x = 1", "after": "x = 2"}
+
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested",
+             worktree_path=str(original_wt), branch_name="test-1",
+             review_history=json.dumps([{
+                 "round": 1, "at": "t", "body": "the glyph cue survived",
+                 "verdict": "changes_requested", "mutations": [mutation, second_mutation],
+             }]))
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run), \
+         patch.object(dispatcher, "ensure_worktree") as fresh_fork, \
+         patch.object(dispatcher, "attach_worktree", return_value=(original_wt, False)), \
+         patch.object(dispatcher, "send_tmux", side_effect=lambda w, p: prompts.append(p) or True), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")):
+        dispatcher.tick(wf.path)
+
+    assert fresh_fork.call_count == 0
+    assert prompts
+    assert "REQUIRED MUTATION SET" in prompts[0]
+    assert '"guard": "the glyph cue"' in prompts[0]
+    assert '"file": "guard.py"' in prompts[0]
+    assert '"before": "glyph = \\"*\\""' in prompts[0]
+    assert "copy this JSON into your self-check experiments file" in prompts[0]
+    # ⛔ Rework round 5, finding 1 (defeat shape #7 in docs/DEFEAT_SHAPES.md): the field-level
+    # substrings above all survive dumping the bare `mutations` list with no `{"experiments":
+    # [...]}` envelope — an agent that copies that verbatim gets refused by
+    # `judge.load_experiments` ("must be a JSON object with an `experiments` list"). Only a
+    # structural marker on the envelope itself catches the missing wrapper.
+    assert '"experiments": [' in prompts[0]
+    # ⛔ Rework round 6, finding 2: `kind` is pinned through `Experiment.as_dict` (round 2)
+    # but the RENDERED brief is a separate hop — `_required_mutations_section` dumps
+    # `mutations` verbatim, and a fixture with no `kind` at all cannot notice a payload that
+    # strips it. A stripped `kind` defaults back to `"mutation"` on parse
+    # (`judge.Experiment.parse`), silently turning a required WIRING re-test into a plain one.
+    assert '"kind": "wiring"' in prompts[0]
+    # ⛔ Rework round 7, finding 1 (defeat shape #13 in docs/DEFEAT_SHAPES.md): every fixture
+    # up to round 6 carried exactly ONE required mutation, so `mutations` and `mutations[:1]`
+    # were indistinguishable in the rendered payload — `_required_mutations_section` could
+    # silently truncate to the first survivor and nothing here would notice. With two
+    # survivors, only a payload carrying BOTH satisfies these two assertions.
+    assert '"guard": "the second survivor"' in prompts[0]
+    assert '"file": "other_guard.py"' in prompts[0]
+
+
+def test_the_rework_prompt_has_no_REQUIRED_MUTATION_SET_section_when_the_verdict_carried_none(tmp_path):
+    """No structured findings on the latest verdict ⇒ the section renders empty — the prompt
+    reads exactly as it did before this existed, not with a dangling empty heading."""
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    original_wt = tmp_path / ".chela" / "wts" / "abc123"
+    original_wt.mkdir(parents=True)
+    fake = _FakeTmux()
+    prompts: list[str] = []
+
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested",
+             worktree_path=str(original_wt), branch_name="test-1",
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "fix the typo",
+                                          "verdict": "changes_requested"}]))
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run), \
+         patch.object(dispatcher, "ensure_worktree"), \
+         patch.object(dispatcher, "attach_worktree", return_value=(original_wt, False)), \
+         patch.object(dispatcher, "send_tmux", side_effect=lambda w, p: prompts.append(p) or True), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")):
+        dispatcher.tick(wf.path)
+
+    assert prompts
+    assert "copy this JSON into your self-check experiments file" not in prompts[0]
+    assert "```json" not in prompts[0]
 
 
 # --- helpers ---------------------------------------------------------------------------

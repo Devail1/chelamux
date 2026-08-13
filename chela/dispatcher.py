@@ -2136,6 +2136,45 @@ def _fire_after_done(wf: WorkflowDef) -> None:
         log.exception("after_done hook failed to start")
 
 
+def _missing_required_mutations(
+    worktree: Path, required: list[dict], submitted: list,
+) -> list[dict]:
+    """⚖️🎯 CMX-269. Which of ``required`` (the REQUIRED MUTATION SET a rework was handed —
+    see :func:`latest_required_mutations`) does ``submitted`` NOT re-test?
+
+    Matched on ``(file, before, after)`` — copy-paste identity, not a fuzzy match on
+    ``guard`` text — because ``before``/``after`` are the load-bearing anchors: an agent
+    that renamed the ``guard`` label but kept the exact mutation still re-tested the exact
+    case that beat it, and one that submitted a *different, easier* experiment for the same
+    file did not, whatever it called it.
+
+    A required mutation whose ``before`` anchor no longer occurs in the LIVE file is not
+    flagged: the code it targeted is gone (legitimately rewritten this round), so there is
+    nothing left to re-test, and re-demanding it would block a real fix for a stale anchor.
+    This is the same anchor-occurs-once contract :func:`chela.judge.apply_mutation` already
+    holds every experiment to — read here, not applied.
+    """
+    submitted_keys = {
+        (str(m.get("file") or ""), str(m.get("before") or ""), str(m.get("after") or ""))
+        for m in submitted if isinstance(m, dict)
+    }
+    missing = []
+    for req in required:
+        key = (str(req.get("file") or ""), str(req.get("before") or ""), str(req.get("after") or ""))
+        if key in submitted_keys:
+            continue
+        file, before = key[0], key[1]
+        try:
+            path = (worktree / file).resolve()
+            path.relative_to(worktree.resolve())
+            still_there = path.is_file() and path.read_text().count(before) > 0
+        except (OSError, ValueError):
+            still_there = False
+        if still_there:
+            missing.append(req)
+    return missing
+
+
 def verify_self_check(task_id: str, experiments_path: str) -> dict:
     """⚖️🔎 CMX-250. The gate `chela task-finished --self-check-experiments` uses to make
     Done Criteria #3 an outcome that BINDS, not a command an agent may or may not have run.
@@ -2145,6 +2184,12 @@ def verify_self_check(task_id: str, experiments_path: str) -> dict:
     now — not whatever the agent saw the last time it happened to invoke `self-check` by
     hand, which may predate edits made since. A guard that was clean a few edits ago and
     is decoration now must still block.
+
+    ⚖️🎯 CMX-269: also cross-checks the submitted experiments against
+    :func:`latest_required_mutations` — the exact case(s) that survived last round. A guard
+    that self-checks CLEAN because the agent tested a different, easier mutation instead of
+    the one the judge actually caught it on is exactly the recurrence this closes; see
+    ``missing_required`` in the return value.
     """
     with _db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
@@ -2159,11 +2204,21 @@ def verify_self_check(task_id: str, experiments_path: str) -> dict:
     )
     if not result.get("ok"):
         return result
+
+    required = latest_required_mutations(dict(row))
+    missing: list[dict] = []
+    if required:
+        raw, err = judge.load_experiments(experiments_path)
+        submitted = raw.get("experiments") if not err and isinstance(raw, dict) else []
+        submitted = submitted if isinstance(submitted, list) else []
+        missing = _missing_required_mutations(Path(worktree_path), required, submitted)
+
     return {
         "ok": True,
         "blocking": result["blocking"],
         "cannot_verify": result["cannot_verify"],
         "outcomes": result.get("outcomes") or [],
+        "missing_required": missing,
     }
 
 
@@ -2520,6 +2575,27 @@ def latest_verdict(run: dict) -> str:
     return ""
 
 
+def latest_required_mutations(run: dict) -> list[dict]:
+    """⚖️🎯 CMX-269. The REQUIRED MUTATION SET of the most recent SUBSTANTIVE verdict — the
+    exact ``{guard, file, before, after}`` experiment(s) that SURVIVED, as :func:`request_changes`
+    stored them, not the prose describing them.
+
+    Mirrors :func:`latest_verdict`'s "skip a `retry` entry" rule for the identical reason: a
+    retry grants another round without anyone re-reviewing the code, so it must never shadow
+    the real verdict's required set with an empty one. ``[]`` for a run with no reviews yet,
+    or whose latest substantive verdict carried no structured findings (a human's free-text
+    review, or a row from before this existed) — callers treat that as "nothing to enforce",
+    exactly the prose-only behavior this is additive to.
+    """
+    reviews = reviews_of(run)
+    for r in reversed(reviews):
+        if r.get("verdict") == "retry":
+            continue
+        raw = r.get("mutations")
+        return [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+    return []
+
+
 def _pr_number(pr_url: str | None) -> str | None:
     m = _PR_NUMBER_RE.search(str(pr_url or ""))
     return m.group(1) if m else None
@@ -2713,7 +2789,10 @@ def adopt_pr(pr_ident: str, workflow_path: str | Path, *, reason: str = "") -> d
     return {"ok": True, "task_id": task_id, "pr_url": pr_url, "branch_name": branch}
 
 
-def request_changes(ident: str, body: str, *, post_comment: bool = True) -> dict:
+def request_changes(
+    ident: str, body: str, *, post_comment: bool = True, mutations: list[dict] | None = None,
+) -> dict:
+
     """FAIL a PR under review: the run goes to ``changes_requested`` and the loop turns.
 
     (a) writes the verdict + the status on the run row — THE authority — and (b), when
@@ -2729,6 +2808,18 @@ def request_changes(ident: str, body: str, *, post_comment: bool = True) -> dict
     finding that most needed to reach the PR was the one most likely not to. Set this false
     only when the comment has independently already been posted; every other caller keeps
     the default and this behaves exactly as before.
+
+    ⚖️🎯 CMX-269: ``mutations`` is the REQUIRED MUTATION SET — the exact ``{guard, file,
+    before, after}`` experiments that SURVIVED, verbatim, straight from the judge's own
+    mechanics (:meth:`chela.judge.Experiment.as_dict`), not a paraphrase of them. Stored on
+    the review entry as DATA, alongside the prose ``body``, because prose is what a
+    reworking agent has twice reconstructed wrong: it read the verdict, hand-authored a
+    *different* experiment, and shipped a guard still defeatable by the exact case that
+    already beat it. :func:`latest_required_mutations` reads this back to hand the rework
+    brief something to copy, and :func:`verify_self_check` to hold ``task-finished`` to
+    actually re-testing it. A caller with no structured findings (a human's free-text
+    review, ``mark_rework_disputed``'s "keep going") passes nothing, and the entry carries
+    an empty set — degrading to exactly the prose-only behavior this had before.
 
     It increments nothing. ``rework_count`` is spent when the dispatcher actually spawns
     the rework (:func:`_respawn_rework`) — a verdict that never gets a concurrency slot
@@ -2750,7 +2841,8 @@ def request_changes(ident: str, body: str, *, post_comment: bool = True) -> dict
 
     reviews = reviews_of(run)
     reviews.append({"round": len(reviews) + 1, "at": _now(), "body": body,
-                    "verdict": "changes_requested"})
+                    "verdict": "changes_requested",
+                    "mutations": [m for m in (mutations or []) if isinstance(m, dict)]})
     with _db() as conn:
         # COMPARE-AND-SWAP on the status we READ. ⛔ Not a formality: `resolve_run` above is
         # a separate connection and a separate moment, and a dispatcher tick runs every 60s
@@ -4611,6 +4703,13 @@ def _launch_agent(
 # its own worktree on its own branch with its PR already open (so it pushes instead of
 # forking anything), and it hands it the verdict — while pointing it at the PR comments as
 # the durable record, because the comment thread is what a human will have added to.
+#
+# ⚖️🎯 CMX-269: {{required_mutations_section}} is the REQUIRED MUTATION SET, not more prose
+# about it — the orchestrator's own words are what a reworking agent has twice reconstructed
+# wrong (told, in prose, "every guard needs a negative control", it still shipped a guard
+# defeatable by the EXACT case named in the verdict). This is copy-paste JSON, straight from
+# the judge's own mechanics, and `verify_self_check` holds `task-finished` to actually
+# re-testing it — see :func:`latest_required_mutations` and :func:`_missing_required_mutations`.
 REWORK_PROMPT = """\
 🔁 **REWORK — your PR failed review.** This is round {{rework_round}} of {{max_reworks}}.
 
@@ -4623,7 +4722,7 @@ existing PR updates itself.
 ## The verdict
 
 {{verdict}}
-
+{{required_mutations_section}}
 ## Do this, in order
 
 1. **Read the PR thread yourself** — `{{pr_comments_cmd}}`. The comment is the durable
@@ -4635,7 +4734,10 @@ existing PR updates itself.
    entry as part of this fix — it is the only durable place that knowledge can land; the
    judge's own checkout is thrown away when it finishes and cannot commit it itself.
 3. Re-run the SAME validation your original task told you to run (this repo's CI gates are
-   not optional).
+   not optional) — and if a REQUIRED MUTATION SET is above, your self-check experiments
+   file MUST include each one **verbatim** (copy the JSON, do not retype it) alongside any
+   new experiments of your own: `task-finished` re-checks this and refuses if one is
+   missing while the code it targets is still there to test.
 4. Stage only what you changed (`git add <paths>` — never `git add -A`), commit, and
    `git push`.
 5. Run `chela task-finished {{task_id}}` as your last step — it puts the run back in
@@ -4659,8 +4761,32 @@ commit goes back through the ordinary judge/CI pass automatically instead. There
 """
 
 
+def _required_mutations_section(mutations: list[dict]) -> str:
+    """⚖️🎯 CMX-269. The ``{{required_mutations_section}}`` block — the REQUIRED MUTATION SET
+    as DATA, not the orchestrator's paraphrase of it. ``""`` when there is nothing to carry
+    (a clean first rework round, or a verdict with no structured findings) — the caller's
+    literal ``{{verdict}}\\n{{required_mutations_section}}`` renders as just the verdict,
+    unchanged from before this existed.
+    """
+    if not mutations:
+        return ""
+    payload = json.dumps({"experiments": mutations}, indent=2)
+    return (
+        "\n### ⚖️🎯 REQUIRED MUTATION SET (data, not prose)\n\n"
+        "These are the EXACT mutation(s) that SURVIVED last round, verbatim from the "
+        "judge's own apply/parse/run mechanics — **copy this JSON into your self-check "
+        "experiments file as-is.** Do not retype them from the verdict text above; "
+        "hand-reconstructing them from prose is what shipped a defeatable guard last "
+        "time.\n\n"
+        "```json\n" + payload + "\n```\n\n"
+        "Add any NEW experiments for guards you changed this round alongside these — do "
+        "not drop them.\n"
+    )
+
+
 def _rework_vars(
-    wf: WorkflowDef, row: sqlite3.Row, worktree: Path | str, verdict: str, rework_round: int
+    wf: WorkflowDef, row: sqlite3.Row, worktree: Path | str, verdict: str, rework_round: int,
+    mutations: list[dict] | None = None,
 ) -> dict:
     """The ``{{...}}`` map a rework renders from — the prompt AND the worktree hooks.
 
@@ -4688,6 +4814,7 @@ def _rework_vars(
         "verdict": verdict,
         "rework_round": rework_round,
         "max_reworks": max_reworks(),
+        "required_mutations_section": _required_mutations_section(mutations or []),
     }
 
 
@@ -4752,6 +4879,7 @@ def _renudge_prompt(wf: WorkflowDef, row: sqlite3.Row, task: Task | None) -> str
             _rework_vars(
                 wf, row, row["worktree_path"] or "",
                 latest_verdict(dict(row)), row["rework_count"] or 0,
+                latest_required_mutations(dict(row)),
             ),
         )
     if task is None:
@@ -4879,7 +5007,9 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
 
     rework_round = (row["rework_count"] or 0) + 1
     verdict = latest_verdict(dict(row))
-    hook_vars = _rework_vars(wf, row, worktree, verdict, rework_round)
+    hook_vars = _rework_vars(
+        wf, row, worktree, verdict, rework_round, latest_required_mutations(dict(row)),
+    )
     prompt = render_prompt(
         wf.get("agent", "rework_prompt", default=None) or REWORK_PROMPT, hook_vars
     )

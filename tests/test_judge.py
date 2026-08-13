@@ -686,6 +686,88 @@ def test_a_surviving_guard_sends_the_run_back_through_request_changes(tmp_path):
     assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
 
 
+def test_a_surviving_guard_hands_the_exact_mutation_forward_as_the_REQUIRED_MUTATION_SET(tmp_path):
+    """⚖️🎯 CMX-269. The prose verdict is not the only thing a SURVIVED guard produces — the
+    exact ``{guard, file, before, after, kind}`` that beat it must reach `request_changes` as
+    DATA too, verbatim from the judge's own `Experiment`, not reformatted from `block_body`'s
+    markdown. This is what a rework brief later copies into its REQUIRED MUTATION SET
+    instead of asking the agent to reconstruct it from prose.
+
+    ⛔ Rework round 2, finding 2: submit a WIRING-kind experiment and pin ``kind`` through
+    the round-trip too — ``Experiment.parse`` defaults an absent/unrecognised ``kind`` back
+    to ``"mutation"``, so if ``as_dict`` ever stopped emitting it, a required WIRING
+    experiment would silently come back demanding a plain mutation instead — and every
+    assertion here that checks only ``file``/``before``/``after``/``guard`` would stay green."""
+    result, run, posted = _judge_run(
+        tmp_path, FAKE_GUARD_TEST, {"experiments": [_exp(kind="wiring")]},
+    )
+    assert result["state"] == judge.J_BLOCKED
+
+    required = dispatcher.latest_required_mutations(run)
+    assert len(required) == 1
+    assert required[0]["file"] == "guard.py"
+    assert required[0]["before"] == GLYPH_BEFORE
+    assert required[0]["after"] == GLYPH_AFTER
+    assert required[0]["guard"] == "the colourblind glyph cue"
+    assert required[0]["kind"] == "wiring"
+
+
+def test_the_REQUIRED_MUTATION_SET_carries_only_the_survivor_not_every_outcome(tmp_path):
+    """⛔ Rework round 3, finding 2: `request_changes` must be handed
+    ``mutations=[o.experiment.as_dict() for o in blocking]`` — the SURVIVED subset — never
+    ``report.outcomes``, which is every experiment the judge ran regardless of verdict. Every
+    other test in this file submits a single experiment, so ``blocking`` and
+    ``report.outcomes`` are the same list and nothing tells them apart. Submit TWO: the glyph
+    (survives — `FAKE_GUARD_TEST`'s glyph check is trivial) and the hue (still a real check,
+    so it's KILLED). If a KILLED experiment ever leaked into the REQUIRED MUTATION SET, a
+    rework brief would demand an agent re-test a mutation its own guard already defeats."""
+    hue_before = '    hue = "green" if state == "on" else "grey"'
+    hue_after = '    hue = "grey"'
+    result, run, posted = _judge_run(
+        tmp_path, FAKE_GUARD_TEST,
+        {"experiments": [_exp(), _exp(guard="the hue cue", before=hue_before, after=hue_after)]},
+    )
+    assert result["state"] == judge.J_BLOCKED
+    assert result["blocking"] == 1
+    assert len(result["outcomes"]) == 2                # both ran — one SURVIVED, one KILLED
+
+    required = dispatcher.latest_required_mutations(run)
+    assert [r["guard"] for r in required] == ["the colourblind glyph cue"]
+
+
+def test_the_REQUIRED_MUTATION_SET_carries_every_survivor_not_just_the_first(tmp_path):
+    """⛔ Rework round 8, findings 1+2: two hops upstream of the stored review entry, both
+    still written assuming a required set of ONE. `judge.judge_run` must hand
+    `request_changes` every survived experiment (`blocking`, not `blocking[:1]`), and
+    `request_changes` must STORE every one of them on the review entry (not
+    `mutations[:1]`) — every other test in this file (including the one directly above,
+    which submits two experiments but only one SURVIVES) still hands both hops a required
+    set of exactly one, so `blocking` and `blocking[:1]` stay indistinguishable everywhere
+    else. These two hops are the PERMANENT-loss ones: truncated here, a survivor is gone
+    from the row before the brief, the enforcement scan, or the print loop ever see it —
+    nothing downstream can recover it.
+
+    Submit TWO experiments that BOTH survive `FAKE_GUARD_TEST` — the glyph cue (as always)
+    and the hue's OFF-state, which the fake guard also never checks (it only asserts
+    `chip("on")["hue"] == "green"`) — and assert `latest_required_mutations` names both, in
+    order, straight off the real `judge_run` → `request_changes` → storage path."""
+    hue_off_before = '    hue = "green" if state == "on" else "grey"'
+    hue_off_after = '    hue = "green" if state == "on" else "green"'
+    result, run, posted = _judge_run(
+        tmp_path, FAKE_GUARD_TEST,
+        {"experiments": [_exp(), _exp(guard="the hue distinguishes on from off",
+                                       before=hue_off_before, after=hue_off_after)]},
+    )
+    assert result["state"] == judge.J_BLOCKED
+    assert result["blocking"] == 2
+    assert len(result["outcomes"]) == 2
+
+    required = dispatcher.latest_required_mutations(run)
+    assert [r["guard"] for r in required] == [
+        "the colourblind glyph cue", "the hue distinguishes on from off",
+    ]
+
+
 def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_path):
     """⚖️🕳️ CMX-228: the run moved out of `awaiting_review` (a human merged it, or CI got
     there first) WHILE the judge was mid-run. `request_changes`'s compare-and-swap correctly

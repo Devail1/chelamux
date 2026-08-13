@@ -219,6 +219,13 @@ class Experiment:
         return cls(guard=vals["guard"].strip(), file=vals["file"].strip(),
                    before=vals["before"], after=vals["after"], kind=kind), ""
 
+    def as_dict(self) -> dict:
+        """The same ``{guard, file, before, after, kind}`` shape :meth:`parse` reads back —
+        round-trips through JSON so a SURVIVED experiment can be handed forward, verbatim,
+        as a REQUIRED MUTATION SET (see :func:`chela.dispatcher.request_changes`)."""
+        return {"guard": self.guard, "file": self.file, "before": self.before,
+                "after": self.after, "kind": self.kind}
+
 
 @dataclass
 class Outcome:
@@ -1685,7 +1692,10 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                                      "spent")
                 result["comment_posted"] = posted
                 return result
-            verdict = dispatcher.request_changes(task_id, body, post_comment=False)
+            verdict = dispatcher.request_changes(
+                task_id, body, post_comment=False,
+                mutations=[o.experiment.as_dict() for o in blocking],
+            )
             if not verdict.get("ok"):
                 # ⚖️🧊 CMX-239: The CAS refused it: the row moved under us (a human merged it,
                 # or the CI gate got there first). The RUN ROW was not written — but the
