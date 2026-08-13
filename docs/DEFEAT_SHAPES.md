@@ -153,3 +153,61 @@ truncation path at all. `tests/test_sessions_proc_shim.py`'s
 `test_sh_children_beyond_the_cap_warns_out_loud` / `test_proc_children_beyond_the_cap_warns_out_loud`
 deliberately build a fixture `_MAX_CHILDREN + 5` children deep to force the cap, rather than
 trusting that production data would ever get there on its own.
+
+---
+
+## 7. Two callers, one guarded (the wiring your fixture happens to reach)
+
+**Assertion form:** a test drives a function through *one* of its call sites and asserts the
+right thing happens. The assertion is real, the fixture is honest, and the guard genuinely
+fails when that path breaks.
+
+**Mutation that defeats it:** break the function at a *different* call site. Nothing notices,
+because no fixture in the suite ever drives that one. The reviewer reads a passing test named
+after the behaviour and reasonably concludes the behaviour is covered — when what is covered is
+one route to it.
+
+**Guard form that survives:** enumerate the call sites (`git grep` the symbol — this is a
+question with a countable answer, unlike a CSS-property space) and drive *each* one. If N
+call sites exist, the suite needs N wiring tests, and the test names should say which route
+each covers.
+
+**Found:** twice in one day, 2026-08-13.
+- `_syncSidebarActive` (CMX-257) has exactly two callers — `selectView` and `showAgentDetail`.
+  Rounds 19-21 guarded the first exhaustively (class set, cue painted, row routed). The second
+  hardcodes a *demoted* view id (`view === 'agent-detail' ? 'agents' : view`) and nothing drove
+  it: blanking that literal left the sidebar with no lit row on every agent drill-in, with 3012
+  tests green. Closed in round 23 by driving the real `chela.selectAgent` path.
+- `latest_required_mutations` (CMX-269) is wired into the rework brief at two render paths —
+  `_respawn_rework` and `_renudge_prompt`. Both new prompt tests drove `tick`, which reaches
+  only one per run state; dropping the argument from the other stayed green.
+
+⭐ The judge caught the second one by proposing **a separate wiring experiment per call site
+rather than guessing which was covered** — which is also the cheapest way to write the guard.
+
+---
+
+## 8. A differential guard that cancels
+
+**Assertion form:** the test mounts two fixtures — the "feature on" case and a "base" case —
+and asserts they *differ* (or match). Comparing against a baseline feels more robust than a
+bare literal, and for a while it is.
+
+**Mutation that defeats it:** apply the regression somewhere that moves **both** fixtures
+equally. The difference is unchanged, so the assertion holds no matter how bad the absolute
+value gets. A differential is blind, by construction, to anything in the common mode.
+
+**Guard form that survives:** assert the **absolute** resolved value, not a diff — "this
+resolves to `0px`", not "this resolves to the same thing the base fixture does". Keep the
+second fixture as a *control* if it aids the diagnosis, but do not let it carry the assertion.
+
+**Found:** CMX-268 round 1 (2026-08-13). The airy-density revert was guarded by comparing an
+`airy` fixture's resolved padding against a no-class `base` fixture mounted from the same
+stylesheet. The judge added horizontal padding to `#term-stage` **ungated** — the natural shape
+of a real regression, since the gating class no longer exists — which widened both fixtures
+identically. The differential held, the wall stopped filling its stage, and 3012 tests stayed
+green. Round 2 replaced it with absolute assertions (`paddingLeft === '0px'`,
+`maxWidth === 'none'`).
+
+⚠️ Related but distinct from shape 6: there the coverage rested on a coincidence in the *data*;
+here it rests on a property of the *comparison*.
