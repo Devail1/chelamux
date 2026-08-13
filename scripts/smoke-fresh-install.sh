@@ -179,7 +179,17 @@ if [ "${SMOKE_BREAK_DASHBOARD:-0}" = "1" ]; then
     # dashboard's bind() gets a genuine EADDRINUSE. Every accepted connection (including
     # curl's, in the readiness loop below) is closed immediately without a reply, so a
     # probe gets an instant, real "connection refused" / empty-reply — never a hang.
-    python3 -c "
+    #
+    # $DASH_PORT is a random pick out of a 20000-wide range, not a reservation — some
+    # other process on the box can already hold it (hit live in CI: the fixture's own
+    # bind() raised a genuine `OSError: Address already in use` before it ever got to
+    # listen()). That collision is froth on the port picker, not the thing this fixture
+    # is trying to prove, so retry with a fresh random port a few times before treating
+    # it as this fixture's own failure to bind.
+    hog_bound=0
+    for hog_attempt in $(seq 1 5); do
+        rm -f "$WORK/dashboard-hog-bound"
+        python3 -c "
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -194,17 +204,26 @@ while True:
     except socket.timeout:
         continue
 " &
-    HOG_PID=$!
-    for _ in $(seq 1 50); do
-        if ! kill -0 "$HOG_PID" 2>/dev/null; then
-            echo "FAIL: SMOKE_BREAK_DASHBOARD fixture process died before binding $DASH_PORT" >&2
-            exit 1
-        fi
-        if [ -f "$WORK/dashboard-hog-bound" ]; then
+        HOG_PID=$!
+        for _ in $(seq 1 50); do
+            if ! kill -0 "$HOG_PID" 2>/dev/null; then
+                break
+            fi
+            if [ -f "$WORK/dashboard-hog-bound" ]; then
+                hog_bound=1
+                break
+            fi
+            sleep 0.1
+        done
+        if [ "$hog_bound" -eq 1 ]; then
             break
         fi
-        sleep 0.1
+        DASH_PORT=$(( 20000 + (RANDOM % 20000) ))
     done
+    if [ "$hog_bound" -ne 1 ]; then
+        echo "FAIL: SMOKE_BREAK_DASHBOARD fixture could not bind a free port after 5 attempts" >&2
+        exit 1
+    fi
 fi
 
 echo "==> chela dashboard (background, isolated port $DASH_PORT)"
