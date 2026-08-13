@@ -44,6 +44,21 @@ export function navViews(views, ctx) {
     return (views || []).filter(v => v && !v.virtual && isEnabled(v, ctx));
 }
 
+// CMX-230: navViews split by `tier`, for the sidebar's two nav groups (nav.js's
+// renderNav) — the domain-object rail (primary) vs. the demoted "attributes of
+// things, not places to go" group (secondary). Both read from the SAME navViews
+// list (same order, same enabled/virtual filtering), so nothing about routing,
+// the command palette (paletteViews, below) or a view's own behaviour changes —
+// only which of the two DOM lists a row's markup lands in. A view with no
+// `tier` (or any value other than 'secondary') defaults to primary, so this is
+// additive: forgetting to tier a new entry never silently hides it.
+export function primaryNavViews(views, ctx) {
+    return navViews(views, ctx).filter(v => v.tier !== 'secondary');
+}
+export function secondaryNavViews(views, ctx) {
+    return navViews(views, ctx).filter(v => v.tier === 'secondary');
+}
+
 // Everything the command palette can jump to. Same source, same order — the
 // palette's third hardcoded list is gone.
 export function paletteViews(views, ctx) {

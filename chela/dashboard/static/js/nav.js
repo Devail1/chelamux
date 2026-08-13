@@ -6,7 +6,7 @@ import { showAddSchedule } from './schedules.js';
 import { _displayLabel, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals.js';
 import { _isFav, _launcherData, launchProject, refreshLauncher } from './launcher.js';
 import { VIEWS } from './views.js';
-import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
+import { findView, otherViews, paletteViews, panelId, primaryNavViews, secondaryNavViews } from './viewreg.js';
 import { refresh } from './main.js';
 
 // ---------------------------------------------------------------------------
@@ -109,7 +109,15 @@ function _navItemHtml(v) {
 function renderNav() {
     const host = document.getElementById('side-nav');
     if (!host) return;
-    host.innerHTML = navViews(VIEWS, _viewCtx()).map(_navItemHtml).join('');
+    const ctx = _viewCtx();
+    host.innerHTML = primaryNavViews(VIEWS, ctx).map(_navItemHtml).join('');
+    // CMX-230: the demoted group (Knowledge/Agents/Personas/Cost) — same
+    // `.side-item` markup, same onclick=selectView, just a second, visually
+    // quieter list (#side-nav-more, index.html; .side-list-secondary,
+    // style.css). #side-nav-more is absent on layouts that never got it
+    // (defensive only — index.html always ships it).
+    const more = document.getElementById('side-nav-more');
+    if (more) more.innerHTML = secondaryNavViews(VIEWS, ctx).map(_navItemHtml).join('');
 }
 
 // --- View switching --------------------------------------------------------

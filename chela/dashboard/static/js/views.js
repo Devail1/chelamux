@@ -14,6 +14,19 @@
 // The views are Feed · Wall · Work · Knowledge · Agents · Personas · Cost.
 // `agent-detail` is a virtual drill-in — reachable, no nav item. See viewreg.js
 // for the entry shape.
+//
+// CMX-230 (Xirp comparison — "nav IS the domain objects"; a 7-item primary rail
+// reads as a dev tool): each entry now also carries a `tier`. 'primary' (Feed,
+// Wall, Work — the domain objects a fleet operator actually navigates BETWEEN)
+// renders in the sidebar's main Navigate list, same as always. 'secondary'
+// (Knowledge, Agents, Personas, Cost — attributes OF an agent/run, not places
+// to go) renders in a demoted group below it (nav.js's renderNav, #side-nav-more).
+// This is RE-PARENTING, NOT REMOVAL: the entries below — id, panel, enter/exit/
+// tick, badges, palette membership — are completely unchanged, so every one of
+// these views still works exactly as it did; only which nav list its row lands
+// in changes. viewreg.js's primaryNavViews/secondaryNavViews read `tier`;
+// tests/dashboard_scale_nav_a11y.test.mjs's nav-inventory guard pins the exact
+// primary set to ['feed', 'terminals', 'work'].
 // ---------------------------------------------------------------------------
 import { refreshAgents } from './agents.js';
 import { refreshCost } from './cost.js';
@@ -28,6 +41,7 @@ export const VIEWS = [
     {
         id: 'feed',
         label: 'Feed',
+        tier: 'primary',
         // A lucide `rss` mark, not a glyph: the old ≡ read exactly like the sidebar
         // toggle. `lucide` names an inline SVG from util.js's vendored set (see
         // _navItemHtml); a plain `icon` string is still a unicode glyph.
@@ -42,6 +56,7 @@ export const VIEWS = [
     {
         id: 'terminals',
         label: 'Wall',
+        tier: 'primary',
         // lucide (not a glyph) so the nav rail's five icons share one box — see the
         // Feed note above. `layout-grid` reads as the wall's grid of live tiles.
         lucide: 'layout-grid',
@@ -55,6 +70,7 @@ export const VIEWS = [
     {
         id: 'work',
         label: 'Work',
+        tier: 'primary',
         // lucide `columns-3` — the Dispatch/Kanban/Schedules board, as a fixed box.
         lucide: 'columns-3',
         badges: [
@@ -69,6 +85,7 @@ export const VIEWS = [
     {
         id: 'knowledge',
         label: 'Knowledge',
+        tier: 'secondary',
         // lucide `book-open` — the knowledge base, as a fixed box.
         lucide: 'book-open',
         // Entering from the nav lands on the glance overview, not whatever concept
@@ -79,6 +96,7 @@ export const VIEWS = [
     {
         id: 'agents',
         label: 'Agents',
+        tier: 'secondary',
         // lucide `bot` — the agent fleet, as a fixed box.
         lucide: 'bot',
         tick: () => refreshAgents(),
@@ -86,6 +104,7 @@ export const VIEWS = [
     {
         id: 'personas',
         label: 'Personas',
+        tier: 'secondary',
         // lucide `drama` — the theatre masks: the declared persona layer (judge · critic ·
         // orchestrator). Read-only: it renders the registry, it never launches a persona.
         lucide: 'drama',
@@ -99,6 +118,7 @@ export const VIEWS = [
     {
         id: 'cost',
         label: 'Cost',
+        tier: 'secondary',
         // lucide `dollar-sign` — fleet spend, as a fixed box.
         lucide: 'dollar-sign',
         // Entering and ticking both just re-pull /api/cost (scoped by the tab's own

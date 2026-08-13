@@ -56,7 +56,10 @@ const BODY = `
 </header>
 <div class="app">
   <aside class="sidebar">
-    <section class="side-section"><div class="side-list" id="side-nav"></div></section>
+    <section class="side-section">
+      <div class="side-list" id="side-nav"></div>
+      <div class="side-list" id="side-nav-more"></div>
+    </section>
     <section class="side-section">
       <span class="side-count" id="hdr-agents">-/-</span>
       <div class="side-list" id="sidebar-agents"><div class="side-empty">No agents</div></div>
@@ -91,6 +94,15 @@ before(async () => {
         media: q, matches: PHONE && /max-width:\s*768px/.test(q),
         addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
     });
+    // jsdom ships no canvas, and `getContext('2d')` returns null. The tab-signal
+    // badge (util.js::_drawFavicon) paints one whenever the "needs you" count goes
+    // ABOVE ZERO — which a waiting/yellow agent row below now exercises. A no-op 2D
+    // context keeps the assertions about the SIDEBAR rather than a canvas polyfill
+    // (same stub as tests/walldock.test.mjs).
+    dom.window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
+        get: (_t, k) => (k === 'canvas' ? null : () => {}),
+    });
+    dom.window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,';
     globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;    // main.js arms poll timers a test has no use for
@@ -200,6 +212,9 @@ test('colour is the SECOND channel, and it is colourblind-safe (Okabe-Ito)', () 
 // reddens this — it asserts the mark that RENDERS, not the string in the source.
 test('the Feed nav item renders the lucide rss SVG — not a glyph that apes the toggle', () => {
     nav.renderNav();
+    // CMX-230: Feed is a primary-tier view, so it's still in #side-nav specifically
+    // (not the demoted #side-nav-more) — see the nav-inventory guard in
+    // tests/dashboard_scale_nav_a11y.test.mjs, which pins that partition.
     const icon = document.querySelector('#side-nav .side-item[data-view="feed"] .side-item-icon');
     assert.ok(icon, 'the Feed nav item is missing');
     const svg = icon.querySelector('svg');
@@ -221,8 +236,13 @@ test('the Feed nav item renders the lucide rss SVG — not a glyph that apes the
 test('every nav item renders a non-empty lucide SVG — no unicode glyph survives', () => {
     nav.renderNav();
     const OLD_GLYPHS = ['▦', '▤', '◆', '▢', '≡'];
+    // CMX-230: this asserts the ICON quality (real SVG, no glyph fallback) on every
+    // registered view regardless of which nav list it renders into — Knowledge/
+    // Agents/Personas/Cost moved to #side-nav-more (demoted), Feed/Wall/Work stay
+    // in #side-nav (primary). The partition itself is pinned by
+    // tests/dashboard_scale_nav_a11y.test.mjs's nav-inventory guard, not here.
     for (const id of ['feed', 'terminals', 'work', 'knowledge', 'agents', 'personas', 'cost']) {
-        const icon = document.querySelector(`#side-nav .side-item[data-view="${id}"] .side-item-icon`);
+        const icon = document.querySelector(`#side-nav .side-item[data-view="${id}"] .side-item-icon, #side-nav-more .side-item[data-view="${id}"] .side-item-icon`);
         assert.ok(icon, `the ${id} nav item is missing`);
         const svg = icon.querySelector('svg');
         assert.ok(svg, `the ${id} nav icon is not an SVG — it fell back to a text glyph`);
@@ -231,6 +251,201 @@ test('every nav item renders a non-empty lucide SVG — no unicode glyph survive
         for (const g of OLD_GLYPHS)
             assert.ok(!icon.textContent.includes(g), `the old ${g} glyph is still rendered on ${id}`);
     }
+});
+
+// --- 1c^b. 🔴 the LABEL is real text on every rendered row, primary AND demoted --
+//
+// style.css's own must-never for the demoted group: "Same .side-item row underneath
+// (icon still a real lucide mark, LABEL STILL REAL TEXT — re-parenting must not cost
+// the accessibility cue)". The only prior guard pointed at the label was a WIRING
+// test (dashboard_scale_nav_a11y.test.mjs) matching the CLASS STRING inside
+// _navItemHtml's template — never the text it wraps — so emptying the label span
+// left every nav row (primary and demoted alike) icon-only, and every guard stayed
+// green. This drives the REAL renderNav() and reads .side-item-label.textContent
+// back off the REAL rendered node for every id in both #side-nav and #side-nav-more.
+test('CMX-257: every nav item renders its REAL label as text — re-parenting into the demoted group must not cost it', () => {
+    nav.renderNav();
+    const LABELS = {
+        feed: 'Feed', terminals: 'Wall', work: 'Work',
+        knowledge: 'Knowledge', agents: 'Agents', personas: 'Personas', cost: 'Cost',
+    };
+    for (const [id, label] of Object.entries(LABELS)) {
+        const row = document.querySelector(
+            `#side-nav .side-item[data-view="${id}"], #side-nav-more .side-item[data-view="${id}"]`);
+        assert.ok(row, `the ${id} nav item is missing`);
+        assert.equal(row.querySelector('.side-item-label').textContent, label,
+            `${id}'s .side-item-label lost its real text — icon-only nav rows are exactly the ` +
+            'hue-free-cue regression this ticket exists to protect against');
+    }
+});
+
+// --- 1c³. 🔴 renderNav ACTUALLY SPLITS the sidebar: primary → #side-nav, demoted →
+// #side-nav-more — not just "somewhere in either list" (the test above, by design,
+// is blind to which host an item lands in). tests/dashboard_scale_nav_a11y.test.mjs's
+// GUARD 7 only calls primaryNavViews/secondaryNavViews directly on entries scraped
+// out of views.js source text — it never asserts the RENDERED sidebar, so reverting
+// renderNav to dump every item into #side-nav (leaving #side-nav-more empty, the
+// registry, `tier` fields and both selector functions all untouched) stayed green. This
+// drives the REAL renderNav() into the REAL #side-nav / #side-nav-more and reads the
+// partition back off the rendered nodes.
+test('CMX-230: renderNav actually SPLITS the sidebar — primary views in #side-nav, demoted views in #side-nav-more', () => {
+    nav.renderNav();
+    const idsIn = sel => [...document.querySelectorAll(`${sel} .side-item`)].map(el => el.dataset.view);
+    const primaryIds = idsIn('#side-nav');
+    const secondaryIds = idsIn('#side-nav-more');
+
+    // CMX-230 round 11: this used to compare primaryIds.sort()/secondaryIds.sort()
+    // against the expected set — order-blind by construction, so a mutation at the
+    // RENDER call site (nav.js: `primaryNavViews(VIEWS, ctx).reverse().map(...)`)
+    // left the shipped rail reading Work/Wall/Feed while every guard, including
+    // tests/dashboard_scale_nav_a11y.test.mjs's GUARD 7 (which only ever checks
+    // primaryNavViews()'s own return order, never the rendered DOM), stayed green.
+    // primaryIds/secondaryIds already come from the REAL rendered DOM in document
+    // order — asserting them UNSORTED closes that hole directly, no separate
+    // render-order guard needed.
+    assert.deepEqual(primaryIds, ['feed', 'terminals', 'work'],
+        '#side-nav must render exactly the 3 primary views, IN ORDER — a full un-split dump, an empty split, or ' +
+        'a reorder at the render call site (e.g. .reverse()) breaks this');
+    assert.deepEqual(secondaryIds, ['knowledge', 'agents', 'personas', 'cost'],
+        '#side-nav-more must render exactly the 4 demoted views, IN ORDER — an empty #side-nav-more means the split never ran');
+
+    for (const id of secondaryIds) assert.ok(!primaryIds.includes(id), `${id} must not ALSO render into #side-nav`);
+    for (const id of primaryIds) assert.ok(!secondaryIds.includes(id), `${id} must not ALSO render into #side-nav-more`);
+});
+
+// --- 1c⁴. 🔴 CLAIM 3 ("re-parenting, not removal") also covers the active-row cue -
+//
+// views.js's own must-never for the demoted group: "the entries below ... are
+// completely unchanged, so EVERY ONE OF THESE VIEWS STILL WORKS EXACTLY AS IT DID;
+// only which nav list its row lands in changes". The one piece of nav behaviour
+// that IS DOM-position-sensitive is the active-row highlight: _syncSidebarActive
+// (nav.js) sweeps `.side-item` to toggle `.active`. Scoping that sweep to
+// `#side-nav` is a no-op before this PR (every row lived there) and a silent
+// regression after it — selecting a demoted view would leave the WHOLE sidebar
+// with no lit row. This drives the REAL renderNav() + REAL selectView() and reads
+// `.active` back off the REAL rendered rows in BOTH #side-nav and #side-nav-more —
+// a guard that checked only one host would pass a sweep wrongly scoped to the
+// other, which is exactly the corruption this closes.
+test('CMX-257: selecting a view lights its row wherever renderNav actually put it — primary AND demoted', () => {
+    nav.renderNav();
+
+    // round 20 (judge finding 1 on PR #326): the ONLY thing that makes a rendered
+    // nav row route anywhere is the onclick _navItemHtml emits — calling
+    // window.chela.selectView(...) below (as this test always has) never touches
+    // it, so emptying that handler left every nav row in BOTH lists inert (the
+    // demoted views become unreachable from the sidebar — removal, not
+    // re-parenting) while this test stayed green. jsdom does not execute inline
+    // onclick="..." attributes without runScripts: "dangerously" (unset here,
+    // same as tests/topbarmenu.test.mjs/tests/settings_update.test.mjs, which
+    // document the same workaround), so the row's actual route to selectView is
+    // pinned on the ATTRIBUTE the real render emits, on both a demoted row and a
+    // primary row.
+    //
+    // round 21 (judge finding 1 on PR #326): pinning the attribute with a
+    // substring regex is a PRESENCE check, not a LIVENESS check — it cannot tell
+    // a live statement from dead code. `onclick="chela.selectView(this.dataset.view)"`
+    // dead-coded to `onclick="if (false) chela.selectView(this.dataset.view)"`
+    // still contains the exact byte sequence the regex looks for, so the regex
+    // kept matching while every nav row went inert. (This repo already wrote this
+    // trap down once, in wallnav.test.mjs 12b/12c, for the identical shape.) So
+    // below, the attribute is EVALUATED as a function body — the same body the
+    // browser would run on click — against a recording stub bound to the row as
+    // `this` (matching _navItemHtml's `this.dataset.view`), and the assertion is
+    // that the stub was actually CALLED. `if (false) …` never calls it, so the
+    // dead-code mutation goes red here. The regex match stays below it as a
+    // cheap smoke test that the attribute exists at all — it is not the guard.
+    const _invokeOnclick = (row, chelaStub) => {
+        const handler = new Function('chela', row.getAttribute('onclick') || '');
+        handler.call(row, chelaStub);
+    };
+
+    const demotedRow = document.querySelector('#side-nav-more .side-item[data-view="agents"]');
+    assert.match(demotedRow.getAttribute('onclick'), /chela\.selectView\(this\.dataset\.view\)/,
+        'the demoted row is not wired to chela.selectView(this.dataset.view) — emptying the handler leaves it ' +
+        'unreachable from the sidebar entirely, which is removal, not re-parenting');
+    const demotedCalls = [];
+    _invokeOnclick(demotedRow, { selectView: (...args) => demotedCalls.push(args) });
+    assert.deepEqual(demotedCalls, [['agents']],
+        'the demoted row\'s onclick did not actually CALL chela.selectView — dead-coding the handler (e.g. ' +
+        '`if (false) chela.selectView(...)`) leaves the attribute text intact but the row unreachable, which ' +
+        'is removal, not re-parenting');
+
+    const primaryRowEl = document.querySelector('#side-nav .side-item[data-view="work"]');
+    assert.match(primaryRowEl.getAttribute('onclick'), /chela\.selectView\(this\.dataset\.view\)/,
+        'the primary row is not wired to chela.selectView(this.dataset.view)');
+    const primaryCalls = [];
+    _invokeOnclick(primaryRowEl, { selectView: (...args) => primaryCalls.push(args) });
+    assert.deepEqual(primaryCalls, [['work']],
+        'the primary row\'s onclick did not actually CALL chela.selectView');
+
+    window.chela.selectView('agents');   // demoted -> #side-nav-more
+    assert.equal(
+        document.querySelector('#side-nav-more .side-item[data-view="agents"]').classList.contains('active'),
+        true,
+        'the demoted row never lit — a sweep scoped away from #side-nav-more leaves every demoted selection dark');
+    assert.equal(
+        document.querySelectorAll('#side-nav .side-item.active').length, 0,
+        'a primary row is lit while a demoted view is selected');
+
+    window.chela.selectView('work');     // primary -> #side-nav
+    assert.equal(
+        document.querySelector('#side-nav .side-item[data-view="work"]').classList.contains('active'),
+        true, 'the primary row never lit');
+    assert.equal(
+        document.querySelector('#side-nav-more .side-item[data-view="agents"]').classList.contains('active'),
+        false, 'the previously-active demoted row is still lit after switching to a primary view');
+});
+
+// --- 1c⁵. 🔴 CLAIM 3 also covers _syncSidebarActive's OTHER caller: showAgentDetail --
+//
+// _syncSidebarActive has exactly two callers (grepped): selectView (guarded above)
+// and showAgentDetail, which hardcodes the demoted 'agents' id as the row to light
+// while drilled into a single agent — nav.js:193-195's own must-never: "keep the
+// Agents nav item lit while drilled into a single agent so the sidebar still shows
+// where you are." Nothing above drives that second caller, so `const navView =
+// view === 'agent-detail' ? 'agents' : view;` could be blanked to '' (no row lit)
+// or pointed at the WRONG view id (a primary row lit instead) and 3012 tests would
+// stay green.
+//
+// showAgentDetail itself isn't exported (it's reachable only from inline HTML
+// handlers), so this drives the REAL, user-reachable path to it: `chela.selectAgent`
+// — the sidebar agent row's own onclick — falls through to showAgentDetail whenever
+// the wall can't place the agent (unresolved in `_agentsCache`, which is exactly
+// this case: no fleet has been loaded into this jsdom instance for this name). That
+// is a genuine call site, not a synthetic seam.
+test('CMX-257 round 23: drilling into an agent lights the DEMOTED Agents row, not just via selectView', () => {
+    nav.renderNav();
+
+    // showAgentDetail also fires an unawaited refreshSummary()/checkContext() — real
+    // network calls in production, reaching #hdr-next/#hdr-updated (absent from this
+    // suite's minimal BODY, see its own comment: "only the ids nav.js reaches for")
+    // and expecting an array back from /api/agents/context. Give it both so those
+    // calls resolve quietly instead of throwing into an unhandled rejection AFTER
+    // this test (synchronous) has already returned — the DOM nodes are left in
+    // place (not torn down) for the same reason: their crash would fire from a
+    // microtask that runs after any `finally` here has already executed. An object
+    // response would make checkContext's `for (const a of data)` throw instead.
+    if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
+    if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    try {
+        window.chela.selectAgent('cmx257-round23-ghost-agent');
+    } finally {
+        globalThis.fetch = prevFetch;
+    }
+
+    assert.equal(
+        document.querySelector('#side-nav-more .side-item[data-view="agents"]').classList.contains('active'),
+        true,
+        'drilling into an agent must keep the DEMOTED Agents row lit — blanking the ' +
+        "'agents' literal (or routing it to any other view id) leaves the sidebar with no correct lit row");
+    assert.equal(
+        document.querySelectorAll('#side-nav .side-item.active').length, 0,
+        'a PRIMARY row is lit while drilled into an agent detail — the highlight was routed to the wrong view id');
+    assert.equal(
+        document.querySelectorAll('#side-nav-more .side-item.active').length, 1,
+        'more than one demoted row is lit while drilled into an agent detail');
 });
 
 // --- 1d. 🔴 the EXPANDED sidebar icons are sized to MATCH the collapsed rail ------
@@ -388,4 +603,46 @@ test('the sidebar is two sections — Launch folded into the launch menu', () =>
         'the launcher does not render into the launch menu');
     // One toggle in the markup, not two.
     assert.equal(HTML.match(/toggleSidebar\(\)/g).length, 1, 'a second sidebar toggle appeared');
+});
+
+// --- CMX-230, round 2: GUARD 3b / GUARD 4 in tests/dashboard_scale_nav_a11y.test.mjs
+// only source-text-match nav.js's templates — `_AGENT_STATUS_WORD`'s literal map
+// and the `<span class="ar-state ${stCls}">${stWord}</span>` / `${p}%` template
+// strings. Neither renders a row, so a judge round blanked the VALUE that feeds
+// each template (`const stWord = '';` / `const p = '';`) and both regexes still
+// matched the untouched template shape byte-for-byte, green. These drive the REAL
+// `_agentRowHtml` (via `renderSidebarAgents`) into a REAL row and read `.ar-state`
+// / `.ar-ctx` back off the rendered node — blanking either value now shows up as
+// an empty text node, not a passing regex.
+// CMX-257 round 12: the two rows above were busy/idle only — the yellow/waiting
+// row (wantsHuman: this codebase's "needs you", the one state a red-weak operator
+// most needs a word for) was never driven through a real render, so blanking
+// `stWord` for `dot === 'yellow'` alone left every waiting row's .ar-state an
+// empty span with only its .waiting colour class, and this test — plus GUARD 3b's
+// source-text match on the untouched _AGENT_STATUS_WORD constant — stayed green.
+// A waiting agent is also rendered inside `.side-triage` (the "Needs you" cluster,
+// see renderSidebarAgents), not the plain project-grouped rows — rowFor() finds it
+// either way since `_agentRowHtml` is the same template for both.
+test('CMX-230: the sidebar row\'s .ar-state renders the real status word, not blank — colour is not the only cue', () => {
+    nav.renderSidebarAgents([
+        agent('working-one', { session_status: 'busy' }),
+        agent('idle-one', { session_status: 'idle' }),
+        agent('waiting-one', { session_status: 'waiting' }),
+    ]);
+    assert.equal(rowFor('working-one').querySelector('.ar-state').textContent, 'working',
+        '.ar-state must carry the real status word, not an empty span the colour class alone would leave');
+    assert.equal(rowFor('idle-one').querySelector('.ar-state').textContent, 'idle');
+    assert.equal(rowFor('waiting-one').querySelector('.ar-state').textContent, 'waiting',
+        '.ar-state must carry the real status word for the waiting/yellow row too — leaving it blank for ' +
+        'exactly this state is unreadable to a red-weak viewer who needs the word most');
+});
+
+test('CMX-230: the sidebar row\'s .ar-ctx renders the real percentage number, not blank — colour is not the only cue', () => {
+    nav.updateCtxCache([{ window_id: '@1', used_pct: 87 }]);
+    nav.renderSidebarAgents([agent('ctx-one', { window_id: '@1' })]);
+    const chip = rowFor('ctx-one').querySelector('.ar-ctx');
+    assert.ok(chip, '.ar-ctx chip did not render for an agent with a cached context %');
+    assert.equal(chip.textContent, '87%',
+        '.ar-ctx must carry the real percentage number, not a bare "%" the warn/danger class alone would leave');
+    assert.ok(chip.classList.contains('danger'), 'a used_pct > 80 must still carry the danger class alongside the number');
 });

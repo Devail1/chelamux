@@ -26,16 +26,21 @@ import { findView, navViews, otherViews, paletteViews, panelId } from '../chela/
 const JS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'js');
 const src = f => readFileSync(join(JS_DIR, f), 'utf8');
 
-// A registry shaped exactly like views.js, with the hooks stubbed out.
+// A registry shaped exactly like views.js, with the hooks stubbed out. CMX-257
+// round 12: `tier` is filled in too — it is the one field this ticket added to
+// every entry, and leaving it off (as this fixture used to) makes every
+// palette/nav derivation test below blind to a bug that keys off it, e.g. a
+// filter that quietly excludes tier:'secondary' views from the command palette.
+// The honest-copy check below ties these values to views.js, same as ids/order.
 function fakeRegistry() {
     return [
-        { id: 'feed', label: 'Feed', icon: '≡' },
-        { id: 'terminals', label: 'Wall', icon: '▦', enabled: ctx => !!ctx.terminalsOn },
-        { id: 'work', label: 'Work', icon: '▤', badges: [{ id: 'side-runs-count' }] },
-        { id: 'knowledge', label: 'Knowledge', icon: '◆' },
-        { id: 'agents', label: 'Agents', icon: '▢' },
-        { id: 'personas', label: 'Personas', icon: '🎭' },
-        { id: 'cost', label: 'Cost', icon: '$' },
+        { id: 'feed', label: 'Feed', icon: '≡', tier: 'primary' },
+        { id: 'terminals', label: 'Wall', icon: '▦', tier: 'primary', enabled: ctx => !!ctx.terminalsOn },
+        { id: 'work', label: 'Work', icon: '▤', tier: 'primary', badges: [{ id: 'side-runs-count' }] },
+        { id: 'knowledge', label: 'Knowledge', icon: '◆', tier: 'secondary' },
+        { id: 'agents', label: 'Agents', icon: '▢', tier: 'secondary' },
+        { id: 'personas', label: 'Personas', icon: '🎭', tier: 'secondary' },
+        { id: 'cost', label: 'Cost', icon: '$', tier: 'secondary' },
         { id: 'agent-detail', label: 'Agent', virtual: true },
     ];
 }
@@ -52,6 +57,23 @@ function shippedOrder() {
     return [...body.matchAll(/^\s+id:\s*'([^']+)'/gm)].map(m => m[1]);
 }
 
+// Same idea as shippedOrder(), for `tier`: reads the REAL per-entry tier off the
+// source so fakeRegistry() can be tied to it too, not just ids/order. Each id's
+// chunk runs from its own `id: '<id>'` to the next one's (or EOF for the last),
+// so a `tier:` line anywhere in between is unambiguously that entry's.
+function shippedTiers() {
+    const body = src('views.js').split('export const VIEWS')[1];
+    const ids = shippedOrder();
+    const out = {};
+    ids.forEach((id, i) => {
+        const start = body.indexOf(`id: '${id}'`);
+        const end = i + 1 < ids.length ? body.indexOf(`id: '${ids[i + 1]}'`) : body.length;
+        const m = body.slice(start, end).match(/tier:\s*'([^']+)'/);
+        out[id] = m ? m[1] : undefined;
+    });
+    return out;
+}
+
 // --- the registry is the ONE declaration ------------------------------------
 
 // GUARD: the shipped nav order is Feed · Wall · Work · Knowledge · Agents, with
@@ -64,6 +86,11 @@ test('the REAL views.js declares the shipped order — Feed·Wall·Work·Knowled
     // …and fakeRegistry() is an HONEST copy of it — same ids, same order — so the
     // derivation tests below are exercising the order that actually ships.
     assert.deepEqual(fakeRegistry().map(v => v.id), shippedOrder());
+    // …and the same for `tier` (CMX-257 round 12) — Feed/Wall/Work primary,
+    // Knowledge/Agents/Personas/Cost secondary, agent-detail untiered. A reorder,
+    // an add, or a tier change in views.js that fakeRegistry() doesn't mirror goes
+    // red here instead of silently leaving every palette/nav test below blind to it.
+    assert.deepEqual(fakeRegistry().map(v => v.tier), shippedOrder().map(id => shippedTiers()[id]));
 });
 
 test('the sidebar and the palette both derive from the registry — same views, same order', () => {
@@ -92,6 +119,27 @@ test('REMOVING a view is one registry deletion — it leaves the nav, the palett
     assert.ok(!paletteViews(views, CTX).some(v => v.id === 'knowledge'));
     // …and nothing else is disturbed: the others still stand.
     assert.deepEqual(navViews(views, CTX).map(v => v.id), ['feed', 'terminals', 'work', 'agents', 'personas', 'cost']);
+});
+
+// CMX-257 round 12: stated twice in this ticket's own production comments —
+// views.js ("...PALETTE MEMBERSHIP — are completely unchanged") and viewreg.js
+// ("nothing about routing, THE COMMAND PALETTE (paletteViews, below)... changes —
+// only which of the two DOM lists a row's markup lands in") — but asserted
+// nowhere until fakeRegistry() carried real tiers (see the honest-copy check
+// above). Demoting a view to the secondary nav group must not also drop it from
+// ⌘K: that would silently turn "re-parenting" into "removal" on the one surface
+// this ticket promised it would not touch.
+test('CMX-257: demoting a view to tier:\'secondary\' does not remove it from the command palette — re-parenting, not removal', () => {
+    const views = fakeRegistry();
+    const secondaryIds = views.filter(v => v.tier === 'secondary').map(v => v.id);
+    assert.deepEqual(secondaryIds, ['knowledge', 'agents', 'personas', 'cost'],
+        'fixture drifted from the tiers views.js actually ships — retune fakeRegistry()');
+    const paletteIds = paletteViews(views, CTX).map(v => v.id);
+    for (const id of secondaryIds) {
+        assert.ok(paletteIds.includes(id),
+            `${id} is demoted to the secondary nav group but must still be reachable from the command ` +
+            'palette — demotion is re-parenting in the sidebar only, never a palette removal');
+    }
 });
 
 test('a virtual view (agent-detail) is reachable but is NOT a nav item or a palette entry', () => {
