@@ -413,6 +413,17 @@ def _no_color_env() -> dict[str, str]:
     how to (de)serialize what crosses it — is popped too, even though it is inert on its own
     once the fd is gone: a fixture that only ever checks the fd cannot tell a full scrub
     apart from a regression that scrubs only the fd, so both are cleared together.
+
+    ⛔ CMX-271 (found chasing this ticket's own new test, flaky under `pytest-xdist -n auto`):
+    ``PYTHONDONTWRITEBYTECODE=1``, for the same reason the judge writes each mutation straight
+    to the SAME PATH the baseline just ran from. CPython's default `.pyc` cache validates by
+    source **mtime + size**, not content — a same-length mutation (`return a + b` → `return a
+    - b`, both 12 bytes) landing within the same filesystem-mtime tick as the baseline's
+    compile is INDISTINGUISHABLE from "unchanged" to the cache, so the mutated run silently
+    re-executes the baseline's cached bytecode and reads back SURVIVED for a guard that never
+    saw the mutation at all. Forcing every suite run to compile from source, every time, is
+    what makes "the file on disk really changed" (the promise :func:`apply_mutation` already
+    proves) also true of what the suite actually EXECUTES.
     """
     env = dict(os.environ)
     env.pop("FORCE_COLOR", None)
@@ -420,6 +431,7 @@ def _no_color_env() -> dict[str, str]:
     env.pop("NODE_CHANNEL_SERIALIZATION_MODE", None)
     env["NO_COLOR"] = "1"
     env["PY_COLORS"] = "0"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
 
