@@ -72,6 +72,13 @@ try {
     const doneCard = doneCol.querySelector(`[data-task-id="${closedTaskId}"].kanban-card-done`);
     assert.ok(!doneCard,
         `task_id=${closedTaskId}'s run was ALSO coerced into a done card in the done column`);
+
+    // Round 7 (PR #334): readable WITHOUT colour — assert the pill's rendered word,
+    // not just the CSS hook a red-weak reader can't see.
+    const stateChip = closedCard.querySelector('.kanban-state-chip');
+    assert.ok(stateChip, 'the closed card has no .kanban-state-chip pill at all');
+    assert.match(stateChip.textContent, /closed, not merged/,
+        `closed card's status pill has no readable label text — got: "${stateChip.textContent}"`);
 } catch (err) {
     console.error(err.message || String(err));
     process.exit(1);

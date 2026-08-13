@@ -54,12 +54,23 @@ def repo(tmp_path):
 
 
 @pytest.fixture
-def ticking(repo, tmp_path, monkeypatch):
+def killed_windows():
+    """Names passed to the stubbed `_kill_window` during a test's `tick()` calls.
+
+    A recording no-op, not a real tmux call: `ticking` stubs `_kill_window` to
+    append here instead of shelling out, so tests can prove a reconcile path
+    actually killed the run's window without letting a real tmux call escape.
+    """
+    return []
+
+
+@pytest.fixture
+def ticking(repo, tmp_path, monkeypatch, killed_windows):
     """A repo whose WORKFLOW.md drives a real tick(), with tmux/gh/spawn stubbed."""
     (repo / "WORKFLOW.md").write_text(WORKFLOW.format(root=tmp_path / ".chela" / "worktrees"))
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
     monkeypatch.setattr(dispatcher, "_tmux_windows", lambda: set())
-    monkeypatch.setattr(dispatcher, "_kill_window", lambda name: None)
+    monkeypatch.setattr(dispatcher, "_kill_window", lambda name: killed_windows.append(name))
     monkeypatch.setattr(dispatcher, "_fire_after_done", lambda wf: None)
     monkeypatch.setattr(dispatcher, "_spawn", lambda *a, **kw: False)
     return repo
@@ -150,7 +161,7 @@ def test_tick_leaves_an_awaiting_review_worktree_alone(ticking, monkeypatch):
     assert wt_path.is_dir()          # still needed — a rework may re-spawn into it
 
 
-def test_tick_reconciles_a_closed_PR_to_closed_and_frees_the_worktree(ticking, monkeypatch):
+def test_tick_reconciles_a_closed_PR_to_closed_and_frees_the_worktree(ticking, monkeypatch, killed_windows):
     """CMX-265: a PR a human closed WITHOUT merging must not park its row in the
     Review lane forever — `pr_state='closed'` is just as terminal as `'merged'`, and
     only the merged branch used to reconcile out of REVIEW_STATUSES. Unhandled, this
@@ -159,7 +170,16 @@ def test_tick_reconciles_a_closed_PR_to_closed_and_frees_the_worktree(ticking, m
     Round 2 (PR #334): the target status is `closed`, NOT `done` — Liav overruled round
     1's `done` argument ("archive them"). A closed-not-merged row must be its own
     terminal state, distinguishable from genuinely-shipped work, not just a differently
-    coloured pill on the same `done` status."""
+    coloured pill on the same `done` status.
+
+    Round 7 (PR #334): the reconcile path also kills the run's tmux window — its
+    disappearance is completion, not death (see inbox.py's SETTLED_RUN_STATES
+    comment). `ticking` used to stub `_kill_window` to a bare no-op, so nothing could
+    ever prove that call happened; it is now a recording no-op (`killed_windows`),
+    and this asserts the run's own window name landed in it. Negative control: drop
+    the `_kill_window(row["window_name"])` call from the closed-reconcile branch in
+    dispatcher.py and this assertion goes RED (the call above still passes since it
+    never inspected `killed_windows`)."""
     repo = ticking
     wf_path = repo / "WORKFLOW.md"
     alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
@@ -174,8 +194,9 @@ def test_tick_reconciles_a_closed_PR_to_closed_and_frees_the_worktree(ticking, m
     assert summary["reconciled_done"] == 0  # ⭐ GUARD: NOT `done` — that is the whole point
     assert not wt_path.exists()  # disk freed immediately, same as the merged path
     with dispatcher._db() as conn:
-        row = conn.execute("SELECT status FROM runs WHERE task_id=?", (alpha,)).fetchone()
+        row = conn.execute("SELECT status, window_name FROM runs WHERE task_id=?", (alpha,)).fetchone()
     assert row["status"] == "closed"  # off the board's REVIEW_STATUSES list — no longer a ghost
+    assert row["window_name"] in killed_windows  # ⭐ GUARD: closing the PR also kills the window
 
 
 def test_closed_run_travels_ledger_api_and_board_from_one_real_tick(ticking, monkeypatch, tmp_path):

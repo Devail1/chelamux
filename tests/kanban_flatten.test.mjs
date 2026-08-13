@@ -90,10 +90,21 @@ test('renderKanban: a closed-not-merged run renders in the archived column, not 
     assert.ok(archivedCol, '#kanban-board has no .kanban-col-archived column');
     assert.ok(doneCol, '#kanban-board has no .kanban-col-done column');
 
-    assert.ok(archivedCol.querySelector('.kanban-card-closed'),
+    const closedCard = archivedCol.querySelector('.kanban-card-closed');
+    assert.ok(closedCard,
         'the closed run never reached the archived column as a kanban-card-closed card');
     assert.equal(doneCol.querySelectorAll('.kanban-card').length, 0,
         'a closed-not-merged run was coerced into the Done column');
+
+    // Round 7 (PR #334): the archived state must be readable WITHOUT colour — the pill
+    // needs a rendered WORD, not just a class a red-weak reader can't see. A mutation
+    // that empties the pill's label while leaving STATUS_CHIPS.closed's source literal
+    // and the escHtml(chipMeta.label) call intact left every class-only assertion here
+    // green, so this checks rendered textContent instead of a CSS hook.
+    const stateChip = closedCard.querySelector('.kanban-state-chip');
+    assert.ok(stateChip, 'the closed card has no .kanban-state-chip pill at all');
+    assert.match(stateChip.textContent, /closed, not merged/,
+        `closed card's status pill has no readable label text — got: "${stateChip.textContent}"`);
 });
 
 // --- 2. ⭐ COUNTERWEIGHT — a genuinely done run still lands in Done, not archived ----
