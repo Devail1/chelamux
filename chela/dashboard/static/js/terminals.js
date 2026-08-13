@@ -2282,10 +2282,6 @@ function buildWall(wids) {
         resizable: { handles: 'e, se, s, sw, w' },
         columnOpts: { breakpoints: [{ w: 768, c: 1 }] },
     }, gsEl);
-    // Reflect the persisted preset's density on this very first paint (see
-    // _setWallDensity) — otherwise a reload sitting on a 1/2-col preset would
-    // stay in the dense layout until the next preset click.
-    if (_wallPreset) _setWallDensity(_wallPreset.cols, _wallPreset.rows);
 
     const persist = () => {
         const out = {};
@@ -2968,25 +2964,12 @@ function _fillNodesByOrder(keyFn, cols, rows) {
 // preset click while auto is on only changes the column/row count auto fills
 // into, per the auto-arrange contract (manual layout is sacred; auto must
 // never be able to clobber it, including via this button).
-// CMX-230: "air in the chrome" at low densities (Xirp comparison) — a 1- or
-// 2-pane preset gets wider stage margins; 4/6-up stays exactly as dense as
-// before. Pure CSS off this body class (.wall-density-airy in style.css); no
-// GridStack geometry (margin/cellHeight) changes, so _wallFill's row math is
-// untouched — it already reads the stage's live padding-bottom. Called both
-// from applyGridLayout (a preset click) and buildWall (first render, or a
-// rebuild that restores the persisted preset) so the class is right from the
-// very first paint, not only after the next preset click.
-function _setWallDensity(cols, rows) {
-    document.body.classList.toggle('wall-density-airy', cols * rows <= 2);
-}
-
 function applyGridLayout(cols, rows, btn) {
     const host = $('#term-grid-presets');
     if (btn) {
         host.querySelectorAll('.gl-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
     }
-    _setWallDensity(cols, rows);
     // Remember the active preset so a viewport resize can re-fit it (the fill
     // is viewport-relative, so a different screen / window size needs a recompute).
     _wallPreset = { cols, rows };
