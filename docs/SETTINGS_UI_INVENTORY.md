@@ -135,10 +135,10 @@ at `chela/agent_manager.py` import, same as they always were — a dashboard wri
 either needs that process restarted; the other seven are read per call and take effect
 on the next tick/request with no restart.
 
-### 3. Dispatch / judge / critic policy (10) — WIRED (CMX-220 + CMX-264), the Dispatch tab
+### 3. Dispatch / judge / critic policy (11) — WIRED (CMX-220 + CMX-264 + CMX-278), the Dispatch tab
 
 **✅ Done.** The second-strongest tab candidate — unlike Group 2, not every member is
-`hot`: four of the ten are latched at some module's own import (the judge/critic
+`hot`: four of the eleven are latched at some module's own import (the judge/critic
 fleet-wide kill switches, the dispatcher's own workflow list, the autonomous merge-base
 fallback), so a dashboard write to one of those needs the daemon/dashboard restarted to
 take effect, same shape `status_cmd_timeout_seconds`/`status_ttl_seconds` already modeled
@@ -163,27 +163,30 @@ means dispatcher off, deliberately, see `docs/CONFIG.md` "a config is not a capa
 **restart_required**), `CHELA_MAX_REWORKS` (rework cap before a run escalates to
 `needs_human`, default `2`, `0` allowed — disables rework), `CHELA_JUDGE` (fleet-wide judge
 kill switch, default `true`; **restart_required**), `CHELA_JUDGE_MAX_UNKNOWN_RETRIES`
-(retries on a `cannot_verify` judge verdict, default `2`, `0` allowed), `CHELA_CRITIC`
-(fleet-wide critic/advisory-review kill switch, default `true`; **restart_required**),
-`CHELA_WORKTREE_DISK_BUDGET` (byte/size-suffixed disk ceiling per worktree root, default
-unset/off), `CHELA_MEMORY_SLICE_BUDGET` (byte/size-suffixed ceiling on the SHARED cgroup
-slice every dispatched agent and judge launches into — CMX-264, `chela/memcap.py`; a
-per-job cap does not bound the box, only a shared one does, see
-`docs/RESOURCE_ISOLATION.md`; default unset/off, and further gated on a working
-`systemd --user` session regardless of the knob), `CHELA_MERGE_BASE` (fallback autonomous
-base branch — per-workflow `base_branch` still wins; the NEVER-list is never overridable
-by this, default `dev`; **restart_required**), `CHELA_GATE_WAIT_S` (how long a
+(retries on a `cannot_verify` judge verdict, default `2`, `0` allowed),
+`CHELA_JUDGE_MAX_CONCURRENT` (judges running at once, per workflow, default `1`, floor `1`
+— was a hardcoded constant with no knob until CMX-278; each judge re-runs the whole test
+suite in its own worktree, see `docs/RESOURCE_ISOLATION.md`'s measured per-judge memory
+cost before raising it), `CHELA_CRITIC` (fleet-wide critic/advisory-review kill switch,
+default `true`; **restart_required**), `CHELA_WORKTREE_DISK_BUDGET` (byte/size-suffixed
+disk ceiling per worktree root, default unset/off), `CHELA_MEMORY_SLICE_BUDGET`
+(byte/size-suffixed ceiling on the SHARED cgroup slice every dispatched agent and judge
+launches into — CMX-264, `chela/memcap.py`; a per-job cap does not bound the box, only a
+shared one does, see `docs/RESOURCE_ISOLATION.md`; default unset/off, and further gated on
+a working `systemd --user` session regardless of the knob), `CHELA_MERGE_BASE` (fallback
+autonomous base branch — per-workflow `base_branch` still wins; the NEVER-list is never
+overridable by this, default `dev`; **restart_required**), `CHELA_GATE_WAIT_S` (how long a
 `PermissionRequest` gate waits for a tap, default `90.0`s, `0` allowed — never wait),
 `CHELA_GATE_MAX_WAITS` (concurrent gate-wait slots, default `8`, floor `1` — a
 `BoundedSemaphore` cannot be sized `0`).
 
-Four of the ten (`CHELA_DISPATCH_WORKFLOWS`/`CHELA_JUDGE`/`CHELA_CRITIC`/`CHELA_MERGE_BASE`)
+Four of the eleven (`CHELA_DISPATCH_WORKFLOWS`/`CHELA_JUDGE`/`CHELA_CRITIC`/`CHELA_MERGE_BASE`)
 are resolved once at their owning module's import (`chela/config.py` for the first three,
 `chela/contract.py` for the fourth) — a dashboard write to any of those needs that process
-restarted; the other six (`chela/config.py`'s `max_reworks()`/
-`judge_max_unknown_retries()`/`worktree_disk_budget_bytes()`/`memory_slice_budget_bytes()`,
-`chela/gateanswer.py`'s `wait_budget()`/`max_waits()`) are read per call and take effect on
-the next tick/request.
+restarted; the other seven (`chela/config.py`'s `max_reworks()`/
+`judge_max_unknown_retries()`/`judge_max_concurrent()`/`worktree_disk_budget_bytes()`/
+`memory_slice_budget_bytes()`, `chela/gateanswer.py`'s `wait_budget()`/`max_waits()`) are
+read per call and take effect on the next tick/request.
 
 ### 4. Unattended-risk switches (3) — `trust-boundary`, keep env-file-only
 
@@ -291,23 +294,23 @@ readout:
 | Candidate tab | Writable knobs | Today |
 |---|---|---|
 | Daemon intervals (Timing) | 9 | **9** (CMX-217) |
-| Dispatch / judge / critic | 10 | **10** (CMX-220 + CMX-264) |
+| Dispatch / judge / critic | 11 | **11** (CMX-220 + CMX-264 + CMX-278) |
 | Notifications | ~6 of 9 | 0 |
 | Telegram | 3 of 4 | 0 |
 | Terminal wall (+ the 7 shell-only) | ~9 of 12 | 0 |
 | Collaboration | 2 | 0 |
 | Launcher | 2 of 4 | **1** (`CHELA_PROJECTS_DIR`) |
 
-That's roughly **40 legitimate write-candidates**, not 2 — the redesign's premise holds,
+That's roughly **41 legitimate write-candidates**, not 2 — the redesign's premise holds,
 just not for the reason "the drawer is a cramped container." The other ~18 (bootstrap,
 unattended-risk, bind host, most internal-paths, identity stamps) have a standing reason
 in this codebase's own comments to stay env-file-only, and a redesign that turns *those*
 into checkboxes would be quietly loosening a trust boundary `userconfig.py` was written to
-protect. A tabbed modal is the right container for the ~40; it should render the other ~18
+protect. A tabbed modal is the right container for the ~41; it should render the other ~18
 as read-only facts (extending the existing Connections & Status pattern) rather than skip
 them or make them editable.
 
-**CMX-217** built the precedence layer the whole ~40 count depends on
+**CMX-217** built the precedence layer the whole ~41 count depends on
 (`chela.config.dashboard_setting()` + a per-tab knob registry, e.g.
 `chela.config.TIMING_KNOBS`) and proved it on the cheapest group — Daemon intervals,
 renamed "Timing" in the UI. **CMX-220** reused it for the second-cheapest group —
