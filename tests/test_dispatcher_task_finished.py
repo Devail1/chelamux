@@ -297,6 +297,29 @@ def test_verify_self_check_flags_a_required_mutation_resubmitted_under_a_differe
     assert [m["guard"] for m in result["missing_required"]] == ["the glyph cue"]
 
 
+def test_verify_self_check_flags_a_required_mutation_resubmitted_under_a_different_file(tmp_path):
+    """⛔ Rework round 4, finding 1: matching is ``(file, before, after)`` identity — all
+    THREE components, including ``file``, not just the two anchors. Resubmit the exact
+    required ``before``/``after`` pair but re-anchored in a DIFFERENT file: this is not the
+    case that beat the judge and must still read as MISSING. A matcher loosened to key on
+    ``(before, after)`` alone (dropping ``file``) would let an agent copy the required
+    anchor text verbatim but re-anchor it in an unrelated file and still pass self-check."""
+    root = _project(tmp_path / "wt", guard_test=REAL_GUARD_TEST)
+    wf = _workflow_md(tmp_path)
+    required = _exp()   # the exact mutation that survived last round, anchored in guard.py
+    # Same `before`/`after`, but a DIFFERENT file — not the case that beat the judge, just
+    # the identical anchor text wearing someone else's filename.
+    retargeted = _exp(guard="the glyph cue", file="test_guard.py")
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [retargeted]}))
+    _insert_run("t1", root, wf, review_history=_review_history_with_required(required))
+
+    result = dispatcher.verify_self_check("t1", str(exp_path))
+
+    assert result["ok"]
+    assert [m["guard"] for m in result["missing_required"]] == ["the glyph cue"]
+
+
 def test_verify_self_check_does_not_flag_a_required_mutation_whose_anchor_is_already_gone(tmp_path):
     """The agent legitimately rewrote the guarded code this round — the old `before` anchor
     no longer occurs anywhere in the file. There is nothing left to re-test, so this must

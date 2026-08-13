@@ -1356,6 +1356,24 @@ def test_latest_required_mutations_skips_a_retry_entry():
     ]
 
 
+def test_latest_required_mutations_returns_the_most_recent_substantive_verdicts_set():
+    """⛔ Rework round 4, finding 2: mirrors `latest_verdict`'s reversed-iteration for the
+    identical reason — a multi-round rework must be handed the CURRENT round's required
+    set, not a stale one from an earlier round the judge no longer cares about. Two
+    `changes_requested` entries, each carrying a DIFFERENT required mutation: the second
+    (more recent) one must win, not the first one encountered in iteration order."""
+    run = {"review_history": json.dumps([
+        {"round": 1, "at": "t1", "body": "the wire is loose", "verdict": "changes_requested",
+         "mutations": [{"guard": "g1", "file": "f.py", "before": "a", "after": "b"}]},
+        {"round": 2, "at": "t2", "body": "a different guard survived this time",
+         "verdict": "changes_requested",
+         "mutations": [{"guard": "g2", "file": "f.py", "before": "c", "after": "d"}]},
+    ])}
+    assert dispatcher.latest_required_mutations(run) == [
+        {"guard": "g2", "file": "f.py", "before": "c", "after": "d"},
+    ]
+
+
 def test_latest_required_mutations_defaults_to_empty_for_a_legacy_or_review_less_run():
     assert dispatcher.latest_required_mutations({"review_history": None}) == []
     run = {"review_history": json.dumps(
