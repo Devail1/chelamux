@@ -670,12 +670,19 @@ def test_timestamp_response_asks_the_module_clock_not_a_fixed_string(event, monk
     """A fixed string like ``"00:00:00"`` satisfies the HH:MM:SS shape check above just as
     well as a real clock — that gap is exactly what let a frozen-clock mutation survive
     (docs/DEFEAT_SHAPES.md). Monkeypatching ``hooks.time.strftime`` and asserting the exact
-    rendered value pins the mechanism (the module's own clock was asked), not just the
-    shape of whatever answer it gave."""
-    monkeypatch.setattr(hooks.time, "strftime", lambda fmt: "12:34:56")
+    rendered value pins THAT the module's own clock was asked, but a stub of the form
+    ``lambda fmt: "12:34:56"`` accepts and discards ``fmt`` — so it does not pin WHAT was
+    asked for, and ``time.strftime("%d:%m:%y")`` (a date, not a time) satisfies both the
+    stub and the HH:MM:SS shape check equally well (round 3's surviving mutation,
+    docs/DEFEAT_SHAPES.md shape 18). Capturing the ``fmt`` argument closes that: it pins
+    the format string itself, not merely the stubbed return value."""
+    captured_fmt = []
+    monkeypatch.setattr(hooks.time, "strftime",
+                         lambda fmt: captured_fmt.append(fmt) or "12:34:56")
 
     resp = hooks.timestamp_response(event)
 
+    assert captured_fmt == ["%H:%M:%S"]
     assert resp["systemMessage"] == "🕐 12:34:56"
 
 
