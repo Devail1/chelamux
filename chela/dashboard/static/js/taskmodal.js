@@ -113,7 +113,7 @@ function _timelineHtml(item) {
             ${s.round != null ? `<span class="ts">round ${escHtml(String(s.round))}</span>` : ''}
             ${s.at ? `<span class="ts">${escHtml(shortTime(s.at))}</span>` : ''}
           </div>
-          ${s.detail ? `<div class="task-modal-timeline-body md">${knMd(s.detail, 'review.md')}</div>` : ''}
+          ${s.detail ? `<div class="task-modal-timeline-body md">${knMd(s.detail)}</div>` : ''}
         </li>`).join('') + '</ol>';
 }
 
@@ -153,7 +153,7 @@ function openTaskModal(item) {
     // inner text (display-only — the PARSED item.title is never touched, see
     // taskmodalmodel.js's doc comment); knInline renders what's left (any
     // remaining markdown/emoji) instead of leaving literal `**`/backticks.
-    const title = knInline(displayTitle(item.title || '(untitled)').slice(0, 300), 'task.md');
+    const title = knInline(displayTitle(item.title || '(untitled)').slice(0, 300));
     const rows = _sideRows(item);
 
     const html = `

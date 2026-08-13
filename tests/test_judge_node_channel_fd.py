@@ -71,7 +71,7 @@ def test_run_suite_survives_a_leaked_node_channel_fd(monkeypatch):
     with the fd that reproduces the abort actually set in this process's own environment —
     proving `run_suite` (which env's through `_no_color_env`) does not hand it down."""
     monkeypatch.setenv("NODE_CHANNEL_FD", _POISON_FD)
-    result = judge.run_suite("node --test tests/cost.test.mjs", ROOT, timeout=60)
+    result = judge.run_suite("node --test tests/views.test.mjs", ROOT, timeout=60)
     assert result.ok, "the suite subprocess itself could not even be started/collected"
     assert result.exit_code == 0, (
         f"`node --test` did not survive a leaked NODE_CHANNEL_FD (exit {result.exit_code}): "
@@ -88,7 +88,7 @@ def test_test_js_suite_itself_survives_a_leaked_node_channel_fd(monkeypatch):
     import test_js_suites
 
     monkeypatch.setenv("NODE_CHANNEL_FD", _POISON_FD)
-    test_js_suites.test_js_suite(ROOT / "tests" / "cost.test.mjs")
+    test_js_suites.test_js_suite(ROOT / "tests" / "views.test.mjs")
 
 
 def test_clean_env_strips_node_channel_serialization_mode_too(monkeypatch):

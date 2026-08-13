@@ -191,7 +191,7 @@ test('costView: a real cost of exactly $0.00 must NOT hide — 0 is a value, not
     assert.equal(costView(0), '$0.00');
 });
 
-test('costView: formats to two decimals like cost.js\'s _fmtCost', () => {
+test('costView: formats to two decimals', () => {
     assert.equal(costView(1.5), '$1.50');
     assert.equal(costView(0.004), '$0.00');
 });
