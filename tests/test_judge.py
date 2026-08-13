@@ -597,6 +597,29 @@ def test_a_surviving_guard_hands_the_exact_mutation_forward_as_the_REQUIRED_MUTA
     assert required[0]["kind"] == "wiring"
 
 
+def test_the_REQUIRED_MUTATION_SET_carries_only_the_survivor_not_every_outcome(tmp_path):
+    """⛔ Rework round 3, finding 2: `request_changes` must be handed
+    ``mutations=[o.experiment.as_dict() for o in blocking]`` — the SURVIVED subset — never
+    ``report.outcomes``, which is every experiment the judge ran regardless of verdict. Every
+    other test in this file submits a single experiment, so ``blocking`` and
+    ``report.outcomes`` are the same list and nothing tells them apart. Submit TWO: the glyph
+    (survives — `FAKE_GUARD_TEST`'s glyph check is trivial) and the hue (still a real check,
+    so it's KILLED). If a KILLED experiment ever leaked into the REQUIRED MUTATION SET, a
+    rework brief would demand an agent re-test a mutation its own guard already defeats."""
+    hue_before = '    hue = "green" if state == "on" else "grey"'
+    hue_after = '    hue = "grey"'
+    result, run, posted = _judge_run(
+        tmp_path, FAKE_GUARD_TEST,
+        {"experiments": [_exp(), _exp(guard="the hue cue", before=hue_before, after=hue_after)]},
+    )
+    assert result["state"] == judge.J_BLOCKED
+    assert result["blocking"] == 1
+    assert len(result["outcomes"]) == 2                # both ran — one SURVIVED, one KILLED
+
+    required = dispatcher.latest_required_mutations(run)
+    assert [r["guard"] for r in required] == ["the colourblind glyph cue"]
+
+
 def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_path):
     """⚖️🕳️ CMX-228: the run moved out of `awaiting_review` (a human merged it, or CI got
     there first) WHILE the judge was mid-run. `request_changes`'s compare-and-swap correctly
