@@ -158,7 +158,27 @@ fi
 run_step "chela plugin --dir (documented offline-render path)" plugin --dir "$WORK/plugin"
 
 # Step 3: first `chela dashboard` — does it start, and does /api/agents answer 200?
-DASH_PORT=$(( 20000 + (RANDOM % 20000) ))
+#
+# CMX-275: this used to be `DASH_PORT=$(( 20000 + (RANDOM % 20000) ))` — a blind guess with
+# no verification, over a range that overlaps Linux's default ephemeral port range
+# (net.ipv4.ip_local_port_range is typically 32768-60999). Under CI's `-n 4` parallel pytest
+# workers, each spawning git/uv/npm/curl subprocesses for the whole time this dashboard
+# stays bound, the kernel can hand some unrelated outbound connection the exact port this
+# script guessed — measured live: PR #342 (untouched by this file) went red on `test
+# (3.12)` and green on `test (3.11)` for byte-identical code, and only this dashboard step
+# calls a port number without checking it first. `chela dashboard`'s own bind() then loses
+# the race with a real EADDRINUSE. Ask the kernel for an actually-free port instead of
+# hoping: bind to port 0, let the kernel pick one nothing else currently holds, read back
+# what it chose, then release it immediately before starting the real dashboard (a TOCTOU
+# window remains, but it is now milliseconds of bash instead of this dashboard's entire
+# lifetime).
+DASH_PORT=$(python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1])
+s.close()
+")
 
 # Step 3 fixture (test-only, SMOKE_BREAK_DASHBOARD=1, unset in the normal adopter path):
 # genuinely occupies $DASH_PORT *before* `chela dashboard` tries to bind it, so Flask's
