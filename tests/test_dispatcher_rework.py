@@ -1094,12 +1094,14 @@ def test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET(tmp_path):
     sent: list[str] = []
     mutation = {"guard": "the glyph cue", "kind": "wiring", "file": "guard.py",
                 "before": 'glyph = "*"', "after": 'glyph = ""'}
+    second_mutation = {"guard": "the second survivor", "kind": "mutation",
+                        "file": "other_guard.py", "before": "x = 1", "after": "x = 2"}
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="running", rework_count=1,
              window_name="test-1", started_at="2020-01-01T00:00:00+00:00",
              review_history=json.dumps([{
                  "round": 1, "at": "t", "body": "the glyph cue survived",
-                 "verdict": "changes_requested", "mutations": [mutation],
+                 "verdict": "changes_requested", "mutations": [mutation, second_mutation],
              }]))
 
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
@@ -1123,6 +1125,11 @@ def test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET(tmp_path):
     # ⛔ Rework round 6, finding 2: `_renudge_prompt` is the SECOND call site that renders
     # `_required_mutations_section` — it must not lose `kind` either.
     assert '"kind": "wiring"' in sent[0]
+    # ⛔ Rework round 7, finding 1 (defeat shape #13 in docs/DEFEAT_SHAPES.md): this is the
+    # SECOND call site's copy of the same one-survivor fixture gap — a truncated render would
+    # be just as invisible here as in the first call site's test.
+    assert '"guard": "the second survivor"' in sent[0]
+    assert '"file": "other_guard.py"' in sent[0]
 
 
 # --- (h) 🔴 changes_requested is not a silent state, and a HOLD must not freeze the exit ---
@@ -1416,13 +1423,15 @@ def test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable
     prompts: list[str] = []
     mutation = {"guard": "the glyph cue", "kind": "wiring", "file": "guard.py",
                 "before": 'glyph = "*"', "after": 'glyph = ""'}
+    second_mutation = {"guard": "the second survivor", "kind": "mutation",
+                        "file": "other_guard.py", "before": "x = 1", "after": "x = 2"}
 
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="changes_requested",
              worktree_path=str(original_wt), branch_name="test-1",
              review_history=json.dumps([{
                  "round": 1, "at": "t", "body": "the glyph cue survived",
-                 "verdict": "changes_requested", "mutations": [mutation],
+                 "verdict": "changes_requested", "mutations": [mutation, second_mutation],
              }]))
 
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
@@ -1455,6 +1464,13 @@ def test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable
     # strips it. A stripped `kind` defaults back to `"mutation"` on parse
     # (`judge.Experiment.parse`), silently turning a required WIRING re-test into a plain one.
     assert '"kind": "wiring"' in prompts[0]
+    # ⛔ Rework round 7, finding 1 (defeat shape #13 in docs/DEFEAT_SHAPES.md): every fixture
+    # up to round 6 carried exactly ONE required mutation, so `mutations` and `mutations[:1]`
+    # were indistinguishable in the rendered payload — `_required_mutations_section` could
+    # silently truncate to the first survivor and nothing here would notice. With two
+    # survivors, only a payload carrying BOTH satisfies these two assertions.
+    assert '"guard": "the second survivor"' in prompts[0]
+    assert '"file": "other_guard.py"' in prompts[0]
 
 
 def test_the_rework_prompt_has_no_REQUIRED_MUTATION_SET_section_when_the_verdict_carried_none(tmp_path):
