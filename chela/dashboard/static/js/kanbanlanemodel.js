@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// KANBAN LANE MODEL — pure status→lane mapping for the Work board's 5
+// KANBAN LANE MODEL — pure status→lane mapping for the Work board's 6
 // Jira-style lanes. No DOM, no fetch, no imports: laneOf() is a straight
 // function of a status string, so it is directly unit-testable
 // (tests/kanban_lane_model.test.mjs) without a jsdom fixture — same split
@@ -7,7 +7,7 @@
 // further here because this file needs no DOM-touching import at all.
 //
 // The board used to be 7 columns, one per status (kanban.js's old KANBAN_COLS).
-// It is now 5 lanes; several lanes hold more than one status, so a card's own
+// It is now 6 lanes; several lanes hold more than one status, so a card's own
 // status pill (kanban.js's STATUS_CHIPS / _kCard) is what tells two cards
 // sharing a lane apart — claimed vs running in In Progress, awaiting vs
 // changes-requested vs needs-human vs failed in Review.
@@ -18,10 +18,18 @@
 // corner would bury the one state that most needs eyes. Its card still gets
 // an unmistakable red "failed" pill (glyph + word — colour is a secondary
 // cue, never the only one; Liav is red-weak).
+//
+// ⛔ ARCHIVED is its own lane, separate from Done (Liav's call, CMX-265 round
+// 2, PR #334 — "archive them", overruling round 1's `done` argument on the
+// same ticket): a `closed` run (a PR a human closed WITHOUT merging) must
+// never share a lane with genuinely-merged work. Folding it into Done — even
+// with a distinct pill — would still let "how many of these shipped?" be
+// answered wrong by just counting a lane's cards; a separate lane keeps that
+// question answerable by reading Done alone.
 // ---------------------------------------------------------------------------
 
-// The 5 lanes, left to right.
-export const KANBAN_LANES = ['backlog', 'todo', 'in_progress', 'review', 'done'];
+// The 6 lanes, left to right.
+export const KANBAN_LANES = ['backlog', 'todo', 'in_progress', 'review', 'done', 'archived'];
 
 export const KANBAN_LANE_LABELS = {
     backlog: 'Backlog',
@@ -29,6 +37,7 @@ export const KANBAN_LANE_LABELS = {
     in_progress: 'In Progress',
     review: 'Review',
     done: 'Done',
+    archived: 'Archived',
 };
 
 // Every status the board currently renders, mapped to the lane that holds it.
@@ -45,6 +54,9 @@ const STATUS_LANE = {
     needs_human: 'review',
     failed: 'review',
     done: 'done',
+    // A PR closed WITHOUT merging (CMX-265) — terminal, like `done`, but never a member
+    // of it: see the ARCHIVED comment above.
+    closed: 'archived',
 };
 
 // Status → lane key. An UNKNOWN status (one STATUS_LANE has never seen — a

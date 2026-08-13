@@ -143,7 +143,11 @@ MAX_DELIVERIES_PER_TICK = 1
 # reached FROM awaiting_review, whose window the agent already killed on its way out. A
 # window that is gone because its agent finished and its PR then failed review is not a
 # corpse — reporting it as one is the false-DIED bug wearing a new state's hat.
-SETTLED_RUN_STATES = ("awaiting_review", "changes_requested", "needs_human", "done", "failed")
+#
+# `closed` (CMX-265) belongs here for the same reason as `done`: the dispatcher's own
+# reconcile path kills the window itself the moment a PR is closed without merging — its
+# disappearance is completion, not death.
+SETTLED_RUN_STATES = ("awaiting_review", "changes_requested", "needs_human", "done", "closed", "failed")
 
 # How long a vanished window's run row gets to settle before we call it a death.
 # The window dies a moment BEFORE the row lands: `chela task-finished` flips the run

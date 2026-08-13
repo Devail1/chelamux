@@ -575,3 +575,96 @@ def test_prune_never_drops_a_done_row_still_unstruck_in_the_tracker():
     assert removed == 1
     remaining = {r["task_id"] for r in conn.execute("SELECT task_id FROM runs").fetchall()}
     assert remaining == {"unstruck"}
+
+
+def test_prune_never_touches_closed_rows_no_matter_how_far_past_the_cap():
+    """⭐ GUARD (round 8, PR #334): "NEVER DELETE THE ROWS" — a `closed` row (a PR a
+    human closed without merging) is the archive Liav asked for, not a retention-
+    windowed cache like `done` rows. `_prune_done_rows` is keyed on `status='done'`
+    only, so a closed row's audit trail (every rework verdict up to the point it was
+    closed) must survive no matter how many `done` rows blow through the cap around
+    it — it is not merely exempt WHILE its task_id is still open in the tracker
+    (that's the sibling guard above), it is exempt full stop.
+
+    `test_tick_preserves_review_history_across_the_closed_transition`
+    (test_dispatcher_worktree_gc.py) covers the closed-reconcile UPDATE that writes
+    a closed row's columns untouched; this covers the OTHER half — the pruner that
+    runs on every later tick must keep walking past it forever.
+
+    Negative control: apply the judge's exact mutation — `status='done'` ->
+    `status IN ('done', 'closed')` in both the outer DELETE and the inner keep-N
+    subquery — and this goes RED (the closed row gets swept up by keep=0)."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    dispatcher.ensure_schema(conn)
+    wf_path = "wf.md"
+    conn.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status, started_at, "
+        "attempt, pr_state) VALUES (?, ?, 't', 'closed', ?, 1, 'closed')",
+        ("closed-row", wf_path, "2020-01-01T00:00:00+00:00"),
+    )
+    conn.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status, started_at, "
+        "attempt, pr_state) VALUES (?, ?, 't', 'done', ?, 1, 'merged')",
+        ("done-row", wf_path, "2020-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+
+    # keep=0 would prune every 'done' row for this workflow — the closed row must
+    # survive it untouched, same as it would survive any smaller cap.
+    removed = dispatcher._prune_done_rows(conn, wf_path, keep=0)
+
+    assert removed == 1  # only the done row
+    remaining = {r["task_id"] for r in conn.execute("SELECT task_id FROM runs").fetchall()}
+    assert remaining == {"closed-row"}  # ⭐ GUARD: the closed row is never in scope for the cap
+
+
+def test_prune_keep_n_subquery_scope_excludes_closed_rows_from_the_retention_window():
+    """⭐ GUARD (round 9, PR #334) — `_prune_done_rows` spells `status='done'` TWICE:
+    once in the outer DELETE, once in the inner keep-N subquery, and they mean
+    different things (what is eligible for deletion vs. what counts toward the cap).
+    The sibling guard above only ever calls this at `keep=0`, where the subquery is
+    `LIMIT 0` and returns nothing whether it is scoped to `done` or to `done, closed`
+    — that axis is structurally unreachable at that one input, so a mutation of the
+    inner subquery ALONE (`status='done'` -> `status IN ('done', 'closed')`, inner
+    only) survived round 8's negative control untouched.
+
+    This exercises a real `keep>0` cap with a `closed` row sitting inside the
+    retention window (the most recent row by timestamp) so the inner subquery's
+    scope actually decides something: with the mutation in place, the closed row
+    steals the one keep-slot from the correctly-scoped `done` row, and BOTH `done`
+    rows get swept by the outer DELETE — breaking `_prune_done_rows`' own docstring
+    promise, "Keep at most `keep` most-recent done rows".
+
+    Negative control (report all three separately, per round 9):
+    1. outer DELETE only mutated -> the keep=0 test above goes RED (already true).
+    2. inner keep-N subquery only mutated -> THIS test goes RED (removed == 2, not
+       1; `done-row-newer` is swept along with `done-row-older`).
+    3. both mutated -> THIS test goes RED too (same failure as #2 — the closed row
+       still survives the outer DELETE via the keep-set, but both `done` rows lose
+       their slot to it either way)."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    dispatcher.ensure_schema(conn)
+    wf_path = "wf.md"
+    rows = [
+        ("closed-row", "closed", "closed", "2020-01-03T00:00:00+00:00"),  # newest
+        ("done-row-newer", "done", "merged", "2020-01-02T00:00:00+00:00"),
+        ("done-row-older", "done", "merged", "2020-01-01T00:00:00+00:00"),  # oldest
+    ]
+    for task_id, status, pr_state, started_at in rows:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, started_at, "
+            "attempt, pr_state) VALUES (?, ?, 't', ?, ?, 1, ?)",
+            (task_id, wf_path, status, started_at, pr_state),
+        )
+    conn.commit()
+
+    # keep=1: correctly scoped, the ONE most-recent `done` row (done-row-newer) fills
+    # the single keep-slot — the closed row is never a candidate for it, done or not.
+    removed = dispatcher._prune_done_rows(conn, wf_path, keep=1)
+
+    assert removed == 1  # only done-row-older
+    remaining = {r["task_id"] for r in conn.execute("SELECT task_id FROM runs").fetchall()}
+    # ⭐ GUARD: done-row-newer keeps its slot — the closed row cannot occupy it.
+    assert remaining == {"closed-row", "done-row-newer"}

@@ -76,8 +76,11 @@ ACTIVE_STATUSES = ("claimed", "running")
 # task (they already own their branch, worktree and PR).
 REVIEW_STATUSES = ("awaiting_review", "changes_requested", "needs_human")
 
-# States a fresh claim must skip: already in flight, parked in review, or shipped.
-NOT_CLAIMABLE = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "done")
+# States a fresh claim must skip: already in flight, parked in review, or terminal.
+# `closed` (CMX-265) is terminal the same way `done` is — a rejected/superseded trial
+# already owns its branch, worktree and PR, and re-claiming the same task_id would fork
+# a second worktree behind a PR nobody is looking at.
+NOT_CLAIMABLE = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "done", "closed")
 
 # Statuses whose PR can still merge OUT OF BAND (a hand `gh pr merge`, never through
 # `chela merge`) with no chance for chela to have already seen it settle: the review
@@ -862,9 +865,11 @@ def _run_trial_outcome(row: sqlite3.Row) -> str | None:
     `died`: a `failed` row at MAX_ATTEMPTS — the exact same "no more retries" test the
     claim loop itself uses to refuse a re-claim, so a row this function calls terminal is
     a row that will never move again.
-    `abandoned`: `done` without a merged PR — the task left the tracker (a human edit, a
-    re-hash, a manually-closed PR) with no completion evidence. The trial ran and was
-    walked away from, not shipped.
+    `abandoned`: `done` without a merged PR (the task left the tracker — a human edit, a
+    re-hash — with no completion evidence), OR `closed` (CMX-265: a PR a human closed
+    WITHOUT merging). Both are the same shape from the ledger's point of view — the
+    trial ran and was walked away from, not shipped — `closed` is only a distinct board
+    lane, not a distinct trial outcome.
     `merged`: the PR landed. Checked first — `pr_state` can be `merged` on a row whose
     `status` is not yet `done` for one tick (phase-0 PR-state refresh runs before the
     reconcile step that flips `status`), and a trial that merged is never "abandoned".
@@ -873,7 +878,7 @@ def _run_trial_outcome(row: sqlite3.Row) -> str | None:
         return "merged"
     if row["status"] == "failed" and (row["attempt"] or 1) >= MAX_ATTEMPTS:
         return "died"
-    if row["status"] == "done":
+    if row["status"] in ("done", "closed"):
         return "abandoned"
     return None
 
@@ -893,7 +898,7 @@ def run_is_terminal(row) -> bool:
         return True
     if row.get("status") == "failed" and (row.get("attempt") or 1) >= MAX_ATTEMPTS:
         return True
-    return row.get("status") == "done"
+    return row.get("status") in ("done", "closed")
 
 
 def reconcile_trial_ledger(existing_text: str, rows: list[sqlite3.Row]) -> tuple[str, list[str], list[str]]:
@@ -3164,7 +3169,8 @@ def _refused(error: str | None, refused: bool = False) -> dict:
     at all — and the daemon must not tell the operator otherwise.
     """
     return {
-        "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
+        "open": 0, "reconciled_done": 0, "reconciled_closed": 0, "reconciled_failed": 0,
+        "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
         "judged": 0, "judge_lost": 0, "judge_stranded": 0,
@@ -3233,6 +3239,7 @@ def tick(workflow_path: str | Path) -> dict:
     summary = {
         "open": len(open_tasks),
         "reconciled_done": 0,
+        "reconciled_closed": 0,
         "reconciled_failed": 0,
         "dispatched": 0,
         "pr_state_refreshed": 0,
@@ -3397,6 +3404,49 @@ def tick(workflow_path: str | Path) -> dict:
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (PR merged)", row["task_id"])
+                continue
+            if row["status"] in RECONCILE_MERGE_STATUSES and row["pr_state"] == "closed":
+                # A human closed the PR WITHOUT merging — a rejected trial, not shipped
+                # work. Left unhandled, the row parks in the Review lane forever: nothing
+                # else ever moves a review-state row off `pr_state='closed'`, since it is
+                # terminal and phase 0 above stops refreshing it. Reconcile it here so it
+                # leaves Review the same tick the close is observed (CMX-265 — 7 closed
+                # PRs stuck in Review, ghosts that made a 5-item queue read as 12).
+                #
+                # Deliberately NOT the merged branch above: no `merged_in_tick` (that
+                # counter exists to fire hooks.after_done, a merge-only signal — firing
+                # it for a rejected PR would be a false "shipped" event) and no tracker
+                # strike expectation (there is nothing to strike; the task was rejected,
+                # not delivered).
+                #
+                # ⭐ `status='closed'` — a THIRD terminal run status, not `done`. Round 1 of
+                # this ticket argued `done` on the record (the RUN finished; the PR's fate
+                # is a separate axis, already carried by `pr_state`) and that argument was
+                # accepted... then overruled by Liav in round 2 (PR #334): "archive them."
+                # Concretely: the Done lane held 18 genuinely-merged rows, and folding in 7
+                # that never merged — some superseded by a successor ticket (cmx-230 →
+                # cmx-257, etc.), some abandoned outright — breaks the one property worth
+                # keeping, "everything in Done shipped". `done` would just be a quieter lie
+                # in a quieter lane than the Review-ghost bug this PR started out fixing.
+                #
+                # `closed` is terminal the same way `done` is (nothing left for the
+                # dispatcher to DO with this row — poll it, nudge it, judge it, dispatch
+                # it), so it gets the same treatment: a member of `NOT_CLAIMABLE` (never
+                # re-claimed) and of `_run_trial_outcome`'s "abandoned" branch (the trial
+                # ran and was walked away from — the ledger doesn't care which board lane a
+                # row sits in). It differs from `done` ONLY where the PR's outcome actually
+                # matters: it does not fire `hooks.after_done` (see above) and it renders
+                # in its own `archived` board lane, never Review or Done — kanban.js's
+                # STATUS_CHIPS['closed'] pill + kanbanlanemodel.js's STATUS_LANE map.
+                if row["window_name"]:
+                    _kill_window(row["window_name"])
+                conn.execute(
+                    "UPDATE runs SET status='closed' WHERE task_id=?", (row["task_id"],)
+                )
+                conn.commit()
+                _cleanup_worktree_on_done(wf.path.parent, row)
+                summary["reconciled_closed"] += 1
+                log.info("Task %s closed (PR closed without merging)", row["task_id"])
                 continue
             if row["task_id"] not in open_ids and row["status"] in REVIEW_STATUSES:
                 # Read the agent's transcript *before* killing the window —

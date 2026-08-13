@@ -58,6 +58,22 @@ def test_outcome_is_abandoned_when_done_without_a_merged_pr():
     assert dispatcher._run_trial_outcome(_row(status="done", pr_state="open")) == "abandoned"
 
 
+def test_outcome_is_abandoned_when_closed_without_a_merged_pr():
+    # 🔴 GUARD (CMX-265 round 4): `closed` (a PR a human closed WITHOUT merging) is its
+    # own board lane (kanbanlanemodel.js's `archived`), but the docstring above is
+    # explicit that it is NOT a distinct trial outcome — the trial ran and was walked
+    # away from, same as an unmerged `done` row, so the ledger must count it as
+    # "abandoned" too. Narrowing `_run_trial_outcome`'s `("done", "closed")` check back
+    # to just `"done"` would silently drop every closed-not-merged trial to "pending"
+    # forever — this is the assertion that catches it.
+    assert dispatcher._run_trial_outcome(_row(status="closed", pr_state=None)) == "abandoned"
+    assert dispatcher._run_trial_outcome(_row(status="closed", pr_state="open")) == "abandoned"
+    # ⭐ COUNTERWEIGHT: `closed` never wins over an actual merge — a row can be `closed`
+    # for one tick before `pr_state` settles, same reasoning as the `merged`-wins-over-
+    # `running` case above.
+    assert dispatcher._run_trial_outcome(_row(status="closed", pr_state="merged")) == "merged"
+
+
 # --- run_is_terminal — the plain yes/no twin CMX-261's `chela.restore` fix consumes ------
 
 def test_run_is_terminal_matches_every_case_run_trial_outcome_calls_terminal():
@@ -70,6 +86,12 @@ def test_run_is_terminal_matches_every_case_run_trial_outcome_calls_terminal():
         _row(status="failed", attempt=1), _row(status="failed", attempt=2),
         _row(status="failed", attempt=dispatcher.MAX_ATTEMPTS),
         _row(status="done", pr_state=None), _row(status="done", pr_state="open"),
+        # 🔴 GUARD (CMX-265 round 6): `dev` grew `run_is_terminal` while this ticket's
+        # `closed` outcome was in flight, and its row list predated `closed` as a status
+        # — so it stayed green even after the two functions disagreed on this exact axis.
+        # These three close that blind spot the same way the ledger-side guard above does.
+        _row(status="closed", pr_state=None), _row(status="closed", pr_state="open"),
+        _row(status="closed", pr_state="merged"),
     ]
     for row in rows:
         assert dispatcher.run_is_terminal(row) == (dispatcher._run_trial_outcome(row) is not None), row

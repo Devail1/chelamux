@@ -828,11 +828,17 @@ def test_reconcile_done_from_a_review_state_row_that_left_the_tracker(tmp_path):
 
 def test_a_vanished_window_in_a_review_state_is_completion_not_death(tmp_path):
     """The agent killed its own window on task-finished; the PR then failed review. That
-    window is not a corpse — reporting it as one is the false-DIED bug in a new hat."""
-    for status in ("changes_requested", "needs_human"):
+    window is not a corpse — reporting it as one is the false-DIED bug in a new hat.
+
+    Round 7 (PR #334): `closed` joined SETTLED_RUN_STATES on the same reasoning — the
+    dispatcher's own closed-reconcile path kills the window itself the moment a PR is
+    closed without merging, so its disappearance is completion too, not a DIED corpse.
+    Without `closed` in this loop, a mutation that dropped it from SETTLED_RUN_STATES
+    left every existing case here green."""
+    for status in ("changes_requested", "needs_human", "closed"):
         assert status in inbox.SETTLED_RUN_STATES
-    event = inbox._gone_event("@7", "test-1", "", {"status": "changes_requested"})
-    assert event["kind"] == "completed_gone" and event.get("silent") is True
+        event = inbox._gone_event("@7", "test-1", "", {"status": status})
+        assert event["kind"] == "completed_gone" and event.get("silent") is True
 
 
 # --- (f) 🔴 THE ENVIRONMENT HALF: a rework is launched into a PREPARED worktree ---------

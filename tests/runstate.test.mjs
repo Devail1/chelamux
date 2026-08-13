@@ -35,6 +35,13 @@ test('the review loop is visually DISTINCT — the three states never collide', 
   assert.equal(new Set(seen).size, 3);
 });
 
+test('closed (CMX-265, a PR closed without merging) is NOT badge-done', () => {
+  // 🔴 GUARD: reusing `badge-done` for a rejected PR would recreate the exact "shipped"
+  // vs "rejected" conflation the board's Archived lane exists to prevent, just here.
+  assert.notEqual(runStatusBadgeClass('closed'), 'badge-done');
+  assert.equal(runStatusBadgeClass('closed'), 'badge-closed');
+});
+
 test('an unknown status still renders (grey), and never throws', () => {
   assert.equal(runStatusBadgeClass('who_knows'), UNKNOWN_BADGE);
   assert.equal(runStatusBadgeClass(undefined), UNKNOWN_BADGE);

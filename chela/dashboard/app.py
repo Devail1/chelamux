@@ -2782,6 +2782,13 @@ def _runs_for_workflow(
     ``== 'awaiting_review'`` test it appeared in NO column of the Kanban at all — it simply
     vanished from the board while its agent was being re-spawned. Each card keeps its OWN
     status (see kanban.js), so the column never claims a rejected PR is awaiting review.
+
+    ``closed`` (CMX-265) rides in `recent` alongside `done`/`failed` — it is just as
+    terminal, and the frontend's own bucketing (kanban.js's `_kanbanFlatten`) is what
+    actually separates it back out into its own `archived` lane. Omitting it here would
+    not just mis-lane it — it would make a closed-not-merged row vanish from this API
+    payload ENTIRELY (the row survives in the DB either way; only the board view would
+    lose it).
     """
     try:
         target = str(Path(wf_path).expanduser().resolve())
@@ -2790,7 +2797,7 @@ def _runs_for_workflow(
     matching = [r for r in all_runs if r.get("workflow_path") == target]
     active = [r for r in matching if r.get("status") in dispatcher.ACTIVE_STATUSES]
     awaiting = [r for r in matching if r.get("status") in dispatcher.REVIEW_STATUSES][:10]
-    recent = [r for r in matching if r.get("status") in ("done", "failed")][:10]
+    recent = [r for r in matching if r.get("status") in ("done", "closed", "failed")][:10]
     return active, awaiting, recent
 
 

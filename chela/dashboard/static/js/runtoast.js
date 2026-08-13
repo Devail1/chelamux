@@ -22,6 +22,9 @@ export const RUN_TOAST_KINDS = {
     needs_human: { icon: '🛑', text: 'NEEDS A HUMAN — rework cap reached' },
     done: { icon: '✅', text: 'done' },
     failed: { icon: '⚠️', text: 'failed' },
+    // A PR closed WITHOUT merging (CMX-265) — its own icon/text, never "done"'s ✅:
+    // that would announce a rejected trial as shipped.
+    closed: { icon: '⊘', text: 'closed — not merged' },
 };
 
 // Returns the toast kind (a key of RUN_TOAST_KINDS) for a status transition, or

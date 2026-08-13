@@ -127,6 +127,14 @@ def test_tick_refuses_and_does_nothing(tmp_path, monkeypatch, caplog):
     # and must not claim otherwise (chela/main.py branches on this).
     assert summary["refused"] is True
     assert "refusing to dispatch" in (summary["error"] or "")
+    # Round 7 (PR #334): chela/main.py:317 and :1140 read these four keys UNCONDITIONALLY
+    # off every tick's summary, refused or not — `_refused()`'s own docstring calls this
+    # "same shape every caller already reads". Dropping any one of them (e.g.
+    # `reconciled_closed`, which CMX-265 added) would KeyError the daemon loop on the very
+    # next refused tick, not merely fail a comparison silently. Read through the real
+    # dispatcher._escaped fence path above, not a hand-built dict.
+    for key in ("dispatched", "reconciled_done", "reconciled_closed", "reconciled_failed"):
+        assert key in summary, f"a refused tick's summary is missing {key!r} — main.py reads it unconditionally"
     # LOUD: this is the whole point. A refusal nobody can see is the silence that hid the
     # bug for hours.
     assert any(r.levelname == "ERROR" and "Dispatch REFUSED" in r.getMessage()
