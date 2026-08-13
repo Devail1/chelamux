@@ -255,6 +255,27 @@ function mountWithRealCss(bodyHtml, extraBodyAttrs, cssOverride) {
     return dom.window;
 }
 
+// jsdom's getComputedStyle has NO pseudo-element support at all (confirmed
+// empirically: `getComputedStyle(el, '::before')` prints "Not implemented" and
+// returns the same 'normal'/'auto' values whether or not a matching ::before
+// rule exists — the request-2 assertion below does not use it for that reason).
+// What jsdom's CSSOM DOES do honestly is parse the real stylesheet and let
+// `Element.matches()` answer selector-matching questions. A `::before` rule only
+// generates a pseudo-box on elements matching its BASE selector (the part before
+// the `::before`), so stripping the pseudo and asking `matches()` answers the
+// exact "does this rule still REACH the re-parented row" question directly —
+// the same mechanism a browser uses to decide which elements get the box at all.
+function _activeRailReaches(win, el) {
+    for (const rule of win.document.styleSheets[0].cssRules) {
+        if (!rule.selectorText || !rule.selectorText.includes('::before')) continue;
+        for (const part of rule.selectorText.split(',').map(s => s.trim())) {
+            if (!part.endsWith('::before')) continue;
+            if (el.matches(part.slice(0, -'::before'.length).trim())) return true;
+        }
+    }
+    return false;
+}
+
 // --- TYPE SCALE (ticket claim 1) — CMX-257 round 10 (human directive on PR
 // #326, superseding round 9's jsdom-cascade framing): this used to assert the
 // --wall-pane-*/--card-* tokens' RESOLVED font-size/line-height via jsdom's
@@ -733,6 +754,71 @@ test('nav inventory (CLAIM 3): the demoted group still exists and renders under 
         'the demoted row\'s label has display: none — re-parenting has become removal of the accessibility cue');
     assert.ok(!/^(hidden|collapse)$/.test(labelCs.visibility),
         `the demoted row's label has visibility: ${labelCs.visibility} — invisible but still occupying box-tree space`);
+});
+
+// --- CLAIM 3, round 20 (human directive on PR #326, judge finding 2): the
+// active-row cue must actually PAINT on a demoted row, not just carry the
+// class. Round 19 closed the JS half (_syncSidebarActive's sweep, guarded in
+// tests/sidebar.test.mjs by reading `.active` off the rendered node with NO
+// stylesheet mounted) — this is the CSS half of the same claim. The three
+// rules that turn `.active` into a visible cue (accent fill, the accent rail
+// ::before, the accent label colour) were all unscoped before this PR, which
+// was a no-op while every nav row lived in #side-nav; scoping any of them to
+// `#side-nav` after the re-parenting is a silent regression — selecting
+// Knowledge/Agents/Personas/Cost would leave the sidebar with an active CLASS
+// but no lit row, degrading to a hue-only cue on the icon tint alone (the
+// exact a11y regression this ticket exists to prevent). Mounted against the
+// REAL index.html nav section + REAL style.css, with one `.active` row shaped
+// exactly as nav.js's _navItemHtml emits it in EACH host (#side-nav-more and,
+// as a live control, #side-nav) plus one inactive row as a second control —
+// three checks account for the whole diff a single "scope to #side-nav"
+// mutation makes in one hunk (background, ::before rail, label colour), so
+// catching any one of them reddens that mutation.
+test('CLAIM 3: the active-row cue actually PAINTS on a demoted row, not just the class', () => {
+    const demotedActive = '<div class="side-item active" data-view="agents"><span class="side-item-icon"></span><span class="side-item-label">Agents</span></div>';
+    const primaryActive = '<div class="side-item active" data-view="work"><span class="side-item-icon"></span><span class="side-item-label">Work</span></div>';
+    const primaryInactive = '<div class="side-item" data-view="feed"><span class="side-item-icon"></span><span class="side-item-label">Feed</span></div>';
+    const bodyHtml = `<div class="app"><aside class="sidebar">${NAV_SECTION_HTML}</aside></div>`
+        .replace('id="side-nav-more"></div>', `id="side-nav-more">${demotedActive}</div>`)
+        .replace('id="side-nav"></div>', `id="side-nav">${primaryActive}${primaryInactive}</div>`);
+    const win = mountWithRealCss(bodyHtml);
+
+    const demoted = win.document.querySelector('#side-nav-more .side-item.active');
+    const primary = win.document.querySelector('#side-nav .side-item.active');
+    const inactive = win.document.querySelector('#side-nav .side-item:not(.active)');
+    assert.ok(demoted && primary && inactive, 'the fixture is missing one of its three rows');
+
+    // 1. the accent FILL: an active demoted row must resolve the same background
+    // as an active primary row, and neither may match a merely-present row's.
+    const demotedBg = win.getComputedStyle(demoted).background;
+    const primaryBg = win.getComputedStyle(primary).background;
+    const inactiveBg = win.getComputedStyle(inactive).background;
+    assert.notEqual(demotedBg, inactiveBg,
+        'the demoted active row has no accent fill distinguishing it from an unselected row — scoping ' +
+        '`.side-item.active` to #side-nav leaves every demoted selection dark');
+    assert.equal(demotedBg, primaryBg,
+        "the demoted active row's accent fill does not match the primary active row's — the active-fill rule " +
+        'no longer reaches #side-nav-more');
+
+    // 2. the accent RAIL (::before): jsdom cannot compute a pseudo-element's
+    // style (see _activeRailReaches above), so this reads the cascade directly —
+    // does the ::before rule's base selector still match the demoted row.
+    assert.ok(_activeRailReaches(win, demoted),
+        "the demoted active row's accent rail (::before) selector no longer matches it — scoping " +
+        '`.side-item.active::before` to #side-nav removes the rail from every demoted selection');
+    assert.ok(_activeRailReaches(win, primary),
+        'sanity: the primary active row should still carry the accent rail (control)');
+
+    // 3. the accent LABEL colour: same shape as the fill check, on the label span.
+    const demotedLabelColor = win.getComputedStyle(demoted.querySelector('.side-item-label')).color;
+    const primaryLabelColor = win.getComputedStyle(primary.querySelector('.side-item-label')).color;
+    const inactiveLabelColor = win.getComputedStyle(inactive.querySelector('.side-item-label')).color;
+    assert.notEqual(demotedLabelColor, inactiveLabelColor,
+        "the demoted active row's label is not accent-coloured — its active state degrades to a hue-only icon " +
+        'tint, the exact cue this ticket\'s a11y claim says must never happen');
+    assert.equal(demotedLabelColor, primaryLabelColor,
+        "the demoted active row's label colour does not match the primary active row's — the active-label rule " +
+        'no longer reaches #side-nav-more');
 });
 
 // --- CMX-257 round 10 (human directive on PR #326, superseding round 8/9):

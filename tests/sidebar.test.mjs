@@ -329,6 +329,25 @@ test('CMX-230: renderNav actually SPLITS the sidebar — primary views in #side-
 test('CMX-257: selecting a view lights its row wherever renderNav actually put it — primary AND demoted', () => {
     nav.renderNav();
 
+    // round 20 (judge finding 1 on PR #326): the ONLY thing that makes a rendered
+    // nav row route anywhere is the onclick _navItemHtml emits — calling
+    // window.chela.selectView(...) below (as this test always has) never touches
+    // it, so emptying that handler left every nav row in BOTH lists inert (the
+    // demoted views become unreachable from the sidebar — removal, not
+    // re-parenting) while this test stayed green. jsdom does not execute inline
+    // onclick="..." attributes without runScripts: "dangerously" (unset here,
+    // same as tests/topbarmenu.test.mjs/tests/settings_update.test.mjs, which
+    // document the same workaround), so the row's actual route to selectView is
+    // pinned on the ATTRIBUTE the real render emits, on both a demoted row and a
+    // primary row.
+    const demotedRow = document.querySelector('#side-nav-more .side-item[data-view="agents"]');
+    assert.match(demotedRow.getAttribute('onclick'), /chela\.selectView\(this\.dataset\.view\)/,
+        'the demoted row is not wired to chela.selectView(this.dataset.view) — emptying the handler leaves it ' +
+        'unreachable from the sidebar entirely, which is removal, not re-parenting');
+    const primaryRowEl = document.querySelector('#side-nav .side-item[data-view="work"]');
+    assert.match(primaryRowEl.getAttribute('onclick'), /chela\.selectView\(this\.dataset\.view\)/,
+        'the primary row is not wired to chela.selectView(this.dataset.view)');
+
     window.chela.selectView('agents');   // demoted -> #side-nav-more
     assert.equal(
         document.querySelector('#side-nav-more .side-item[data-view="agents"]').classList.contains('active'),
