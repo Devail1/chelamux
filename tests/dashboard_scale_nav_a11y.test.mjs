@@ -568,6 +568,17 @@ test('nav inventory: secondaryNavViews drops a disabled view — the enabled fil
         'secondaryNavViews must drop a disabled secondary-tier view (enabled() false) — this is the ENABLED half of the shared navViews() filter');
     assert.deepEqual(secondaryNavViews(entries, { terminalsOn: true }).map(v => v.id), ['demoted-like'],
         'secondaryNavViews must include the same view once its enabled() check passes');
+
+    // CMX-257 round 17: the VIRTUAL half of the same shared filter (judge
+    // finding — round 16 above only closed the ENABLED half). `virtual: true`
+    // means "reachable, but NOT a nav item" (viewreg.js's own comment) — that
+    // must hold regardless of tier, so a virtual view tiered 'secondary' must
+    // never surface as a #side-nav-more row. `enabled` is fixed `true` (not a
+    // function of ctx) so this fixture can ONLY be reached by dropping the
+    // virtual filter, not the enabled one.
+    const virtualEntries = [{ id: 'virtual-secondary-like', tier: 'secondary', virtual: true, enabled: true }];
+    assert.deepEqual(secondaryNavViews(virtualEntries, { terminalsOn: true }).map(v => v.id), [],
+        'secondaryNavViews must drop a virtual secondary-tier view — this is the VIRTUAL half of the shared navViews() filter');
 });
 
 test('nav inventory: Knowledge/Agents/Personas/Cost are demoted (secondary), not deleted', () => {
