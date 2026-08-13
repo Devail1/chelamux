@@ -145,6 +145,26 @@
 // and any font-size/weight COMPARISON to the primary rail's own rows) moves
 // to NOT GUARDED, item (v) below.
 //
+// CMX-273 spike (orchestrator, after CMX-268 merged over a blocked verdict):
+// three rework rounds on PR #338 each found a new spelling of "the wall stops
+// filling its stage" that the four assertions below (padding-left/-right,
+// max-width, width) didn't cover (an unresolved `vw`, an unexpanded
+// `padding-inline`, a `width`+`margin:auto` pair). Before writing a fifth
+// property assertion, this spike asked whether the OUTCOME itself — "does
+// the wall visually fill its stage" — is guardable at all in this harness.
+// Verdict: no. jsdom has no layout engine (getBoundingClientRect/offsetWidth
+// are always zero, percentage/flex/grid widths never resolve against a real
+// parent — see docs/SPIKE_WALL_FILLS_STAGE.md), so this file can only ever
+// pin an enumerated list of known-bad property values, never observe the
+// rendered result. Confirmed live: `transform: scale(0.6)` on `.grid-stack`
+// reproduces the identical regression today and passes all four assertions
+// below untouched — the same "unbounded CSS surface" shape as CLAIM 1 and
+// GUARD 6 above. The four properties stay (cheap tripwires against the three
+// regressions that already happened) but this is deliberately NOT extended
+// with a fifth/sixth property; see item (vi) below and the spike doc for the
+// full evidence and the Playwright-sized project that would be needed to
+// guard the outcome for real.
+//
 // NOT GUARDED here — verified instead by manual greyscale capture (per the
 // round-6 directive: "I verified it live on an isolated dashboard... a
 // greyscale capture showing every status distinguishable with hue fully
@@ -194,6 +214,21 @@
 // guarded is the one DOM fact below: the four demoted views still exist and
 // render under a heading that itself exists and carries real text —
 // "RE-PARENTING, NOT REMOVAL", views.js's own claim.
+// — CMX-273 spike —
+// (vi) "the wall visually fills its stage" as an OUTCOME (does .grid-stack
+// actually render at full width at every density, by whatever CSS mechanism
+// might narrow it — transform/zoom/inset/container-queries/aspect-ratio/a
+// new wrapper element/anything else) — jsdom has no layout engine, so no
+// text-and-DOM test in this file can observe a rendered box size, only pin
+// enumerated property VALUES (see docs/SPIKE_WALL_FILLS_STAGE.md for the
+// empirical proof and a live fifth counter-example). What stays guarded,
+// deliberately not extended further, is the narrow, cheap claim below:
+// #term-stage's own padding-left/-right and .grid-stack's own max-width/
+// width resolve to the specific values the three CMX-268 regressions
+// actually broke. A real outcome-level guard needs a headless-browser suite
+// (Playwright), not present in this repo; until then this claim's acceptance
+// check is a manual visual look at the live dashboard, same discipline as
+// (iv) and the type-scale half of claim 1 above.
 //
 // Run: node --test tests/dashboard_scale_nav_a11y.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
