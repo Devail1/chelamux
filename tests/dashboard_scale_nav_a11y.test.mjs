@@ -317,6 +317,23 @@ test('WIRING: the airy-density rule\'s horizontal padding is won by the real sel
     assert.ok(px(cs.paddingRight) >= 32,
         `#term-stage's resolved padding-right (${cs.paddingRight}) is too thin at a desktop width — a higher-specificity ` +
         'override (or a zeroed clamp) is winning the cascade instead of the airy-density rule');
+
+    // CMX-257 round 18 (judge finding 1): the assertions above only mount
+    // `wall-density-airy` ON, so they prove the class turns the air ON and say
+    // nothing about the absence of the class keeping it OFF — which is exactly
+    // why descoping the selector from `body.wall-density-airy #term-stage` to
+    // plain `body #term-stage` stayed green through the whole suite. style.css's
+    // own must-never ("1 and 2-pane layouts only; 4/6-up stays exactly as dense
+    // as before this ticket") IS the OFF case; mount the same fixture with NO
+    // body class and pin that the padding stays thin.
+    const winOff = mountWithRealCss(AIRY_FIXTURE, '', AIRY_PADDING_CSS);
+    const csOff = winOff.getComputedStyle(winOff.document.getElementById('term-stage'));
+    assert.ok(px(csOff.paddingLeft) < 32,
+        `#term-stage's padding-left without wall-density-airy is ${csOff.paddingLeft} — the airy-density rule is firing ` +
+        'unconditionally, not gated on the class');
+    assert.ok(px(csOff.paddingRight) < 32,
+        `#term-stage's padding-right without wall-density-airy is ${csOff.paddingRight} — the airy-density rule is firing ` +
+        'unconditionally, not gated on the class');
 });
 // CMX-257 round 10 (human directive on PR #326, superseding round 9): "which
 // padding edges the airy-density rule sets" (i.e. horizontal-only, never
@@ -340,6 +357,21 @@ test('WIRING: the airy-density .grid-stack column stays capped (max-width), cent
     // never actually took effect at any viewport.
     assert.equal(cs.minWidth, 'auto',
         `min-width resolved to ${cs.minWidth}, not auto — per CSS 2.1 §10.4 it overrides max-width when they conflict, so the capped column would never bind at any viewport`);
+
+    // CMX-257 round 18 (judge finding 2): same missing half as the padding
+    // test above — mount the fixture with NO body class and pin that the cap
+    // and centring never apply. Without this, descoping the selector from
+    // `body.wall-density-airy #term-stage .grid-stack` to plain
+    // `body #term-stage .grid-stack` caps/centres the wall's grid at EVERY
+    // density, including 4/6-up, and nothing here notices.
+    const winOff = mountWithRealCss(AIRY_FIXTURE, '');
+    const csOff = winOff.getComputedStyle(winOff.document.querySelector('.grid-stack'));
+    assert.equal(csOff.maxWidth, 'none',
+        `.grid-stack's max-width without wall-density-airy is ${csOff.maxWidth}, not none — the cap is firing unconditionally, not gated on the class`);
+    assert.notEqual(csOff.marginLeft, 'auto',
+        `.grid-stack's margin-left without wall-density-airy resolved to auto — the centring is firing unconditionally, not gated on the class`);
+    assert.notEqual(csOff.marginRight, 'auto',
+        `.grid-stack's margin-right without wall-density-airy resolved to auto — the centring is firing unconditionally, not gated on the class`);
 });
 
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
@@ -579,6 +611,18 @@ test('nav inventory: secondaryNavViews drops a disabled view — the enabled fil
     const virtualEntries = [{ id: 'virtual-secondary-like', tier: 'secondary', virtual: true, enabled: true }];
     assert.deepEqual(secondaryNavViews(virtualEntries, { terminalsOn: true }).map(v => v.id), [],
         'secondaryNavViews must drop a virtual secondary-tier view — this is the VIRTUAL half of the shared navViews() filter');
+
+    // CMX-257 round 18: the mirror case for primaryNavViews. Every real VIEWS
+    // entry GUARD 7 feeds primaryNavViews is pre-filtered with `.filter(v =>
+    // !v.virtual)`, so dropping the virtual filter from primaryNavViews alone
+    // passes every fixture above; today it's only caught, incidentally, by
+    // sidebar.test.mjs's real render — because VIEWS happens to contain
+    // exactly one virtual, untiered, enabled entry (agent-detail). That's a
+    // coincidence of the registry, not a guaranteed catch. This synthetic
+    // fixture makes it deliberate.
+    const primaryVirtualEntries = [{ id: 'virtual-primary-like', tier: 'primary', virtual: true, enabled: true }];
+    assert.deepEqual(primaryNavViews(primaryVirtualEntries, { terminalsOn: true }).map(v => v.id), [],
+        'primaryNavViews must drop a virtual view — this is the VIRTUAL half of the shared navViews() filter');
 });
 
 test('nav inventory: Knowledge/Agents/Personas/Cost are demoted (secondary), not deleted', () => {
