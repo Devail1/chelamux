@@ -413,6 +413,17 @@ def _no_color_env() -> dict[str, str]:
     how to (de)serialize what crosses it — is popped too, even though it is inert on its own
     once the fd is gone: a fixture that only ever checks the fd cannot tell a full scrub
     apart from a regression that scrubs only the fd, so both are cleared together.
+
+    ⛔ CMX-271 (found chasing this ticket's own new test, flaky under `pytest-xdist -n auto`):
+    ``PYTHONDONTWRITEBYTECODE=1``, for the same reason the judge writes each mutation straight
+    to the SAME PATH the baseline just ran from. CPython's default `.pyc` cache validates by
+    source **mtime + size**, not content — a same-length mutation (`return a + b` → `return a
+    - b`, both 12 bytes) landing within the same filesystem-mtime tick as the baseline's
+    compile is INDISTINGUISHABLE from "unchanged" to the cache, so the mutated run silently
+    re-executes the baseline's cached bytecode and reads back SURVIVED for a guard that never
+    saw the mutation at all. Forcing every suite run to compile from source, every time, is
+    what makes "the file on disk really changed" (the promise :func:`apply_mutation` already
+    proves) also true of what the suite actually EXECUTES.
     """
     env = dict(os.environ)
     env.pop("FORCE_COLOR", None)
@@ -420,6 +431,7 @@ def _no_color_env() -> dict[str, str]:
     env.pop("NODE_CHANNEL_SERIALIZATION_MODE", None)
     env["NO_COLOR"] = "1"
     env["PY_COLORS"] = "0"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
 
@@ -837,6 +849,82 @@ def _docs_only_diff(worktree: Path, base_branch: str) -> bool | None:
     return all(_is_prose_path(f) for f in files)
 
 
+# ⚖️🕳️ CMX-271, measured on cmx-268 (#338, 2026-08-13). A pure deletion — `terminals.js` -17,
+# `style.css` -20, two test files -172 net, +10 total — reached a CLEAN judge verdict: six
+# proposed experiments, all KILLED. Every one of them mutated a guard the deletion never
+# touched (a survivor immediately above or below the deleted lines, in the same file) —
+# thorough-LOOKING, and useless, because nothing corrupted the actual removal. `_docs_only_diff`
+# already knows a diff can be structurally unreviewable by mutation (nothing to corrupt); this
+# is the sibling case — there IS something to corrupt, but the judge corrupted the wrong thing,
+# and a green battery cannot tell "no guard needed" from "no guard exists" apart. Below the
+# threshold, the ratio has one real anchor: cmx-268's OWN rework (adding the missing guards
+# back) moved the same PR's total diff from added=10/deleted=209 (ratio 0.05, HEAVY) to
+# added=108/deleted=211 (ratio 0.51, clear) without this module knowing anything about CSS or
+# JS — real replacement coverage moves the ratio on its own.
+MIN_DELETION_HEAVY_LINES = 20
+DELETION_HEAVY_ADD_RATIO = 0.25
+
+
+def _deletion_heavy_diff(
+    worktree: Path, base_branch: str,
+) -> tuple[bool, int, int, list[str]] | None:
+    """Is this PR's diff (prose excluded) dominated by deletion — few lines added for every
+    line removed? Returns ``(heavy, added, deleted, files)`` where ``files`` are the non-prose
+    paths that lost lines; ``None`` when :func:`_diff_numstat` cannot say (mirrors
+    :func:`_docs_only_diff`: an unknown is never read as a yes or a no).
+
+    This is a SHAPE measurement, not a verdict on the code — a deletion-heavy PR that truly
+    needs no replacement guard gets the same treatment a docs-only PR does: it still blocks
+    autonomous merge, but as an unknown for a human, not a finding against the PR.
+    """
+    rows = _diff_numstat(worktree, base_branch)
+    if rows is None:
+        return None
+    files = [(a, d, p) for a, d, p in rows if not _is_prose_path(p)]
+    if not files:
+        return None
+    added = sum(a for a, _, _ in files)
+    deleted = sum(d for _, d, _ in files)
+    heavy = deleted >= MIN_DELETION_HEAVY_LINES and added <= deleted * DELETION_HEAVY_ADD_RATIO
+    return heavy, added, deleted, sorted({p for _, d, p in files if d > 0})
+
+
+def _diff_numstat(worktree: Path, base_branch: str) -> list[tuple[int, int, str]] | None:
+    """``git diff --numstat`` between ``origin/<base_branch>`` and HEAD, parsed to
+    ``(added, deleted, path)`` triples. ``None`` when it cannot be computed at all — no
+    ``base_branch``, an unresolvable ref, or the diff invocation itself failing.
+    """
+    if not base_branch:
+        return None
+    ref = f"origin/{base_branch}"
+    resolved = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True, errors="replace",
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return None
+    base_sha = resolved.stdout.strip()
+    diff = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--numstat", f"{base_sha}...HEAD"],
+        capture_output=True, text=True, errors="replace",
+    )
+    if diff.returncode != 0:
+        return None
+    rows: list[tuple[int, int, str]] = []
+    for line in diff.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        added_s, deleted_s, path = parts
+        if added_s == "-" or deleted_s == "-":     # binary files: no line-level signal
+            continue
+        try:
+            rows.append((int(added_s), int(deleted_s), path))
+        except ValueError:
+            continue
+    return rows
+
+
 def run_experiments(
     worktree: Path,
     test_cmd: str,
@@ -870,10 +958,18 @@ def run_experiments(
       judge saw code and proposed nothing anyway (worth investigating) — the two used to read
       as the same unknown.
 
-    ``base_branch`` is optional and used to diagnose a red baseline and a docs-only diff
-    (never to change whether the run is ``cannot_verify``, and never touched when neither
-    diagnosis applies) — pass "" (the default) when it is not known, and the report says so
-    instead of guessing.
+    A fourth thing downgrades an otherwise-CLEAN report (every outcome KILLED or INVALID, none
+    SURVIVED) to CANNOT VERIFY: ⚖️🕳️ CMX-271, given ``base_branch`` and no blocking outcome,
+    a diff that is DELETION-HEAVY (see :func:`_deletion_heavy_diff`) — few lines added for
+    every line removed. Measured on cmx-268 (#338): a pure-deletion PR's six experiments all
+    KILLED because every one of them corrupted a guard the deletion never touched, and the
+    report read CLEAN. Unlike the red-baseline and docs-only diagnostics, THIS ONE CAN change
+    the run's outcome, not just its wording — an otherwise-clean report on a deletion-heavy
+    diff is exactly the shape that looked safe and was not.
+
+    ``base_branch`` is optional and used to diagnose a red baseline, a docs-only diff, and (per
+    the deletion-heavy check above) an otherwise-clean report — pass "" (the default) when it
+    is not known, and the report says so instead of guessing.
     """
     report = Report()
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -952,6 +1048,31 @@ def run_experiments(
     report.outcomes.extend(outcomes)
     if contamination:
         report.cannot_verify = contamination
+        return report
+
+    # ⚖️🕳️ CMX-271: a report with no SURVIVED outcome is not automatically a clean bill of
+    # health — every outcome could be a KILLED guard the diff's own deletion never touched
+    # (see cmx-268, #338: six experiments, all KILLED, none of them related to what was
+    # actually removed). Only reachable when nothing already blocks: a real SURVIVED finding
+    # is a fact and must not be masked by this becoming `cannot_verify` instead.
+    if not any(o.blocking for o in outcomes):
+        heavy = _deletion_heavy_diff(worktree, base_branch)
+        if heavy and heavy[0]:
+            _, added, deleted, files = heavy
+            report.cannot_verify = (
+                f"⚖️🕳️ CMX-271: this PR's diff is DELETION-HEAVY ({added} line(s) added vs "
+                f"{deleted} removed, across {', '.join(files)}), and every one of its "
+                f"{len(outcomes)} experiment(s) came back KILLED or INVALID — not one SURVIVED. "
+                "A clean mutation battery here proves the guards it corrupted still work; it "
+                "proves NOTHING about whether the removed behavior can silently come back, "
+                "because a deletion leaves nothing in the file for a mutation to corrupt. "
+                "Measured on cmx-268 (#338): a pure-deletion PR reached exactly this CLEAN "
+                "verdict, all six of its experiments KILLED, none of them touching what the PR "
+                "actually deleted. ⛔ This is not a finding against the code — it still blocks "
+                "AUTONOMOUS merge (unknown ≠ safe) until a human confirms either the removal "
+                "needs no replacement guard, or a rework adds one (e.g. a guard that fails if "
+                "the deleted code is reintroduced)."
+            )
     return report
 
 
