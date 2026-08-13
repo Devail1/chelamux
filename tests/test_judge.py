@@ -410,36 +410,85 @@ def test_block_body_points_the_rework_agent_at_the_defeat_shapes_catalog():
     assert "docs/DEFEAT_SHAPES.md" in body
 
 
-def test_rework_prompt_points_at_the_defeat_shapes_catalog():
-    """CMX-272: the retry-brief a reworking agent wakes up to (``REWORK_PROMPT``) must point
-    at ``docs/DEFEAT_SHAPES.md`` — otherwise the catalog only ever reaches an agent that
+def test_rework_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
+    """CMX-272: the retry-brief a reworking agent wakes up to must point at
+    ``docs/DEFEAT_SHAPES.md`` — otherwise the catalog only ever reaches an agent that
     happens to already be reading this test file, exactly the reach problem the catalog
-    exists to close."""
-    assert "docs/DEFEAT_SHAPES.md" in dispatcher.REWORK_PROMPT
+    exists to close.
+
+    Seen to go red: revert the live spawn site's `wf.get(...) or REWORK_PROMPT` fallback
+    (`_renudge_prompt`, the same expression `_respawn_rework` renders from) to
+    `wf.get(...) or ""` — `dispatcher.REWORK_PROMPT` itself stays byte-identical, so a test
+    that only imports the constant can't see the wiring break. Rendering through
+    `_renudge_prompt` exercises the actual expression the spawn path evaluates.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), rework_count=1,
+                 review_history=json.dumps([{"round": 1, "at": "t", "body": "fix the thing"}]))
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    prompt = dispatcher._renudge_prompt(wf, row, None)
+    assert prompt is not None
+    assert "docs/DEFEAT_SHAPES.md" in prompt
 
 
-def test_judge_prompt_points_at_the_defeat_shapes_catalog():
+def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
     """CMX-272: the judge agent should reach for an already-catalogued shape before spending
-    a mutation rediscovering one from scratch."""
-    assert "docs/DEFEAT_SHAPES.md" in dispatcher.JUDGE_PROMPT
+    a mutation rediscovering one from scratch.
+
+    Seen to go red: revert the live spawn site's `wf.get(...) or JUDGE_PROMPT` fallback
+    (`_spawn_judge`) to `wf.get(...) or ""` — `dispatcher.JUDGE_PROMPT` itself stays
+    byte-identical, so a test that only imports the constant can't see the wiring break.
+    Capturing the prompt `_spawn_judge` actually hands to `_launch_agent` exercises the real
+    expression.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        captured = {}
+        with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+             patch.object(dispatcher, "_refresh_judge_worktree", return_value=None), \
+             patch.object(dispatcher, "_judge_vars", return_value={}), \
+             patch.object(dispatcher, "_launch_agent",
+                           side_effect=lambda *a, **kw: captured.__setitem__("prompt", a[4])):
+            assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
+    assert "docs/DEFEAT_SHAPES.md" in captured["prompt"]
 
 
 def test_defeat_shapes_catalog_documents_every_seeded_shape():
     """CMX-272: pins the 6 shapes the catalog was seeded with (all hit live on 2026-08-13) —
     a doc edit that drops one silently shrinks institutional knowledge back down without
-    anyone noticing."""
+    anyone noticing.
+
+    Seen to go red: gutting a section's BODY down to a stub (e.g. `_TBD._`) while leaving its
+    heading byte-identical — a heading-only presence check can't see this, because the
+    heading itself survives untouched. Splitting the doc into its per-section bodies and
+    requiring each of the four labelled fields inside its own section catches it.
+    """
     root = Path(__file__).resolve().parent.parent
     text = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
+    sections = re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]  # drop the preamble
 
-    for heading in (
+    headings = (
         "Presence/substring assertion defeated by dead-coding",
         "Fixture parked on a default value",
         "Positive-case-only mount (never mounts the OFF state)",
         "Compound mutation proves the pair, not either half",
         "Asserting a source constant instead of the rendered value",
         "Coverage resting on a coincidence in production data",
-    ):
-        assert heading in text, f"missing defeat shape: {heading}"
+    )
+    assert len(sections) == len(headings), (
+        f"expected {len(headings)} numbered defeat-shape sections, found {len(sections)}"
+    )
+    # The doc's own "Each entry:" spec (see "How this file grows" above) names exactly these
+    # three required fields — "Found:" is present on 5 of 6 entries but not mandated by the
+    # spec, so it is not required here.
+    for heading, section in zip(headings, sections):
+        assert section.startswith(heading), f"missing defeat shape: {heading}"
+        for field in ("**Assertion form:**", "**Mutation that defeats it:**",
+                      "**Guard form that survives:**"):
+            assert field in section, f"{heading!r} is missing its {field} field"
 
 
 def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
