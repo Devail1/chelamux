@@ -340,13 +340,43 @@ test('CMX-257: selecting a view lights its row wherever renderNav actually put i
     // document the same workaround), so the row's actual route to selectView is
     // pinned on the ATTRIBUTE the real render emits, on both a demoted row and a
     // primary row.
+    //
+    // round 21 (judge finding 1 on PR #326): pinning the attribute with a
+    // substring regex is a PRESENCE check, not a LIVENESS check — it cannot tell
+    // a live statement from dead code. `onclick="chela.selectView(this.dataset.view)"`
+    // dead-coded to `onclick="if (false) chela.selectView(this.dataset.view)"`
+    // still contains the exact byte sequence the regex looks for, so the regex
+    // kept matching while every nav row went inert. (This repo already wrote this
+    // trap down once, in wallnav.test.mjs 12b/12c, for the identical shape.) So
+    // below, the attribute is EVALUATED as a function body — the same body the
+    // browser would run on click — against a recording stub bound to the row as
+    // `this` (matching _navItemHtml's `this.dataset.view`), and the assertion is
+    // that the stub was actually CALLED. `if (false) …` never calls it, so the
+    // dead-code mutation goes red here. The regex match stays below it as a
+    // cheap smoke test that the attribute exists at all — it is not the guard.
+    const _invokeOnclick = (row, chelaStub) => {
+        const handler = new Function('chela', row.getAttribute('onclick') || '');
+        handler.call(row, chelaStub);
+    };
+
     const demotedRow = document.querySelector('#side-nav-more .side-item[data-view="agents"]');
     assert.match(demotedRow.getAttribute('onclick'), /chela\.selectView\(this\.dataset\.view\)/,
         'the demoted row is not wired to chela.selectView(this.dataset.view) — emptying the handler leaves it ' +
         'unreachable from the sidebar entirely, which is removal, not re-parenting');
+    const demotedCalls = [];
+    _invokeOnclick(demotedRow, { selectView: (...args) => demotedCalls.push(args) });
+    assert.deepEqual(demotedCalls, [['agents']],
+        'the demoted row\'s onclick did not actually CALL chela.selectView — dead-coding the handler (e.g. ' +
+        '`if (false) chela.selectView(...)`) leaves the attribute text intact but the row unreachable, which ' +
+        'is removal, not re-parenting');
+
     const primaryRowEl = document.querySelector('#side-nav .side-item[data-view="work"]');
     assert.match(primaryRowEl.getAttribute('onclick'), /chela\.selectView\(this\.dataset\.view\)/,
         'the primary row is not wired to chela.selectView(this.dataset.view)');
+    const primaryCalls = [];
+    _invokeOnclick(primaryRowEl, { selectView: (...args) => primaryCalls.push(args) });
+    assert.deepEqual(primaryCalls, [['work']],
+        'the primary row\'s onclick did not actually CALL chela.selectView');
 
     window.chela.selectView('agents');   // demoted -> #side-nav-more
     assert.equal(

@@ -754,6 +754,44 @@ test('nav inventory (CLAIM 3): the demoted group still exists and renders under 
         'the demoted row\'s label has display: none — re-parenting has become removal of the accessibility cue');
     assert.ok(!/^(hidden|collapse)$/.test(labelCs.visibility),
         `the demoted row's label has visibility: ${labelCs.visibility} — invisible but still occupying box-tree space`);
+
+    // round 21 (judge finding 2 on PR #326): this test asserted display/visibility
+    // on the ROW and the LABEL but never on the .side-item-icon span its own
+    // fixture renders, so `.side-list-secondary .side-item-icon { display: none; }`
+    // survived — the identical shape as the already-guarded `.side-item { display:
+    // none; }` one child up, and round 14 kept exactly this `display: none` /
+    // `visibility` pair guarded ("beyond 'not display:none, not visibility:hidden'"
+    // is what moved to NOT GUARDED, not display:none itself).
+    const icon = row.querySelector('.side-item-icon');
+    assert.ok(icon, 'the demoted row has no .side-item-icon span at all — re-parenting has become removal of the accessibility cue');
+    const iconCs = win.getComputedStyle(icon);
+    assert.notEqual(iconCs.display, 'none',
+        'the demoted row\'s icon has display: none — re-parenting has become removal of the accessibility cue');
+    assert.ok(!/^(hidden|collapse)$/.test(iconCs.visibility),
+        `the demoted row's icon has visibility: ${iconCs.visibility} — invisible but still occupying box-tree space`);
+});
+
+// --- CLAIM 3, round 21 (judge finding 2 on PR #326): the icon check above,
+// repeated with the sidebar COLLAPSED. `body.sidebar-collapsed .side-item-label`
+// is ALREADY display: none (style.css:3044) in that state, so the icon is the
+// ONLY remaining cue a demoted row has — if `.side-list-secondary .side-item-icon`
+// also goes display: none there, Knowledge/Agents/Personas/Cost render as four
+// blank clickable strips with no cue of any kind. This must redden on its own,
+// independent of the expanded-state assertion above.
+test('nav inventory (CLAIM 3): the demoted row\'s icon survives the COLLAPSED rail, where the label cannot compensate', () => {
+    const rowHtml = '<div class="side-item"><span class="side-item-icon"></span><span class="side-item-label">Knowledge</span></div>';
+    const bodyHtml = `<div class="app"><aside class="sidebar">${NAV_SECTION_HTML}</aside></div>`
+        .replace('id="side-nav-more"></div>', `id="side-nav-more">${rowHtml}</div>`);
+    const win = mountWithRealCss(bodyHtml, ' class="sidebar-collapsed"');
+
+    const icon = win.document.querySelector('#side-nav-more .side-item .side-item-icon');
+    assert.ok(icon, 'the demoted row has no .side-item-icon span at all in the collapsed rail');
+    const iconCs = win.getComputedStyle(icon);
+    assert.notEqual(iconCs.display, 'none',
+        'the demoted row\'s icon has display: none while collapsed — with the label already hidden in this state, ' +
+        'the row becomes a blank clickable strip with no cue of any kind');
+    assert.ok(!/^(hidden|collapse)$/.test(iconCs.visibility),
+        `the demoted row's icon has visibility: ${iconCs.visibility} while collapsed — invisible but still occupying box-tree space`);
 });
 
 // --- CLAIM 3, round 20 (human directive on PR #326, judge finding 2): the
