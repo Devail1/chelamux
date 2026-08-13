@@ -2634,6 +2634,85 @@ def resolve_run(ident: str) -> dict | None:
     return named[0] if len(named) == 1 else None
 
 
+def adopt_pr(pr_ident: str, workflow_path: str | Path, *, reason: str = "") -> dict:
+    """⚖️🚪 CMX-276: close the one path around the judge gate.
+
+    A hand-opened PR (``gh pr create`` run directly, not through ``_spawn``) has NO run
+    row — and every gate that matters reads the ``runs`` table: the per-sha judge trigger
+    in :func:`tick` only ever ``SELECT``s from it, and :func:`chela.contract.merge` refuses
+    with "no run matches" before it even gets to the judge-clean check. The result is not
+    "merge refused" — it is silence: nothing judges the PR, and nothing stops a human (or
+    the orchestrator) from running ``gh pr merge`` on it directly, outside chela entirely.
+    That happened live: PR #346 edited ``tests/test_judge.py`` — exactly the kind of change
+    the judge exists to interrogate — and merged unjudged, because there was no run row for
+    the per-sha trigger to find.
+
+    This creates that row. It does NOT dispatch an agent, spawn a worktree, or open a tmux
+    window — the work is already done and pushed; ``adopt`` only enrolls the existing PR
+    into the SAME queue a dispatched task uses. The row lands directly in
+    ``awaiting_review`` with no ``judge_sha``/``judge_state``, so the very next dispatcher
+    tick refreshes its live PR/CI state (the phase-0 refresh in :func:`tick` matches any row
+    with a ``pr_url``, regardless of how it got there) and the judge trigger picks it up
+    exactly like a freshly-dispatched PR's first pass. From that point on it is an ordinary
+    run: ``chela merge`` still refuses it until the judge reports ``clean``, same as any
+    other PR — adoption grants the PR nothing except a place in the gate, never a bypass of
+    it.
+    """
+    wf = load_workflow(workflow_path)
+    repo_dir = str(wf.path.parent)
+    raw = str(pr_ident or "").strip()
+    pr_number = _pr_number(raw) or (raw if raw.isdigit() else None)
+    if not pr_number:
+        return {"ok": False, "error": f"{pr_ident!r} is not a PR url or number"}
+
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", pr_number, "--json",
+             "url,title,state,headRefName,headRefOid"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "error": f"could not read PR #{pr_number} from GitHub: {e}"}
+    if out.returncode != 0:
+        detail = (out.stderr or out.stdout or "gh pr view failed").strip()[:300]
+        return {"ok": False, "error": f"gh pr view #{pr_number} failed: {detail}"}
+    try:
+        data = json.loads(out.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return {"ok": False, "error": f"gh pr view #{pr_number} returned unparseable JSON"}
+
+    state = (data.get("state") or "").strip().lower()
+    if state != "open":
+        return {"ok": False, "error": f"PR #{pr_number} is {state or 'unknown'!r}, not "
+                "open — nothing to adopt"}
+
+    pr_url = data.get("url") or raw
+    branch = data.get("headRefName") or ""
+    head_sha = data.get("headRefOid") or None
+    title = data.get("title") or f"PR #{pr_number}"
+    task_id = f"adopt-{pr_number}"
+    brief = f"Adopted hand-opened PR {pr_url} — brought under the judge/merge gate " \
+            f"(CMX-276)." + (f" {reason.strip()}" if reason.strip() else "")
+
+    with _db() as conn:
+        dup = conn.execute(
+            "SELECT task_id, status FROM runs WHERE task_id=? OR pr_url=?",
+            (task_id, pr_url),
+        ).fetchone()
+        if dup:
+            return {"ok": False, "error": f"{dup['task_id']!r} already tracks this PR "
+                    f"(status={dup['status']!r}) — nothing to adopt; use `chela reopen` "
+                    "or `chela judge run` if it needs a fresh pass"}
+        conn.execute(
+            """INSERT INTO runs (task_id, workflow_path, title, status, branch_name,
+               started_at, attempt, pr_url, pr_state, pr_head_sha, brief)
+               VALUES (?, ?, ?, 'awaiting_review', ?, ?, 1, ?, 'open', ?, ?)""",
+            (task_id, str(wf.path), title, branch, _now(), pr_url, head_sha, brief),
+        )
+    log.info("adopt: %s (%s) brought under the judge/merge gate", task_id, pr_url)
+    return {"ok": True, "task_id": task_id, "pr_url": pr_url, "branch_name": branch}
+
+
 def request_changes(ident: str, body: str, *, post_comment: bool = True) -> dict:
     """FAIL a PR under review: the run goes to ``changes_requested`` and the loop turns.
 
@@ -3463,7 +3542,17 @@ def tick(workflow_path: str | Path) -> dict:
                 summary["reconciled_closed"] += 1
                 log.info("Task %s closed (PR closed without merging)", row["task_id"])
                 continue
-            if row["task_id"] not in open_ids and row["status"] in REVIEW_STATUSES:
+            # ⚖️🚪 CMX-276: `worktree_path IS NOT NULL` — an ADOPTED row (`adopt_pr`, a
+            # hand-opened PR enrolled into this same gate) never went through `_spawn`'s
+            # claim, so it never had a worktree OR a tracker line to leave in the first
+            # place. Without this guard the very next tick after adopting one reconciled it
+            # straight to `done` ("removed from source, window killed") — `open_ids` is
+            # true (it never was IN the tracker), but that is not completion evidence for a
+            # row the tracker never owned; it just deletes the row before the judge trigger
+            # a few lines below ever gets a look at it, silently recreating the exact bug
+            # this feature exists to close, just with an extra row in the table.
+            if (row["task_id"] not in open_ids and row["worktree_path"] is not None
+                    and row["status"] in REVIEW_STATUSES):
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
                 # the live tmux pane, and that mapping disappears once tmux drops

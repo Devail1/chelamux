@@ -2183,6 +2183,27 @@ def cmd_update(args) -> None:
               "your agent windows.")
 
 
+def cmd_adopt(args) -> None:
+    """⚖️🚪 CMX-276: enroll a hand-opened PR into the judge/merge gate.
+
+    A PR opened by ``gh pr create`` directly (not through the dispatcher) has no run row,
+    so nothing judges it and ``chela merge`` cannot even find it to refuse it — the one path
+    around the gate everything else goes through. This creates the missing run row in
+    ``awaiting_review``; it does not touch the PR, spawn an agent, or grant anything. The
+    next dispatcher tick refreshes its CI state and the judge trigger picks it up like any
+    freshly-dispatched PR's first pass. ``chela merge`` still refuses it until the judge
+    reports clean.
+    """
+    result = dispatcher.adopt_pr(args.pr, args.workflow, reason=getattr(args, "reason", "") or "")
+    if not result.get("ok"):
+        print(f"adopt: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"⚖️ {result['task_id']} ({result['pr_url']}) is now awaiting_review under the "
+          "dispatcher's gate — the next tick refreshes CI and the judge trigger picks it "
+          "up exactly like a freshly-dispatched PR's first pass. `chela merge` still "
+          "refuses it until the judge reports clean.")
+
+
 def cmd_merge(args) -> None:
     """⚙️⚖️ AUTONOMOUSLY merge a dispatched PR — the escalation contract, enforced in code.
 
@@ -2580,6 +2601,23 @@ def main() -> None:
         help="Worktree to mutate in place (default: the current directory)",
     )
 
+    # adopt — enroll a hand-opened PR into the judge/merge gate (CMX-276)
+    p_adopt = sub.add_parser(
+        "adopt",
+        help="⚖️🚪 Bring a hand-opened PR under the SAME judge/merge gate as a dispatched "
+             "one — creates the run row a hand-opened PR is otherwise missing, so the "
+             "judge trigger and `chela merge` can see it at all",
+    )
+    p_adopt.add_argument("pr", help="PR url or number (e.g. 346, or the full github.com URL)")
+    p_adopt.add_argument(
+        "--workflow", required=True, metavar="PATH",
+        help="Path to the WORKFLOW.md that owns this PR's repo",
+    )
+    p_adopt.add_argument(
+        "--reason", default="",
+        help="Optional note: why this PR was opened by hand instead of dispatched",
+    )
+
     # merge — the AUTONOMOUS merge gate: the escalation contract enforced in code
     p_merge = sub.add_parser(
         "merge",
@@ -2837,6 +2875,8 @@ def main() -> None:
             cmd_judge_self_check(args)
         else:
             p_judge.print_help()
+    elif args.command == "adopt":
+        cmd_adopt(args)
     elif args.command == "merge":
         cmd_merge(args)
     elif args.command == "reopen":

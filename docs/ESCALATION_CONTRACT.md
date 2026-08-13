@@ -73,6 +73,14 @@ the decision with its justification** (see Provenance).
 - **Merge a dispatched `cmx-N` PR to `dev`** when *all* hold: CI green **and** judge `clean`
   **and** the orchestrator's own adversarial verification passed (corrupt each guard → red). This
   is the standing auth (`feedback_chela_dispatch_merge_authority`) — dev/dogfood only.
+  ⚖️🚪 **A hand-opened PR (`gh pr create` run directly, not through the dispatcher) has no run
+  row and therefore no judge** — `chela merge`'s judge-clean check can't even find it to refuse
+  it, and nothing else in the loop looks at it either (CMX-276: PR #346 merged this way,
+  unjudged, editing `tests/test_judge.py` of all things). Run `chela adopt <pr>` on it FIRST —
+  it enrolls the PR into the same `awaiting_review` queue a dispatched one uses, so the next
+  tick's per-sha trigger judges it — before merging it by any path, autonomous or by hand. A
+  raw `gh pr merge` on an un-adopted PR is the one bypass everything else in this contract is
+  built to prevent; treat it as such.
 - **Send a PR back through rework** on a **mechanical, verified** finding (a guard that survives
   corruption, a number that doesn't reproduce, a missing test proven by mutation) — with a precise
   brief. (This is what happened to CMX-82 this session.)
