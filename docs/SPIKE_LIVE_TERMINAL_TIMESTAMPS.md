@@ -4,12 +4,31 @@
 timestamp *inside* the live terminal wall — the same view a browser tile shows — using
 only the Claude Code plugin's hooks (`plugin/hooks/hooks.json` → `chela/hooks.py`)?
 
-**Verdict: no.** Not as scoped ("via the hooks"). The hook channel and the terminal-wall
-render path are two separate systems with no write edge between them, and the one real
-injection point chela already has into that render path cannot reach message boundaries
-either. Below is the evidence, and what *is* buildable instead.
+**Verdict: yes.** The original version of this document said no, and that verdict was
+wrong. Below is the correction: the actual write path, why the original's "no path into
+the pty" claim doesn't hold, and what is still unverified before this ships.
 
-## What the live terminal wall actually is
+## ⛔ Correction (CMX-274) — the original verdict rested on the wrong mechanism
+
+The original spike (CMX-270) tested one specific route — chela's own code reaching into
+`ttyd`'s served page and touching xterm.js's buffer directly — found it closed on three
+independent grounds, and generalized that closure to "the hook channel cannot write into
+the pty stream at all." That generalization is false. It conflated two different
+questions:
+
+1. *Can chelamux's own JavaScript reach into `ttyd`'s rendered page and decorate a
+   specific row?* No — confirmed below, this part of the original spike was measured
+   correctly and stands.
+2. *Can a hook cause the **Claude Code CLI process itself** — which is the thing actually
+   drawing content into the pty, before `ttyd` ever sees a byte — to print a line?* Yes.
+   Claude Code's hook JSON output schema has a field whose entire purpose is exactly
+   this, and it is universal across every hook event, including the `http` transport
+   chela uses for every hook except `SessionStart`.
+
+The original spike never asked question 2. It answered question 1, thoroughly, and then
+wrote the answer to question 1 as if it settled question 2.
+
+## What the live terminal wall actually is (unchanged, and still the reason route 1 is closed)
 
 Confirmed against a running tile (`ps aux | grep ttyd`, then `curl` its own page):
 
@@ -18,90 +37,122 @@ Confirmed against a running tile (`ps aux | grep ttyd`, then `curl` its own page
   forwards `/term/<wid>/*` verbatim to `127.0.0.1:<port>`). `ttyd` attaches its own tmux
   client directly to the agent's pane and streams the pty bytes over its own WebSocket.
 - `ttyd`'s entire frontend — including xterm.js — ships as **one minified webpack IIFE**
-  inlined in the page (`(()=>{"use strict"; ... (0,e.render)((0,e.h)(t.App,null),
-  document.body)})()`). Nothing is attached to `window`: no global `term`, no `Terminal`
-  handle, no exported module registry. Verified live: `curl 127.0.0.1:<port>/term/@N/` and
-  grep the response — no `src="..."` script tags, no globals, just the closure.
+  inlined in the page. Nothing is attached to `window`: no global `term`, no `Terminal`
+  handle, no exported module registry.
 - xterm.js is running with **`CanvasAddon`/`WebglAddon`** (`rendererType:"webgl"` present
-  in the bundle) — it paints to a `<canvas>`, not per-character DOM nodes. There is nothing
-  a `MutationObserver` could read.
+  in the bundle) — it paints to a `<canvas>`, not per-character DOM nodes.
 
-So "the live terminal" is pixels painted by a process chelamux does not own, delivered
-through a proxy chelamux does not control the *content* of — only the transport.
-
-## What the hook channel actually is
-
-`chela/hooks.py`'s own module docstring is explicit: *"This module turns a hook POST into
-an `event_log` record. It does nothing else: it answers no gate and decides no
-permission."* Concretely:
-
-- `plugin/hooks/hooks.json` registers HTTP callbacks (`http://127.0.0.1:5001/hooks/*`)
-  that Claude Code's CLI fires **synchronously inside itself**, out-of-band from the pty.
-- `chela/event_log.append()` stamps every event with `ts = time.time()` and appends it to
-  a JSONL log — a side channel chela reads for the dashboard Feed, Telegram relays, and
-  gate-answering. It has no return path into the pty: it can't write a byte to the tmux
-  pane, and it isn't asked to.
-- The one hook that *does* act (`PermissionRequest` → `chela.gateanswer`) answers Claude
-  Code's own JSON response body for that tool call — still not terminal content.
-
-A hook firing tells chela "an event happened, here's `ts`" on a completely separate wire
-from whatever `ttyd` is streaming to the browser at that moment.
-
-## The one real injection point — and why it doesn't close the gap
-
-Chelamux *does* inject `<script>` shims into `ttyd`'s served HTML today — paste-image,
+Chelamux does inject `<script>` shims into `ttyd`'s served HTML today — paste-image,
 Ctrl+V, the palette hotkey, touch-scroll, collab presence (`chela/dashboard/app.py`,
 `_TERM_PASTE_SHIM` / `_TERM_PASTE_KEY_SHIM` / `_TERM_PALETTE_KEY_SHIM` and friends,
-`term_http`). This is proof a script *can* run in that page. It doesn't help here, because:
+`term_http`). Proof a script *can* run in that page — but every one of them listens to
+DOM/keyboard/paste events; none of them, nor anything else chelamux could inject, can
+reach xterm's buffer to decorate a specific row (no handle, and a canvas has no DOM to
+mutate). **This route is genuinely closed, and none of the above is what changed.** It's
+also, per the correction, not the route that matters: chelamux doesn't need to write into
+`ttyd`'s page at all if the process one layer upstream will write the line for it.
 
-- Every existing shim listens to **DOM/keyboard/paste events** on `document` — it never
-  touches xterm's buffer, and (per above) there's no handle to touch: the `Terminal`
-  instance lives inside the anonymous webpack closure.
-- Even granting instance access (e.g. by vendoring/patching `ttyd`'s bundle instead of
-  using the system binary), xterm.js's line-decoration API (`registerDecoration`,
-  the mechanism VS Code's terminal actually uses for inline command timestamps) needs a
-  **buffer marker** — a specific row. There is no reliable hook→row mapping: Claude
-  Code's TUI is a live-redrawing renderer (spinners, streamed tokens, collapsed tool
-  blocks) over the raw pty, not an append-only log. A `UserPromptSubmit` firing at `ts=T`
-  doesn't say which on-screen row that prompt will end up occupying once the pane
-  reflows, and that row keeps moving as output streams and the view scrolls.
+## The real write path: `systemMessage`, from Claude Code's own hook output schema
 
-## The closest thing to an in-pane surface (rejected)
+Per the current hook reference (`code.claude.com/docs/en/hooks`), every hook response —
+`command` or `http` alike — is parsed against one shared JSON output schema, and one of
+its universal fields is:
 
-tmux itself can label a pane from the *server* side — `tmux select-pane -t <wid> -T
-"<text>"` (pane title) plus `pane-border-status`/`pane-border-format`, refreshed on every
-hook. Chela's own hook handler could plausibly run that. But it doesn't answer the
-question asked:
+> `systemMessage` — "Warning message shown to the user."
 
-- It's **one line per pane** (last event only), not a per-message stamp in the transcript.
-- `scripts/agent-terminals.sh` explicitly runs each `ttyd`'s tmux session with
-  `set-option status off` and never turns on pane borders (a single-pane session has none
-  by default) — wiring this up means adding visible chrome to every tile, a UX change well
-  outside a hooks-feasibility spike.
+And for the `http` transport specifically (which is what every chela hook except
+`SessionStart` uses, per `plugin/hooks/hooks.json`):
 
-## What's actually buildable, if the underlying need is "see when things happened"
+> "Claude Code sends the hook's JSON input as the POST request body... The response body
+> uses the same JSON output format as command hooks." A 2xx JSON body is "parsed using
+> the same JSON output schema as command hooks."
 
-The hook `ts` is already flowing into a place designed to show exactly this, just not
-inside the raw pty mirror:
+This is not a theoretical schema field. Two real, reproduced reports against
+`anthropics/claude-code` confirm it renders, live, as a persistent line in the terminal
+transcript — the same pty stream `ttyd` mirrors byte-for-byte into the wall tile:
 
-- **The dashboard Feed** (`chela/dashboard/static/js/feed.js` + `feedmodel.js`) already
-  renders every hook-derived event, per agent, with a timestamp — this *is* "timestamped
-  messages," it's the structured view next to the wall instead of burned into it.
-- A cheap, real addition within the existing shim mechanism: a small floating badge over
-  each wall tile ("last activity HH:MM:SS"), sourced from `event_log`'s `ts` over the
-  dashboard's existing SSE channel (`sse.js`). This sits in chela's own DOM around the
-  iframe — not inside `ttyd`'s page — so none of the constraints above apply. It's a
-  per-agent status ticker, not a per-message inline stamp, which is a smaller thing than
-  what was asked for; flagging that gap explicitly rather than quietly substituting it.
+- **[#50542](https://github.com/anthropics/claude-code/issues/50542)** — a plugin-dispatched
+  `Stop` hook returning `{"systemMessage": "✦ 30 memories woven into the palace"}` was
+  observed rendering as "a visible single-line `<Line>` element via `AttachmentMessage.tsx`
+  handling a `hook_system_message` attachment," displayed as `Stop says: <message>`. The
+  reporter's own repro thread narrows the reliable shape: a **bare** `{"systemMessage":
+  "…"}` renders and is then discarded within about a second (visible, but easy to miss);
+  pairing it with the full schema — `{"continue": true, "suppressOutput": false,
+  "systemMessage": "…"}` — made the line "persist as expected," consistently, across
+  repeated fires.
+- **[#40380](https://github.com/anthropics/claude-code/issues/40380)** — the same field on
+  `PreToolUse`/`PostToolUse` is silently dropped **unless** `hookSpecificOutput` is also
+  present (e.g. `hookSpecificOutput.permissionDecision: "allow"` alongside
+  `additionalContext`); with it, both the terminal render and the model-context injection
+  work. The report also names `#32624` as confirming the same field renders for
+  `SessionStart`.
+
+So the field is real, it is universal, `http` hooks carry it exactly like `command` hooks,
+and the working shape is event-dependent: `Stop` wants `continue`+`suppressOutput`
+alongside it, tool events want `hookSpecificOutput` alongside it. Bare `systemMessage` on
+its own is the one shape that's unreliable.
+
+## Why the "no hook→row mapping" objection dissolves
+
+The original spike's second, deeper objection — that xterm's decoration API needs a
+buffer marker, and there is no reliable hook→row mapping because the TUI repaints live —
+was a real problem for the *ttyd-buffer-decoration* idea. It is not a problem here,
+because this mechanism isn't decorating an existing row at all. Claude Code's own
+process — the one already deciding, this instant, where the next line of its own
+transcript goes — is the one inserting the line, synchronously, at the exact moment the
+(blocking) hook call returns. There is no async timestamp to reconcile against a
+scrolled, reflowed buffer from the outside: the write happens from the inside, in order,
+by the same renderer that owns "what row is this."
+
+## What's already wired in chela — zero new hook registration needed
+
+`plugin/hooks/hooks.json` already registers `UserPromptSubmit` (fires at the user-message
+boundary) and `Stop` (fires at the assistant-reply-finished boundary) against
+`http://127.0.0.1:5001/hooks/*` — exactly the two events "user prompt / assistant reply"
+in the original question maps to. `chela/hooks.py`'s `ingest()` currently returns only
+the log record; the Flask routes for every event except `PermissionRequest` and
+`SessionStart` reply with `{}` (see `chela/dashboard/app.py`). Making this real is a
+response-body change on those two routes — attaching a timestamp-bearing `systemMessage`
+(plus its event's required companion fields) to what's already returned — not new plugin
+wiring.
+
+## What remains unverified — the concrete next step before shipping
+
+This correction is grounded in the current official schema docs and two reproduced,
+external bug reports — not, unlike Part 1 above, a live `ps`/`curl`-style measurement
+against chela's own daemon and a running tile in this repo. That's the standard this file
+sets for itself, and it hasn't been met yet for this specific field. Before wiring it in
+for real:
+
+1. Point `chela/hooks.py`'s `UserPromptSubmit` and `Stop` routes at a response carrying
+   `systemMessage` (with each event's required companion fields, per above) with a
+   formatted timestamp.
+2. Watch a real tile (`curl 127.0.0.1:<port>/term/@N/`, or the browser wall) across
+   several fires and confirm the line renders, persists, and lands in the right temporal
+   order — not just once, given `#50542`'s own account of intermittency on some CLI
+   versions.
+3. Confirm the currently-pinned Claude Code version behaves at least as well as the
+   schema promises; the flakiness reports above are from `2.1.114`, and chela's own hook
+   comments already track version-specific behavior elsewhere (`chela/hooks.py`'s
+   `GATE_TIMEOUT` measurements).
+
+## `terminalSequence` — a narrower, adjacent primitive
+
+The same schema also exposes `terminalSequence`: "a terminal escape sequence for Claude
+Code to emit on your behalf... Restricted to OSC `0`/`1`/`2`/`9`/`99`/`777` and BEL." That
+can move a timestamp into the pane/tab **title** (a live "last activity" signal, closer to
+the status-ticker idea this document previously proposed as a fallback), but it cannot
+carry an arbitrary line of text into the transcript itself the way `systemMessage` can.
+Worth knowing about; not the mechanism this correction is about.
 
 ## Bottom line
 
-"Timestamps on messages in the live terminal, via the hooks" is not feasible as scoped:
-the hook channel cannot write into the pty stream at all, and the terminal wall's own
-render path (an unmodified system `ttyd` binary bundling an opaque xterm.js) doesn't
-expose a surface to attach per-message decorations to even if something *did* have a
-write path in. Closing the gap for real would mean vendoring/patching `ttyd` (or replacing
-it with a chela-owned xterm.js frontend) to get buffer-marker access, and *still* solving
-the harder, hook-independent problem of mapping an async event timestamp to a specific
-row in a TUI that repaints live — a materially bigger project than "via the hooks," and
-one this task explicitly scoped out by asking for a spike first.
+"Timestamps on messages in the live terminal, via the hooks" is feasible, via
+`systemMessage` (with its event-appropriate companion fields) in the response body of the
+`UserPromptSubmit` and `Stop` hooks chela already registers — both firing exactly at the
+message boundaries asked about, both already wired to chela's own daemon, requiring a
+response-body change rather than new plumbing. The original verdict's fatal claim — "the
+hook channel... can't write a byte to the tmux pane" — was true of chelamux's own code and
+false of Claude Code's, which owns the pty and exposes a documented field for precisely
+this. What's still open is a live measurement of reliability against this repo's own
+pinned Claude Code version, not feasibility.
