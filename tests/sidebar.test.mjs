@@ -312,6 +312,15 @@ test('selecting a view lights its own row and clears the other — via the REAL 
 // onclick — falls through to showAgentDetail whenever the wall can't place the
 // agent (unresolved in `_agentsCache`, which is exactly this case: no fleet
 // has been loaded into this jsdom instance for this name).
+//
+// CMX-279 rework round 1 (PR #350, judge finding): this also drives
+// nav.js's `_agentDetailBackView()` — TERMINALS_ENABLED is true for this whole
+// file (see before(), above), so the "← Back" link must route to 'terminals'
+// (the Wall), never the deleted 'agents' view. tests/dashboard_default_view.test.mjs
+// covers the OTHER branch (TERMINALS_ENABLED false -> 'work') plus the found-agent
+// call site (nav.js:608); this covers the not-found call site (nav.js:560) on the
+// terminals-on branch, closing all 4 combinations (DEFEAT_SHAPES shape 7: two call
+// sites x two branches).
 test('drilling into an agent lights no nav row — agent-detail has none of its own', () => {
     nav.renderNav();
 
@@ -323,6 +332,10 @@ test('drilling into an agent lights no nav row — agent-detail has none of its 
     // this test (synchronous) has already returned.
     if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
     if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
+    // renderAgentDetail (nav.js) no-ops without a host to paint into — absent from
+    // this suite's minimal BODY (it only carries "the ids nav.js reaches for" for
+    // the sidebar), so give it one here, same pattern as hdr-next/hdr-updated above.
+    if (!document.getElementById('agent-detail')) document.body.appendChild(document.createElement('div')).id = 'agent-detail';
     const prevFetch = globalThis.fetch;
     globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
     try {
@@ -335,6 +348,37 @@ test('drilling into an agent lights no nav row — agent-detail has none of its 
         document.querySelectorAll('#side-nav .side-item.active').length, 0,
         'a nav row is lit while drilled into an agent detail — agent-detail is virtual (no nav item of its own) ' +
         'and no longer borrows a deleted view\'s row, so nothing in #side-nav should be active');
+
+    const back = document.querySelector('#agent-detail .detail-back');
+    assert.ok(back, 'no .detail-back node rendered into #agent-detail (not-found branch, nav.js:560)');
+    assert.match(back.getAttribute('onclick'), /chela\.selectView\('terminals'\)/,
+        'the "← Back" link is not wired to chela.selectView(\'terminals\') — with terminals on, it must route ' +
+        'to the Wall, never the deleted \'agents\' view');
+});
+
+// CMX-279 rework round 1 (PR #350, judge finding): the FOUND branch of
+// renderAgentDetail (nav.js:608) is a SEPARATE call site from the not-found one
+// above — DEFEAT_SHAPES shape 7 ("two callers, one guarded"). A resolvable
+// agent with no window_id never enters selectAgent's wall-focus branch even
+// with terminals on, so it always falls through to showAgentDetail's found path.
+test('the agent-detail "← Back" link also routes to the Wall from the FOUND branch (nav.js:608)', () => {
+    nav.renderNav();
+    if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
+    if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
+    if (!document.getElementById('agent-detail')) document.body.appendChild(document.createElement('div')).id = 'agent-detail';
+    util.setAgentsCache([{ name: 'cmx279-known-agent', online: true }]);   // no window_id -> always showAgentDetail
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    try {
+        window.chela.selectAgent('cmx279-known-agent');
+    } finally {
+        globalThis.fetch = prevFetch;
+    }
+
+    const back = document.querySelector('#agent-detail .detail-back');
+    assert.ok(back, 'no .detail-back node rendered into #agent-detail (found branch, nav.js:608)');
+    assert.match(back.getAttribute('onclick'), /chela\.selectView\('terminals'\)/,
+        'the "← Back" link is not wired to chela.selectView(\'terminals\') on the found branch');
 });
 
 
