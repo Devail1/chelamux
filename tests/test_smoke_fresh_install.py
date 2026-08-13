@@ -221,3 +221,34 @@ def test_strips_inherited_chela_env_so_a_live_install_never_leaks_in():
         + out.stdout
     )
     assert "definitely-not-a-real-session-cmx263" not in out.stdout
+
+
+# CMX-275, round 3 — declared NOT GUARDED (docs/DEFEAT_SHAPES.md #10). Two rounds tried to
+# pin "DASH_PORT comes from a real kernel bind-to-0 probe, not an arithmetic guess" and both
+# guards were defeated by the judge without touching the fix:
+#
+#   round 2a: a band check ("15 samples must include one outside 20000-39999") defeated by
+#             drawing the guess from a different band (40000-59999) — still an arithmetic
+#             guess, just relocated. Any band the test picks, the next mutation can dodge.
+#   round 2b: a source-text match on `DASH_PORT=$(pick_free_port)` defeated by leaving that
+#             line in place and shadowing it on the next line — the same pattern this
+#             script's own SMOKE_BREAK_DASHBOARD retry path already uses legitimately.
+#
+# What's actually unprotected: no test proves the port came from asking the kernel rather
+# than from any other value that merely looks free right now. The property that would prove
+# it — "the kernel was asked" — is a mechanism, not an outcome, and the only outcome where a
+# kernel probe and a blind guess provably differ is CONTENTION (something else already holds
+# the guessed port) — which is exactly the condition a unit test doesn't reproduce, and the
+# only way to force it here would be to occupy this box's entire ephemeral port range
+# (tens of thousands of sockets, well past default ulimits) or narrow the kernel's ephemeral
+# range via a systemwide sysctl write, both too invasive for this suite.
+#
+# What covers it instead: `pick_free_port()` (scripts/smoke-fresh-install.sh) is a one-line,
+# self-evidently correct `bind(('127.0.0.1', 0))` probe, and the bug this fix closes — a CI
+# flake under real contention — was the thing that actually caught the original arithmetic
+# guess. This suite doesn't need to reprove that; it needs to not claim it does.
+#
+# `pick_free_port()` / `--print-port` (the seam this file used to drive) are kept: they're
+# still better production structure than an inlined guess (see docs/DEFEAT_SHAPES.md #9), and
+# a future test could still use them if a genuinely discriminating check is ever found — see
+# #10 for what such a check would have to prove.
