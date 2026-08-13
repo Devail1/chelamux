@@ -15,6 +15,17 @@ an opinion wearing a fact's clothes, and each one was a real, hand-made mistake 
 The mutation experiments here are REAL: a real git repo, a real production module, a real
 pytest guard, a real `python -m pytest` subprocess. The one thing that is stubbed is
 `gh` — GitHub is not this module's to own.
+
+⚠️ NOT GUARDED: the WORDING of WORKFLOW.md step 6's and judge.block_body's step 3's
+self-check mandate is not machine-verified. A substring assertion cannot distinguish a
+mandate ("you must pass one of these flags") from its negation ("neither flag is
+required") or an arbitrary paraphrase of either — CMX-258 rework rounds 1-16 closed this
+axis for presence, then mandate, then pairing, then negation, at both sites, and each
+fix caught one wording and the next round found another (same class CMX-257 retired for
+CSS values). The BEHAVIOUR those docs describe — that `task-finished` reads and enforces
+`--self-check-experiments`/`--no-new-guards`, and that step 6's flag must point at THE
+SAME experiments file step 3 wrote — IS guarded below, by the tests that exercise the
+flags themselves rather than the prose that describes them.
 """
 from __future__ import annotations
 
@@ -352,6 +363,62 @@ def test_a_cannot_verify_report_blocks_nothing_whatever_its_findings_say(tmp_pat
     )
     assert judge.Report(outcomes=[survived]).blocking == [survived]
     assert judge.Report(outcomes=[survived], cannot_verify="the baseline was red").blocking == []
+
+
+def test_block_body_step_3_binds_the_self_check_flag_to_the_same_experiments_file():
+    """⛔ CMX-258 rework round 12 (judge finding 1, WIRING): pins the BINDING half of
+    ``block_body`` step 3 — that the experiments file it names is THE SAME one the judge just
+    proved a guard survived corruption in, not any freshly-written file that happens to come
+    back clean. Softening the parenthetical from "(the same experiments file `chela judge
+    self-check` uses)" to "(any experiments file)" tells a blocked rework agent it may write
+    a NEW experiments file for the round it was blocked on — the gate would then re-verify
+    guards the agent chose after the fact instead of the ones the judge just proved were
+    decoration, on the exact round that matters most. Same shape as
+    ``test_workflow_md_step_6_binds_the_self_check_flag_to_the_same_experiments_file`` below,
+    pinned at ``block_body``'s own call site instead of ``WORKFLOW.md``'s. (The wording of
+    step 3's mandate itself is NOT machine-verified — see the module docstring.)"""
+    survived = judge.Outcome(
+        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+        judge.SURVIVED, "it survived",
+        baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+        mutated=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+    )
+    report = judge.Report(outcomes=[survived],
+                           baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""))
+
+    body = judge.block_body(report, "https://x/1", TEST_CMD)
+
+    assert "the same experiments file `chela judge self-check` uses" in body
+
+
+def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
+    """⛔ CMX-258 rework round 4, finding 3 (WIRING): step 3 tells the agent to KEEP the
+    experiments JSON file so step 6 can consume it. If this instruction reverses (an agent
+    told to delete the file instead), following the doc destroys the path before step 6
+    exists — `task-finished --self-check-experiments <path>` can never run, and every run
+    silently falls back to the warn-only `--no-new-guards` path. Pins step 3's half of the
+    step-3-to-step-6 wiring; the sibling test below pins step 6's half."""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert "Keep the experiments JSON file" in text
+    assert "do not delete it after step 3" in text
+    assert "step 6 needs its path" in text
+
+
+def test_workflow_md_step_6_binds_the_self_check_flag_to_the_same_experiments_file():
+    """⛔ CMX-258 rework round 10 (judge finding 3, WIRING): the sibling test above pins step
+    3's half of the step-3-to-step-6 wiring ('Keep the experiments JSON file … step 6 needs
+    its path'), but step 6's own half — that `--self-check-experiments` must point at THE
+    SAME file step 3 wrote, not any freshly-written one that happens to come back clean —
+    was unpinned. Softening 'the SAME experiments file from step 3' to 'an experiments file'
+    unbinds the gate from the guards this run actually added, which is exactly the
+    prose-that-can-be-skipped failure CMX-250 exists to close. (The wording of step 6's
+    mandate to pass a flag at all is NOT machine-verified — see the module docstring.)"""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert "the SAME experiments file from step 3" in text
 
 
 def test_zero_experiments_is_CANNOT_VERIFY_not_a_clean_bill_of_health(tmp_path):

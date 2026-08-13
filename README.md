@@ -361,7 +361,7 @@ measured numbers, and why a per-job cap does *not* protect the machine:
 | `chela review <run\|branch> --request-changes --body-file -` | **Fail a PR and send it back**: the run re-enters its *own* worktree and branch, with your verdict as the prompt. `--approve` records a pass and merges nothing |
 | `chela reopen <run> [--reason R]` | 🔓 Put a `needs_human` run back into `awaiting_review` after **you** fixed and pushed, so judge/review/merge re-verify it. Nudges (never blocks) from the 3rd reopen on if nothing under `chela/` changed since the first |
 | `chela restore [--apply]` | Report epoch-dangling rows a hard tmux death orphaned (inbox / telegram-bindings / session-ids / dispatcher runs). Read-only by default; `--apply` re-stamps REVIVABLE rows at their new address and archives-then-removes MANUAL ones |
-| `chela task-finished <task_id>` | (agent uses this) mark a run awaiting-review + kill its window |
+| `chela task-finished <task_id> [--self-check-experiments PATH \| --no-new-guards]` | (agent uses this) mark a run awaiting-review + kill its window. The flag re-verifies `chela judge self-check`'s experiments file against the run's worktree and refuses the transition if a guard survived corruption |
 | `chela msg <agent> <text> [--from] [--priority]` | Message a live agent over tmux (by window id `@32` or name; non-zero exit if not delivered) |
 | `chela broadcast <text>` | Message every other live agent |
 | `chela telegram [--no-inbound]` | Bridge agent windows ↔ Telegram forum topics (see [`skills/telegram-setup`](skills/telegram-setup/SKILL.md)) |

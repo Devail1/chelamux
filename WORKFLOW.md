@@ -150,7 +150,8 @@ message.
    hand off.** Doing this by hand invites the exact mistakes the judge exists to catch (a
    mutation that never applied, one that broke the parse) — let the command make and verify the
    corruption instead of hand-editing and eyeballing it. **This is the exact check the judge will
-   run — catch your own decoration first, or the PR comes straight back.**
+   run — catch your own decoration first, or the PR comes straight back.** ⛔ **Keep the
+   experiments JSON file** (do not delete it after step 3) — step 6 needs its path.
 4. **Commit in the worktree.** Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`). Verify with `git status` +
    `git diff --cached --stat` before committing.
@@ -158,7 +159,18 @@ message.
    `gh pr create --base {{base_branch}} --title "{{project_key}}-{{task_number}}: <summary>" --body ...`
    (put `{{task_id}}` in the body).
 6. **Run `chela task-finished {{task_id}}` as your last step** — marks the run
-   `awaiting_review`, records the PR URL, and kills your tmux window.
+   `awaiting_review`, records the PR URL, and kills your tmux window. ⚖️🔎 **CMX-250: pass
+   ONE of these two flags — `task-finished` now enforces step 3's outcome instead of trusting
+   it happened:**
+   - **Added or changed a guard?** `chela task-finished {{task_id}} --self-check-experiments <path>`
+     — the SAME experiments file from step 3, re-verified against your worktree right now.
+     `task-finished` REFUSES the transition (exits nonzero, run stays `running`) if a guard
+     SURVIVED corruption or the check CANNOT VERIFY. Fix it and call `task-finished` again.
+   - **Added or changed no guard this run?** `chela task-finished {{task_id}} --no-new-guards`
+     — the honest opt-out. Do not reach for this to dodge a failing self-check; the judge
+     still reads the diff and a guard that exists without a matching self-check is exactly
+     the gap this closes. It is checked (never blocked, but recorded) against your own
+     diff — passing it on a run that touches `tests/` prints a loud warning.
 
 **Do NOT touch the tracker file.** You do not tick your own checkbox — the dispatcher
 strikes it on `{{base_branch}}` once your PR actually **merges**. It is the file's only

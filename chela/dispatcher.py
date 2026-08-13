@@ -2131,6 +2131,112 @@ def _fire_after_done(wf: WorkflowDef) -> None:
         log.exception("after_done hook failed to start")
 
 
+def verify_self_check(task_id: str, experiments_path: str) -> dict:
+    """⚖️🔎 CMX-250. The gate `chela task-finished --self-check-experiments` uses to make
+    Done Criteria #3 an outcome that BINDS, not a command an agent may or may not have run.
+
+    Looks the run up by ``task_id`` (never trusts a bare ``--cwd`` the caller could point
+    anywhere) and re-runs :func:`chela.judge.run_self_check` against ITS worktree, right
+    now — not whatever the agent saw the last time it happened to invoke `self-check` by
+    hand, which may predate edits made since. A guard that was clean a few edits ago and
+    is decoration now must still block.
+    """
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None:
+        return {"ok": False, "error": f"no run found for task_id {task_id}"}
+    worktree_path = row["worktree_path"]
+    if not worktree_path:
+        return {"ok": False, "error": "run has no worktree_path on record — cannot self-check"}
+
+    result = judge.run_self_check(
+        worktree_path, experiments_path, workflow_path=row["workflow_path"],
+    )
+    if not result.get("ok"):
+        return result
+    return {
+        "ok": True,
+        "blocking": result["blocking"],
+        "cannot_verify": result["cannot_verify"],
+        "outcomes": result.get("outcomes") or [],
+    }
+
+
+def _is_guard_path(path: str) -> bool:
+    """⚖️🔎 CMX-258 rework round 6: the DEFINITION ``check_no_new_guards`` cross-checks — "is
+    this diff-touched path a guard?" — written down once, in one place, instead of being
+    re-derived one clause at a time by each review round.
+
+    A path is a guard when it is something the repo's own suites actually execute:
+
+    * anything under the top-level ``tests/`` directory — this is the ONLY place pytest
+      looks (``pyproject.toml``'s ``[tool.pytest.ini_options] testpaths = ["tests"]``), so a
+      Python file nested somewhere else that happens to sit under its own ``tests/``
+      subdirectory (e.g. a hypothetical ``chela/tests/x.py``) is never collected and is
+      therefore NOT a guard by this definition — a decision, not an oversight: nothing
+      pytest runs is protected by a mutation to that file.
+    * any ``*.test.mjs`` file ANYWHERE in the repo — ``tests/test_js_suites.py`` globs the
+      whole tree with ``ROOT.rglob("*.test.mjs")`` and runs every hit under
+      ``CHELA_REQUIRE_JS_TESTS=1``, precisely so a suite like
+      ``chela/dashboard/static/collab/fit.test.mjs`` (real, outside ``tests/`` today) still
+      counts as a guard even though it is not a ``.py`` file and not under ``tests/``.
+
+    A path that merely STARTS WITH the letters "tests" without the directory separator
+    (``tests_helper.py``, ``tests-helpers/x.py``) is deliberately excluded — it is not under
+    the ``tests/`` directory at all.
+    """
+    return path.startswith("tests/") or path.endswith(".test.mjs")
+
+
+def check_no_new_guards(task_id: str) -> bool | None:
+    """⚖️🔎 CMX-250 review round 1: whether ``--no-new-guards`` looks WRONG for this run —
+    its diff (vs its own ``base_branch``, read from its own worktree, right now) touches a
+    guard, per :func:`_is_guard_path`. Report-only, on purpose: the opt-out must stay usable
+    for a genuinely guard-free run, so this never refuses the transition — it makes a wrong
+    opt-out VISIBLE (an event, plus a loud CLI warning) instead of it being a bare
+    self-declaration nothing ever cross-checks, which is exactly how the prose version of
+    Done Criteria #3 failed.
+
+    Returns ``None`` when it cannot tell (no run on record, no worktree_path/workflow_path,
+    the workflow does not parse, or ``base_branch`` does not resolve on origin) — an
+    unknown must never be misread as "no test files touched".
+    """
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return None
+    worktree_path = row["worktree_path"]
+    try:
+        wf = load_workflow(row["workflow_path"])
+    except Exception:
+        return None
+    base_branch = wf.get("workspace", "base_branch", default="master")
+    ref = f"origin/{base_branch}"
+    resolved = subprocess.run(
+        ["git", "-C", worktree_path, "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True, errors="replace",
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return None
+    base_sha = resolved.stdout.strip()
+    diff = subprocess.run(
+        ["git", "-C", worktree_path, "diff", "--name-only", f"{base_sha}...HEAD"],
+        capture_output=True, text=True, errors="replace",
+    )
+    if diff.returncode != 0:
+        return None
+    files = [f for f in diff.stdout.splitlines() if f.strip()]
+    touched = [f for f in files if _is_guard_path(f)]
+    if touched:
+        event_log.append(
+            "no_new_guards_mismatch",
+            f"{task_id}: --no-new-guards was passed but the diff touches tests/ "
+            f"({len(touched)} file(s))",
+            payload={"task_id": task_id, "files": touched},
+        )
+    return bool(touched)
+
+
 def mark_awaiting_review(task_id: str) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 

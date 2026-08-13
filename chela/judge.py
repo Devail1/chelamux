@@ -1152,7 +1152,10 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
         "test is asserting something other than what the PR claims.",
         "2. ⛔ Do NOT delete the mutation from the code (it is not in your branch — it was "
         "applied to a throwaway copy and reverted). Fix the **test**.",
-        "3. Re-run the suite, push to this branch, and `chela task-finished <task-id>`.",
+        "3. Re-run the suite, push to this branch, then `chela task-finished <task-id> "
+        "--self-check-experiments <path>` (the same experiments file `chela judge "
+        "self-check` uses) — it re-verifies the fix before this can go back to "
+        "awaiting_review.",
         "",
         f"_The judge never merges and never approves. PR: {pr_url or '(none on the run row)'}._",
     ]
