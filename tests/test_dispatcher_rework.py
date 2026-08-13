@@ -1383,6 +1383,23 @@ def test_latest_required_mutations_defaults_to_empty_for_a_legacy_or_review_less
     assert dispatcher.latest_required_mutations(run) == []
 
 
+def test_latest_required_mutations_stops_at_the_latest_verdict_even_when_it_carries_no_findings():
+    """⛔ Rework round 5, finding 2 (defeat shape #8 in docs/DEFEAT_SHAPES.md): every earlier
+    test either has one substantive entry, or has every entry carry a `mutations` list — so
+    "stop at the most recent substantive verdict" and "keep scanning older entries until one
+    has `mutations`" were indistinguishable. Here round 1 carries a required set and round 2
+    (the most recent, a human's free-text `changes_requested` or `mark_rework_disputed`'s
+    carrier) carries none — the round-2 verdict is what's live, so nothing is required,
+    NOT round 1's stale set."""
+    run = {"review_history": json.dumps([
+        {"round": 1, "at": "t1", "body": "the wire is loose", "verdict": "changes_requested",
+         "mutations": [{"guard": "g", "file": "f.py", "before": "a", "after": "b"}]},
+        {"round": 2, "at": "t2", "body": "just fix the typo",
+         "verdict": "changes_requested"},
+    ])}
+    assert dispatcher.latest_required_mutations(run) == []
+
+
 def test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable_JSON_block(tmp_path):
     """The rework brief must carry the exact mutation as DATA the agent can copy-paste into
     its self-check experiments file — not just prose describing it. This is the fix for the
@@ -1423,6 +1440,12 @@ def test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable
     assert '"file": "guard.py"' in prompts[0]
     assert '"before": "glyph = \\"*\\""' in prompts[0]
     assert "copy this JSON into your self-check experiments file" in prompts[0]
+    # ⛔ Rework round 5, finding 1 (defeat shape #7 in docs/DEFEAT_SHAPES.md): the field-level
+    # substrings above all survive dumping the bare `mutations` list with no `{"experiments":
+    # [...]}` envelope — an agent that copies that verbatim gets refused by
+    # `judge.load_experiments` ("must be a JSON object with an `experiments` list"). Only a
+    # structural marker on the envelope itself catches the missing wrapper.
+    assert '"experiments": [' in prompts[0]
 
 
 def test_the_rework_prompt_has_no_REQUIRED_MUTATION_SET_section_when_the_verdict_carried_none(tmp_path):
