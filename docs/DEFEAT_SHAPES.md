@@ -214,7 +214,102 @@ here it rests on a property of the *comparison*.
 
 ---
 
-## 9. Substring assertions on a nested payload never pin its wrapping envelope
+## 9. A behavior-changing fix shipped with no guard at all
+
+**Assertion form:** none. The PR states plainly that it adds no test or guard — "this is a
+production script fix" — and the suite is green because nothing in it was ever pinned to the
+invariant the fix introduces.
+
+**Mutation that defeats it:** revert the fix verbatim. With nothing asserting the new
+behavior, a one-line revert to the exact pre-fix code is indistinguishable from the fix
+itself — the whole suite, unrelated to the change, stays green.
+
+**Guard form that survives:** when the fix is "stop guessing X, ask the real source of truth
+for X instead," a single guard rarely closes the whole gap on its own — read whichever of the
+two applies:
+- If the "real source of truth" can be called on its own (a function, a `--print-X` mode),
+  a *behavioral* test can drive it directly and prove its output has a property a guess could
+  never have. Cheap, but only proves the function is honest — not that production code still
+  calls it. See shape 7 for that half.
+- A *static* exact-line match on the call site closes the shape-7 gap the behavioral test
+  leaves — see shape 7 for when a source-text match is the strong form instead of the weak
+  one shape 1 warns about.
+
+**Found:** CMX-275 rework round 1 (2026-08-13), PR #345. `scripts/smoke-fresh-install.sh`'s
+dashboard port picker changed from a blind `$(( 20000 + (RANDOM % 20000) ))` guess to a real
+`bind(('127.0.0.1', 0))` kernel probe, with "no test or guard was added or changed" stated in
+the PR body. The judge reverted the diff in a throwaway checkout and 3027 tests, including
+every other test in `tests/test_smoke_fresh_install.py`, stayed green — nothing anywhere
+checked where `$DASH_PORT` actually came from, only that some dashboard eventually answered
+200. Round 1 factored the probe into `pick_free_port()`, exposed it via a `--print-port` fast
+path, and paired a behavioral test (repeated samples must include at least one port outside
+the `[20000, 40000)` band a blind guess is confined to) with a static exact-line match on the
+production `DASH_PORT=$(pick_free_port)` call site (shape 7: the behavioral test alone
+doesn't notice that specific line reverted while `pick_free_port()` itself stays honest). The
+structure (a real seam plus a paired behavioral+static test) was the right shape, but round 2
+defeated *both* halves without touching the fix — see shape 10, which is about the specific
+way "the kernel was asked" turned out to be a proxy no band or source match could pin down.
+`pick_free_port()`/`--print-port` were kept; the two tests were replaced with a declared
+`NOT GUARDED`.
+
+---
+
+## 10. A range/band check as a proxy for "how the value was produced"
+
+**Assertion form:** the guard asserts a produced value falls inside (or outside) a specific
+numeric band, as a stand-in for a claim about *mechanism* — "this came from asking the kernel,
+not from arithmetic" — rather than observing the mechanism directly. A paired "wiring" half
+source-matches the one call site that's supposed to feed the value through.
+
+**Mutation that defeats it:** two independent mutations, both against the same target.
+- The band check is defeated by generating the arithmetic guess from a *different* band than
+  the one the test happens to check. It's still a guess, still not the kernel — the mutation
+  just moved to a part of the number line the test wasn't looking at. Any fixed band the test
+  picks, the next mutation can dodge; there is no band exhaustive enough to close this, short
+  of the entire feasible port space.
+- The paired source match is defeated by leaving the matched line in place, unmodified, and
+  *shadowing* its result on the very next line — a pattern this same script already uses
+  legitimately elsewhere (a retry path re-picking a port after occupying the first one), so
+  it isn't even an unusual shape to write.
+
+**Why this is a distinct shape from 5, 6, and 9:** shape 5 is about reading a *constant* off
+source instead of a rendered value; shape 6 is coverage resting on a coincidence in the data;
+shape 9 is no guard at all. This shape is subtler than any of those: a real seam exists (the
+production function is directly callable), the test drives it hundreds of times, and it
+genuinely fails against the first mutation tried. It looks, and mostly is, the "guard form
+that survives" shape 9 itself prescribes — right up until a second experiment targets the
+*specific number range* the assertion happens to check, rather than the code path.
+
+**The deeper problem, and why "guard form that survives" isn't a fix here:** the property
+being claimed — "the kernel was asked" — is a mechanism, not an outcome. A mechanism has no
+observable trace in the return value alone; a kernel-assigned port and a well-guessed one are
+bit-for-bit indistinguishable numbers. The *only* outcome where the two mechanisms provably
+differ is **contention** (something else already holds the port a guess would have picked) —
+and a unit test, run on an otherwise-idle box, does not reproduce contention. Widening the
+band the test checks doesn't change this; it only raises the number of mutations needed to
+find an unchecked band, the same treadmill shape 1's "just pick a different dead-code wrapper"
+represents for source matches.
+
+**Guard form that survives:** stop looking for a wider proxy and
+ask whether the property is observable at all under the constraints a test can actually
+create (no root, no exhausting the OS's whole ephemeral range, no reliably-reproducible
+contention). If it isn't, **declare `NOT GUARDED`**: name exactly what's unprotected, why
+(the mechanisms are indistinguishable outside contention), and what covers the fix instead
+(a one-line, self-evidently correct change, and/or the original bug report — here, a real CI
+flake under contention — that already proved the old code wrong once). A declared gap that
+says this beats a third band nobody can prove is the last one.
+
+**Found:** CMX-275 rework round 2 (2026-08-13), PR #345 — both halves of the round-1 WIRING
+guard for `scripts/smoke-fresh-install.sh`'s `pick_free_port()` (see shape 9) survived the
+judge's mutations: the behavioral test's band check was defeated by a guess drawn from
+`[40000, 60000)` instead of `[20000, 40000)`, and the static source match was defeated by
+leaving `DASH_PORT=$(pick_free_port)` in place and overriding `$DASH_PORT` on the next line.
+Resolved round 3 by declaring the gap `NOT GUARDED` in `tests/test_smoke_fresh_install.py`
+rather than writing a third proxy.
+
+---
+
+## 11. Substring assertions on a nested payload never pin its wrapping envelope
 
 **Assertion form:** the guard builds a structured payload (`{"experiments": [...]}`) and only
 ever asserts substrings that live *inside* the inner list — a field name, a value, a piece of
@@ -242,7 +337,7 @@ substrings, none of which distinguish `json.dumps({"experiments": mutations})` f
 
 ---
 
-## 10. A "stop, don't fall through" rule untested because every fixture has the property everywhere
+## 12. A "stop, don't fall through" rule untested because every fixture has the property everywhere
 
 **Assertion form:** a function is supposed to STOP at the first (or most recent) matching
 entry in a sequence and return based on that entry alone — never falling through to consult
@@ -270,7 +365,7 @@ carried no `mutations` while an *earlier* one did, so a fall-through mutation
 
 ---
 
-## 11. A per-item loop over a required SET tested with a set of exactly one
+## 13. A per-item loop over a required SET tested with a set of exactly one
 
 **Assertion form:** a function is supposed to check EVERY item in a list against some
 condition and collect the ones that fail — but every fixture that drives it hands it a
@@ -298,7 +393,7 @@ hands the function two required mutations and asserts only the unsubmitted one i
 
 ---
 
-## 12. A field pinned at one hop of a round-trip, untested at the next
+## 14. A field pinned at one hop of a round-trip, untested at the next
 
 **Assertion form:** a value is produced by one function, consumed by another, and the two
 are separated by a serialize/render step in between. A test pins the value on the
@@ -330,7 +425,7 @@ prompt.
 
 ---
 
-## 13. A list rendered verbatim, tested with a list of exactly one — the render-side mirror of shape 11
+## 15. A list rendered verbatim, tested with a list of exactly one — the render-side mirror of shape 13
 
 **Assertion form:** the same shape as #11 (a required SET tested with a set of length one) —
 but on the OTHER side of a check/render pair. Shape 11 was the *enforcement* side deciding
@@ -343,7 +438,7 @@ distinguish "dump the whole list" from "dump only the first item" — `mutations
 `json.dumps({"experiments": mutations[:1]}, indent=2)` instead of `mutations`. On a one-item
 fixture this is invisible. The concrete failure is worse than a silent gap because the two
 sides of the pair are coupled: the judge blocks with two survivors, the brief renders only
-the first, the agent copies the JSON exactly as instructed, and shape 11's own fix —
+the first, the agent copies the JSON exactly as instructed, and shape 13's own fix —
 correctly — flags the second as missing. The agent is then refused for omitting a mutation
 it was never shown, with no way to discover what it is: an unescapable refuse-loop produced
 by fixing one side of a pair and not the other.
@@ -354,9 +449,9 @@ just that "a" required-mutation section exists, and not just fields the first it
 would already satisfy.
 
 **Found:** `chela/dispatcher.py`'s `_required_mutations_section`, at both call sites that
-render it (CMX-269 rework round 7) — the same two tests fixed for shape 12
+render it (CMX-269 rework round 7) — the same two tests fixed for shape 14
 (`test_the_rework_prompt_carries_the_REQUIRED_MUTATION_SET_as_a_copy_pasteable_JSON_block`,
 `test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET`) still built their
-`mutations` list with exactly one entry, so round 6's enforcement-side fix for shape 11 had
+`mutations` list with exactly one entry, so round 6's enforcement-side fix for shape 13 had
 no render-side counterpart. Fixed by giving each fixture a second, distinct mutation and
 asserting both survivors' `guard` and `file` values appear in the rendered prompt.
