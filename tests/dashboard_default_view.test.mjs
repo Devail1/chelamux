@@ -143,6 +143,29 @@ test('panel-work is the panel that is actually active after a terminals-off boot
         "when terminals are off (selectView('work') is never called on this boot path) — the canvas would load blank");
 });
 
+test('the sidebar nav on a terminals-off boot lists only Work — not Wall, whose enabled predicate is TERMINALS_ON-gated', () => {
+    // nav.js's renderNav() (called once at main.js's own module-load time,
+    // main.js:51) runs VIEWS through _viewCtx() -> { terminalsOn: TERMINALS_ON },
+    // and views.js's Wall entry (`enabled: ctx => !!ctx.terminalsOn`) is the ONLY
+    // thing that keeps it off this list on a terminals-off deployment. Reading
+    // the actual #side-nav DOM back — on THIS file's genuine terminals-off boot —
+    // is what proves that predicate ran and excluded Wall, not just that some
+    // fixture with a hand-picked ctx would have excluded it: neither of
+    // tests/dashboard_scale_nav_a11y.test.mjs's nav-inventory or WIRING tests
+    // does that (the source-level one feeds navViews() synthetic entries with no
+    // `enabled` key at all, so the predicate is never even reached; the WIRING
+    // one always drives renderNav() with { terminalsOn: true }, so a predicate
+    // that only ever REMOVES a row when terminalsOn is false can never trip it
+    // either). Neutralising the predicate to `ctx => true` (round 2's verdict)
+    // would have rendered BOTH items here and gone undetected by either of those.
+    const ids = [...document.querySelectorAll('#side-nav .side-item')].map(el => el.dataset.view);
+    assert.deepEqual(ids, ['work'],
+        "the terminals-off sidebar nav is not exactly ['work'] — Wall's enabled predicate " +
+        "let a row through it shouldn't have, which would route selectView('terminals') at " +
+        'a panel that does not exist (index.html only emits #panel-terminals when terminals ' +
+        'are enabled) and blank the canvas');
+});
+
 test('the currentTab gate actually lets the Work board paint — not just a value that happens to read "work"', () => {
     // work.js:174 (`if (currentTab !== 'work') return;`) is the load-bearing
     // consumer of the literal above. Proven behaviourally: renderKanban() only

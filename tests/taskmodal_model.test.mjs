@@ -10,13 +10,13 @@ import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 
-let tm;
+let tm, knowledge;
 
 before(async () => {
     // taskmodalmodel.js imports knowledge.js's knMd, which imports util.js —
     // util.js reads window/document at MODULE SCOPE (window.location.pathname,
     // document.addEventListener, ...), so those globals must exist before the
-    // import, same bootstrap as tests/knowledge_graph.test.mjs.
+    // import, same bootstrap as the now-deleted tests/knowledge_graph.test.mjs.
     const dom = new JSDOM('<!doctype html><html><body></body></html>',
         { url: 'http://localhost:5005/' });
     for (const k of ['window', 'document', 'getComputedStyle', 'HTMLElement', 'Element', 'Node']) {
@@ -26,6 +26,7 @@ before(async () => {
     }
     globalThis.window.chela = globalThis.window.chela || {};
     tm = await import('../chela/dashboard/static/js/taskmodalmodel.js');
+    knowledge = await import('../chela/dashboard/static/js/knowledge.js');
 });
 
 // --- briefSource: brief > body > raw, never throws on a sparse item --------
@@ -97,6 +98,47 @@ test('briefHtml: a heading + numbered list + inline code render via knMd', () =>
         + '<p>Build <code>sample()</code> with these steps:</p>'
         + '<ol class="kn-ol"><li>First step with <code>code</code>.</li><li>Second step.</li></ol>'
         + '<p>Some paragraph.</p>',
+    );
+});
+
+// --- knMd: the bullet-list branch — guards lost when tests/knowledge_graph.test.mjs
+// was deleted alongside the Knowledge view (CMX-279). knMd is SHARED, not
+// exclusive to that view (see knowledge.js's own header: it backs THIS file's
+// briefHtml too), but its tests lived only in the deleted view's test file, so
+// deleting that file silently dropped every guard on this branch — the
+// exact-output test above never contains a `-`/`*` bullet, only `1.`/`2.`. -----
+
+test('knMd: a `-` run renders <ul> with a MATCHING closing tag, not <ol>', () => {
+    // 🔴 GUARD (CMX-279 rework round 2, PR #350): the briefHtml exact-output test
+    // above only ever exercises the ORDERED (`1.`/`2.`) branch. A corruption that
+    // opens `<ol class="kn-ol">` for a `-` run while closeList() still emits
+    // `</ul>` (listType is still set to 'ul') produces a byte-identical
+    // `<ol class="kn-ol">...</ul>` mismatch — a substring check on either tag
+    // alone would miss it; only asserting the FULL string (open tag through
+    // close tag) catches the mismatch.
+    assert.equal(
+        knowledge.knMd('- one\n- two'),
+        '<ul class="kn-ul"><li>one</li><li>two</li></ul>',
+    );
+});
+
+test('knMd: a heading between a `-` run and a `1.` run splits them into two separate lists', () => {
+    // 🔴 GUARD: dropping closeList() from the heading branch would merge the
+    // bullet run and the numbered run into one list (or leave a dangling open
+    // tag) instead of two independently-closed ones.
+    assert.equal(
+        knowledge.knMd('- a\n### H\n1. b'),
+        '<ul class="kn-ul"><li>a</li></ul><h3 class="kn-mh">H</h3><ol class="kn-ol"><li>b</li></ol>',
+    );
+});
+
+test('knMd: switching list kind mid-run (bullet then numbered, no blank line) closes the first list before opening the second', () => {
+    // 🔴 GUARD: this is what `listType` (tracking 'ul' vs 'ol' instead of a
+    // single boolean) exists for — collapsing it back to a boolean would merge
+    // an adjacent `-` run and `1.` run into one mismatched list.
+    assert.equal(
+        knowledge.knMd('- a\n1. b'),
+        '<ul class="kn-ul"><li>a</li></ul><ol class="kn-ol"><li>b</li></ol>',
     );
 });
 
