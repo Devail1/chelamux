@@ -780,6 +780,33 @@ def test_terminal_timestamps_defaults_off_with_no_env_var_set(monkeypatch):
         importlib.reload(config)  # restore whatever env the rest of the suite expects
 
 
+def test_timestamps_on_does_not_steal_the_post_tool_use_gate_resolution(client, monkeypatch):
+    """CMX-277 rework round 5: ``app.py``'s own docstring claims the stamp branch fires
+    ONLY at the two message boundaries ("Every other event still returns {}") — but every
+    test that mounts the ON state (above) POSTs only ``UserPromptSubmit``/``Stop``, and
+    every test that POSTs ``PostToolUse`` runs at the real default, which is OFF, so the
+    stamp branch is skipped before the event set is even consulted either way. No test
+    observed the endpoint with timestamps ON and a non-boundary event, so
+    ``if event in hooks.TIMESTAMP_EVENTS`` could be widened to also swallow ``PostToolUse``
+    (docs/DEFEAT_SHAPES.md shape 12 — untested because every fixture sits on the property)
+    and nothing would catch it: with timestamps on, that widened branch returns before
+    ``gateanswer.gate_resolved`` is ever reached, so a held gate would wait out its whole
+    wait budget (the CMX-54 regression) instead of being torn down. Pin both halves at once:
+    the body is the empty-object shape non-boundary events get, AND the resolution side
+    effect the PostToolUse branch is responsible for still ran.
+    """
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
+    resolved = []
+    monkeypatch.setattr(dash.gateanswer, "gate_resolved", lambda tuid: resolved.append(tuid))
+
+    resp = client.post("/hooks/PostToolUse", json=_body(hook_event_name="PostToolUse",
+                                                          tool_use_id="toolu_123"))
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {}
+    assert resolved == ["toolu_123"]
+
+
 def test_terminal_timestamps_turns_on_with_the_env_var_set_to_true(monkeypatch):
     """CMX-277 rework round 4: the mirror of the OFF-default test above. Every other
     ON-state test in this file monkeypatches the `TERMINAL_TIMESTAMPS` attribute directly,
