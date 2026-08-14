@@ -807,6 +807,40 @@ def test_timestamps_on_does_not_steal_the_post_tool_use_gate_resolution(client, 
     assert resolved == ["toolu_123"]
 
 
+# Every event other than the two timestamp boundaries — derived from `hooks.HOOK_EVENTS`
+# itself, not hand-copied, so an event Claude Code adds later is exercised automatically.
+_NON_TIMESTAMP_EVENTS = [e for e in hooks.HOOK_EVENTS if e not in hooks.TIMESTAMP_EVENTS]
+
+
+@pytest.mark.parametrize("event", _NON_TIMESTAMP_EVENTS)
+def test_timestamps_on_leaves_every_non_boundary_event_unchanged(client, monkeypatch, event):
+    """CMX-283: the test above pins exactly one hole a judge mutation happened to find —
+    widening the membership test to also swallow ``PostToolUse``. That chases the
+    short-circuit one event at a time: the next event a widened condition happens to pick
+    up (``PermissionRequest``, ``SessionStart``, or an event Claude Code adds tomorrow)
+    would need its own dedicated round, forever one step behind whatever the judge finds
+    next. Assert the property the short-circuit actually promises, exhaustively instead:
+    for every event other than the two timestamp boundaries, whether
+    ``CHELA_TERMINAL_TIMESTAMPS`` is on or off must make NO difference to that event's
+    response — the branch is a true no-op outside its own two events. A membership test
+    widened to also catch this event returns ``hooks.timestamp_response(event)`` in place
+    of its real body once the flag is on, which a same-event on/off comparison catches
+    directly, without needing to know what that event's real body is or mock its handler's
+    side effects. Parametrized off ``hooks.HOOK_EVENTS`` (see `_NON_TIMESTAMP_EVENTS`
+    above), so covering a future event needs no new test, only a wider tuple.
+    """
+    body = _body(hook_event_name=event, tool_name="Bash", tool_use_id=f"toolu_{event}")
+
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", False)
+    resp_off = client.post(f"/hooks/{event}", json=body)
+
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
+    resp_on = client.post(f"/hooks/{event}", json=body)
+
+    assert resp_off.status_code == resp_on.status_code == 200
+    assert resp_on.data == resp_off.data
+
+
 def test_terminal_timestamps_turns_on_with_the_env_var_set_to_true(monkeypatch):
     """CMX-277 rework round 4: the mirror of the OFF-default test above. Every other
     ON-state test in this file monkeypatches the `TERMINAL_TIMESTAMPS` attribute directly,

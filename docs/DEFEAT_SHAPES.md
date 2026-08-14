@@ -131,6 +131,20 @@ reads `btn.disabled` / `row.textContent` (how the control *looks*), and the judg
 fix asserts `btn.getAttribute('onclick')` matches `/chela\.applyUpdate\(\)/` directly — the
 rendered wiring, not the control's appearance.
 
+**Found again:** `tests/test_runtime_truth.py`'s `process.node_ipc_env` pair (CMX-281 rework
+round 1, PR #352). `Finding.detail` is one string mixing a dynamically-rendered
+`{k}={v!r}` clause (built from what `os.environ` actually held) with STATIC advice prose
+that spells out both var names verbatim, unconditionally, for troubleshooting purposes
+(`` `env -u NODE_CHANNEL_FD -u NODE_CHANNEL_SERIALIZATION_MODE` ``). The tests asserted
+`"NODE_CHANNEL_FD" in findings[0].detail`, which the static prose alone satisfies — the
+judge blanked the dynamic clause entirely and the suite stayed green. This is the same shape
+as the `settings_update.test.mjs` case with a subtler disguise: it isn't a *separate* source
+constant sitting elsewhere in the file, it's a compile-time-constant substring living inside
+the very field that also carries the rendered value, so the two look, at a glance, like one
+observation-derived string. The fix asserts the rendered `k=v!r` pair itself
+(`"NODE_CHANNEL_FD='3'"`) and that the absent sibling's rendered pair is NOT present — pinned
+to what the observation produced, not to any name the prose happens to mention.
+
 ---
 
 ## 6. Coverage resting on a coincidence in production data
@@ -683,7 +697,208 @@ whole budget). Closed by
 
 ---
 
-## 21. A large green suite as false comfort for a claim that has zero guard of its own
+## 21. A shared field value tested on the sibling that motivated it, not on the one that already had it
+
+**Assertion form:** two (or more) declarations set the same field to the same value —
+`live_reload=True` on both `worktree_disk_budget` and `memory_slice_budget`. A PR adds the
+field and a test that exercises what the field actually *does* (here, `capabilities.live()`
+reconciling a `live_reload` capability against fresh config instead of a stale boot snapshot)
+— but only for the capability the PR's own ticket was about. The sibling declaration, present
+before the PR and unchanged by it, reads as "already covered" because a plain `effective()`
+test already asserts its `on`/`detail` values — except `effective()` always reads config
+fresh regardless of the flag, so that test cannot distinguish `live_reload=True` from
+`live_reload=False`. Nothing in the suite ever drives the sibling through `capabilities.live()`.
+
+**Mutation that defeats it:** flip the sibling's `live_reload` to the opposite of what its own
+comment says it must be. Every existing test for that capability — the `effective()` tests
+and the dispatcher-gate tests — reads config directly and never goes through `live()`, so none
+of them notice.
+
+**Guard form that survives:** when a field is declared identically on N siblings and a new
+test proves what the field does for sibling K, ask whether siblings 1..N-1 already have an
+equivalent test — not just a test with the same *name shape* (`test_capability_reports_*`),
+but one that actually exercises the code path the field controls. If they don't, they are
+untested for that field, no matter how long they've been in the suite.
+
+**Found:** CMX-280 rework round 1 (2026-08-14), PR #351. `_memory_slice_capability` was new
+in this PR and got `test_memory_slice_budget_reflects_a_post_boot_env_change_not_the_boot_snapshot`
+driving it through `capabilities.live()`. `_worktree_disk_budget_capability` had carried
+`live_reload=True` since CMX-164, predating this PR, with only `effective()`-level tests
+(`test_capability_reports_off_by_default`, `test_capability_reports_on_with_the_human_size`)
+— both blind to the flag. The judge flipped `worktree_disk_budget`'s `live_reload` to `False`
+in a throwaway checkout; 3083 tests, including every `worktree_disk_budget` test, stayed
+green. Closed by adding
+`test_worktree_disk_budget_reflects_a_post_boot_env_change_not_the_boot_snapshot`, mirroring
+the memory-slice test: publish a boot snapshot with the budget off, then set the env var with
+no restart and assert `capabilities.live_capability("worktree_disk_budget")` picks it up.
+
+---
+
+## 22. A field declared identically on every branch of one function, tested through only one branch
+
+**Assertion form:** a single function returns several `Capability` objects — one per
+branch (knob-on-and-usable, knob-on-but-unusable, externally-bound, off) — and every
+branch declares the same field (`live_reload=True`). One test drives a boot snapshot
+through the code that actually reads the field (`capabilities.live()`) — but only by
+publishing from ONE of the branches (usually whichever one the fixture defaults to) and
+flipping config so the *next* read lands on a different branch. That proves the flag
+matters on the branch that was published from; it proves nothing about the flag on the
+other N-1 branches, because `live()` only ever consults the flag on the row that was
+actually in the boot snapshot.
+
+**Mutation that defeats it:** flip `live_reload` to `False` on any branch OTHER than the
+one the existing test happens to publish from. Every `effective()`-level test for that
+capability reads config fresh and can't tell the flag apart; the one `live()` test never
+publishes a snapshot FROM the mutated branch, so it never exercises that branch's own
+flag either.
+
+**Guard form that survives:** for each branch of the function, publish a boot snapshot
+from THAT branch specifically, then change config so a later read would land on a
+different branch, and assert `live()` picks up the change. One test per branch, not one
+test for the function.
+
+**Found:** CMX-280 rework round 3 (2026-08-14), PR #351 — this is
+[[21|entry 21]] recurring one level down: not siblings across two functions, but branches
+inside one. `_memory_slice_capability` returns four `Capability` objects (memcap-available
+ON at `capabilities.py:161`, set-but-unwrapped OFF at `:168`, external-bound ON at `:186`,
+plain OFF at `:192`), all `live_reload=True`. Round 2 added
+`test_memory_slice_budget_reflects_a_post_boot_env_change_not_the_boot_snapshot`, which
+publishes from the `:192` OFF branch and flips to the `:161` ON branch — proving `:192`'s
+flag matters, saying nothing about `:161`'s. The judge flipped `:161`'s flag to `False` in
+a throwaway checkout; 3095 tests, including that test, stayed green. Closed by adding
+`test_memory_slice_budget_on_going_off_live_does_not_stay_latched` (publishes from `:161`,
+flips live to off) and its two siblings for `:168` and `:186`.
+
+---
+
+## 23. Two rendered quantities collide on the same substring, so mutating one is invisible
+
+**Assertion form:** a detail string renders more than one distinct numeric quantity
+derived from the same inputs (a ceiling, and a headroom computed as ceiling-minus-current)
+side by side in prose. The guard asserts each *expected* number appears as a substring —
+but only pins the ceiling's value, not the headroom's, and the two would print identically
+if headroom were computed wrong (e.g. mistakenly re-emitting the ceiling instead of
+subtracting).
+
+**Mutation that defeats it:** change the derived quantity's formula so it collapses onto
+the OTHER quantity's value (`headroom = human_size(max_bytes)` instead of
+`human_size(max_bytes - current)`). The string still contains every substring the guard
+checks — the ceiling's value was already being asserted, and now headroom prints the same
+digits — so the suite stays green even though the number that matters (how much room is
+actually left) is wrong.
+
+**Guard form that survives:** when a string renders two or more numbers derived from the
+same inputs, choose fixture values where every rendered number is numerically distinct,
+and assert each one by the surrounding words that make it unambiguous which quantity it
+is (`"currently using 10.0G"`, `"~2.0G headroom"`) — not just the bare digits, which could
+belong to either.
+
+**Found:** CMX-280 rework round 3 (2026-08-14), PR #351 —
+`test_capability_reports_an_external_bound_as_on` asserted `"12.0G"` (the ceiling) and
+`"83%"` but never pinned the headroom value by itself; with `max_bytes=12G` and
+`current=10G`, correct headroom is `"2.0G"`, and the judge's mutation
+(`headroom = config.human_size(bound["max_bytes"])`) made headroom render `"12.0G"` too —
+a substring the test already asserted for the ceiling. 3095 tests stayed green. Closed by
+asserting `"currently using 10.0G"` and `"~2.0G headroom"` as distinct, unambiguous
+substrings.
+
+---
+
+## 24. A subprocess fake dispatches on an argv prefix, so a wrong flag beyond the prefix still gets fabricated correct-shaped data back
+
+**Assertion form:** a test fakes `subprocess.run` to answer a real external command
+(`systemctl --user show <unit> -p ...`). The fake routes on a short prefix of `cmd`
+(`cmd[:3] == ["systemctl", "--user", "show"]`) plus one positional argument used as a
+lookup key (`unit = cmd[3]`), then fabricates stdout from a per-unit fixture dict keyed
+only on that unit name. Every property flag after the key (`-p MemoryMax -p
+MemoryCurrent`, `--type=slice`) is never inspected — the fake cannot tell which
+properties or unit-type filter production actually asked for, only that *some* call
+matching the prefix happened.
+
+**Mutation that defeats it:** change what property or filter the real call asks for,
+without changing the prefix or the unit — `-p MemoryMax` → `-p MemoryHigh` (a different,
+real systemd property), or `--type=slice` → `--type=service` in the discovery call. The
+fake still matches on `cmd[:3]`/`cmd[3]`, still hands back the fixture's `MemoryMax=...`
+line or `.slice`-named units regardless, so production's parser reads exactly the value
+the fixture author intended — even though systemd would never return that property (or
+those units) for the request production actually issued. Every assertion downstream
+passes; on a real box the query returns nothing and the feature silently reports "off"
+forever.
+
+**Why this is distinct from shape 18:** shape 18 is a stub whose return value is a fixed
+literal, blind to *any* argument (`lambda fmt: "12:34:56"`). Here the fake is NOT
+argument-blind in general — it correctly varies its answer per unit name, which makes it
+look far more rigorous than a canned constant. The gap is narrower and easier to miss:
+the fake discards only the tail of the argv (the actual query semantics — which property,
+which unit type), while still convincingly discriminating on the part it does read.
+"This fake varies its output, so it must be checking what was asked" is the trap.
+
+**Guard form that survives:** assert the full trailing argv the fake dispatches on, not
+just the routing prefix, and not just membership of one flag within it — `assert cmd[4:]
+== ["-p", "MemoryMax", "-p", "MemoryCurrent"]` for the `show` call, `assert cmd[3:] ==
+["--type=slice", "--state=active", "--no-legend", "--plain", "--no-pager"]` for the
+`list-units` call — so a request for the wrong property, unit type, *or any other flag in
+the same command* raises inside the fake itself instead of silently returning fixture
+data shaped as if the request were correct. (An earlier version of this entry recommended
+`assert "--type=slice" in cmd` for the `list-units` call; that membership check is itself
+an instance of shape 25 below and was defeated the round after it shipped.)
+
+**Found:** CMX-280 rework round 4 (2026-08-14), PR #351 — `_fake_show`/
+`_fake_list_and_show` in `tests/test_memory_slice_budget.py` matched only on
+`cmd[:3]` (plus `cmd[3]` as a unit-name lookup key), so the judge's `MemoryMax` →
+`MemoryHigh` and `--type=slice` → `--type=service` mutations in `chela/memcap.py` both
+left every `live_bound()` test green — the fakes handed back fixture data keyed on the
+unit name regardless of which systemd property or unit type was actually requested.
+3098 tests stayed green. Closed by asserting the trailing `-p` flags and the
+`--type=slice` filter inside the fakes themselves.
+
+## 25. A shape's own prescribed fix is applied fully at one call site and only partially at its sibling
+
+**Assertion form:** two call sites share the same shape-24 defect (a subprocess fake that
+discards part of the argv it dispatches on). The fix lands as a *full* argv-equality
+assertion at one site (`assert cmd[4:] == _SHOW_PROPS` for the `show` call) and as a
+*membership* assertion — checking only that one known flag is present, not that the rest
+of the argv matches — at the other (`assert "--type=slice" in cmd` for the `list-units`
+call). Both read as "the fix for shape 24," and the fully-fixed sibling sitting right next
+to it makes the partial one look reviewed rather than incomplete.
+
+**Mutation that defeats it:** change any flag in the `list-units` call other than the one
+membership checks — `--state=active` → `--state=inactive`. `--type=slice` is still
+present, so the membership assertion still passes; the fake still fabricates the fixture's
+active-looking units regardless of which state was actually requested. On a real box,
+`--state=inactive` enumerates units that are NOT running (measured: zero units, versus one
+for `--state=active`), so the function this feeds returns nothing and the capability it
+powers reports "off" forever — the exact failure class shape 24 was written to catch, now
+reintroduced through the one call site whose fix didn't generalize.
+
+**Why this is distinct from shape 24:** shape 24 is "the fake doesn't look at the tail of
+the argv at all." This is "the fake looks at *one flag* of the tail and treats that as
+proof of the whole tail" — a fix that is *shaped* like a real fix (it does assert
+something about the previously-invisible argv), so a reviewer (human or judge) scanning
+for "was shape 24 addressed here" sees an assertion referencing `--type=slice` and moves
+on, without checking whether that assertion covers `--state=active`,
+`--no-legend`, `--plain`, and `--no-pager` too — the same shape-24 gap, just narrowed from
+"all five flags" to "four of five flags."
+
+**Guard form that survives:** when the same fake dispatches a command with more than one
+significant flag, assert equality on the whole trailing slice (`cmd[3:] ==
+[...]`), not membership of the one flag that happens to be top of mind while writing the
+fix. When fixing a cataloged shape at N call sites, re-derive the guard from the
+production argv at each site independently rather than pattern-matching the fix already
+applied at a sibling site — the two sites can carry a different number of significant
+flags, and a fix copied by feel tends to check only the flags the previous round's mutation
+happened to target.
+
+**Found:** CMX-280 rework round 5 (2026-08-14), PR #351 — round 4's own fix for shape 24
+was applied to `_fake_show` as a full-argv assertion but to `_fake_list_and_show` as
+`assert "--type=slice" in cmd`, leaving `--state=active` (and every other flag past
+`--type=slice`) unguarded. `--state=active` → `--state=inactive` in `chela/memcap.py`
+kept all 3103 tests green. Closed by asserting `cmd[3:]` against the full expected flag
+list at the `list-units` call site.
+
+---
+
+## 26. A large green suite as false comfort for a claim that has zero guard of its own
 
 **Assertion form:** a PR's own description (or test-plan section) states a specific
 behavioral claim — often "the default X moves from A to B" — that depends on one or more
@@ -725,7 +940,7 @@ terminals-on branch, the counterpart to the terminals-off branch the new file co
 
 ---
 
-## 22. Coverage deleted alongside the feature it shared a *file* with
+## 27. Coverage deleted alongside the feature it shared a *file* with
 
 **Assertion form:** a PR deletes a whole view/feature and, with it, that view's test file —
 reasonable, since the view's OWN code is gone too. But some of the production code the
@@ -766,7 +981,7 @@ the Knowledge view itself is gone — the guard belongs with the surviving calle
 directly into a `1.` run mid-document — restoring the three cases the deleted file's own guard
 comments named.
 
-## 23. A guard closed to the exact width of the blocking finding, leaving a named remainder undefended
+## 28. A guard closed to the exact width of the blocking finding, leaving a named remainder undefended
 
 **Assertion form:** a judge round's blocking finding names a gap and prescribes a fix that
 covers MORE ground than the finding strictly requires — e.g. a non-blocking note beside the
@@ -812,7 +1027,7 @@ DEFEAT_SHAPES #7 wiring test (see above). The standing lesson: when a note names
 blocking finding only forces closing a subset, close ALL N in the same round — a partial close
 does not make the round's own note stop being a to-do list for the next judge.
 
-## 24. An exact-output fixture whose payload is IDENTITY under the very transform it claims to guard
+## 29. An exact-output fixture whose payload is IDENTITY under the very transform it claims to guard
 
 **Assertion form:** an exact-output test asserts a string produced by a transform function
 (an escaping call, a level-pinning regex capture, a character-class alternative) — and the
@@ -853,7 +1068,7 @@ rather than answering only the four findings asked for.
 
 ---
 
-## 25. A branch-enumeration table proves the dispatch fired, not that the transforms nested inside it ran
+## 30. A branch-enumeration table proves the dispatch fired, not that the transforms nested inside it ran
 
 **Assertion form:** a table enumerates every branch of a dispatcher function, one row per
 entry condition (does this `if` fire, does it emit the right tag) — the correct response to

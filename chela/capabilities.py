@@ -48,12 +48,22 @@ class Capability:
     fix: str = ""                   # how to turn it on — only meaningful when off
     warn_when_off: bool = False     # OFF is a foot-gun, not a preference: log WARNING
     warn_when_on: bool = False      # ON is the risk (e.g. auto-merge) — log WARNING, not INFO
+    # True only for a capability backed by a knob the running daemon re-reads on every use
+    # (no restart needed — see the non-``restart_required`` ``DispatchKnob`` rows in
+    # config.py, e.g. ``memory_slice_budget_bytes``). For those, "what the daemon published
+    # at boot" is provably NOT "what the daemon is doing right now" the moment an operator
+    # edits the knob live — see :func:`live`, which recomputes exactly these rather than
+    # trusting the stale snapshot. Every other capability (dispatch, judge, ...) is latched
+    # at some module's import, so its boot snapshot IS the running daemon's truth until a
+    # restart — leave those alone.
+    live_reload: bool = False
     extra: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {"key": self.key, "label": self.label, "on": self.on,
                 "detail": self.detail, "fix": self.fix,
                 "warn_when_off": self.warn_when_off, "warn_when_on": self.warn_when_on,
+                "live_reload": self.live_reload,
                 **self.extra}
 
 
@@ -91,6 +101,97 @@ def _update_available_capability() -> Capability:
         detail=(f"{status.behind} commit(s) behind — run `chela update`" if status.behind
                 else "up to date (as of the last fetch)"),
         fix="chela update",
+    )
+
+
+def _worktree_disk_budget_capability() -> Capability:
+    """🧹💽 CMX-164: the `memcap` analog for disk. Off is the safe, unopinionated default
+    for a fresh install — a small repo never needs it — but a heavier one (a Rust
+    `target/`, an ML venv, a Node monorepo) can fill the disk with nothing to stop it,
+    so an operator who knows their repo's footprint gets a rail to turn on.
+    """
+    return Capability(
+        key="worktree_disk_budget", label="🧹💽 Worktree disk budget",
+        on=bool(config.worktree_disk_budget_bytes()),
+        detail=(f"refusing a fresh claim once a workflow's worktree root exceeds "
+                f"{config.human_size(config.worktree_disk_budget_bytes())}"
+                if config.worktree_disk_budget_bytes() else
+                "off — CHELA_WORKTREE_DISK_BUDGET is unset/0, so no rail stops a heavy "
+                "repo from filling the disk"),
+        fix="set CHELA_WORKTREE_DISK_BUDGET=20G (or any K/M/G/T byte size) in "
+            f"{config.env_file_path() or '$CHELA_DIR/chela.env'} — takes effect on "
+            "the next dispatch, no restart required",
+        # dispatcher.py reads worktree_disk_budget_bytes() fresh on every tick — this
+        # is not a ``restart_required`` DispatchKnob, so the boot-time publish() must
+        # not be trusted as this capability's current state (see live_reload's doc).
+        live_reload=True,
+    )
+
+
+def _memory_slice_capability() -> Capability:
+    """🧠🔒 CMX-264/280: the `memcap` analog for memory. A per-job memory ceiling does not
+    bound the box — see docs/RESOURCE_ISOLATION.md's 2026-07-14 incident, where 4
+    agents each under their own 6G cap still authorised 24G on a 19G box and the
+    kernel's global OOM killer took tmux and the orchestrator with it, not the jobs
+    that caused it. This rail puts every dispatched agent AND judge into one SHARED
+    cgroup slice so the ceiling applies to their SUM. Off by default (unset/0), same
+    posture as the disk-budget rail above; further gated on a working
+    `systemd --user` session, so an operator can turn the knob on and still see
+    exactly why it isn't taking effect on their box.
+
+    CMX-280: ``CHELA_MEMORY_SLICE_BUDGET`` unset/0 answers "did chela turn this on?",
+    not "is a bound in force?" — this box's own cgroup can already be bounded by
+    something chela never touched (an operator's own ``~/bin/memcap``-style wrapper,
+    see ``docs/RESOURCE_ISOLATION.md``), and reporting that as OFF is actively
+    misleading: whoever sizes ``judge_max_concurrent`` off a doctor line that says OFF
+    gets it wrong in either direction. :func:`chela.memcap.live_bound` answers the
+    question that matters — a ceiling already in force on a SEPARATE ``systemd --user``
+    slice (chela's dispatched agents are never nested inside it; see
+    :func:`chela.memcap.live_bound`'s own docstring) still eats into the same box's
+    total RAM, and bounds an unwrapped dispatched agent exactly as much as chela's own
+    rail would, whoever set it.
+    """
+    fix = ("set CHELA_MEMORY_SLICE_BUDGET=12G (or any K/M/G/T byte size) in "
+           f"{config.env_file_path() or '$CHELA_DIR/chela.env'} — takes effect on "
+           "the next dispatch, no restart required")
+    if config.memory_slice_budget_bytes() and memcap.available():
+        return Capability(
+            key="memory_slice_budget", label="🧠🔒 Shared memory slice", on=True,
+            detail=(f"dispatched agents and judges launch into one shared "
+                    f"{memcap.SLICE_NAME} capped at "
+                    f"{config.human_size(config.memory_slice_budget_bytes())} TOTAL"),
+            fix=fix, live_reload=True,
+        )
+    if config.memory_slice_budget_bytes():
+        return Capability(
+            key="memory_slice_budget", label="🧠🔒 Shared memory slice", on=False,
+            detail="CHELA_MEMORY_SLICE_BUDGET is set but `systemd-run` is not on PATH "
+                   "— launching unwrapped, no memory ceiling enforced",
+            fix=fix, live_reload=True,
+        )
+    bound = memcap.live_bound()
+    if bound and not bound["chela_owned"]:
+        current = bound["current_bytes"]
+        occupancy = ""
+        if current is not None:
+            pct = current / bound["max_bytes"] * 100
+            headroom = config.human_size(bound["max_bytes"] - current)
+            occupancy = (f", currently using {config.human_size(current)} "
+                         f"({pct:.0f}%, ~{headroom} headroom)")
+        return Capability(
+            key="memory_slice_budget", label="🧠🔒 Shared memory slice", on=True,
+            detail=(f"a bound IS in force from outside chela — `{bound['unit']}` caps "
+                    f"this session at {config.human_size(bound['max_bytes'])}"
+                    f"{occupancy}. CHELA_MEMORY_SLICE_BUDGET is unset/0 — chela did not "
+                    "set this ceiling, but every dispatched agent and judge is under "
+                    "it anyway, launched or not"),
+            fix="", live_reload=True,
+        )
+    return Capability(
+        key="memory_slice_budget", label="🧠🔒 Shared memory slice", on=False,
+        detail="off — CHELA_MEMORY_SLICE_BUDGET is unset/0, so no rail bounds the "
+               "combined memory of every dispatched agent and judge",
+        fix=fix, live_reload=True,
     )
 
 
@@ -181,46 +282,8 @@ def effective() -> list[Capability]:
             fix="unset CHELA_TERMINALS_ENABLED=false",
         ),
         _update_available_capability(),
-        # 🧹💽 CMX-164: the `memcap` analog for disk. Off is the safe, unopinionated default
-        # for a fresh install — a small repo never needs it — but a heavier one (a Rust
-        # `target/`, an ML venv, a Node monorepo) can fill the disk with nothing to stop it,
-        # so an operator who knows their repo's footprint gets a rail to turn on.
-        Capability(
-            key="worktree_disk_budget", label="🧹💽 Worktree disk budget",
-            on=bool(config.worktree_disk_budget_bytes()),
-            detail=(f"refusing a fresh claim once a workflow's worktree root exceeds "
-                    f"{config.human_size(config.worktree_disk_budget_bytes())}"
-                    if config.worktree_disk_budget_bytes() else
-                    "off — CHELA_WORKTREE_DISK_BUDGET is unset/0, so no rail stops a heavy "
-                    "repo from filling the disk"),
-            fix="set CHELA_WORKTREE_DISK_BUDGET=20G (or any K/M/G/T byte size) in "
-                f"{config.env_file_path() or '$CHELA_DIR/chela.env'} and restart the daemon",
-        ),
-        # 🧠🔒 CMX-264: the `memcap` analog for memory. A per-job memory ceiling does not
-        # bound the box — see docs/RESOURCE_ISOLATION.md's 2026-07-14 incident, where 4
-        # agents each under their own 6G cap still authorised 24G on a 19G box and the
-        # kernel's global OOM killer took tmux and the orchestrator with it, not the jobs
-        # that caused it. This rail puts every dispatched agent AND judge into one SHARED
-        # cgroup slice so the ceiling applies to their SUM. Off by default (unset/0), same
-        # posture as the disk-budget rail above; further gated on a working
-        # `systemd --user` session, so an operator can turn the knob on and still see
-        # exactly why it isn't taking effect on their box.
-        Capability(
-            key="memory_slice_budget", label="🧠🔒 Shared memory slice",
-            on=bool(config.memory_slice_budget_bytes()) and memcap.available(),
-            detail=(f"dispatched agents and judges launch into one shared "
-                    f"{memcap.SLICE_NAME} capped at "
-                    f"{config.human_size(config.memory_slice_budget_bytes())} TOTAL"
-                    if config.memory_slice_budget_bytes() and memcap.available() else
-                    "CHELA_MEMORY_SLICE_BUDGET is set but `systemd-run` is not on PATH — "
-                    "launching unwrapped, no memory ceiling enforced"
-                    if config.memory_slice_budget_bytes() else
-                    "off — CHELA_MEMORY_SLICE_BUDGET is unset/0, so no rail bounds the "
-                    "combined memory of every dispatched agent and judge"),
-            fix="set CHELA_MEMORY_SLICE_BUDGET=12G (or any K/M/G/T byte size) in "
-                f"{config.env_file_path() or '$CHELA_DIR/chela.env'} — takes effect on "
-                "the next dispatch, no restart required",
-        ),
+        _worktree_disk_budget_capability(),
+        _memory_slice_capability(),
         # 🔀⚠️ CMX-138. The one fully-UNATTENDED merge path in the whole system — see
         # chela.automerge. OFF is the safe, expected state for every install but an operator's
         # own; ON gets its own WARNING line every boot (never just an INFO), because "silence
@@ -328,6 +391,16 @@ def live() -> dict | None:
 
     A file whose pid is gone is stale — the daemon died — and counts as no daemon at all,
     so a crashed instance cannot keep claiming a capability nothing is providing.
+
+    A ``live_reload`` capability (``memory_slice_budget``, ``worktree_disk_budget``) is
+    reconciled against THIS process's current config before returning — measured
+    2026-08-13: a 12G ``CHELA_MEMORY_SLICE_BUDGET`` added to the env file after the daemon
+    booted was already bounding the box (``memcap.wrap_launch_cmd`` re-reads the knob every
+    dispatch, no restart needed — that is the whole point of not marking it
+    ``restart_required``), while ``chela doctor``/the dashboard kept reporting it OFF from
+    the stale boot-time snapshot. Every other capability is latched at some module's
+    import, so its boot snapshot genuinely IS the running daemon's truth until a restart —
+    those are returned exactly as published, unchanged.
     """
     try:
         data = json.loads(state_file().read_text(encoding="utf-8"))
@@ -346,7 +419,15 @@ def live() -> dict | None:
             pass                 # alive, owned by someone else
         except OSError:
             return None
-    return data
+    fresh_by_key = None
+    reconciled = []
+    for cap in caps:
+        if isinstance(cap, dict) and cap.get("live_reload"):
+            if fresh_by_key is None:
+                fresh_by_key = {c.key: c.as_dict() for c in effective()}
+            cap = fresh_by_key.get(cap.get("key"), cap)
+        reconciled.append(cap)
+    return {**data, "capabilities": reconciled}
 
 
 def live_capability(key: str) -> dict | None:
