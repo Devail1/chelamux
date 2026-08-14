@@ -851,6 +851,18 @@ def test_timestamps_on_leaves_every_non_boundary_event_unchanged(client, monkeyp
     directly, without needing to know what that event's real body is or mock its handler's
     side effects. Parametrized off ``hooks.HOOK_EVENTS`` (see `_NON_TIMESTAMP_EVENTS`
     above), so covering a future event needs no new test, only a wider tuple.
+
+    CMX-285 rework round 2 (docs/DEFEAT_SHAPES.md shape 26): the on/off comparison alone
+    is not enough once the timestamp branch sits ABOVE ``hooks.ingest`` (CMX-285 moved it
+    there so the streamed ``MessageDisplay`` firehose never reaches the log). A widened
+    membership test now returns ``{}`` for BOTH flag states — the response comparison
+    stays green precisely because the event was swallowed identically either way, and the
+    thing actually lost — the event never reaching ``hooks.ingest`` at all — is invisible
+    to a response-shape assertion. Restore the property CMX-277's own endpoint test used to
+    pin per-event (the ``assert event_log.read()["events"][0]["type"] == "hook.stop"``
+    line CMX-285 dropped when it deleted the ``Stop``-specific test): for every
+    non-timestamp event, ingest must actually have run, independent of what the HTTP
+    response looks like.
     """
     body = _body(hook_event_name=event, tool_name="Bash", tool_use_id=f"toolu_{event}")
 
@@ -862,6 +874,31 @@ def test_timestamps_on_leaves_every_non_boundary_event_unchanged(client, monkeyp
 
     assert resp_off.status_code == resp_on.status_code == 200
     assert resp_on.data == resp_off.data
+
+    # Both POSTs must have reached hooks.ingest — one record per call, both typed for
+    # THIS event. A short-circuit that swallows the event (with the flag on, off, or
+    # both) leaves this list short instead of merely changing what the HTTP body says.
+    types = [e["type"] for e in event_log.read()["events"]]
+    assert types == [hooks.event_type(event), hooks.event_type(event)]
+
+
+def test_endpoint_message_display_survives_a_malformed_body(client, monkeypatch):
+    """CMX-285 rework round 2: ``message_display_response`` calls ``body.get(...)`` — a
+    non-dict body (unparseable JSON, an empty POST, a bare JSON list) would raise
+    ``AttributeError`` inside it and turn into a 500 into a live, blocked agent, exactly
+    the failure ``test_endpoint_does_not_fail_a_blocked_agent`` pins for ``PreToolUse``.
+    That test never exercises ``MessageDisplay`` with the flag on, so the ``isinstance``
+    guard on this branch's early-return path — the one place a malformed payload actually
+    meets ``message_display_response`` — had nothing watching it (the endpoint's own
+    docstring promise: "200 and an empty object, every time").
+    """
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
+    for data in (b"{not json", b"", b"[1,2,3]"):
+        resp = client.post("/hooks/MessageDisplay", data=data,
+                           content_type="application/json")
+        assert resp.status_code == 200
+        assert resp.get_json() == {}
+    assert event_log.read()["events"] == []
 
 
 def test_terminal_timestamps_turns_on_with_the_env_var_set_to_true(monkeypatch):
