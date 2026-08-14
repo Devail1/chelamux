@@ -10,6 +10,7 @@ BOTH things it takes down, and the daemon's real state must be readable from out
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -97,6 +98,47 @@ def test_a_dead_daemons_state_file_is_not_a_running_daemon(chela_dir, monkeypatc
     capabilities.state_file().write_text(text)
     assert capabilities.live() is None
     assert capabilities.live_capability("dispatch") is None
+
+
+def test_a_malformed_state_file_is_no_daemon_at_all(chela_dir):
+    """A whole-FILE failure — unparseable JSON, or valid JSON missing the shape ``live()``
+    needs — must degrade to "no daemon at all": ``live()`` returns ``None``, full stop.
+    Contrast with the malformed-ROW case below, where ONE bad entry inside an otherwise
+    valid ``capabilities`` list must NOT take the rest of the file down with it."""
+    capabilities.state_file().write_text("{not valid json", encoding="utf-8")
+    assert capabilities.live() is None
+    assert capabilities.live_capability("dispatch") is None
+
+    capabilities.state_file().write_text(
+        json.dumps({"pid": os.getpid()}), encoding="utf-8")   # no "capabilities" key at all
+    assert capabilities.live() is None
+
+    capabilities.state_file().write_text(
+        json.dumps({"pid": os.getpid(), "capabilities": "not-a-list"}), encoding="utf-8")
+    assert capabilities.live() is None
+
+
+def test_a_malformed_row_degrades_in_place_not_the_whole_file(chela_dir, monkeypatch):
+    """One bad ROW inside an otherwise well-formed ``capabilities`` list is a DIFFERENT
+    failure than the whole-FILE case above, and must degrade differently: ``live()`` still
+    returns the file, the bad row rides along unchanged, and every OTHER capability in the
+    list stays readable by key. A fix that makes one bad row null out the whole response
+    (matching the whole-FILE behavior instead) collapses a recoverable, partial failure
+    into a total one."""
+    caps = list(_caps(monkeypatch, [Path("/repo/WORKFLOW.md")]).values())
+    capabilities.publish(caps, boot_id="row-test")
+
+    data = json.loads(capabilities.state_file().read_text(encoding="utf-8"))
+    assert isinstance(data["capabilities"][0], dict)
+    data["capabilities"][0] = "not-a-capability-row"       # corrupt exactly one row
+    capabilities.state_file().write_text(json.dumps(data), encoding="utf-8")
+
+    live = capabilities.live()
+    assert live is not None                                 # the FILE is still fine
+    assert live["capabilities"][0] == "not-a-capability-row"   # bad row passed through as-is
+    # every other, well-formed row is still reachable by key — the bad row didn't poison it
+    assert capabilities.live_capability("dispatch") is not None
+    assert capabilities.live_capability("dispatch")["on"] is True
 
 
 def test_clear_removes_the_state_and_is_safe_twice(chela_dir, monkeypatch):
