@@ -37,8 +37,16 @@ sync with what's actually in it.
     flight at once always produced the same git conflict on the same lines, needing a hand
     renumber every time (measured: four times in 24h on 2026-08-14). A new file has no shared
     lines to collide on — two reworks adding `21-foo.md` and `21-bar.md` concurrently merge
-    cleanly even if they picked the same number; the number is a readability aid, not an
-    enforced key.
+    cleanly even if they picked the same number.
+  - **The number still has to be unique, though.** An earlier version of this doc called the
+    number "a readability aid, not an enforced key" — that was wrong: this catalog's own
+    cross-references ("shape 37", `[[21|entry 21]]`) and every "DEFEAT_SHAPES #N" citation
+    scattered across the test suite point at a *number*, not a filename, so two files
+    claiming the same one make every such reference ambiguous (measured: shape 37 landed
+    twice on `dev` with no signal, CMX-293). A test asserts the numbers are unique across
+    `docs/defeat_shapes/`, so a collision fails loudly on your branch — bump your file's
+    number (and its heading) to the next free one and move on; it's a local, one-line fix,
+    same as resolving any other rebase conflict.
 - Each entry: the **assertion form** (how the guard was written), the **mutation that
   defeats it** (what corruption slips through), and the **guard form that survives** (how to
   write it so the same corruption goes red).
