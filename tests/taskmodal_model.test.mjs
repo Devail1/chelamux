@@ -168,6 +168,61 @@ test('knMd: a bold span, an external link, an in-bundle .md link, and a #anchor 
     );
 });
 
+// --- knMd: blockquote + fenced code — the other two branches named in round
+// 2's note (the bullet-list branch was closed in round 2, bold/links in round
+// 3; blockquote and fenced code were still exactly where the note left them
+// going into round 4 — DEFEAT_SHAPES #19) --------------------------------
+
+test('knMd: a blockquote line and a fenced code block render via their own branches, not as plain paragraphs, and fenced content is NOT run through knInline', () => {
+    // 🔴 GUARD (CMX-279 rework round 4, PR #350): dead-coding either branch's
+    // `if` condition (`if (false && ...)`) makes the `>`/``` lines fall through
+    // to the plain-paragraph case instead — no <blockquote>, no <pre class="kn-code">.
+    // The `**not bold**` line INSIDE the fence also pins that fenced lines are
+    // escaped verbatim (escHtml), not run through knInline — if the fence
+    // detector is dead-coded, that line gets knInline'd instead and comes out
+    // as `<strong>not bold</strong>`.
+    const src = '> quoted line\n```\nconst x = 1;\n**not bold**\n```\nafter';
+    assert.equal(
+        knowledge.knMd(src),
+        '<blockquote>quoted line</blockquote>'
+        + '<pre class="kn-code"><code>const x = 1;\n**not bold**\n</code></pre>'
+        + '<p>after</p>',
+    );
+});
+
+// --- knInline: escHtml — the PR's own claim (kanban.js's comment, round 3's
+// verdict) that knInline is where HTML-special characters get escaped on this
+// path. No fixture anywhere in the suite fed knInline anything containing
+// `<`, `>` or `&`, so dropping the escHtml call entirely stayed green. -----
+
+test('knMd: HTML-special characters are escaped by knInline before any markdown rule runs', () => {
+    // 🔴 GUARD (CMX-279 rework round 4, PR #350): replacing `s = escHtml(s)`
+    // with a bare null-guard (`s = (s == null) ? '' : String(s)`) leaves
+    // `<img src=x onerror=alert(1)>` un-escaped — this is exactly the string a
+    // task title or brief would splice raw into the kanban card / modal
+    // header / brief pane.
+    assert.equal(
+        knowledge.knMd('<img src=x onerror=alert(1)> & unescaped'),
+        '<p>&lt;img src=x onerror=alert(1)&gt; &amp; unescaped</p>',
+    );
+});
+
+// --- knLink: attrEsc on the href — round 3 added a link fixture, but neither
+// of its hrefs contains a `"`, so attrEsc's one job over plain escHtml (that
+// a quote can't break out of the attribute) was asserted by nothing. -------
+
+test('knMd: a link href containing a double quote is escaped by attrEsc, not spliced raw into the attribute', () => {
+    // 🔴 GUARD (CMX-279 rework round 4, PR #350): replacing `attrEsc(href)`
+    // with a bare `href` (bypassing attrEsc while keeping the binding
+    // referenced) leaves the `"` in the href literal, producing
+    // `href="foo"bar"` — a link target that injects arbitrary attributes into
+    // the rendered <a>.
+    assert.equal(
+        knowledge.knMd('[text](foo"bar)'),
+        '<p><a href="foo&quot;bar" target="_blank" rel="noopener">text</a></p>',
+    );
+});
+
 // --- displayTitle: display-only concise header, never the parsed title -----
 
 test('displayTitle: a leading bold span becomes the display title, trailing text dropped', () => {

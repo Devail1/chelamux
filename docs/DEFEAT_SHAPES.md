@@ -181,9 +181,18 @@ each covers.
 - `latest_required_mutations` (CMX-269) is wired into the rework brief at two render paths —
   `_respawn_rework` and `_renudge_prompt`. Both new prompt tests drove `tick`, which reaches
   only one per run state; dropping the argument from the other stayed green.
+- `knMd`/`knInline` (CMX-279 rework round 4, PR #350) has THREE call sites this PR edited —
+  kanban.js:152 and taskmodal.js:156 (the title) were closed independently in round 3;
+  taskmodal.js:116 (`_timelineHtml`'s `knMd(s.detail)` for the review-timeline body — the PR
+  also edited this line, dropping the `'review.md'` argument) was never driven by any fixture,
+  since every DOM test that reaches `openTaskModal` passes no `review_history`. Closed by a
+  4th wiring test in `tests/taskmodal_render.test.mjs` that passes a `review_history` payload
+  and reads the real `.task-modal-timeline-body` element back.
 
 ⭐ The judge caught the second one by proposing **a separate wiring experiment per call site
 rather than guessing which was covered** — which is also the cheapest way to write the guard.
+Two callers becomes N callers becomes "count them all, every round" — a shape doesn't stop
+recurring just because it was closed once at a smaller N.
 
 ---
 
@@ -616,3 +625,16 @@ cover a bold span, an external link, an in-bundle `.md` link and a `#anchor` lin
 assertion, plus two independent DOM-level wiring tests (`tests/kanban_flatten.test.mjs` and
 the new `tests/taskmodal_render.test.mjs`) driving each `knInline(displayTitle(...))` call
 site through its real caller.
+
+**Recurred:** CMX-279 rework round 4 (2026-08-14), same PR #350, same underlying note — it had
+named FOUR gaps (blockquote, fenced code, plus the two already covered above), and round 3
+only closed the two it was blocking on. The blockquote and fenced-code branches were still
+byte-identical to where round 2 found them; round 4's judge re-derived both as blocking
+mutations a second time, plus two more the note never explicitly named (knInline's own
+`escHtml` call, and `attrEsc` on knLink's href — both real behaviour the PR's rewritten code
+carries, just never exercised by a fixture with an HTML-special character or a quoted href).
+Closed by three more assertions in the same `tests/taskmodal_model.test.mjs` (blockquote+fence
+in one fixture, escHtml, attrEsc-on-quote) plus the third `knMd` call site as a fourth
+DEFEAT_SHAPES #7 wiring test (see above). The standing lesson: when a note names N gaps and a
+blocking finding only forces closing a subset, close ALL N in the same round — a partial close
+does not make the round's own note stop being a to-do list for the next judge.

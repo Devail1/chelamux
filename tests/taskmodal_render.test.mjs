@@ -63,3 +63,25 @@ test('openTaskModal: a title with a mid-string bold span renders through knInlin
     assert.equal(titleEl.innerHTML, 'ship <strong>the wall</strong> now',
         `task modal title did not render through knInline — got: "${titleEl.innerHTML}"`);
 });
+
+// 🔴 GUARD (round 4, PR #350): the THIRD knMd/knInline call site this PR edited
+// (taskmodal.js:116's `knMd(s.detail)` inside `_timelineHtml`, which dropped the
+// 'review.md' argument). tests/taskmodal_model.test.mjs pins knMd as a pure
+// function; this drives the REAL openTaskModal with a `review_history` payload
+// (which every other test in this suite passes as absent, so `_timelineHtml`
+// never reaches the knMd call) and reads the REAL `.task-modal-timeline-body`
+// element back out of `#task-modal-content`. If taskmodal.js:116's `knMd(...)`
+// call is dead-coded (bypassed in favour of a plain escHtml() of the raw
+// detail, wrapped without knMd's own `<p>`), this fails on literal `**` and a
+// missing `<p>` wrapper where `<strong>` inside `<p>` should be.
+test('openTaskModal: a review-timeline entry with a markdown detail renders through knMd, not literal escaped text', () => {
+    const review_history = JSON.stringify([
+        { round: 1, at: '2026-07-20T10:00:00+00:00', body: 'ship **the wall** now', verdict: 'changes_requested' },
+    ]);
+    taskmodal.openTaskModal({ title: 'plain title', status: 'open', review_history });
+
+    const bodyEl = document.querySelector('#task-modal-content .task-modal-timeline-body');
+    assert.ok(bodyEl, 'openTaskModal did not render a .task-modal-timeline-body element');
+    assert.equal(bodyEl.innerHTML, '<p>ship <strong>the wall</strong> now</p>',
+        `review-timeline body did not render through knMd — got: "${bodyEl.innerHTML}"`);
+});
