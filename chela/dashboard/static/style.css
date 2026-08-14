@@ -3154,6 +3154,31 @@ input[type="text"]:focus, textarea:focus, select:focus {
     color: var(--text-dim); font-size: 11px;
 }
 
+/* --- Generic centered-modal "sheet" (CMX-288) ---
+   .palette-overlay is already the shared backdrop for two modals (#palette,
+   #shortcuts-overlay) — dim+blur, fixed, flex-centered, no per-modal copy
+   needed. Neither of those two fit the Decisions inbox: .palette is shaped
+   for a fuzzy-search input+list+footer, .shortcuts-sheet for a static
+   multi-column cheatsheet. .modal-sheet is the third shape — a plain
+   header (title + close button) over a scrollable body — for any content
+   that's neither of those. Reuse THIS (backdrop + .modal-sheet), not a new
+   bespoke overlay, for the next centered modal (e.g. a tabbed settings
+   modal folding in #settings-drawer). */
+.modal-sheet {
+    width: 480px; max-width: 92vw; max-height: 80vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 20px 60px -10px rgba(0, 0, 0, 0.7);
+    animation: palette-in 0.13s ease-out;
+}
+.modal-sheet-head {
+    display: flex; align-items: center; gap: 10px; padding: 14px 16px;
+    border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+.modal-sheet-head .popover-title { font-weight: 700; font-size: 14px; color: var(--text); flex: 1 1 auto; }
+.modal-sheet-head .icon-btn { flex: 0 0 auto; }
+.modal-sheet-body { flex: 1 1 auto; overflow-y: auto; padding: 14px 16px; }
+
 /* --- Canvas --- */
 .canvas { grid-row: 2; overflow-y: auto; padding: 18px 20px; }
 .canvas-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
@@ -3796,20 +3821,18 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .persona-doc { font-size: 10.5px; color: var(--text-dim); background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
 
-/* Decisions — the durable, owner-independent log (decisions.js), now a topbar
-   popover (index.html #decisions-menu, anchored off #btn-decisions; cmx-106
-   first shipped this inside the Personas panel, cmx-107 relocated it into an
-   always-visible sidebar section, CMX-171 moved it again into this popover so
-   the sidebar stops permanently spending a section on it — and structurally
-   fixes a bug where the sidebar's collapsed-rail hide-list never listed these
-   elements, so they used to spill into the 60px icon rail). Rows reuse the
-   Feed's .feed-row/.feed-cls-*/.feed-glyph classes verbatim (feed.js), so a
-   decision reads identically whether you meet it here or in the Feed — but the
-   popover is far narrower than the Feed's canvas, so the row grid is overridden
+/* Decisions — the durable, owner-independent log (decisions.js), now a
+   centered modal (index.html #decisions-menu, a `.palette-overlay` +
+   `.modal-sheet`, opened off #btn-decisions; cmx-106 first shipped this
+   inside the Personas panel, cmx-107 relocated it into an always-visible
+   sidebar section, CMX-171 moved it into a topbar popover so the sidebar
+   stops permanently spending a section on it, CMX-288 moved it again off
+   that anchored popover — measured spanning the dashboard's full width and
+   occluding the whole Wall — into this modal). Rows reuse the Feed's
+   .feed-row/.feed-cls-*/.feed-glyph classes verbatim (feed.js), so a decision
+   reads identically whether you meet it here or in the Feed — but the modal
+   is far narrower than the Feed's canvas, so the row grid is overridden
    below into a stacked, wrapping layout. */
-.decisions-menu { min-width: 320px; max-width: 92vw; padding: 8px; }
-.decisions-menu .popover-head { padding: 4px 8px 6px; }
-.decisions-menu .popover-title { font-weight: 700; font-size: 12.5px; color: var(--text); }
 .decisions-chip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border);
     background: var(--surface); font-size: 11.5px; margin-bottom: 10px; }

@@ -1,11 +1,14 @@
 // ---------------------------------------------------------------------------
 // DECISIONS LOG — the durable, owner-independent home for what the decisions
-// inbox has ever said. Lives in a topbar popover (index.html `#decisions-menu`,
-// anchored off `#btn-decisions`), not gated behind any nav tab (cmx-106 first
-// shipped it inside the Personas panel — cmx-107 moved it into an always-visible
-// sidebar section — CMX-171 moved it again, out of the sidebar into this popover,
-// so the sidebar stops permanently spending a third section on it. It is still
-// seeded/ticked exactly the same as before; only the DOM it paints into moved).
+// inbox has ever said. Lives in a centered modal (index.html `#decisions-menu`,
+// opened off `#btn-decisions` — CMX-288 moved it off-anchor into the same
+// `.palette-overlay` shell the command palette uses, after CMX-171's anchored
+// popover was measured spanning the dashboard's full width and occluding the
+// whole Wall behind it), not gated behind any nav tab (cmx-106 first shipped
+// it inside the Personas panel — cmx-107 moved it into an always-visible
+// sidebar section — CMX-171 moved it again, out of the sidebar into a topbar
+// popover. It is still seeded/ticked exactly the same as before; only the DOM
+// it paints into moved).
 //
 // This is deliberately NOT a second store. chela/inbox.py::tick() appends every
 // event to event_log (chela/event_log.py) whether or not a live session is
@@ -353,9 +356,9 @@ function _rowHtml(e) {
 // empty or the fetch itself fails. Never throws, never blocks a dead click:
 // every path below still opens something.
 //
-// CMX-182: a row is inside #decisions-menu, so the light-dismiss listener
-// (openDecisionsMenu, above) no longer closes the popover on this click — a
-// row click must close it itself, or the popover is left open behind the
+// A row is inside #decisions-menu, and (CMX-288) the modal has no
+// document-level dismiss listener to fall back on — a row click must close
+// it itself, or the modal is left open behind the
 // ticket modal this opens on top of it.
 async function openDecisionTicket(el) {
     const seq = Number(el && el.dataset && el.dataset.seq);
@@ -487,52 +490,38 @@ async function _render() {
     host.innerHTML = _gapHtml() + scope + rows.map(_rowHtml).join('');
 }
 
-// --- Header popover: anchored + light-dismiss, same pattern as nav.js's
-// openPrimaryMenu/openNewMenu (#primary-menu/#new-menu) — with one difference.
-// #new-menu/#primary-menu hold nothing but buttons, so ANY click landing
-// inside them is itself the dismissal action and closing on it is correct.
-// #decisions-menu holds a text input (#decisions-search, CMX-178) — a click
-// there is "please focus this box", not "please close the popover", so
-// CMX-182: the dismisser itself ignores clicks that land anywhere inside
-// #decisions-menu (or on the #btn-decisions launcher, which already has its
-// own stopPropagation above), rather than requiring every interactive
-// descendant to remember to stop its own propagation. Opening marks every
+// --- Centered modal (CMX-288): same shell + dismiss pattern as #palette/
+// #shortcuts-overlay (nav.js openPalette/closePalette) — a `.palette-overlay`
+// backdrop toggled via an `open` class, dismissed by clicking the backdrop
+// itself (index.html's `onclick="if(event.target===this)…"`, wired on the
+// overlay element) or Esc (below). Previously this was a `.popover` anchored
+// off #btn-decisions with hand-rolled position math + a document-level
+// light-dismiss listener (CMX-182) that had to special-case the search box —
+// none of that survives the move to a modal: there is no anchor to measure,
+// and a backdrop click is unambiguous (nothing interactive lives out there),
+// so the CMX-182 containment dance is gone too. Opening marks every
 // currently-held event as seen (clearing the unread badge) and ticks the log
-// so the popover is never showing a stale read the moment it appears.
-function openDecisionsMenu(ev) {
-    if (ev) ev.stopPropagation();
+// so the modal is never showing a stale read the moment it appears.
+function openDecisionsMenu() {
     const m = $('#decisions-menu');
     if (!m) return;
-    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-decisions');
-    // Show it BEFORE measuring: a display:none element has no offsetWidth.
-    m.style.display = 'block';
-    const r = anchor.getBoundingClientRect();
-    m.style.top = (r.bottom + 6) + 'px';
-    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
+    m.classList.add('open');
     _markSeen();
     tickDecisions();
-    setTimeout(() => document.addEventListener('click', _dismissDecisionsMenuIfOutside), 0);
-}
-
-// Not `{ once: true }`: a click inside the popover must NOT disarm this
-// listener (that was the CMX-182 bug — the light-dismiss firing on the
-// search box's own click, once, closed the popover before it could re-arm
-// for the NEXT outside click). It stays registered across any number of
-// inside clicks and is only ever torn down by hideDecisionsMenu, which is
-// the sole path back to display:none.
-function _dismissDecisionsMenuIfOutside(ev) {
-    const m = $('#decisions-menu');
-    if (!m) return;
-    const btn = document.getElementById('btn-decisions');
-    if (m.contains(ev.target) || (btn && btn.contains(ev.target))) return;
-    hideDecisionsMenu();
+    const search = document.getElementById('decisions-search');
+    if (search) setTimeout(() => search.focus(), 0);
 }
 
 function hideDecisionsMenu() {
     const m = $('#decisions-menu');
-    if (m) m.style.display = 'none';
-    document.removeEventListener('click', _dismissDecisionsMenuIfOutside);
+    if (m) m.classList.remove('open');
 }
+
+document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const m = $('#decisions-menu');
+    if (m && m.classList.contains('open')) { e.preventDefault(); hideDecisionsMenu(); }
+});
 
 // --- Stage 0: ES-module exports ---
 export {
