@@ -27,7 +27,15 @@
 // runs every .test.mjs inside pytest, by discovery).
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 import { bootDashboardDom, clickOnclick, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const STYLE_CSS = fs.readFileSync(
+    path.join(HERE, '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
 
 const KANBAN_BOARD_HTML = sliceTemplate(
     '<div class="work-pane active" id="work-board" data-seg="board">', '<!-- /work-board -->');
@@ -53,36 +61,37 @@ function _payload(run) {
     };
 }
 
-test('clicking a REAL rendered kanban card opens the REAL task modal, visibly, with that card\'s content', () => {
-    // TWO decoys straddle the card under test — one BEFORE it, one AFTER —
-    // so the clicked card's data-kidx is neither the first index nor the
-    // last. A single decoy (first-only) leaves the LAST-registered card
-    // indistinguishable from the data-kidx-read card: with only a
-    // before-decoy, the card under test is *also* the most recently pushed
-    // entry in _kanbanCardIndex, so a lookup that ignores data-kidx and
-    // just resolves `_kanbanCardIndex[_kanbanCardIndex.length - 1]` (a
-    // "most recent" shortcut) would pass identically to a real
-    // `el.dataset.kidx` read. _KANBAN_BUCKET_ORDER / KANBAN_LANES
-    // (kanban.js / kanbanlanemodel.js) render Open before Done before
-    // Archived, so: decoy-first (open_tasks, todo lane) -> t-wiring
-    // (recent_runs status=done, done lane) -> decoy-last (recent_runs
-    // status=closed, archived lane). Neither a hardcoded index 0 NOR a
-    // hardcoded "most recent" index can resolve to the middle card — only
-    // an actual data-kidx read can.
+test('clicking a REAL rendered kanban card opens the REAL task modal, visibly, with THAT card\'s content — and no function of the fixture alone (index 0, last, middle, or any other f(length)) can fake it', () => {
+    // Earlier rounds tried to defeat a positional-shortcut lookup by placing
+    // the card under test at a "safe" index — first a non-zero index, then a
+    // non-last index, then (this round) discovered that even "the middle of
+    // exactly 3" is itself a positional slot: Math.floor(length / 2) resolves
+    // to it directly, no data-kidx read required. Chasing a safer index is an
+    // arms race with no last round — every fixture of fixed size N has SOME
+    // constant that lands on it.
+    //
+    // The fix that actually closes the class: click TWO different cards in
+    // the SAME render (same fixture, same length) and assert a DIFFERENT
+    // title for each. A positional lookup is a pure function of the fixture
+    // — f(3) computes to exactly one value — so it can match at most one of
+    // the two clicks. Hardcoded 0, hardcoded length-1, floor(length/2),
+    // length-2, or any formula nobody has thought of yet: all of them fail
+    // one of the two assertions below. Only an actual el.dataset.kidx read,
+    // which sees WHICH element was clicked, can satisfy both in one render.
     renderKanban({
         configured: true,
         workflows: [{
             path: '/x/WORKFLOW.md', project_key: 'CMX',
-            open_tasks: [{ id: 't-decoy-first', title: 'decoy — must never appear in the modal', raw: 'decoy', body: null }],
+            open_tasks: [{ id: 't-decoy', title: 'decoy — must never appear in the modal', raw: 'decoy', body: null }],
             backlog_items: [], active_runs: [], awaiting_review_runs: [],
             recent_runs: [
                 {
-                    task_id: 't-wiring', title: 'ship **the wall** now', status: 'done', pr_state: 'merged',
+                    task_id: 't-card-a', title: 'ship **the wall** now', status: 'done', pr_state: 'merged',
                     started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T01:00:00Z',
                     attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-1',
                 },
                 {
-                    task_id: 't-decoy-last', title: 'decoy — must never appear in the modal', status: 'closed', pr_state: 'closed',
+                    task_id: 't-card-b', title: 'raise the **second** gate', status: 'closed', pr_state: 'closed',
                     started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T00:30:00Z',
                     attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-9',
                 },
@@ -95,45 +104,127 @@ test('clicking a REAL rendered kanban card opens the REAL task modal, visibly, w
     assert.equal(modal.classList.contains('active'), false,
         'the task modal starts open — the test below could not tell a real open from a no-op');
 
-    const card = document.querySelector('.kanban-card[data-task-id="t-wiring"]');
-    assert.ok(card, 'the rendered card is missing — check .kanban-card[data-task-id]');
-    assert.match(card.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
-        'the card is not wired to chela.openTaskModalFromCard(this)');
+    const cardA = document.querySelector('.kanban-card[data-task-id="t-card-a"]');
+    const cardB = document.querySelector('.kanban-card[data-task-id="t-card-b"]');
+    assert.ok(cardA, 'card A is missing — check .kanban-card[data-task-id]');
+    assert.ok(cardB, 'card B is missing — check .kanban-card[data-task-id]');
+    assert.match(cardA.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
+        'card A is not wired to chela.openTaskModalFromCard(this)');
+    assert.match(cardB.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
+        'card B is not wired to chela.openTaskModalFromCard(this)');
 
     const totalCards = document.querySelectorAll('.kanban-card').length;
     assert.equal(totalCards, 3,
-        'setup: expected exactly 3 rendered cards (decoy-first + t-wiring + decoy-last) — check the fixture above');
-    assert.notEqual(card.dataset.kidx, '0',
-        'setup: the clicked card claimed data-kidx 0 — the before-decoy must render first, or a ' +
-        'hardcoded _kanbanCardIndex[0] resolve would pass this test for the wrong reason');
-    assert.notEqual(card.dataset.kidx, String(totalCards - 1),
-        'setup: the clicked card claimed the LAST data-kidx — the after-decoy must render last, or a ' +
-        'hardcoded "most recently registered card" resolve would pass this test for the wrong reason');
+        'setup: expected exactly 3 rendered cards (decoy + card A + card B) — check the fixture above');
+    assert.notEqual(cardA.dataset.kidx, cardB.dataset.kidx,
+        'setup: card A and card B claimed the SAME data-kidx — the fixture above is not rendering two distinct cards');
 
-    // 🔴 THE CLICK ITSELF — the same two hops (onclick attribute -> window.chela
-    // -> handler) a real mouse click takes, compiled by clickOnclick() instead
+    // 🔴 CLICK A — the same two hops (onclick attribute -> window.chela ->
+    // handler) a real mouse click takes, compiled by clickOnclick() instead
     // of jsdom's HTML parser (jsdom does not execute inline onclick= on a
     // dispatched click event without runScripts:"dangerously").
-    clickOnclick(card);
+    clickOnclick(cardA);
 
     // 🔴 GUARD: the modal must actually become VISIBLE. showModal('modal-task')
     // (util.js) adding `.active` to the REAL #modal-task (sliced from
     // index.html, whose `.modal-overlay` CSS gates display on that class) is
     // the only thing a user watching the screen would see happen.
     assert.equal(modal.classList.contains('active'), true,
-        'the task modal never became visible — openTaskModalFromCard -> openTaskModal -> showModal chain is broken ' +
-        'somewhere, even though the earlier guards below may still pass');
+        'the task modal never became visible after clicking card A — openTaskModalFromCard -> ' +
+        'openTaskModal -> showModal chain is broken');
 
-    // 🔴 GUARD: and it must show the CLICKED card's own content, not a stale
-    // or wrong one — proves _kanbanCardIndex's data-kidx lookup actually
-    // resolved to the object this click's card corresponds to.
-    const titleEl = document.querySelector('#task-modal-content .task-modal-title');
+    let titleEl = document.querySelector('#task-modal-content .task-modal-title');
     assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
     assert.equal(titleEl.innerHTML, 'ship <strong>the wall</strong> now',
-        `task modal title does not match the clicked card — got: "${titleEl.innerHTML}"`);
+        `task modal title does not match card A — got: "${titleEl.innerHTML}"`);
+
+    // 🔴 CLICK B — SAME render, SAME fixture length, a DIFFERENT clicked
+    // element. Whatever answered "card A" for the click above (correctly, by
+    // reading el.dataset.kidx, OR by accident via a positional formula that
+    // happens to equal card A's index) must now answer "card B" — which no
+    // f(fixture) can do, since f(3) cannot be two different values at once.
+    clickOnclick(cardB);
+
+    assert.equal(modal.classList.contains('active'), true,
+        'the task modal closed or never re-opened after clicking card B');
+
+    titleEl = document.querySelector('#task-modal-content .task-modal-title');
+    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
+    assert.equal(titleEl.innerHTML, 'raise the <strong>second</strong> gate',
+        `task modal title does not match card B (still showing a stale/wrong card) — got: "${titleEl.innerHTML}"`);
+});
+
+test('clicking a REAL rendered BACKLOG card — _kCard\'s OTHER renderer, never driven by the test above — also opens the REAL task modal with that card\'s content', () => {
+    // _kCard returns from TWO places: the backlog branch (no task_id, no
+    // branch, no PR — just a BACKLOG.md bullet) and the run-backed branch the
+    // test above exclusively drives. Both branches emit their own
+    // `data-kidx` + `onclick="chela.openTaskModalFromCard(this)"` — that
+    // wiring is duplicated in the source, not shared, so a revert or typo on
+    // ONE branch leaves the other looking covered while backlog cards go
+    // unclickable in production. See docs/defeat_shapes/07 (two callers, one
+    // guarded).
+    renderKanban({
+        configured: true,
+        workflows: [{
+            path: '/x/WORKFLOW.md', project_key: 'CMX',
+            open_tasks: [], active_runs: [], awaiting_review_runs: [], recent_runs: [],
+            backlog_items: [{ text: 'a backlog bullet needs a click too', section: 'Now', file: 'TODO.md' }],
+        }],
+    });
+
+    const modal = document.getElementById('modal-task');
+    const card = document.querySelector('.kanban-card-backlog');
+    assert.ok(card, 'no backlog card rendered — check the backlog_items fixture above');
+    assert.match(card.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
+        'the backlog card is not wired to chela.openTaskModalFromCard(this) — this is the OTHER _kCard ' +
+        'renderer, not covered by the run-backed click test above');
+
+    clickOnclick(card);
+
+    assert.equal(modal.classList.contains('active'), true,
+        'clicking a backlog card never opened the task modal — the backlog branch\'s wiring is broken');
+    const titleEl = document.querySelector('#task-modal-content .task-modal-title');
+    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
+    assert.equal(titleEl.innerHTML, 'a backlog bullet needs a click too',
+        `task modal title does not match the clicked backlog card — got: "${titleEl.innerHTML}"`);
+});
+
+test('the REAL #modal-task VISIBLY appears when .active is added — .modal-overlay.active cascades to display:flex under the REAL style.css, not just a class toggling with nothing rendering it', () => {
+    // The click tests above assert `modal.classList.contains('active')` —
+    // that the CLASS was added. Neither one asserts the OTHER half of
+    // "visibly": that `.modal-overlay`'s CSS actually gates screen visibility
+    // on that class. A judge mutation that flips `.modal-overlay.active`'s
+    // `display` from `flex` to `none` leaves classList.contains('active')
+    // true while the modal never appears on screen — invisible to every
+    // assertion above. This test mounts the REAL #modal-task fragment under
+    // the REAL style.css in jsdom (which resolves CSS cascade/specificity,
+    // same recipe as tests/wire_live_css.test.mjs) and reads the CASCADED
+    // `display` value with getComputedStyle, closing that gap directly.
+    const cssDom = new JSDOM(
+        `<!doctype html><html><head><style>${STYLE_CSS}</style></head><body>${MODAL_TASK_HTML}</body></html>`,
+        { pretendToBeVisual: true });
+    const modal = cssDom.window.document.getElementById('modal-task');
+    assert.ok(modal, 'sliceTemplate did not carry #modal-task into the fixture');
+
+    assert.equal(cssDom.window.getComputedStyle(modal).display, 'none',
+        'setup: #modal-task should start hidden (no .active class) — check .modal-overlay\'s base `display` rule');
+
+    modal.classList.add('active');
+    assert.equal(cssDom.window.getComputedStyle(modal).display, 'flex',
+        '.modal-overlay.active must cascade to display:flex — otherwise the task modal never becomes ' +
+        'visible even though .active was added (the classList assertions elsewhere in this file cannot see this)');
 });
 
 test('clicking the REAL close button hides the REAL task modal', () => {
+    // Earlier tests in this file leave #modal-task open (they never close
+    // it), and this suite shares one DOM (bootDashboardDom runs once in
+    // `before`) — so entering this test the modal may already carry
+    // `.active` regardless of what happens below. Force it CLOSED first so
+    // the "setup: the modal did not open" assertion actually proves this
+    // test's own click opened it, instead of passing vacuously off a
+    // previous test's leftover state.
+    document.getElementById('modal-task').classList.remove('active');
+
     renderKanban(_payload({
         task_id: 't-close', title: 'a task', status: 'done', pr_state: 'merged',
         started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T01:00:00Z',

@@ -27,11 +27,17 @@ untested, even when the fix was applied exactly as the earlier shape prescribed.
 **Guard form that survives:** render at least THREE items, with the item under test in the
 middle — one decoy before it, one decoy after it — so the target's index is neither the
 first nor the last. Assert both preconditions as setup guards: `card.dataset.kidx !== '0'`
-AND `card.dataset.kidx !== String(totalCards - 1)`. First and last are the only positional
-defaults a naive index lookup can degrade to (there is no third "constant" position a
-render-order index could plausibly collapse onto), so a provably-middle item closes the
-class rather than one more instance of it — no round 3 lookup-position mutation exists for
-this guard to miss.
+AND `card.dataset.kidx !== String(totalCards - 1)`.
+
+⚠️ **Correction (CMX-290 round 3):** the paragraph below, as originally written, claimed
+"there is no third 'constant' position a render-order index could plausibly collapse onto"
+and "no round 3 lookup-position mutation exists for this guard to miss." That was wrong —
+`Math.floor(length / 2)` on the resulting three-card fixture resolves to exactly the middle
+slot this fix places the target at, and it survived a real judge round. First and last are
+not the only positional defaults; they were just the only two anyone had enumerated yet. See
+[shape 40](40-a-fixture-position-guard-closed-by-enumeration-still.md) for why enumerating
+"safe" indices can never close this class, and for the guard form (a differential assertion
+across two clicks in one render) that actually does.
 
 **Found:** `tests/kanban_task_modal_wiring.test.mjs`'s wiring guard (CMX-290, round 2)
 rendered a before-decoy (`open_tasks`, Todo lane) and the card under test (`recent_runs`

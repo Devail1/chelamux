@@ -49,6 +49,13 @@ each covers.
   back. The standing lesson from the second occurrence: counting call sites once is not
   enough — re-`git grep` the symbol every round a guard on it changes, since a caller added or
   edited in an earlier round of the SAME PR can still be the one nobody wired.
+- `_kCard` (CMX-290 round 3) has exactly two callers — the backlog branch (`kanban-card-backlog`,
+  no `task_id`) and the run-backed branch (`kanban-card-${card.status}`) — and both emit their
+  own `data-kidx` + `onclick="chela.openTaskModalFromCard(this)"` independently. The new
+  click-through wiring guard in `tests/kanban_task_modal_wiring.test.mjs` only ever clicked
+  the run-backed branch; `grep -rn 'kanban-card-backlog' tests/` returned nothing, and
+  reverting the backlog branch's `onclick` attribute left the suite green. Closed by a second
+  wiring test that renders a `backlog_items` bullet and clicks it directly.
 
 ⭐ The judge caught the second one by proposing **a separate wiring experiment per call site
 rather than guessing which was covered** — which is also the cheapest way to write the guard.
