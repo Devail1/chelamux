@@ -36,3 +36,17 @@ this — a fixture of one is not a fixture, it's a constant with extra steps.
 for the only click the test ever made. Closed by rendering a decoy `open_tasks` card first
 (Open lane renders before Done in `_KANBAN_BUCKET_ORDER`, claiming `data-kidx="0"`) and
 asserting the real card's title — not the decoy's — appears in the modal.
+
+**Found again, on the sibling call site the first fix never touched (CMX-290 round 4):** the
+fix above closed the shape for the run-backed branch of `_kCard` only. `_kCard`'s OTHER
+branch — the backlog card, `kanban.js:170`, `class="kanban-card kanban-card-backlog"
+data-kidx="${kidx}"` — emits its own `data-kidx` from textually independent source (this is
+shape 7, two callers, composed with this shape). The wiring test added for the backlog
+branch in round 3 rendered exactly ONE backlog card, so its real index was again always 0:
+`chela judge` mutated the backlog branch's `data-kidx="${kidx}"` to the literal
+`data-kidx="0"`, and `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3133 passed).
+Fixing shape 38 once, on one emitter of a duplicated value, does not fix it on the other
+emitter — each independent `data-kidx="${...}"` in the source needs its OWN two-item fixture,
+not just the lookup that reads them back. Closed by rendering two backlog cards in one render
+and clicking both (same differential-click design as shape 40), so a hardcoded `0` can match
+at most one of the two.

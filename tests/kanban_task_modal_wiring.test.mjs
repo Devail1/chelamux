@@ -154,39 +154,73 @@ test('clicking a REAL rendered kanban card opens the REAL task modal, visibly, w
         `task modal title does not match card B (still showing a stale/wrong card) — got: "${titleEl.innerHTML}"`);
 });
 
-test('clicking a REAL rendered BACKLOG card — _kCard\'s OTHER renderer, never driven by the test above — also opens the REAL task modal with that card\'s content', () => {
+test('clicking either of TWO REAL rendered BACKLOG cards — _kCard\'s OTHER renderer, never driven by the test above — opens the REAL task modal with THAT card\'s content, not a hardcoded first one', () => {
     // _kCard returns from TWO places: the backlog branch (no task_id, no
     // branch, no PR — just a BACKLOG.md bullet) and the run-backed branch the
-    // test above exclusively drives. Both branches emit their own
-    // `data-kidx` + `onclick="chela.openTaskModalFromCard(this)"` — that
-    // wiring is duplicated in the source, not shared, so a revert or typo on
-    // ONE branch leaves the other looking covered while backlog cards go
-    // unclickable in production. See docs/defeat_shapes/07 (two callers, one
-    // guarded).
+    // test above exclusively drives. Both branches emit their OWN `data-kidx`
+    // + `onclick="chela.openTaskModalFromCard(this)"` from source that is
+    // duplicated, not shared (kanban.js:170 vs :244) — see docs/defeat_shapes/07
+    // (two callers, one guarded).
+    //
+    // Round 3 closed shape 07 here (this test used to render exactly ONE
+    // backlog card and prove the onclick attribute + the click reached the
+    // modal) but that single-card fixture reintroduced shape 38 on this
+    // SIBLING call site: with only one backlog card ever rendered, its real
+    // `data-kidx` is always 0, so `_kCard`'s backlog branch could have
+    // emitted the literal `data-kidx="0"` instead of the real `${kidx}` and
+    // this test could not have told the difference — the judge proved
+    // exactly that mutation stayed green. The fix is the same one shape 38's
+    // own guard form prescribes: render two backlog cards in the SAME
+    // render, click both, and assert each shows ITS OWN content. A hardcoded
+    // `0` (or any other constant) can match at most one of the two clicks.
     renderKanban({
         configured: true,
         workflows: [{
             path: '/x/WORKFLOW.md', project_key: 'CMX',
             open_tasks: [], active_runs: [], awaiting_review_runs: [], recent_runs: [],
-            backlog_items: [{ text: 'a backlog bullet needs a click too', section: 'Now', file: 'TODO.md' }],
+            backlog_items: [
+                { text: 'the FIRST backlog bullet needs its own click', section: 'Now', file: 'TODO.md' },
+                { text: 'the SECOND backlog bullet needs its own click', section: 'Now', file: 'TODO.md' },
+            ],
         }],
     });
 
     const modal = document.getElementById('modal-task');
-    const card = document.querySelector('.kanban-card-backlog');
-    assert.ok(card, 'no backlog card rendered — check the backlog_items fixture above');
-    assert.match(card.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
-        'the backlog card is not wired to chela.openTaskModalFromCard(this) — this is the OTHER _kCard ' +
+    modal.classList.remove('active');
+
+    const cards = document.querySelectorAll('.kanban-card-backlog');
+    assert.equal(cards.length, 2,
+        'setup: expected exactly 2 rendered backlog cards — check the backlog_items fixture above');
+    const [cardA, cardB] = cards;
+    assert.match(cardA.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
+        'backlog card A is not wired to chela.openTaskModalFromCard(this) — this is the OTHER _kCard ' +
         'renderer, not covered by the run-backed click test above');
+    assert.match(cardB.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
+        'backlog card B is not wired to chela.openTaskModalFromCard(this)');
+    assert.notEqual(cardA.dataset.kidx, cardB.dataset.kidx,
+        'setup: backlog card A and B claimed the SAME data-kidx — the fixture above is not rendering two ' +
+        'distinct cards (or the backlog branch is emitting a constant instead of its render-order index)');
 
-    clickOnclick(card);
-
+    // 🔴 CLICK A
+    clickOnclick(cardA);
     assert.equal(modal.classList.contains('active'), true,
-        'clicking a backlog card never opened the task modal — the backlog branch\'s wiring is broken');
-    const titleEl = document.querySelector('#task-modal-content .task-modal-title');
+        'clicking backlog card A never opened the task modal — the backlog branch\'s wiring is broken');
+    let titleEl = document.querySelector('#task-modal-content .task-modal-title');
     assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
-    assert.equal(titleEl.innerHTML, 'a backlog bullet needs a click too',
-        `task modal title does not match the clicked backlog card — got: "${titleEl.innerHTML}"`);
+    assert.equal(titleEl.innerHTML, 'the FIRST backlog bullet needs its own click',
+        `task modal title does not match backlog card A — got: "${titleEl.innerHTML}"`);
+
+    // 🔴 CLICK B — same render, same fixture length, a different clicked
+    // element. A hardcoded `data-kidx="0"` (shape 38) would resolve THIS
+    // click back to card A's object too, since card A is index 0 here —
+    // only an actual el.dataset.kidx read can tell card B apart.
+    clickOnclick(cardB);
+    assert.equal(modal.classList.contains('active'), true,
+        'the task modal closed or never re-opened after clicking backlog card B');
+    titleEl = document.querySelector('#task-modal-content .task-modal-title');
+    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
+    assert.equal(titleEl.innerHTML, 'the SECOND backlog bullet needs its own click',
+        `task modal title does not match backlog card B (still showing card A, or a stale card) — got: "${titleEl.innerHTML}"`);
 });
 
 test('the REAL #modal-task VISIBLY appears when .active is added — .modal-overlay.active cascades to display:flex under the REAL style.css, not just a class toggling with nothing rendering it', () => {
