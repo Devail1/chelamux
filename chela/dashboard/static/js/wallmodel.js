@@ -128,7 +128,7 @@ export function prChip(pr) {
 
 // cost_usd of exactly 0 is a REAL value, not "missing" — only `== null` hides
 // it. A naive `if (!costUsd)` would wrongly hide a genuine $0.00, and this is
-// the guard that catches that mistake. Matches cost.js's `_fmtCost`.
+// the guard that catches that mistake.
 export function costView(costUsd) {
     if (costUsd == null) return null;
     return '$' + Number(costUsd).toFixed(2);

@@ -53,9 +53,7 @@ renderNav();   // the sidebar's view list, from the registry — before anything
 // Wall is the flagship default canvas when terminals are enabled.
 if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) selectView('terminals');
 
-refresh().then(() => {
-    if (currentTab === 'agents') checkContext();
-});
+refresh();
 setInterval(refresh, REFRESH_MS);
 // The ONE /api/dispatcher poll (board + runs + the always-visible sidebar badges).
 // App-level, not view-level: the badges are on screen from every view.
@@ -66,7 +64,8 @@ initSSE();
 // the SSE `orchestrator` delta.
 refreshOrchestratorStatus();
 // Seeds the sidebar Decisions section (chip + rows) on load — it is always
-// visible now (cmx-107), not gated behind opening the Personas tab, so this is
+// visible now (cmx-107), not gated behind opening a view (the Personas view it
+// used to ride along inside was itself deleted later, CMX-279), so this is
 // the ONLY thing that paints it before the first SSE `log`/`orchestrator` delta
 // or the next refresh() tick.
 enterDecisions();
