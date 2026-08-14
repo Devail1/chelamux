@@ -1,6 +1,6 @@
-## 40. A fixture-position guard closed by enumeration ("not first, not last") still leaves every OTHER function of the fixture's length open — the fix is a differential assertion, not a safer index
+## 53. A fixture-position guard closed by enumeration ("not first, not last") still leaves every OTHER function of the fixture's length open — the fix is a differential assertion, not a safer index
 
-**Assertion form:** shape 39 closed a two-card fixture (decoy, then the card under test) by
+**Assertion form:** shape 52 closed a two-card fixture (decoy, then the card under test) by
 adding a second decoy so the target sits neither first nor last among three cards, and
 asserted both preconditions (`kidx !== '0'`, `kidx !== String(totalCards - 1)`) as guardrails.
 The guard clicks the one card under test and asserts the modal shows its title.
@@ -11,14 +11,14 @@ With exactly three cards, `floor(3/2)` is `1` — the middle slot — which is e
 "neither first nor last" fix placed the card under test. The mutated code returns the exact
 object the correct code would have, for the one click the test ever makes. `chela judge`
 found this live on CMX-290 round 3: `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green
-(3133 passed) with this mutation applied, even though shape 39's two preconditions were both
+(3133 passed) with this mutation applied, even though shape 52's two preconditions were both
 already in place and passing.
 
-**Why this is distinct from shapes 38 and 39, and why "add a smarter decoy" doesn't work
-this time:** shape 38 closed index `0`; shape 39 closed index `length - 1`; both fixes worked
+**Why this is distinct from shapes 51 and 39, and why "add a smarter decoy" doesn't work
+this time:** shape 51 closed index `0`; shape 52 closed index `length - 1`; both fixes worked
 by finding one more constant a naive lookup could degrade to and rendering a decoy that
 occupies it. That approach implicitly assumes the set of dangerous constants is small and
-enumerable — shape 39's own "guard form that survives" said outright that "there is no third
+enumerable — shape 52's own "guard form that survives" said outright that "there is no third
 'constant' position a render-order index could plausibly collapse onto." That claim is false:
 `floor(length/2)`, `length-2`, and any other `f(length)` are all further constants, and a
 fixture of fixed length N always has *some* index they resolve to. Placing the card under
@@ -39,7 +39,7 @@ one enumerated member at a time — there is no "round 4" left to find, because 
 constant can be two different values.
 
 **Found:** `tests/kanban_task_modal_wiring.test.mjs`'s wiring guard (CMX-290, round 3) had
-already survived two rounds of "render a decoy at the unsafe index" (shapes 38, 39) when
+already survived two rounds of "render a decoy at the unsafe index" (shapes 51, 39) when
 `floor(length/2)` on the resulting three-card fixture passed identically to a real
 `data-kidx` read. Closed by clicking two different cards (indices 1 and 2 of the same
 three-card render) and asserting each click resolves to its OWN card's title — which kills

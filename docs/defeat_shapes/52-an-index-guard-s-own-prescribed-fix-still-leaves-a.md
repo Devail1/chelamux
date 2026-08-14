@@ -1,6 +1,6 @@
-## 39. An index guard's own prescribed fix still leaves a second positional shortcut open: the item under test is non-zero but still the LAST one registered
+## 52. An index guard's own prescribed fix still leaves a second positional shortcut open: the item under test is non-zero but still the LAST one registered
 
-**Assertion form:** shape 38 closed a single-card fixture by rendering a decoy card first and
+**Assertion form:** shape 51 closed a single-card fixture by rendering a decoy card first and
 asserting `card.dataset.kidx !== '0'` — proving the clicked card's index isn't the literal
 0. With exactly two cards (decoy, then the card under test), that precondition holds: the
 target's index is non-zero. The guard renders the decoy in a lane that sorts before the
@@ -14,10 +14,10 @@ the *most recently pushed* entry in `_kanbanCardIndex`, because it is the only c
 after the decoy. A "most recent" shortcut and a real `el.dataset.kidx` read resolve to the
 exact same object for the one click the test ever makes. `chela judge` found this live on
 CMX-290 round 2: `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3132 passed) with
-this mutation applied, even though shape 38's precondition (`kidx !== '0'`) was already in
+this mutation applied, even though shape 51's precondition (`kidx !== '0'`) was already in
 place and passing.
 
-**Why this is distinct from shape 38:** shape 38's fix eliminated exactly one positional
+**Why this is distinct from shape 51:** shape 51's fix eliminated exactly one positional
 default (index 0) by proving the target isn't first. It did not consider that "first" and
 "last" are two *different* constant shortcuts a lookup can degrade to, and a two-item fixture
 only rules out one of them — the item that isn't first is, by construction, last. Closing a
@@ -35,7 +35,7 @@ and "no round 3 lookup-position mutation exists for this guard to miss." That wa
 `Math.floor(length / 2)` on the resulting three-card fixture resolves to exactly the middle
 slot this fix places the target at, and it survived a real judge round. First and last are
 not the only positional defaults; they were just the only two anyone had enumerated yet. See
-[shape 40](40-a-fixture-position-guard-closed-by-enumeration-still.md) for why enumerating
+[shape 53](53-a-fixture-position-guard-closed-by-enumeration-still.md) for why enumerating
 "safe" indices can never close this class, and for the guard form (a differential assertion
 across two clicks in one render) that actually does.
 

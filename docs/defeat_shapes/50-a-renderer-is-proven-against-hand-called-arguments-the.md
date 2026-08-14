@@ -1,4 +1,4 @@
-## 37. A renderer is proven against hand-called arguments; the onclick attribute a real click compiles is never run
+## 50. A renderer is proven against hand-called arguments; the onclick attribute a real click compiles is never run
 
 **Assertion form:** a dashboard surface has two halves — a render function that paints a
 control with an `onclick="chela.someHandler(this)"` attribute, and the handler itself, which

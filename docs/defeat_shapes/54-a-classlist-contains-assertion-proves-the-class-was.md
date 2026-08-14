@@ -1,4 +1,4 @@
-## 41. A `classList.contains` assertion proves the class was ADDED, not that the CSS rule gating on it still makes anything visible
+## 54. A `classList.contains` assertion proves the class was ADDED, not that the CSS rule gating on it still makes anything visible
 
 **Assertion form:** a guard proves a "show this UI" action fired by asserting the toggled
 class landed — `modal.classList.contains('active') === true` — after driving the real click
