@@ -2209,6 +2209,62 @@ def test_a_vanished_judge_window_does_not_spend_a_retry(tmp_path, monkeypatch):
     assert _state() == (judge.J_RUNNING, 0, 0)
 
 
+def test_an_expired_login_is_reaped_immediately_and_does_not_spend_a_retry(tmp_path, monkeypatch):
+    """⚖️🔌 CMX-282. An expired login leaves the judge's window ALIVE (tmux never dropped
+    it) and its pane sitting at "Login expired · Please run /login" — no amount of waiting
+    fixes that, so the watchdog must reap it on sight instead of holding it for the full
+    JUDGE_TIMEOUT_SECONDS (60min) the way a genuine stall would. Measured live 2026-08-14:
+    two judges sat at exactly this banner until the 60-minute timeout arm finally caught them.
+
+    Because the judge never got a chance to run (same as a vanished window), it must not
+    spend the bounded `judge_cannot_verify_tries` budget either — re-launching it on the
+    same commit is the FIRST attempt, not a retry of a failed one.
+
+    Seen to go red: drop the `login_expired` check from `_judge_watchdog` (falls through to
+    the `alive and not timed_out: continue` and waits the full hour), or stamp
+    `judge_no_verdict=0` for it (spends a retry it shouldn't).
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    def _spawn(sha):
+        with dispatcher._db() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+            with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+                 patch.object(dispatcher, "render_prompt", return_value="x"), \
+                 patch.object(dispatcher, "_judge_vars", return_value={}), \
+                 patch.object(dispatcher, "_launch_agent", return_value=None):
+                assert dispatcher._spawn_judge(wf, row, sha, conn) is True
+
+    def _state():
+        r = dispatcher.resolve_run("abc123")
+        return r["judge_state"], r["judge_cannot_verify_tries"], r["judge_no_verdict"]
+
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+    window = judge.judge_window_name("test-1")
+    banner = "✽ Sonnet 5\n\nLogin expired · Please run /login\n\n❯ "
+    with dispatcher._db() as conn:
+        with patch.object(dispatcher, "_capture_pane", return_value=banner), \
+             patch.object(dispatcher, "_kill_windows_named") as kill:
+            handed_over = dispatcher._judge_watchdog(conn, wf, live_windows={window})
+        conn.commit()
+    assert handed_over == 1
+    kill.assert_called_once_with(window)          # ⛔ still alive — must be torn down, not left
+    state, tries, no_verdict = _state()
+    assert state == judge.J_CANNOT_VERIFY
+    assert "login" in dispatcher.resolve_run("abc123")["judge_detail"].lower()
+    assert no_verdict == 1
+    assert tries == 0                             # untouched — this reap is not a spent attempt
+
+    # Re-launching the SAME sha must NOT count this as a spent retry.
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+
 def test_a_genuine_cannot_verify_verdict_still_spends_a_retry(tmp_path, monkeypatch):
     """⚖️🕳️ CMX-253 Objective 2, negative control. A `cannot_verify` the judge actually
     PRODUCED (it ran, and came back with an unknown — `set_judge_state`'s default,
