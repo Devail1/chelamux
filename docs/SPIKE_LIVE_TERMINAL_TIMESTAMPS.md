@@ -156,3 +156,41 @@ hook channel... can't write a byte to the tmux pane" — was true of chelamux's 
 false of Claude Code's, which owns the pty and exposes a documented field for precisely
 this. What's still open is a live measurement of reliability against this repo's own
 pinned Claude Code version, not feasibility.
+
+## ⛔ Correction (CMX-285) — `systemMessage` is the wrong field, `MessageDisplay` is the right event
+
+CMX-277 shipped the `systemMessage` mechanism above, and Liav's verdict on it: "i see the
+timestamps now, but it doesn't seem to be presented like it does for
+zoharbabin/claude-code-message-timestamps." He's right, and this document's own framing
+is why: it asked "can a hook write *a line* into the transcript" and answered that
+question well — but a reference plugin doing this same feature answers a different
+question, "can a hook change how *this exact message* is displayed," and the two render
+completely differently.
+
+`systemMessage` is a **warning-message field**, universal across every hook event. Claude
+Code renders it as its own `<Line>` — a `Stop says: …`-style attachment, separate from and
+outside the message it's attached to. That is a real, working mechanism, and it does
+"stamp the terminal with a timestamp" by any literal reading of that phrase. It is just
+not what "timestamp on the message" means to someone who has used the reference plugin:
+there, the clock reads `[14:32:05] Sure, I'll do that…` — the stamp is the first few
+characters of the assistant's own reply text, not a line above or below it.
+
+That shape comes from a **different, newer hook event** this repo's own schema dump
+(`chela/hooks.py`'s comment trail never spotted it — the original spike measured against
+`code.claude.com/docs/en/hooks`' prose, not a live binary's embedded schema) had all along:
+**`MessageDisplay`**, fired once per streamed batch of an assistant message
+(`{index, delta, final, …}`), whose `hookSpecificOutput.displayContent` response
+"replaces the delta on screen without changing the stored message" — display-only, by
+design, so it can never confuse the model the way editing `systemMessage` content would.
+Stamping `index == 0`'s `delta` with a `"🕐 HH:MM:SS "` prefix is what makes the marker
+part of the message's own first line, verified against `zoharbabin/claude-code-message-
+timestamps`' own `hooks/scripts/timestamp-display.sh` (fetched via `gh api`), which does
+exactly this. `MessageDisplay` needs Claude Code 2.1.152+; chela's install is pinned
+above that, and an older pin simply never fires the hook — no marker, never a broken one.
+
+This also fixes a volume problem CMX-277 didn't have to think about: `UserPromptSubmit`/
+`Stop` fire once per message and were safe to log through the ordinary event-log path.
+`MessageDisplay` fires once per streamed **batch** — order of magnitude more calls per
+turn — so `chela/dashboard/app.py`'s endpoint answers it ahead of `hooks.ingest` entirely
+and never logs it, keeping the feature off the event log's hot path whether or not
+`CHELA_TERMINAL_TIMESTAMPS` is even on.
