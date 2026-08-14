@@ -1202,13 +1202,25 @@ test('🔴 GUARD: the REAL index.html\'s #decisions-menu reuses the shared .pale
         '#decisions-menu must carry the palette-overlay class in index.html — without it, .open toggles no CSS rule and the sheet stays inline/visible');
 });
 
-test('Esc closes the open decisions modal', () => {
+// 🔴 GUARD (CMX-292): the positive half of the preventDefault property. Two guards below pin
+// the negative halves — "Esc does not preventDefault while already closed" and "a non-Escape
+// key does not close or preventDefault while open" — and both read dispatchEvent's return value
+// to assert it is TRUE (not prevented). Nothing anywhere asserted it is FALSE: the `!isOpen()`
+// check alone can't tell "hideDecisionsMenu() ran and preventDefault() also ran" apart from
+// "hideDecisionsMenu() ran but the e.preventDefault() call on line 523 was deleted" — both leave
+// the modal closed. Deleting `e.preventDefault();` from the open-and-Escape branch kept the
+// modal-closes assertion green; only reading dispatchEvent's own return value here closes that
+// gap. See docs/defeat_shapes/49-a-two-sided-boolean-property-has-both-negative-halves.md.
+test('Esc closes the open decisions modal AND preventDefault()s the keydown', () => {
     decisions.openDecisionsMenu();
     assert.ok(isOpen(), 'openDecisionsMenu did not open the modal — this test would be vacuous otherwise');
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    const notPrevented = document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
 
     assert.ok(!isOpen(), 'Esc did not close #decisions-menu');
+    assert.ok(!notPrevented,
+        'Esc must call preventDefault() while the decisions modal is open — otherwise whatever else ' +
+        'is listening for Escape (a browser default, another handler) also fires on the same keydown');
 });
 
 // 🔴 GUARD (CMX-288 rework round 5): the key filter itself, one line above the closed-gate the
