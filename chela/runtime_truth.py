@@ -411,6 +411,43 @@ def _node_ipc_env_report(_declared: None, obs: Observation) -> list[Finding]:
     )]
 
 
+# CMX-281: `tmux.node_ipc_env` above reads the SERVER's global table — the state a NEW
+# spawn inherits. It says nothing about a window that is already running: that window kept
+# whatever env it was born with, and `dispatcher._new_window`'s scrub only ever touches the
+# global table going forward, never a window already alive under the old one. Three agents
+# hit exactly this gap in one day (CMX-276, CMX-277, CMX-280, 2026-08-13): each ran the
+# suite from inside its own poisoned window, watched `tests/test_judge_node_channel_fd.py`
+# fail, checked `tmux show-environment -g` (clean — the leak had already been scrubbed from
+# NEW spawns by the time they looked), and wrote "reproduces identically on unmodified dev"
+# into a PR body. The global table was telling the truth about the SERVER; it was never the
+# question. The question is what THIS process — the one about to write that claim — actually
+# inherited, and only `os.environ` answers that.
+def _process_node_ipc_env_read() -> Observation:
+    return observed({var: os.environ[var] for var in _NODE_IPC_ENV_VARS if var in os.environ})
+
+
+def _process_node_ipc_env_report(_declared: None, obs: Observation) -> list[Finding]:
+    leaked: dict[str, str] = obs.value
+    if not leaked:
+        return [Finding(OK, "this process's own environment carries no leaked Node IPC vars")]
+    names = sorted(leaked)
+    return [Finding(
+        ERROR,
+        f"THIS PROCESS inherited {', '.join(names)} — `node --test` will fail HERE, on "
+        "ANY branch, for a reason that has nothing to do with the code under test",
+        f"{', '.join(f'{k}={v!r}' for k, v in sorted(leaked.items()))}. CMX-252's leak, "
+        "read from the window this process is actually running in rather than tmux's "
+        "GLOBAL table — the two can disagree, because a window keeps the env it was born "
+        "with even after a later spawn's scrub cleans the global table for new windows "
+        "(CMX-276, CMX-277, CMX-280, 2026-08-13: three agents checked the global table, "
+        "found it clean, and reported a red JS suite as pre-existing on the base branch "
+        "anyway). A red suite in THIS window is evidence about THIS window, not about the "
+        "base branch — confirm on a checkout you did not create (a fresh worktree, or "
+        "`env -u NODE_CHANNEL_FD -u NODE_CHANNEL_SERIALIZATION_MODE`) before writing that "
+        "claim.",
+    )]
+
+
 def _in_flight_runs() -> dict[str, dict]:
     """``{task_id: {wid, epoch}}`` for every run that CLAIMS a live tmux window.
 
@@ -2759,6 +2796,17 @@ def facts() -> list[Fact]:
             declare=lambda: None,
             read_back=_node_ipc_env_read,
             report=_node_ipc_env_report,
+        ),
+        Fact(
+            name="process.node_ipc_env",
+            declared_by="nothing — chela never sets these; a clean process requires "
+                        "their absence, not any particular value",
+            owned_by="THIS process's own environment — what a `node --test` child it "
+                     "spawns actually inherits, independent of what tmux's global table "
+                     "says right now",
+            declare=lambda: None,
+            read_back=_process_node_ipc_env_read,
+            report=_process_node_ipc_env_report,
         ),
         Fact(
             name="dashboard.port",

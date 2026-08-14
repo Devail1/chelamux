@@ -137,6 +137,15 @@ message.
    `skills/telegram-send` skills.
 2. **Validate — this repo's CI gates on ruff.** Run `uv run ruff check chela tests`
    (MUST pass — pytest-green is NOT sufficient) and `uv run pytest -q`; fix what you broke.
+   ⛔ **Before writing "pre-existing on {{base_branch}}" or "reproduces on unmodified
+   {{base_branch}}" anywhere — in a PR body, a comment, your own reasoning — confirm it on
+   a checkout you did not create, not by re-reading this window's own red output.** This
+   window can carry state (e.g. a leaked `NODE_CHANNEL_FD` — `chela doctor` names it under
+   `process.node_ipc_env` if so) that a fresh checkout does not, and three PRs landed that
+   exact false claim in one day (CMX-276, CMX-277, CMX-280) by trusting the reasoning
+   instead of the mechanical check. Run `chela doctor` first; if it is silent on that fact,
+   reproduce the failure in a `git worktree add` you just created (or `git stash` +
+   re-clone) before calling anything pre-existing.
 3. **⚖️ SELF-VERIFY YOUR GUARDS — this is a CHECK, not a habit, so run it as one.** For every
    test or guard you added or changed, write a `{guard, file, before, after}` experiment (the
    `before` anchor must occur EXACTLY ONCE in `file`; `after` is the invariant broken — flip a
