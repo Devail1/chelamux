@@ -54,11 +54,26 @@ function _payload(run) {
 }
 
 test('clicking a REAL rendered kanban card opens the REAL task modal, visibly, with that card\'s content', () => {
-    renderKanban(_payload({
-        task_id: 't-wiring', title: 'ship **the wall** now', status: 'done', pr_state: 'merged',
-        started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T01:00:00Z',
-        attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-1',
-    }));
+    // A DECOY card in the Open lane, which _KANBAN_BUCKET_ORDER (kanban.js)
+    // renders BEFORE the Done lane the card under test lands in — so the
+    // decoy claims data-kidx="0" and the real card gets a NON-ZERO index.
+    // A single-card fixture can never prove the data-kidx lookup runs at
+    // all: with exactly one card, index 0 IS the clicked card whether or
+    // not openTaskModalFromCard reads `el.dataset.kidx` or just hardcodes
+    // `_kanbanCardIndex[0]`. Two cards make those two behaviours diverge.
+    renderKanban({
+        configured: true,
+        workflows: [{
+            path: '/x/WORKFLOW.md', project_key: 'CMX',
+            open_tasks: [{ id: 't-decoy', title: 'decoy — must never appear in the modal', raw: 'decoy', body: null }],
+            backlog_items: [], active_runs: [], awaiting_review_runs: [],
+            recent_runs: [{
+                task_id: 't-wiring', title: 'ship **the wall** now', status: 'done', pr_state: 'merged',
+                started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T01:00:00Z',
+                attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-1',
+            }],
+        }],
+    });
 
     const modal = document.getElementById('modal-task');
     assert.ok(modal, 'sliceTemplate did not carry #modal-task into the fixture');
@@ -69,6 +84,9 @@ test('clicking a REAL rendered kanban card opens the REAL task modal, visibly, w
     assert.ok(card, 'the rendered card is missing — check .kanban-card[data-task-id]');
     assert.match(card.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
         'the card is not wired to chela.openTaskModalFromCard(this)');
+    assert.notEqual(card.dataset.kidx, '0',
+        'setup: the clicked card claimed data-kidx 0 — the decoy card must render first, or a ' +
+        'hardcoded _kanbanCardIndex[0] resolve would pass this test for the wrong reason');
 
     // 🔴 THE CLICK ITSELF — the same two hops (onclick attribute -> window.chela
     // -> handler) a real mouse click takes, compiled by clickOnclick() instead
