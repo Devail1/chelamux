@@ -54,24 +54,39 @@ function _payload(run) {
 }
 
 test('clicking a REAL rendered kanban card opens the REAL task modal, visibly, with that card\'s content', () => {
-    // A DECOY card in the Open lane, which _KANBAN_BUCKET_ORDER (kanban.js)
-    // renders BEFORE the Done lane the card under test lands in — so the
-    // decoy claims data-kidx="0" and the real card gets a NON-ZERO index.
-    // A single-card fixture can never prove the data-kidx lookup runs at
-    // all: with exactly one card, index 0 IS the clicked card whether or
-    // not openTaskModalFromCard reads `el.dataset.kidx` or just hardcodes
-    // `_kanbanCardIndex[0]`. Two cards make those two behaviours diverge.
+    // TWO decoys straddle the card under test — one BEFORE it, one AFTER —
+    // so the clicked card's data-kidx is neither the first index nor the
+    // last. A single decoy (first-only) leaves the LAST-registered card
+    // indistinguishable from the data-kidx-read card: with only a
+    // before-decoy, the card under test is *also* the most recently pushed
+    // entry in _kanbanCardIndex, so a lookup that ignores data-kidx and
+    // just resolves `_kanbanCardIndex[_kanbanCardIndex.length - 1]` (a
+    // "most recent" shortcut) would pass identically to a real
+    // `el.dataset.kidx` read. _KANBAN_BUCKET_ORDER / KANBAN_LANES
+    // (kanban.js / kanbanlanemodel.js) render Open before Done before
+    // Archived, so: decoy-first (open_tasks, todo lane) -> t-wiring
+    // (recent_runs status=done, done lane) -> decoy-last (recent_runs
+    // status=closed, archived lane). Neither a hardcoded index 0 NOR a
+    // hardcoded "most recent" index can resolve to the middle card — only
+    // an actual data-kidx read can.
     renderKanban({
         configured: true,
         workflows: [{
             path: '/x/WORKFLOW.md', project_key: 'CMX',
-            open_tasks: [{ id: 't-decoy', title: 'decoy — must never appear in the modal', raw: 'decoy', body: null }],
+            open_tasks: [{ id: 't-decoy-first', title: 'decoy — must never appear in the modal', raw: 'decoy', body: null }],
             backlog_items: [], active_runs: [], awaiting_review_runs: [],
-            recent_runs: [{
-                task_id: 't-wiring', title: 'ship **the wall** now', status: 'done', pr_state: 'merged',
-                started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T01:00:00Z',
-                attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-1',
-            }],
+            recent_runs: [
+                {
+                    task_id: 't-wiring', title: 'ship **the wall** now', status: 'done', pr_state: 'merged',
+                    started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T01:00:00Z',
+                    attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-1',
+                },
+                {
+                    task_id: 't-decoy-last', title: 'decoy — must never appear in the modal', status: 'closed', pr_state: 'closed',
+                    started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T00:30:00Z',
+                    attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-9',
+                },
+            ],
         }],
     });
 
@@ -84,9 +99,16 @@ test('clicking a REAL rendered kanban card opens the REAL task modal, visibly, w
     assert.ok(card, 'the rendered card is missing — check .kanban-card[data-task-id]');
     assert.match(card.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
         'the card is not wired to chela.openTaskModalFromCard(this)');
+
+    const totalCards = document.querySelectorAll('.kanban-card').length;
+    assert.equal(totalCards, 3,
+        'setup: expected exactly 3 rendered cards (decoy-first + t-wiring + decoy-last) — check the fixture above');
     assert.notEqual(card.dataset.kidx, '0',
-        'setup: the clicked card claimed data-kidx 0 — the decoy card must render first, or a ' +
+        'setup: the clicked card claimed data-kidx 0 — the before-decoy must render first, or a ' +
         'hardcoded _kanbanCardIndex[0] resolve would pass this test for the wrong reason');
+    assert.notEqual(card.dataset.kidx, String(totalCards - 1),
+        'setup: the clicked card claimed the LAST data-kidx — the after-decoy must render last, or a ' +
+        'hardcoded "most recently registered card" resolve would pass this test for the wrong reason');
 
     // 🔴 THE CLICK ITSELF — the same two hops (onclick attribute -> window.chela
     // -> handler) a real mouse click takes, compiled by clickOnclick() instead
