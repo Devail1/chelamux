@@ -20,6 +20,13 @@
       "before": "        headroom = max_bytes if current_bytes is None else max_bytes - current_bytes\n",
       "after": "        headroom = 0 if current_bytes is None else max_bytes - current_bytes\n",
       "kind": "mutation"
+    },
+    {
+      "guard": "live_bound()'s discovery query must ask systemd for ACTIVE slices — round 4's own fix (DEFEAT_SHAPES #24: 'assert the full trailing argv the fake dispatches on, not just the prefix it routes on') was applied to only ONE of the two call sites. _fake_show now asserts the full tail (cmd[4:] == _SHOW_PROPS), but _fake_list_and_show asserts only membership of a single flag (`'--type=slice' in cmd`), leaving --state=active, --no-legend, --plain and --no-pager as invisible to the suite as --type=slice was last round. Flipping --state=active to --state=inactive makes _list_user_slices() enumerate units that are NOT running — measured on this box, `systemctl --user list-units --type=slice --state=inactive` returns ZERO units while the active query returns memcap.slice — so live_bound() returns None on every real box and `doctor` says OFF forever, which is precisely the bug CMX-280 exists to end.",
+      "file": "chela/memcap.py",
+      "before": "            [\"systemctl\", \"--user\", \"list-units\", \"--type=slice\", \"--state=active\",\n",
+      "after": "            [\"systemctl\", \"--user\", \"list-units\", \"--type=slice\", \"--state=inactive\",\n",
+      "kind": "wiring"
     }
   ]
 }

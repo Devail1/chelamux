@@ -299,6 +299,7 @@ def test_available_false_when_systemd_run_missing(monkeypatch):
 
 
 _SHOW_PROPS = ["-p", "MemoryMax", "-p", "MemoryCurrent"]
+_LIST_UNITS_ARGS = ["--type=slice", "--state=active", "--no-legend", "--plain", "--no-pager"]
 
 
 def _fake_show(monkeypatch, per_unit):
@@ -325,12 +326,15 @@ def _fake_show(monkeypatch, per_unit):
 
 
 def _fake_list_and_show(monkeypatch, units, per_unit):
-    """As :func:`_fake_show`, plus the `list-units` discovery call — asserts it actually
-    filters on `--type=slice` (DEFEAT_SHAPES #24: without this, a swap to
-    `--type=service` still gets the fabricated `.slice`-named units back)."""
+    """As :func:`_fake_show`, plus the `list-units` discovery call — asserts the FULL
+    trailing argv, not just that `--type=slice` appears somewhere in it (DEFEAT_SHAPES
+    #24: a fake that only checks membership of one flag can't see `--state=active` flip
+    to `--state=inactive`, which makes discovery enumerate slices that are NOT running —
+    `live_bound()` then returns `None` on every real box)."""
     def fake_run(cmd, **kwargs):
         if cmd[:3] == ["systemctl", "--user", "list-units"]:
-            assert "--type=slice" in cmd, f"expected --type=slice in {cmd}"
+            assert cmd[3:] == _LIST_UNITS_ARGS, (
+                f"expected {_LIST_UNITS_ARGS} after list-units, got {cmd[3:]}")
             lines = "\n".join(f"{u}  loaded active active {u}" for u in units)
             return subprocess.CompletedProcess(cmd, 0, stdout=lines)
         if cmd[:3] == ["systemctl", "--user", "show"]:
