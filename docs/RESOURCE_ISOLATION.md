@@ -169,6 +169,20 @@ reload — degrades to launching **unwrapped** rather than ever blocking a launc
 `Capability` (`memory_slice_budget`, dashboard + `chela doctor`) announces whether it is
 actually enforcing right now, not just whether the knob is set.
 
+**CMX-280: "the knob is off" is not "no bound is in force."** `chela-agents.slice` is
+chela's own rail, but this personal wrapper's `memcap.slice` (or anything else sharing
+this box's `systemd --user` session) still eats into the SAME machine's total RAM even
+though chela never wrapped a single agent in it — `memcap.wrap_launch_cmd` only decides
+whether an agent gets its OWN scope inside `chela-agents.slice`; it has no say over
+what else is already running on the box. `memcap.live_bound()` scans every active
+`systemd --user` slice (`systemctl --user show <unit> -p MemoryMax -p MemoryCurrent`,
+the same property this page's own "Verify, don't assume" section checks by hand) and
+surfaces the one with the least headroom, tagged `chela_owned` so an operator can tell
+"chela's rail" from "something else already bounding this box" apart. `chela
+doctor`/the dashboard now report that ceiling — occupancy included — even when
+`CHELA_MEMORY_SLICE_BUDGET` is unset, which is exactly the state a `memcap.slice`
+sized for an operator's OWN heavy jobs leaves the box in day to day.
+
 **What this closes:** the "four correct per-job caps still authorised 24G on a 19G box"
 failure mode above, for chela's own fleet specifically — the slice bounds the SUM of every
 agent and judge chela itself launches. **What it does not close:** everything else on this
