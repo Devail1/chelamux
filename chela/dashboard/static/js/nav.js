@@ -8,6 +8,7 @@ import { _isFav, _launcherData, launchProject, refreshLauncher } from './launche
 import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
 import { refresh } from './main.js';
+import { refreshCost } from './cost.js';
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -620,21 +621,64 @@ function renderAgentDetail() {
         ${recap}`;
 }
 
-// --- Settings drawer -------------------------------------------------------
+// --- Settings modal (CMX-287: tabbed, replaces the old off-canvas drawer) --
+//
+// Liav: "should we make the settings sidebar a tab system modal? it would
+// make settings easier to navigate, and will allow to show cost and maybe
+// other things that are not related to the main views?" — confirmed both
+// calls: revive cost.js (deleted as a standalone nav view by CMX-279, backend
+// route untouched) as a tab here, and the modal REPLACES the drawer rather
+// than wrapping it.
+//
+// Same #settings-drawer / #drawer-body / #drawer-scrim ids as the old drawer
+// (only the CSS class + internal structure changed) — every existing test and
+// caller (toggleSettings, the popover's "Settings"/"Notifications" rows) keeps
+// working unchanged. What's new is #settings-tabs (the tab rail) and wrapping
+// each settings-section group in a `.settings-tabpanel` that _selectSettingsTab
+// shows/hides; every individual section's ids (#dispatch-rows, #cost-table,
+// ...) are untouched, so the per-section loaders below are the same functions
+// the old drawer called.
+const SETTINGS_TABS = [
+    { id: 'general', label: 'General' },
+    { id: 'timing', label: 'Timing' },
+    { id: 'dispatch', label: 'Dispatch' },
+    { id: 'notifications', label: 'Notifications' },
+    { id: 'cost', label: 'Cost' },
+    { id: 'appearance', label: 'Appearance' },
+    { id: 'collaboration', label: 'Collaboration' },
+];
+let _settingsTab = 'general';
 
 function toggleSettings(focus) {
-    const drawer = document.getElementById('settings-drawer');
+    const modal = document.getElementById('settings-drawer');
     const scrim = document.getElementById('drawer-scrim');
-    if (!drawer) return;
-    const open = !drawer.classList.contains('open');
-    drawer.classList.toggle('open', open);
+    if (!modal) return;
+    const open = !modal.classList.contains('open');
+    modal.classList.toggle('open', open);
     if (scrim) scrim.classList.toggle('open', open);
     if (open) renderSettings(focus);
 }
 
+// focus: 'notify' opens straight to the Notifications tab (the popover's
+// "Notifications" row uses this) — otherwise the modal reopens on whichever
+// tab was last selected, defaulting to General on first open.
+function selectSettingsTab(tab) {
+    if (!SETTINGS_TABS.some(t => t.id === tab)) return;
+    _settingsTab = tab;
+    $$('.settings-tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+    $$('.settings-tabpanel').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+    if (tab === 'cost') refreshCost();
+}
+
 function renderSettings(focus) {
     const body = document.getElementById('drawer-body');
+    const tabsHost = document.getElementById('settings-tabs');
     if (!body) return;
+    if (tabsHost) {
+        tabsHost.innerHTML = SETTINGS_TABS.map(t =>
+            `<div class="settings-tab" data-tab="${t.id}" onclick="chela.selectSettingsTab(this.dataset.tab)">${escHtml(t.label)}</div>`
+        ).join('');
+    }
     const theme = localStorage.getItem('chela_theme') || 'dark';
     const termLatin = localStorage.getItem('chela_term_latin') || 'jetbrains';
     const termFont = localStorage.getItem('chela_term_font') || 'miriam';
@@ -643,6 +687,7 @@ function renderSettings(focus) {
     const collabAuto = localStorage.getItem('chela_collab_autoname') || 'auto-assigned';
     const runToastsMuted = localStorage.getItem('chela_mute_run_toasts') === '1';
     body.innerHTML = `
+        <div class="settings-tabpanel" data-tab="general">
         <section class="settings-section" id="settings-status">
             <h4>Connections &amp; Status</h4>
             <div class="s-status-list"><div class="s-desc">Loading…</div></div>
@@ -708,6 +753,20 @@ function renderSettings(focus) {
             setting.</p>
         </section>
 
+        <section class="settings-section">
+            <h4>Remote access</h4>
+            <p class="s-desc">Zero built-in auth — the dashboard binds <code>127.0.0.1</code>.
+            Put it behind a tailnet or SSH tunnel; that is the trust boundary.</p>
+            <div class="s-examples">
+                <div class="s-ex"><span class="s-tag">tailnet</span><code>tailscale serve 5001</code></div>
+                <div class="s-ex"><span class="s-tag">tunnel</span><code>ssh -L 5001:127.0.0.1:5001 host</code></div>
+            </div>
+            <p class="s-desc">Phone: SSH/Mosh in (Blink / Termius), then
+            <code>tmux attach</code> for the live panes.</p>
+        </section>
+        </div>
+
+        <div class="settings-tabpanel" data-tab="timing">
         <section class="settings-section" id="settings-timing">
             <h4>Timing</h4>
             <p class="s-desc">Daemon and dispatcher cadences. Blank a field to fall back to
@@ -722,7 +781,9 @@ function renderSettings(focus) {
             </div>
             <div id="timing-msg" class="s-savemsg"></div>
         </section>
+        </div>
 
+        <div class="settings-tabpanel" data-tab="dispatch">
         <section class="settings-section" id="settings-dispatch">
             <h4>Dispatch</h4>
             <p class="s-desc">Dispatcher, judge, and critic policy. Blank a field to fall back
@@ -740,7 +801,9 @@ function renderSettings(focus) {
             </div>
             <div id="dispatch-msg" class="s-savemsg"></div>
         </section>
+        </div>
 
+        <div class="settings-tabpanel" data-tab="notifications">
         <section class="settings-section">
             <h4>Needs-input notifications</h4>
             <p class="s-desc">Fires a one-shot ping when an agent's pane enters
@@ -763,19 +826,32 @@ function renderSettings(focus) {
                 <div class="s-ex"><span class="s-tag">webhook</span><span class="s-exnote">any URL — receives JSON <code>{title,message,event}</code></span></div>
             </div>
         </section>
+        </div>
 
-        <section class="settings-section">
-            <h4>Remote access</h4>
-            <p class="s-desc">Zero built-in auth — the dashboard binds <code>127.0.0.1</code>.
-            Put it behind a tailnet or SSH tunnel; that is the trust boundary.</p>
-            <div class="s-examples">
-                <div class="s-ex"><span class="s-tag">tailnet</span><code>tailscale serve 5001</code></div>
-                <div class="s-ex"><span class="s-tag">tunnel</span><code>ssh -L 5001:127.0.0.1:5001 host</code></div>
+        <div class="settings-tabpanel" data-tab="cost">
+        <section class="settings-section" id="settings-cost">
+            <h4>Cost</h4>
+            <p class="s-desc">Fleet spend from the cost each agent's statusLine hook already
+            reports (<code>cost.total_cost_usd</code>) — no separate accounting, just a read
+            over data chela ingests anyway. Grouped by project, same convention the sidebar
+            uses for "what project is this agent".</p>
+            <div class="work-toolbar">
+                <div class="work-seg" id="cost-window" role="group" aria-label="Cost window">
+                    <button type="button" class="work-seg-btn cost-window-btn" data-win="live" aria-pressed="true"
+                            onclick="chela.setCostWindow('live')">Live</button>
+                    <button type="button" class="work-seg-btn cost-window-btn" data-win="today" aria-pressed="false"
+                            onclick="chela.setCostWindow('today')">Today</button>
+                    <button type="button" class="work-seg-btn cost-window-btn" data-win="7d" aria-pressed="false"
+                            onclick="chela.setCostWindow('7d')">7d</button>
+                    <button type="button" class="work-seg-btn cost-window-btn" data-win="30d" aria-pressed="false"
+                            onclick="chela.setCostWindow('30d')">30d</button>
+                </div>
             </div>
-            <p class="s-desc">Phone: SSH/Mosh in (Blink / Termius), then
-            <code>tmux attach</code> for the live panes.</p>
+            <div id="cost-table"><div class="s-desc">Loading…</div></div>
         </section>
+        </div>
 
+        <div class="settings-tabpanel" data-tab="appearance">
         <section class="settings-section">
             <h4>Theme</h4>
             <div class="s-row">
@@ -819,7 +895,9 @@ function renderSettings(focus) {
                 </select>
             </div>
         </section>
+        </div>
 
+        <div class="settings-tabpanel" data-tab="collaboration">
         <section class="settings-section">
             <h4>Collaboration</h4>
             <p class="s-desc">Your display name in shared terminals (presence pills +
@@ -839,8 +917,9 @@ function renderSettings(focus) {
             is a zero-knowledge fan-out that only ever sees ciphertext (keys are derived in your
             browser from the pairing code). It does see room names + traffic timing (metadata) —
             run your own relay for full metadata privacy.</p>
-        </section>`;
-    if (focus === 'notify') body.scrollTop = 0;
+        </section>
+        </div>`;
+    selectSettingsTab(focus === 'notify' ? 'notifications' : _settingsTab);
     _loadProjectsSetting();
     _loadCollabSetting();
     _loadAgentModeSetting();
@@ -1721,4 +1800,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
