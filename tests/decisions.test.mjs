@@ -978,6 +978,21 @@ test('the REAL index.html wires the modal backdrop to hideDecisionsMenu, same as
         '#decisions-menu backdrop is not wired to chela.hideDecisionsMenu() in index.html');
 });
 
+// The 'sanity: the modal must start closed' assertion above only proves the
+// synthetic BODY fixture (built by hand, above) starts closed — it says
+// nothing about the REAL served markup, which is what a browser actually
+// loads. This is the property Liav's screenshot was about: the modal
+// occluding the Wall on page load, before any interaction. Checked directly
+// against REAL_HTML, not the fixture, so a regression in the real template
+// (e.g. someone hand-adding `open` while wiring up a "start expanded" mode)
+// cannot hide behind the fixture's own correctness.
+test('the REAL index.html does not render #decisions-menu already open at rest', () => {
+    const tag = REAL_HTML.match(/<div class="([^"]*)" id="decisions-menu"/);
+    assert.ok(tag, '#decisions-menu div not found in index.html');
+    assert.ok(!tag[1].split(/\s+/).includes('open'),
+        '#decisions-menu must not carry the "open" class at rest in index.html — it would occlude the Wall on page load, the exact bug CMX-288 fixed');
+});
+
 test('Esc closes the open decisions modal', () => {
     decisions.openDecisionsMenu();
     assert.ok(isOpen(), 'openDecisionsMenu did not open the modal — this test would be vacuous otherwise');

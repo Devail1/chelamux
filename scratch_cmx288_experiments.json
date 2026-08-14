@@ -1,0 +1,22 @@
+{
+  "experiments": [
+    {
+      "guard": "Esc closes the open decisions modal",
+      "file": "chela/dashboard/static/js/decisions.js",
+      "before": "if (m && m.classList.contains('open')) { e.preventDefault(); hideDecisionsMenu(); }",
+      "after": "if (m && !m.classList.contains('open')) { e.preventDefault(); hideDecisionsMenu(); }"
+    },
+    {
+      "guard": "the modal backdrop is wired to hideDecisionsMenu, same as #palette/#shortcuts-overlay",
+      "file": "chela/dashboard/templates/index.html",
+      "before": "if(event.target===this)chela.hideDecisionsMenu()",
+      "after": "if(event.target===this)void 0"
+    },
+    {
+      "guard": "the REAL index.html does not render #decisions-menu already open at rest",
+      "file": "chela/dashboard/templates/index.html",
+      "before": "<div class=\"palette-overlay\" id=\"decisions-menu\" onclick=\"if(event.target===this)chela.hideDecisionsMenu()\">",
+      "after": "<div class=\"palette-overlay open\" id=\"decisions-menu\" onclick=\"if(event.target===this)chela.hideDecisionsMenu()\">"
+    }
+  ]
+}
