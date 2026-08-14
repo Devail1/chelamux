@@ -223,6 +223,103 @@ test('knMd: a link href containing a double quote is escaped by attrEsc, not spl
     );
 });
 
+// --- knMd: EXHAUSTIVE branch table (CMX-279 rework round 5, PR #350) -------
+//
+// Rounds 2-4 each closed one or two knMd branches per round, and the judge kept
+// finding another — because each round's fixture turned out to be a FIXED POINT
+// of the very transform it was meant to pin (DEFEAT_SHAPES #24): the fenced-code
+// fixture (`const x = 1;` / `**not bold**`) had nothing for escHtml to escape,
+// every heading fixture anywhere in the suite used `###`, and the bullet-list
+// fixture never used `*`. Dropping the escHtml call, pinning the heading level
+// to a constant 3, and narrowing the bullet class to `-` alone all passed the
+// full suite unnoticed.
+//
+// `knowledge.js`'s knMd is 83 lines with ~10 branches — small enough to read
+// end to end and enumerate exhaustively, rather than adding one more one-off
+// fixture per round. Each row below is picked so the branch it names PROVABLY
+// changes the output (a payload where the transform is NOT the identity), and
+// two rows are NEGATIVE CONTROLS — branches the round-5 judge finding did not
+// name — included to prove this table closes the space rather than answering
+// only the four findings named this round.
+const KN_MD_BRANCH_TABLE = [
+    {
+        branch: 'fenced code: content is escaped verbatim via escHtml, not knInline\'d '
+            + '(payload with `<`/`&` so escHtml is NOT the identity — DEFEAT_SHAPES #24)',
+        md: '```\n<script>alert(1)</script> & co\n```',
+        html: '<pre class="kn-code"><code>&lt;script&gt;alert(1)&lt;/script&gt; &amp; co\n</code></pre>',
+    },
+    {
+        branch: 'NEGATIVE CONTROL (not named by the round-5 finding): an unterminated fence '
+            + '(odd number of ``` lines — e.g. a truncated judge verdict) still closes the '
+            + '<pre>/<code> at EOF',
+        md: '```\nunterminated',
+        html: '<pre class="kn-code"><code>unterminated\n</code></pre>',
+    },
+    {
+        branch: 'a blank line closes an open list',
+        md: '- a\n\n- b',
+        html: '<ul class="kn-ul"><li>a</li></ul><ul class="kn-ul"><li>b</li></ul>',
+    },
+    {
+        branch: 'heading level 1 (`#`) — the `#{1,4}` capture is not pinned to a constant (DEFEAT_SHAPES #24)',
+        md: '# h1',
+        html: '<h1 class="kn-mh">h1</h1>',
+    },
+    { branch: 'heading level 2 (`##`)', md: '## h2', html: '<h2 class="kn-mh">h2</h2>' },
+    { branch: 'heading level 3 (`###`)', md: '### h3', html: '<h3 class="kn-mh">h3</h3>' },
+    {
+        branch: 'heading level 4 (`####`) — the other end of the `#{1,4}` capture (DEFEAT_SHAPES #24)',
+        md: '#### h4',
+        html: '<h4 class="kn-mh">h4</h4>',
+    },
+    { branch: 'blockquote', md: '> quoted', html: '<blockquote>quoted</blockquote>' },
+    {
+        branch: 'ordered list item (`1.`/`2.`)',
+        md: '1. a\n2. b',
+        html: '<ol class="kn-ol"><li>a</li><li>b</li></ol>',
+    },
+    { branch: 'unordered `-` bullet', md: '- a', html: '<ul class="kn-ul"><li>a</li></ul>' },
+    {
+        branch: 'unordered `*` bullet — the second alternative in `/^[-*]\\s+(.*)$/`, never '
+            + 'fixtured before this round (DEFEAT_SHAPES #24)',
+        md: '* a',
+        html: '<ul class="kn-ul"><li>a</li></ul>',
+    },
+    {
+        branch: 'NEGATIVE CONTROL (not named by the round-5 finding): list-kind switch ol -> ul '
+            + '(no blank line) closes the ol\'s </ol> before opening the ul',
+        md: '1. a\n- b',
+        html: '<ol class="kn-ol"><li>a</li></ol><ul class="kn-ul"><li>b</li></ul>',
+    },
+    {
+        branch: 'list-kind switch ul -> ol (no blank line) closes the ul\'s </ul> before opening the ol',
+        md: '- a\n1. b',
+        html: '<ul class="kn-ul"><li>a</li></ul><ol class="kn-ol"><li>b</li></ol>',
+    },
+    {
+        branch: 'a `-` run immediately followed by a fenced block: closeList() runs BEFORE the '
+            + '<pre> opens, so the </ul> is not left dangling inside the last <li>',
+        md: '- a\n```\ncode\n```',
+        html: '<ul class="kn-ul"><li>a</li></ul><pre class="kn-code"><code>code\n</code></pre>',
+    },
+    {
+        branch: 'a `#anchor` link renders as plain text, never a clickable <a> (knLink)',
+        md: '[here](#anchor)',
+        html: '<p>here</p>',
+    },
+    {
+        branch: 'an external link renders via knLink/attrEsc',
+        md: '[docs](https://example.com/x)',
+        html: '<p><a href="https://example.com/x" target="_blank" rel="noopener">docs</a></p>',
+    },
+];
+
+for (const { branch, md, html } of KN_MD_BRANCH_TABLE) {
+    test(`knMd branch table: ${branch}`, () => {
+        assert.equal(knowledge.knMd(md), html);
+    });
+}
+
 // --- displayTitle: display-only concise header, never the parsed title -----
 
 test('displayTitle: a leading bold span becomes the display title, trailing text dropped', () => {

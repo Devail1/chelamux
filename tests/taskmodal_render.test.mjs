@@ -85,3 +85,20 @@ test('openTaskModal: a review-timeline entry with a markdown detail renders thro
     assert.equal(bodyEl.innerHTML, '<p>ship <strong>the wall</strong> now</p>',
         `review-timeline body did not render through knMd — got: "${bodyEl.innerHTML}"`);
 });
+
+// 🔴 GUARD (round 5, PR #350): the FOURTH knMd/knInline call site — taskmodal.js:127's
+// `_briefPane`, which calls `briefHtml(src)` (taskmodalmodel.js) only once `briefSource(item)`
+// resolves to something non-null. The other two tests in this suite pass items with no
+// brief/body/raw at all, so briefSource short-circuits to null and _briefPane never reaches
+// briefHtml — this drives the REAL openTaskModal with an item carrying a `brief` full of
+// markdown and reads the REAL `.task-modal-brief` element back out of `#task-modal-content`.
+// If taskmodal.js:127's `briefHtml(src)` call is dead-coded (bypassed in favour of a plain
+// escHtml of the raw brief), this fails on literal `###`/`**` where <h3>/<strong> should be.
+test('openTaskModal: a task brief with markdown renders through briefHtml/knMd in the brief pane, not literal escaped source', () => {
+    taskmodal.openTaskModal({ title: 'plain title', status: 'open', brief: '### OBJECTIVE\nDo the **thing**.' });
+
+    const briefEl = document.querySelector('#task-modal-content .task-modal-brief');
+    assert.ok(briefEl, 'openTaskModal did not render a .task-modal-brief element');
+    assert.equal(briefEl.innerHTML, '<h3 class="kn-mh">OBJECTIVE</h3><p>Do the <strong>thing</strong>.</p>',
+        `brief pane did not render through briefHtml/knMd — got: "${briefEl.innerHTML}"`);
+});

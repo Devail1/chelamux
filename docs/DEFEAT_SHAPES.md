@@ -196,6 +196,17 @@ each covers.
   since every DOM test that reaches `openTaskModal` passes no `review_history`. Closed by a
   4th wiring test in `tests/taskmodal_render.test.mjs` that passes a `review_history` payload
   and reads the real `.task-modal-timeline-body` element back.
+- `knMd`/`knInline` (CMX-279 rework round 5, PR #350) — recurred a SECOND time on the same
+  symbol. `taskmodal.js:127` `_briefPane`'s `briefHtml(src)` call is a FOURTH call site (the
+  header's own doc comment names it first, as the reason the module survives at all), and it
+  was still unguarded going into round 5: both existing DOM tests in
+  `tests/taskmodal_render.test.mjs` pass items with no `brief`/`body`/`raw`, so
+  `briefSource(item)` resolves to `null` and `_briefPane` short-circuits to its "No brief
+  recorded" note before ever reaching `briefHtml`. Closed by a 5th wiring test driving the real
+  `openTaskModal` with an item carrying a markdown `brief` and reading `.task-modal-brief`
+  back. The standing lesson from the second occurrence: counting call sites once is not
+  enough — re-`git grep` the symbol every round a guard on it changes, since a caller added or
+  edited in an earlier round of the SAME PR can still be the one nobody wired.
 
 ⭐ The judge caught the second one by proposing **a separate wiring experiment per call site
 rather than guessing which was covered** — which is also the cheapest way to write the guard.
@@ -800,3 +811,42 @@ in one fixture, escHtml, attrEsc-on-quote) plus the third `knMd` call site as a 
 DEFEAT_SHAPES #7 wiring test (see above). The standing lesson: when a note names N gaps and a
 blocking finding only forces closing a subset, close ALL N in the same round — a partial close
 does not make the round's own note stop being a to-do list for the next judge.
+
+## 24. An exact-output fixture whose payload is IDENTITY under the very transform it claims to guard
+
+**Assertion form:** an exact-output test asserts a string produced by a transform function
+(an escaping call, a level-pinning regex capture, a character-class alternative) — and the
+fixture's *value* happens to be a fixed point of that transform: running the transform or
+skipping it entirely produces the same output. The test's own doc comment may even name the
+transform as the thing it guards, and the guard is not lying — it genuinely calls the
+function it says it does. It just never gives that function anything to do.
+
+**Mutation that defeats it:** delete or narrow the call (skip the escaping, pin the captured
+level to whatever constant the fixture always uses, narrow a character class to the one
+alternative the fixture always hits). The fixture's output is unchanged, because the
+transform was a no-op on that particular input — the assertion cannot tell "the transform ran
+and did nothing" apart from "the transform did not run."
+
+**Guard form that survives:** for any assertion meant to pin a transform, pick a payload for
+which the transform PROVABLY changes the output — a string containing the characters an
+escaper actually escapes, a value other than whatever every other fixture in the file already
+uses, a case exercising every alternative in a character class rather than just one. State
+*why* the payload is diagnostic (which property of the input makes the row non-identity) so a
+reviewer widening the suite later can check the claim against the code instead of re-deriving
+it from scratch.
+
+**Found:** CMX-279 rework round 5 (2026-08-14), PR #350. Three of `knMd`'s exact-output guards
+were each built from a fixture that happened to be a fixed point of the branch it was meant to
+pin: the round-4 fenced-code fixture (`const x = 1;`, `**not bold**`) has nothing for
+`escHtml` to escape, so dropping the `escHtml` call inside the fence left the assertion
+byte-identical; every heading fixture in the whole suite used `###`, so pinning the heading
+level to the constant `3` (instead of reading `h[1].length`) passed; and the list-item regex
+fixture only ever used `-` bullets, so narrowing `/^[-*]\s+(.*)$/` to `/^[-]\s+(.*)$/` passed
+too. All three shipped clean through `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (3076 passed,
+0 failed). Closed by a single table-driven test (`KN_MD_BRANCH_TABLE` in
+`tests/taskmodal_model.test.mjs`) enumerating every branch of `knMd` from the source, with each
+row deliberately picked to be non-identity under whatever it guards — an HTML-special-character
+payload inside the fence, one row per heading level 1 through 4, and both list-marker
+characters — plus two negative-control rows (an unterminated fence, and an ol→ul list-kind
+switch) for branches the round-5 finding did not name, to prove the table closes the space
+rather than answering only the four findings asked for.
