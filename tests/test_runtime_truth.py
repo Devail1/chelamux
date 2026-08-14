@@ -106,6 +106,11 @@ def fleet(tmp_path, monkeypatch, request):
     # spawn. A real `tmux show-environment -g` call here would depend on the test host's
     # own tmux server, same reason session_exists/get_windows_by_id are stubbed above.
     monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: {})
+    # process.node_ipc_env: THIS test process carries no leaked Node IPC vars either —
+    # the state a window not born under a poisoned tmux server actually has. Explicit,
+    # not assumed: a leak here would make every other test in this file's baseline lie.
+    monkeypatch.delenv("NODE_CHANNEL_FD", raising=False)
+    monkeypatch.delenv("NODE_CHANNEL_SERIALIZATION_MODE", raising=False)
     monkeypatch.setattr(epoch, "current", lambda: EPOCH)
     monkeypatch.setattr(runtime_truth, "_in_flight_runs",
                         lambda: {"CMX-66": {"wid": "@1", "epoch": EPOCH}})
@@ -260,6 +265,17 @@ def _break_tmux_node_ipc_env(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_truth, "_tmux_global_env",
                         lambda: {"NODE_CHANNEL_FD": "3",
                                  "NODE_CHANNEL_SERIALIZATION_MODE": "json"})
+    return doctor.ERROR
+
+
+def _break_process_node_ipc_env(tmp_path, monkeypatch):
+    """CMX-281: THIS process — a window already alive, not a new spawn — carries the
+    leaked vars in its OWN environment. `tmux.node_ipc_env`'s corruption (above) breaks
+    the GLOBAL table a NEW window would inherit; this breaks what a window already
+    running (like the one an agent is writing its PR from) actually has right now —
+    exactly the state that fooled three agents into calling a red suite pre-existing."""
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    monkeypatch.setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
     return doctor.ERROR
 
 
@@ -558,6 +574,7 @@ CORRUPTIONS = {
     "env.running": _break_env_running,
     "tmux.session": _break_tmux_session,
     "tmux.node_ipc_env": _break_tmux_node_ipc_env,
+    "process.node_ipc_env": _break_process_node_ipc_env,
     "dashboard.port": _break_dashboard_port,
     "dashboard.update_lock": _break_update_apply_lock,
     "plugin.rendered": _break_plugin_rendered,
@@ -765,6 +782,62 @@ def test_node_ipc_env_detects_serialization_mode_when_the_fd_is_absent(fleet, mo
         f"a tmux global env carrying ONLY NODE_CHANNEL_SERIALIZATION_MODE must still be "
         f"ERROR, got {findings}")
     assert "NODE_CHANNEL_SERIALIZATION_MODE" in findings[0].title
+
+
+def test_process_node_ipc_env_is_ok_when_the_tmux_global_table_is_the_only_thing_clean(
+    fleet, monkeypatch,
+):
+    """⭐⭐ CMX-281's actual trap: a window already running keeps the env it was born
+    with even after `tmux.node_ipc_env`'s GLOBAL table (what a NEW spawn inherits) has
+    since been scrubbed clean. `tmux.node_ipc_env` alone reading OK here — as the
+    `fleet` baseline sets it — must not make `process.node_ipc_env` read OK too; they are
+    two different owners answering two different questions."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env", lambda: {})   # global: clean
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")                          # THIS window: not
+    findings = [f for f in doctor.check() if f.fact == "process.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a poisoned process env must be reported even while the tmux global table is "
+        f"clean, got {findings}")
+    tmux_findings = [f for f in doctor.check() if f.fact == "tmux.node_ipc_env"]
+    assert not _red(tmux_findings), (
+        "the global table is genuinely clean in this scenario — it must stay OK; this "
+        "test is only meaningful if the two facts can disagree")
+
+
+def test_process_node_ipc_env_detects_node_channel_fd_when_the_sibling_is_absent(
+    fleet, monkeypatch,
+):
+    """Same reasoning as the tmux fact's paired guard: `_break_process_node_ipc_env`
+    always leaks BOTH vars together, so a mutation dropping ``NODE_CHANNEL_FD`` out of
+    `_NODE_IPC_ENV_VARS` would still pass on the surviving sibling alone unless this
+    leaks ONLY the fd."""
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    findings = [f for f in doctor.check() if f.fact == "process.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a process env carrying ONLY NODE_CHANNEL_FD must still be ERROR, got {findings}")
+    # ⛔ Judge round 1: `detail`'s STATIC advice prose already spells out both var names
+    # verbatim (`env -u NODE_CHANNEL_FD -u NODE_CHANNEL_SERIALIZATION_MODE`), so a bare
+    # `"NODE_CHANNEL_FD" in detail` substring check is satisfied by that source constant no
+    # matter what the observation contained. Assert on the RENDERED k=v!r pair — the part
+    # that can only come from `obs.value` — and that the absent sibling's rendered pair is
+    # NOT present, so this is attributable to the observation, not the prose.
+    assert "NODE_CHANNEL_FD='3'" in findings[0].detail
+    assert "NODE_CHANNEL_SERIALIZATION_MODE='" not in findings[0].detail
+
+
+def test_process_node_ipc_env_detects_serialization_mode_when_the_fd_is_absent(
+    fleet, monkeypatch,
+):
+    """Complementary half: leak ONLY the sibling, not the fd."""
+    monkeypatch.setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
+    findings = [f for f in doctor.check() if f.fact == "process.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a process env carrying ONLY NODE_CHANNEL_SERIALIZATION_MODE must still be "
+        f"ERROR, got {findings}")
+    # Same reasoning as the fd's paired guard above: assert the RENDERED k=v!r pair, not a
+    # bare name that the static advice prose also contains verbatim.
+    assert "NODE_CHANNEL_SERIALIZATION_MODE='json'" in findings[0].detail
+    assert "NODE_CHANNEL_FD='" not in findings[0].detail
 
 
 def test_tmux_global_env_reader_is_none_not_empty_when_tmux_cannot_be_asked(monkeypatch):

@@ -24,13 +24,14 @@ Fully programmatic: no tmux, no Claude Code, no daemon.
 """
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from chela import event_log, hooks, messenger, rooms, sessions, transcripts
+from chela import config, event_log, hooks, messenger, rooms, sessions, transcripts
 from chela.dashboard import app as dash
 
 REPO = Path(__file__).resolve().parent.parent
@@ -642,6 +643,49 @@ def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
     assert "$CHELA_WID" not in command.replace("${CHELA_WID:-}", "")
 
 
+# --- live terminal timestamps (CMX-277) -------------------------------------------
+
+def test_timestamp_events_are_exactly_the_two_message_boundaries():
+    """Prompt-sent and reply-finished — the two boundaries the feature is about."""
+    assert hooks.TIMESTAMP_EVENTS == frozenset({"UserPromptSubmit", "Stop"})
+
+
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
+def test_timestamp_response_carries_the_proven_persistent_envelope(event):
+    """Bare ``{"systemMessage": ...}`` was reported flashing and vanishing within about a
+    second (anthropics/claude-code#50542); pairing it with ``continue``/``suppressOutput``
+    is what made it persist. Losing either field regresses to the flaky bare shape."""
+    resp = hooks.timestamp_response(event)
+
+    assert resp["continue"] is True
+    assert resp["suppressOutput"] is False
+    msg = resp["systemMessage"]
+    assert msg.startswith("🕐 ")
+    stamp = msg.removeprefix("🕐 ")
+    assert len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"  # HH:MM:SS
+
+
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
+def test_timestamp_response_asks_the_module_clock_not_a_fixed_string(event, monkeypatch):
+    """A fixed string like ``"00:00:00"`` satisfies the HH:MM:SS shape check above just as
+    well as a real clock — that gap is exactly what let a frozen-clock mutation survive
+    (docs/DEFEAT_SHAPES.md). Monkeypatching ``hooks.time.strftime`` and asserting the exact
+    rendered value pins THAT the module's own clock was asked, but a stub of the form
+    ``lambda fmt: "12:34:56"`` accepts and discards ``fmt`` — so it does not pin WHAT was
+    asked for, and ``time.strftime("%d:%m:%y")`` (a date, not a time) satisfies both the
+    stub and the HH:MM:SS shape check equally well (round 3's surviving mutation,
+    docs/DEFEAT_SHAPES.md shape 18). Capturing the ``fmt`` argument closes that: it pins
+    the format string itself, not merely the stubbed return value."""
+    captured_fmt = []
+    monkeypatch.setattr(hooks.time, "strftime",
+                         lambda fmt: captured_fmt.append(fmt) or "12:34:56")
+
+    resp = hooks.timestamp_response(event)
+
+    assert captured_fmt == ["%H:%M:%S"]
+    assert resp["systemMessage"] == "🕐 12:34:56"
+
+
 # --- the endpoint ----------------------------------------------------------------
 
 def test_endpoint_appends_and_answers_nothing_that_nobody_answered(client):
@@ -685,6 +729,133 @@ def test_endpoint_does_not_fail_a_blocked_agent(client):
 def test_endpoint_rejects_an_unknown_event(client):
     assert client.post("/hooks/DropTables", json=_body()).status_code == 404
     assert event_log.read()["events"] == []
+
+
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
+def test_endpoint_stamps_a_timestamp_on_the_message_boundaries(client, monkeypatch, event):
+    """``CHELA_TERMINAL_TIMESTAMPS`` defaults OFF (adopter-facing, unverified rendering
+    reliability across Claude Code versions) — exercise the stamping path by opting in
+    explicitly, the same way an adopter who wants it would."""
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
+    resp = client.post(f"/hooks/{event}", json=_body(hook_event_name=event))
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["continue"] is True
+    assert body["suppressOutput"] is False
+    assert body["systemMessage"].startswith("🕐 ")
+
+    # Still an ordinary ingested event, same as every other hook.
+    events = event_log.read()["events"]
+    assert len(events) == 1
+    assert events[0]["type"] == hooks.event_type(event)
+
+
+def test_the_timestamp_can_be_turned_off(client, monkeypatch):
+    """``CHELA_TERMINAL_TIMESTAMPS=false`` is the escape hatch the spike's own
+    "what remains unverified" section calls for — a pinned Claude Code version that
+    renders the field badly must be able to turn it off without code changes."""
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", False)
+
+    resp = client.post("/hooks/Stop", json=_body(hook_event_name="Stop"))
+
+    assert resp.get_json() == {}
+    # The escape hatch mutes the visible line only — the event is still logged.
+    assert event_log.read()["events"][0]["type"] == "hook.stop"
+
+
+def test_terminal_timestamps_defaults_off_with_no_env_var_set(monkeypatch):
+    """CMX-277's rework round: this writes a visible line at every message boundary in
+    EVERY adopter's terminal, on a mechanism whose own spike names rendering reliability
+    across Claude Code versions as unverified — so it must ship OFF, opt-in per install,
+    not on-by-default-with-an-escape-hatch. Reloads the real module against a clean env,
+    not just a monkeypatched attribute, so a `"true"` fallback string reintroduced into
+    :data:`chela.config.TERMINAL_TIMESTAMPS`'s ``os.environ.get`` default is caught here
+    even though every other test in this file monkeypatches the attribute directly."""
+    monkeypatch.delenv("CHELA_TERMINAL_TIMESTAMPS", raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.TERMINAL_TIMESTAMPS is False
+    finally:
+        importlib.reload(config)  # restore whatever env the rest of the suite expects
+
+
+def test_timestamps_on_does_not_steal_the_post_tool_use_gate_resolution(client, monkeypatch):
+    """CMX-277 rework round 5: ``app.py``'s own docstring claims the stamp branch fires
+    ONLY at the two message boundaries ("Every other event still returns {}") — but every
+    test that mounts the ON state (above) POSTs only ``UserPromptSubmit``/``Stop``, and
+    every test that POSTs ``PostToolUse`` runs at the real default, which is OFF, so the
+    stamp branch is skipped before the event set is even consulted either way. No test
+    observed the endpoint with timestamps ON and a non-boundary event, so
+    ``if event in hooks.TIMESTAMP_EVENTS`` could be widened to also swallow ``PostToolUse``
+    (docs/DEFEAT_SHAPES.md shape 12 — untested because every fixture sits on the property)
+    and nothing would catch it: with timestamps on, that widened branch returns before
+    ``gateanswer.gate_resolved`` is ever reached, so a held gate would wait out its whole
+    wait budget (the CMX-54 regression) instead of being torn down. Pin both halves at once:
+    the body is the empty-object shape non-boundary events get, AND the resolution side
+    effect the PostToolUse branch is responsible for still ran.
+    """
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
+    resolved = []
+    monkeypatch.setattr(dash.gateanswer, "gate_resolved", lambda tuid: resolved.append(tuid))
+
+    resp = client.post("/hooks/PostToolUse", json=_body(hook_event_name="PostToolUse",
+                                                          tool_use_id="toolu_123"))
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {}
+    assert resolved == ["toolu_123"]
+
+
+# Every event other than the two timestamp boundaries — derived from `hooks.HOOK_EVENTS`
+# itself, not hand-copied, so an event Claude Code adds later is exercised automatically.
+_NON_TIMESTAMP_EVENTS = [e for e in hooks.HOOK_EVENTS if e not in hooks.TIMESTAMP_EVENTS]
+
+
+@pytest.mark.parametrize("event", _NON_TIMESTAMP_EVENTS)
+def test_timestamps_on_leaves_every_non_boundary_event_unchanged(client, monkeypatch, event):
+    """CMX-283: the test above pins exactly one hole a judge mutation happened to find —
+    widening the membership test to also swallow ``PostToolUse``. That chases the
+    short-circuit one event at a time: the next event a widened condition happens to pick
+    up (``PermissionRequest``, ``SessionStart``, or an event Claude Code adds tomorrow)
+    would need its own dedicated round, forever one step behind whatever the judge finds
+    next. Assert the property the short-circuit actually promises, exhaustively instead:
+    for every event other than the two timestamp boundaries, whether
+    ``CHELA_TERMINAL_TIMESTAMPS`` is on or off must make NO difference to that event's
+    response — the branch is a true no-op outside its own two events. A membership test
+    widened to also catch this event returns ``hooks.timestamp_response(event)`` in place
+    of its real body once the flag is on, which a same-event on/off comparison catches
+    directly, without needing to know what that event's real body is or mock its handler's
+    side effects. Parametrized off ``hooks.HOOK_EVENTS`` (see `_NON_TIMESTAMP_EVENTS`
+    above), so covering a future event needs no new test, only a wider tuple.
+    """
+    body = _body(hook_event_name=event, tool_name="Bash", tool_use_id=f"toolu_{event}")
+
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", False)
+    resp_off = client.post(f"/hooks/{event}", json=body)
+
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
+    resp_on = client.post(f"/hooks/{event}", json=body)
+
+    assert resp_off.status_code == resp_on.status_code == 200
+    assert resp_on.data == resp_off.data
+
+
+def test_terminal_timestamps_turns_on_with_the_env_var_set_to_true(monkeypatch):
+    """CMX-277 rework round 4: the mirror of the OFF-default test above. Every other
+    ON-state test in this file monkeypatches the `TERMINAL_TIMESTAMPS` attribute directly,
+    which never exercises the `os.environ.get(...)` parse that actually reads
+    `CHELA_TERMINAL_TIMESTAMPS` — so `TERMINAL_TIMESTAMPS = False and os.environ.get(...)`
+    (a dead-coded knob that can never turn ON, however the env var is set) left every
+    attribute-monkeypatched test green. Reload the real module against a real env var, the
+    same shape as the OFF-default test, so the parse path itself is what's pinned."""
+    monkeypatch.setenv("CHELA_TERMINAL_TIMESTAMPS", "true")
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.TERMINAL_TIMESTAMPS is True
+    finally:
+        monkeypatch.delenv("CHELA_TERMINAL_TIMESTAMPS", raising=False)
+        importlib.reload(config)  # restore whatever env the rest of the suite expects
 
 
 def test_endpoint_will_not_read_an_oversized_body(client):

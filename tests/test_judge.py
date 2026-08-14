@@ -1716,7 +1716,8 @@ def _wf(tmp_path, **cfg):
     )
 
 
-def _tick(wf, spawned, checks=dispatcher.CI_PASSING, sha="cafe1234", windows=()):
+def _tick(wf, spawned, checks=dispatcher.CI_PASSING, sha="cafe1234", windows=(),
+          open_ids=("abc123",)):
     from chela.workflow import WorkflowStatus
 
     class R:
@@ -1741,7 +1742,7 @@ def _tick(wf, spawned, checks=dispatcher.CI_PASSING, sha="cafe1234", windows=())
 
     with patch.object(dispatcher, "load_workflow_cached",
                       return_value=WorkflowStatus(path=wf.path, workflow=wf, error=None)), \
-         patch.object(dispatcher, "get_source", return_value=_EmptySource()), \
+         patch.object(dispatcher, "get_source", return_value=_EmptySource(open_ids)), \
          patch.object(dispatcher, "_claim_order", return_value=[]), \
          patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
          patch.object(dispatcher, "_spawn_judge", side_effect=spawned), \
@@ -1752,10 +1753,13 @@ def _tick(wf, spawned, checks=dispatcher.CI_PASSING, sha="cafe1234", windows=())
 
 
 class _EmptySource:
+    def __init__(self, open_ids=("abc123",)):
+        self._open_ids = open_ids
+
     def list_open_tasks(self):
         from chela.sources import Task
-        return [Task(id="abc123", title="do a thing", file="TODO.md", line_number=1,
-                     raw="- [ ] do a thing")]
+        return [Task(id=task_id, title="do a thing", file="TODO.md", line_number=1,
+                     raw="- [ ] do a thing") for task_id in self._open_ids]
 
 
 def test_the_judge_fires_ONCE_per_head_sha(tmp_path):
@@ -2622,6 +2626,47 @@ def test_a_judge_that_is_still_working_is_left_alone(tmp_path):
     assert summary["judge_lost"] == 0
     assert dispatcher.resolve_run("abc123")["judge_state"] == judge.J_RUNNING
     assert summary["judged"] == 0                   # …and only one judge at a time
+
+
+def test_judge_max_concurrent_gates_how_many_spawn_per_tick(tmp_path):
+    """⚖️ CMX-278: `JUDGE_MAX_CONCURRENT` was a hardcoded ``1`` with no knob — this is that
+    same per-tick gate, now `config.judge_max_concurrent()`. Two FRESH runs (no judge
+    running yet) on the same workflow; the default (``1``) spawns only the first and leaves
+    the second for a later tick, same as the single-run "left alone" test above."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, task_id="abc123", workflow_path=str(wf.path),
+                 window_name="test-1", branch_name="test-1")
+        _run_row(conn, tmp_path, task_id="def456", workflow_path=str(wf.path),
+                 window_name="test-2", branch_name="test-2")
+
+    spawns: list[str] = []
+    summary = _tick(wf, lambda w, row, sha, conn: (spawns.append(row["task_id"]), True)[1],
+                     open_ids=("abc123", "def456"))
+
+    assert summary["judged"] == 1
+    assert len(spawns) == 1
+
+
+def test_judge_max_concurrent_env_raises_the_per_tick_gate(tmp_path, monkeypatch):
+    """🔴 Same two fresh runs, but `CHELA_JUDGE_MAX_CONCURRENT=2` — both spawn in the same
+    tick. ⚖️ Corrupt (register the knob in `config.DISPATCH_KNOBS` but never call it from
+    the dispatcher's judge-spawn loop) → this goes RED while the config-level knob tests
+    stay green, same gap CMX-220's `gate_max_waits` wiring tests exist to catch."""
+    monkeypatch.setenv("CHELA_JUDGE_MAX_CONCURRENT", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, task_id="abc123", workflow_path=str(wf.path),
+                 window_name="test-1", branch_name="test-1")
+        _run_row(conn, tmp_path, task_id="def456", workflow_path=str(wf.path),
+                 window_name="test-2", branch_name="test-2")
+
+    spawns: list[str] = []
+    summary = _tick(wf, lambda w, row, sha, conn: (spawns.append(row["task_id"]), True)[1],
+                     open_ids=("abc123", "def456"))
+
+    assert summary["judged"] == 2
+    assert sorted(spawns) == ["abc123", "def456"]
 
 
 def _write_live_judge_lock(wf, task_id: str) -> Path:
