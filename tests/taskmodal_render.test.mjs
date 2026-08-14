@@ -13,7 +13,7 @@
 // runs every .test.mjs inside pytest, by discovery).
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
 const BODY = `
 <div id="modal-task" class="modal">
@@ -23,29 +23,11 @@ const BODY = `
 let taskmodal;
 
 before(async () => {
-    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
-        { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        // defineProperty, NOT assignment: from node 21 `globalThis.navigator` has only a
-        // getter (see tests/wall.test.mjs).
-        Object.defineProperty(globalThis, k, {
-            value: dom.window[k], writable: true, configurable: true,
-        });
-    }
-    dom.window.matchMedia = q => ({
-        media: q, matches: false, addEventListener() {}, removeEventListener() {},
-        addListener() {}, removeListener() {},
-    });
-    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-    globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;
-
     // Browser-faithful import order (main.js is the entry) — same bootstrap as
     // tests/taskmodal_judge_badge.test.mjs.
-    await import('../chela/dashboard/static/js/main.js');
-    taskmodal = await import('../chela/dashboard/static/js/taskmodal.js');
+    ({ modules: { taskmodal } } = await bootDashboardDom({
+        body: BODY, extraModules: ['taskmodal.js'],
+    }));
 });
 
 // 🔴 GUARD (round 3, PR #350): calls the REAL openTaskModal (not a stub) with a title

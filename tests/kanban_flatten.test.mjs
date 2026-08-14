@@ -16,8 +16,8 @@
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';
 import { KANBAN_LANE_LABELS } from '../chela/dashboard/static/js/kanbanlanemodel.js';
+import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
 const BODY = `
 <div class="work-pane active" id="work-board" data-seg="board">
@@ -32,29 +32,12 @@ const BODY = `
 let renderKanban;
 
 before(async () => {
-    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
-        { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        Object.defineProperty(globalThis, k, {
-            value: dom.window[k], writable: true, configurable: true,
-        });
-    }
-    dom.window.matchMedia = q => ({
-        media: q, matches: false,
-        addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
-    });
-    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-    globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;
-    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
-
-    // Same module-graph-import approach as tests/dispatch_hold.test.mjs: import
-    // main.js first so the whole app module graph (kanban.js included) evaluates
-    // against a real window, then pull renderKanban out of the same cached instance.
-    await import('../chela/dashboard/static/js/main.js');
-    ({ renderKanban } = await import('../chela/dashboard/static/js/kanban.js'));
+    // Same module-graph-import approach as tests/dispatch_hold.test.mjs: main.js
+    // first so the whole app module graph (kanban.js included) evaluates against
+    // a real window, then pull renderKanban out of the same cached instance.
+    ({ modules: { kanban: { renderKanban } } } = await bootDashboardDom({
+        body: BODY, extraModules: ['kanban.js'],
+    }));
 });
 
 function _payload(recentRuns) {
