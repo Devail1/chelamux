@@ -2251,16 +2251,33 @@ def test_an_expired_login_is_reaped_immediately_and_does_not_spend_a_retry(tmp_p
 
     window = judge.judge_window_name("test-1")
     banner = "✽ Sonnet 5\n\nLogin expired · Please run /login\n\n❯ "
+    # ⛔ side_effect, not return_value: a flat return_value answers the banner for ANY
+    # target, so `_capture_pane("")` (the wrong-pane mutation) would pass just as well as
+    # `_capture_pane(window)`. Only the judge's OWN window may see the banner — see
+    # DEFEAT_SHAPES.md.
+    capture_calls = []
+
+    def _capture(w):
+        capture_calls.append(w)
+        return banner if w == window else ""
+
     with dispatcher._db() as conn:
-        with patch.object(dispatcher, "_capture_pane", return_value=banner), \
+        with patch.object(dispatcher, "_capture_pane", side_effect=_capture), \
              patch.object(dispatcher, "_kill_windows_named") as kill:
             handed_over = dispatcher._judge_watchdog(conn, wf, live_windows={window})
         conn.commit()
     assert handed_over == 1
+    assert window in capture_calls                # the pane read must target the judge's OWN window
     kill.assert_called_once_with(window)          # ⛔ still alive — must be torn down, not left
     state, tries, no_verdict = _state()
     assert state == judge.J_CANNOT_VERIFY
-    assert "login" in dispatcher.resolve_run("abc123")["judge_detail"].lower()
+    # ⛔ full sentence, not a lowercase "login" substring: that substring is satisfied by
+    # the "/login" fragment alone, so it would still pass if the leading clause were
+    # rewritten to claim the window disappeared instead of the login expiring.
+    assert dispatcher.resolve_run("abc123")["judge_detail"] == (
+        "the judge's session login expired mid-run (\"Login expired · Please run "
+        "/login\") — not a verdict on the PR"
+    )
     assert no_verdict == 1
     assert tries == 0                             # untouched — this reap is not a spent attempt
 
@@ -2300,17 +2317,29 @@ def test_an_expired_login_reaps_even_when_the_judge_lock_says_alive(tmp_path, mo
 
     window = judge.judge_window_name("test-1")
     banner = "✽ Sonnet 5\n\nLogin expired · Please run /login\n\n❯ "
+    # ⛔ side_effect, not return_value — see the sibling test above for why a flat
+    # return_value can't tell `_capture_pane(window)` from `_capture_pane("")`.
+    capture_calls = []
+
+    def _capture(w):
+        capture_calls.append(w)
+        return banner if w == window else ""
+
     with dispatcher._db() as conn:
-        with patch.object(dispatcher, "_capture_pane", return_value=banner), \
+        with patch.object(dispatcher, "_capture_pane", side_effect=_capture), \
              patch.object(dispatcher, "_kill_windows_named") as kill, \
              patch.object(judge, "judge_lock_live", return_value=True):
             handed_over = dispatcher._judge_watchdog(conn, wf, live_windows={window})
         conn.commit()
     assert handed_over == 1                       # reaped despite the lock claiming alive
+    assert window in capture_calls                # the pane read must target the judge's OWN window
     kill.assert_called_once_with(window)
     r = dispatcher.resolve_run("abc123")
     assert r["judge_state"] == judge.J_CANNOT_VERIFY
-    assert "login" in r["judge_detail"].lower()
+    assert r["judge_detail"] == (
+        "the judge's session login expired mid-run (\"Login expired · Please run "
+        "/login\") — not a verdict on the PR"
+    )
 
 
 def test_a_genuine_cannot_verify_verdict_still_spends_a_retry(tmp_path, monkeypatch):
