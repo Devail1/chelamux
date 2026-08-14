@@ -408,6 +408,8 @@ def test_block_body_points_the_rework_agent_at_the_defeat_shapes_catalog():
     body = judge.block_body(report, "https://x/1", TEST_CMD)
 
     assert "docs/DEFEAT_SHAPES.md" in body
+    assert "docs/defeat_shapes/" in body
+    assert "ONE NEW FILE" in body
 
 
 def test_rework_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
@@ -430,6 +432,8 @@ def test_rework_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
     prompt = dispatcher._renudge_prompt(wf, row, None)
     assert prompt is not None
     assert "docs/DEFEAT_SHAPES.md" in prompt
+    assert "docs/defeat_shapes/" in prompt
+    assert "NEW FILE to `docs/defeat_shapes/`" in prompt
 
 
 def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
