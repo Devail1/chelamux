@@ -2265,6 +2265,50 @@ def test_an_expired_login_is_reaped_immediately_and_does_not_spend_a_retry(tmp_p
     assert _state() == (judge.J_RUNNING, 0, 0)
 
 
+def test_an_expired_login_reaps_even_when_the_judge_lock_says_alive(tmp_path, monkeypatch):
+    """⚖️🔌 CMX-282, negative control on the CMX-229 lock cross-check. `login_expired` is a
+    BOUND on that cross-check exactly like `timed_out` is (see the comment above the
+    `judge.judge_lock_live(...)` call in `_judge_watchdog`): once the pane evidence says the
+    session is stuck at the login banner, no lock file claiming the process is still alive
+    may hold teardown — the process being alive is exactly the problem, not proof of health.
+
+    Without this control, a version of the fix that let a live lock override `login_expired`
+    (i.e. only short-circuits `judge_lock_live` when NOT login_expired, same bug shape as the
+    surviving mutation `if not timed_out and not login_expired and judge.judge_lock_live(...)`
+    → `if not timed_out and judge.judge_lock_live(...)`) would pass every other test here,
+    because none of them mount a LIVE lock at the same time as an expired-login banner.
+
+    Seen to go red: reintroduce `judge.judge_lock_live(...)` into the boolean the watchdog
+    consults when `login_expired` is True (i.e. drop the `not login_expired` short-circuit) —
+    a live lock then holds teardown instead of reaping, and `handed_over` comes back 0.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+             patch.object(dispatcher, "render_prompt", return_value="x"), \
+             patch.object(dispatcher, "_judge_vars", return_value={}), \
+             patch.object(dispatcher, "_launch_agent", return_value=None):
+            assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
+
+    window = judge.judge_window_name("test-1")
+    banner = "✽ Sonnet 5\n\nLogin expired · Please run /login\n\n❯ "
+    with dispatcher._db() as conn:
+        with patch.object(dispatcher, "_capture_pane", return_value=banner), \
+             patch.object(dispatcher, "_kill_windows_named") as kill, \
+             patch.object(judge, "judge_lock_live", return_value=True):
+            handed_over = dispatcher._judge_watchdog(conn, wf, live_windows={window})
+        conn.commit()
+    assert handed_over == 1                       # reaped despite the lock claiming alive
+    kill.assert_called_once_with(window)
+    r = dispatcher.resolve_run("abc123")
+    assert r["judge_state"] == judge.J_CANNOT_VERIFY
+    assert "login" in r["judge_detail"].lower()
+
+
 def test_a_genuine_cannot_verify_verdict_still_spends_a_retry(tmp_path, monkeypatch):
     """⚖️🕳️ CMX-253 Objective 2, negative control. A `cannot_verify` the judge actually
     PRODUCED (it ran, and came back with an unknown — `set_judge_state`'s default,
