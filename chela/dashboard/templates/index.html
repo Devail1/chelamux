@@ -93,20 +93,14 @@
          view REGISTRY (static/js/views.js) — one declaration per view, so adding
          or deleting a view is one entry there and nothing here.
 
-         CMX-230 (Xirp comparison: "nav IS the domain objects" — a 7-item rail
-         reads as a dev tool): the registry's `tier` field splits this into two
-         lists. #side-nav is the primary rail (Feed/Wall/Work — 3 items,
-         nav.js's primaryNavViews). #side-nav-more is EVERYTHING ELSE
-         (Knowledge/Agents/Personas/Cost — nav.js's secondaryNavViews),
-         re-parented here rather than removed: same view registry entries, same
-         selectView routing, same .side-item markup — just visually demoted
-         (.side-list-secondary, style.css) so it reads as "attributes of things"
-         under the 3 places you actually navigate BETWEEN. -->
+         CMX-279 (measured, not assumed — Liav named exactly two of the seven
+         views he actually opens): Wall and Work. CMX-230 had tried demoting the
+         other five into a quieter secondary group below this one rather than
+         deleting them (`#side-nav-more`); that group is gone along with the
+         views it held — there is only one nav list now. -->
     <section class="side-section">
       <div class="side-head"><span class="side-title">Navigate</span></div>
       <div class="side-list" id="side-nav"></div>
-      <div class="side-subhead">More</div>
-      <div class="side-list side-list-secondary" id="side-nav-more"></div>
     </section>
 
     <!-- Live tmux sessions. The header is a plain label; click a row to land on
@@ -144,46 +138,17 @@
   <!-- Main canvas: context-driven by sidebar selection -->
   <main class="canvas" id="canvas">
 
-    <!-- Feed — the event log (chela/event_log.py) read through /api/log, drawn as
-         AGENT LANES: the fleet is the spine, the log is what each agent is saying,
-         and an agent that needs you sorts to the top wearing a ◆ NEEDS YOU badge.
-         The chips and the lanes are rendered by feed.js from feedmodel.js — the one
-         place the row classes are declared. Flat = the same rows, ungrouped. -->
-    <div class="panel" id="panel-feed">
-      <div class="work-toolbar">
-        <div class="work-seg" id="feed-seg" role="group" aria-label="Feed grouping">
-          <button type="button" class="work-seg-btn" data-seg="lanes" aria-pressed="true"
-                  onclick="chela.feedSetMode('lanes')">Lanes</button>
-          <button type="button" class="work-seg-btn" data-seg="flat" aria-pressed="false"
-                  onclick="chela.feedSetMode('flat')">Flat</button>
-        </div>
-        <div id="feed-filters"></div>
-      </div>
-      <div class="feed-list" id="feed-list"></div>
-    </div>
-
-    <!-- Agents grid (default view) -->
-    <div class="panel active" id="panel-agents">
-      <div class="canvas-toolbar">
-        <input type="text" id="broadcast-input" placeholder="Broadcast to all agents…"
-               onkeydown="if(event.key==='Enter')chela.doBroadcast()">
-        <button class="btn-accent" onclick="chela.doBroadcast()">Broadcast</button>
-        <button onclick="chela.doRediscover()">Rediscover</button>
-      </div>
-      <div class="agent-grid" id="agent-grid"></div>
-    </div>
-
     <!-- Agent detail (focused single agent) -->
     <div class="panel" id="panel-agent-detail">
       <div id="agent-detail"></div>
     </div>
 
-    <!-- WORK — Dispatch + Kanban + Schedules, one view over one poll.
+    <!-- WORK (default view) — Dispatch + Kanban + Schedules, one view over one poll.
          Dispatch and Kanban were never two datasets: both rendered /api/dispatcher.
          They are two SEGMENTS of the same view now, drawn from one fetch (work.js),
          and Schedules — the other half of "work in flight" — rides along. Every id
          inside is unchanged, so the renderers are untouched. -->
-    <div class="panel" id="panel-work">
+    <div class="panel active" id="panel-work">
       <div class="work-toolbar">
         <div class="work-seg" id="work-seg" role="group" aria-label="Work view">
           <button type="button" class="work-seg-btn" data-seg="board" aria-pressed="true"
@@ -304,51 +269,6 @@
     </div>
 
     </div><!-- /panel-work -->
-
-    <!-- Personas — the declared persona layer (judge · critic · orchestrator), rendered
-         read-only from the Python registry (/api/personas). It SHOWS the personas embedded
-         in chela; it never launches or drives one. The decisions log used to ride along
-         here (cmx-106) — it now lives in the always-visible sidebar section instead
-         (cmx-107), so this panel is persona cards only. -->
-    <div class="panel" id="panel-personas">
-      <div class="personas-intro">
-        <strong>The persona layer.</strong> Mechanical facts in code, judgment in the LLM —
-        the judge, the critic and the orchestrator as one pattern, three times. This panel
-        declares them; it does not launch them.
-      </div>
-      <div class="personas-list" id="personas-list"></div>
-    </div>
-
-    <!-- Cost — fleet spend, from the cost chela already ingests (the statusLine
-         payload's cost.total_cost_usd, surfaced per-agent at /api/cost). The
-         Live/Today/7d/30d selector scopes that endpoint's `window` param; cost.js
-         joins it with /api/agents (for cwd → project) and groups by project. -->
-    <div class="panel" id="panel-cost">
-      <div class="work-toolbar">
-        <div class="work-seg" id="cost-window" role="group" aria-label="Cost window">
-          <button type="button" class="work-seg-btn cost-window-btn" data-win="live" aria-pressed="true"
-                  onclick="chela.setCostWindow('live')">Live</button>
-          <button type="button" class="work-seg-btn cost-window-btn" data-win="today" aria-pressed="false"
-                  onclick="chela.setCostWindow('today')">Today</button>
-          <button type="button" class="work-seg-btn cost-window-btn" data-win="7d" aria-pressed="false"
-                  onclick="chela.setCostWindow('7d')">7d</button>
-          <button type="button" class="work-seg-btn cost-window-btn" data-win="30d" aria-pressed="false"
-                  onclick="chela.setCostWindow('30d')">30d</button>
-        </div>
-      </div>
-      <div id="cost-table"></div>
-    </div>
-
-    <!-- Knowledge (OKF viewer) -->
-    <div class="panel" id="panel-knowledge">
-      <div class="canvas-toolbar">
-        <input type="text" id="kn-search" placeholder="Search knowledge…"
-               oninput="chela.knOnSearch(this.value)">
-        <button onclick="chela.knShowGraph()">Graph</button>
-        <button onclick="chela.knRefresh(this)" title="Re-export the bundle from current fleet state">Refresh</button>
-      </div>
-      <div id="kn-content"></div>
-    </div>
 
     {% if terminals_enabled %}
     <!-- Terminals wall (flagship view mode; streams live ttyd panes) -->
@@ -722,8 +642,6 @@
 {% if terminals_enabled %}<script>window.TERMINALS_ENABLED = true;</script>{% endif %}
 {% if wall_tile_dispatched %}<script>window.WALL_TILE_DISPATCHED = true;</script>{% endif %}
 <script src="static/vendor/gridstack-all.js"></script>
-<!-- Knowledge tab graph view: sigma.js + graphology (WebGL), vendored+minified. -->
-<script src="static/vendor/sigma-graph.min.js"></script>
 <!-- Stage 0: one ES-module entry. main.js imports the rest through the module
      graph (util → feature renderers → nav → sse → main bootstrap). No build step.
      terminals.js/launcher.js load via the graph and stay inert when terminals

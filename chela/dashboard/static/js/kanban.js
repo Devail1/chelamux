@@ -149,7 +149,7 @@ function _kCard(card) {
     // parsed `title` that a task id hashes from), knInline() renders any
     // remaining inline markdown/emoji (and does its own escHtml). Without this
     // the board showed the raw multi-line `**bold**` brief bullet verbatim.
-    const title = knInline(displayTitle(card.title || '').slice(0, 200), 'task.md');
+    const title = knInline(displayTitle(card.title || '').slice(0, 200));
     const wf = escHtml(_wfName(card.workflow_path));
     const delBtn = _kCardDeleteBtn(card);
     if (card.status === 'backlog') {

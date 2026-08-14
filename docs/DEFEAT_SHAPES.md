@@ -203,9 +203,29 @@ each covers.
   the write path; mutating the reader's own `max(1, ...)` to `max(0, ...)` — the last guard
   standing on the second path — left the suite green. Closed by a second test that sets the
   env var to `"0"` and asserts the reader still returns `1`.
+- `knMd`/`knInline` (CMX-279 rework round 4, PR #350) has THREE call sites this PR edited —
+  kanban.js:152 and taskmodal.js:156 (the title) were closed independently in round 3;
+  taskmodal.js:116 (`_timelineHtml`'s `knMd(s.detail)` for the review-timeline body — the PR
+  also edited this line, dropping the `'review.md'` argument) was never driven by any fixture,
+  since every DOM test that reaches `openTaskModal` passes no `review_history`. Closed by a
+  4th wiring test in `tests/taskmodal_render.test.mjs` that passes a `review_history` payload
+  and reads the real `.task-modal-timeline-body` element back.
+- `knMd`/`knInline` (CMX-279 rework round 5, PR #350) — recurred a SECOND time on the same
+  symbol. `taskmodal.js:127` `_briefPane`'s `briefHtml(src)` call is a FOURTH call site (the
+  header's own doc comment names it first, as the reason the module survives at all), and it
+  was still unguarded going into round 5: both existing DOM tests in
+  `tests/taskmodal_render.test.mjs` pass items with no `brief`/`body`/`raw`, so
+  `briefSource(item)` resolves to `null` and `_briefPane` short-circuits to its "No brief
+  recorded" note before ever reaching `briefHtml`. Closed by a 5th wiring test driving the real
+  `openTaskModal` with an item carrying a markdown `brief` and reading `.task-modal-brief`
+  back. The standing lesson from the second occurrence: counting call sites once is not
+  enough — re-`git grep` the symbol every round a guard on it changes, since a caller added or
+  edited in an earlier round of the SAME PR can still be the one nobody wired.
 
 ⭐ The judge caught the second one by proposing **a separate wiring experiment per call site
 rather than guessing which was covered** — which is also the cheapest way to write the guard.
+Two callers becomes N callers becomes "count them all, every round" — a shape doesn't stop
+recurring just because it was closed once at a smaller N.
 
 ---
 
@@ -878,7 +898,225 @@ list at the `list-units` call site.
 
 ---
 
-## 26. A bound clause's short-circuit tested with the gated call parked at the value that hides it
+## 26. A large green suite as false comfort for a claim that has zero guard of its own
+
+**Assertion form:** a PR's own description (or test-plan section) states a specific
+behavioral claim — often "the default X moves from A to B" — that depends on one or more
+small, easy-to-miss literals (a fallback return value, a pre-set CSS class in a template, a
+`let` initializer). The PR ships alongside a large, genuinely-passing test suite covering
+the surrounding feature, and that suite's size and greenness reads as coverage — but none of
+its tests ever reads back the actual runtime/rendered consequence of the specific literal
+the claim depends on. This is subtler than shape 9 ("no guard at all, and the PR says so"):
+here the PR believes it shipped tests for the change, and did — just not for this claim.
+
+**Mutation that defeats it:** revert any one of the claim's load-bearing literals to its
+pre-change value, in isolation. Every test in the surrounding (large, real, honest) suite
+was written against the FEATURE, not against this specific default, so none of them ever
+drives execution through the literal's actual consequence — the suite's size is irrelevant
+to whether this one fact is pinned.
+
+**Guard form that survives:** for every literal a PR's own claim names as load-bearing,
+write a guard that reads its RENDERED/runtime consequence (a live DOM node's class list, an
+imported module's live binding, a downstream render that only fires if the value is right)
+— never a re-parse of the literal itself — and manually revert the literal once to confirm
+the new guard actually goes red before trusting it. A claim stated only in prose (a PR
+description, a code comment, a test-plan bullet) is not evidence it was ever tested; treat
+it as a checklist of guards still owed.
+
+**Found:** CMX-279 rework round 1 (2026-08-13), PR #350 — three independent literals all
+backed the PR's own claim that "the default view (when the wall is off) moves from Agents to
+Work": util.js's `let currentTab = 'work';` initializer, index.html's pre-set
+`class="panel active"` on `#panel-work`, and nav.js's `_agentDetailBackView()` fallback.
+3059 tests passed, none of which ever booted `main.js` with a genuine terminals-off
+bootstrap and read back `currentTab`, `#panel-work`'s classList, or the agent-detail "←
+Back" link's actual target. The judge reverted each literal independently, in a throwaway
+checkout, and the full 3059-test suite stayed green all three times. Closed by
+`tests/dashboard_default_view.test.mjs` (a real terminals-off `main.js` boot reading the
+live `currentTab` binding, the real `#panel-work` DOM node, and the `renderKanban()` paint
+that only happens if the `currentTab` gate at `work.js:174` actually lets it through) plus
+two new assertions extending `tests/sidebar.test.mjs`'s existing agent-detail drill-in tests
+(covering both `_agentDetailBackView()` call sites — nav.js:560 and :608 — on the
+terminals-on branch, the counterpart to the terminals-off branch the new file covers).
+
+---
+
+## 27. Coverage deleted alongside the feature it shared a *file* with
+
+**Assertion form:** a PR deletes a whole view/feature and, with it, that view's test file —
+reasonable, since the view's OWN code is gone too. But some of the production code the
+deleted view used was never exclusive to it: another surviving surface (a shared renderer,
+a shared helper) imports the same module and is explicitly called out — in the PR's own
+summary or the surviving file's header comment — as proof that module "survives, still
+used verbatim." The deleted test file, however, held the *only* guards on branches of that
+shared module the surviving caller's own tests never happen to exercise (a fixture that only
+ever used one of the module's two code paths). Deleting the file deletes those guards too,
+silently — the suite's pass count doesn't even move, because nothing was left half-covered
+in a way a diff of test *counts* would show.
+
+**Mutation that defeats it:** corrupt the surviving module's unexercised branch (the one only
+the deleted view's tests drove). Nothing in the remaining suite reaches it, so the corruption
+ships clean — while the PR's own text claims that exact module "still works" for the
+surviving caller.
+
+**Guard form that survives:** when a PR deletes a test FILE (not just a test), list every
+production symbol that file imported and tested, and for each one still referenced by
+surviving code, check off that either (a) the deleted file's guards for the branches the
+survivor actually exercises were re-homed into a surviving test file, or (b) an equivalent
+guard already exists there. "The suite still passes at N tests" is not evidence — a file that
+tested 8 branches of a 3-branch-shared, 5-branch-exclusive module and gets deleted whole
+looks, in a pass-count diff, identical to a file that tested nothing the survivor needed.
+
+**Found:** CMX-279 rework round 2 (2026-08-14), PR #350. `tests/knowledge_graph.test.mjs`
+was deleted with the rest of the Knowledge view (CMX-279's five-view strip), but
+`knowledge.js`'s `knMd`/`knInline` were kept — per the file's own header — because the Work
+view's task-detail modal (`taskmodalmodel.js`/`taskmodal.js`) and `kanban.js`'s card titles
+still call them verbatim. The surviving guard (`tests/taskmodal_model.test.mjs`'s exact-output
+`briefHtml` test) only ever fed `knMd` a heading + an ORDERED (`1.`/`2.`) list + inline code —
+no fixture anywhere contained a `-`/`*` bullet. The judge made a `-` run open `<ol class="kn-ol">`
+while `closeList()` still emitted `</ul>` for it (mismatched tags on every bulleted brief in
+the app) and the full suite — 3064 tests — stayed green. Closed by three new tests added
+directly to `tests/taskmodal_model.test.mjs` (not a revived `knowledge_graph.test.mjs`, since
+the Knowledge view itself is gone — the guard belongs with the surviving caller now) driving
+`knMd` on a `-` run, a heading splitting a `-` run from a `1.` run, and a `-` run switching
+directly into a `1.` run mid-document — restoring the three cases the deleted file's own guard
+comments named.
+
+## 28. A guard closed to the exact width of the blocking finding, leaving a named remainder undefended
+
+**Assertion form:** a judge round's blocking finding names a gap and prescribes a fix that
+covers MORE ground than the finding strictly requires — e.g. a non-blocking note beside the
+finding says "one fixture covering A, B and C would close this" — and the rework closes only
+the narrowest slice that makes the blocking finding itself go away (A), leaving B and C
+exactly where the note found them. The suite goes green, the round passes, and — because
+non-blocking notes cost no round and block nothing — the fact that B and C are still
+unguarded carries **no signal** into the next round. It reads as closed until a future judge
+round independently re-derives B or C from scratch.
+
+**Mutation that defeats it:** corrupt B or C. Nothing added by the "fix" reaches either one,
+so the corruption ships clean — while the PR now claims (via the closed finding) that the
+whole area is guarded.
+
+**Guard form that survives:** when a judge note prescribes a fix wider than the blocking
+finding strictly requires, close the WHOLE prescription in the same round, not just the part
+that makes the round pass — the marginal cost of the rest is usually small (it is often one
+extra fixture row, not a new file) and a note that named the gap and was only partially acted
+on is exactly the shape the next round is built to find.
+
+**Found:** CMX-279 rework round 3 (2026-08-14), PR #350. Round 2's non-blocking note named
+three unguarded `knInline`/`knLink` rules — bold spans, links, and the two `knInline(
+displayTitle(...))` call sites in kanban.js/taskmodal.js — and prescribed "one fixture ...
+covering a bullet run, a bold span and an .md link would close all three at once." The round-2
+rework took only the bullet run (closing DEFEAT_SHAPES #18, the blocking finding) and left
+bold/links/call-sites exactly where the note found them. Round 3's judge re-derived all three
+as blocking mutations. Closed by extending `tests/taskmodal_model.test.mjs`'s knMd fixture to
+cover a bold span, an external link, an in-bundle `.md` link and a `#anchor` link in one
+assertion, plus two independent DOM-level wiring tests (`tests/kanban_flatten.test.mjs` and
+the new `tests/taskmodal_render.test.mjs`) driving each `knInline(displayTitle(...))` call
+site through its real caller.
+
+**Recurred:** CMX-279 rework round 4 (2026-08-14), same PR #350, same underlying note — it had
+named FOUR gaps (blockquote, fenced code, plus the two already covered above), and round 3
+only closed the two it was blocking on. The blockquote and fenced-code branches were still
+byte-identical to where round 2 found them; round 4's judge re-derived both as blocking
+mutations a second time, plus two more the note never explicitly named (knInline's own
+`escHtml` call, and `attrEsc` on knLink's href — both real behaviour the PR's rewritten code
+carries, just never exercised by a fixture with an HTML-special character or a quoted href).
+Closed by three more assertions in the same `tests/taskmodal_model.test.mjs` (blockquote+fence
+in one fixture, escHtml, attrEsc-on-quote) plus the third `knMd` call site as a fourth
+DEFEAT_SHAPES #7 wiring test (see above). The standing lesson: when a note names N gaps and a
+blocking finding only forces closing a subset, close ALL N in the same round — a partial close
+does not make the round's own note stop being a to-do list for the next judge.
+
+## 29. An exact-output fixture whose payload is IDENTITY under the very transform it claims to guard
+
+**Assertion form:** an exact-output test asserts a string produced by a transform function
+(an escaping call, a level-pinning regex capture, a character-class alternative) — and the
+fixture's *value* happens to be a fixed point of that transform: running the transform or
+skipping it entirely produces the same output. The test's own doc comment may even name the
+transform as the thing it guards, and the guard is not lying — it genuinely calls the
+function it says it does. It just never gives that function anything to do.
+
+**Mutation that defeats it:** delete or narrow the call (skip the escaping, pin the captured
+level to whatever constant the fixture always uses, narrow a character class to the one
+alternative the fixture always hits). The fixture's output is unchanged, because the
+transform was a no-op on that particular input — the assertion cannot tell "the transform ran
+and did nothing" apart from "the transform did not run."
+
+**Guard form that survives:** for any assertion meant to pin a transform, pick a payload for
+which the transform PROVABLY changes the output — a string containing the characters an
+escaper actually escapes, a value other than whatever every other fixture in the file already
+uses, a case exercising every alternative in a character class rather than just one. State
+*why* the payload is diagnostic (which property of the input makes the row non-identity) so a
+reviewer widening the suite later can check the claim against the code instead of re-deriving
+it from scratch.
+
+**Found:** CMX-279 rework round 5 (2026-08-14), PR #350. Three of `knMd`'s exact-output guards
+were each built from a fixture that happened to be a fixed point of the branch it was meant to
+pin: the round-4 fenced-code fixture (`const x = 1;`, `**not bold**`) has nothing for
+`escHtml` to escape, so dropping the `escHtml` call inside the fence left the assertion
+byte-identical; every heading fixture in the whole suite used `###`, so pinning the heading
+level to the constant `3` (instead of reading `h[1].length`) passed; and the list-item regex
+fixture only ever used `-` bullets, so narrowing `/^[-*]\s+(.*)$/` to `/^[-]\s+(.*)$/` passed
+too. All three shipped clean through `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (3076 passed,
+0 failed). Closed by a single table-driven test (`KN_MD_BRANCH_TABLE` in
+`tests/taskmodal_model.test.mjs`) enumerating every branch of `knMd` from the source, with each
+row deliberately picked to be non-identity under whatever it guards — an HTML-special-character
+payload inside the fence, one row per heading level 1 through 4, and both list-marker
+characters — plus two negative-control rows (an unterminated fence, and an ol→ul list-kind
+switch) for branches the round-5 finding did not name, to prove the table closes the space
+rather than answering only the four findings asked for.
+
+---
+
+## 30. A branch-enumeration table proves the dispatch fired, not that the transforms nested inside it ran
+
+**Assertion form:** a table enumerates every branch of a dispatcher function, one row per
+entry condition (does this `if` fire, does it emit the right tag) — the correct response to
+shape #24, and each row's *own* payload is deliberately non-identity for the thing that row
+was written to pin. But a branch often does more than open a tag: it also calls a shared
+helper partway through its body (an inline-rendering/escaping function, a state-closing
+function like "close whatever was open before this new thing starts"). The table's per-row
+payload was chosen to make the *branch's own* transform non-identity and nothing checked
+whether it was ALSO non-identity for every helper nested inside that branch, or whether the
+state the helper is supposed to clean up was actually dirty when that row's fixture ran.
+
+**Mutation that defeats it:** drop or dead-code the nested helper call inside a branch whose
+row payload happens to be a fixed point of that helper (plain alphanumeric text is identity
+under an inline-markdown/escaping call), or whose row payload never puts the branch in the
+state the helper exists to clean up (no list open when the row's fixture reaches that
+branch). The row's own assertion — pinned to the branch's own tag — is unaffected, because
+the corruption is one level below what that row was checking.
+
+**Guard form that survives:** treat the table as enumerating a cross-product, not a single
+axis — for every branch that calls a shared inline-rendering helper, include a row whose
+payload is non-identity under THAT helper too (not just under the branch's own dispatch); for
+every call site of a shared state-closing helper, include a row that actually has the state
+open immediately before that branch fires, with no intervening blank line or other
+state-clearing branch. Count the helper's call sites from the source (not from what the
+current fixtures happen to reach) and check each one off explicitly.
+
+**Found:** CMX-279 rework round 6 (2026-08-14), PR #350, recurring one level below shape #24
+inside the very table shape #24 was closed by. The round-5 `KN_MD_BRANCH_TABLE` gave its
+blockquote row (`> quoted`) and its four heading rows (`# h1` … `#### h4`) plain-text
+payloads — non-identity for the branch's own dispatch (does it emit `<blockquote>`/`<hN>`),
+but identity under `knInline`, the helper both branches call to render their content. Dropping
+`knInline` from either branch left both rows byte-identical, even though the same table had
+already fixed this precise defect one branch over, for the fenced-code row. Separately,
+`closeList()` — the helper that closes a still-open `<ul>`/`<ol>` before a new block starts —
+has eight call sites in `knMd`; the round-5 table's rows exercised six (heading, blank line,
+both list-kind switches, the fence, and the EOF tail) but no row put a list open immediately
+before a blockquote or a plain paragraph line, so dead-coding either of those two call sites
+left every existing row's assertion unchanged. All four survived
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (3080 passed, 0 failed) in the judge's own
+mutation checkout. Closed by six more rows in the same `KN_MD_BRANCH_TABLE`: a blockquote and
+a heading row each carrying a bold span *and* HTML-special characters (non-identity under
+`knInline`), and a blockquote and a plain paragraph line each placed directly after an open
+`-` run with no blank line between (state dirty when the branch fires, so a dead-coded
+`closeList()` nests the new block inside the list's last `<li>` instead of closing it first).
+
+---
+
+## 31. A bound clause's short-circuit tested with the gated call parked at the value that hides it
 
 **Assertion form:** a compound boolean has a bound clause meant to short-circuit a downstream
 call entirely — not just add another condition, but make the call irrelevant once the clause

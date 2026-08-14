@@ -4,6 +4,19 @@
 // same discipline as tests/kanban_lane_model.test.mjs: assert a precise value
 // against the REAL source/module, not "some rule exists".
 //
+// CMX-279 SUPERSESSION (2026-08-13, measured not assumed — asked which of the
+// seven views he actually opens, Liav named exactly two): claim 3 below ("nav
+// inventory") assumed CMX-230's call that the four demoted views stay reachable,
+// re-parented under a quieter "More" group rather than deleted. CMX-279 reverses
+// that call outright — Feed, Knowledge, Agents, Personas and Cost are DELETED,
+// not demoted, along with the `tier` field, viewreg.js's primaryNavViews/
+// secondaryNavViews split, and index.html's #side-nav-more/.side-subhead group
+// that rendered them. Every test below that asserted the demoted group RENDERS
+// (GUARD 7 / "CLAIM 3" and their sidebar.test.mjs companions) tested a feature
+// that no longer exists and is replaced by a single, much smaller "nav inventory"
+// guard further down. Claims 1/2/4 (type scale, airy density, non-hue cue) are
+// untouched by this — see their own sections below.
+//
 // Deliberate scoping note (read before extending this file): the ticket's
 // accessibility ask names four abstract states — idle/working/waiting/error.
 // They don't all live on one component. "error" specifically does NOT exist as
@@ -40,17 +53,18 @@
 //      "CLAIM 2 (airy density), REVERTED" below for the OPPOSITE invariant
 //      (no horizontal padding / no column cap at 1-up and 2-up) plus the
 //      companion class-check in tests/wallnav.test.mjs.
-//   3. nav inventory — the primary rail is exactly the 3 domain objects, the
-//      4 demoted views are present (not deleted) and actually render — occupy
-//      space and paint — under the More subhead (see "nav inventory" /
-//      ".side-subhead and #side-nav-more" below).
+//   3. nav inventory — CMX-279 (below) supersedes this claim as originally
+//      written: the ticket's own "demoted, not deleted" call is reversed, so
+//      what's guarded now is that the shipped nav is exactly Wall and Work
+//      (see "nav inventory" below).
 //   4. non-hue cue — every real status family carries a glyph/word, not just
 //      colour; this is the accessibility hard requirement and the one claim
 //      here that must never regress (see "GUARD 3" below).
-// A handful of adjacent, already-converged guards (GUARD 4/5/6/7, the
-// .side-list-secondary weight/wiring pair) are kept as-is: they weren't the
-// source of the recurring findings and already assert a resolved value or a
-// real function's behaviour, not a property-presence scan.
+// A handful of adjacent, already-converged guards (GUARD 4/5/6) are kept
+// as-is: they weren't the source of the recurring findings and already
+// assert a resolved value or a real function's behaviour, not a
+// property-presence scan. GUARD 7's own .side-list-secondary weight/wiring
+// pair is gone with the group it styled — see the CMX-279 note above.
 //
 // CMX-257 round 9 — HARD NARROWING (human directive on PR #326, superseding
 // round 6's "resolved effect" framing): round 6 collapsed property-by-property
@@ -183,11 +197,12 @@
 // selectors never sitting below the pre-CMX-230 legibility floor (11px /
 // 11px / 1.45 / >10px for the .gs-state escape hatch) — the greyscale
 // capture at 1/2/4/6 densities is its acceptance check;
-// (ii) the demoted nav group (.side-list-secondary) rendering its icon/label
-// font-size strictly, visibly lighter than the primary rail's own — the
-// greyscale capture is its acceptance check (the WIRING test that nav.js
-// still emits the .side-item-icon/.side-item-label classes the demotion rule
-// depends on stays guarded, below);
+// (ii) — CMX-279: MOOT, not just removed. The demoted nav group
+// (.side-list-secondary) this item described no longer exists — CMX-279
+// deleted the five views it held rather than keeping CMX-230's demotion, so
+// there is no group left to render lighter than the primary rail, and the
+// WIRING test this item pointed at (nav.js emitting the classes the demotion
+// rule depended on) is deleted along with it;
 // (iii) — REMOVED, not narrowed: CMX-268 reverted the airy-density treatment
 // entirely (wall-density-airy, its style.css rule, and _setWallDensity are
 // gone — see claim 2 above), so there is no rule or class left for this item
@@ -202,18 +217,14 @@
 // allowlist still only parsed hex/rgb(), and failed OPEN — silently skipped —
 // on anything else, e.g. a bare hsl() literal) — the greyscale capture at
 // 1/2/4/6 densities is its acceptance check.
-// — round 14, FINAL narrowing of CLAIM 3 —
-// (v) .side-subhead's and the demoted group's own precise STYLING: the exact
-// opacity/font-size/colour values the heading and rows render with beyond
-// "not display:none, not visibility:hidden" (asserted below), the exact
-// source POSITION/ordering of .side-subhead relative to #side-nav and
-// #side-nav-more, and any font-size/weight COMPARISON between the demoted
-// rows and the primary rail's own rows ("renders lighter than primary" —
-// same CSS-value-comparison class as (ii) above, which this subsumes) — the
-// greyscale capture at 1/2/4/6 densities is its acceptance check. What stays
-// guarded is the one DOM fact below: the four demoted views still exist and
-// render under a heading that itself exists and carries real text —
-// "RE-PARENTING, NOT REMOVAL", views.js's own claim.
+// — round 14, FINAL narrowing of CLAIM 3; CMX-279 (below) supersedes this
+// entirely, kept for the historical record only —
+// (v) — CMX-279: MOOT. .side-subhead and the demoted group it styled are
+// deleted, not just unguarded — there is no heading, no #side-nav-more, and
+// no "RE-PARENTING, NOT REMOVAL" claim left to hold (views.js's own comment
+// now says the opposite: the five views ARE deleted). CLAIM 3's replacement,
+// "nav inventory" below, guards the new shape directly: the shipped nav is
+// exactly Wall and Work.
 // — CMX-273 spike —
 // (vi) "the wall visually fills its stage" as an OUTCOME (does .grid-stack
 // actually render at full width at every density, by whatever CSS mechanism
@@ -240,7 +251,7 @@ import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 
 import { tileState } from '../chela/dashboard/static/js/wallmodel.js';
-import { primaryNavViews, secondaryNavViews } from '../chela/dashboard/static/js/viewreg.js';
+import { navViews } from '../chela/dashboard/static/js/viewreg.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const src = p => readFileSync(join(ROOT, p), 'utf8');
@@ -620,400 +631,85 @@ test('wall pane footer completeness: model + spend + branch + context% + tokens 
     }
 });
 
-// --- GUARD 7: nav inventory — the primary rail is EXACTLY 3 domain objects
-// (Feed/Wall/Work); Knowledge/Agents/Personas/Cost are demoted, not deleted
-// (still enabled, still reachable — see primaryNavViews/secondaryNavViews's
-// shared navViews() base). Promoting any demoted view back to `tier: 'primary'`
-// — or forgetting to demote a new one — must fail here.
-function shippedViewEntries() {
+// --- GUARD 7: nav inventory — CMX-279 (measured, not assumed: asked which of
+// the seven views he actually opens, Liav named exactly two) supersedes
+// CMX-230's "demoted, not deleted" call from here on. Feed, Knowledge, Agents,
+// Personas and Cost are gone — not re-parented into a quieter group — along
+// with the `tier` field, viewreg.js's primaryNavViews/secondaryNavViews split,
+// and index.html's #side-nav-more/.side-subhead markup that rendered them.
+// This replaces the old ~400-line GUARD 7 / "CLAIM 3" section (nav-inventory
+// pin + the #side-nav-more WIRING tests) wholesale: there is no longer a
+// second nav group, a demotion, or a re-parenting claim to guard piece by
+// piece — the whole shape collapses to one fact, asserted directly against
+// the REAL views.js source and the REAL rendered sidebar.
+function shippedViewIds() {
     const body = VIEWS_SRC.split('export const VIEWS')[1];
     const ids = [...body.matchAll(/^\s+id:\s*'([^']+)'/gm)];
     return ids.map((m, i) => {
         const start = m.index;
         const end = i + 1 < ids.length ? ids[i + 1].index : body.length;
         const block = body.slice(start, end);
-        const tierM = block.match(/tier:\s*'([^']+)'/);
-        return { id: m[1], virtual: /virtual:\s*true/.test(block), tier: tierM ? tierM[1] : undefined };
+        return { id: m[1], virtual: /virtual:\s*true/.test(block) };
     });
 }
 
-test('nav inventory: the shipped primary rail is exactly Feed, Wall, Work — nothing more, nothing less', () => {
-    const entries = shippedViewEntries().filter(v => !v.virtual);
-    assert.ok(entries.length >= 7, 'view extraction from views.js found too few entries — did its shape change?');
-    const primary = primaryNavViews(entries, { terminalsOn: true }).map(v => v.id);
-    assert.deepEqual(primary, ['feed', 'terminals', 'work'],
-        'the primary nav set drifted from the ticket\'s exact 3 domain objects');
+test('nav inventory: the shipped nav is exactly Wall and Work — the other five views are DELETED, not demoted', () => {
+    const entries = shippedViewIds().filter(v => !v.virtual);
+    const shipped = navViews(entries, { terminalsOn: true }).map(v => v.id);
+    assert.deepEqual(shipped, ['terminals', 'work'],
+        'the shipped nav drifted from CMX-279\'s exact 2 views — if this includes feed/knowledge/agents/personas/cost, ' +
+        'one of the five deleted views came back; if it is missing terminals or work, one of the two kept views broke');
 });
 
-// CMX-230 round 8: viewreg.js's own comment says primaryNavViews/secondaryNavViews
-// share "the SAME... ENABLED/virtual filtering" as navViews() — but every fixture
-// above runs with terminalsOn: true, so a mutation that drops JUST the isEnabled
-// filter from primaryNavViews (keeping virtual + tier intact) stayed invisible: no
-// test here ever renders a disabled entry through primaryNavViews. Mirrors the
-// real 'terminals' entry (views.js: `enabled: ctx => !!ctx.terminalsOn`) — on a
-// TERMINALS_ENABLED=false deployment this must vanish from the primary rail, not
-// route to a #panel-terminals that was never rendered.
-test('nav inventory: primaryNavViews drops a disabled view — the enabled filter, not just virtual/tier', () => {
-    const entries = [{ id: 'terminals-like', tier: 'primary', enabled: ctx => !!ctx.terminalsOn }];
-    assert.deepEqual(primaryNavViews(entries, { terminalsOn: false }).map(v => v.id), [],
-        'primaryNavViews must drop a disabled view (enabled() false) — this is the ENABLED half of the shared navViews() filter');
-    assert.deepEqual(secondaryNavViews(entries, { terminalsOn: false }).map(v => v.id), [],
-        'a disabled view must not resurface in secondaryNavViews either — it is disabled, not demoted');
-    assert.deepEqual(primaryNavViews(entries, { terminalsOn: true }).map(v => v.id), ['terminals-like'],
-        'primaryNavViews must include the same view once its enabled() check passes');
-});
-
-// The 'disabled view must not resurface in secondaryNavViews either' assertion
-// above is fed a tier: 'primary' fixture — a primary-tier entry can never
-// appear in secondaryNavViews's output regardless of whether the shared
-// enabled() filter runs, so that assertion can never fail and proves nothing
-// about secondaryNavViews's own use of navViews(). This drives a tier:
-// 'secondary' entry through secondaryNavViews directly, so a disabled
-// secondary-tier view (the only shape that could actually resurface there)
-// is the thing under test.
-test('nav inventory: secondaryNavViews drops a disabled view — the enabled filter, not just tier', () => {
-    const entries = [{ id: 'demoted-like', tier: 'secondary', enabled: ctx => !!ctx.terminalsOn }];
-    assert.deepEqual(secondaryNavViews(entries, { terminalsOn: false }).map(v => v.id), [],
-        'secondaryNavViews must drop a disabled secondary-tier view (enabled() false) — this is the ENABLED half of the shared navViews() filter');
-    assert.deepEqual(secondaryNavViews(entries, { terminalsOn: true }).map(v => v.id), ['demoted-like'],
-        'secondaryNavViews must include the same view once its enabled() check passes');
-
-    // CMX-257 round 17: the VIRTUAL half of the same shared filter (judge
-    // finding — round 16 above only closed the ENABLED half). `virtual: true`
-    // means "reachable, but NOT a nav item" (viewreg.js's own comment) — that
-    // must hold regardless of tier, so a virtual view tiered 'secondary' must
-    // never surface as a #side-nav-more row. `enabled` is fixed `true` (not a
-    // function of ctx) so this fixture can ONLY be reached by dropping the
-    // virtual filter, not the enabled one.
-    const virtualEntries = [{ id: 'virtual-secondary-like', tier: 'secondary', virtual: true, enabled: true }];
-    assert.deepEqual(secondaryNavViews(virtualEntries, { terminalsOn: true }).map(v => v.id), [],
-        'secondaryNavViews must drop a virtual secondary-tier view — this is the VIRTUAL half of the shared navViews() filter');
-
-    // CMX-257 round 18: the mirror case for primaryNavViews. Every real VIEWS
-    // entry GUARD 7 feeds primaryNavViews is pre-filtered with `.filter(v =>
-    // !v.virtual)`, so dropping the virtual filter from primaryNavViews alone
-    // passes every fixture above; today it's only caught, incidentally, by
-    // sidebar.test.mjs's real render — because VIEWS happens to contain
-    // exactly one virtual, untiered, enabled entry (agent-detail). That's a
-    // coincidence of the registry, not a guaranteed catch. This synthetic
-    // fixture makes it deliberate.
-    const primaryVirtualEntries = [{ id: 'virtual-primary-like', tier: 'primary', virtual: true, enabled: true }];
-    assert.deepEqual(primaryNavViews(primaryVirtualEntries, { terminalsOn: true }).map(v => v.id), [],
-        'primaryNavViews must drop a virtual view — this is the VIRTUAL half of the shared navViews() filter');
-});
-
-test('nav inventory: Knowledge/Agents/Personas/Cost are demoted (secondary), not deleted', () => {
-    const entries = shippedViewEntries().filter(v => !v.virtual);
-    const secondary = secondaryNavViews(entries, { terminalsOn: true }).map(v => v.id);
-    assert.deepEqual(secondary, ['knowledge', 'agents', 'personas', 'cost'],
-        'the demoted set no longer matches the ticket\'s "attributes of things, not places to go" list');
-});
-
-test('nav inventory: demoting a view never removes it from the sidebar entirely — it still renders somewhere', () => {
-    // primaryNavViews + secondaryNavViews must partition the SAME navViews() base
-    // navViews() itself already filters (virtual, enabled) — every remaining view
-    // lands in exactly one of the two groups; neither drops it.
-    const entries = shippedViewEntries().filter(v => !v.virtual);
-    const ctx = { terminalsOn: true };
-    const all = [...primaryNavViews(entries, ctx), ...secondaryNavViews(entries, ctx)].map(v => v.id).sort();
-    const expected = entries.map(v => v.id).sort();
-    assert.deepEqual(all, expected, 'a non-virtual, enabled view fell out of BOTH the primary and secondary nav groups');
-});
-
-// viewreg.js's own comment states the must-never explicitly: "A view with no
-// `tier` (or any value other than 'secondary') defaults to primary, so this is
-// additive: forgetting to tier a new entry never silently hides it." Every
-// SHIPPED entry happens to carry an explicit tier, so the test above (built
-// from shippedViewEntries()) never exercises that default branch — a judge
-// round flipped primaryNavViews's filter from `tier !== 'secondary'` to
-// `tier === 'primary'` (byte-for-byte the failure the comment promises can't
-// happen) and every shipped-entry test above stayed green because 'primary'
-// was never actually asserted as the untiered default. This drives
-// primaryNavViews/secondaryNavViews directly on a SYNTHETIC entry with no
-// `tier` field at all, closing the untested branch.
-test('nav inventory: a view with NO tier field defaults to primary, per viewreg.js\'s own must-never comment', () => {
-    const ctx = { terminalsOn: true };
-    const entries = [{ id: 'untiered-view' }];
-    const primary = primaryNavViews(entries, ctx).map(v => v.id);
-    const secondary = secondaryNavViews(entries, ctx).map(v => v.id);
-    assert.deepEqual(primary, ['untiered-view'],
-        'a view entry with no `tier` field must default into primaryNavViews — forgetting to tier a new entry must never silently hide it');
-    assert.deepEqual(secondary, [],
-        'an untiered view must NOT land in secondaryNavViews — only tier === \'secondary\' may demote it');
-});
-
-// --- CLAIM 3 (nav demotion), reduced to ONE structural fact — CMX-257 round
-// 14 (human directive on PR #326, FINAL narrowing, superseding rounds 1-13):
-// .side-subhead and the demoted group had drawn findings across TEN rounds —
-// collapsed-rail hiding, text-present, opacity-exists, opacity-readable,
-// position, renders-at-all, readable-heading, entity-blank, same-row-styling,
-// and finally the round-13 human-authored enumeration itself turning out to
-// have its own gap (a corrupted `color: transparent` satisfied every item on
-// that list). Each round closed the SPECIFIC visual aspect named and the next
-// round found another aspect of the SAME element — an unbounded surface, not
-// a converging guard. The fix is not a longer enumeration, it's a shorter
-// one: guard exactly the DOM fact views.js's own comment makes a claim
-// about — "RE-PARENTING, NOT REMOVAL" — and move every other visual/
-// positional aspect of .side-subhead and the demoted group (styling, weight,
-// opacity, exact position, row-shape parity with the primary rail) to NOT
-// GUARDED at the top of this file, with the manual greyscale capture at
-// 1/2/4/6 densities as its acceptance check.
-//
-// Mounted against the REAL index.html nav section (not a hand-copied
-// fixture — a hand fixture drifts from production silently, as the round-13
-// non-blocking note found) with the REAL style.css cascade, so jsdom's own
-// getComputedStyle decides what actually renders. Production ships
-// #side-nav-more empty (renderNav populates it at runtime); one row shaped
-// exactly as nav.js's _navItemHtml emits it (icon span + label span) is
-// injected so this test can ask the one CSS-side question sidebar.test.mjs
-// cannot: does real style.css hide what renderNav puts there. Whether
-// renderNav puts the real Knowledge/Agents/Personas/Cost ids and label text
-// there at all is already proven, with no stylesheet mounted, by
-// sidebar.test.mjs's real-renderNav tests — that half is not re-proven here.
-const NAV_SECTION_HTML = (() => {
+test('nav inventory: the five deleted views leave no trace — no panel, no tier field, no secondary nav group', () => {
     const html = src('templates/index.html');
-    const start = html.indexOf('<section class="side-section">');
-    const end = html.indexOf('</section>', start) + '</section>'.length;
-    return html.slice(start, end);
-})();
-
-test('nav inventory (CLAIM 3): the demoted group still exists and renders under a heading — re-parenting, not removal', () => {
-    const rowHtml = '<div class="side-item"><span class="side-item-icon"></span><span class="side-item-label">Knowledge</span></div>';
-    const bodyHtml = `<div class="app"><aside class="sidebar">${NAV_SECTION_HTML}</aside></div>`
-        .replace('id="side-nav-more"></div>', `id="side-nav-more">${rowHtml}</div>`);
-    const win = mountWithRealCss(bodyHtml);
-
-    const subhead = win.document.querySelector('.side-subhead');
-    assert.ok(subhead, 'index.html no longer has a .side-subhead heading for the demoted nav group');
-    assert.notEqual(subhead.textContent.trim(), '',
-        'the .side-subhead renders with no visible text (its content trims to nothing, e.g. an &nbsp; entity) — ' +
-        'the demoted nav group would render with no readable heading at all');
-    const subheadCs = win.getComputedStyle(subhead);
-    assert.notEqual(subheadCs.display, 'none', 'the .side-subhead heading has display: none — removed from the box tree entirely');
-    assert.ok(!/^(hidden|collapse)$/.test(subheadCs.visibility),
-        `the .side-subhead heading has visibility: ${subheadCs.visibility} — invisible but still occupying box-tree space`);
-
-    const row = win.document.querySelector('#side-nav-more .side-item');
-    assert.ok(row, 'index.html no longer has a #side-nav-more container for the demoted nav group to render into');
-
-    // round 22 (judge finding 1 on PR #326): the per-node check below only
-    // ever answered "does the ROW's own declaration say display: none" — it
-    // stayed green when the judge hid an ANCESTOR instead (.side-list-
-    // secondary, i.e. #side-nav-more itself), because an ancestor's
-    // display: none does not touch a descendant's OWN computed value. The
-    // chain walk is the actual guard; it answers "can the user see this row
-    // at all", checking every ancestor up to the mount root, not just the
-    // row's own declaration.
-    assert.ok(_visibleInTree(win, row),
-        'the demoted row is not visible in the tree — some ancestor between it and the mount root ' +
-        '(the #side-nav-more container itself, .sidebar, or the nav section) has display: none or ' +
-        'visibility: hidden/collapse, even though the row\'s OWN computed style looks fine — ' +
-        '"RE-PARENTING, NOT REMOVAL" (views.js) means it must still render, not vanish');
-
-    const rowCs = win.getComputedStyle(row);
-    assert.notEqual(rowCs.display, 'none',
-        'the demoted row has display: none — "RE-PARENTING, NOT REMOVAL" (views.js) means it must still render, not vanish');
-    assert.ok(!/^(hidden|collapse)$/.test(rowCs.visibility),
-        `the demoted row has visibility: ${rowCs.visibility} — invisible but still occupying box-tree space`);
-
-    const label = row.querySelector('.side-item-label');
-    assert.ok(label, 'the demoted row has no .side-item-label span at all — re-parenting has become removal of the accessibility cue');
-    assert.notEqual(label.textContent.trim(), '',
-        'the demoted row\'s label has no real text — re-parenting has become removal of the accessibility cue');
-    const labelCs = win.getComputedStyle(label);
-    assert.notEqual(labelCs.display, 'none',
-        'the demoted row\'s label has display: none — re-parenting has become removal of the accessibility cue');
-    assert.ok(!/^(hidden|collapse)$/.test(labelCs.visibility),
-        `the demoted row's label has visibility: ${labelCs.visibility} — invisible but still occupying box-tree space`);
-
-    // round 21 (judge finding 2 on PR #326): this test asserted display/visibility
-    // on the ROW and the LABEL but never on the .side-item-icon span its own
-    // fixture renders, so `.side-list-secondary .side-item-icon { display: none; }`
-    // survived — the identical shape as the already-guarded `.side-item { display:
-    // none; }` one child up, and round 14 kept exactly this `display: none` /
-    // `visibility` pair guarded ("beyond 'not display:none, not visibility:hidden'"
-    // is what moved to NOT GUARDED, not display:none itself).
-    const icon = row.querySelector('.side-item-icon');
-    assert.ok(icon, 'the demoted row has no .side-item-icon span at all — re-parenting has become removal of the accessibility cue');
-    const iconCs = win.getComputedStyle(icon);
-    assert.notEqual(iconCs.display, 'none',
-        'the demoted row\'s icon has display: none — re-parenting has become removal of the accessibility cue');
-    assert.ok(!/^(hidden|collapse)$/.test(iconCs.visibility),
-        `the demoted row's icon has visibility: ${iconCs.visibility} — invisible but still occupying box-tree space`);
+    for (const id of ['feed', 'knowledge', 'agents', 'personas', 'cost']) {
+        assert.ok(!html.includes(`id="panel-${id}"`),
+            `index.html still has a panel-${id} div — CMX-279 deleted this view's panel along with its nav entry`);
+    }
+    assert.ok(!VIEWS_SRC.includes('tier:'),
+        'views.js still carries a `tier` field — CMX-279 removed the primary/secondary split along with the ' +
+        'five demoted-then-deleted views (nothing left needs a second nav group)');
+    assert.ok(!html.includes('id="side-nav-more"'),
+        'index.html still has a #side-nav-more container — CMX-279 removed the secondary nav group entirely, ' +
+        'it did not just empty it');
 });
 
-// --- CLAIM 3, round 21 (judge finding 2 on PR #326): the icon check above,
-// repeated with the sidebar COLLAPSED. `body.sidebar-collapsed .side-item-label`
-// is ALREADY display: none (style.css:3044) in that state, so the icon is the
-// ONLY remaining cue a demoted row has — if `.side-list-secondary .side-item-icon`
-// also goes display: none there, Knowledge/Agents/Personas/Cost render as four
-// blank clickable strips with no cue of any kind. This must redden on its own,
-// independent of the expanded-state assertion above.
-test('nav inventory (CLAIM 3): the demoted row\'s icon survives the COLLAPSED rail, where the label cannot compensate', () => {
-    const rowHtml = '<div class="side-item"><span class="side-item-icon"></span><span class="side-item-label">Knowledge</span></div>';
-    const bodyHtml = `<div class="app"><aside class="sidebar">${NAV_SECTION_HTML}</aside></div>`
-        .replace('id="side-nav-more"></div>', `id="side-nav-more">${rowHtml}</div>`);
-    const win = mountWithRealCss(bodyHtml, ' class="sidebar-collapsed"');
+// WIRING: the REAL renderNav() renders exactly Wall and Work into the REAL
+// #side-nav — not just "the registry says two ids" (the source-level test
+// above, by design, never touches the DOM). A judge round could leave
+// #side-nav-more in nav.js's renderNav (harmless once the container is gone
+// from index.html, `if (more)` guards it — but a silent no-op is still worth
+// a green test naming it) or scope renderNav to drop an id silently; this
+// drives nav.js's own renderNav against a minimal real sidebar fixture and
+// reads the rendered rows back.
+test('WIRING: the REAL renderNav() renders exactly Wall and Work into #side-nav, in order', async () => {
+    const BODY = '<div class="app"><aside class="sidebar"><section class="side-section">' +
+        '<div class="side-list" id="side-nav"></div></section></aside></div>';
+    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
+        { url: 'http://localhost:5005/', pretendToBeVisual: true });
+    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
+        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
+        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
+        Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
+    }
+    dom.window.matchMedia = q => ({
+        media: q, matches: false, addEventListener() {}, removeEventListener() {},
+        addListener() {}, removeListener() {},
+    });
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    globalThis.window.chela = globalThis.window.chela || {};
+    globalThis.setInterval = () => 0;
+    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
 
-    // round 22 (judge finding 2 on PR #326): this test used to check only the
-    // ICON's own display, never the ROW containing it — so hiding the
-    // demoted ROWS in the collapsed rail (`body.sidebar-collapsed
-    // .side-list-secondary .side-item { display: none; }`) left the icon's
-    // own computed display at 'inline' and this test green, while all four
-    // demoted views vanished from the 48px rail completely. The chain walk
-    // from the row up catches that, the row's own display: none, AND any
-    // ancestor (#side-nav-more/.side-list-secondary, .sidebar, the nav
-    // section) hidden in this state — same guard as the expanded test above.
-    const row = win.document.querySelector('#side-nav-more .side-item');
-    assert.ok(row, 'the demoted row does not exist in the collapsed rail');
-    assert.ok(_visibleInTree(win, row),
-        'the demoted row is not visible in the collapsed rail — either the row itself or some ancestor ' +
-        '(#side-nav-more/.side-list-secondary, .sidebar, the nav section) has display: none or ' +
-        'visibility: hidden/collapse — with the label already hidden in this state, the row would vanish ' +
-        'from the rail completely, not degrade to a blank clickable strip');
+    // Browser-faithful import order: main.js is the entry (nav <-> main is a
+    // cycle — import anything else first and its `let`s are in their TDZ).
+    await import('../chela/dashboard/static/js/main.js');
+    const nav = await import('../chela/dashboard/static/js/nav.js');
 
-    const icon = row.querySelector('.side-item-icon');
-    assert.ok(icon, 'the demoted row has no .side-item-icon span at all in the collapsed rail');
-    const iconCs = win.getComputedStyle(icon);
-    assert.notEqual(iconCs.display, 'none',
-        'the demoted row\'s icon has display: none while collapsed — with the label already hidden in this state, ' +
-        'the row becomes a blank clickable strip with no cue of any kind');
-    assert.ok(!/^(hidden|collapse)$/.test(iconCs.visibility),
-        `the demoted row's icon has visibility: ${iconCs.visibility} while collapsed — invisible but still occupying box-tree space`);
-});
-
-// --- CLAIM 3, round 20 (human directive on PR #326, judge finding 2): the
-// active-row cue must actually PAINT on a demoted row, not just carry the
-// class. Round 19 closed the JS half (_syncSidebarActive's sweep, guarded in
-// tests/sidebar.test.mjs by reading `.active` off the rendered node with NO
-// stylesheet mounted) — this is the CSS half of the same claim. The three
-// rules that turn `.active` into a visible cue (accent fill, the accent rail
-// ::before, the accent label colour) were all unscoped before this PR, which
-// was a no-op while every nav row lived in #side-nav; scoping any of them to
-// `#side-nav` after the re-parenting is a silent regression — selecting
-// Knowledge/Agents/Personas/Cost would leave the sidebar with an active CLASS
-// but no lit row, degrading to a hue-only cue on the icon tint alone (the
-// exact a11y regression this ticket exists to prevent). Mounted against the
-// REAL index.html nav section + REAL style.css, with one `.active` row shaped
-// exactly as nav.js's _navItemHtml emits it in EACH host (#side-nav-more and,
-// as a live control, #side-nav) plus one inactive row as a second control —
-// three checks account for the whole diff a single "scope to #side-nav"
-// mutation makes in one hunk (background, ::before rail, label colour), so
-// catching any one of them reddens that mutation.
-test('CLAIM 3: the active-row cue actually PAINTS on a demoted row, not just the class', () => {
-    const demotedActive = '<div class="side-item active" data-view="agents"><span class="side-item-icon"></span><span class="side-item-label">Agents</span></div>';
-    const primaryActive = '<div class="side-item active" data-view="work"><span class="side-item-icon"></span><span class="side-item-label">Work</span></div>';
-    const primaryInactive = '<div class="side-item" data-view="feed"><span class="side-item-icon"></span><span class="side-item-label">Feed</span></div>';
-    const bodyHtml = `<div class="app"><aside class="sidebar">${NAV_SECTION_HTML}</aside></div>`
-        .replace('id="side-nav-more"></div>', `id="side-nav-more">${demotedActive}</div>`)
-        .replace('id="side-nav"></div>', `id="side-nav">${primaryActive}${primaryInactive}</div>`);
-    const win = mountWithRealCss(bodyHtml);
-
-    const demoted = win.document.querySelector('#side-nav-more .side-item.active');
-    const primary = win.document.querySelector('#side-nav .side-item.active');
-    const inactive = win.document.querySelector('#side-nav .side-item:not(.active)');
-    assert.ok(demoted && primary && inactive, 'the fixture is missing one of its three rows');
-
-    // 1. the accent FILL: an active demoted row must resolve the same background
-    // as an active primary row, and neither may match a merely-present row's.
-    const demotedBg = win.getComputedStyle(demoted).background;
-    const primaryBg = win.getComputedStyle(primary).background;
-    const inactiveBg = win.getComputedStyle(inactive).background;
-    assert.notEqual(demotedBg, inactiveBg,
-        'the demoted active row has no accent fill distinguishing it from an unselected row — scoping ' +
-        '`.side-item.active` to #side-nav leaves every demoted selection dark');
-    assert.equal(demotedBg, primaryBg,
-        "the demoted active row's accent fill does not match the primary active row's — the active-fill rule " +
-        'no longer reaches #side-nav-more');
-
-    // 2. the accent RAIL (::before): jsdom cannot compute a pseudo-element's
-    // style (see _activeRailReaches above), so this reads the cascade directly —
-    // does the ::before rule's base selector still match the demoted row.
-    assert.ok(_activeRailReaches(win, demoted),
-        "the demoted active row's accent rail (::before) selector no longer matches it — scoping " +
-        '`.side-item.active::before` to #side-nav removes the rail from every demoted selection');
-    assert.ok(_activeRailReaches(win, primary),
-        'sanity: the primary active row should still carry the accent rail (control)');
-
-    // 3. the accent LABEL colour: same shape as the fill check, on the label span.
-    const demotedLabelColor = win.getComputedStyle(demoted.querySelector('.side-item-label')).color;
-    const primaryLabelColor = win.getComputedStyle(primary.querySelector('.side-item-label')).color;
-    const inactiveLabelColor = win.getComputedStyle(inactive.querySelector('.side-item-label')).color;
-    assert.notEqual(demotedLabelColor, inactiveLabelColor,
-        "the demoted active row's label is not accent-coloured — its active state degrades to a hue-only icon " +
-        'tint, the exact cue this ticket\'s a11y claim says must never happen');
-    assert.equal(demotedLabelColor, primaryLabelColor,
-        "the demoted active row's label colour does not match the primary active row's — the active-label rule " +
-        'no longer reaches #side-nav-more');
-});
-
-// --- CMX-257 round 10 (human directive on PR #326, superseding round 8/9):
-// this file used to carry a hand-rolled cascade/specificity resolver
-// (resolveAllForContext/selectorSpecificity, ~150 lines) to assert
-// ".side-list-secondary actually renders lighter than the primary row" —
-// finding 2 across rounds 1/8/10, always the same shape: a higher-specificity
-// override written under a differently-spelled selector wins the real cascade
-// but is invisible to a lookup keyed on selector text. A font-weight/size
-// COMPARISON like this is a CSS-VALUE assertion the way findings 1 and 3 are,
-// and jsdom cannot resolve it honestly either (round 9's own mount-based
-// technique answers "which declaration wins", not "what does it look like
-// relative to its sibling"). Moved to the NOT GUARDED block at the top of
-// this file; the acceptance check is the manual greyscale capture, not
-// another resolver. The WIRING test below (that nav.js emits the class names
-// this now-removed guard depended on) stays — it is markup/source-text, not
-// a CSS-value comparison, and it is what keeps the greyscale capture's
-// premise ("this markup even has a side-list-secondary row to look at")
-// honest.
-
-// --- WIRING (CMX-257 round 2): every one of the checks the removed
-// ".side-list-secondary actually renders lighter" guard made hung off the
-// CLASS NAMES the CSS selectors name, never off the markup that actually
-// has to emit them. A judge round renamed the label span nav.js's
-// _navItemHtml emits from `side-item-label` to `side-item-name` (leaving
-// style.css's `.side-list-secondary .side-item-label` selector, and every
-// other guard in this file, untouched) — every demoted row's label span
-// stops matching that selector (and the primary row's own `.side-item`
-// font-size fallback, since it no longer carries a recognised label class
-// either), so the "renders lighter" contract silently stops applying to any
-// real DOM, while a resolver-based test would keep comparing two CSS rules
-// that no longer style anything a browser renders. Pin the two class names
-// style.css's demotion rule depends on directly against the markup that has
-// to emit them.
-//
-// --- WIRING (CMX-257 round 15, judge finding 1 on PR #326): pinning
-// nav.js's two item-level classes is only half the selector.
-// `.side-list-secondary .side-item-icon`/`.side-item-label` also needs
-// index.html's #side-nav-more CONTAINER to actually carry
-// `side-list-secondary` — nothing above asserted that (sidebar.test.mjs's
-// fixture hard-codes `class="side-list"` without it, and CLAIM 3 above
-// mounts the real markup but only reads display/visibility/text, never the
-// container's class attribute). Dropping `side-list-secondary` from
-// #side-nav-more silently un-demotes the whole group — identical in kind to
-// the round-2 side-item-label rename this file already guards against, just
-// from the container end of the selector instead of the item end.
-test('WIRING: index.html\'s #side-nav-more container carries the side-list-secondary class style.css\'s demotion rule depends on', () => {
-    const html = src('templates/index.html');
-    const start = html.indexOf('id="side-nav-more"');
-    assert.notEqual(start, -1, 'index.html no longer has a #side-nav-more container for the demoted nav group');
-    const tagStart = html.lastIndexOf('<div', start);
-    const tagEnd = html.indexOf('>', start);
-    const openTag = html.slice(tagStart, tagEnd + 1);
-    assert.match(openTag, /class="[^"]*\bside-list-secondary\b[^"]*"/,
-        '#side-nav-more no longer carries class="side-list-secondary" — style.css\'s ' +
-        '`.side-list-secondary .side-item-icon`/`.side-item-label` demotion rule would no longer match this ' +
-        'container at all, silently un-demoting the whole group back to full prominence');
-});
-
-test('WIRING: nav.js emits the exact .side-item-icon / .side-item-label classes style.css\'s demotion rule depends on', () => {
-    const fn = NAV.slice(NAV.indexOf('function _navItemHtml'));
-    const body = fn.slice(0, fn.indexOf('\nfunction ', 10));
-    assert.match(body, /class="side-item-icon"/,
-        '_navItemHtml no longer emits class="side-item-icon" — style.css\'s ' +
-        '`.side-list-secondary .side-item-icon` demotion rule (and the primary .side-item-icon rule it is compared ' +
-        'against above) would no longer match any rendered nav row');
-    assert.match(body, /class="side-item-label"/,
-        '_navItemHtml no longer emits class="side-item-label" — style.css\'s ' +
-        '`.side-list-secondary .side-item-label` demotion rule (and the primary .side-item font-size it is compared ' +
-        'against above) would no longer match any rendered nav row, so the "renders lighter" guard above would be ' +
-        'comparing two CSS rules that style nothing real');
+    nav.renderNav();
+    const ids = [...document.querySelectorAll('#side-nav .side-item')].map(el => el.dataset.view);
+    assert.deepEqual(ids, ['terminals', 'work'],
+        'the REAL rendered #side-nav no longer matches Wall·Work — either a deleted view resurfaced or one of ' +
+        'the two kept views failed to render');
 });

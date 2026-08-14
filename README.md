@@ -608,25 +608,20 @@ you'd hand the keyboard to.
 
 A first-class feature, shipped as a separate install to keep the core lean.
 `uv sync --extra dashboard && uv run chela dashboard` serves a web UI on
-`127.0.0.1:5001` with five views — **Feed** (the [event log](docs/EVENTS.md)),
-**Agents** (liveness from `claude agents --json`: alive / waiting / offline),
-**Wall**, **Work** (the dispatcher, a Kanban of runs, and schedules, over one
-poll), and **Knowledge**. Every view is one entry in a registry
-(`static/js/views.js`), so a view is as cheap to delete as it is to add.
-Liveness is derived live from the native session status — no heartbeat daemon.
-An embedded ttyd **terminal wall** (a multi-pane view that streams the
-live panes) is **on by default**, but **loopback-guarded**: because it serves
+`127.0.0.1:5001` with two views — **Wall** (the live terminal wall, demo above)
+and **Work** (the dispatcher, a Kanban of runs, and schedules, over one poll).
+Every view is one entry in a registry (`static/js/views.js`), so a view is as
+cheap to delete as it is to add — and as cheap to bring back: liveness,
+context %, cost and recap per agent still live behind the sidebar's Sessions
+list and the agent-detail drill-in, they just aren't a dedicated tab. Liveness
+is derived live from the native session status — no heartbeat daemon. An
+embedded ttyd **terminal wall** (a multi-pane view that streams the live
+panes) is **on by default**, but **loopback-guarded**: because it serves
 writable shells, the dashboard only serves it on a `127.0.0.1` bind. Bind to a
 non-loopback interface (e.g. `--host 0.0.0.0`) and the wall is refused — its
 routes 404 and its UI is hidden — unless you explicitly set
 `CHELA_TERMINALS_EXPOSE=true`. Turn the wall off entirely with
 `CHELA_TERMINALS_ENABLED=false`.
-
-<p align="center">
-  <img src="docs/img/agents.png" alt="Agents view — per-agent context, cost, schedule, recap and liveness" width="900">
-  <br>
-  <em>Agents view — context usage, cost, liveness, latest recap and next run, per agent.</em>
-</p>
 
 <p align="center">
   <img src="docs/img/schedules.png" alt="Schedules view — interval, cron and one-shot pokes per agent" width="900">

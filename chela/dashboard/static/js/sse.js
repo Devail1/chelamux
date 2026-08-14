@@ -1,8 +1,6 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, _agentsCache, api, attrEsc, currentTab, escHtml, setAgentsCache } from './util.js';
-import { refreshAgents } from './agents.js';
 import { pollWork } from './work.js';
-import { onLogDelta } from './feed.js';
 import { onDecisionsLogDelta } from './decisions.js';
 import { refreshOrchestratorStatus } from './orchestrator.js';
 import { RUN_TOAST_KINDS, runToastKind } from './runtoast.js';
@@ -12,16 +10,15 @@ import { _absorbFreshTerminals, _cssEsc, _refreshPaneLabels, _renderedWids, _sto
 // Reactive updates via Server-Sent Events (accelerator over the poll timers)
 //
 // ONE EventSource opened on load — there is deliberately no second one. Each delta
-// event re-runs the EXISTING render path for the affected view: refreshAgents and
-// pollWork refetch the full shape and redraw, dropTerminalPane / renderTerminals
-// handle the wall reactively, and the `log` frame tells the Feed its cursor has
-// something behind it. Every frame is a NOTIFICATION — it carries no data the UI
-// renders directly, so a dropped frame is never a lost fact.
+// event re-runs the EXISTING render path for the affected view: pollWork refetches
+// the full shape and redraws, dropTerminalPane / renderTerminals handle the wall
+// reactively. Every frame is a NOTIFICATION — it carries no data the UI renders
+// directly, so a dropped frame is never a lost fact.
 //
 // This is strictly additive. The 30s global refresh, the 4s termTick and work.js's
 // 30s /api/dispatcher poll all keep running. If the stream never connects or drops,
 // the browser auto-reconnects and the timers cover the gap, so the UI behaves
-// exactly as it did before SSE existed — the Feed included.
+// exactly as it did before SSE existed.
 // ---------------------------------------------------------------------------
 
 let _sse = null;
@@ -30,9 +27,7 @@ function _sseWindows(d) {
     // Window set changed (agent window appeared / vanished). Invalidate the
     // agent cache so any render refetches the fresh shape.
     setAgentsCache([]);
-    if (currentTab === 'agents') {
-        refreshAgents();
-    } else if (TERMINALS_ON && currentTab === 'terminals') {
+    if (TERMINALS_ON && currentTab === 'terminals') {
         // Reconcile by stable window id, not the payload names: refetch the live
         // agent set, drop tiles for vanished wids, and absorb new ones surgically
         // (wall appends a tile, single refreshes the dropdown — neither reloads a
@@ -62,12 +57,10 @@ function _sseRuns(d) {
 
 function _sseLog(d) {
     // The event log's seq moved. The frame is a NOTIFICATION — it carries the new
-    // seq, not the events — so the reader fetches /api/log from its OWN cursor. Two
-    // readers share this one delta: the Feed (everything), gated to its own tab
-    // since off it the view's entry does a fresh read on re-entry — and the
-    // Decisions sidebar section (a filtered tail), which is ALWAYS on screen
-    // (cmx-107), so it repaints on every frame regardless of currentTab.
-    if (currentTab === 'feed') onLogDelta(d);
+    // seq, not the events — so the reader fetches /api/log from its OWN cursor. The
+    // Decisions sidebar section (a filtered tail) is the one reader left since the
+    // Feed view was deleted (CMX-279) — it is ALWAYS on screen (cmx-107), so it
+    // repaints on every frame regardless of currentTab.
     onDecisionsLogDelta(d);
 }
 
