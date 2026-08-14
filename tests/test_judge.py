@@ -408,6 +408,19 @@ def test_block_body_points_the_rework_agent_at_the_defeat_shapes_catalog():
     body = judge.block_body(report, "https://x/1", TEST_CMD)
 
     assert "docs/DEFEAT_SHAPES.md" in body
+    assert "docs/defeat_shapes/" in body
+    assert "ONE NEW FILE" in body
+    # CMX-284 rework round 3: item 4 mentions `docs/defeat_shapes/` twice — once in a
+    # decorative "(see ... for the catalog itself)" parenthetical and once in the load-bearing
+    # "add ONE NEW FILE to ..." directive. The three substring checks above are all satisfied
+    # by the parenthetical alone, so pointing the DIRECTIVE back at the monolith (the exact
+    # append this PR's whole catalog split exists to forbid) still passes them. Pin the
+    # directive and its target adjacent, not just present anywhere in the body.
+    assert "add ONE NEW FILE to `docs/defeat_shapes/`" in body
+    # The decorative parenthetical is the OTHER of the two mentions — pin it too, so reverting
+    # it alone (leaving the directive above untouched) still goes red instead of hiding behind
+    # the directive's own coverage.
+    assert "(see `docs/defeat_shapes/` for the catalog itself)" in body
 
 
 def test_rework_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
@@ -430,6 +443,8 @@ def test_rework_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
     prompt = dispatcher._renudge_prompt(wf, row, None)
     assert prompt is not None
     assert "docs/DEFEAT_SHAPES.md" in prompt
+    assert "docs/defeat_shapes/" in prompt
+    assert "NEW FILE to `docs/defeat_shapes/`" in prompt
 
 
 def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
@@ -454,6 +469,12 @@ def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
                            side_effect=lambda *a, **kw: captured.__setitem__("prompt", a[4])):
             assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
     assert "docs/DEFEAT_SHAPES.md" in captured["prompt"]
+    # CMX-284 rework round 3: the pre-PR wording already satisfied the assert above on its
+    # own — this PR's actual production change was appending "and browse
+    # `docs/defeat_shapes/`" to send the judge into the new catalog location. Pin that half
+    # too, or a revert to the pre-split wording (judge told to skim a now-empty pointer file)
+    # passes silently.
+    assert "docs/defeat_shapes/" in captured["prompt"]
 
 
 def test_defeat_shapes_catalog_documents_every_seeded_shape():
@@ -461,14 +482,26 @@ def test_defeat_shapes_catalog_documents_every_seeded_shape():
     a doc edit that drops one silently shrinks institutional knowledge back down without
     anyone noticing.
 
+    CMX-284: the catalog moved from one file with a numbered section per shape to one FILE
+    per shape under `docs/defeat_shapes/` — every concurrent rework used to append its new
+    section to the same shared tail, and two reworks in flight at once collided on the same
+    lines every time. Reading "the catalog" now means reading every file in that directory,
+    concatenated in filename order, rather than one file's text.
+
     Seen to go red: gutting a section's BODY down to a stub (e.g. `_TBD._`) while leaving its
     heading byte-identical — a heading-only presence check can't see this, because the
-    heading itself survives untouched. Splitting the doc into its per-section bodies and
+    heading itself survives untouched. Splitting each file into its per-section bodies and
     requiring each of the four labelled fields inside its own section catches it.
     """
     root = Path(__file__).resolve().parent.parent
-    text = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
-    sections = re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]  # drop the preamble
+    shapes_dir = root / "docs" / "defeat_shapes"
+    files = sorted(shapes_dir.glob("*.md"))
+    assert files, f"no shape files found under {shapes_dir}"
+    sections = []
+    for f in files:
+        text = f.read_text()
+        parts = re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]
+        sections.extend(parts)
 
     headings = (
         "Presence/substring assertion defeated by dead-coding",
@@ -480,8 +513,8 @@ def test_defeat_shapes_catalog_documents_every_seeded_shape():
     )
     # ⛔ CMX-272's original spelling was `len(sections) == len(headings)`, which pinned the
     # catalog at EXACTLY six sections — directly contradicting the feature it guards. The
-    # file's own "How this file grows" contract tells a reworking agent to "add a section for
-    # it as part of the same fix"; under an equality check the FIRST agent to obey that
+    # catalog's own "How this catalog grows" contract tells a reworking agent to add a new
+    # file as part of the same fix; under an equality check the FIRST agent to obey that
     # instruction reddens CI. Found the hard way: this PR added shapes 7 and 8 and broke it.
     # The real invariant is that the seeded shapes never SHRINK away, so assert a floor and
     # let the catalog grow.
@@ -489,12 +522,13 @@ def test_defeat_shapes_catalog_documents_every_seeded_shape():
         f"the catalog shrank: expected at least {len(headings)} numbered defeat-shape "
         f"sections, found {len(sections)}"
     )
-    # The doc's own "Each entry:" spec (see "How this file grows" above) names exactly these
-    # three required fields — "Found:" is present on most entries but not mandated by the
-    # spec, so it is not required here.
+    # Each file's own "Each entry:" spec (see DEFEAT_SHAPES.md's "How this catalog grows")
+    # names exactly these three required fields — "Found:" is present on most entries but
+    # not mandated by the spec, so it is not required here.
     REQUIRED_FIELDS = ("**Assertion form:**", "**Mutation that defeats it:**",
                        "**Guard form that survives:**")
-    # The seeded six must still be present, in order, at the head of the file.
+    # The seeded six must still be present, in order, at the head of the catalog (filename
+    # order — 01-..., 02-..., ...).
     for heading, section in zip(headings, sections):
         assert section.startswith(heading), f"missing defeat shape: {heading}"
     # ⭐ Every section — including ones added after seeding — must carry the spec's fields.
@@ -504,6 +538,125 @@ def test_defeat_shapes_catalog_documents_every_seeded_shape():
         title = section.splitlines()[0] if section.strip() else "<empty section>"
         for field in REQUIRED_FIELDS:
             assert field in section, f"{title!r} is missing its {field} field"
+
+
+def test_defeat_shapes_index_carries_no_numbered_sections_of_its_own():
+    """CMX-284: `docs/DEFEAT_SHAPES.md` is a static pointer at `docs/defeat_shapes/`, not a
+    hand-maintained index — that split is the whole fix for the collision this PR closes
+    (every concurrent rework used to append a new numbered section to this file's tail, and
+    two reworks in flight at once collided on the same lines every time, needing a hand
+    renumber). If a numbered `## N. ` section ever creeps back into this file, growth is
+    once again editing a shared file instead of adding a new one, and the collision comes
+    back.
+
+    Seen to go red: pasting a new shape's `## 21. ...` section directly into
+    `DEFEAT_SHAPES.md` instead of `docs/defeat_shapes/21-....md` — the file that was supposed
+    to stay untouched by growth gets a numbered section again.
+    """
+    root = Path(__file__).resolve().parent.parent
+    text = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
+    assert not re.search(r"^## \d+\. ", text, flags=re.MULTILINE), (
+        "docs/DEFEAT_SHAPES.md picked up a numbered defeat-shape section — new shapes belong "
+        "in their own file under docs/defeat_shapes/, not appended here"
+    )
+    assert "docs/defeat_shapes/" in text
+    # CMX-284 rework round 3: "docs/defeat_shapes/" also appears in plain prose elsewhere in
+    # this file (the "How this catalog grows" section), so the substring check above passes
+    # even if the file's ONE markdown link — the whole navigational payload of a file that is
+    # otherwise just a pointer — is pointed at a target that doesn't exist. Resolve the link
+    # target on disk and require it to actually be the catalog directory.
+    m = re.search(r"\[`docs/defeat_shapes/`\]\(([^)]+)\)", text)
+    assert m, "index is missing its markdown link to the catalog directory"
+    target = (root / "docs" / m.group(1)).resolve()
+    assert target == (root / "docs" / "defeat_shapes").resolve(), (
+        f"index's catalog link points at {m.group(1)!r}, which does not resolve to "
+        "docs/defeat_shapes/"
+    )
+
+
+def test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename():
+    """CMX-284 rework round 1: a heading that loses its period is invisible to every tool
+    reading the catalog — `re.split(r"^## \\d+\\. ", ...)` (the scan the sibling test above
+    uses) silently drops a file whose heading doesn't match this exact shape, and a
+    sequential-numbering assertion can't see the gap either, because the malformed heading
+    was never counted as a section in the first place. Hand-resolving a merge conflict this
+    way orphaned three shapes on cmx-279: `## 21. Title` became `## 21 Title` (period
+    dropped), and nothing in the suite noticed.
+
+    Seen to go red: `## 21 A shape with no period` — matches neither `^## \\d+\\. ` (the
+    section scanner) nor this test's own `^## \\d+\\. ` check, so it fails LOUDLY here
+    instead of silently vanishing from the catalog scan.
+    """
+    root = Path(__file__).resolve().parent.parent
+    shapes_dir = root / "docs" / "defeat_shapes"
+    files = sorted(shapes_dir.glob("*.md"))
+    assert files, f"no shape files found under {shapes_dir}"
+    for f in files:
+        filename_num = int(f.name.split("-", 1)[0])
+        first_line = f.read_text().splitlines()[0]
+        m = re.match(r"^## (\d+)\. ", first_line)
+        assert m, (
+            f"{f.name}: heading {first_line!r} does not match '## N. Title' (missing the "
+            f"period after the number makes this shape invisible to the catalog scan)"
+        )
+        heading_num = int(m.group(1))
+        assert heading_num == filename_num, (
+            f"{f.name}: filename number {filename_num} does not match heading number "
+            f"{heading_num}"
+        )
+
+
+def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
+    """CMX-284 rework round 1: entries cross-reference each other by number ("the render-side
+    mirror of shape 13", "[[21|entry 21]]") — under the old single-file catalog, renumbering
+    to resolve a merge conflict could silently orphan a reference (rename shape 13 to 14 and
+    every "shape 13" mention elsewhere now points at the wrong entry, or at nothing), and
+    nobody could check that mechanically because there was no enumerable set of "shapes that
+    exist" independent of the numbering itself. One file per shape makes that set concrete:
+    the filenames. Assert every cross-reference resolves to one of them.
+
+    Seen to go red: a reference left behind as "shape 31" (or any number with no
+    `docs/defeat_shapes/31-*.md` file) after a renumber that missed one mention.
+    """
+    root = Path(__file__).resolve().parent.parent
+    shapes_dir = root / "docs" / "defeat_shapes"
+    files = sorted(shapes_dir.glob("*.md"))
+    assert files, f"no shape files found under {shapes_dir}"
+    existing = {int(f.name.split("-", 1)[0]) for f in files}
+
+    ref_pattern = re.compile(r"\bshapes? (\d+)\b|\[\[(\d+)\|")
+    for f in files:
+        text = f.read_text()
+        for m in ref_pattern.finditer(text):
+            num = int(m.group(1) or m.group(2))
+            assert num in existing, (
+                f"{f.name} references shape {num}, which has no "
+                f"docs/defeat_shapes/{num:02d}-*.md file"
+            )
+
+
+def test_defeat_shapes_each_file_carries_exactly_one_numbered_section():
+    """CMX-284 rework round 3: one-file-per-shape is the whole point of this PR ('a new file
+    has no shared lines to collide on'), but nothing enforced it — the index test only reads
+    `DEFEAT_SHAPES.md`, and the filename/heading test above reads only each file's FIRST
+    line. A SECOND `## N. ` section appended to the tail of an existing shape file is
+    invisible to both: the index stays untouched and the first line still matches its
+    filename, so growth silently goes back to editing a shared file — the exact
+    conflicting-tail collision this split exists to remove.
+
+    Seen to go red: appending a second `## 33. ...` section to the tail of an existing shape
+    file instead of creating a new one.
+    """
+    root = Path(__file__).resolve().parent.parent
+    shapes_dir = root / "docs" / "defeat_shapes"
+    files = sorted(shapes_dir.glob("*.md"))
+    assert files, f"no shape files found under {shapes_dir}"
+    for f in files:
+        headings = re.findall(r"^## \d+\. ", f.read_text(), flags=re.MULTILINE)
+        assert len(headings) == 1, (
+            f"{f.name} carries {len(headings)} numbered sections — one file per shape means "
+            "exactly one; a growing catalog adds a new file, not a second section here"
+        )
 
 
 def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():

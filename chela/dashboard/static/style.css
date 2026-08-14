@@ -2834,19 +2834,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .side-list { display: flex; flex-direction: column; gap: 1px; padding: 0 6px; }
 .side-empty { padding: 8px 10px; color: var(--text-dim); font-size: 11px; }
 
-/* CMX-230: the demoted nav group (Knowledge/Agents/Personas/Cost — "attributes
-   of things, not places to go"). Same .side-item row underneath (icon still a
-   real lucide mark, label still real text — re-parenting must not cost the
-   accessibility cue), just quieter: a plain-text subhead instead of the
-   Navigate section's uppercase label, and a smaller icon/label so the primary
-   3-item rail (Feed/Wall/Work) reads as the nav, this as its footnote. */
-.side-subhead {
-    padding: 10px 16px 3px; font-size: 10px; color: var(--text-dim); opacity: 0.7;
-}
-.side-list-secondary .side-item-icon { font-size: 15px; }
-.side-list-secondary .side-item-label { font-size: 11px; }
-body.sidebar-collapsed .side-subhead { display: none; }
-
 /* Nav rows: rounded, with a shared active vocabulary — accent-tinted fill, a
    short accent rail, and an accent-coloured label. Hover is a quiet surface
    wash. The same look is reused by Wall / Work items and agent rows so the

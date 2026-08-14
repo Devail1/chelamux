@@ -643,47 +643,72 @@ def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
     assert "$CHELA_WID" not in command.replace("${CHELA_WID:-}", "")
 
 
-# --- live terminal timestamps (CMX-277) -------------------------------------------
+# --- live terminal timestamps (CMX-277, mechanism swapped in CMX-285) --------------
 
-def test_timestamp_events_are_exactly_the_two_message_boundaries():
-    """Prompt-sent and reply-finished — the two boundaries the feature is about."""
-    assert hooks.TIMESTAMP_EVENTS == frozenset({"UserPromptSubmit", "Stop"})
+def test_timestamp_events_is_exactly_message_display():
+    """The one event the inline-timestamp feature answers now — the assistant-message
+    display boundary, not the ``UserPromptSubmit``/``Stop`` pair CMX-277 used."""
+    assert hooks.TIMESTAMP_EVENTS == frozenset({"MessageDisplay"})
 
 
-@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
-def test_timestamp_response_carries_the_proven_persistent_envelope(event):
-    """Bare ``{"systemMessage": ...}`` was reported flashing and vanishing within about a
-    second (anthropics/claude-code#50542); pairing it with ``continue``/``suppressOutput``
-    is what made it persist. Losing either field regresses to the flaky bare shape."""
-    resp = hooks.timestamp_response(event)
+def test_message_display_response_stamps_only_the_first_batch():
+    """``MessageDisplay`` fires once per streamed batch of an assistant message — stamp
+    only ``index == 0`` so the marker appears exactly once per reply, not before every
+    chunk. A later batch gets the empty-object "display unchanged" shape."""
+    first = hooks.message_display_response(
+        {"hook_event_name": "MessageDisplay", "index": 0, "delta": "Sure, on it."})
 
-    assert resp["continue"] is True
-    assert resp["suppressOutput"] is False
-    msg = resp["systemMessage"]
-    assert msg.startswith("🕐 ")
-    stamp = msg.removeprefix("🕐 ")
+    assert first == {"hookSpecificOutput": {
+        "hookEventName": "MessageDisplay",
+        "displayContent": first["hookSpecificOutput"]["displayContent"],
+    }}
+    content = first["hookSpecificOutput"]["displayContent"]
+    assert content.startswith("🕐 ")
+    assert content.endswith(" Sure, on it.")
+    stamp = content.removeprefix("🕐 ").removesuffix(" Sure, on it.")
     assert len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"  # HH:MM:SS
 
+    later = hooks.message_display_response(
+        {"hook_event_name": "MessageDisplay", "index": 1, "delta": " and it's done."})
+    assert later == {}
 
-@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
-def test_timestamp_response_asks_the_module_clock_not_a_fixed_string(event, monkeypatch):
+
+def test_message_display_response_asks_the_module_clock_not_a_fixed_string(monkeypatch):
     """A fixed string like ``"00:00:00"`` satisfies the HH:MM:SS shape check above just as
     well as a real clock — that gap is exactly what let a frozen-clock mutation survive
     (docs/DEFEAT_SHAPES.md). Monkeypatching ``hooks.time.strftime`` and asserting the exact
     rendered value pins THAT the module's own clock was asked, but a stub of the form
     ``lambda fmt: "12:34:56"`` accepts and discards ``fmt`` — so it does not pin WHAT was
     asked for, and ``time.strftime("%d:%m:%y")`` (a date, not a time) satisfies both the
-    stub and the HH:MM:SS shape check equally well (round 3's surviving mutation,
-    docs/DEFEAT_SHAPES.md shape 18). Capturing the ``fmt`` argument closes that: it pins
-    the format string itself, not merely the stubbed return value."""
+    stub and the HH:MM:SS shape check equally well (docs/DEFEAT_SHAPES.md shape 18).
+    Capturing the ``fmt`` argument closes that: it pins the format string itself, not
+    merely the stubbed return value."""
     captured_fmt = []
     monkeypatch.setattr(hooks.time, "strftime",
                          lambda fmt: captured_fmt.append(fmt) or "12:34:56")
 
-    resp = hooks.timestamp_response(event)
+    resp = hooks.message_display_response(
+        {"hook_event_name": "MessageDisplay", "index": 0, "delta": "hi"})
 
     assert captured_fmt == ["%H:%M:%S"]
-    assert resp["systemMessage"] == "🕐 12:34:56"
+    assert resp["hookSpecificOutput"]["displayContent"] == "🕐 12:34:56 hi"
+
+
+def test_message_display_response_tolerates_a_missing_or_non_string_delta():
+    """The real payload always carries a string ``delta``, but a malformed one must
+    degrade to an empty delta, not get stringified into the message a human reads.
+    An f-string never raises on ``None``/``42``/a list, so a bare ``startswith`` check
+    would pass just as well whether the bad value was dropped OR silently rendered as
+    the literal text ``"None"`` — pinning the exact trailing content is what actually
+    proves the type guard ran."""
+    for delta in (None, 42, ["oops"]):
+        resp = hooks.message_display_response(
+            {"hook_event_name": "MessageDisplay", "index": 0, "delta": delta})
+        content = resp["hookSpecificOutput"]["displayContent"]
+        assert content.startswith("🕐 ")
+        stamp = content[len("🕐 "):-1]
+        assert len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"  # HH:MM:SS
+        assert content == f"🕐 {stamp} "  # a trailing "None"/"42"/"['oops']" fails this
 
 
 # --- the endpoint ----------------------------------------------------------------
@@ -731,37 +756,37 @@ def test_endpoint_rejects_an_unknown_event(client):
     assert event_log.read()["events"] == []
 
 
-@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
-def test_endpoint_stamps_a_timestamp_on_the_message_boundaries(client, monkeypatch, event):
-    """``CHELA_TERMINAL_TIMESTAMPS`` defaults OFF (adopter-facing, unverified rendering
-    reliability across Claude Code versions) — exercise the stamping path by opting in
-    explicitly, the same way an adopter who wants it would."""
+def test_endpoint_stamps_a_timestamp_on_the_message_display_hook(client, monkeypatch):
+    """``CHELA_TERMINAL_TIMESTAMPS`` defaults OFF (adopter-facing, needs Claude Code
+    2.1.152+) — exercise the stamping path by opting in explicitly, the same way an
+    adopter who wants it would."""
     monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
-    resp = client.post(f"/hooks/{event}", json=_body(hook_event_name=event))
+    resp = client.post("/hooks/MessageDisplay", json=_body(
+        hook_event_name="MessageDisplay", index=0, delta="On it."))
 
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["continue"] is True
-    assert body["suppressOutput"] is False
-    assert body["systemMessage"].startswith("🕐 ")
+    content = body["hookSpecificOutput"]["displayContent"]
+    assert body["hookSpecificOutput"]["hookEventName"] == "MessageDisplay"
+    assert content.startswith("🕐 ")
+    assert content.endswith(" On it.")
 
-    # Still an ordinary ingested event, same as every other hook.
-    events = event_log.read()["events"]
-    assert len(events) == 1
-    assert events[0]["type"] == hooks.event_type(event)
+    # UNLIKE every other hook: never ingested. `MessageDisplay` fires once per streamed
+    # batch of every assistant reply — logging it would flood the event log with a
+    # firehose of near-duplicate "message display" records nobody would read.
+    assert event_log.read()["events"] == []
 
 
 def test_the_timestamp_can_be_turned_off(client, monkeypatch):
-    """``CHELA_TERMINAL_TIMESTAMPS=false`` is the escape hatch the spike's own
-    "what remains unverified" section calls for — a pinned Claude Code version that
-    renders the field badly must be able to turn it off without code changes."""
+    """``CHELA_TERMINAL_TIMESTAMPS=false`` is the escape hatch an adopter on a Claude Code
+    version that renders the field badly must be able to flip without code changes."""
     monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", False)
 
-    resp = client.post("/hooks/Stop", json=_body(hook_event_name="Stop"))
+    resp = client.post("/hooks/MessageDisplay", json=_body(
+        hook_event_name="MessageDisplay", index=0, delta="On it."))
 
     assert resp.get_json() == {}
-    # The escape hatch mutes the visible line only — the event is still logged.
-    assert event_log.read()["events"][0]["type"] == "hook.stop"
+    assert event_log.read()["events"] == []
 
 
 def test_terminal_timestamps_defaults_off_with_no_env_var_set(monkeypatch):
@@ -781,19 +806,17 @@ def test_terminal_timestamps_defaults_off_with_no_env_var_set(monkeypatch):
 
 
 def test_timestamps_on_does_not_steal_the_post_tool_use_gate_resolution(client, monkeypatch):
-    """CMX-277 rework round 5: ``app.py``'s own docstring claims the stamp branch fires
-    ONLY at the two message boundaries ("Every other event still returns {}") — but every
-    test that mounts the ON state (above) POSTs only ``UserPromptSubmit``/``Stop``, and
-    every test that POSTs ``PostToolUse`` runs at the real default, which is OFF, so the
-    stamp branch is skipped before the event set is even consulted either way. No test
-    observed the endpoint with timestamps ON and a non-boundary event, so
-    ``if event in hooks.TIMESTAMP_EVENTS`` could be widened to also swallow ``PostToolUse``
-    (docs/DEFEAT_SHAPES.md shape 12 — untested because every fixture sits on the property)
-    and nothing would catch it: with timestamps on, that widened branch returns before
-    ``gateanswer.gate_resolved`` is ever reached, so a held gate would wait out its whole
-    wait budget (the CMX-54 regression) instead of being torn down. Pin both halves at once:
-    the body is the empty-object shape non-boundary events get, AND the resolution side
-    effect the PostToolUse branch is responsible for still ran.
+    """CMX-277 rework round 5 (still true after CMX-285's mechanism swap): the
+    ``MessageDisplay`` branch returns EARLY, ahead of ``hooks.ingest`` and every
+    event-specific branch below it — including the ``PostToolUse`` one that calls
+    ``gateanswer.gate_resolved``. If ``hooks.TIMESTAMP_EVENTS`` were ever widened to also
+    match ``PostToolUse`` (docs/DEFEAT_SHAPES.md shape 12), that widened branch would
+    return before ``gate_resolved`` is ever reached, so a held gate would wait out its
+    whole wait budget (the CMX-54 regression) instead of being torn down. No other test in
+    this file POSTs ``PostToolUse`` with timestamps ON, so nothing else would catch it.
+    Pin both halves at once: the body is the empty-object shape a non-timestamp event
+    gets, AND the resolution side effect the ``PostToolUse`` branch is responsible for
+    still ran.
     """
     monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
     resolved = []
@@ -828,6 +851,18 @@ def test_timestamps_on_leaves_every_non_boundary_event_unchanged(client, monkeyp
     directly, without needing to know what that event's real body is or mock its handler's
     side effects. Parametrized off ``hooks.HOOK_EVENTS`` (see `_NON_TIMESTAMP_EVENTS`
     above), so covering a future event needs no new test, only a wider tuple.
+
+    CMX-285 rework round 2 (docs/DEFEAT_SHAPES.md shape 26): the on/off comparison alone
+    is not enough once the timestamp branch sits ABOVE ``hooks.ingest`` (CMX-285 moved it
+    there so the streamed ``MessageDisplay`` firehose never reaches the log). A widened
+    membership test now returns ``{}`` for BOTH flag states — the response comparison
+    stays green precisely because the event was swallowed identically either way, and the
+    thing actually lost — the event never reaching ``hooks.ingest`` at all — is invisible
+    to a response-shape assertion. Restore the property CMX-277's own endpoint test used to
+    pin per-event (the ``assert event_log.read()["events"][0]["type"] == "hook.stop"``
+    line CMX-285 dropped when it deleted the ``Stop``-specific test): for every
+    non-timestamp event, ingest must actually have run, independent of what the HTTP
+    response looks like.
     """
     body = _body(hook_event_name=event, tool_name="Bash", tool_use_id=f"toolu_{event}")
 
@@ -839,6 +874,31 @@ def test_timestamps_on_leaves_every_non_boundary_event_unchanged(client, monkeyp
 
     assert resp_off.status_code == resp_on.status_code == 200
     assert resp_on.data == resp_off.data
+
+    # Both POSTs must have reached hooks.ingest — one record per call, both typed for
+    # THIS event. A short-circuit that swallows the event (with the flag on, off, or
+    # both) leaves this list short instead of merely changing what the HTTP body says.
+    types = [e["type"] for e in event_log.read()["events"]]
+    assert types == [hooks.event_type(event), hooks.event_type(event)]
+
+
+def test_endpoint_message_display_survives_a_malformed_body(client, monkeypatch):
+    """CMX-285 rework round 2: ``message_display_response`` calls ``body.get(...)`` — a
+    non-dict body (unparseable JSON, an empty POST, a bare JSON list) would raise
+    ``AttributeError`` inside it and turn into a 500 into a live, blocked agent, exactly
+    the failure ``test_endpoint_does_not_fail_a_blocked_agent`` pins for ``PreToolUse``.
+    That test never exercises ``MessageDisplay`` with the flag on, so the ``isinstance``
+    guard on this branch's early-return path — the one place a malformed payload actually
+    meets ``message_display_response`` — had nothing watching it (the endpoint's own
+    docstring promise: "200 and an empty object, every time").
+    """
+    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
+    for data in (b"{not json", b"", b"[1,2,3]"):
+        resp = client.post("/hooks/MessageDisplay", data=data,
+                           content_type="application/json")
+        assert resp.status_code == 200
+        assert resp.get_json() == {}
+    assert event_log.read()["events"] == []
 
 
 def test_terminal_timestamps_turns_on_with_the_env_var_set_to_true(monkeypatch):

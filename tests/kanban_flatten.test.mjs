@@ -152,3 +152,24 @@ test('renderKanban: the Archived and Done lane heads render their labels as text
     assert.notEqual(archivedLabel.textContent, doneLabel.textContent,
         'archived and done lane heads render identical text — no cue beyond colour');
 });
+
+// --- 4. 🔴 GUARD (round 3, PR #350) — a card title actually goes through knInline --------
+//
+// kanban.js's header comment claims knowledge.js's knInline is "reused verbatim ... by
+// kanban.js for inline card text", and _kCard's own comment says the same — but every
+// existing card fixture in this file uses a plain title ('a task'), for which knInline is
+// the identity function, so the call at kanban.js:152 could be dead-coded (bypassed
+// entirely, falling straight back to `displayTitle(...)` with no HTML escaping at all) and
+// nothing above would notice. This drives a title with a mid-string `**bold**` span — the
+// one case displayTitle() deliberately leaves untouched (see taskmodal_model.test.mjs) so
+// knInline is the thing that has to render it — through the REAL renderKanban() and reads
+// the REAL card title element back.
+
+test('renderKanban: a card title with a mid-string bold span renders through knInline as <strong>, not literal asterisks', () => {
+    renderKanban(_payload([_run({ title: 'ship **the wall** now', status: 'done', pr_state: 'merged' })]));
+
+    const titleEl = document.querySelector('.kanban-card-done .kanban-card-title');
+    assert.ok(titleEl, 'the done card has no .kanban-card-title element');
+    assert.equal(titleEl.innerHTML, 'ship <strong>the wall</strong> now',
+        `kanban card title did not render through knInline — got: "${titleEl.innerHTML}"`);
+});

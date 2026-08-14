@@ -2379,10 +2379,12 @@ def api_hooks(event):
     It is the ONLY safe way to answer a multi-question / ``multiSelect`` picker: the
     keystroke path has no cursor to read for those shapes, and the one time it guessed it
     silently answered the wrong option (CMX-32). Nothing else here decides anything —
-    ``UserPromptSubmit``/``Stop`` also return a non-empty body (CMX-277,
-    :func:`chela.hooks.timestamp_response`, gated by ``config.TERMINAL_TIMESTAMPS``), but
-    that body only stamps a ``systemMessage`` timestamp into the live terminal transcript;
-    it answers no prompt and decides nothing. Every other event still returns ``{}``.
+    ``MessageDisplay`` also returns a non-empty body (CMX-285,
+    :func:`chela.hooks.message_display_response`, gated by ``config.TERMINAL_TIMESTAMPS``),
+    but that body only replaces how an assistant reply's own first line is DISPLAYED (a
+    local-time marker prepended inline); it never touches the stored transcript, answers
+    no prompt, and decides nothing a human would call a decision. Every other event still
+    returns ``{}``.
 
     **A blocked request is bounded and fails OPEN.** The wait is at most
     ``CHELA_GATE_WAIT_S`` and the number of simultaneously-held gates is capped; past
@@ -2401,16 +2403,24 @@ def api_hooks(event):
         log.warning("hooks: %s body over %d bytes — not read", event, hooks.MAX_BODY)
         return jsonify({})
     body = request.get_json(force=True, silent=True)
+    if event in hooks.TIMESTAMP_EVENTS:
+        # CMX-285: `MessageDisplay` fires once per streamed BATCH of every assistant
+        # message — far higher volume than PreToolUse/PostToolUse (already ~78% of the
+        # log on their own, per hooks.hooks_spec's own comment). Answered here, ahead of
+        # hooks.ingest, so this display-only decoration never touches the event log (a
+        # firehose of near-duplicate "message display" records nobody would read) and
+        # stays off the hot path — no wid resolution, no disk write — even when
+        # config.TERMINAL_TIMESTAMPS is False. See docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md
+        # and hooks.message_display_response.
+        if config.TERMINAL_TIMESTAMPS and isinstance(body, dict):
+            return jsonify(hooks.message_display_response(body))
+        return jsonify({})
     # Only the SessionStart `command` hook can send this (CMX-160) — every other event
     # rides `http`, which carries Claude Code's payload and none of the agent's own env.
     explicit_wid = request.headers.get("X-Chela-Wid") or None
     hooks.ingest(event, body, explicit_wid=explicit_wid)
     if event == "SessionStart" and isinstance(body, dict):
         return _session_start_recap(body, explicit_wid)
-    if event in hooks.TIMESTAMP_EVENTS and config.TERMINAL_TIMESTAMPS:
-        # CMX-277: stamp the live terminal wall at the message boundary. See
-        # docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md and hooks.timestamp_response.
-        return jsonify(hooks.timestamp_response(event))
     if event == "PostToolUse" and isinstance(body, dict):
         # The gate is over — whoever answered it. A ⏎ driven into the mirrored pane answers
         # the TUI directly, so a hook we are holding for that same call would otherwise wait
