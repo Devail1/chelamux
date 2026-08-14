@@ -606,6 +606,37 @@ def test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename():
         )
 
 
+def test_defeat_shapes_numbers_are_unique_across_the_catalog():
+    """CMX-293: CMX-284 made file names collision-proof (two concurrent reworks writing
+    `21-foo.md` and `21-bar.md` merge cleanly — no shared lines) and explicitly waved off the
+    *number* itself as "a readability aid, not an enforced key". That was the wrong call: the
+    number is exactly what a "shape 37" cross-reference — inside this catalog
+    (`\\bshapes? N\\b`, `[[N|...]]`) and in the wider test suite's "DEFEAT_SHAPES #N" comments
+    — actually points at. Two files both claiming 37 merge without conflict, but "see shape
+    37" no longer says which one; the file-level fix left this residue live (measured: two
+    shapes both numbered 37 landed on `dev` with no CI signal).
+
+    Seen to go red: two catalog files whose headings both open `## 37. ` — the exact
+    collision CMX-284's own writeup declared harmless.
+    """
+    root = Path(__file__).resolve().parent.parent
+    shapes_dir = root / "docs" / "defeat_shapes"
+    files = sorted(shapes_dir.glob("*.md"))
+    assert files, f"no shape files found under {shapes_dir}"
+    numbers = []
+    for f in files:
+        first_line = f.read_text().splitlines()[0]
+        m = re.match(r"^## (\d+)\. ", first_line)
+        assert m, f"{f.name}: heading {first_line!r} does not match '## N. Title'"
+        numbers.append(int(m.group(1)))
+    dupes = sorted({n for n in numbers if numbers.count(n) > 1})
+    assert not dupes, (
+        f"duplicate defeat-shape numbers: {dupes} — two files claim the same number, making "
+        "any 'shape N' cross-reference to it ambiguous; bump one of the colliding files' "
+        "number (filename AND heading) to the next free one before merging"
+    )
+
+
 def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
     """CMX-284 rework round 1: entries cross-reference each other by number ("the render-side
     mirror of shape 13", "[[21|entry 21]]") — under the old single-file catalog, renumbering

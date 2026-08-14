@@ -3154,39 +3154,108 @@ input[type="text"]:focus, textarea:focus, select:focus {
     color: var(--text-dim); font-size: 11px;
 }
 
+/* --- Generic centered-modal "sheet" (CMX-288) ---
+   .palette-overlay is already the shared backdrop for two modals (#palette,
+   #shortcuts-overlay) — dim+blur, fixed, flex-centered, no per-modal copy
+   needed. Neither of those two fit the Decisions inbox: .palette is shaped
+   for a fuzzy-search input+list+footer, .shortcuts-sheet for a static
+   multi-column cheatsheet. .modal-sheet is the third shape — a plain
+   header (title + close button) over a scrollable body — for any content
+   that's neither of those. Reuse THIS (backdrop + .modal-sheet), not a new
+   bespoke overlay, for the next centered modal (e.g. a tabbed settings
+   modal folding in #settings-drawer). */
+.modal-sheet {
+    width: 480px; max-width: 92vw; max-height: 80vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 20px 60px -10px rgba(0, 0, 0, 0.7);
+    animation: palette-in 0.13s ease-out;
+}
+.modal-sheet-head {
+    display: flex; align-items: center; gap: 10px; padding: 14px 16px;
+    border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+.modal-sheet-head .popover-title { font-weight: 700; font-size: 14px; color: var(--text); flex: 1 1 auto; }
+.modal-sheet-head .icon-btn { flex: 0 0 auto; }
+.modal-sheet-body { flex: 1 1 auto; overflow-y: auto; padding: 14px 16px; }
+
 /* --- Canvas --- */
 .canvas { grid-row: 2; overflow-y: auto; padding: 18px 20px; }
 .canvas-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .canvas-toolbar input[type=text] { flex: 1; }
 
-/* --- Settings drawer --- */
+/* --- Settings modal (CMX-287) ---
+   Was an off-canvas right-edge drawer (slide-in, one long scroll). Now a
+   centered TABBED modal — same idiom as .modal-task's overlay+dialog, plus a
+   tab rail (.settings-tabs) down the left so each knob group (General/Timing/
+   Dispatch/Notifications/Cost/Appearance/Collaboration) is its own screen
+   instead of a stop on one long scroll. #drawer-scrim (shared with the mobile
+   sidebar drawer) is still the dimming backdrop; only the dialog itself
+   changed shape. */
 .drawer-scrim {
     position: fixed; inset: 0; background: rgba(0,0,0,0.45);
     opacity: 0; pointer-events: none; transition: opacity 0.15s; z-index: 40;
 }
 .drawer-scrim.open { opacity: 1; pointer-events: auto; }
-.drawer {
-    position: fixed; top: 0; right: 0; height: 100vh; width: 380px; max-width: 92vw;
-    background: var(--surface); border-left: 1px solid var(--border);
-    transform: translateX(100%); transition: transform 0.18s ease;
-    z-index: 50; display: flex; flex-direction: column;
+.settings-modal {
+    position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%) scale(0.97);
+    width: min(760px, 94vw); max-height: 86vh;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+    opacity: 0; pointer-events: none; transition: opacity 0.15s ease, transform 0.15s ease;
+    z-index: 50; display: flex; flex-direction: column; overflow: hidden;
 }
-.drawer.open { transform: translateX(0); }
-.drawer-head {
+.settings-modal.open { opacity: 1; pointer-events: auto; transform: translate(-50%, -50%) scale(1); }
+.settings-modal-head {
     display: flex; align-items: center; justify-content: space-between;
     padding: 12px 16px; border-bottom: 1px solid var(--border); font-weight: 700;
+    flex: 0 0 auto;
 }
-.drawer-body { padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.settings-modal-body { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
+/* The tab rail. Same active vocabulary as .side-item (accent-tinted fill, no
+   hue-only cue) so the modal reads as part of the same design system as the
+   sidebar it replaces navigation for. */
+.settings-tabs {
+    flex: 0 0 156px; overflow-y: auto; padding: 10px; border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 2px;
+}
+.settings-tab {
+    padding: 8px 10px; border-radius: 7px; font-size: 12.5px; color: var(--text-dim);
+    cursor: pointer; user-select: none; transition: background 0.13s ease, color 0.13s ease;
+}
+.settings-tab:hover { background: var(--bg); color: var(--text); }
+.settings-tab.active { background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent); font-weight: 600; }
+.settings-tabpanels { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 14px; }
+.settings-tabpanel { display: none; flex-direction: column; gap: 12px; }
+.settings-tabpanel.active { display: flex; }
 /* margin-top:auto pins the footer to the bottom of the flex column without giving
-   .drawer-body a flex-grow it does not currently have — the AGPL source offer has
-   to be visible, but not at the cost of relaying the drawer above it. */
-.drawer-foot {
+   .settings-modal-body a flex-grow it does not currently have — the AGPL source
+   offer has to be visible, but not at the cost of shrinking the tab content above it. */
+.settings-modal-foot {
     margin-top: auto; padding: 10px 16px; border-top: 1px solid var(--border);
-    font-size: 11px; color: var(--text-dim);
+    font-size: 11px; color: var(--text-dim); flex: 0 0 auto;
 }
-.drawer-foot a { color: var(--text-dim); text-decoration: underline; }
-.drawer-foot a:hover { color: var(--text); }
-.drawer-body code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+.settings-modal-foot a { color: var(--text-dim); text-decoration: underline; }
+.settings-modal-foot a:hover { color: var(--text); }
+.settings-tabpanels code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+
+@media (max-width: 640px) {
+    /* No room for a side rail on a phone — the tabs become a horizontal
+       scroller above the panel, same trade the mobile sidebar already makes
+       (off-canvas becomes overlay; here, a column becomes a row). */
+    .settings-modal {
+        top: 4vh; left: 3vw; transform: translate(0, 0) scale(0.97);
+        width: 94vw; max-height: 92vh;
+    }
+    .settings-modal.open { transform: translate(0, 0) scale(1); }
+    .settings-modal-body { flex-direction: column; }
+    .settings-tabs {
+        flex: 0 0 auto; flex-direction: row; overflow-x: auto; overflow-y: hidden;
+        border-right: none; border-bottom: 1px solid var(--border);
+    }
+    .settings-tab { flex: 0 0 auto; white-space: nowrap; }
+}
 
 /* Settings sections — each group of related controls is a card. */
 .settings-section {
@@ -3796,20 +3865,18 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .persona-doc { font-size: 10.5px; color: var(--text-dim); background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
 
-/* Decisions — the durable, owner-independent log (decisions.js), now a topbar
-   popover (index.html #decisions-menu, anchored off #btn-decisions; cmx-106
-   first shipped this inside the Personas panel, cmx-107 relocated it into an
-   always-visible sidebar section, CMX-171 moved it again into this popover so
-   the sidebar stops permanently spending a section on it — and structurally
-   fixes a bug where the sidebar's collapsed-rail hide-list never listed these
-   elements, so they used to spill into the 60px icon rail). Rows reuse the
-   Feed's .feed-row/.feed-cls-*/.feed-glyph classes verbatim (feed.js), so a
-   decision reads identically whether you meet it here or in the Feed — but the
-   popover is far narrower than the Feed's canvas, so the row grid is overridden
+/* Decisions — the durable, owner-independent log (decisions.js), now a
+   centered modal (index.html #decisions-menu, a `.palette-overlay` +
+   `.modal-sheet`, opened off #btn-decisions; cmx-106 first shipped this
+   inside the Personas panel, cmx-107 relocated it into an always-visible
+   sidebar section, CMX-171 moved it into a topbar popover so the sidebar
+   stops permanently spending a section on it, CMX-288 moved it again off
+   that anchored popover — measured spanning the dashboard's full width and
+   occluding the whole Wall — into this modal). Rows reuse the Feed's
+   .feed-row/.feed-cls-*/.feed-glyph classes verbatim (feed.js), so a decision
+   reads identically whether you meet it here or in the Feed — but the modal
+   is far narrower than the Feed's canvas, so the row grid is overridden
    below into a stacked, wrapping layout. */
-.decisions-menu { min-width: 320px; max-width: 92vw; padding: 8px; }
-.decisions-menu .popover-head { padding: 4px 8px 6px; }
-.decisions-menu .popover-title { font-weight: 700; font-size: 12.5px; color: var(--text); }
 .decisions-chip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border);
     background: var(--surface); font-size: 11.5px; margin-bottom: 10px; }

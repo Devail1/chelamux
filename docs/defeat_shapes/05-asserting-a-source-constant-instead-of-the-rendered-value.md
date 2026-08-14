@@ -32,3 +32,41 @@ the very field that also carries the rendered value, so the two look, at a glanc
 observation-derived string. The fix asserts the rendered `k=v!r` pair itself
 (`"NODE_CHANNEL_FD='3'"`) and that the absent sibling's rendered pair is NOT present — pinned
 to what the observation produced, not to any name the prose happens to mention.
+
+**Found a third time, inverted:** `tests/settings_cost.test.mjs`'s tab-switching property
+(CMX-287 rework round 3, PR #358). Here there was no source constant to point at at all — the
+test called `window.chela.selectSettingsTab(tab)` (the real, un-mutated production function)
+directly, so the `.active`-class toggling it asserted was genuinely correct... for a path a
+real click never takes. `renderSettings()` renders each rail entry as
+`` `<div class="settings-tab" data-tab="${t.id}" onclick="chela.selectSettingsTab(this.dataset.tab)">` ``,
+and nothing in the suite ever read that `onclick` attribute — so the judge blanking its
+argument (`onclick="chela.selectSettingsTab('')"`) left every tab click a silent no-op while
+the suite, which never clicks anything, stayed green. Where the first two instances checked a
+*stand-in* for the rendered value (a source copy, static prose), this one skipped the render
+step's consumer entirely by calling the handler as a plain function — same failure to observe
+the rendered artifact, reached by calling the *right* function with the *wrong* provenance
+instead of reading a wrong stand-in. Closed with the idiom `tests/sidebar.test.mjs` already
+established for this exact gap (its own round-20/21 comment: "calling
+`window.chela.selectView(...)` directly never touches [the onclick]"): read the REAL rendered
+node's `onclick` attribute, assert its text names `this.dataset.tab` (not a literal), then
+`new Function('chela', el.getAttribute('onclick'))` compiled and run `this`-bound to the node
+— first against a recording stub (proves the wire isn't a no-op independent of the handler's
+own correctness), then against the real `window.chela` (proves the DOM actually changes).
+
+**Found a fourth time, same PR, one widget over:** `tests/settings_cost.test.mjs`'s
+Cost-window switcher (CMX-287 rework round 4, PR #358). The round-3 fix above closed this hop
+on the tab rail, but the Cost tab's own `.cost-window-btn` segments — rendered by the same
+`renderSettings()` with the same shape (`onclick="chela.setCostWindow('7d')"`) — had a
+sibling test (`window.chela.setCostWindow('7d')` called directly) that never got the same
+treatment. The judge corrupted the 7d button's literal argument to
+`onclick="chela.setCostWindow('live')"`: the attribute still parses, still names a real
+window, still reaches a real function, so the button becomes a live, highlighted no-op that
+re-fetches Live forever — invisible to a test that only ever drives the handler by name.
+Closing one instance of this shape in a file does not close a second, independently-written
+widget in the same file; each rendered `onclick` needs its own binding-level test, not one
+per file. Closed the same way, plus one refinement: because these buttons' onclick arguments
+are literals (not `this.dataset.win`), the fix asserts the attribute text names *that
+button's own* `data-win` value (`` new RegExp(`setCostWindow\('${btn.dataset.win}'\)`) ``)
+rather than a hardcoded `'7d'` literal — a hardcoded `'7d'` on the test side would still match
+a hardcoded, but WRONG, `'7d'` typo'd onto the wrong button in production, so pinning against
+the button's own data attribute is what actually catches the mismatch the mutation produced.

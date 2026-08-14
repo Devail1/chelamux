@@ -654,7 +654,7 @@ literal Escape.
 | `GET /api/dispatcher` | Open tasks + active/awaiting/recent runs per workflow |
 | `POST /api/dispatcher/runs/<id>/merge` · `/merge-all` | Squash-merge PRs + clean up |
 | `POST /api/agents/{start,stop,restart,msg,broadcast,trigger}` | Agent controls |
-| `POST /api/update/apply` | Run the same `chela update` pull-and-restart from the Settings drawer's "Update now" button — refuses on a dirty/diverged tree; 409 while a dispatched agent run is in flight (the restart would orphan it) or if an update is already running |
+| `POST /api/update/apply` | Run the same `chela update` pull-and-restart from the Settings modal's "Update now" button — refuses on a dirty/diverged tree; 409 while a dispatched agent run is in flight (the restart would orphan it) or if an update is already running |
 | `GET /api/events` | Server-Sent Events stream (reactive UI accelerator) |
 
 ---
