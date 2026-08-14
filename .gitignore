@@ -48,3 +48,7 @@ node_modules
 # The dispatch queue is per-install working state, not shipped content
 # (see TODO.example.md). The dispatcher reads it from disk.
 TODO.md
+
+# `chela task-finished --self-check-experiments` scratch files (WORKFLOW.md step 6) —
+# throwaway experiment logs, not source.
+.chela-self-check-*.json

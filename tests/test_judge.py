@@ -2366,6 +2366,135 @@ def test_a_vanished_judge_window_does_not_spend_a_retry(tmp_path, monkeypatch):
     assert _state() == (judge.J_RUNNING, 0, 0)
 
 
+def test_an_expired_login_is_reaped_immediately_and_does_not_spend_a_retry(tmp_path, monkeypatch):
+    """⚖️🔌 CMX-282. An expired login leaves the judge's window ALIVE (tmux never dropped
+    it) and its pane sitting at "Login expired · Please run /login" — no amount of waiting
+    fixes that, so the watchdog must reap it on sight instead of holding it for the full
+    JUDGE_TIMEOUT_SECONDS (60min) the way a genuine stall would. Measured live 2026-08-14:
+    two judges sat at exactly this banner until the 60-minute timeout arm finally caught them.
+
+    Because the judge never got a chance to run (same as a vanished window), it must not
+    spend the bounded `judge_cannot_verify_tries` budget either — re-launching it on the
+    same commit is the FIRST attempt, not a retry of a failed one.
+
+    Seen to go red: drop the `login_expired` check from `_judge_watchdog` (falls through to
+    the `alive and not timed_out: continue` and waits the full hour), or stamp
+    `judge_no_verdict=0` for it (spends a retry it shouldn't).
+    """
+    monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    def _spawn(sha):
+        with dispatcher._db() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+            with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+                 patch.object(dispatcher, "render_prompt", return_value="x"), \
+                 patch.object(dispatcher, "_judge_vars", return_value={}), \
+                 patch.object(dispatcher, "_launch_agent", return_value=None):
+                assert dispatcher._spawn_judge(wf, row, sha, conn) is True
+
+    def _state():
+        r = dispatcher.resolve_run("abc123")
+        return r["judge_state"], r["judge_cannot_verify_tries"], r["judge_no_verdict"]
+
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+    window = judge.judge_window_name("test-1")
+    banner = "✽ Sonnet 5\n\nLogin expired · Please run /login\n\n❯ "
+    # ⛔ side_effect, not return_value: a flat return_value answers the banner for ANY
+    # target, so `_capture_pane("")` (the wrong-pane mutation) would pass just as well as
+    # `_capture_pane(window)`. Only the judge's OWN window may see the banner — see
+    # DEFEAT_SHAPES.md.
+    capture_calls = []
+
+    def _capture(w):
+        capture_calls.append(w)
+        return banner if w == window else ""
+
+    with dispatcher._db() as conn:
+        with patch.object(dispatcher, "_capture_pane", side_effect=_capture), \
+             patch.object(dispatcher, "_kill_windows_named") as kill:
+            handed_over = dispatcher._judge_watchdog(conn, wf, live_windows={window})
+        conn.commit()
+    assert handed_over == 1
+    assert window in capture_calls                # the pane read must target the judge's OWN window
+    kill.assert_called_once_with(window)          # ⛔ still alive — must be torn down, not left
+    state, tries, no_verdict = _state()
+    assert state == judge.J_CANNOT_VERIFY
+    # ⛔ full sentence, not a lowercase "login" substring: that substring is satisfied by
+    # the "/login" fragment alone, so it would still pass if the leading clause were
+    # rewritten to claim the window disappeared instead of the login expiring.
+    assert dispatcher.resolve_run("abc123")["judge_detail"] == (
+        "the judge's session login expired mid-run (\"Login expired · Please run "
+        "/login\") — not a verdict on the PR"
+    )
+    assert no_verdict == 1
+    assert tries == 0                             # untouched — this reap is not a spent attempt
+
+    # Re-launching the SAME sha must NOT count this as a spent retry.
+    _spawn("cafe1234")
+    assert _state() == (judge.J_RUNNING, 0, 0)
+
+
+def test_an_expired_login_reaps_even_when_the_judge_lock_says_alive(tmp_path, monkeypatch):
+    """⚖️🔌 CMX-282, negative control on the CMX-229 lock cross-check. `login_expired` is a
+    BOUND on that cross-check exactly like `timed_out` is (see the comment above the
+    `judge.judge_lock_live(...)` call in `_judge_watchdog`): once the pane evidence says the
+    session is stuck at the login banner, no lock file claiming the process is still alive
+    may hold teardown — the process being alive is exactly the problem, not proof of health.
+
+    Without this control, a version of the fix that let a live lock override `login_expired`
+    (i.e. only short-circuits `judge_lock_live` when NOT login_expired, same bug shape as the
+    surviving mutation `if not timed_out and not login_expired and judge.judge_lock_live(...)`
+    → `if not timed_out and judge.judge_lock_live(...)`) would pass every other test here,
+    because none of them mount a LIVE lock at the same time as an expired-login banner.
+
+    Seen to go red: reintroduce `judge.judge_lock_live(...)` into the boolean the watchdog
+    consults when `login_expired` is True (i.e. drop the `not login_expired` short-circuit) —
+    a live lock then holds teardown instead of reaping, and `handed_over` comes back 0.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+             patch.object(dispatcher, "render_prompt", return_value="x"), \
+             patch.object(dispatcher, "_judge_vars", return_value={}), \
+             patch.object(dispatcher, "_launch_agent", return_value=None):
+            assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
+
+    window = judge.judge_window_name("test-1")
+    banner = "✽ Sonnet 5\n\nLogin expired · Please run /login\n\n❯ "
+    # ⛔ side_effect, not return_value — see the sibling test above for why a flat
+    # return_value can't tell `_capture_pane(window)` from `_capture_pane("")`.
+    capture_calls = []
+
+    def _capture(w):
+        capture_calls.append(w)
+        return banner if w == window else ""
+
+    with dispatcher._db() as conn:
+        with patch.object(dispatcher, "_capture_pane", side_effect=_capture), \
+             patch.object(dispatcher, "_kill_windows_named") as kill, \
+             patch.object(judge, "judge_lock_live", return_value=True):
+            handed_over = dispatcher._judge_watchdog(conn, wf, live_windows={window})
+        conn.commit()
+    assert handed_over == 1                       # reaped despite the lock claiming alive
+    assert window in capture_calls                # the pane read must target the judge's OWN window
+    kill.assert_called_once_with(window)
+    r = dispatcher.resolve_run("abc123")
+    assert r["judge_state"] == judge.J_CANNOT_VERIFY
+    assert r["judge_detail"] == (
+        "the judge's session login expired mid-run (\"Login expired · Please run "
+        "/login\") — not a verdict on the PR"
+    )
+
+
 def test_a_genuine_cannot_verify_verdict_still_spends_a_retry(tmp_path, monkeypatch):
     """⚖️🕳️ CMX-253 Objective 2, negative control. A `cannot_verify` the judge actually
     PRODUCED (it ran, and came back with an unknown — `set_judge_state`'s default,
