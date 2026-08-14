@@ -130,6 +130,33 @@ def hook_timeout(event: str) -> int:
     return HOOK_TIMEOUT
 
 
+# The two events "timestamps on messages in the live terminal" maps to: the user-message
+# boundary and the assistant-reply-finished boundary (CMX-277, correcting CMX-270's "not
+# feasible" verdict — see docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md). Both already fire over
+# http against this daemon; making the timestamp visible is a response-body change here,
+# not new plugin wiring.
+TIMESTAMP_EVENTS: frozenset[str] = frozenset({"UserPromptSubmit", "Stop"})
+
+
+def timestamp_response(event: str) -> dict:
+    """The hook response body that stamps ``event`` into the live terminal transcript.
+
+    ``systemMessage`` is the field Claude Code itself renders as a visible line in the
+    pty stream it owns — the spike's corrected finding: chelamux's own JS can't reach
+    xterm's canvas buffer to decorate a row, but the Claude Code process, writing its own
+    transcript, can. A **bare** ``{"systemMessage": ...}`` was observed rendering and then
+    being discarded within about a second (anthropics/claude-code#50542); pairing it with
+    ``continue``/``suppressOutput`` made it persist reliably for ``Stop`` in that same
+    report. There's no equivalent report for ``UserPromptSubmit``, so it gets the same
+    proven-persistent envelope rather than the proven-flaky bare one.
+
+    Local time, ``HH:MM:SS`` — the same clock and format the Feed already renders
+    timestamps in (``chela/main.py``'s event log view).
+    """
+    ts = time.strftime("%H:%M:%S")
+    return {"continue": True, "suppressOutput": False, "systemMessage": f"🕐 {ts}"}
+
+
 def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
     """The ``SessionStart`` command hook: POST the payload, print the recap, fail open.
 
