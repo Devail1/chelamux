@@ -1,139 +1,18 @@
 // --- Stage 0: ES-module imports ---
-import { $, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, escHtml, msgTargetAgent, relativeTime, setAgentsCache, setMsgTarget, shortTime, showModal } from './util.js';
-import { _displayLabel } from './terminals.js';
+import { $, api, closeModal, msgTargetAgent, setMsgTarget, showModal } from './util.js';
 import { refresh } from './main.js';
 
 // ---------------------------------------------------------------------------
-// Render: Agents
+// Agent actions + context readouts — shared by the agent-detail drill-in
+// (nav.js's showAgentDetail/renderAgentDetail) and the header rate-limit
+// pills, which are visible from every view. The dedicated Agents grid view
+// (refreshAgents -> #agent-grid, the broadcast/rediscover toolbar, and the
+// per-card kebab menu's Check/Compact/Clear context actions) was one of the
+// five views CMX-279 deleted — Liav named only Wall and Work as views he
+// actually opens — so that grid-only rendering is gone with it; what remains
+// here is everything still reachable from agent-detail or the always-visible
+// chrome.
 // ---------------------------------------------------------------------------
-
-function _sortAgents(agents) {
-    // Plain alphabetical — every window is a peer session (no managed roster).
-    return agents.sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function _renderCard(a) {
-    const name = escHtml(a.name);
-
-    // Activity dot, shared with the sidebar + wall (agentDotColor): busy → green,
-    // waiting → yellow, idle / no Claude → grey. Matches the wall's pane dots.
-    const dotColor = agentDotColor(a);
-
-    // Kebab menu — same controls for all agents. "Message" is redundant when the
-    // terminal wall is on (you just type into the pane), so it's offered only as
-    // the fallback send-channel when terminals are off.
-    const _termsOn = typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON;
-    let menuItems = _termsOn ? '' : `
-        <div class="menu-item" onclick="chela.openSendMsg('${name}')">Message</div>`;
-    if (a.has_schedules) {
-        menuItems += `
-        <div class="menu-item" onclick="chela.triggerSchedule('${name}')">Trigger Schedule</div>`;
-    }
-    menuItems += `
-        <div class="menu-sep"></div>
-        <details class="menu-group">
-            <summary class="menu-item">Context ▸</summary>
-            <div class="menu-item" onclick="chela.checkAgentContext('${name}')">Check</div>
-            <div class="menu-item" onclick="chela.compactAgent('${name}')">Compact</div>
-            <div class="menu-item" onclick="chela.clearContext('${name}')">Clear</div>
-        </details>
-        <div class="menu-sep"></div>`;
-    if (a.claude_running) {
-        menuItems += `
-        <div class="menu-item" onclick="chela.restartAgent('${name}')">Restart</div>
-        <div class="menu-item menu-danger" onclick="chela.stopAgent('${name}')">Stop</div>`;
-    } else {
-        menuItems += `
-        <div class="menu-item" onclick="chela.startAgent('${name}')">Start</div>`;
-    }
-
-    // Liveness line: native session status (busy/idle/waiting) when claude is
-    // running, else a plain offline note. Replaces the old heartbeat age.
-    const statusLine = a.session_status
-        ? `<span>Status: ${escHtml(a.session_status)}</span>`
-        : (a.claude_running ? '<span>Status: running</span>' : '');
-
-    let scheduleLine = '';
-    if (a.schedule_last_run || a.schedule_next_run) {
-        const parts = [];
-        if (a.schedule_last_run) parts.push('Last: ' + shortTime(a.schedule_last_run));
-        if (a.schedule_next_run) parts.push('Next: ' + relativeTime(a.schedule_next_run));
-        scheduleLine = `<span>${parts.join(' · ')}</span>`;
-    }
-
-    // Recap (latest away_summary) — truncated by default, expand on click.
-    // <details>/<summary> handles the toggle for free; full text is in the
-    // summary so the truncated head reads as a sentence, full body shown
-    // below when expanded. Hidden entirely if no recap.
-    let recapBlock = '';
-    if (a.recap) {
-        const head = a.recap.length > 90 ? a.recap.slice(0, 90).trimEnd() + '…' : a.recap;
-        // Recaps are sparse (Claude Code emits away_summary only occasionally),
-        // so surface the record's age — dimmed once >1h — to make a lagging
-        // recap read as stale instead of looking current.
-        let ageTag = '';
-        if (a.recap_ts) {
-            const ageS = (Date.now() - new Date(a.recap_ts)) / 1000;
-            const cls = ageS > 3600 ? 'recap-age stale' : 'recap-age';
-            ageTag = ` <span class="${cls}">${ageStr(ageS)}</span>`;
-        }
-        recapBlock = `
-        <details class="agent-recap" open>
-            <summary><span class="recap-label">Recap</span>${ageTag} <span class="recap-head">${escHtml(head)}</span></summary>
-            <div class="recap-body">${escHtml(a.recap)}</div>
-        </details>`;
-    }
-
-    // PR badge — last pr-link record; clickable, opens in new tab. Hidden
-    // if no PR (don't render placeholder).
-    let prBadge = '';
-    if (a.pr && a.pr.url) {
-        const label = a.pr.number ? `PR #${a.pr.number}` : 'PR';
-        const repo = a.pr.repository ? `${a.pr.repository} ` : '';
-        prBadge = `<a class="pr-badge" href="${escHtml(a.pr.url)}" target="_blank" rel="noopener noreferrer" title="${escHtml(repo + label)}">${escHtml(label)}</a>`;
-    }
-
-    return `
-    <div class="agent-card agent-card-session">
-        <div class="agent-header">
-            <div class="agent-name">
-                <span class="health-dot ${dotColor}"></span>
-                <span class="agent-name-link" data-agent="${attrEsc(a.name)}" onclick="chela.selectAgent(this.dataset.agent)" title="Open this agent's pane">${escHtml(_displayLabel(a.window_id || a.name))}</span>
-                <span class="claude-badge ${a.claude_running ? 'claude-on' : 'claude-off'}">${a.claude_running ? 'running' : 'stopped'}</span>
-                ${prBadge}
-            </div>
-            <div class="kebab-wrap">
-                <button class="kebab-btn" onclick="chela.toggleMenu(this)">&#8942;</button>
-                <div class="kebab-menu">${menuItems}</div>
-            </div>
-        </div>
-        <div class="agent-meta">
-            <span>Window: ${a.window_id || 'none'}</span>
-            ${statusLine}
-            ${scheduleLine}
-        </div>
-        <div class="context-bar-wrap" id="ctx-${name}">
-            <div class="context-bar"><div class="context-bar-fill" style="width:0%"></div></div>
-            <span class="context-label">Context: --</span>
-        </div>
-        ${recapBlock}
-    </div>`;
-}
-
-async function refreshAgents() {
-    const agents = await api('/api/agents');
-    setAgentsCache(agents);
-    const sorted = _sortAgents(agents);
-
-    const grid = $('#agent-grid');
-    let html = sorted.map(a => _renderCard(a)).join('');
-
-    if (!sorted.length) {
-        html = '<div style="padding:20px; text-align:center; color:var(--text-dim);">No active sessions found</div>';
-    }
-
-    grid.innerHTML = html;
-}
 
 function openSendMsg(agent) {
     setMsgTarget(agent);
@@ -298,62 +177,14 @@ function _renderContextData(data) {
     }
 }
 
-async function checkAgentContext(agent) {
-    const wrap = document.getElementById(`ctx-${agent}`);
-    if (wrap) wrap.querySelector('.context-label').textContent = 'Context: loading...';
-    const data = await api(`/api/agents/context?agent=${encodeURIComponent(agent)}`);
-    _renderContextData(data);
-}
-
-async function compactAgent(agent) {
-    if (!confirm(`Compact context for ${agent}? This will summarize conversation history.`)) return;
-    await api('/api/agents/msg', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent, message: '/compact' }),
-    });
-    setTimeout(() => checkAgentContext(agent), 8000);
-}
-
-async function clearContext(agent) {
-    try {
-        const res = await api('/api/agents/msg', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agent, message: '/clear' }),
-        });
-        console.log('clearContext response:', res);
-    } catch (e) {
-        console.error('clearContext error:', e);
-    }
-    setTimeout(() => checkAgentContext(agent), 5000);
-}
-
-async function doRediscover() {
-    await api('/api/agents/rediscover', { method: 'POST' });
-    refresh();
-}
-
 async function checkContext() {
     const data = await api('/api/agents/context');
     _renderContextData(data);
 }
 
-async function doBroadcast() {
-    const msg = $('#broadcast-input').value.trim();
-    if (!msg) return;
-    await api('/api/agents/broadcast', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg }),
-    });
-    $('#broadcast-input').value = '';
-}
-
-
 // --- Stage 0: ES-module exports ---
-export { checkContext, refreshAgents };
+export { checkContext };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { checkAgentContext, clearContext, compactAgent, doBroadcast, doRediscover, doSendMsg, openSendMsg, restartAgent, startAgent, stopAgent, triggerSchedule });
+Object.assign(window.chela, { doSendMsg, openSendMsg, restartAgent, startAgent, stopAgent, triggerSchedule });

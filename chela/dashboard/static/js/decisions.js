@@ -11,9 +11,10 @@
 // event to event_log (chela/event_log.py) whether or not a live session is
 // registered as the orchestrator — "the log is owner-independent" is already
 // true of the write path (see inbox.tick's unconditional `event_log.from_inbox`
-// loop). So this popover is a FILTERED READ of the same /api/log the Feed reads
-// (feed.js), narrowed to the kinds chela/inbox.py actually queues/logs, plus an
-// owner chip (orchestrator.js) — a decision is never lost here even when the
+// loop). So this popover is a FILTERED READ of the same /api/log endpoint (the
+// Feed view used to read it too, before CMX-279 deleted that view), narrowed to
+// the kinds chela/inbox.py actually queues/logs, plus an owner chip
+// (orchestrator.js) — a decision is never lost here even when the
 // chip reads "nobody": that IS this panel being the fallback home.
 //
 // Wiring (cmx-107, unchanged by CMX-171): main.js seeds it ONCE on page load
@@ -105,7 +106,7 @@ const DECISION_TYPES = [
 
 const DECISIONS_LIMIT = 300;     // per fetch
 const DECISIONS_MAX = 500;       // events kept in the browser
-const CATCHUP_FETCHES = 8;       // bounded drain, mirrors feed.js
+const CATCHUP_FETCHES = 8;       // bounded drain, mirrors feedmodel.js's drainLog
 
 let _cursor = null;
 let _boot = null;

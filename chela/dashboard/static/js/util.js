@@ -52,7 +52,9 @@ function lucideIcon(name, size = 16) {
 }
 
 const REFRESH_MS = 30000;
-let currentTab = 'agents';
+// 'work' when terminals are off — matches main.js's own fallback (the Wall is
+// selected explicitly on load when TERMINALS_ON).
+let currentTab = 'work';
 let msgTargetAgent = '';
 let _agentsCache = [];  // cache for populating schedule dropdown
 
@@ -146,8 +148,7 @@ function agentDotColor(a) {
 
 // Project key for grouping = basename of the session's cwd. Shells / sessions
 // with no resolved cwd have no project (callers pick their own "unknown" bucket
-// label). Shared by the sidebar's project groups (nav.js) and the Cost view
-// (cost.js) — one rule for "what project is this agent", not two.
+// label). Used by the sidebar's project groups (nav.js).
 function _agentProject(a) {
     if (!a || !a.cwd) return null;
     const parts = String(a.cwd).replace(/\/+$/, '').split('/');

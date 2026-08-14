@@ -37,7 +37,7 @@ export function briefSource(item) {
 // assertion on the modal.
 export function briefHtml(text) {
     if (!text) return '';
-    return knMd(text, 'brief.md');
+    return knMd(text);
 }
 
 // The modal header's display title. ⛔ Display-only — never touches the
