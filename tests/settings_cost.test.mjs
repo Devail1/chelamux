@@ -53,7 +53,21 @@
 // guard can see it, so it is declared NOT GUARDED above instead of chased)
 // and the wiring finding REAL, closed below by driving the actual rendered
 // `onclick` attribute instead of calling `selectSettingsTab()` directly. See
-// DEFEAT_SHAPES #35.
+// DEFEAT_SHAPES #5.
+//
+// CMX-287 rework round 4 (PR #358): the SAME handler-vs-binding hop the
+// round-3 verdict caught on the tab rail turned out to also be open one
+// widget over, in property 2's Cost-window switcher — test 2 called
+// `window.chela.setCostWindow('7d')` directly and never touched the onclick
+// `renderSettings()` emits onto each `.cost-window-btn`, so a corrupted
+// literal argument (the 7d button wired to `setCostWindow('live')`) stayed
+// green. A second, independent gap in the same property: nothing asserted
+// which segment `_applyWindowButtons()` marks `.active`/`aria-pressed`, so
+// dead-coding that function's own selection logic (`const on = false && ...`)
+// also stayed green even though the fetch/table assertions kept passing.
+// Closed by test 2b (the onclick-binding gap, same idiom as test 1b) and by
+// new assertions appended to test 2 itself (the selection-state gap). See
+// DEFEAT_SHAPES #5 and #39.
 //
 // Also closes DEFEAT_SHAPES #34 here: the fixture used to hand-type its own
 // `<nav id="settings-tabs">`/`<div id="drawer-body">` markup instead of the
@@ -283,4 +297,62 @@ test('the Cost tab renders a project-grouped table joined from /api/agents + /ap
     assert.ok(call, 'setCostWindow("7d") did not re-fetch /api/cost');
     assert.match(call.url, /window=7d/, 'the window change was not threaded into the /api/cost query');
     assert.match(document.getElementById('cost-table').textContent, /\$9\.00/, 'the table did not re-render for the new window');
+
+    // Which segment is marked selected is a SEPARATE render step
+    // (_applyWindowButtons()) from the fetch/table-render above — a mutation
+    // that dead-codes just that step (`const on = false && ...`) leaves the
+    // fetch, the URL and the table all correct while no segment is ever
+    // highlighted and aria-pressed stays stuck on Live. See DEFEAT_SHAPES #39.
+    const d7Btn = document.querySelector('.cost-window-btn[data-win="7d"]');
+    const liveBtn = document.querySelector('.cost-window-btn[data-win="live"]');
+    assert.equal(d7Btn.classList.contains('active'), true, 'the 7d segment is not marked .active after setCostWindow("7d")');
+    assert.equal(d7Btn.getAttribute('aria-pressed'), 'true', 'the 7d segment\'s aria-pressed did not flip to "true"');
+    assert.equal(liveBtn.classList.contains('active'), false, 'the Live segment is still marked .active after switching to 7d');
+    assert.equal(liveBtn.getAttribute('aria-pressed'), 'false', 'the Live segment\'s aria-pressed did not flip to "false"');
+});
+
+// --- 2b. 🔴 clicking a REAL Cost-window segment — via its onclick attribute — switches the window --
+//
+// Same handler-vs-binding hop as test 1b above, on a second widget: the test
+// just above drives window.chela.setCostWindow('7d') directly, which never
+// touches the onclick attribute renderSettings() emits onto each
+// .cost-window-btn. A corrupted literal argument (e.g. the 7d button wired to
+// `chela.setCostWindow('live')` — a live, highlighted, no-op that re-fetches
+// Live forever) would leave that test green, because it never reads the
+// attribute at all. Closed the same way test 1b was: read the REAL onclick
+// text off the REAL rendered button and check it names THAT button's own
+// data-win (not a hardcoded literal, so a mismatch between the two is what
+// actually gets caught), then compile+run it — first against a recording
+// stub, then against the real window.chela. See DEFEAT_SHAPES #39.
+test('clicking a rendered Cost-window segment — via its REAL onclick attribute — switches the window', async () => {
+    await openOnTab('cost');
+
+    const d7Btn = document.querySelector('.cost-window-btn[data-win="7d"]');
+    assert.ok(d7Btn, 'no rendered .cost-window-btn[data-win="7d"] — the Cost tab did not build the window switcher');
+    assert.match(d7Btn.getAttribute('onclick'), new RegExp(`chela\\.setCostWindow\\('${d7Btn.dataset.win}'\\)`),
+        'the 7d segment\'s onclick does not call chela.setCostWindow with its OWN data-win — a literal ' +
+        'pointing at a different window (e.g. \'live\') would leave this unmatched');
+
+    const calls = [];
+    _invokeOnclick(d7Btn, { setCostWindow: (...args) => calls.push(args) });
+    assert.deepEqual(calls, [['7d']],
+        'the 7d segment\'s onclick did not actually call chela.setCostWindow(\'7d\') — a wrong/blanked argument ' +
+        'leaves this empty or wrong even though the attribute text survives');
+
+    fetchCalls = [];
+    costPayload = [{ name: 'runner-east', model: 'sonnet', cost_usd: 9 }];
+    _invokeOnclick(d7Btn, window.chela);
+    await flush();
+    await flush();   // refreshCost()'s Promise.all
+
+    const call = fetchCalls.find(c => c.url.startsWith('/api/cost'));
+    assert.ok(call, 'clicking the 7d segment did not re-fetch /api/cost');
+    assert.match(call.url, /window=7d/, 'clicking the 7d segment did not thread window=7d into the /api/cost query');
+    assert.match(document.getElementById('cost-table').textContent, /\$9\.00/, 'clicking the 7d segment did not re-render the table');
+
+    const liveBtn = document.querySelector('.cost-window-btn[data-win="live"]');
+    assert.equal(d7Btn.classList.contains('active'), true, 'clicking the 7d segment did not mark it .active');
+    assert.equal(d7Btn.getAttribute('aria-pressed'), 'true', 'clicking the 7d segment did not set aria-pressed="true"');
+    assert.equal(liveBtn.classList.contains('active'), false, 'the Live segment is still .active after clicking 7d');
+    assert.equal(liveBtn.getAttribute('aria-pressed'), 'false', 'the Live segment\'s aria-pressed is still "true" after clicking 7d');
 });
