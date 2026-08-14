@@ -199,6 +199,15 @@ Nobody had a number for what a single judge or dispatched agent actually peaks a
 change either value (that decision needs the number below, made separately, on the
 record), but it does put a real measurement in place of the guess.
 
+**CMX-278 made that separate decision, using the number below.** `JUDGE_MAX_CONCURRENT`
+was a hardcoded `1` with no knob at all — the single biggest throughput constraint in the
+dispatch loop (every `awaiting_review` PR across every workflow queued behind ONE judge).
+It is now `chela.config.judge_max_concurrent()`, a Dispatch-tab knob
+(`CHELA_JUDGE_MAX_CONCURRENT`, per-workflow) — see its own docstring. The default stays
+`1`: raising it is sizing decision against your OWN box, per the counterintuitive-swap
+section above (`concurrency × working-set < SLICECAP`), not something the ~0.77G number
+below licenses chela to pick for you.
+
 **What was measured, and why not the judge/agent process directly:** a judge's dominant
 paid-for step (`chela judge self-check`'s `self_check`) IS running this repo's own test
 suite — `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (2826 tests, `-n 4 --dist loadfile`,

@@ -181,6 +181,14 @@ each covers.
 - `latest_required_mutations` (CMX-269) is wired into the rework brief at two render paths —
   `_respawn_rework` and `_renudge_prompt`. Both new prompt tests drove `tick`, which reaches
   only one per run state; dropping the argument from the other stayed green.
+- `judge_max_concurrent`'s floor=1 (CMX-278) has two entry paths into the value — the
+  dashboard/`set_dispatch` *write* path, which `validate_dispatch` floors before it ever
+  reaches storage, and the env-file *read* path (`CHELA_JUDGE_MAX_CONCURRENT`), which
+  `dashboard_setting` resolves straight from `os.environ` and never runs through
+  `validate_dispatch` at all. `test_judge_max_concurrent_floor_is_one_not_zero` drove only
+  the write path; mutating the reader's own `max(1, ...)` to `max(0, ...)` — the last guard
+  standing on the second path — left the suite green. Closed by a second test that sets the
+  env var to `"0"` and asserts the reader still returns `1`.
 
 ⭐ The judge caught the second one by proposing **a separate wiring experiment per call site
 rather than guessing which was covered** — which is also the cheapest way to write the guard.
@@ -501,7 +509,161 @@ and `test_cmd_task_finished_prints_every_missing_required_mutation_not_just_the_
 
 ---
 
-## 17. A shared field value tested on the sibling that motivated it, not on the one that already had it
+## 17. A syntactic-shape check on a live value instead of pinning what produced it
+
+**Assertion form:** the guard checks that a value produced by a live mechanism (a clock, a
+random source, an external call) has the right *shape* — length, character positions, a regex
+— rather than pinning that the mechanism was actually invoked to produce it. `len(stamp) == 8
+and stamp[2] == ":" and stamp[5] == ":"` reads exactly like "this is an HH:MM:SS timestamp"
+and is satisfied identically by a real clock read and by a hardcoded literal.
+
+**Mutation that defeats it:** replace the call to the live mechanism with a fixed value of the
+same shape — `time.strftime("%H:%M:%S")` → `"00:00:00"`. Every shape assertion still passes;
+the feature's entire claim (this is a *live* timestamp) is gone.
+
+**Why this is distinct from shape 5 and shape 10:** shape 5 is about reading a constant off
+source instead of the rendered/wired value — here the value genuinely is the rendered output,
+not source. Shape 10 is a mechanism that is *unobservable outside contention* (a kernel-picked
+port vs. a lucky guess are bit-for-bit identical, so no test can pin the mechanism directly,
+only declare the gap). This shape is the easy case: the mechanism **is** directly observable —
+the module holds the live source (`time`) as an attribute, so a test can monkeypatch it and
+assert the exact value that flowed through, no declared gap required.
+
+**Guard form that survives:** monkeypatch the live source itself
+(`monkeypatch.setattr(hooks.time, "strftime", lambda fmt: "12:34:56")`) and assert the
+rendered output equals the exact value the patched mechanism returned. This proves the code
+path actually asks the mechanism, rather than merely producing something shaped like its
+answer.
+
+**Found:** CMX-277 rework round 2 (2026-08-14), PR #348 —
+`test_timestamp_response_carries_the_proven_persistent_envelope`'s shape check
+(`len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"`) survived the judge's
+`ts = time.strftime("%H:%M:%S")` → `ts = "00:00:00"` mutation. Closed by adding
+`test_timestamp_response_asks_the_module_clock_not_a_fixed_string`, which monkeypatches
+`hooks.time.strftime` and asserts the exact rendered `systemMessage`.
+
+## 18. A monkeypatched stub that pins the mechanism was invoked, but discards which arguments it was invoked with
+
+**Assertion form:** the guard from shape 17 — monkeypatch the live source and assert the exact
+value the stub returned — proves the mechanism was *asked*, but the stub itself is written as
+`lambda fmt: "12:34:56"`: it accepts `fmt` and throws it away. Any call, with any format string,
+produces the same stubbed return value, so the assertion on that return value cannot tell two
+different format strings apart.
+
+**Mutation that defeats it:** change *what* is asked for, not *whether* it's asked —
+`time.strftime("%H:%M:%S")` → `time.strftime("%d:%m:%y")`. Both calls still reach the
+monkeypatched `strftime`, so the "mechanism was invoked" guard is untouched and still returns
+the stubbed `"12:34:56"`. The rendered `systemMessage` is byte-identical either way, so the
+shape-17 fix — which only ever inspects the return value — cannot distinguish a live *time*
+stamp from a live *date* stamp. The docstring's claim (`HH:MM:SS`, local time) is now false for
+a date-formatted string, and nothing failed.
+
+**Why this is distinct from shape 17:** shape 17 is "was the mechanism invoked at all, versus a
+hardcoded literal" — solved by monkeypatching the source and checking the output flowed through
+it. This shape is one level deeper: *given* the mechanism was invoked, *which request* did the
+code make of it? A stub that ignores its own arguments proves the former but is structurally
+blind to the latter — the args never reach anything the assertion inspects.
+
+**Guard form that survives:** capture the argument the code passed, not just the value the stub
+handed back — `captured = []`; `monkeypatch.setattr(hooks.time, "strftime", lambda fmt:
+captured.append(fmt) or "12:34:56")`; then assert `captured == ["%H:%M:%S"]` in addition to
+asserting the rendered output. This pins the request, not just that a request happened.
+
+**Found:** CMX-277 rework round 3 (2026-08-14), PR #348 — the judge's
+`ts = time.strftime("%H:%M:%S")` → `ts = time.strftime("%d:%m:%y")` mutation survived round 2's
+`test_timestamp_response_asks_the_module_clock_not_a_fixed_string` because its stub discarded
+`fmt`. Closed by capturing `fmt` into a list and asserting its exact value.
+
+---
+
+## 19. A two-valued knob mounted through different mechanisms per value, so only one direction exercises the real parse
+
+**Assertion form:** a boolean config knob has one guard per state — an OFF guard and an ON
+guard — which looks like full coverage of both directions (the mirror of shape 3, which is
+about a direction never mounted at all). But the two guards reach the value through different
+mechanisms: the OFF guard reloads the real module against a real (cleared) env var, so it runs
+the actual `os.environ.get(...)` parse; every ON guard instead does
+`monkeypatch.setattr(config, "KNOB", True)` on the already-imported module, which never touches
+`os.environ` or the parse expression at all.
+
+**Mutation that defeats it:** dead-code the parse so it can never produce `True`, while leaving
+the string default intact — `TERMINAL_TIMESTAMPS = os.environ.get(...)` → `TERMINAL_TIMESTAMPS =
+False and os.environ.get(...)`. The OFF guard still passes (the expression still evaluates to
+`False` with no env var set — dead-coding the true-producing half doesn't touch the false
+default). Every ON guard still passes too, because none of them evaluate that expression at
+all — they overwrite the attribute directly, downstream of the parse entirely. The knob is now
+permanently OFF regardless of the env var, and nothing goes red.
+
+**Why this is distinct from shape 3:** shape 3 is a direction that is never mounted at all — no
+assertion ever reads the OFF state. Here, both directions ARE asserted; the gap is that the two
+assertions don't exercise the same code. One pins the parse, the other pins something
+downstream of it, and the mutation lives in the part only the first one reaches — so from a
+glance at "is there an OFF test and an ON test," coverage looks symmetric when it isn't.
+
+**Guard form that survives:** mount the ON direction the same way as the OFF direction — set
+the real env var (`monkeypatch.setenv("CHELA_TERMINAL_TIMESTAMPS", "true")`) and reload the
+real module, then assert the reloaded attribute is `True`. This runs the actual parse
+expression in both directions, so a dead-coded half of it is caught regardless of which half.
+
+**Found:** CMX-277 rework round 4 (2026-08-14), PR #348 — the judge's `TERMINAL_TIMESTAMPS =
+os.environ.get(...)` → `TERMINAL_TIMESTAMPS = False and os.environ.get(...)` mutation survived
+because every ON-state test in `tests/test_hooks.py` monkeypatched the `TERMINAL_TIMESTAMPS`
+attribute directly, and the one env-reload test in the file (`test_terminal_timestamps_defaults_off_with_no_env_var_set`)
+only mounted the OFF direction. Closed by adding
+`test_terminal_timestamps_turns_on_with_the_env_var_set_to_true`, which reloads the real module
+against a real `CHELA_TERMINAL_TIMESTAMPS=true` env var.
+
+---
+
+## 20. A short-circuit's membership set is proven, but never proven together with the state that would make widening it dangerous
+
+**Assertion form:** a dispatcher-style function has an early `if event in SOME_SET and FLAG:
+return X` that is meant to intercept only a couple of named events and fall through to
+everything else unchanged. One test pins the set's exact membership (`SOME_SET ==
+frozenset({...})`); other tests drive each member event through the branch with `FLAG` on;
+still other tests drive the events the branch is protecting (a *different* event, further
+down the function) with `FLAG` at its real default. No test ever combines "an event the later
+branch cares about" with "`FLAG` on" — because every fixture that turns `FLAG` on also happens
+to only POST the early-branch's own events, and every fixture that POSTs the later branch's
+event happens to run at `FLAG`'s real (off) default.
+
+**Mutation that defeats it:** widen the membership check with an `or event == "<later branch's
+event>"` clause. The early branch now also intercepts and returns for that event whenever
+`FLAG` is on — silently skipping whatever the later branch does (a side effect, not just a
+different return value) with `FLAG` in the one state no fixture ever paired with that event.
+The membership-equality test still passes (it never says the check is *only* membership,
+just what the set contains); every early-branch test still passes (none of them touch the
+later branch's event); every later-branch test still passes (none of them turn `FLAG` on).
+
+**Why this is distinct from shape 12:** shape 12 is a loop that should stop at the first match
+but is tricked into falling through to consult more entries. Here there is no loop — it's a
+single boolean short-circuit whose *members* are proven correct in isolation, but never
+proven not to swallow a sibling branch once independently-true guard conditions (set
+membership, and a config flag) are combined. The gap is combinatorial coverage of two
+independently-toggled conditions, not fall-through.
+
+**Guard form that survives:** drive the later branch's event through the endpoint with the
+early branch's flag deliberately turned ON, and assert two things at once — the response body
+still has the *un-intercepted* shape (proving the early branch did not return early for this
+event), and the later branch's own side effect still fired (proving control actually reached
+it, not just that the return value looked right by coincidence).
+
+**Found:** CMX-277 rework round 5 (2026-08-14), PR #348 — the judge's `if event in
+hooks.TIMESTAMP_EVENTS and config.TERMINAL_TIMESTAMPS:` → `if (event in
+hooks.TIMESTAMP_EVENTS or event == "PostToolUse") and config.TERMINAL_TIMESTAMPS:` mutation
+in `chela/dashboard/app.py` survived because the flip to `TERMINAL_TIMESTAMPS` defaulting OFF
+(round 2) meant every ON-state test only POSTed `UserPromptSubmit`/`Stop`, and every
+`PostToolUse` test ran at the real (OFF) default — so no fixture ever POSTed `PostToolUse`
+with timestamps ON, which is exactly the combination the mutation needs to steal
+`gateanswer.gate_resolved()` and reproduce the CMX-54 regression (a held gate waiting out its
+whole budget). Closed by
+`test_timestamps_on_does_not_steal_the_post_tool_use_gate_resolution`, which sets
+`TERMINAL_TIMESTAMPS = True`, POSTs `PostToolUse`, and asserts both the body is `{}` and
+`gate_resolved` was still called.
+
+---
+
+## 21. A shared field value tested on the sibling that motivated it, not on the one that already had it
 
 **Assertion form:** two (or more) declarations set the same field to the same value —
 `live_reload=True` on both `worktree_disk_budget` and `memory_slice_budget`. A PR adds the
