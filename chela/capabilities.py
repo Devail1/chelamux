@@ -145,9 +145,11 @@ def _memory_slice_capability() -> Capability:
     see ``docs/RESOURCE_ISOLATION.md``), and reporting that as OFF is actively
     misleading: whoever sizes ``judge_max_concurrent`` off a doctor line that says OFF
     gets it wrong in either direction. :func:`chela.memcap.live_bound` answers the
-    question that matters — a ceiling already in force on this process's own cgroup
-    ancestry bounds an unwrapped dispatched agent exactly as much as chela's own rail
-    would, whoever set it.
+    question that matters — a ceiling already in force on a SEPARATE ``systemd --user``
+    slice (chela's dispatched agents are never nested inside it; see
+    :func:`chela.memcap.live_bound`'s own docstring) still eats into the same box's
+    total RAM, and bounds an unwrapped dispatched agent exactly as much as chela's own
+    rail would, whoever set it.
     """
     fix = ("set CHELA_MEMORY_SLICE_BUDGET=12G (or any K/M/G/T byte size) in "
            f"{config.env_file_path() or '$CHELA_DIR/chela.env'} — takes effect on "

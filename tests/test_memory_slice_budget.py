@@ -298,12 +298,25 @@ def test_available_false_when_systemd_run_missing(monkeypatch):
 # found it (`systemctl --user show memcap.slice`).
 
 
+_SHOW_PROPS = ["-p", "MemoryMax", "-p", "MemoryCurrent"]
+
+
 def _fake_show(monkeypatch, per_unit):
     """`systemctl --user show <unit> -p MemoryMax -p MemoryCurrent` → each unit's lines
-    from `per_unit[unit]`, a dict of MemoryMax/MemoryCurrent raw strings."""
+    from `per_unit[unit]`, a dict of MemoryMax/MemoryCurrent raw strings.
+
+    Asserts the trailing `-p` flags are exactly `MemoryMax`/`MemoryCurrent`, not just
+    that `cmd[:3]` looks like a `show` call — DEFEAT_SHAPES #24: a fake that dispatches
+    on an argv prefix and then fabricates per-unit data from a table keyed on the unit
+    name alone hands back MemoryMax= lines whether or not production actually asked for
+    MemoryMax, so a swap to a different real property (e.g. MemoryHigh) is invisible to
+    it.
+    """
     def fake_run(cmd, **kwargs):
         if cmd[:3] == ["systemctl", "--user", "show"]:
             unit = cmd[3]
+            assert cmd[4:] == _SHOW_PROPS, (
+                f"expected {_SHOW_PROPS} after the unit, got {cmd[4:]}")
             props = per_unit.get(unit, {"MemoryMax": "infinity", "MemoryCurrent": "0"})
             stdout = "\n".join(f"{k}={v}" for k, v in props.items())
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout)
@@ -312,12 +325,18 @@ def _fake_show(monkeypatch, per_unit):
 
 
 def _fake_list_and_show(monkeypatch, units, per_unit):
+    """As :func:`_fake_show`, plus the `list-units` discovery call — asserts it actually
+    filters on `--type=slice` (DEFEAT_SHAPES #24: without this, a swap to
+    `--type=service` still gets the fabricated `.slice`-named units back)."""
     def fake_run(cmd, **kwargs):
         if cmd[:3] == ["systemctl", "--user", "list-units"]:
+            assert "--type=slice" in cmd, f"expected --type=slice in {cmd}"
             lines = "\n".join(f"{u}  loaded active active {u}" for u in units)
             return subprocess.CompletedProcess(cmd, 0, stdout=lines)
         if cmd[:3] == ["systemctl", "--user", "show"]:
             unit = cmd[3]
+            assert cmd[4:] == _SHOW_PROPS, (
+                f"expected {_SHOW_PROPS} after the unit, got {cmd[4:]}")
             props = per_unit.get(unit, {"MemoryMax": "infinity", "MemoryCurrent": "0"})
             stdout = "\n".join(f"{k}={v}" for k, v in props.items())
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout)
@@ -406,6 +425,24 @@ def test_live_bound_picks_the_slice_with_the_least_headroom(monkeypatch):
     bound = memcap.live_bound()
 
     assert bound["unit"] == "memcap.slice"
+
+
+def test_live_bound_tie_break_treats_unreadable_occupancy_as_full_headroom(monkeypatch):
+    # huge.slice: 100G cap, occupancy UNREADABLE (no MemoryCurrent line at all).
+    # tight.slice: 6G cap, 5G used -> 1G headroom, the real bound an operator needs to
+    # see. Correct behaviour treats huge.slice's headroom as its own 100G ceiling (the
+    # docstring's "max_bytes alone when occupancy is unreadable"), so tight.slice's 1G
+    # wins. Collapsing the unreadable case to a 0-headroom guess instead would make
+    # huge.slice always look tighter than any real, measured headroom and hide the
+    # actual bound behind a slice chela knows nothing about.
+    _fake_list_and_show(monkeypatch, ["huge.slice", "tight.slice"], {
+        "huge.slice": {"MemoryMax": str(100 * 1024**3)},  # MemoryCurrent omitted
+        "tight.slice": {"MemoryMax": str(6 * 1024**3), "MemoryCurrent": str(5 * 1024**3)},
+    })
+
+    bound = memcap.live_bound()
+
+    assert bound["unit"] == "tight.slice"
 
 
 def test_live_bound_current_bytes_none_when_unreadable(monkeypatch):

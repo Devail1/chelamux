@@ -1,0 +1,25 @@
+{
+  "experiments": [
+    {
+      "guard": "NEW: live_bound() must ask systemd for SLICE units — the discovery query is what makes the whole feature find an operator's memcap.slice at all. Asking for the wrong unit type makes live_bound() return None on every real box (the .slice filter drops every returned name), i.e. `doctor` says OFF forever, which is precisely the bug CMX-280 exists to end",
+      "file": "chela/memcap.py",
+      "before": "            [\"systemctl\", \"--user\", \"list-units\", \"--type=slice\", \"--state=active\",\n",
+      "after": "            [\"systemctl\", \"--user\", \"list-units\", \"--type=service\", \"--state=active\",\n",
+      "kind": "wiring"
+    },
+    {
+      "guard": "NEW: _slice_memory() must ask systemd for MemoryMax — the property docs/RESOURCE_ISOLATION.md's own 'Verify, don't assume' section checks by hand, and the one the parser then reads back with values.get('MemoryMax'). Asking for MemoryHigh (a real, different systemd property — the soft limit) means the MemoryMax key is never present in real output, so _finite(None) -> None -> live_bound() returns None and the feature is dead on every real box",
+      "file": "chela/memcap.py",
+      "before": "            [\"systemctl\", \"--user\", \"show\", unit, \"-p\", \"MemoryMax\", \"-p\", \"MemoryCurrent\"],\n",
+      "after": "            [\"systemctl\", \"--user\", \"show\", unit, \"-p\", \"MemoryHigh\", \"-p\", \"MemoryCurrent\"],\n",
+      "kind": "wiring"
+    },
+    {
+      "guard": "NEW: live_bound()'s tie-break, as its own docstring states it — 'the slice with the LEAST headroom (max_bytes - current_bytes, or max_bytes alone when occupancy is unreadable)'. Collapsing the unreadable-occupancy case to 0 makes any slice whose MemoryCurrent could not be read always win, hiding the real 12G/10G bound an operator needs to see behind a slice chela knows nothing about",
+      "file": "chela/memcap.py",
+      "before": "        headroom = max_bytes if current_bytes is None else max_bytes - current_bytes\n",
+      "after": "        headroom = 0 if current_bytes is None else max_bytes - current_bytes\n",
+      "kind": "mutation"
+    }
+  ]
+}
