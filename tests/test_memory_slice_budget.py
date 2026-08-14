@@ -98,6 +98,14 @@ def test_capability_reports_an_external_bound_as_on(monkeypatch):
     assert "12.0G" in cap.detail
     assert "83%" in cap.detail
     assert "chela did not set this ceiling" in cap.detail
+    # CMX-280 rework round 3: "12.0G" (the ceiling) also appears once headroom is
+    # rendered, so a mutation collapsing headroom onto the ceiling value (`max_bytes`
+    # instead of `max_bytes - current`) was invisible to the assertions above — both
+    # numbers were "12.0G" in that case, and "12.0G" was already asserted. Pin the two
+    # rendered quantities by their own distinct values instead: 10G used out of 12G
+    # leaves exactly 2G headroom, and only the correct subtraction produces that.
+    assert "currently using 10.0G" in cap.detail
+    assert "~2.0G headroom" in cap.detail
 
 
 def test_capability_reports_an_external_bound_with_unreadable_occupancy(monkeypatch):
@@ -194,6 +202,74 @@ def test_memory_slice_budget_off_going_on_live_does_not_move_a_boot_latched_capa
 
     monkeypatch.setattr(config, "DISPATCH_WORKFLOWS", [Path("/repo/WORKFLOW.md")])
     assert capabilities.live_capability("dispatch")["on"] is False
+
+
+# CMX-280 rework round 3 (DEFEAT_SHAPES #22): `_memory_slice_capability` declares
+# `live_reload=True` on FOUR separate `return`s (capabilities.py:161, :168, :186, :192),
+# but the only test above that drives a boot snapshot through `capabilities.live()`
+# publishes while the knob is OFF (the :192 branch) — so only THAT branch's own
+# `live_reload=True` was ever proven load-bearing. The judge flipped the memcap-available
+# ON branch's flag (:161) to False in a throwaway checkout and the whole suite, including
+# every test above, stayed green: nothing ever published a boot snapshot FROM that branch
+# to see whether it un-latches. Closed by publishing from each of the other three branches
+# in turn and flipping live config to something else with no restart, mirroring the
+# OFF->ON test above in the opposite direction (and, for the two "on" branches, sideways).
+
+
+def test_memory_slice_budget_on_going_off_live_does_not_stay_latched(monkeypatch):
+    """Boot-publish from the memcap-available ON branch (capabilities.py:161) — the exact
+    branch the judge's surviving mutation targeted — then remove the knob live and confirm
+    `live()` reconciles to OFF instead of returning the stale ON snapshot."""
+    monkeypatch.setenv("CHELA_MEMORY_SLICE_BUDGET", "12G")
+    monkeypatch.setattr(memcap, "available", lambda: True)
+    capabilities.publish(capabilities.effective(), boot_id="b1")
+    assert capabilities.live_capability("memory_slice_budget")["on"] is True
+
+    # No restart — operator removed the knob from the env file live, which is exactly
+    # what this rail's `fix` text promises works without one.
+    monkeypatch.delenv("CHELA_MEMORY_SLICE_BUDGET", raising=False)
+    monkeypatch.setattr(memcap, "live_bound", lambda: None)
+    cap = capabilities.live_capability("memory_slice_budget")
+    assert cap["on"] is False
+    assert "unset/0" in cap["detail"]
+
+
+def test_memory_slice_budget_set_but_unwrapped_live_reflects_systemd_run_appearing(
+        monkeypatch):
+    """Boot-publish from the set-but-no-systemd-run branch (capabilities.py:168, `on`
+    False) then have `systemd-run` appear on PATH live — with no restart, `live()` must
+    reconcile to ON rather than keep reporting the boot-time OFF."""
+    monkeypatch.setenv("CHELA_MEMORY_SLICE_BUDGET", "12G")
+    monkeypatch.setattr(memcap, "available", lambda: False)
+    capabilities.publish(capabilities.effective(), boot_id="b1")
+    cap = capabilities.live_capability("memory_slice_budget")
+    assert cap["on"] is False
+    assert "systemd-run" in cap["detail"]
+
+    monkeypatch.setattr(memcap, "available", lambda: True)
+    cap = capabilities.live_capability("memory_slice_budget")
+    assert cap["on"] is True
+    assert "12.0G" in cap["detail"]
+
+
+def test_memory_slice_budget_external_bound_live_reflects_the_bound_disappearing(
+        monkeypatch):
+    """Boot-publish from the external-bound branch (capabilities.py:186, `on` True with
+    the knob itself unset) then have that outside bound go away live — `live()` must
+    reconcile to OFF, not keep reporting the boot-time external-bound ON."""
+    monkeypatch.delenv("CHELA_MEMORY_SLICE_BUDGET", raising=False)
+    monkeypatch.setattr(memcap, "live_bound", lambda: {
+        "unit": "memcap.slice", "max_bytes": 12 * 1024**3,
+        "current_bytes": 10 * 1024**3, "chela_owned": False,
+    })
+    capabilities.publish(capabilities.effective(), boot_id="b1")
+    cap = capabilities.live_capability("memory_slice_budget")
+    assert cap["on"] is True
+    assert "chela did not set this ceiling" in cap["detail"]
+
+    monkeypatch.setattr(memcap, "live_bound", lambda: None)
+    cap = capabilities.live_capability("memory_slice_budget")
+    assert cap["on"] is False
 
 
 # --- chela.memcap: available() --------------------------------------------------------

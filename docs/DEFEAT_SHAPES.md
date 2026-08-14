@@ -697,3 +697,73 @@ green. Closed by adding
 `test_worktree_disk_budget_reflects_a_post_boot_env_change_not_the_boot_snapshot`, mirroring
 the memory-slice test: publish a boot snapshot with the budget off, then set the env var with
 no restart and assert `capabilities.live_capability("worktree_disk_budget")` picks it up.
+
+---
+
+## 22. A field declared identically on every branch of one function, tested through only one branch
+
+**Assertion form:** a single function returns several `Capability` objects — one per
+branch (knob-on-and-usable, knob-on-but-unusable, externally-bound, off) — and every
+branch declares the same field (`live_reload=True`). One test drives a boot snapshot
+through the code that actually reads the field (`capabilities.live()`) — but only by
+publishing from ONE of the branches (usually whichever one the fixture defaults to) and
+flipping config so the *next* read lands on a different branch. That proves the flag
+matters on the branch that was published from; it proves nothing about the flag on the
+other N-1 branches, because `live()` only ever consults the flag on the row that was
+actually in the boot snapshot.
+
+**Mutation that defeats it:** flip `live_reload` to `False` on any branch OTHER than the
+one the existing test happens to publish from. Every `effective()`-level test for that
+capability reads config fresh and can't tell the flag apart; the one `live()` test never
+publishes a snapshot FROM the mutated branch, so it never exercises that branch's own
+flag either.
+
+**Guard form that survives:** for each branch of the function, publish a boot snapshot
+from THAT branch specifically, then change config so a later read would land on a
+different branch, and assert `live()` picks up the change. One test per branch, not one
+test for the function.
+
+**Found:** CMX-280 rework round 3 (2026-08-14), PR #351 — this is
+[[21|entry 21]] recurring one level down: not siblings across two functions, but branches
+inside one. `_memory_slice_capability` returns four `Capability` objects (memcap-available
+ON at `capabilities.py:161`, set-but-unwrapped OFF at `:168`, external-bound ON at `:186`,
+plain OFF at `:192`), all `live_reload=True`. Round 2 added
+`test_memory_slice_budget_reflects_a_post_boot_env_change_not_the_boot_snapshot`, which
+publishes from the `:192` OFF branch and flips to the `:161` ON branch — proving `:192`'s
+flag matters, saying nothing about `:161`'s. The judge flipped `:161`'s flag to `False` in
+a throwaway checkout; 3095 tests, including that test, stayed green. Closed by adding
+`test_memory_slice_budget_on_going_off_live_does_not_stay_latched` (publishes from `:161`,
+flips live to off) and its two siblings for `:168` and `:186`.
+
+---
+
+## 23. Two rendered quantities collide on the same substring, so mutating one is invisible
+
+**Assertion form:** a detail string renders more than one distinct numeric quantity
+derived from the same inputs (a ceiling, and a headroom computed as ceiling-minus-current)
+side by side in prose. The guard asserts each *expected* number appears as a substring —
+but only pins the ceiling's value, not the headroom's, and the two would print identically
+if headroom were computed wrong (e.g. mistakenly re-emitting the ceiling instead of
+subtracting).
+
+**Mutation that defeats it:** change the derived quantity's formula so it collapses onto
+the OTHER quantity's value (`headroom = human_size(max_bytes)` instead of
+`human_size(max_bytes - current)`). The string still contains every substring the guard
+checks — the ceiling's value was already being asserted, and now headroom prints the same
+digits — so the suite stays green even though the number that matters (how much room is
+actually left) is wrong.
+
+**Guard form that survives:** when a string renders two or more numbers derived from the
+same inputs, choose fixture values where every rendered number is numerically distinct,
+and assert each one by the surrounding words that make it unambiguous which quantity it
+is (`"currently using 10.0G"`, `"~2.0G headroom"`) — not just the bare digits, which could
+belong to either.
+
+**Found:** CMX-280 rework round 3 (2026-08-14), PR #351 —
+`test_capability_reports_an_external_bound_as_on` asserted `"12.0G"` (the ceiling) and
+`"83%"` but never pinned the headroom value by itself; with `max_bytes=12G` and
+`current=10G`, correct headroom is `"2.0G"`, and the judge's mutation
+(`headroom = config.human_size(bound["max_bytes"])`) made headroom render `"12.0G"` too —
+a substring the test already asserted for the ceiling. 3095 tests stayed green. Closed by
+asserting `"currently using 10.0G"` and `"~2.0G headroom"` as distinct, unambiguous
+substrings.
