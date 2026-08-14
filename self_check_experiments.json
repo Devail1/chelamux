@@ -1,0 +1,95 @@
+{
+  "experiments": [
+    {
+      "guard": "knMd's FENCED-CODE branch escapes its content. Round 4's own new test comment claims it: 'fenced content is NOT run through knInline' and lines inside a fence are 'escaped verbatim (escHtml)'. But the only fenced fixture in the suite (tests/taskmodal_model.test.mjs, the round-4 blockquote+fence test) is `const x = 1;` and `**not bold**` — escHtml is the identity function on both, so the escHtml call inside the fence can be dropped entirely and that exact-output assertion still matches byte for byte. Drop it: a judge verdict or TODO.md brief containing a fenced block with `<img src=x onerror=...>` (or any `<`/`&`) is spliced RAW into the review-timeline body and the brief pane — the same injection round 4 closed for the NON-fenced path (knInline's escHtml) is still open one branch over.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "if (inCode) { html += escHtml(raw) + '\\n'; continue; }",
+      "after": "if (inCode) { html += raw + '\\n'; continue; }",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's HEADING LEVEL. The briefHtml exact-output test's own comment names it explicitly as one of the things it guards — 'Regressing ANY of these (heading level, code wrapping, ...) changes this string and goes RED'. It cannot: every heading in every fixture in the suite is `###` (tests/taskmodal_model.test.mjs's `### OBJECTIVE` and `### H`), and no test anywhere contains an h1, h2 or h4 assertion. Pin the level to a constant 3: `# TITLE` and `#### detail` in a task brief both render as <h3>, collapsing the whole heading hierarchy the `#{1,4}` capture exists to preserve — a real regression for a brief pane whose headings are its only structure, and a screen-reader/outline regression too.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "const lv = h[1].length;",
+      "after": "const lv = 3;",
+      "kind": "mutation"
+    },
+    {
+      "guard": "WIRING — the FOURTH knMd/knInline call site, and the one the PR names FIRST as the reason knowledge.js survives the strip. knowledge.js's new header says the renderer 'is reused verbatim by the Work view's task-detail modal (taskmodal.js/taskmodalmodel.js)'; taskmodalmodel.js's briefHtml is the line this PR edited (it dropped the 'brief.md' argument), and taskmodal.js:127 `_briefPane` is where it actually reaches the DOM. Rounds 3 and 4 wired three call sites through a real DOM (kanban.js:152, taskmodal.js:156, taskmodal.js:116) — this one was left. tests/taskmodal_model.test.mjs drives briefHtml only as a PURE function, and both DOM tests in tests/taskmodal_render.test.mjs pass items with no brief/body/raw, so briefSource returns null and _briefPane short-circuits to its 'No brief recorded' note before ever calling briefHtml. Dead-code the call (binding kept referenced, no unused-import noise): every task brief in the modal's wide column renders as literal escaped markdown source — `### OBJECTIVE`, raw `**bold**`, raw backticks — which is exactly the regression this PR's own comment says the call exists to prevent. Same DEFEAT_SHAPES #7 shape ('two callers, one guarded') that rounds 3 and 4 already fired on twice.",
+      "file": "chela/dashboard/static/js/taskmodal.js",
+      "before": "    return briefHtml(src);",
+      "after": "    return false ? briefHtml(src) : escHtml(src);",
+      "kind": "wiring"
+    },
+    {
+      "guard": "knMd's `*` bullet alternative. knowledge.js's own doc comment (rewritten in round 2's rework, and the thing the three list-structure tests were written to protect) states the contract in as many words: `listType` is \"'ul' for a `-`/`*` run, 'ol' for a `1.`/`2.` run\". Every list fixture added in round 2 uses `-` only; no test anywhere feeds knMd a `*` bullet. Narrow the character class to `-` alone: a brief or judge verdict written with `*` bullets (valid markdown, and what an agent writing a verdict may well emit) renders as a run of paragraphs with a literal leading asterisk instead of a <ul> — no list, no <li>, and the `*` visible to the reader.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "const li = line.match(/^[-*]\\s+(.*)$/);",
+      "after": "const li = line.match(/^[-]\\s+(.*)$/);",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's fence branch must CLOSE AN OPEN LIST before opening the <pre>. Every other block branch that interrupts a list is guarded by round 2's 'a heading between a `-` run and a `1.` run splits them' test — the heading branch's closeList(), the blank-line branch's, the ol/ul switch. The fence branch's closeList() is the one that never got a fixture: round 4's blockquote+fence test opens no list at all (`> quoted line` then the fence), and the three list tests contain no fence. Dead-code it: a `-` bullet run immediately followed by a fenced code block — the single most common shape in a TODO.md brief or a judge verdict — leaves the <ul> hanging open with the <pre class=\"kn-code\"> nested INSIDE the last <li>, and the </ul> is emitted after the fence closes, so everything from the fence to the end of the brief renders inside the list item.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "if (/^```/.test(raw)) {\n            closeList();",
+      "after": "if (/^```/.test(raw)) {\n            if (false) closeList();",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's unterminated-fence tail (round 5 negative control, not named by the round-5 finding — round 4's own non-blocking note named it and explicitly declined to spend a blocking finding on it). A brief that ends mid-fence (an odd number of ``` lines — common in a truncated judge verdict) relies on the post-loop `if (inCode) html += '</code></pre>';` to close the <pre>/<code> the renderer itself opened. Dead-code it: a truncated fenced brief leaves the tags unclosed by knMd, relying on the browser's own error-recovery to auto-close them instead of the renderer doing it deliberately.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "if (inCode) html += '</code></pre>';",
+      "after": "if (false) html += '</code></pre>';",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's BLOCKQUOTE branch runs its content through knInline — which is where escHtml happens on this path (kanban.js's own comment; round 4's verdict said so in as many words). The round-5 branch table has a blockquote row, but its payload is `> quoted` and round 4's fixture is `> quoted line` — both are the IDENTITY under knInline, so the row pins that a <blockquote> is emitted, not that its content is escaped or inline-rendered. That is DEFEAT_SHAPES #24 (the fixture is a fixed point of the transform it claims to pin) recurring INSIDE the table written to close #24. Drop knInline from the branch: a `> quoted **bold** <img src=x onerror=alert(1)>` line — and judge verdicts, which knMd renders in the review-timeline body, routinely quote — is spliced RAW into the timeline body and the brief pane, and loses its inline markdown. Same injection round 4 closed for the paragraph path and round 5 closed for the fenced path, still open one branch over.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "<blockquote>${knInline(line.replace(/^>\\s?/, ''))}</blockquote>",
+      "after": "<blockquote>${line.replace(/^>\\s?/, '')}</blockquote>",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's HEADING branch runs its content through knInline. Round 5 widened the heading rows for the LEVEL (`#` through `####`, closing round 5's finding) but every heading payload in the entire suite is plain alphanumeric text — `# h1`, `## h2`, `### h3`, `#### h4`, `### OBJECTIVE` (briefHtml + taskmodal_render), `### H` — all identity under knInline AND under escHtml. So the level is now guarded and the CONTENT transform is not. Drop knInline from the heading branch: a brief or verdict heading containing `<`/`&`, `` `code` `` or `**bold**` (`### Fix <Wall> & the **grid**`) renders unescaped and unformatted straight into the brief pane and the review timeline — the same class of injection as experiment 1, on the branch the table just finished widening for a different property.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "class=\"kn-mh\">${knInline(h[2])}</h${lv}>",
+      "after": "class=\"kn-mh\">${h[2]}</h${lv}>",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's BLOCKQUOTE branch must closeList() before emitting the <blockquote>. The round-5 table enumerates closeList for the fence branch (`- a` then a fence), the blank line (`- a\\n\\n- b`), the heading (the round-2 test), both list-kind switches and the EOF tail — six of the eight closeList call sites — but no fixture anywhere puts a `> quote` after an open list. Dead-code it: a `-` run immediately followed by a quoted line (the shape of every judge verdict that lists findings and then quotes the code) leaves the <ul> hanging open with the <blockquote> nested INSIDE the last <li>, and the </ul> is emitted only at EOF, so everything from the quote to the end of the brief renders inside that list item. This is the exact defect the table's own fence row exists to catch, on the sibling branch it did not enumerate.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "if (/^>\\s?/.test(line)) { closeList();",
+      "after": "if (/^>\\s?/.test(line)) { if (false) closeList();",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's PARAGRAPH fallback must closeList() before emitting the <p> — the eighth closeList call site, and the other one the table did not enumerate. Every existing fixture that reaches a paragraph after a list goes through a blank line first (briefHtml's `2. Second step.\\n\\nSome paragraph.`) or through a fence (round 4's `after`), so the paragraph branch's own closeList is asserted by nothing. Dead-code it: a bullet run followed directly by a plain continuation line — `- ship the wall\\nthen review it`, the most ordinary shape in a TODO.md brief — nests the <p> inside the last <li> and leaves the </ul> to the EOF tail, so the rest of the brief renders inside the list. Kept separate from experiment 3 because a fixture that fixes one closeList site cannot pass for the other.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "        closeList();\n        html += `<p>${knInline(line)}</p>`;",
+      "after": "        if (false) closeList();\n        html += `<p>${knInline(line)}</p>`;",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's blank-line check runs on the TRIMMED line (raw.replace(/\\s+$/, '')), not on raw — this is why a whitespace-only separator line closes an open list exactly like a truly empty one. No existing fixture has a whitespace-only line; every blank-line fixture (`- a\\n\\n- b`) uses a genuinely empty line. Drop the trailing-whitespace strip: a whitespace-only separator (common when a brief is hand-edited or pasted through something that pads lines) no longer matches `line === ''`, falls through to the paragraph fallback instead, and renders as a spurious empty `<p>   </p>` wedged between the two lists instead of being treated as the blank separator it visually is.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "const line = raw.replace(/\\s+$/, '');",
+      "after": "const line = raw;",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's ordered-list regex allows leading indentation before the digit (`/^\\s*\\d+\\.\\s+(.+)$/`), deliberately wider than the unordered regex right below it. No fixture anywhere feeds knMd an indented ordered item; every `1.`/`2.` fixture starts at column 0. Narrow the regex to `/^\\d+\\.\\s+(.+)$/`: an indented ordered item (`  1. a`, the ordinary shape of a numbered step nested under a bullet in a TODO.md brief) no longer matches the ordered-item branch, falls through to the paragraph fallback, and renders as a plain paragraph with the leading spaces and the bare numeral visible instead of an <li> inside an <ol>.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "const ol = line.match(/^\\s*\\d+\\.\\s+(.+)$/);",
+      "after": "const ol = line.match(/^\\d+\\.\\s+(.+)$/);",
+      "kind": "mutation"
+    },
+    {
+      "guard": "knMd's list-kind switch, ol -> ul direction (round 5 negative control, not named by the round-5 finding). When a `1.` run is immediately followed by a `-` run with no blank line in between, closeList() must run before the new <ul> opens, exactly as round 2's guard already pins for the reverse (ul -> ol) direction. Dropping the closeList() call on this branch leaves the earlier `<ol class=\"kn-ol\">` unclosed, merging the two lists into one malformed nested structure instead of two independently-closed ones.",
+      "file": "chela/dashboard/static/js/knowledge.js",
+      "before": "if (listType !== 'ul') { closeList(); html += '<ul class=\"kn-ul\">'; listType = 'ul'; }",
+      "after": "if (listType !== 'ul') { html += '<ul class=\"kn-ul\">'; listType = 'ul'; }",
+      "kind": "mutation"
+    }
+  ]
+}

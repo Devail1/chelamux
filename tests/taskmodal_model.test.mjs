@@ -241,6 +241,15 @@ test('knMd: a link href containing a double quote is escaped by attrEsc, not spl
 // two rows are NEGATIVE CONTROLS — branches the round-5 judge finding did not
 // name — included to prove this table closes the space rather than answering
 // only the four findings named this round.
+//
+// Round 6: enumerating knMd's branches by ENTRY CONDITION (does this branch
+// emit its tag) is not the same as enumerating every (branch x transform)
+// pair inside it. The blockquote and heading rows above used plain-text
+// payloads — identity under knInline — so knInline's escaping/bold-rendering
+// inside those two branches went unexercised even though this same table had
+// already fixed that exact defect for the fenced-code branch. And closeList()
+// has eight call sites; the round-5 table covered six. See the six rows below
+// and DEFEAT_SHAPES #25.
 const KN_MD_BRANCH_TABLE = [
     {
         branch: 'fenced code: content is escaped verbatim via escHtml, not knInline\'d '
@@ -311,6 +320,56 @@ const KN_MD_BRANCH_TABLE = [
         branch: 'an external link renders via knLink/attrEsc',
         md: '[docs](https://example.com/x)',
         html: '<p><a href="https://example.com/x" target="_blank" rel="noopener">docs</a></p>',
+    },
+    // --- round 6 additions: the round-5 table enumerated knMd's branches BY
+    // ENTRY CONDITION (does this branch emit its tag) but not by the transforms
+    // each branch applies once inside — DEFEAT_SHAPES #24 recurring one level
+    // deeper (see DEFEAT_SHAPES #25). The blockquote and heading rows above
+    // (`> quoted`, `# h1`...`#### h4`) are plain alphanumeric text — identity
+    // under knInline — so dropping the knInline call from either branch left
+    // both rows byte-identical. And of closeList()'s eight call sites the
+    // table exercised six; these two close the remaining pair (blockquote and
+    // paragraph immediately after an open list, no blank line).
+    {
+        branch: 'blockquote content is run through knInline, not spliced raw — payload with '
+            + 'a bold span AND HTML-special characters so knInline is NOT the identity '
+            + '(DEFEAT_SHAPES #25)',
+        md: '> quoted **bold** <img src=x onerror=alert(1)>',
+        html: '<blockquote>quoted <strong>bold</strong> &lt;img src=x onerror=alert(1)&gt;</blockquote>',
+    },
+    {
+        branch: 'heading content is run through knInline, not spliced raw — payload with a '
+            + 'bold span AND HTML-special characters so knInline is NOT the identity '
+            + '(DEFEAT_SHAPES #25)',
+        md: '### Fix <Wall> & the **grid**',
+        html: '<h3 class="kn-mh">Fix &lt;Wall&gt; &amp; the <strong>grid</strong></h3>',
+    },
+    {
+        branch: 'a `-` run immediately followed by a blockquote: closeList() runs BEFORE '
+            + 'the <blockquote> opens, so the </ul> is not left dangling inside the last '
+            + '<li> (the closeList() call site the round-5 table did not cover)',
+        md: '- a\n> quoted',
+        html: '<ul class="kn-ul"><li>a</li></ul><blockquote>quoted</blockquote>',
+    },
+    {
+        branch: 'a `-` run immediately followed by a plain continuation line (no blank '
+            + 'line, no fence): closeList() runs BEFORE the <p> opens (the eighth and '
+            + 'last closeList() call site the round-5 table did not cover)',
+        md: '- ship the wall\nthen review it',
+        html: '<ul class="kn-ul"><li>ship the wall</li></ul><p>then review it</p>',
+    },
+    {
+        branch: 'a whitespace-only line closes an open list exactly like a truly blank '
+            + 'line — the trailing-whitespace strip (`raw.replace(/\\s+$/, \'\')`) runs '
+            + 'before the blank-line check',
+        md: '- a\n   \n- b',
+        html: '<ul class="kn-ul"><li>a</li></ul><ul class="kn-ul"><li>b</li></ul>',
+    },
+    {
+        branch: 'an indented ordered-list item (leading spaces before the digit) still '
+            + 'matches the ordered-item branch, not the paragraph fallback',
+        md: '  1. a',
+        html: '<ol class="kn-ol"><li>a</li></ol>',
     },
 ];
 
