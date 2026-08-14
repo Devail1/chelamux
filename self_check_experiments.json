@@ -1,42 +1,21 @@
 {
   "experiments": [
     {
-      "guard": "message_display_response stamps only the message's first streamed batch (index==0)",
-      "file": "chela/hooks.py",
-      "before": "    if body.get(\"index\") != 0:",
-      "after": "    if body.get(\"index\") == 0:"
+      "guard": "WIRING: clicking a tab in the rail must switch tabs — the entire point of the drawer->modal rewrite. Both suites call window.chela.selectSettingsTab(...) directly and never dispatch a click on a rendered .settings-tab, so the onclick the user actually hits is exercised by nothing. After this mutation every tab click is a no-op (selectSettingsTab('') fails the SETTINGS_TABS membership check and returns) while the rail still renders and still highlights whatever the tests select programmatically.",
+      "file": "chela/dashboard/static/js/nav.js",
+      "before": "onclick=\"chela.selectSettingsTab(this.dataset.tab)\"",
+      "after": "onclick=\"chela.selectSettingsTab('')\"",
+      "kind": "wiring"
     },
     {
-      "guard": "TIMESTAMP_EVENTS pins exactly MessageDisplay, so PostToolUse's gate resolution can never be swallowed by the timestamp branch",
-      "file": "chela/hooks.py",
-      "before": "TIMESTAMP_EVENTS: frozenset[str] = frozenset({\"MessageDisplay\"})",
-      "after": "TIMESTAMP_EVENTS: frozenset[str] = frozenset({\"MessageDisplay\", \"PostToolUse\"})"
-    },
-    {
-      "guard": "the MessageDisplay branch in api_hooks answers on its own and never falls through to hooks.ingest (keeps the streamed-batch firehose off the event log)",
-      "file": "chela/dashboard/app.py",
-      "before": "    if event in hooks.TIMESTAMP_EVENTS:",
-      "after": "    if event in hooks.TIMESTAMP_EVENTS and False:"
-    },
-    {
-      "guard": "a non-string delta degrades to empty rather than being stringified into the displayed message",
-      "file": "chela/hooks.py",
-      "before": "    delta = delta if isinstance(delta, str) else \"\"",
-      "after": "    delta = delta if isinstance(delta, str) else delta"
-    },
-    {
-      "guard": "the short-circuit swallows ONLY its own event — widening it must not silently drop another event's ingest (DEFEAT_SHAPES shape 12, retested against the branch's NEW position above ingest)",
-      "file": "chela/dashboard/app.py",
-      "before": "    if event in hooks.TIMESTAMP_EVENTS:",
-      "after": "    if event in hooks.TIMESTAMP_EVENTS or event == \"Stop\":",
-      "kind": "mutation"
-    },
-    {
-      "guard": "the endpoint still fails OPEN on a malformed MessageDisplay body — 200 and {}, never a 500 into a live agent (the endpoint docstring's own promise, on the new early-return path)",
-      "file": "chela/dashboard/app.py",
-      "before": "        if config.TERMINAL_TIMESTAMPS and isinstance(body, dict):",
-      "after": "        if config.TERMINAL_TIMESTAMPS:",
+      "guard": "nav.js's own comment: \"focus: 'notify' opens straight to the Notifications tab (the popover's 'Notifications' row uses this)\". topbarmenu.test.mjs only asserts the popover's onclick STRING is chela.toggleSettings('notify'); nothing asserts where that lands now that the panels are hidden per-tab (pre-CMX-287 it was a scrollTop on one long scroll, so the section was visible either way). After this mutation the bell opens on the last/default tab and the notification settings are not reachable from it at all.",
+      "file": "chela/dashboard/static/js/nav.js",
+      "before": "selectSettingsTab(focus === 'notify' ? 'notifications' : _settingsTab);",
+      "after": "selectSettingsTab(false && focus === 'notify' ? 'notifications' : _settingsTab);",
       "kind": "mutation"
     }
+  ],
+  "notes": [
+    "The round-3 verdict's third finding (settings_cost.test.mjs style.css '.settings-tabpanel { display: none }' -> '{ display: flex }') is deliberately NOT included here. It is not omitted by oversight: the orchestrator (PR #358, round-4 comment) ruled it an unfair test measured against this suite — tests/settings_cost.test.mjs never loads style.css and jsdom resolves no layout/box model, so no CSS mutation of any spelling can redden this suite; a stylesheet-text parser to fake a signal is the exact race CMX-117 already burned ~4 judge rounds on with correct code throughout. Closed instead by narrowing the test's docstring to state the gap explicitly (NOT GUARDED) and removing the 'or the CSS selector drifts' claim it could not back up. See docs/DEFEAT_SHAPES.md shape 5's third 'Found' entry for the two mutations that ARE guarded here."
   ]
 }

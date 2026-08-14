@@ -4,14 +4,31 @@
 // assert what renderSettings()/selectSettingsTab()/cost.js's refreshCost()
 // actually produce in the DOM, not a source grep.
 //
-// Two properties:
+// Three properties:
 //
-//   1. 🔴 TAB SWITCHING SHOWS EXACTLY ONE PANEL. The drawer->modal rewrite's
-//      whole point is per-tab panels instead of one long scroll — if
-//      selectSettingsTab() stops toggling the `.active` class (or the CSS
-//      selector drifts), every panel would render at once, silently reverting
-//      to the old one-scroll drawer with extra chrome.
-//   2. 🔴 THE COST TAB JOINS /api/agents (for cwd -> project) WITH /api/cost
+//   1. 🔴 TAB SWITCHING SHOWS EXACTLY ONE `.active` PANEL/RAIL-ENTRY. The
+//      drawer->modal rewrite's whole point is per-tab panels instead of one
+//      long scroll — if selectSettingsTab() stops toggling the `.active`
+//      class, that regresses silently. ⚠️ NOT GUARDED: whether a
+//      non-`.active` `.settings-tabpanel` is actually PAINTED (i.e. that
+//      `style.css`'s `.settings-tabpanel { display: none }` /
+//      `.settings-tabpanel.active { display: flex }` pair still exists and
+//      still wins) is a *rendered* fact this suite cannot see — jsdom builds
+//      no box model and resolves no layout, and this file never even loads
+//      `style.css`. A CSS mutation that keeps every panel's `display` at
+//      `flex` regardless of `.active` is invisible here at any spelling
+//      (parsing the stylesheet as text to "catch" it is its own defeatable
+//      race — see CMX-117 rounds 3-8). That gap is covered only by manual
+//      verification, not by this suite; see the PR's VERIFY note.
+//   2. 🔴 CLICKING A RAIL ENTRY ACTUALLY SWITCHES TABS. Calling
+//      `window.chela.selectSettingsTab(tab)` proves the handler, not the
+//      binding — it never touches the `onclick` attribute `renderSettings()`
+//      renders onto each `.settings-tab`, so a corrupted or dead-coded wire
+//      (e.g. `onclick="chela.selectSettingsTab('')"`) would still leave the
+//      suite green. Guarded by compiling and running the REAL rendered
+//      `onclick` attribute (same idiom as tests/sidebar.test.mjs's
+//      `_invokeOnclick`), not by calling the handler directly.
+//   3. 🔴 THE COST TAB JOINS /api/agents (for cwd -> project) WITH /api/cost
 //      (for cost_usd), GROUPED BY PROJECT, and re-fetches on window change. A
 //      revival that renders an empty table (or never re-fetches on Today/7d/
 //      30d) is decoration, not a working Cost tab.
@@ -26,6 +43,17 @@
 // "(unknown)" for both rows. Fixed by naming agents so neither name shares a
 // substring with either project, and by pinning the exact project-row text
 // (not just "is this substring anywhere in the table").
+//
+// CMX-287 rework round 3 (PR #358): the judge's round-3 verdict found two
+// more gaps in property 1 above — a CSS mutation (`.settings-tabpanel`'s base
+// `display: none` -> `display: flex`) and a wiring mutation (the rail's
+// `onclick` argument blanked) both stayed green. The orchestrator's own
+// review of that verdict (PR #358 comment, round 4) found the CSS finding
+// UNFAIR (jsdom does no layout and this file never loads style.css — no
+// guard can see it, so it is declared NOT GUARDED above instead of chased)
+// and the wiring finding REAL, closed below by driving the actual rendered
+// `onclick` attribute instead of calling `selectSettingsTab()` directly. See
+// DEFEAT_SHAPES #35.
 //
 // Also closes DEFEAT_SHAPES #34 here: the fixture used to hand-type its own
 // `<nav id="settings-tabs">`/`<div id="drawer-body">` markup instead of the
@@ -143,6 +171,80 @@ test('selecting a tab shows only that tab\'s panel and marks it active in the ra
     const nowActive = document.querySelectorAll('.settings-tabpanel.active');
     assert.equal(nowActive.length, 1);
     assert.equal(nowActive[0].dataset.tab, 'timing', 'switching tabs did not move the active panel to Timing');
+});
+
+// --- 1b. 🔴 clicking a REAL rail entry actually switches tabs (not the handler called directly) --
+//
+// jsdom (no runScripts:"dangerously" — deliberately unset here, matching
+// tests/sidebar.test.mjs/tests/topbarmenu.test.mjs/tests/decisions.test.mjs)
+// never executes inline onclick="..." attributes on a real
+// dispatchEvent('click'), so a literal MouseEvent dispatch would prove
+// nothing. Instead this reads the ACTUAL onclick attribute string off the
+// REAL rendered `.settings-tab` node (renderSettings() emits it, not a
+// fixture) and compiles+runs exactly that source, `this`-bound to the rail
+// node (matching `this.dataset.tab`) — the same two things a real click
+// would go through (attribute -> window.chela -> function), just compiled by
+// this test instead of by a browser's HTML parser. This is what the CMX-287
+// round-3 judge finding caught: `openOnTab()`/property 1 above call
+// `window.chela.selectSettingsTab(tab)` directly, which never touches this
+// attribute, so `onclick="chela.selectSettingsTab('')"` left the whole suite
+// green.
+function _invokeOnclick(el, chelaStub) {
+    const handler = new Function('chela', el.getAttribute('onclick') || '');
+    handler.call(el, chelaStub);
+}
+
+test('clicking a rendered rail entry — via its REAL onclick attribute — switches the active tab/panel', async () => {
+    window.chela.toggleSettings();
+    await flush();
+
+    const timingTab = document.querySelector('.settings-tab[data-tab="timing"]');
+    assert.ok(timingTab, 'no rendered .settings-tab[data-tab="timing"] — renderSettings() did not build the rail');
+    assert.match(timingTab.getAttribute('onclick'), /chela\.selectSettingsTab\(this\.dataset\.tab\)/,
+        'the Timing rail entry is not wired to chela.selectSettingsTab(this.dataset.tab)');
+
+    // Prove it is not a no-op wire first, via a recording stub (catches the
+    // wire pointing at a dead/blanked argument without depending on the real
+    // handler's own behaviour).
+    const calls = [];
+    _invokeOnclick(timingTab, { selectSettingsTab: (...args) => calls.push(args) });
+    assert.deepEqual(calls, [['timing']],
+        'the Timing rail entry\'s onclick did not actually call chela.selectSettingsTab(\'timing\') — a blanked ' +
+        'argument (e.g. selectSettingsTab(\'\')) leaves this empty or wrong even though the attribute text survives');
+
+    // Then drive it against the REAL window.chela and read the REAL DOM back.
+    _invokeOnclick(timingTab, window.chela);
+    const active = document.querySelectorAll('.settings-tabpanel.active');
+    assert.equal(active.length, 1);
+    assert.equal(active[0].dataset.tab, 'timing', 'clicking the Timing rail entry did not activate the Timing panel');
+    assert.equal(document.querySelector('.settings-tab.active').dataset.tab, 'timing',
+        'clicking the Timing rail entry did not mark it active in the rail');
+});
+
+// --- 1c. 🔴 the bell's "notify" focus lands on Notifications, not the last-selected tab -----
+//
+// nav.js's renderSettings(focus) ternary (`focus === 'notify' ? 'notifications'
+// : _settingsTab`) is downstream of the onclick binding already covered by
+// tests/topbarmenu.test.mjs (which pins the popover's onclick STRING is
+// `chela.toggleSettings('notify')`); calling the real, un-mutated
+// `toggleSettings('notify')` here exercises the ternary itself, which is what
+// the CMX-287 round-3 judge finding named
+// (`false && focus === 'notify' ? ... : _settingsTab`).
+test('toggleSettings("notify") opens on the Notifications tab even if another tab was selected last', async () => {
+    await openOnTab('appearance');   // leaves _settingsTab === 'appearance'
+    assert.equal(document.querySelector('.settings-tabpanel.active').dataset.tab, 'appearance');
+    window.chela.toggleSettings();   // close
+    await flush();
+
+    window.chela.toggleSettings('notify');   // reopen with the bell's focus
+    await flush();
+
+    const active = document.querySelectorAll('.settings-tabpanel.active');
+    assert.equal(active.length, 1);
+    assert.equal(active[0].dataset.tab, 'notifications',
+        'toggleSettings(\'notify\') did not land on the Notifications tab — it stayed on the last-selected tab instead');
+    assert.equal(document.querySelector('.settings-tab.active').dataset.tab, 'notifications',
+        'toggleSettings(\'notify\') did not mark the Notifications rail entry active');
 });
 
 // --- 2. 🔴 the Cost tab joins agents + cost by project, and re-fetches on window change --
