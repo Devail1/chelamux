@@ -15,23 +15,33 @@
 // `_renderDispatchRows`'s `const isEnv = k.source === 'env'` to `const isEnv = false`
 // turns every test below RED — verified by hand before writing this file.
 //
+// CMX-287 rework round 2 (PR #358) — DEFEAT_SHAPES #34: this file's BODY used to
+// be hand-typed to LOOK like index.html's settings modal, rather than sliced
+// from the template itself, so a mutation to the real template (e.g. renaming
+// `id="settings-tabs"`) would never reach this fixture — it just kept agreeing
+// with its own hand-typed copy. Sliced from the real file now, same idiom as
+// tests/dashboard_default_view.test.mjs.
+//
 // Run: node --test tests/settings_modal_precedence.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';
 
-// The real modal markup (chela/dashboard/templates/index.html) — not the minimal
-// drawer fixture the pre-CMX-287 test files use.
-const BODY = `
-<div class="drawer-scrim" id="drawer-scrim" onclick="chela.toggleSettings()"></div>
-<div class="settings-modal" id="settings-drawer" role="dialog" aria-modal="true" aria-label="Settings">
-  <div class="settings-modal-head"><span>Settings</span></div>
-  <div class="settings-modal-body">
-    <nav class="settings-tabs" id="settings-tabs"></nav>
-    <div class="settings-tabpanels" id="drawer-body"></div>
-  </div>
-</div>`;
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
+const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
+
+// The REAL modal markup (scrim + tab rail + tabpanel host), sliced straight out
+// of index.html — not hand-typed — so a mutation to the tab rail's id (the
+// judge's own reported mutation) shows up here, not just in a fixture that
+// happens to agree with the file today.
+const SETTINGS_START = HTML.indexOf('<div class="drawer-scrim" id="drawer-scrim"');
+const SETTINGS_END = HTML.indexOf('<!-- "+ new" popover');
+if (SETTINGS_START < 0 || SETTINGS_END < 0) throw new Error('index.html markers for the settings modal moved — update this test');
+const BODY = HTML.slice(SETTINGS_START, SETTINGS_END);
 
 const TIMING_KNOBS = [
     { key: 'scheduler_poll_interval_seconds', env: 'CHELA_SCHEDULER_POLL_INTERVAL',

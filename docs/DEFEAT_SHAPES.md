@@ -1213,3 +1213,83 @@ mutation through the real `#settings-tabs`/`.settings-tabpanels` modal markup (t
 fixtures use a bare `#settings-drawer`/`#drawer-body` div) rather than through the older
 drawer's minimal DOM, so no future round can pin the "decorative" claim on the DOM shape
 differing from what a user actually sees.
+
+---
+
+## 33. A fixture's DOM is hand-typed to resemble the real template instead of sliced from it, so the template drifting away from the fixture is invisible
+
+**Assertion form:** a JS test that needs the real page's markup (a tab rail an app's
+`selectSettingsTab()` renders into, a panel a render function toggles `.active` on) writes
+its own `const BODY = \`<nav id="...">...\`\`` literal that *looks like* the template at the
+time the test was written — sometimes explicitly commented as "the real modal markup" —
+rather than reading `templates/index.html` and slicing the relevant block out of it. The
+suite passes because the hand-typed copy and the real template happen to agree today.
+
+**Mutation that defeats it:** change an id, class, or nesting in the REAL template that the
+JS being tested actually depends on (`id="settings-tabs"` -> `id="settings-tabs-reverted"`
+in `templates/index.html`) without touching the test file at all. The test's own hand-typed
+`BODY` string still has the original, correct id, so `document.getElementById('settings-tabs')`
+still finds an element and every assertion still passes — the suite is now proving the JS
+works against a fixture, not against the page a user is actually served.
+
+**Why this is distinct from shape 7:** shape 7 ("two callers, one guarded") is about a
+function with N call sites and a fixture that only ever drives one of them. Here there is
+one call site and one fixture, but the fixture is a *duplicate transcription* of the real
+source of truth rather than a read of it — the gap is between the fixture and the template
+it claims to represent, not between covered and uncovered branches of the code under test.
+
+**Guard form that survives:** `readFileSync` the real template, locate the relevant block
+with `indexOf()`/`slice()` against two stable markers (throwing if either marker isn't
+found, so the test fails loudly instead of silently reverting to an empty string the moment
+the template is restructured), and embed that slice verbatim into the JSDOM body — the same
+idiom `tests/dashboard_default_view.test.mjs` already established for `#panel-work`. Never
+hand-type markup that a template file already owns.
+
+**Found:** CMX-287 rework round 2 (2026-08-14), PR #358 — `tests/settings_cost.test.mjs`
+and `tests/settings_modal_precedence.test.mjs` (the latter added in round 1, closing shape
+32 above, and its own comment claimed to drive "the real modal markup") both hand-typed a
+`BODY` literal instead of slicing `templates/index.html`. The judge's `id="settings-tabs"`
+-> `id="settings-tabs-reverted"` mutation to the real template left the full suite green.
+Closed by slicing `templates/index.html` between the `#drawer-scrim` div and the `"+ new"
+popover` comment in both files, verified by hand to turn red under the same mutation.
+
+---
+
+## 34. A joined value's expected text is already present, unjoined, elsewhere in the same rendered view
+
+**Assertion form:** a render function joins two data sources on a key (here, `/api/agents`'
+`cwd` -\> project name, joined onto `/api/cost` rows by agent `name`) and a test asserts the
+joined value appears as a substring of the whole view's `textContent` — but the test
+fixture's *un-joined* identifiers (the agent names) already contain the joined value as a
+substring (`'chelamux-dev'` contains `'chelamux'`), so the assertion is satisfied by data
+that never went through the join at all.
+
+**Mutation that defeats it:** break the join input itself (`_agentProject({ cwd:
+cwdByName[c.name] })` -> `_agentProject({ cwd: '' })`, collapsing every row into the
+"(unknown)" project bucket). The rendered project cells are now wrong, but the agent-name
+cells sitting in the very same table still contain `'chelamux'`/`'nautilus'` as substrings
+of `'chelamux-dev'`/`'nautilus-hub'`, so a `textContent`-wide substring assertion for the
+project name keeps passing — the suite never sees the join fail.
+
+**Why this is distinct from shape 23:** shape 23 is two *numbers* derived from the same
+inputs colliding when one formula degenerates into the other. Here there is no arithmetic
+collision — the joined value and the un-joined value are simply the same string family by
+construction (a project is the basename of a path an agent's own name was derived to
+resemble in the test fixture), so a whole-view substring search can't tell which source
+produced the substring it found.
+
+**Guard form that survives:** when a fixture's identifiers are chosen for readability
+(`'chelamux-dev'`, an agent obviously working on chelamux), check whether the *expected*
+readable name is also a **substring of an unrelated identifier already in the same
+rendered view** — if so, either rename the fixture so no identifier contains another
+identifier's expected output, or stop asserting on whole-view `textContent` and pin the
+specific cell/row the joined value is supposed to land in (`.cost-project-row td:first-child`,
+not `table.textContent`).
+
+**Found:** CMX-287 rework round 2 (2026-08-14), PR #358 — `tests/settings_cost.test.mjs`'s
+fixture agents (`'chelamux-dev'`, `'nautilus-hub'`) each contained their expected project
+name as a substring, so `assert.match(table.textContent, /chelamux/)` passed even when the
+judge's mutation broke the cwd -\> project join entirely. Closed by renaming the fixture
+agents to `'runner-east'`/`'runner-west'` (no substring overlap with either project name)
+and asserting `.cost-project-row td:first-child` / `.cost-agent-row td:nth-child(2)` text
+directly instead of the whole table's `textContent`.

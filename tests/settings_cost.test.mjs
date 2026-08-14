@@ -16,26 +16,57 @@
 //      revival that renders an empty table (or never re-fetches on Today/7d/
 //      30d) is decoration, not a working Cost tab.
 //
+// CMX-287 rework round 2 (PR #358): the judge mutated cost.js's join input
+// (`_agentProject({ cwd: cwdByName[c.name] })` -> `_agentProject({ cwd: '' })`,
+// which collapses every agent into the "(unknown)" project) and the suite
+// stayed green — DEFEAT_SHAPES #33: the fixture's agent names ('chelamux-dev',
+// 'nautilus-hub') already CONTAIN the project names ('chelamux', 'nautilus') as
+// substrings, so `assert.match(table.textContent, /chelamux/)` kept matching
+// against the agent-name cell even after the project cell fell back to
+// "(unknown)" for both rows. Fixed by naming agents so neither name shares a
+// substring with either project, and by pinning the exact project-row text
+// (not just "is this substring anywhere in the table").
+//
+// Also closes DEFEAT_SHAPES #34 here: the fixture used to hand-type its own
+// `<nav id="settings-tabs">`/`<div id="drawer-body">` markup instead of the
+// real chela/dashboard/templates/index.html, so a template mutation (e.g.
+// renaming #settings-tabs) went uncaught — the hand copy just kept agreeing
+// with itself. Sliced from the real template now, same idiom as
+// tests/dashboard_default_view.test.mjs.
+//
 // Run: node --test tests/settings_cost.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';
 
-const BODY = `
-<div class="drawer-scrim" id="drawer-scrim" onclick="chela.toggleSettings()"></div>
-<div class="settings-modal" id="settings-drawer">
-  <nav class="settings-tabs" id="settings-tabs"></nav>
-  <div class="settings-tabpanels" id="drawer-body"></div>
-</div>`;
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
+const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
 
+// The REAL settings modal — scrim + tab rail + tabpanel host — sliced straight
+// out of index.html, not hand-typed, so a mutation to the tab rail's id (the
+// shape the judge found: `id="settings-tabs"` -> `id="settings-tabs-reverted"`)
+// shows up here instead of only in a fixture that happens to still agree.
+const SETTINGS_START = HTML.indexOf('<div class="drawer-scrim" id="drawer-scrim"');
+const SETTINGS_END = HTML.indexOf('<!-- "+ new" popover');
+if (SETTINGS_START < 0 || SETTINGS_END < 0) throw new Error('index.html markers for the settings modal moved — update this test');
+const BODY = HTML.slice(SETTINGS_START, SETTINGS_END);
+
+// Agent names deliberately share NO substring with either project name below
+// ('chela-fleet' project is 'chelamux', 'nautilus-book' project is 'nautilus')
+// — see DEFEAT_SHAPES #33. If a project name ever needs to appear verbatim in
+// an agent name, the join assertions below must stop relying on `textContent`
+// substring matches and pin the project-row cell specifically instead.
 const AGENTS = [
-    { name: 'chelamux-dev', cwd: '/home/user/projects/chelamux' },
-    { name: 'nautilus-hub', cwd: '/home/user/projects/nautilus' },
+    { name: 'runner-east', cwd: '/home/user/projects/chelamux' },
+    { name: 'runner-west', cwd: '/home/user/projects/nautilus' },
 ];
 const COST_LIVE = [
-    { name: 'chelamux-dev', model: 'sonnet', cost_usd: 1.5 },
-    { name: 'nautilus-hub', model: 'opus', cost_usd: 2.25 },
+    { name: 'runner-east', model: 'sonnet', cost_usd: 1.5 },
+    { name: 'runner-west', model: 'opus', cost_usd: 2.25 },
 ];
 
 let costPayload = COST_LIVE;
@@ -124,13 +155,26 @@ test('the Cost tab renders a project-grouped table joined from /api/agents + /ap
 
     const table = document.getElementById('cost-table');
     assert.ok(table.querySelector('table.cost-table'), 'no cost table rendered');
-    assert.match(table.textContent, /chelamux/, 'the chelamux project (from /api/agents\' cwd) is missing from the table');
-    assert.match(table.textContent, /nautilus/, 'the nautilus project is missing from the table');
+
+    // Pin the PROJECT-ROW cells specifically (not "is this text anywhere in
+    // the table") — the agent names deliberately don't contain either project
+    // name (DEFEAT_SHAPES #33), so this can only pass if _agentProject() was
+    // actually driven off /api/agents' cwd, not off the agent name/row order.
+    const projectRowNames = Array.from(table.querySelectorAll('.cost-project-row td:first-child'))
+        .map(td => td.textContent.trim());
+    assert.deepEqual(projectRowNames.sort(), ['chelamux', 'nautilus'],
+        'the project rows are not exactly {chelamux, nautilus}, joined from /api/agents\' cwd');
+
+    const agentRowNames = Array.from(table.querySelectorAll('.cost-agent-row td:nth-child(2)'))
+        .map(td => td.textContent.trim());
+    assert.deepEqual(agentRowNames.sort(), ['runner-east', 'runner-west'],
+        'the agent rows do not list the raw agent names from /api/cost');
+
     assert.match(table.textContent, /\$1\.50/, 'the per-agent cost is missing/wrong');
     assert.match(table.textContent, /\$3\.75/, 'the fleet total (1.50 + 2.25) is missing/wrong');
 
     fetchCalls = [];
-    costPayload = [{ name: 'chelamux-dev', model: 'sonnet', cost_usd: 9 }];
+    costPayload = [{ name: 'runner-east', model: 'sonnet', cost_usd: 9 }];
     await window.chela.setCostWindow('7d');
 
     const call = fetchCalls.find(c => c.url.startsWith('/api/cost'));
