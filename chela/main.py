@@ -313,7 +313,8 @@ def cmd_run(args) -> None:
                     elif not summary.get("held") and dispatch_held:
                         dispatch_held = False
                         log.info("Work dispatcher resumed — the queue hold was released")
-                    if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
+                    if (summary["dispatched"] or summary["reconciled_done"]
+                            or summary["reconciled_closed"] or summary["reconciled_failed"]):
                         log.info("Dispatch %s: %s", wf_path.name, summary)
                 except Exception:
                     log.exception("Dispatch tick failed for %s", wf_path)
@@ -1135,7 +1136,8 @@ def cmd_dispatch(args) -> None:
     while not stop.stopping:
         try:
             summary = dispatcher.tick(args.workflow)
-            if summary["dispatched"] or summary["reconciled_done"] or summary["reconciled_failed"]:
+            if (summary["dispatched"] or summary["reconciled_done"]
+                    or summary["reconciled_closed"] or summary["reconciled_failed"]):
                 log.info("Dispatch tick: %s", summary)
         except Exception:
             log.exception("Dispatch tick failed")
@@ -1844,7 +1846,69 @@ def cmd_task_finished(args) -> None:
     awaiting_review (so the dispatcher won't re-dispatch the task) and kills the
     agent's tmux window. The row flips to `done` automatically on the next tick
     after the user merges the PR (which removes the TODO line from the base branch).
+
+    ⚖️🔎 CMX-250: ``--self-check-experiments`` closes the gap CMX-249 left open — Done
+    Criteria #3 ("run `chela judge self-check` before committing") was prose an agent could
+    silently skip, and skipping it had NO effect on anything downstream. Pass the same
+    experiments file here and this re-runs `judge.run_self_check` against the run's own
+    worktree ONE more time and REFUSES the transition (exit 1) if a guard SURVIVED
+    corruption or the check CANNOT VERIFY — the outcome now binds, not just the invocation.
+    ``--no-new-guards`` is the honest opt-out for a run that added none — cross-checked
+    (report-only, never blocking) against the run's own diff: if it touches ``tests/``
+    anyway, this warns loudly and logs an event, so the opt-out stays usable while misuse
+    of it stays visible instead of being a bare, uncheckable self-declaration. Passing
+    neither is still accepted (a run dispatched under an older WORKFLOW.md never learned
+    these flags exist) but prints a loud warning — nothing downstream reads it, on
+    purpose: an old, in-flight agent must not be broken by a check it was never told to
+    run.
     """
+    experiments = getattr(args, "self_check_experiments", None)
+    no_new_guards = getattr(args, "no_new_guards", False)
+    if experiments and no_new_guards:
+        print("task-finished: pass at most one of --self-check-experiments / --no-new-guards")
+        sys.exit(2)
+
+    if experiments:
+        check = dispatcher.verify_self_check(args.task_id, experiments)
+        if not check.get("ok"):
+            print(f"task-finished: self-check could not run — {check.get('error', 'unknown error')}")
+            sys.exit(1)
+        for outcome in check.get("outcomes") or []:
+            print(f"  [{outcome['verdict']:8}] {outcome['file']}: {outcome['guard'][:70]}")
+        missing = check.get("missing_required") or []
+        if missing:
+            print(f"⚖️🎯 {len(missing)} REQUIRED mutation(s) from last round's verdict were "
+                  "NOT re-tested — the code they target is still there, but your experiments "
+                  "file does not include them:")
+            for m in missing:
+                print(f"  [MISSING ] {m.get('file')}: {str(m.get('guard') or '')[:70]}")
+            print("   Copy them verbatim from the rework brief's REQUIRED MUTATION SET into "
+                  "your experiments file, then call task-finished again.")
+            sys.exit(1)
+        if check["blocking"]:
+            print(f"⚖️ {check['blocking']} guard(s) SURVIVED corruption — this is "
+                  "DECORATION, not a guard. Fix it, then call task-finished again.")
+            sys.exit(1)
+        if check["cannot_verify"]:
+            print(f"⚖️ self-check CANNOT VERIFY — {check['cannot_verify']}")
+            print("   Nothing was blocked and nothing was cleared. task-finished refuses "
+                  "until this resolves.")
+            sys.exit(1)
+        print(f"✓ self-check: every guard held ({len(check['outcomes'])} experiment(s)) — "
+              "proceeding.")
+    elif no_new_guards:
+        touched_tests = dispatcher.check_no_new_guards(args.task_id)
+        if touched_tests:
+            print("⚠ task-finished: --no-new-guards was passed, but this run's diff "
+                  "touches tests/ — Done Criteria #3 says a run that added or changed a "
+                  "guard must self-check it. Not blocked, but recorded.")
+        print("task-finished: --no-new-guards — skipping self-check.")
+    else:
+        print("⚠ task-finished: neither --self-check-experiments nor --no-new-guards was "
+              "given — Done Criteria #3 was not enforced for this run. Pass "
+              "--self-check-experiments <path> (or --no-new-guards if this PR truly adds "
+              "no guards) next time.")
+
     result = dispatcher.mark_awaiting_review(args.task_id)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
@@ -2127,6 +2191,27 @@ def cmd_update(args) -> None:
         print("⚠️  chela's hooks still look stale — run `claude plugin update "
               "chela@<marketplace>` (or in Claude Code, `/plugin update`), then restart "
               "your agent windows.")
+
+
+def cmd_adopt(args) -> None:
+    """⚖️🚪 CMX-276: enroll a hand-opened PR into the judge/merge gate.
+
+    A PR opened by ``gh pr create`` directly (not through the dispatcher) has no run row,
+    so nothing judges it and ``chela merge`` cannot even find it to refuse it — the one path
+    around the gate everything else goes through. This creates the missing run row in
+    ``awaiting_review``; it does not touch the PR, spawn an agent, or grant anything. The
+    next dispatcher tick refreshes its CI state and the judge trigger picks it up like any
+    freshly-dispatched PR's first pass. ``chela merge`` still refuses it until the judge
+    reports clean.
+    """
+    result = dispatcher.adopt_pr(args.pr, args.workflow, reason=getattr(args, "reason", "") or "")
+    if not result.get("ok"):
+        print(f"adopt: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"⚖️ {result['task_id']} ({result['pr_url']}) is now awaiting_review under the "
+          "dispatcher's gate — the next tick refreshes CI and the judge trigger picks it "
+          "up exactly like a freshly-dispatched PR's first pass. `chela merge` still "
+          "refuses it until the judge reports clean.")
 
 
 def cmd_merge(args) -> None:
@@ -2526,6 +2611,23 @@ def main() -> None:
         help="Worktree to mutate in place (default: the current directory)",
     )
 
+    # adopt — enroll a hand-opened PR into the judge/merge gate (CMX-276)
+    p_adopt = sub.add_parser(
+        "adopt",
+        help="⚖️🚪 Bring a hand-opened PR under the SAME judge/merge gate as a dispatched "
+             "one — creates the run row a hand-opened PR is otherwise missing, so the "
+             "judge trigger and `chela merge` can see it at all",
+    )
+    p_adopt.add_argument("pr", help="PR url or number (e.g. 346, or the full github.com URL)")
+    p_adopt.add_argument(
+        "--workflow", required=True, metavar="PATH",
+        help="Path to the WORKFLOW.md that owns this PR's repo",
+    )
+    p_adopt.add_argument(
+        "--reason", default="",
+        help="Optional note: why this PR was opened by hand instead of dispatched",
+    )
+
     # merge — the AUTONOMOUS merge gate: the escalation contract enforced in code
     p_merge = sub.add_parser(
         "merge",
@@ -2673,6 +2775,19 @@ def main() -> None:
         help="Mark a dispatcher run as awaiting_review and kill its tmux window",
     )
     p_tf.add_argument("task_id")
+    p_tf.add_argument(
+        "--self-check-experiments", metavar="PATH",
+        help="⚖️🔎 CMX-250: the SAME {guard, file, before, after} experiments file used "
+             "with `chela judge self-check` (Done Criteria #3). Re-verified against this "
+             "run's worktree now, and task-finished REFUSES the transition if a guard "
+             "survives corruption or the check cannot verify.",
+    )
+    p_tf.add_argument(
+        "--no-new-guards", action="store_true",
+        help="This run added or changed no test/guard — the honest opt-out from "
+             "--self-check-experiments. Cross-checked (report-only, never blocking) "
+             "against this run's own diff for tests/ changes.",
+    )
 
     # rework-disputed — the rework agent's "nothing to push" escape hatch
     # (CMX-248, re-scope of CMX-244)
@@ -2770,6 +2885,8 @@ def main() -> None:
             cmd_judge_self_check(args)
         else:
             p_judge.print_help()
+    elif args.command == "adopt":
+        cmd_adopt(args)
     elif args.command == "merge":
         cmd_merge(args)
     elif args.command == "reopen":

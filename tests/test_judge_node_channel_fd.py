@@ -21,6 +21,30 @@ The fix is two independent env scrubs, because the two code paths that spawn ``n
 share a caller: :func:`chela.judge._no_color_env` (the top-level ``test_cmd`` the judge
 runs) and ``tests/test_js_suites.py``'s own ``node --test`` invocation (which runs the same
 way under a bare ``uv run pytest -q``, whether or not a judge is involved at all).
+
+⚠️ SIBLING TRAP (found reworking CMX-277, 2026-08-13): this exact test —
+``test_run_suite_survives_a_leaked_node_channel_fd`` — can ALSO fail on a clean env with a
+completely unrelated cause: a fresh dispatch worktree that never ran ``npm ci``. The pytest
+summary line ("1 failed") is identical to the real SIGABRT regression; only the printed
+``result.tail`` tells them apart —
+
+    # NODE_CHANNEL_FD SIGABRT (the bug this file guards):
+    # node:internal/child_process:753 … Assertion failed … or a bare abort, before "TAP version 13"
+
+    # missing `npm ci` (unrelated — see package.json's own docstring, "Run `npm ci` before
+    # `pytest`"):
+    # node:internal/modules/esm/resolve:873
+    #   throw new ERR_MODULE_NOT_FOUND(packageName, fileURLToPath(base), null);
+    # Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'jsdom' imported from …/tests/cost.test.mjs
+
+Two prior rework rounds on unrelated tickets (CMX-276, then CMX-277's own first round) each
+called this "one unrelated pre-existing failure … a local node/ESM resolution issue" in a PR
+body without pasting the actual node output — a plausible-sounding guess in roughly the right
+direction (it IS node/ESM, it IS local) that happened to be wrong both times: on re-run in a
+clean worktree with ``npm ci`` applied, the suite goes fully green. **Before writing either
+"pre-existing" or "NODE_CHANNEL_FD" into a PR body, run ``npm ci`` and re-run the test; if it
+now passes, the honest sentence is "worktree was missing node_modules," not a claim about
+what's on base_branch.**
 """
 from __future__ import annotations
 
@@ -71,7 +95,7 @@ def test_run_suite_survives_a_leaked_node_channel_fd(monkeypatch):
     with the fd that reproduces the abort actually set in this process's own environment —
     proving `run_suite` (which env's through `_no_color_env`) does not hand it down."""
     monkeypatch.setenv("NODE_CHANNEL_FD", _POISON_FD)
-    result = judge.run_suite("node --test tests/cost.test.mjs", ROOT, timeout=60)
+    result = judge.run_suite("node --test tests/views.test.mjs", ROOT, timeout=60)
     assert result.ok, "the suite subprocess itself could not even be started/collected"
     assert result.exit_code == 0, (
         f"`node --test` did not survive a leaked NODE_CHANNEL_FD (exit {result.exit_code}): "
@@ -88,7 +112,7 @@ def test_test_js_suite_itself_survives_a_leaked_node_channel_fd(monkeypatch):
     import test_js_suites
 
     monkeypatch.setenv("NODE_CHANNEL_FD", _POISON_FD)
-    test_js_suites.test_js_suite(ROOT / "tests" / "cost.test.mjs")
+    test_js_suites.test_js_suite(ROOT / "tests" / "views.test.mjs")
 
 
 def test_clean_env_strips_node_channel_serialization_mode_too(monkeypatch):

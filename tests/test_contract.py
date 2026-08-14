@@ -25,6 +25,36 @@ from chela.judge import J_BLOCKED, J_BLOCKED_RACE, J_CANNOT_VERIFY, J_RUNNING
 from chela.personas import lease
 
 
+def test_git_timeout_is_the_shared_network_timeout_not_its_own_constant(monkeypatch):
+    """CMX-262 rework: ``contract.GIT_TIMEOUT`` bounds ``gh pr merge`` — a round-trip to
+    GitHub, exactly the class ``dispatcher.GIT_NET_TIMEOUT_SECONDS`` governs — so it must be
+    THAT constant, not a third one that happens to equal it today and silently drifts the
+    next time either is tuned.
+
+    Round 2: an ``is`` comparison against ``dispatcher.GIT_NET_TIMEOUT_SECONDS`` (60) cannot
+    tell an alias apart from a copied literal ``GIT_TIMEOUT = 60`` — CPython interns small
+    ints, so the copy IS the same object too. And a copy vs. a genuine reference is an
+    import-time fact: ``GIT_TIMEOUT = dispatcher.GIT_NET_TIMEOUT_SECONDS`` binds contract's
+    module-level value once, at import, same as a literal would — monkeypatching
+    ``dispatcher.GIT_NET_TIMEOUT_SECONDS`` afterward changes nothing for either version.
+    The only way to actually distinguish them is to change the source value BEFORE
+    contract's assignment runs, i.e. re-tune it and re-import: an alias tracks the new
+    value, a copied literal doesn't."""
+    import importlib
+
+    monkeypatch.setattr(dispatcher, "GIT_NET_TIMEOUT_SECONDS", 12345)
+    importlib.reload(contract)
+    try:
+        assert contract.GIT_TIMEOUT == 12345, (
+            "contract.GIT_TIMEOUT did not track a re-tuned "
+            "dispatcher.GIT_NET_TIMEOUT_SECONDS — it must be bound to that constant, not a "
+            "copied literal that happens to equal it today"
+        )
+    finally:
+        monkeypatch.undo()
+        importlib.reload(contract)
+
+
 @pytest.fixture(autouse=True)
 def _own_runs_db(tmp_path, monkeypatch):
     """A runs DB per test (``dispatcher.DB_PATH`` is latched at import — see conftest).

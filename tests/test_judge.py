@@ -15,6 +15,17 @@ an opinion wearing a fact's clothes, and each one was a real, hand-made mistake 
 The mutation experiments here are REAL: a real git repo, a real production module, a real
 pytest guard, a real `python -m pytest` subprocess. The one thing that is stubbed is
 `gh` — GitHub is not this module's to own.
+
+⚠️ NOT GUARDED: the WORDING of WORKFLOW.md step 6's and judge.block_body's step 3's
+self-check mandate is not machine-verified. A substring assertion cannot distinguish a
+mandate ("you must pass one of these flags") from its negation ("neither flag is
+required") or an arbitrary paraphrase of either — CMX-258 rework rounds 1-16 closed this
+axis for presence, then mandate, then pairing, then negation, at both sites, and each
+fix caught one wording and the next round found another (same class CMX-257 retired for
+CSS values). The BEHAVIOUR those docs describe — that `task-finished` reads and enforces
+`--self-check-experiments`/`--no-new-guards`, and that step 6's flag must point at THE
+SAME experiments file step 3 wrote — IS guarded below, by the tests that exercise the
+flags themselves rather than the prose that describes them.
 """
 from __future__ import annotations
 
@@ -354,6 +365,177 @@ def test_a_cannot_verify_report_blocks_nothing_whatever_its_findings_say(tmp_pat
     assert judge.Report(outcomes=[survived], cannot_verify="the baseline was red").blocking == []
 
 
+def test_block_body_step_3_binds_the_self_check_flag_to_the_same_experiments_file():
+    """⛔ CMX-258 rework round 12 (judge finding 1, WIRING): pins the BINDING half of
+    ``block_body`` step 3 — that the experiments file it names is THE SAME one the judge just
+    proved a guard survived corruption in, not any freshly-written file that happens to come
+    back clean. Softening the parenthetical from "(the same experiments file `chela judge
+    self-check` uses)" to "(any experiments file)" tells a blocked rework agent it may write
+    a NEW experiments file for the round it was blocked on — the gate would then re-verify
+    guards the agent chose after the fact instead of the ones the judge just proved were
+    decoration, on the exact round that matters most. Same shape as
+    ``test_workflow_md_step_6_binds_the_self_check_flag_to_the_same_experiments_file`` below,
+    pinned at ``block_body``'s own call site instead of ``WORKFLOW.md``'s. (The wording of
+    step 3's mandate itself is NOT machine-verified — see the module docstring.)"""
+    survived = judge.Outcome(
+        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+        judge.SURVIVED, "it survived",
+        baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+        mutated=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+    )
+    report = judge.Report(outcomes=[survived],
+                           baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""))
+
+    body = judge.block_body(report, "https://x/1", TEST_CMD)
+
+    assert "the same experiments file `chela judge self-check` uses" in body
+
+
+def test_block_body_points_the_rework_agent_at_the_defeat_shapes_catalog():
+    """CMX-272: a SURVIVED verdict is exactly the moment a new defeat shape was just measured
+    — the judge's own throwaway checkout is deleted the instant it finishes and can never
+    commit ``docs/DEFEAT_SHAPES.md`` itself, so ``block_body`` is the only place that can hand
+    the catalog off to the agent that DOES have a branch to put an entry on."""
+    survived = judge.Outcome(
+        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+        judge.SURVIVED, "it survived",
+        baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+        mutated=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+    )
+    report = judge.Report(outcomes=[survived],
+                           baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""))
+
+    body = judge.block_body(report, "https://x/1", TEST_CMD)
+
+    assert "docs/DEFEAT_SHAPES.md" in body
+
+
+def test_rework_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
+    """CMX-272: the retry-brief a reworking agent wakes up to must point at
+    ``docs/DEFEAT_SHAPES.md`` — otherwise the catalog only ever reaches an agent that
+    happens to already be reading this test file, exactly the reach problem the catalog
+    exists to close.
+
+    Seen to go red: revert the live spawn site's `wf.get(...) or REWORK_PROMPT` fallback
+    (`_renudge_prompt`, the same expression `_respawn_rework` renders from) to
+    `wf.get(...) or ""` — `dispatcher.REWORK_PROMPT` itself stays byte-identical, so a test
+    that only imports the constant can't see the wiring break. Rendering through
+    `_renudge_prompt` exercises the actual expression the spawn path evaluates.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), rework_count=1,
+                 review_history=json.dumps([{"round": 1, "at": "t", "body": "fix the thing"}]))
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    prompt = dispatcher._renudge_prompt(wf, row, None)
+    assert prompt is not None
+    assert "docs/DEFEAT_SHAPES.md" in prompt
+
+
+def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
+    """CMX-272: the judge agent should reach for an already-catalogued shape before spending
+    a mutation rediscovering one from scratch.
+
+    Seen to go red: revert the live spawn site's `wf.get(...) or JUDGE_PROMPT` fallback
+    (`_spawn_judge`) to `wf.get(...) or ""` — `dispatcher.JUDGE_PROMPT` itself stays
+    byte-identical, so a test that only imports the constant can't see the wiring break.
+    Capturing the prompt `_spawn_judge` actually hands to `_launch_agent` exercises the real
+    expression.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        captured = {}
+        with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+             patch.object(dispatcher, "_refresh_judge_worktree", return_value=None), \
+             patch.object(dispatcher, "_judge_vars", return_value={}), \
+             patch.object(dispatcher, "_launch_agent",
+                           side_effect=lambda *a, **kw: captured.__setitem__("prompt", a[4])):
+            assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
+    assert "docs/DEFEAT_SHAPES.md" in captured["prompt"]
+
+
+def test_defeat_shapes_catalog_documents_every_seeded_shape():
+    """CMX-272: pins the 6 shapes the catalog was seeded with (all hit live on 2026-08-13) —
+    a doc edit that drops one silently shrinks institutional knowledge back down without
+    anyone noticing.
+
+    Seen to go red: gutting a section's BODY down to a stub (e.g. `_TBD._`) while leaving its
+    heading byte-identical — a heading-only presence check can't see this, because the
+    heading itself survives untouched. Splitting the doc into its per-section bodies and
+    requiring each of the four labelled fields inside its own section catches it.
+    """
+    root = Path(__file__).resolve().parent.parent
+    text = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
+    sections = re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]  # drop the preamble
+
+    headings = (
+        "Presence/substring assertion defeated by dead-coding",
+        "Fixture parked on a default value",
+        "Positive-case-only mount (never mounts the OFF state)",
+        "Compound mutation proves the pair, not either half",
+        "Asserting a source constant instead of the rendered value",
+        "Coverage resting on a coincidence in production data",
+    )
+    # ⛔ CMX-272's original spelling was `len(sections) == len(headings)`, which pinned the
+    # catalog at EXACTLY six sections — directly contradicting the feature it guards. The
+    # file's own "How this file grows" contract tells a reworking agent to "add a section for
+    # it as part of the same fix"; under an equality check the FIRST agent to obey that
+    # instruction reddens CI. Found the hard way: this PR added shapes 7 and 8 and broke it.
+    # The real invariant is that the seeded shapes never SHRINK away, so assert a floor and
+    # let the catalog grow.
+    assert len(sections) >= len(headings), (
+        f"the catalog shrank: expected at least {len(headings)} numbered defeat-shape "
+        f"sections, found {len(sections)}"
+    )
+    # The doc's own "Each entry:" spec (see "How this file grows" above) names exactly these
+    # three required fields — "Found:" is present on most entries but not mandated by the
+    # spec, so it is not required here.
+    REQUIRED_FIELDS = ("**Assertion form:**", "**Mutation that defeats it:**",
+                       "**Guard form that survives:**")
+    # The seeded six must still be present, in order, at the head of the file.
+    for heading, section in zip(headings, sections):
+        assert section.startswith(heading), f"missing defeat shape: {heading}"
+    # ⭐ Every section — including ones added after seeding — must carry the spec's fields.
+    # This is the half that makes growth SAFE rather than merely allowed: a new entry that
+    # is a heading with no body is exactly the stub this test was written to catch.
+    for section in sections:
+        title = section.splitlines()[0] if section.strip() else "<empty section>"
+        for field in REQUIRED_FIELDS:
+            assert field in section, f"{title!r} is missing its {field} field"
+
+
+def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
+    """⛔ CMX-258 rework round 4, finding 3 (WIRING): step 3 tells the agent to KEEP the
+    experiments JSON file so step 6 can consume it. If this instruction reverses (an agent
+    told to delete the file instead), following the doc destroys the path before step 6
+    exists — `task-finished --self-check-experiments <path>` can never run, and every run
+    silently falls back to the warn-only `--no-new-guards` path. Pins step 3's half of the
+    step-3-to-step-6 wiring; the sibling test below pins step 6's half."""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert "Keep the experiments JSON file" in text
+    assert "do not delete it after step 3" in text
+    assert "step 6 needs its path" in text
+
+
+def test_workflow_md_step_6_binds_the_self_check_flag_to_the_same_experiments_file():
+    """⛔ CMX-258 rework round 10 (judge finding 3, WIRING): the sibling test above pins step
+    3's half of the step-3-to-step-6 wiring ('Keep the experiments JSON file … step 6 needs
+    its path'), but step 6's own half — that `--self-check-experiments` must point at THE
+    SAME file step 3 wrote, not any freshly-written one that happens to come back clean —
+    was unpinned. Softening 'the SAME experiments file from step 3' to 'an experiments file'
+    unbinds the gate from the guards this run actually added, which is exactly the
+    prose-that-can-be-skipped failure CMX-250 exists to close. (The wording of step 6's
+    mandate to pass a flag at all is NOT machine-verified — see the module docstring.)"""
+    root = Path(__file__).resolve().parent.parent
+    text = " ".join((root / "WORKFLOW.md").read_text().split())
+
+    assert "the SAME experiments file from step 3" in text
+
+
 def test_zero_experiments_is_CANNOT_VERIFY_not_a_clean_bill_of_health(tmp_path):
     root = _project(tmp_path / "repo")
 
@@ -502,6 +684,88 @@ def test_a_surviving_guard_sends_the_run_back_through_request_changes(tmp_path):
     # judge cannot judge its own rework forever — CHELA_MAX_REWORKS bounds the whole loop.
     assert (run["rework_count"] or 0) == 0          # not spent until the rework SPAWNS
     assert dispatcher.reviews_of(run)[-1]["verdict"] == "changes_requested"
+
+
+def test_a_surviving_guard_hands_the_exact_mutation_forward_as_the_REQUIRED_MUTATION_SET(tmp_path):
+    """⚖️🎯 CMX-269. The prose verdict is not the only thing a SURVIVED guard produces — the
+    exact ``{guard, file, before, after, kind}`` that beat it must reach `request_changes` as
+    DATA too, verbatim from the judge's own `Experiment`, not reformatted from `block_body`'s
+    markdown. This is what a rework brief later copies into its REQUIRED MUTATION SET
+    instead of asking the agent to reconstruct it from prose.
+
+    ⛔ Rework round 2, finding 2: submit a WIRING-kind experiment and pin ``kind`` through
+    the round-trip too — ``Experiment.parse`` defaults an absent/unrecognised ``kind`` back
+    to ``"mutation"``, so if ``as_dict`` ever stopped emitting it, a required WIRING
+    experiment would silently come back demanding a plain mutation instead — and every
+    assertion here that checks only ``file``/``before``/``after``/``guard`` would stay green."""
+    result, run, posted = _judge_run(
+        tmp_path, FAKE_GUARD_TEST, {"experiments": [_exp(kind="wiring")]},
+    )
+    assert result["state"] == judge.J_BLOCKED
+
+    required = dispatcher.latest_required_mutations(run)
+    assert len(required) == 1
+    assert required[0]["file"] == "guard.py"
+    assert required[0]["before"] == GLYPH_BEFORE
+    assert required[0]["after"] == GLYPH_AFTER
+    assert required[0]["guard"] == "the colourblind glyph cue"
+    assert required[0]["kind"] == "wiring"
+
+
+def test_the_REQUIRED_MUTATION_SET_carries_only_the_survivor_not_every_outcome(tmp_path):
+    """⛔ Rework round 3, finding 2: `request_changes` must be handed
+    ``mutations=[o.experiment.as_dict() for o in blocking]`` — the SURVIVED subset — never
+    ``report.outcomes``, which is every experiment the judge ran regardless of verdict. Every
+    other test in this file submits a single experiment, so ``blocking`` and
+    ``report.outcomes`` are the same list and nothing tells them apart. Submit TWO: the glyph
+    (survives — `FAKE_GUARD_TEST`'s glyph check is trivial) and the hue (still a real check,
+    so it's KILLED). If a KILLED experiment ever leaked into the REQUIRED MUTATION SET, a
+    rework brief would demand an agent re-test a mutation its own guard already defeats."""
+    hue_before = '    hue = "green" if state == "on" else "grey"'
+    hue_after = '    hue = "grey"'
+    result, run, posted = _judge_run(
+        tmp_path, FAKE_GUARD_TEST,
+        {"experiments": [_exp(), _exp(guard="the hue cue", before=hue_before, after=hue_after)]},
+    )
+    assert result["state"] == judge.J_BLOCKED
+    assert result["blocking"] == 1
+    assert len(result["outcomes"]) == 2                # both ran — one SURVIVED, one KILLED
+
+    required = dispatcher.latest_required_mutations(run)
+    assert [r["guard"] for r in required] == ["the colourblind glyph cue"]
+
+
+def test_the_REQUIRED_MUTATION_SET_carries_every_survivor_not_just_the_first(tmp_path):
+    """⛔ Rework round 8, findings 1+2: two hops upstream of the stored review entry, both
+    still written assuming a required set of ONE. `judge.judge_run` must hand
+    `request_changes` every survived experiment (`blocking`, not `blocking[:1]`), and
+    `request_changes` must STORE every one of them on the review entry (not
+    `mutations[:1]`) — every other test in this file (including the one directly above,
+    which submits two experiments but only one SURVIVES) still hands both hops a required
+    set of exactly one, so `blocking` and `blocking[:1]` stay indistinguishable everywhere
+    else. These two hops are the PERMANENT-loss ones: truncated here, a survivor is gone
+    from the row before the brief, the enforcement scan, or the print loop ever see it —
+    nothing downstream can recover it.
+
+    Submit TWO experiments that BOTH survive `FAKE_GUARD_TEST` — the glyph cue (as always)
+    and the hue's OFF-state, which the fake guard also never checks (it only asserts
+    `chip("on")["hue"] == "green"`) — and assert `latest_required_mutations` names both, in
+    order, straight off the real `judge_run` → `request_changes` → storage path."""
+    hue_off_before = '    hue = "green" if state == "on" else "grey"'
+    hue_off_after = '    hue = "green" if state == "on" else "green"'
+    result, run, posted = _judge_run(
+        tmp_path, FAKE_GUARD_TEST,
+        {"experiments": [_exp(), _exp(guard="the hue distinguishes on from off",
+                                       before=hue_off_before, after=hue_off_after)]},
+    )
+    assert result["state"] == judge.J_BLOCKED
+    assert result["blocking"] == 2
+    assert len(result["outcomes"]) == 2
+
+    required = dispatcher.latest_required_mutations(run)
+    assert [r["guard"] for r in required] == [
+        "the colourblind glyph cue", "the hue distinguishes on from off",
+    ]
 
 
 def test_a_blocking_verdict_still_posts_to_the_PR_when_the_run_moved_first(tmp_path):
@@ -1452,7 +1716,8 @@ def _wf(tmp_path, **cfg):
     )
 
 
-def _tick(wf, spawned, checks=dispatcher.CI_PASSING, sha="cafe1234", windows=()):
+def _tick(wf, spawned, checks=dispatcher.CI_PASSING, sha="cafe1234", windows=(),
+          open_ids=("abc123",)):
     from chela.workflow import WorkflowStatus
 
     class R:
@@ -1477,7 +1742,7 @@ def _tick(wf, spawned, checks=dispatcher.CI_PASSING, sha="cafe1234", windows=())
 
     with patch.object(dispatcher, "load_workflow_cached",
                       return_value=WorkflowStatus(path=wf.path, workflow=wf, error=None)), \
-         patch.object(dispatcher, "get_source", return_value=_EmptySource()), \
+         patch.object(dispatcher, "get_source", return_value=_EmptySource(open_ids)), \
          patch.object(dispatcher, "_claim_order", return_value=[]), \
          patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
          patch.object(dispatcher, "_spawn_judge", side_effect=spawned), \
@@ -1488,10 +1753,13 @@ def _tick(wf, spawned, checks=dispatcher.CI_PASSING, sha="cafe1234", windows=())
 
 
 class _EmptySource:
+    def __init__(self, open_ids=("abc123",)):
+        self._open_ids = open_ids
+
     def list_open_tasks(self):
         from chela.sources import Task
-        return [Task(id="abc123", title="do a thing", file="TODO.md", line_number=1,
-                     raw="- [ ] do a thing")]
+        return [Task(id=task_id, title="do a thing", file="TODO.md", line_number=1,
+                     raw="- [ ] do a thing") for task_id in self._open_ids]
 
 
 def test_the_judge_fires_ONCE_per_head_sha(tmp_path):
@@ -2260,6 +2528,47 @@ def test_a_judge_that_is_still_working_is_left_alone(tmp_path):
     assert summary["judged"] == 0                   # …and only one judge at a time
 
 
+def test_judge_max_concurrent_gates_how_many_spawn_per_tick(tmp_path):
+    """⚖️ CMX-278: `JUDGE_MAX_CONCURRENT` was a hardcoded ``1`` with no knob — this is that
+    same per-tick gate, now `config.judge_max_concurrent()`. Two FRESH runs (no judge
+    running yet) on the same workflow; the default (``1``) spawns only the first and leaves
+    the second for a later tick, same as the single-run "left alone" test above."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, task_id="abc123", workflow_path=str(wf.path),
+                 window_name="test-1", branch_name="test-1")
+        _run_row(conn, tmp_path, task_id="def456", workflow_path=str(wf.path),
+                 window_name="test-2", branch_name="test-2")
+
+    spawns: list[str] = []
+    summary = _tick(wf, lambda w, row, sha, conn: (spawns.append(row["task_id"]), True)[1],
+                     open_ids=("abc123", "def456"))
+
+    assert summary["judged"] == 1
+    assert len(spawns) == 1
+
+
+def test_judge_max_concurrent_env_raises_the_per_tick_gate(tmp_path, monkeypatch):
+    """🔴 Same two fresh runs, but `CHELA_JUDGE_MAX_CONCURRENT=2` — both spawn in the same
+    tick. ⚖️ Corrupt (register the knob in `config.DISPATCH_KNOBS` but never call it from
+    the dispatcher's judge-spawn loop) → this goes RED while the config-level knob tests
+    stay green, same gap CMX-220's `gate_max_waits` wiring tests exist to catch."""
+    monkeypatch.setenv("CHELA_JUDGE_MAX_CONCURRENT", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, task_id="abc123", workflow_path=str(wf.path),
+                 window_name="test-1", branch_name="test-1")
+        _run_row(conn, tmp_path, task_id="def456", workflow_path=str(wf.path),
+                 window_name="test-2", branch_name="test-2")
+
+    spawns: list[str] = []
+    summary = _tick(wf, lambda w, row, sha, conn: (spawns.append(row["task_id"]), True)[1],
+                     open_ids=("abc123", "def456"))
+
+    assert summary["judged"] == 2
+    assert sorted(spawns) == ["abc123", "def456"]
+
+
 def _write_live_judge_lock(wf, task_id: str) -> Path:
     """A real ``.judgelock`` sibling of the judge worktree, naming THIS test process — the
     same shape :func:`judge._claim_judge_slot` writes, read back by
@@ -2524,6 +2833,37 @@ def test_run_self_check_reads_test_cmd_from_the_workflow(tmp_path):
     assert result["ok"]
     assert result["state"] == judge.J_BLOCKED
     assert result["blocking"] == 1
+
+
+def test_run_self_check_forwards_the_ENTIRE_judge_config_in_one_call(tmp_path, monkeypatch):
+    """⚖️🔁 CMX-266, the remainder of CMX-258 / PR #327: that PR's judge found ``test_cmd``
+    unforwarded in rework round 12 and ``suite_timeout_seconds`` unforwarded in round 13 —
+    two separate rounds for two fields of the SAME config. This guard corrupts the ONE
+    accessor (:func:`judge.judge_suite_config`) both fields come from, so a regression to
+    the old "each field sourced by hand, one call site at a time" shape — where a future
+    field can silently stop reaching :func:`judge.self_check` — fails HERE, in one place,
+    instead of waiting for the judge to find each dropped field on its own round."""
+    wf_path = _workflow_md(tmp_path, "some-distinctive-cmd")
+    exp_path = tmp_path / "experiments.json"
+    exp_path.write_text(json.dumps({"experiments": [_exp()]}))
+
+    captured = {}
+
+    def fake_self_check(worktree, test_cmd, raw, *, timeout):
+        captured["test_cmd"] = test_cmd
+        captured["timeout"] = timeout
+        return judge.Report()
+
+    monkeypatch.setattr(judge, "self_check", fake_self_check)
+
+    result = judge.run_self_check(tmp_path, exp_path, workflow_path=wf_path)
+
+    assert result["ok"]
+    # both fields of _workflow_md's `judge:` block, from the ONE JudgeSuiteConfig built by
+    # judge_suite_config — not a test_cmd sourced correctly while timeout falls back to the
+    # module default (or vice versa).
+    assert captured["test_cmd"] == "some-distinctive-cmd"
+    assert captured["timeout"] == 120
 
 
 def test_run_self_check_explicit_test_cmd_wins_over_the_workflow(tmp_path):

@@ -8,13 +8,16 @@ generalised here past "every knob is a plain positive number":
 - two free-text knobs (``dispatch_workflows``, ``merge_base``, kind="text"),
   the second with an extra safety check since it feeds ``chela.contract``'s
   autonomous-merge fallback;
-- a K/M/G/T-suffixed size (``worktree_disk_budget_bytes``, kind="size");
+- a K/M/G/T-suffixed size pair (``worktree_disk_budget_bytes``, and CMX-264's
+  ``memory_slice_budget_bytes``, both kind="size");
 - and, unlike every Timing knob (which all reject ``<= 0``), three of these
   legitimately accept ``0`` (``max_reworks``, ``judge_max_unknown_retries``,
-  ``gate_wait_seconds`` all mean "disabled" at zero) while one (``gate_max_waits``)
-  does not (a ``BoundedSemaphore`` cannot be sized 0).
+  ``gate_wait_seconds`` all mean "disabled" at zero) while two (``gate_max_waits``,
+  and CMX-278's ``judge_max_concurrent``) do not — a ``BoundedSemaphore`` cannot be
+  sized 0, and 0 concurrent judges would silently wedge the queue rather than disable it
+  (that's ``judge_enabled=false``'s job).
 
-Four of the nine (``restart_required``) are latched at some OTHER module's own
+Four of the eleven (``restart_required``) are latched at some OTHER module's own
 import — ``chela.config`` itself for the judge/critic kill switches and the
 dispatcher's workflow list, ``chela.contract`` for the autonomous merge base —
 proving the precedence layer survives crossing a module boundary, not just
@@ -29,8 +32,8 @@ import pytest
 
 DISPATCH_ENV_VARS = (
     "CHELA_DISPATCH_WORKFLOWS", "CHELA_MAX_REWORKS", "CHELA_JUDGE",
-    "CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "CHELA_CRITIC",
-    "CHELA_WORKTREE_DISK_BUDGET", "CHELA_MERGE_BASE",
+    "CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "CHELA_JUDGE_MAX_CONCURRENT", "CHELA_CRITIC",
+    "CHELA_WORKTREE_DISK_BUDGET", "CHELA_MEMORY_SLICE_BUDGET", "CHELA_MERGE_BASE",
     "CHELA_GATE_WAIT_S", "CHELA_GATE_MAX_WAITS",
 )
 
@@ -108,12 +111,16 @@ def _restore_latched_modules_after_every_test(monkeypatch):
 
 # --- the registry itself -----------------------------------------------------
 
-def test_registry_has_exactly_the_nine_settings_inventory_knobs(mods):
+def test_registry_has_exactly_the_eleven_settings_inventory_knobs(mods):
+    """CMX-264 added ``memory_slice_budget_bytes`` as the ``worktree_disk_budget_bytes``
+    analog for memory, and CMX-278 added ``judge_max_concurrent`` (was a hardcoded ``1``
+    with no knob at all) — same registry, same precedence layer, so the nine CMX-220 knobs
+    plus these two are the whole Dispatch tab now."""
     config, _ = mods
     assert {k.key for k in config.DISPATCH_KNOBS} == {
         "dispatch_workflows", "max_reworks", "judge_enabled",
-        "judge_max_unknown_retries", "critic_enabled",
-        "worktree_disk_budget_bytes", "merge_base",
+        "judge_max_unknown_retries", "judge_max_concurrent", "critic_enabled",
+        "worktree_disk_budget_bytes", "memory_slice_budget_bytes", "merge_base",
         "gate_wait_seconds", "gate_max_waits",
     }
 
@@ -122,14 +129,17 @@ def test_exactly_four_knobs_are_restart_required(mods):
     """⚖️ Corrupt (flip any of these, or leave a fifth marked restart_required)
     → RED: this is what the UI's "restart" badge — and CMX-220's own task
     description ("9 knobs, and 4 of them are NOT hot") — depend on being
-    exactly right."""
+    exactly right. CMX-264's ``memory_slice_budget_bytes`` and CMX-278's
+    ``judge_max_concurrent`` joined the registry after, both read per call (like
+    ``worktree_disk_budget_bytes``), so the restart-required set itself is unchanged."""
     config, _ = mods
     restart = {k.key for k in config.DISPATCH_KNOBS if k.restart_required}
     assert restart == {"dispatch_workflows", "judge_enabled", "critic_enabled", "merge_base"}
     hot = {k.key for k in config.DISPATCH_KNOBS if not k.restart_required}
     assert hot == {
-        "max_reworks", "judge_max_unknown_retries",
-        "worktree_disk_budget_bytes", "gate_wait_seconds", "gate_max_waits",
+        "max_reworks", "judge_max_unknown_retries", "judge_max_concurrent",
+        "worktree_disk_budget_bytes", "memory_slice_budget_bytes",
+        "gate_wait_seconds", "gate_max_waits",
     }
 
 
@@ -141,13 +151,14 @@ def test_named_readers_return_their_own_knobs_stored_value(mods):
     readers = {
         "max_reworks": config.max_reworks,
         "judge_max_unknown_retries": config.judge_max_unknown_retries,
+        "judge_max_concurrent": config.judge_max_concurrent,
         "worktree_disk_budget_bytes": config.worktree_disk_budget_bytes,
     }
     for key, reader in readers.items():
         knob = next(k for k in config.DISPATCH_KNOBS if k.key == key)
         assert reader() == knob.default
 
-    distinct = {"max_reworks": 11, "judge_max_unknown_retries": 12,
+    distinct = {"max_reworks": 11, "judge_max_unknown_retries": 12, "judge_max_concurrent": 3,
                 "worktree_disk_budget_bytes": 999_000}
     for key, value in distinct.items():
         userconfig.set_(key, value)
@@ -202,6 +213,32 @@ def test_gate_max_waits_floor_is_one_not_zero(mods):
     assert err is not None
     assert userconfig.get("gate_max_waits") is None
     assert config.set_dispatch("gate_max_waits", "1") is None
+
+
+def test_judge_max_concurrent_floor_is_one_not_zero(mods):
+    """⚖️ Corrupt (drop this knob's floor=1 in favor of the shared floor=0 default)
+    → RED: 0 does not mean "disabled" here (that's ``judge_enabled=false``) — it would
+    silently wedge every workflow's judge queue forever, indistinguishable from a stuck
+    daemon (see ``config.judge_max_concurrent()``'s own docstring)."""
+    config, userconfig = mods
+    err = config.set_dispatch("judge_max_concurrent", "0")
+    assert err is not None
+    assert userconfig.get("judge_max_concurrent") is None
+    assert config.set_dispatch("judge_max_concurrent", "1") is None
+
+
+def test_judge_max_concurrent_reader_floors_env_zero_too(mods, monkeypatch):
+    """⚖️ Corrupt (``config.judge_max_concurrent()``'s ``max(1, ...)`` → ``max(0, ...)``)
+    → RED. ``test_judge_max_concurrent_floor_is_one_not_zero`` above only exercises the
+    ``set_dispatch``/dashboard write path, which ``validate_dispatch`` already floors —
+    it cannot catch a reader-side regression. ``CHELA_JUDGE_MAX_CONCURRENT`` is a first-class
+    env-file config path (``dashboard_setting``) that never goes through
+    ``validate_dispatch``, so an env file with ``=0`` reaches ``dispatch_value`` unvalidated;
+    the reader's own ``max(1, ...)`` is the only thing standing between that and the
+    'silently wedge every workflow's judge queue forever' its docstring warns about."""
+    config, _ = mods
+    monkeypatch.setenv("CHELA_JUDGE_MAX_CONCURRENT", "0")
+    assert config.judge_max_concurrent() == 1
 
 
 def test_gate_wait_seconds_zero_is_valid_it_means_never_wait(mods):
@@ -431,8 +468,9 @@ def test_get_marks_restart_required_rows(mods, client):
     knobs = {k["key"]: k for k in body["knobs"]}
     for key in ("dispatch_workflows", "judge_enabled", "critic_enabled", "merge_base"):
         assert knobs[key]["restart_required"] is True
-    for key in ("max_reworks", "judge_max_unknown_retries",
-                "worktree_disk_budget_bytes", "gate_wait_seconds", "gate_max_waits"):
+    for key in ("max_reworks", "judge_max_unknown_retries", "judge_max_concurrent",
+                "worktree_disk_budget_bytes", "memory_slice_budget_bytes",
+                "gate_wait_seconds", "gate_max_waits"):
         assert knobs[key]["restart_required"] is False
 
 

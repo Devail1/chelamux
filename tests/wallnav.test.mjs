@@ -414,6 +414,35 @@ test('a pinned pane keeps its exact geometry through a grid-preset reflow', () =
     assert.notEqual(geom(PINNED), before.pinned, 'once unpinned, a reflow may move it again');
 });
 
+// 3b — CMX-268 rework round 1 (PR #338): A GRID-PRESET CLICK NEVER TOGGLES
+// body.wall-density-airy ANYMORE — the class, its style.css rule, and
+// _setWallDensity are gone (CMX-268 reverted the treatment: Liav, live on the
+// shipped dashboard, 2026-08-13, "i think the wall was better when it took
+// the full space"). This drives the REAL applyGridLayout at the two
+// densities that used to trigger the treatment (the 1-up boundary and the
+// 2-up boundary, which was also the shipped default) and reads the REAL body
+// class back. This file has no real style.css mounted (CSS above is read
+// only as a source-text string, never put in a `<style>` tag — see the
+// fixtures/setup comment at the top of this file), so it cannot see whether
+// the CSS rule itself is gone; that half is guarded in
+// tests/dashboard_scale_nav_a11y.test.mjs's "CLAIM 2 (airy density),
+// REVERTED" tests instead, which mount the real style.css but never import
+// the real terminals.js. Together the two files catch a half-restore of
+// either piece alone: re-adding ONLY the CSS rule leaves THIS test green
+// (nothing here ever attaches the class for real) but reddens the CSS-side
+// test (whose fixture hardcodes the class itself, independent of this file's
+// toggle line); re-adding ONLY the toggle line below leaves the CSS-side
+// test green but reddens this one on its own.
+test('CMX-268: a grid-preset click never adds body.wall-density-airy — the density treatment was reverted, not just its CSS', () => {
+    window.chela.applyGridLayout(1, 1);   // 1-up: used to be the airiest density
+    assert.ok(!document.body.classList.contains('wall-density-airy'),
+        'applyGridLayout(1,1) added wall-density-airy — the reverted density toggle is back');
+
+    window.chela.applyGridLayout(2, 1);   // 2-up: the boundary, and the shipped default preset
+    assert.ok(!document.body.classList.contains('wall-density-airy'),
+        'applyGridLayout(2,1) added wall-density-airy — the reverted density toggle is back');
+});
+
 // 4 — THE KEYBOARD SWITCHER. Alt+N jumps to the pane the badge shows; bare N does not.
 test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alone', async () => {
     const idx = wid => tile(wid).querySelector('.gs-idx');
@@ -806,6 +835,81 @@ test('the header dot is painted by live status (working vs idle carry different 
     assert.ok(badge.classList.contains('idle'), 'reverting session_status must repaint the dot back to idle');
 });
 
+// 12b — THE .gs-state PILL'S WORD ACTUALLY REPAINTS ON A LIVE STATE CHANGE, NOT JUST
+// ITS COLOUR CLASS (CMX-230). tests/dashboard_scale_nav_a11y.test.mjs's GUARD 3a only
+// source-text-matches `w.textContent = s.word` inside _applyWallTileFrame's body — a
+// judge round found that regex still matches even when the whole statement is dead
+// code (`if (false && w) w.textContent = s.word;`), because the substring survives
+// unchanged. This drives the REAL function through a REAL live state transition
+// (termTick, same as test 12 above) and reads the rendered word back off the node,
+// so dead-coding the repaint actually goes red here.
+test('CMX-230: the .gs-state pill\'s WORD text actually repaints on a live state change, not just its colour class', async () => {
+    const wid = '@1';
+    const word = tile(wid).querySelector('.gs-state-word');
+    assert.equal(word.textContent, 'idle', 'sanity: an agent with no session_status paints the idle word');
+
+    AGENTS[0].session_status = 'busy';
+    await terminals.termTick();
+    assert.equal(word.textContent, 'working',
+        '_applyWallTileFrame must repaint .gs-state-word\'s TEXT on a live state change, not just recolour the pill');
+
+    delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
+    await terminals.termTick();
+    assert.equal(word.textContent, 'idle', 'reverting session_status must repaint the word back to idle too');
+});
+
+// 12c — THE .gs-state PILL'S GLYPH ACTUALLY REPAINTS ON A LIVE STATE CHANGE TOO
+// (CMX-230, round 2). A judge round found 12b only covers the WORD half of
+// _applyWallTileFrame's repaint — GUARD 3a in tests/dashboard_scale_nav_a11y.test.mjs
+// still only source-text-matches `g.textContent = s.glyph`, which stays green even
+// when that statement is dead-coded (`if (false && g) g.textContent = s.glyph;`),
+// the exact same hole 12b was written to close for the word span one line below.
+// This drives the REAL function through a REAL live state transition and reads the
+// GLYPH text back off the node, so dead-coding the glyph repaint goes red here too.
+test('CMX-230: the .gs-state pill\'s GLYPH text actually repaints on a live state change, not just its colour class', async () => {
+    const wid = '@1';
+    const glyph = tile(wid).querySelector('.gs-state-glyph');
+    assert.equal(glyph.textContent, '○', 'sanity: an agent with no session_status paints the idle glyph');
+
+    AGENTS[0].session_status = 'busy';
+    await terminals.termTick();
+    assert.equal(glyph.textContent, '●',
+        '_applyWallTileFrame must repaint .gs-state-glyph\'s TEXT on a live state change, not just recolour the pill');
+
+    delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
+    await terminals.termTick();
+    assert.equal(glyph.textContent, '○', 'reverting session_status must repaint the glyph back to idle too');
+});
+
+// 12d — THE .gs-state PILL'S OWN COLOUR CLASS ACTUALLY REPAINTS ON A LIVE STATE
+// CHANGE TOO (CMX-230, round 4). 12b/12c drove the word and glyph text nodes
+// through a real live transition after a judge round found GUARD 3a only
+// source-text-matched them; the SAME regex hole was still open one statement up
+// for `el.className = 'gs-state gs-state-' + s.cls` — dead-coding that one
+// (`if (false) el.className = ...`) left the pill painted `gs-state gs-state-idle`
+// forever while 12b/12c's word/glyph reads (and GUARD 3a's source match) all stay
+// green, so a live transition would say "working" but stay coloured idle. This
+// drives the REAL function through a REAL live state transition and reads the
+// pill's own className back off the node, closing the last of the three statements
+// in _applyWallTileFrame's repaint trio.
+test('CMX-230: the .gs-state pill\'s own colour CLASS actually repaints on a live state change', async () => {
+    const wid = '@1';
+    const pill = tile(wid).querySelector('.gs-state');
+    assert.ok(pill.classList.contains('gs-state-idle'), 'sanity: an agent with no session_status paints gs-state-idle');
+    assert.ok(!pill.classList.contains('gs-state-working'));
+
+    AGENTS[0].session_status = 'busy';
+    await terminals.termTick();
+    assert.ok(pill.classList.contains('gs-state-working'),
+        '_applyWallTileFrame must repaint the .gs-state pill\'s own className on a live state change, not just the word/glyph text');
+    assert.ok(!pill.classList.contains('gs-state-idle'), 'and lose the stale gs-state-idle class — colour must actually change');
+
+    delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
+    await terminals.termTick();
+    assert.ok(pill.classList.contains('gs-state-idle'), 'reverting session_status must repaint the pill\'s colour class back to idle too');
+    assert.ok(!pill.classList.contains('gs-state-working'));
+});
+
 // 13 — THE ☰ GLYPH IS GONE; .gs-grip STAYS THE DRAG HANDLE (CMX-117 B). GridStack's
 // `handle`/`draggable.handle` option targets `.gs-grip` (buildWall) — dropping the
 // class, not just the glyph, would silently break dragging.
@@ -863,6 +967,70 @@ test('branch + context render inside the bottom .term-ctx-bar, and the live poll
 
     CTX = [];   // leave the fixture as other tests expect it (real shape: an array)
     await terminals.termTick();
+});
+
+// 15c — CMX-230 round 7: the wall .gs-ctx chip's warn/danger class is a REAL DOM
+// reinforcement, not just source text `_applyTermContext` happens to contain.
+// Test 15 above only ever polls at used_pct: 42 (ctxLevel 'ok', no severity
+// class at all), so wrapping the `ctxChip.className = ...` assignment in
+// `if (false)` — dead code, byte-identical string still present — left the
+// chip stuck on whatever class `_ctxBarHTML` painted it with initially, and
+// nothing here would have noticed: `ctx-danger`/`ctx-warn` appeared zero times
+// in this file. This drives termTick at a used_pct that actually crosses both
+// thresholds and reads the class back off the rendered node, mirroring
+// sidebar.test.mjs's `.ar-ctx` danger-class check (its wall counterpart).
+test('the wall .gs-ctx chip carries a REAL danger/warn class off a live poll crossing the threshold — CMX-230', async () => {
+    const wid = '@1';
+    const ctxBar = tile(wid).querySelector('.term-ctx-bar');
+    const ctxChip = ctxBar.querySelector('.gs-ctx');
+
+    CTX = [{ window_id: wid, used_pct: 85, used: '170.0K', total: '200K', estimated: false, branch: 'cmx-230' }];
+    await terminals.termTick();
+    assert.ok(ctxChip.classList.contains('ctx-danger'),
+        'crossing 80% must add ctx-danger as a rendered class, not just paint the text');
+    assert.equal(ctxChip.classList.contains('ctx-warn'), false, 'danger and warn must be mutually exclusive');
+
+    CTX = [{ window_id: wid, used_pct: 65, used: '130.0K', total: '200K', estimated: false, branch: 'cmx-230' }];
+    await terminals.termTick();
+    assert.ok(ctxChip.classList.contains('ctx-warn'),
+        'crossing 60% (and not 80%) must add ctx-warn as a rendered class');
+    assert.equal(ctxChip.classList.contains('ctx-danger'), false,
+        'a stale ctx-danger class must not survive a poll that dropped back under 80%');
+
+    CTX = [];   // leave the fixture as other tests expect it (real shape: an array)
+    await terminals.termTick();
+});
+
+// 15d — CMX-230 round 8: GUARD 5 (dashboard_scale_nav_a11y.test.mjs) only ever
+// matched `.gs-model`/`.gs-cost`'s CLASS inside _ctxBarHTML's template string —
+// both chips ship `hidden` in that markup, and no test anywhere drove a poll
+// carrying `model`/`cost_usd` to prove the reveal half of the wiring (the `if
+// (c.model) { ...hidden = false }` branch in _applyTermContext) ever actually
+// runs. That left `if (false && c.model)` — a permanently dead reveal — byte-
+// indistinguishable from the real thing to every test that came before this
+// one. Mirrors test 15's own discipline: drive termTick, read the rendered node.
+test('the wall footer\'s model + cost chips are revealed by a live poll carrying model/cost_usd — CMX-230', async () => {
+    const wid = '@1';
+    const ctxBar = tile(wid).querySelector('.term-ctx-bar');
+    const modelChip = ctxBar.querySelector('.gs-model');
+    const costChip = ctxBar.querySelector('.gs-cost');
+    assert.ok(modelChip, 'the wall pane footer has no .gs-model chip');
+    assert.ok(costChip, 'the wall pane footer has no .gs-cost chip');
+
+    CTX = [{
+        window_id: wid, used_pct: 42, used: '84.0K', total: '200K', estimated: false,
+        branch: 'cmx-230', model: 'opus-5', cost_usd: 1.23,
+    }];
+    await terminals.termTick();
+    assert.equal(modelChip.hidden, false, 'a poll carrying c.model must reveal .gs-model — it must not stay dead-coded hidden');
+    assert.equal(modelChip.textContent, 'opus-5');
+    assert.equal(costChip.hidden, false, 'a poll carrying c.cost_usd must reveal .gs-cost');
+    assert.equal(costChip.textContent, '$1.23');
+
+    CTX = [];   // leave the fixture as other tests expect it (real shape: an array)
+    await terminals.termTick();
+    assert.equal(modelChip.hidden, true, 'a poll with no context data must hide .gs-model again');
+    assert.equal(costChip.hidden, true, 'a poll with no context data must hide .gs-cost again');
 });
 
 // 15b — THE BOTTOM BAR'S ORDER IS CONSTANT REGARDLESS OF BRANCH PRESENCE (CMX-127,
@@ -1170,11 +1338,27 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
     const gsHeadBlocks = rules.filter((r) => r.selector.split(',').map((s) => s.trim()).includes('.gs-head'));
     assert.equal(gsHeadBlocks.length, 2,
         'expected exactly one desktop .gs-head rule and one mobile override — found ' + gsHeadBlocks.length);
+    // CMX-230 tokenised .gs-head's desktop font-size onto :root's
+    // --wall-pane-font-size (a bare px literal there is exactly what that
+    // ticket's own type-scale guard now forbids — see
+    // tests/dashboard_scale_nav_a11y.test.mjs) — so a `font-size:` value here
+    // may be a literal Npx (the mobile override still is) OR a `var(--name)`
+    // reference, resolved against its :root declaration.
+    const rootTokenPx = (name) => {
+        const root = CSS.match(/:root\s*\{([^}]*)\}/);
+        assert.ok(root, ':root block not found');
+        const m = root[1].match(new RegExp('--' + name + ':\\s*([0-9.]+)px'));
+        assert.ok(m, `--${name} not declared as a px value on :root`);
+        return parseFloat(m[1]);
+    };
     const dims = (body) => {
         const pad = body.match(/padding:\s*([0-9.]+)px\s+([0-9.]+)px/);
-        const fs = body.match(/font-size:\s*([0-9.]+)px/);
-        assert.ok(pad && fs, 'each .gs-head rule must declare both padding: Npx Npx and font-size: Npx');
-        return { v: parseFloat(pad[1]), h: parseFloat(pad[2]), fs: parseFloat(fs[1]) };
+        const fsLiteral = body.match(/font-size:\s*([0-9.]+)px/);
+        const fsVar = body.match(/font-size:\s*var\(--([\w-]+)\)/);
+        assert.ok(pad, 'each .gs-head rule must declare padding: Npx Npx');
+        assert.ok(fsLiteral || fsVar, 'each .gs-head rule must declare font-size: Npx or font-size: var(--token)');
+        const fs = fsLiteral ? parseFloat(fsLiteral[1]) : rootTokenPx(fsVar[1]);
+        return { v: parseFloat(pad[1]), h: parseFloat(pad[2]), fs };
     };
     const desktop = dims(gsHeadBlocks[0].body);
     const mobile = dims(gsHeadBlocks[1].body);

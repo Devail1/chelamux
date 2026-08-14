@@ -1860,11 +1860,11 @@ def api_config_dispatch():
     (bool/text/size, not just positive numbers), each knob's ``kind`` says how
     to validate and render it.
 
-    Four of the nine (``restart_required: true`` in the snapshot) are latched at
+    Four of these (``restart_required: true`` in the snapshot) are latched at
     another module's import (the judge/critic kill switches, the dispatcher's
     workflow list, the autonomous merge base) — a save here persists immediately
     but only takes effect the next time the daemon/dashboard restarts, exactly
-    like the Timing tab's status-feed timeout/TTL pair. The other five are read
+    like the Timing tab's status-feed timeout/TTL pair. The rest are read
     per call and take effect on the next tick.
 
     Same atomic-batch / fail-closed shape as ``/api/config/timing``: every key
@@ -2363,14 +2363,14 @@ def _session_start_recap(body: dict, explicit_wid: str | None = None):
 @app.route("/hooks/<event>", methods=["POST"])
 @require_auth
 def api_hooks(event):
-    """Receive one Claude Code hook: append it to the event log, and — for exactly one
-    event — hand the agent an answer back.
+    """Receive one Claude Code hook: append it to the event log, and — for a few events —
+    hand the agent something back.
 
     The plugin (``plugin/hooks/hooks.json``, rendered by :func:`chela.hooks.hooks_spec`)
     POSTs each event here as an ``http`` hook, so there is no shell script and no process
     spawn per tool call. Correlation to a window is off the session's origin, not the pane.
 
-    **Every event but one returns ``{}``.** An agent is *blocked* on this request and
+    **Only one event ever decides anything.** An agent is *blocked* on this request and
     Claude Code reads what comes back, so a ``permissionDecision`` or a
     ``hookSpecificOutput`` here is chela answering a prompt on the human's behalf. That is
     now a thing chela deliberately does — for ``PermissionRequest`` on an
@@ -2378,7 +2378,13 @@ def api_hooks(event):
     Telegram topic within the wait budget (:func:`chela.gateanswer.answer_permission_request`).
     It is the ONLY safe way to answer a multi-question / ``multiSelect`` picker: the
     keystroke path has no cursor to read for those shapes, and the one time it guessed it
-    silently answered the wrong option (CMX-32). Nothing else here decides anything.
+    silently answered the wrong option (CMX-32). Nothing else here decides anything —
+    ``MessageDisplay`` also returns a non-empty body (CMX-285,
+    :func:`chela.hooks.message_display_response`, gated by ``config.TERMINAL_TIMESTAMPS``),
+    but that body only replaces how an assistant reply's own first line is DISPLAYED (a
+    local-time marker prepended inline); it never touches the stored transcript, answers
+    no prompt, and decides nothing a human would call a decision. Every other event still
+    returns ``{}``.
 
     **A blocked request is bounded and fails OPEN.** The wait is at most
     ``CHELA_GATE_WAIT_S`` and the number of simultaneously-held gates is capped; past
@@ -2397,6 +2403,18 @@ def api_hooks(event):
         log.warning("hooks: %s body over %d bytes — not read", event, hooks.MAX_BODY)
         return jsonify({})
     body = request.get_json(force=True, silent=True)
+    if event in hooks.TIMESTAMP_EVENTS:
+        # CMX-285: `MessageDisplay` fires once per streamed BATCH of every assistant
+        # message — far higher volume than PreToolUse/PostToolUse (already ~78% of the
+        # log on their own, per hooks.hooks_spec's own comment). Answered here, ahead of
+        # hooks.ingest, so this display-only decoration never touches the event log (a
+        # firehose of near-duplicate "message display" records nobody would read) and
+        # stays off the hot path — no wid resolution, no disk write — even when
+        # config.TERMINAL_TIMESTAMPS is False. See docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md
+        # and hooks.message_display_response.
+        if config.TERMINAL_TIMESTAMPS and isinstance(body, dict):
+            return jsonify(hooks.message_display_response(body))
+        return jsonify({})
     # Only the SessionStart `command` hook can send this (CMX-160) — every other event
     # rides `http`, which carries Claude Code's payload and none of the agent's own env.
     explicit_wid = request.headers.get("X-Chela-Wid") or None
@@ -2782,6 +2800,13 @@ def _runs_for_workflow(
     ``== 'awaiting_review'`` test it appeared in NO column of the Kanban at all — it simply
     vanished from the board while its agent was being re-spawned. Each card keeps its OWN
     status (see kanban.js), so the column never claims a rejected PR is awaiting review.
+
+    ``closed`` (CMX-265) rides in `recent` alongside `done`/`failed` — it is just as
+    terminal, and the frontend's own bucketing (kanban.js's `_kanbanFlatten`) is what
+    actually separates it back out into its own `archived` lane. Omitting it here would
+    not just mis-lane it — it would make a closed-not-merged row vanish from this API
+    payload ENTIRELY (the row survives in the DB either way; only the board view would
+    lose it).
     """
     try:
         target = str(Path(wf_path).expanduser().resolve())
@@ -2790,7 +2815,7 @@ def _runs_for_workflow(
     matching = [r for r in all_runs if r.get("workflow_path") == target]
     active = [r for r in matching if r.get("status") in dispatcher.ACTIVE_STATUSES]
     awaiting = [r for r in matching if r.get("status") in dispatcher.REVIEW_STATUSES][:10]
-    recent = [r for r in matching if r.get("status") in ("done", "failed")][:10]
+    recent = [r for r in matching if r.get("status") in ("done", "closed", "failed")][:10]
     return active, awaiting, recent
 
 

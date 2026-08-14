@@ -8,15 +8,16 @@ import subprocess
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import critic, epoch, event_log, hold, judge
+from chela import critic, epoch, event_log, hold, judge, memcap
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
     dispatch_tick_interval,
     human_size,
+    judge_max_concurrent,
     judge_max_unknown_retries,
     max_reworks,
     worktree_disk_budget_bytes,
@@ -76,8 +77,11 @@ ACTIVE_STATUSES = ("claimed", "running")
 # task (they already own their branch, worktree and PR).
 REVIEW_STATUSES = ("awaiting_review", "changes_requested", "needs_human")
 
-# States a fresh claim must skip: already in flight, parked in review, or shipped.
-NOT_CLAIMABLE = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "done")
+# States a fresh claim must skip: already in flight, parked in review, or terminal.
+# `closed` (CMX-265) is terminal the same way `done` is — a rejected/superseded trial
+# already owns its branch, worktree and PR, and re-claiming the same task_id would fork
+# a second worktree behind a PR nobody is looking at.
+NOT_CLAIMABLE = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "done", "closed")
 
 # Statuses whose PR can still merge OUT OF BAND (a hand `gh pr merge`, never through
 # `chela merge`) with no chance for chela to have already seen it settle: the review
@@ -227,9 +231,11 @@ _CI_RUN_ID_RE = re.compile(r"/actions/runs/(\d+)")
 # judging — and a `pending` one has not finished telling us what it is yet.
 JUDGE_TRIGGER_CHECKS = (CI_PASSING, CI_NONE)
 
-# One judge at a time, per workflow. Each experiment re-runs the whole suite in its own
-# worktree, so a fleet of judges is a fleet of test suites competing for the same box.
-JUDGE_MAX_CONCURRENT = 1
+# Judges running at once, per workflow. Each experiment re-runs the whole suite in its own
+# worktree, so a fleet of judges is a fleet of test suites competing for the same box — this
+# was hardcoded to 1 with no knob until CMX-278. Now `config.judge_max_concurrent()`, a
+# Dispatch-tab knob (`CHELA_JUDGE_MAX_CONCURRENT`) — see its own docstring for the measured
+# per-judge memory cost and why the default stays 1. Read per call below, not latched here.
 
 # A judge that has not published a verdict in this long is not thinking, it is stuck. It is
 # killed and its run becomes CANNOT VERIFY — which blocks nothing and approves nothing.
@@ -404,14 +410,33 @@ def resolve_agent_cmd(wf: WorkflowDef, role: str = "coding") -> tuple[str, str]:
     return f"{AGENT_BASE_CMD} --permission-mode {permission_mode} --model {model}", source
 
 
-def _git(repo: Path, *args: str, timeout: float = GIT_TIMEOUT_SECONDS):
-    """Run a git command in `repo`. Returns None if git is missing or hung."""
+class GitTimeout(RuntimeError):
+    """Raised by :func:`_git` when ``raise_on_timeout=True`` and the command hits its
+    timeout. Opt-in and default-off so ``_git``'s ~20 other call sites, which all just
+    treat a ``None`` return as "this failed, don't care why", are untouched — only a
+    caller that needs to tell a timeout apart from every other failure (chela.update's
+    network calls: CMX-262, a timed-out fetch must say so rather than send an adopter
+    hunting for a git problem they don't have) opts in.
+    """
+
+
+def _git(repo: Path, *args: str, timeout: float = GIT_TIMEOUT_SECONDS, raise_on_timeout: bool = False):
+    """Run a git command in `repo`. Returns None if git is missing or hung — unless
+    `raise_on_timeout`, in which case a hang raises :class:`GitTimeout` instead of
+    returning None (a missing git binary still returns None either way)."""
     try:
         return subprocess.run(
             ["git", "-C", str(repo), *args],
             capture_output=True, text=True, timeout=timeout,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired as e:
+        log.warning("git %s timed out in %s after %ss", " ".join(args), repo, timeout)
+        if raise_on_timeout:
+            raise GitTimeout(f"git {' '.join(args)} timed out after {timeout:.0f}s — "
+                              "this looks like a slow network link, not a problem with "
+                              "the repo itself") from e
+        return None
+    except FileNotFoundError as e:
         log.warning("git %s failed in %s: %s", " ".join(args), repo, e)
         return None
 
@@ -843,9 +868,11 @@ def _run_trial_outcome(row: sqlite3.Row) -> str | None:
     `died`: a `failed` row at MAX_ATTEMPTS — the exact same "no more retries" test the
     claim loop itself uses to refuse a re-claim, so a row this function calls terminal is
     a row that will never move again.
-    `abandoned`: `done` without a merged PR — the task left the tracker (a human edit, a
-    re-hash, a manually-closed PR) with no completion evidence. The trial ran and was
-    walked away from, not shipped.
+    `abandoned`: `done` without a merged PR (the task left the tracker — a human edit, a
+    re-hash — with no completion evidence), OR `closed` (CMX-265: a PR a human closed
+    WITHOUT merging). Both are the same shape from the ledger's point of view — the
+    trial ran and was walked away from, not shipped — `closed` is only a distinct board
+    lane, not a distinct trial outcome.
     `merged`: the PR landed. Checked first — `pr_state` can be `merged` on a row whose
     `status` is not yet `done` for one tick (phase-0 PR-state refresh runs before the
     reconcile step that flips `status`), and a trial that merged is never "abandoned".
@@ -854,7 +881,7 @@ def _run_trial_outcome(row: sqlite3.Row) -> str | None:
         return "merged"
     if row["status"] == "failed" and (row["attempt"] or 1) >= MAX_ATTEMPTS:
         return "died"
-    if row["status"] == "done":
+    if row["status"] in ("done", "closed"):
         return "abandoned"
     return None
 
@@ -874,7 +901,7 @@ def run_is_terminal(row) -> bool:
         return True
     if row.get("status") == "failed" and (row.get("attempt") or 1) >= MAX_ATTEMPTS:
         return True
-    return row.get("status") == "done"
+    return row.get("status") in ("done", "closed")
 
 
 def reconcile_trial_ledger(existing_text: str, rows: list[sqlite3.Row]) -> tuple[str, list[str], list[str]]:
@@ -2112,6 +2139,182 @@ def _fire_after_done(wf: WorkflowDef) -> None:
         log.exception("after_done hook failed to start")
 
 
+def _missing_required_mutations(
+    worktree: Path, required: list[dict], submitted: list,
+) -> list[dict]:
+    """⚖️🎯 CMX-269. Which of ``required`` (the REQUIRED MUTATION SET a rework was handed —
+    see :func:`latest_required_mutations`) does ``submitted`` NOT re-test?
+
+    Matched on ``(file, before, after)`` — copy-paste identity, not a fuzzy match on
+    ``guard`` text — because ``before``/``after`` are the load-bearing anchors: an agent
+    that renamed the ``guard`` label but kept the exact mutation still re-tested the exact
+    case that beat it, and one that submitted a *different, easier* experiment for the same
+    file did not, whatever it called it.
+
+    A required mutation whose ``before`` anchor no longer occurs in the LIVE file is not
+    flagged: the code it targeted is gone (legitimately rewritten this round), so there is
+    nothing left to re-test, and re-demanding it would block a real fix for a stale anchor.
+    This is the same anchor-occurs-once contract :func:`chela.judge.apply_mutation` already
+    holds every experiment to — read here, not applied.
+    """
+    submitted_keys = {
+        (str(m.get("file") or ""), str(m.get("before") or ""), str(m.get("after") or ""))
+        for m in submitted if isinstance(m, dict)
+    }
+    missing = []
+    for req in required:
+        key = (str(req.get("file") or ""), str(req.get("before") or ""), str(req.get("after") or ""))
+        if key in submitted_keys:
+            continue
+        file, before = key[0], key[1]
+        try:
+            path = (worktree / file).resolve()
+            path.relative_to(worktree.resolve())
+            still_there = path.is_file() and path.read_text().count(before) > 0
+        except (OSError, ValueError):
+            still_there = False
+        if still_there:
+            missing.append(req)
+    return missing
+
+
+def verify_self_check(task_id: str, experiments_path: str) -> dict:
+    """⚖️🔎 CMX-250. The gate `chela task-finished --self-check-experiments` uses to make
+    Done Criteria #3 an outcome that BINDS, not a command an agent may or may not have run.
+
+    Looks the run up by ``task_id`` (never trusts a bare ``--cwd`` the caller could point
+    anywhere) and re-runs :func:`chela.judge.run_self_check` against ITS worktree, right
+    now — not whatever the agent saw the last time it happened to invoke `self-check` by
+    hand, which may predate edits made since. A guard that was clean a few edits ago and
+    is decoration now must still block.
+
+    ⚖️🎯 CMX-269: also cross-checks the submitted experiments against
+    :func:`latest_required_mutations` — the exact case(s) that survived last round. A guard
+    that self-checks CLEAN because the agent tested a different, easier mutation instead of
+    the one the judge actually caught it on is exactly the recurrence this closes; see
+    ``missing_required`` in the return value.
+    """
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None:
+        return {"ok": False, "error": f"no run found for task_id {task_id}"}
+    worktree_path = row["worktree_path"]
+    if not worktree_path:
+        return {"ok": False, "error": "run has no worktree_path on record — cannot self-check"}
+
+    result = judge.run_self_check(
+        worktree_path, experiments_path, workflow_path=row["workflow_path"],
+    )
+    if not result.get("ok"):
+        return result
+
+    required = latest_required_mutations(dict(row))
+    missing: list[dict] = []
+    if required:
+        raw, err = judge.load_experiments(experiments_path)
+        submitted = raw.get("experiments") if not err and isinstance(raw, dict) else []
+        submitted = submitted if isinstance(submitted, list) else []
+        missing = _missing_required_mutations(Path(worktree_path), required, submitted)
+
+    return {
+        "ok": True,
+        "blocking": result["blocking"],
+        "cannot_verify": result["cannot_verify"],
+        "outcomes": result.get("outcomes") or [],
+        "missing_required": missing,
+    }
+
+
+def _is_guard_path(path: str) -> bool:
+    """⚖️🔎 CMX-258 rework round 6: the DEFINITION ``check_no_new_guards`` cross-checks — "is
+    this diff-touched path a guard?" — written down once, in one place, instead of being
+    re-derived one clause at a time by each review round.
+
+    A path is a guard when it is something the repo's own suites actually execute:
+
+    * anything under the top-level ``tests/`` directory — this is the ONLY place pytest
+      looks (``pyproject.toml``'s ``[tool.pytest.ini_options] testpaths = ["tests"]``), so a
+      Python file nested somewhere else that happens to sit under its own ``tests/``
+      subdirectory (e.g. a hypothetical ``chela/tests/x.py``) is never collected and is
+      therefore NOT a guard by this definition — a decision, not an oversight: nothing
+      pytest runs is protected by a mutation to that file.
+    * any ``*.test.mjs`` file ANYWHERE in the repo — ``tests/test_js_suites.py`` globs the
+      whole tree with ``ROOT.rglob("*.test.mjs")`` and runs every hit under
+      ``CHELA_REQUIRE_JS_TESTS=1``, precisely so a suite like
+      ``chela/dashboard/static/collab/fit.test.mjs`` (real, outside ``tests/`` today) still
+      counts as a guard even though it is not a ``.py`` file and not under ``tests/``.
+
+    A path that merely STARTS WITH the letters "tests" without the directory separator
+    (``tests_helper.py``, ``tests-helpers/x.py``) is deliberately excluded — it is not under
+    the ``tests/`` directory at all.
+
+    ⚖️🔎 CMX-267: rounds 5, 8 and 15 each found a fresh way for the first clause to
+    misclassify a path, and each was closed by hand-adding one more table row on top of a
+    STRING prefix test (``path.startswith("tests/")``) — a test that only ever gave the
+    right answer because every path this function has been fed so far happened to already
+    be normalized ``git diff --name-only`` output. "Is this path under the ``tests/``
+    directory" is a statement about PATH STRUCTURE (its first component), not about which
+    characters happen to appear at the front of the string, and encoding it as the latter
+    means every new path SHAPE (not just every new path VALUE) is a fresh chance to be
+    wrong — a leading ``./``, a doubled separator, anything a future caller other than this
+    module's own ``git diff`` might hand in. Decomposing the path with ``PurePosixPath``
+    and comparing its first PART to ``"tests"`` tests the actual English definition above
+    directly, so there is no boundary left to rediscover by hand: ``tests_helper.py`` has
+    first part ``"tests_helper.py"``, not ``"tests"``, no matter how the string is spelled.
+    """
+    parts = PurePosixPath(path).parts
+    return (parts[:1] == ("tests",)) or path.endswith(".test.mjs")
+
+
+def check_no_new_guards(task_id: str) -> bool | None:
+    """⚖️🔎 CMX-250 review round 1: whether ``--no-new-guards`` looks WRONG for this run —
+    its diff (vs its own ``base_branch``, read from its own worktree, right now) touches a
+    guard, per :func:`_is_guard_path`. Report-only, on purpose: the opt-out must stay usable
+    for a genuinely guard-free run, so this never refuses the transition — it makes a wrong
+    opt-out VISIBLE (an event, plus a loud CLI warning) instead of it being a bare
+    self-declaration nothing ever cross-checks, which is exactly how the prose version of
+    Done Criteria #3 failed.
+
+    Returns ``None`` when it cannot tell (no run on record, no worktree_path/workflow_path,
+    the workflow does not parse, or ``base_branch`` does not resolve on origin) — an
+    unknown must never be misread as "no test files touched".
+    """
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return None
+    worktree_path = row["worktree_path"]
+    try:
+        wf = load_workflow(row["workflow_path"])
+    except Exception:
+        return None
+    base_branch = wf.get("workspace", "base_branch", default="master")
+    ref = f"origin/{base_branch}"
+    resolved = subprocess.run(
+        ["git", "-C", worktree_path, "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True, errors="replace",
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return None
+    base_sha = resolved.stdout.strip()
+    diff = subprocess.run(
+        ["git", "-C", worktree_path, "diff", "--name-only", f"{base_sha}...HEAD"],
+        capture_output=True, text=True, errors="replace",
+    )
+    if diff.returncode != 0:
+        return None
+    files = [f for f in diff.stdout.splitlines() if f.strip()]
+    touched = [f for f in files if _is_guard_path(f)]
+    if touched:
+        event_log.append(
+            "no_new_guards_mismatch",
+            f"{task_id}: --no-new-guards was passed but the diff touches tests/ "
+            f"({len(touched)} file(s))",
+            payload={"task_id": task_id, "files": touched},
+        )
+    return bool(touched)
+
+
 def mark_awaiting_review(task_id: str) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
@@ -2375,6 +2578,27 @@ def latest_verdict(run: dict) -> str:
     return ""
 
 
+def latest_required_mutations(run: dict) -> list[dict]:
+    """⚖️🎯 CMX-269. The REQUIRED MUTATION SET of the most recent SUBSTANTIVE verdict — the
+    exact ``{guard, file, before, after}`` experiment(s) that SURVIVED, as :func:`request_changes`
+    stored them, not the prose describing them.
+
+    Mirrors :func:`latest_verdict`'s "skip a `retry` entry" rule for the identical reason: a
+    retry grants another round without anyone re-reviewing the code, so it must never shadow
+    the real verdict's required set with an empty one. ``[]`` for a run with no reviews yet,
+    or whose latest substantive verdict carried no structured findings (a human's free-text
+    review, or a row from before this existed) — callers treat that as "nothing to enforce",
+    exactly the prose-only behavior this is additive to.
+    """
+    reviews = reviews_of(run)
+    for r in reversed(reviews):
+        if r.get("verdict") == "retry":
+            continue
+        raw = r.get("mutations")
+        return [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+    return []
+
+
 def _pr_number(pr_url: str | None) -> str | None:
     m = _PR_NUMBER_RE.search(str(pr_url or ""))
     return m.group(1) if m else None
@@ -2489,7 +2713,89 @@ def resolve_run(ident: str) -> dict | None:
     return named[0] if len(named) == 1 else None
 
 
-def request_changes(ident: str, body: str, *, post_comment: bool = True) -> dict:
+def adopt_pr(pr_ident: str, workflow_path: str | Path, *, reason: str = "") -> dict:
+    """⚖️🚪 CMX-276: close the one path around the judge gate.
+
+    A hand-opened PR (``gh pr create`` run directly, not through ``_spawn``) has NO run
+    row — and every gate that matters reads the ``runs`` table: the per-sha judge trigger
+    in :func:`tick` only ever ``SELECT``s from it, and :func:`chela.contract.merge` refuses
+    with "no run matches" before it even gets to the judge-clean check. The result is not
+    "merge refused" — it is silence: nothing judges the PR, and nothing stops a human (or
+    the orchestrator) from running ``gh pr merge`` on it directly, outside chela entirely.
+    That happened live: PR #346 edited ``tests/test_judge.py`` — exactly the kind of change
+    the judge exists to interrogate — and merged unjudged, because there was no run row for
+    the per-sha trigger to find.
+
+    This creates that row. It does NOT dispatch an agent, spawn a worktree, or open a tmux
+    window — the work is already done and pushed; ``adopt`` only enrolls the existing PR
+    into the SAME queue a dispatched task uses. The row lands directly in
+    ``awaiting_review`` with no ``judge_sha``/``judge_state``, so the very next dispatcher
+    tick refreshes its live PR/CI state (the phase-0 refresh in :func:`tick` matches any row
+    with a ``pr_url``, regardless of how it got there) and the judge trigger picks it up
+    exactly like a freshly-dispatched PR's first pass. From that point on it is an ordinary
+    run: ``chela merge`` still refuses it until the judge reports ``clean``, same as any
+    other PR — adoption grants the PR nothing except a place in the gate, never a bypass of
+    it.
+    """
+    wf = load_workflow(workflow_path)
+    repo_dir = str(wf.path.parent)
+    raw = str(pr_ident or "").strip()
+    pr_number = _pr_number(raw) or (raw if raw.isdigit() else None)
+    if not pr_number:
+        return {"ok": False, "error": f"{pr_ident!r} is not a PR url or number"}
+
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", pr_number, "--json",
+             "url,title,state,headRefName,headRefOid"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "error": f"could not read PR #{pr_number} from GitHub: {e}"}
+    if out.returncode != 0:
+        detail = (out.stderr or out.stdout or "gh pr view failed").strip()[:300]
+        return {"ok": False, "error": f"gh pr view #{pr_number} failed: {detail}"}
+    try:
+        data = json.loads(out.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return {"ok": False, "error": f"gh pr view #{pr_number} returned unparseable JSON"}
+
+    state = (data.get("state") or "").strip().lower()
+    if state != "open":
+        return {"ok": False, "error": f"PR #{pr_number} is {state or 'unknown'!r}, not "
+                "open — nothing to adopt"}
+
+    pr_url = data.get("url") or raw
+    branch = data.get("headRefName") or ""
+    head_sha = data.get("headRefOid") or None
+    title = data.get("title") or f"PR #{pr_number}"
+    task_id = f"adopt-{pr_number}"
+    brief = f"Adopted hand-opened PR {pr_url} — brought under the judge/merge gate " \
+            f"(CMX-276)." + (f" {reason.strip()}" if reason.strip() else "")
+
+    with _db() as conn:
+        dup = conn.execute(
+            "SELECT task_id, status FROM runs WHERE task_id=? OR pr_url=?",
+            (task_id, pr_url),
+        ).fetchone()
+        if dup:
+            return {"ok": False, "error": f"{dup['task_id']!r} already tracks this PR "
+                    f"(status={dup['status']!r}) — nothing to adopt; use `chela reopen` "
+                    "or `chela judge run` if it needs a fresh pass"}
+        conn.execute(
+            """INSERT INTO runs (task_id, workflow_path, title, status, branch_name,
+               started_at, attempt, pr_url, pr_state, pr_head_sha, brief)
+               VALUES (?, ?, ?, 'awaiting_review', ?, ?, 1, ?, 'open', ?, ?)""",
+            (task_id, str(wf.path), title, branch, _now(), pr_url, head_sha, brief),
+        )
+    log.info("adopt: %s (%s) brought under the judge/merge gate", task_id, pr_url)
+    return {"ok": True, "task_id": task_id, "pr_url": pr_url, "branch_name": branch}
+
+
+def request_changes(
+    ident: str, body: str, *, post_comment: bool = True, mutations: list[dict] | None = None,
+) -> dict:
+
     """FAIL a PR under review: the run goes to ``changes_requested`` and the loop turns.
 
     (a) writes the verdict + the status on the run row — THE authority — and (b), when
@@ -2505,6 +2811,18 @@ def request_changes(ident: str, body: str, *, post_comment: bool = True) -> dict
     finding that most needed to reach the PR was the one most likely not to. Set this false
     only when the comment has independently already been posted; every other caller keeps
     the default and this behaves exactly as before.
+
+    ⚖️🎯 CMX-269: ``mutations`` is the REQUIRED MUTATION SET — the exact ``{guard, file,
+    before, after}`` experiments that SURVIVED, verbatim, straight from the judge's own
+    mechanics (:meth:`chela.judge.Experiment.as_dict`), not a paraphrase of them. Stored on
+    the review entry as DATA, alongside the prose ``body``, because prose is what a
+    reworking agent has twice reconstructed wrong: it read the verdict, hand-authored a
+    *different* experiment, and shipped a guard still defeatable by the exact case that
+    already beat it. :func:`latest_required_mutations` reads this back to hand the rework
+    brief something to copy, and :func:`verify_self_check` to hold ``task-finished`` to
+    actually re-testing it. A caller with no structured findings (a human's free-text
+    review, ``mark_rework_disputed``'s "keep going") passes nothing, and the entry carries
+    an empty set — degrading to exactly the prose-only behavior this had before.
 
     It increments nothing. ``rework_count`` is spent when the dispatcher actually spawns
     the rework (:func:`_respawn_rework`) — a verdict that never gets a concurrency slot
@@ -2526,7 +2844,8 @@ def request_changes(ident: str, body: str, *, post_comment: bool = True) -> dict
 
     reviews = reviews_of(run)
     reviews.append({"round": len(reviews) + 1, "at": _now(), "body": body,
-                    "verdict": "changes_requested"})
+                    "verdict": "changes_requested",
+                    "mutations": [m for m in (mutations or []) if isinstance(m, dict)]})
     with _db() as conn:
         # COMPARE-AND-SWAP on the status we READ. ⛔ Not a formality: `resolve_run` above is
         # a separate connection and a separate moment, and a dispatcher tick runs every 60s
@@ -3039,7 +3358,8 @@ def _refused(error: str | None, refused: bool = False) -> dict:
     at all — and the daemon must not tell the operator otherwise.
     """
     return {
-        "open": 0, "reconciled_done": 0, "reconciled_failed": 0, "dispatched": 0,
+        "open": 0, "reconciled_done": 0, "reconciled_closed": 0, "reconciled_failed": 0,
+        "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
         "judged": 0, "judge_lost": 0, "judge_stranded": 0,
@@ -3108,6 +3428,7 @@ def tick(workflow_path: str | Path) -> dict:
     summary = {
         "open": len(open_tasks),
         "reconciled_done": 0,
+        "reconciled_closed": 0,
         "reconciled_failed": 0,
         "dispatched": 0,
         "pr_state_refreshed": 0,
@@ -3273,7 +3594,60 @@ def tick(workflow_path: str | Path) -> dict:
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (PR merged)", row["task_id"])
                 continue
-            if row["task_id"] not in open_ids and row["status"] in REVIEW_STATUSES:
+            if row["status"] in RECONCILE_MERGE_STATUSES and row["pr_state"] == "closed":
+                # A human closed the PR WITHOUT merging — a rejected trial, not shipped
+                # work. Left unhandled, the row parks in the Review lane forever: nothing
+                # else ever moves a review-state row off `pr_state='closed'`, since it is
+                # terminal and phase 0 above stops refreshing it. Reconcile it here so it
+                # leaves Review the same tick the close is observed (CMX-265 — 7 closed
+                # PRs stuck in Review, ghosts that made a 5-item queue read as 12).
+                #
+                # Deliberately NOT the merged branch above: no `merged_in_tick` (that
+                # counter exists to fire hooks.after_done, a merge-only signal — firing
+                # it for a rejected PR would be a false "shipped" event) and no tracker
+                # strike expectation (there is nothing to strike; the task was rejected,
+                # not delivered).
+                #
+                # ⭐ `status='closed'` — a THIRD terminal run status, not `done`. Round 1 of
+                # this ticket argued `done` on the record (the RUN finished; the PR's fate
+                # is a separate axis, already carried by `pr_state`) and that argument was
+                # accepted... then overruled by Liav in round 2 (PR #334): "archive them."
+                # Concretely: the Done lane held 18 genuinely-merged rows, and folding in 7
+                # that never merged — some superseded by a successor ticket (cmx-230 →
+                # cmx-257, etc.), some abandoned outright — breaks the one property worth
+                # keeping, "everything in Done shipped". `done` would just be a quieter lie
+                # in a quieter lane than the Review-ghost bug this PR started out fixing.
+                #
+                # `closed` is terminal the same way `done` is (nothing left for the
+                # dispatcher to DO with this row — poll it, nudge it, judge it, dispatch
+                # it), so it gets the same treatment: a member of `NOT_CLAIMABLE` (never
+                # re-claimed) and of `_run_trial_outcome`'s "abandoned" branch (the trial
+                # ran and was walked away from — the ledger doesn't care which board lane a
+                # row sits in). It differs from `done` ONLY where the PR's outcome actually
+                # matters: it does not fire `hooks.after_done` (see above) and it renders
+                # in its own `archived` board lane, never Review or Done — kanban.js's
+                # STATUS_CHIPS['closed'] pill + kanbanlanemodel.js's STATUS_LANE map.
+                if row["window_name"]:
+                    _kill_window(row["window_name"])
+                conn.execute(
+                    "UPDATE runs SET status='closed' WHERE task_id=?", (row["task_id"],)
+                )
+                conn.commit()
+                _cleanup_worktree_on_done(wf.path.parent, row)
+                summary["reconciled_closed"] += 1
+                log.info("Task %s closed (PR closed without merging)", row["task_id"])
+                continue
+            # ⚖️🚪 CMX-276: `worktree_path IS NOT NULL` — an ADOPTED row (`adopt_pr`, a
+            # hand-opened PR enrolled into this same gate) never went through `_spawn`'s
+            # claim, so it never had a worktree OR a tracker line to leave in the first
+            # place. Without this guard the very next tick after adopting one reconciled it
+            # straight to `done` ("removed from source, window killed") — `open_ids` is
+            # true (it never was IN the tracker), but that is not completion evidence for a
+            # row the tracker never owned; it just deletes the row before the judge trigger
+            # a few lines below ever gets a look at it, silently recreating the exact bug
+            # this feature exists to close, just with an extra row in the table.
+            if (row["task_id"] not in open_ids and row["worktree_path"] is not None
+                    and row["status"] in REVIEW_STATUSES):
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
                 # the live tmux pane, and that mapping disappears once tmux drops
@@ -3836,7 +4210,7 @@ def tick(workflow_path: str | Path) -> dict:
                 (str(wf.path), *JUDGE_TRIGGER_CHECKS,
                  judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
             ).fetchall():
-                if judging >= JUDGE_MAX_CONCURRENT:
+                if judging >= judge_max_concurrent():
                     break        # it waits a tick; each judge re-runs a whole test suite
                 if _spawn_judge(wf, row, row["pr_head_sha"], conn):
                     judging += 1
@@ -4278,6 +4652,11 @@ def _launch_agent(
         socket_arg = messaging_socket_launch_arg(target_id)
         if socket_arg:
             agent_cmd = f"{agent_cmd} {socket_arg}"
+    # 🧠🔒 CMX-264: put this agent (coding agent OR judge — both funnel through this one
+    # function) into the SHARED memory slice, when CHELA_MEMORY_SLICE_BUDGET is on and a
+    # working `systemd --user` session confirms it is ready. A no-op (returns agent_cmd
+    # unchanged) whenever the rail is off or unavailable — see chela/memcap.py.
+    agent_cmd = memcap.wrap_launch_cmd(agent_cmd)
     log.info("Launching %s with %r (source: %s)", task_id, agent_cmd, cmd_source)
     # CMX-115: strip daemon-only secrets from THIS window's shell before anything else
     # runs in it — must land before the CHELA_WID export and the agent command below,
@@ -4327,6 +4706,13 @@ def _launch_agent(
 # its own worktree on its own branch with its PR already open (so it pushes instead of
 # forking anything), and it hands it the verdict — while pointing it at the PR comments as
 # the durable record, because the comment thread is what a human will have added to.
+#
+# ⚖️🎯 CMX-269: {{required_mutations_section}} is the REQUIRED MUTATION SET, not more prose
+# about it — the orchestrator's own words are what a reworking agent has twice reconstructed
+# wrong (told, in prose, "every guard needs a negative control", it still shipped a guard
+# defeatable by the EXACT case named in the verdict). This is copy-paste JSON, straight from
+# the judge's own mechanics, and `verify_self_check` holds `task-finished` to actually
+# re-testing it — see :func:`latest_required_mutations` and :func:`_missing_required_mutations`.
 REWORK_PROMPT = """\
 🔁 **REWORK — your PR failed review.** This is round {{rework_round}} of {{max_reworks}}.
 
@@ -4339,14 +4725,22 @@ existing PR updates itself.
 ## The verdict
 
 {{verdict}}
-
+{{required_mutations_section}}
 ## Do this, in order
 
 1. **Read the PR thread yourself** — `{{pr_comments_cmd}}`. The comment is the durable
    record, and a human may have added to it since the verdict above was written.
-2. Fix every defect it names, in this worktree.
+2. Fix every defect it names, in this worktree. If a guard SURVIVED corruption, check
+   `docs/DEFEAT_SHAPES.md` — it catalogs known ways a guard looks like it works but doesn't
+   (dead-coded statements, fixtures parked on a default, source-constant checks instead of
+   the rendered value…). If the shape the verdict just found isn't listed there yet, add an
+   entry as part of this fix — it is the only durable place that knowledge can land; the
+   judge's own checkout is thrown away when it finishes and cannot commit it itself.
 3. Re-run the SAME validation your original task told you to run (this repo's CI gates are
-   not optional).
+   not optional) — and if a REQUIRED MUTATION SET is above, your self-check experiments
+   file MUST include each one **verbatim** (copy the JSON, do not retype it) alongside any
+   new experiments of your own: `task-finished` re-checks this and refuses if one is
+   missing while the code it targets is still there to test.
 4. Stage only what you changed (`git add <paths>` — never `git add -A`), commit, and
    `git push`.
 5. Run `chela task-finished {{task_id}}` as your last step — it puts the run back in
@@ -4370,8 +4764,32 @@ commit goes back through the ordinary judge/CI pass automatically instead. There
 """
 
 
+def _required_mutations_section(mutations: list[dict]) -> str:
+    """⚖️🎯 CMX-269. The ``{{required_mutations_section}}`` block — the REQUIRED MUTATION SET
+    as DATA, not the orchestrator's paraphrase of it. ``""`` when there is nothing to carry
+    (a clean first rework round, or a verdict with no structured findings) — the caller's
+    literal ``{{verdict}}\\n{{required_mutations_section}}`` renders as just the verdict,
+    unchanged from before this existed.
+    """
+    if not mutations:
+        return ""
+    payload = json.dumps({"experiments": mutations}, indent=2)
+    return (
+        "\n### ⚖️🎯 REQUIRED MUTATION SET (data, not prose)\n\n"
+        "These are the EXACT mutation(s) that SURVIVED last round, verbatim from the "
+        "judge's own apply/parse/run mechanics — **copy this JSON into your self-check "
+        "experiments file as-is.** Do not retype them from the verdict text above; "
+        "hand-reconstructing them from prose is what shipped a defeatable guard last "
+        "time.\n\n"
+        "```json\n" + payload + "\n```\n\n"
+        "Add any NEW experiments for guards you changed this round alongside these — do "
+        "not drop them.\n"
+    )
+
+
 def _rework_vars(
-    wf: WorkflowDef, row: sqlite3.Row, worktree: Path | str, verdict: str, rework_round: int
+    wf: WorkflowDef, row: sqlite3.Row, worktree: Path | str, verdict: str, rework_round: int,
+    mutations: list[dict] | None = None,
 ) -> dict:
     """The ``{{...}}`` map a rework renders from — the prompt AND the worktree hooks.
 
@@ -4399,6 +4817,7 @@ def _rework_vars(
         "verdict": verdict,
         "rework_round": rework_round,
         "max_reworks": max_reworks(),
+        "required_mutations_section": _required_mutations_section(mutations or []),
     }
 
 
@@ -4463,6 +4882,7 @@ def _renudge_prompt(wf: WorkflowDef, row: sqlite3.Row, task: Task | None) -> str
             _rework_vars(
                 wf, row, row["worktree_path"] or "",
                 latest_verdict(dict(row)), row["rework_count"] or 0,
+                latest_required_mutations(dict(row)),
             ),
         )
     if task is None:
@@ -4590,7 +5010,9 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
 
     rework_round = (row["rework_count"] or 0) + 1
     verdict = latest_verdict(dict(row))
-    hook_vars = _rework_vars(wf, row, worktree, verdict, rework_round)
+    hook_vars = _rework_vars(
+        wf, row, worktree, verdict, rework_round, latest_required_mutations(dict(row)),
+    )
     prompt = render_prompt(
         wf.get("agent", "rework_prompt", default=None) or REWORK_PROMPT, hook_vars
     )
@@ -4655,7 +5077,11 @@ failures, a whole production wiring that could be REVERTED with 1112 passed.
 
 ## Do this, in order
 
-1. Read what this PR claims: `{{diff_cmd}}` and `{{pr_view_cmd}}`.
+1. Read what this PR claims: `{{diff_cmd}}` and `{{pr_view_cmd}}`. Skim
+   `docs/DEFEAT_SHAPES.md` — a catalog of ways a guard has already been found to look like it
+   works while missing a real corruption (dead-coded statements, fixtures parked on a
+   default, source-constant checks instead of the rendered value…). Reaching for one of
+   those shapes first is faster than rediscovering it from scratch.
 2. For **each guard/invariant it adds** (each new or changed test, each "must never…"
    comment, each accessibility cue), design ONE **minimal, live, syntactically valid**
    mutation to the **production** code that a real guard MUST catch:

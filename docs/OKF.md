@@ -259,9 +259,17 @@ This is the interop payoff: one viewer, any OKF source.
    emitting a conformant bundle from `scheduler.db`. One module, one command,
    no new deps.
 3. **Embedded viewer** — Flask read-only routes + Knowledge view in the SPA
-   (glance + browse + backlinks first; search; then graph).
+   (glance + browse + backlinks first; search; then graph). Shipped, then
+   **removed by CMX-279** (2026-08-13): the dashboard's Knowledge tab was one
+   of five views nobody opened (Liav named only Wall and Work), so the
+   SPA-embedded browsing UI (`_kn`/knRenderGlance/knOpen/knShowGraph/…) and
+   its nav item are deleted. The `/api/knowledge/*` Flask routes and
+   `chela/okf.py` are untouched — only the in-dashboard browser is gone — and
+   `knMd`/`knInline` (the dependency-free markdown renderer phase 3 built)
+   survive in `static/js/knowledge.js`, reused by the Work view's task-detail
+   modal. Phase 4 below is now the plan for browsing the bundle again.
 4. **Portable viewer** — `viewer.html` shipped in the bundle, sharing the JS
-   logic from phase 3.
+   logic phase 3 built (`knMd`/`knInline`, still in `static/js/knowledge.js`).
 5. **Adapters** — `~/.claude` memory source; external bundle mount.
 
 ## Open questions

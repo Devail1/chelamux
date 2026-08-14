@@ -13,8 +13,8 @@ import { refresh } from './main.js';
 // Sidebar + canvas navigation (replaces the old tab bar)
 //
 // The canvas is a set of .panel elements (one per view) kept from the tab
-// layout, so every existing renderer (refreshAgents -> #agent-grid,
-// renderKanban -> #kanban-board, ...) works unchanged. `currentTab` (declared in
+// layout, so every existing renderer (renderKanban -> #kanban-board,
+// renderTerminals -> the wall, ...) works unchanged. `currentTab` (declared in
 // util.js) is still the active-view variable, so main.js and sse.js keep
 // dispatching on it; only the *chrome* that sets it changed from a tab bar to
 // this sidebar.
@@ -182,10 +182,11 @@ function showAgentDetail(name) {
 }
 
 function _syncSidebarActive(view, agentName) {
-    // The agent-detail view has no nav item of its own; keep the Agents nav item
-    // lit while drilled into a single agent so the sidebar still shows where you
-    // are.
-    const navView = view === 'agent-detail' ? 'agents' : view;
+    // The agent-detail view has no nav item of its own (it is reached from the
+    // always-visible sidebar Sessions list, not a nav tab), so nothing in
+    // #side-nav lights up while drilled into one — `navView` never matches a
+    // real data-view when `view` is 'agent-detail'.
+    const navView = view === 'agent-detail' ? null : view;
     $$('.side-item').forEach(el => el.classList.toggle('active', el.dataset.view === navView));
     $$('.agent-row').forEach(el => el.classList.toggle('active', el.dataset.agent === agentName));
 }
@@ -542,13 +543,21 @@ async function resumeSession(btn) {
 
 // --- Agent detail view -----------------------------------------------------
 
+// Where "← Back" returns to: agent-detail has no nav item of its own (it is
+// reached from the always-visible sidebar Sessions list, not a nav tab), so
+// there is no single "parent" view — fall back to the same default main.js
+// picks on load (the Wall when terminals are on, else Work).
+function _agentDetailBackView() {
+    return (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) ? 'terminals' : 'work';
+}
+
 function renderAgentDetail() {
     const host = document.getElementById('agent-detail');
     if (!host) return;
     const a = (_agentsCache || []).find(x => x.name === _detailAgent);
     if (!a) {
         host.innerHTML = `<div class="detail-head">
-            <span class="detail-back" onclick="chela.selectView('agents')">← Agents</span>
+            <span class="detail-back" onclick="chela.selectView('${_agentDetailBackView()}')">← Back</span>
             <span class="detail-title">${escHtml(_detailAgent || '')}</span>
         </div>
         <div class="side-empty">This agent's window is no longer present.</div>`;
@@ -596,7 +605,7 @@ function renderAgentDetail() {
 
     host.innerHTML = `
         <div class="detail-head">
-            <span class="detail-back" onclick="chela.selectView('agents')">← Agents</span>
+            <span class="detail-back" onclick="chela.selectView('${_agentDetailBackView()}')">← Back</span>
             <span class="health-dot ${dot}"></span>
             <span class="detail-title">${escHtml(a.name)}</span>${pr}
         </div>

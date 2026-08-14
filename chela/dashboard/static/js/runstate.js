@@ -26,6 +26,11 @@ const BADGE_CLASS = {
     // and "we forgot this one" become the same pixel — which is the bug this module exists
     // to prevent.
     done: 'badge-done',
+    // A PR a human closed WITHOUT merging (CMX-265) — terminal, like `done`, but NOT
+    // shipped. Its own class, deliberately not `badge-done`: reusing it would recreate
+    // exactly the "shipped" vs "rejected" conflation the board's own Archived lane
+    // exists to prevent, just in this other surface (the runs table / task-modal history).
+    closed: 'badge-closed',
 };
 
 // The fallback is for an UNKNOWN status only. ⛔ Never let a real run state fall through to
@@ -37,5 +42,6 @@ export function runStatusBadgeClass(status) {
 }
 
 // Every status the dispatcher can put on a run row (chela/dispatcher.py: ACTIVE_STATUSES +
-// REVIEW_STATUSES + done/failed). The test asserts each one has a badge — that is the guard.
+// REVIEW_STATUSES + done/closed/failed). The test asserts each one has a badge — that is
+// the guard.
 export const RUN_STATUSES = Object.keys(BADGE_CLASS);

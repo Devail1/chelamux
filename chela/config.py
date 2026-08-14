@@ -425,10 +425,14 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
                  "Judge (adversarial review)", kind="bool", restart_required=True),
     DispatchKnob("judge_max_unknown_retries", "CHELA_JUDGE_MAX_UNKNOWN_RETRIES", 2, int,
                  "Judge cannot-verify retries", floor=0),
+    DispatchKnob("judge_max_concurrent", "CHELA_JUDGE_MAX_CONCURRENT", 1, int,
+                 "Judge max concurrent (per workflow)", floor=1),
     DispatchKnob("critic_enabled", "CHELA_CRITIC", True, _cast_bool,
                  "Critic (pre-dispatch review)", kind="bool", restart_required=True),
     DispatchKnob("worktree_disk_budget_bytes", "CHELA_WORKTREE_DISK_BUDGET", 0, _cast_size,
                  "Worktree disk budget", unit="bytes", kind="size"),
+    DispatchKnob("memory_slice_budget_bytes", "CHELA_MEMORY_SLICE_BUDGET", 0, _cast_size,
+                 "Shared memory slice budget", unit="bytes", kind="size"),
     DispatchKnob("merge_base", "CHELA_MERGE_BASE", "dev", str,
                  "Autonomous merge base branch", kind="text", restart_required=True,
                  check=_check_branch_name),
@@ -789,6 +793,33 @@ def judge_max_unknown_retries() -> int:
     Dispatch-tab knob (CMX-220) — see DISPATCH_KNOBS above.
     """
     return max(0, dispatch_value("judge_max_unknown_retries"))
+
+
+def judge_max_concurrent() -> int:
+    """How many judges may run AT ONCE, per workflow — ``dispatcher.py``'s judge-spawn
+    loop counts ``judge_state='running'`` rows for the workflow and stops claiming past
+    this. Hardcoded to ``1`` with no knob until CMX-278 (measured 2026-08-13 as the
+    single biggest throughput constraint in the system: every awaiting-review PR queues
+    behind one judge at a time, however many workflows fan out ahead of it).
+
+    Default stays ``1`` — raising it is a resource decision, not a throughput one, and it
+    is the operator's to make against their own box: each judge re-runs the whole test
+    suite in its own worktree (``docs/RESOURCE_ISOLATION.md`` measured that run's peak
+    cgroup memory, coordinator + xdist workers together, at ~0.77G), so N concurrent
+    judges is N of those at once, on TOP of whatever else the box is doing (the daemon,
+    dashboard, tmux, any dispatched agents) — none of which live inside
+    ``CHELA_MEMORY_SLICE_BUDGET``'s shared slice either. Raising this without first
+    reading that doc's "never raise the ceiling to make a job fit" section is exactly the
+    2026-07-14 global-OOM mistake it documents, replayed one knob over.
+
+    Floored at 1, not 0: unlike ``max_reworks``/``judge_max_unknown_retries``, 0 here does
+    not mean "disabled" (that is ``judge_enabled=false``) — it would silently wedge every
+    workflow's judge queue forever, indistinguishable from a stuck daemon. Read per call,
+    never latched at import: a policy knob an operator turns on a running daemon, and a
+    garbage value degrades to the default rather than crashing the tick. A Dispatch-tab
+    knob (CMX-220) — see DISPATCH_KNOBS above.
+    """
+    return max(1, dispatch_value("judge_max_concurrent"))
 # ⚖️ The judge (see chela.judge) — the adversarial pass on a PR that reached
 # awaiting_review. The fleet-wide kill switch; a workflow turns it off for itself with
 # `judge: {enabled: false}`, and it is off anyway for any workflow with no `judge.test_cmd`
@@ -934,6 +965,21 @@ STATUS_LINE = os.environ.get("CHELA_STATUS_LINE", "true").strip().lower() not in
     "false", "0", "no", "off",
 )
 
+# Live-terminal message timestamps (CMX-277, correcting CMX-270's "not feasible"
+# verdict; CMX-285 corrected CMX-277's own mechanism — see
+# docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md): the MessageDisplay hook's `displayContent`
+# response prepends a local-time marker to an assistant reply's own first line, which is
+# what the wall's ttyd tile mirrors byte-for-byte — genuinely INLINE, unlike CMX-277's
+# `systemMessage`, which Claude Code renders as its own separate line. OFF by default —
+# this decorates every assistant message in every adopter's terminal, and needs Claude
+# Code 2.1.152+ (older pins never fire the hook at all, so this degrades to "no marker,"
+# never a broken one — but that is still unverified across the full version range). Liav
+# turns it on with CHELA_TERMINAL_TIMESTAMPS=true on his own box; that is a config change,
+# not a shipped default.
+TERMINAL_TIMESTAMPS = os.environ.get("CHELA_TERMINAL_TIMESTAMPS", "false").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+
 # Embedded ttyd terminal wall on/off (read by the dashboard and the ttyd
 # supervisor in scripts/agent-terminals.sh). The wall — the flagship feature —
 # is ON by default, but it serves writable shells, so the dashboard gates it on
@@ -1037,6 +1083,31 @@ def worktree_disk_budget_bytes() -> int:
     that is already running. A Dispatch-tab knob (CMX-220) — see DISPATCH_KNOBS above.
     """
     return dispatch_value("worktree_disk_budget_bytes")
+
+
+def memory_slice_budget_bytes() -> int:
+    """The ceiling for the SHARED cgroup slice every dispatched agent and judge launches
+    into (CMX-264) — the `memcap` idea from ``docs/RESOURCE_ISOLATION.md``, now built in
+    rather than left to a personal wrapper outside chela. A per-job memory cap does not
+    bound the box: N agents each under their own ceiling can still authorise N times that
+    ceiling on the machine (measured: 4 agents at 6G each authorised 24G on a 19G box, and
+    the kernel's global OOM killer took tmux and the orchestrator with it). One SHARED
+    slice bounds the SUM instead, so an operator no longer has to hand-tune
+    ``concurrency.max`` down to whatever they hope fits in RAM and cross their fingers.
+
+    ``CHELA_MEMORY_SLICE_BUDGET`` accepts a bare byte count or a K/M/G/T-suffixed size
+    (``"12G"``, ``"500M"``, ...), same parser as :func:`worktree_disk_budget_bytes`. ``0``,
+    unset, or anything that fails to parse means OFF — nobody is forced onto a rail they
+    haven't sized for their own box, and a garbage value degrades to the safe default
+    rather than crashing the tick. Only takes effect on a Linux host with a working
+    ``systemd --user`` session (see :mod:`chela.memcap`); anywhere else this silently
+    stays off and agents launch exactly as they do today.
+
+    Read per call, never latched at import — a policy knob an operator turns on a daemon
+    that is already running. A Dispatch-tab knob (CMX-220 pattern) — see DISPATCH_KNOBS
+    above.
+    """
+    return dispatch_value("memory_slice_budget_bytes")
 
 
 def human_size(n: int) -> str:

@@ -11,39 +11,33 @@
 // hooks come from this array, the global refresh calls this array's `tick`, and
 // the palette lists this array. Deleting a view is deleting its entry below.
 //
-// The views are Feed · Wall · Work · Knowledge · Agents · Personas · Cost.
-// `agent-detail` is a virtual drill-in — reachable, no nav item. See viewreg.js
-// for the entry shape.
+// CMX-279 (measured, not assumed — asked which of the seven views he actually
+// opens, Liav named exactly two): the dashboard is Wall · Work. CMX-230 had
+// tried demoting the other five (Feed, Knowledge, Agents, Personas, Cost) into
+// a quieter secondary nav group rather than deleting them — this ticket
+// supersedes that call: the five are gone outright, not re-parented, because
+// nobody was opening them either way and cutting nav count is a bigger visual
+// win than any redesign of a group that was never read. Their dedicated
+// renderer modules (feed.js, cost.js, personas.js) are deleted with them;
+// agents.js and knowledge.js survive trimmed, since both also back surfaces
+// that stay (the agent-detail drill-in and the sidebar rate-limit pills; the
+// task-modal brief's markdown renderer, respectively — see those files' own
+// headers).
+//
+// `agent-detail` is a virtual drill-in — reachable (from the always-visible
+// sidebar Sessions list, the Wall, or the palette), no nav item of its own.
+// See viewreg.js for the entry shape.
 // ---------------------------------------------------------------------------
-import { refreshAgents } from './agents.js';
-import { refreshCost } from './cost.js';
-import { enterFeed, tickFeed } from './feed.js';
-import { _kn, knBackToGlance, refreshKnowledge } from './knowledge.js';
 import { renderAgentDetail } from './nav.js';
-import { refreshPersonas } from './personas.js';
 import { renderTerminals, startTermTimer, stopTermTimer } from './terminals.js';
 import { pollWork } from './work.js';
 
 export const VIEWS = [
     {
-        id: 'feed',
-        label: 'Feed',
-        // A lucide `rss` mark, not a glyph: the old ≡ read exactly like the sidebar
-        // toggle. `lucide` names an inline SVG from util.js's vendored set (see
-        // _navItemHtml); a plain `icon` string is still a unicode glyph.
-        lucide: 'rss',
-        // AGENT LANES: the log, grouped under the agent that produced each row, with
-        // the agents that need you sorted to the top. Entering re-reads the fleet AND
-        // the log from scratch; the SSE `log` delta accelerates it, and this tick is
-        // the fallback that keeps it correct if the stream never connects.
-        enter: () => enterFeed(),
-        tick: () => tickFeed(),
-    },
-    {
         id: 'terminals',
         label: 'Wall',
-        // lucide (not a glyph) so the nav rail's five icons share one box — see the
-        // Feed note above. `layout-grid` reads as the wall's grid of live tiles.
+        // lucide (not a glyph) so the nav rail's icons share one box. `layout-grid`
+        // reads as the wall's grid of live tiles.
         lucide: 'layout-grid',
         enabled: ctx => !!ctx.terminalsOn,
         // The wall holds LIVE iframes: entering reconciles by stable window id and
@@ -65,46 +59,6 @@ export const VIEWS = [
         // poll for the whole app (it also feeds the badges above, which are visible on
         // every view) — so there is no timer to start here, only an immediate redraw.
         enter: () => pollWork(),
-    },
-    {
-        id: 'knowledge',
-        label: 'Knowledge',
-        // lucide `book-open` — the knowledge base, as a fixed box.
-        lucide: 'book-open',
-        // Entering from the nav lands on the glance overview, not whatever concept
-        // was last open.
-        enter: () => { if (typeof knBackToGlance === 'function' && _kn.tree) knBackToGlance(); },
-        tick: () => refreshKnowledge(),
-    },
-    {
-        id: 'agents',
-        label: 'Agents',
-        // lucide `bot` — the agent fleet, as a fixed box.
-        lucide: 'bot',
-        tick: () => refreshAgents(),
-    },
-    {
-        id: 'personas',
-        label: 'Personas',
-        // lucide `drama` — the theatre masks: the declared persona layer (judge · critic ·
-        // orchestrator). Read-only: it renders the registry, it never launches a persona.
-        lucide: 'drama',
-        // The decisions log used to ride alongside the persona cards (cmx-106); it now
-        // lives in the topbar's Decisions popover (main.js seeds + ticks it,
-        // decisions.js — CMX-171 moved it out of the sidebar), so this view is
-        // persona cards only.
-        enter: () => refreshPersonas(),
-        tick: () => refreshPersonas(),
-    },
-    {
-        id: 'cost',
-        label: 'Cost',
-        // lucide `dollar-sign` — fleet spend, as a fixed box.
-        lucide: 'dollar-sign',
-        // Entering and ticking both just re-pull /api/cost (scoped by the tab's own
-        // Live/Today/7d/30d selector state) + /api/agents (for project) and re-render.
-        enter: () => refreshCost(),
-        tick: () => refreshCost(),
     },
     {
         id: 'agent-detail',
