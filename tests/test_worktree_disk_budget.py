@@ -84,6 +84,31 @@ def test_capability_reports_on_with_the_human_size(monkeypatch):
     assert "20.0G" in cap.detail
 
 
+# --- capabilities.live(): a live_reload capability must not go stale ----------------------
+#
+# CMX-280 gave memory_slice_budget the same live_reload=True treatment this capability
+# already had, and in doing so proved this rail had NO test pinning that live_reload
+# actually does anything: `effective()` (above) always reads config fresh regardless of
+# the flag, so a test that only calls `effective()` cannot tell live_reload=True from
+# live_reload=False. Only `capabilities.live()` branches on the flag (it is what decides
+# whether a published boot snapshot gets reconciled against current config or returned
+# stale) — see test_memory_slice_budget.py's sibling test, which this mirrors.
+
+
+def test_worktree_disk_budget_reflects_a_post_boot_env_change_not_the_boot_snapshot(
+        monkeypatch):
+    monkeypatch.delenv("CHELA_WORKTREE_DISK_BUDGET", raising=False)
+    capabilities.publish(capabilities.effective(), boot_id="b1")
+    assert capabilities.live_capability("worktree_disk_budget")["on"] is False
+
+    # No restart — dispatcher.py reads worktree_disk_budget_bytes() fresh on every tick,
+    # which is the whole point of NOT marking this knob restart_required.
+    monkeypatch.setenv("CHELA_WORKTREE_DISK_BUDGET", "20G")
+    cap = capabilities.live_capability("worktree_disk_budget")
+    assert cap["on"] is True
+    assert "20.0G" in cap["detail"]
+
+
 # --- the dispatcher gate: refuses a FRESH claim, nothing else ----------------------------
 
 
