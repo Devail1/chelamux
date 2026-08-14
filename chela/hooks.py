@@ -53,10 +53,13 @@ log = logging.getLogger(__name__)
 
 # Every hook event Claude Code emits (measured on 2.1.207 — `AskUserQuestion` and
 # `ExitPlanMode` are NOT events, they are TOOLS, and arrive as PreToolUse /
-# PermissionRequest carrying `tool_name` + the full `tool_input`).
+# PermissionRequest carrying `tool_name` + the full `tool_input`). `MessageDisplay`
+# is newer (2.1.152+, per CMX-285) and absent on an older pin — Claude Code simply never
+# fires a hook it doesn't have, so an adopter on an old version sees no line, never a
+# broken one.
 HOOK_EVENTS: tuple[str, ...] = (
     "PreToolUse", "PostToolUse", "PermissionRequest", "PermissionDenied",
-    "UserPromptSubmit", "SessionStart", "SessionEnd", "Stop",
+    "UserPromptSubmit", "SessionStart", "SessionEnd", "Stop", "MessageDisplay",
     "SubagentStart", "SubagentStop", "Notification",
     "PreCompact", "PostCompact", "Elicitation",
 )
@@ -130,31 +133,42 @@ def hook_timeout(event: str) -> int:
     return HOOK_TIMEOUT
 
 
-# The two events "timestamps on messages in the live terminal" maps to: the user-message
-# boundary and the assistant-reply-finished boundary (CMX-277, correcting CMX-270's "not
-# feasible" verdict — see docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md). Both already fire over
-# http against this daemon; making the timestamp visible is a response-body change here,
-# not new plugin wiring.
-TIMESTAMP_EVENTS: frozenset[str] = frozenset({"UserPromptSubmit", "Stop"})
+# The event "timestamps on messages in the live terminal" maps to now (CMX-285,
+# correcting CMX-277's own mechanism — see docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md).
+# CMX-277 used `systemMessage` on `UserPromptSubmit`/`Stop`, which Claude Code renders as
+# its OWN separate `<Line>` above/below the message — visible, but not what Liav meant by
+# "timestamps": his verdict on the shipped version was that it "doesn't seem to be
+# presented like it does for zoharbabin/claude-code-message-timestamps," and that plugin's
+# actual mechanism is `MessageDisplay`, not `systemMessage`. `MessageDisplay` fires once
+# per streamed batch of an assistant message (`index` 0-based, `delta` the newly-completed
+# text), and its `displayContent` response field replaces the delta ON SCREEN ONLY — the
+# stored transcript and what the model sees are untouched (Claude Code's own schema:
+# "Display-only: replaces the delta on screen without changing the stored message"). That
+# is what lets the marker sit INSIDE the message's own text — genuinely inline — instead
+# of arriving as a second, separately-rendered line. Requires Claude Code 2.1.152+.
+TIMESTAMP_EVENTS: frozenset[str] = frozenset({"MessageDisplay"})
 
 
-def timestamp_response(event: str) -> dict:
-    """The hook response body that stamps ``event`` into the live terminal transcript.
+def message_display_response(body: dict) -> dict:
+    """The ``MessageDisplay`` response that stamps ``body``'s delta with a local-time
+    marker — but only on the message's FIRST streamed batch (``index == 0``), so the
+    marker appears exactly once per assistant reply, not before every chunk.
 
-    ``systemMessage`` is the field Claude Code itself renders as a visible line in the
-    pty stream it owns — the spike's corrected finding: chelamux's own JS can't reach
-    xterm's canvas buffer to decorate a row, but the Claude Code process, writing its own
-    transcript, can. A **bare** ``{"systemMessage": ...}`` was observed rendering and then
-    being discarded within about a second (anthropics/claude-code#50542); pairing it with
-    ``continue``/``suppressOutput`` made it persist reliably for ``Stop`` in that same
-    report. There's no equivalent report for ``UserPromptSubmit``, so it gets the same
-    proven-persistent envelope rather than the proven-flaky bare one.
+    Every later batch returns ``{}``: Claude Code's own schema treats an absent
+    ``displayContent`` as "display the original," so a later chunk's text renders exactly
+    as it would have without this hook at all.
 
     Local time, ``HH:MM:SS`` — the same clock and format the Feed already renders
-    timestamps in (``chela/main.py``'s event log view).
+    timestamps in (``chela/main.py``'s event log view), and the format CMX-277's
+    ``timestamp_response`` (superseded by this) used.
     """
+    if body.get("index") != 0:
+        return {}
+    delta = body.get("delta")
+    delta = delta if isinstance(delta, str) else ""
     ts = time.strftime("%H:%M:%S")
-    return {"continue": True, "suppressOutput": False, "systemMessage": f"🕐 {ts}"}
+    return {"hookSpecificOutput": {"hookEventName": "MessageDisplay",
+                                    "displayContent": f"🕐 {ts} {delta}"}}
 
 
 def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
@@ -272,9 +286,10 @@ def hooks_fingerprint(port: int | None = None) -> str:
 # hash in here keyed by the new version.
 EXPECTED_HOOKS_FINGERPRINT: dict[str, str] = {
     "0.2.1": "67b4358055f8df27922da7df6bf99c740ed23c800b19a03f0e41c485b4480bc9",
+    "0.2.2": "0cfd26508b63a2804c0f815437e5b5c2564e1b72427bda18754692e199e8408d",
 }
 
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.2.2"
 
 
 def plugin_manifest() -> dict:
