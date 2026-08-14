@@ -65,7 +65,7 @@
            not a substitute for each other; click to open the full log (which also
            clears the badge). -->
       <button class="icon-btn" id="btn-decisions" title="Decisions" aria-label="Decisions inbox"
-              aria-haspopup="true" onclick="chela.openDecisionsMenu(event)">
+              aria-haspopup="dialog" onclick="chela.openDecisionsMenu()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
         <span class="decisions-dot" id="decisions-dot" hidden></span>
         <span class="decisions-unread" id="decisions-unread" hidden></span>
@@ -547,35 +547,41 @@
   </div>
 </div>
 
-<!-- Decisions inbox popover — the durable, owner-independent record of every
-     dispatch outcome chela/inbox.py has ever queued, plus who (if anyone)
-     currently receives it live. CMX-171: moved here from a permanent THIRD
+<!-- Decisions inbox — the durable, owner-independent record of every dispatch
+     outcome chela/inbox.py has ever queued, plus who (if anyone) currently
+     receives it live. CMX-171 first moved this out of a permanent THIRD
      sidebar section (`#side-decisions`, cmx-106/cmx-107) into a topbar popover
-     anchored off #btn-decisions, same open/close pattern as #new-menu /
-     #primary-menu above. This also fixes a real bug structurally: the sidebar's
-     collapsed 60px icon-rail hide-list (style.css) never listed the old
-     `#decisions-chip`/`.decisions-list`, so they used to spill into the rail —
-     moving the section out of the sidebar entirely means there is nothing left
-     to spill. #decisions-chip/#decisions-list keep their ids unchanged, so
-     chela/dashboard/static/js/decisions.js paints into this popover exactly as
-     it painted into the old sidebar section — nothing about its state/seeding/
-     SSE wiring changed, only where the DOM lives. -->
-<div class="popover decisions-menu" id="decisions-menu" style="display:none;">
-  <div class="popover-head">
-    <span class="popover-title"
-          title="Every dispatch outcome, ever — recorded here whether or not a live session is receiving it. Click a pane's ⊙ toggle on the Wall to have it delivered straight into that session instead of landing only here.">Decisions</span>
+     anchored off #btn-decisions; CMX-288 moved it again, off-anchor into a
+     centered modal — a screenshot of the anchored popover (no cap smaller
+     than `max-width: 92vw`) showed it spanning the dashboard's full width and
+     occluding the entire terminal Wall behind it (Liav, 2026-08-14). Reuses
+     `.palette-overlay` for the backdrop — the SAME shell #palette and
+     #shortcuts-overlay already share below — plus new `.modal-sheet`/
+     `.modal-sheet-head`/`.modal-sheet-body` for the header+scrollable-body
+     shape neither of those two needed. `.modal-sheet` is the reusable part:
+     the next centered modal (e.g. a tabbed settings modal) should reuse THIS
+     shell rather than hand-roll another one. #decisions-chip/#decisions-search/
+     #decisions-list keep their ids unchanged, so decisions.js paints into
+     this modal exactly as it painted into the old popover — nothing about
+     its state/seeding/SSE wiring changed, only the shell around it. -->
+<div class="palette-overlay" id="decisions-menu" onclick="if(event.target===this)chela.hideDecisionsMenu()">
+  <div class="modal-sheet" role="dialog" aria-label="Decisions">
+    <div class="modal-sheet-head">
+      <span class="popover-title"
+            title="Every dispatch outcome, ever — recorded here whether or not a live session is receiving it. Click a pane's ⊙ toggle on the Wall to have it delivered straight into that session instead of landing only here.">Decisions</span>
+      <button class="icon-btn" title="Close" aria-label="Close" onclick="chela.hideDecisionsMenu()">✕</button>
+    </div>
+    <div class="modal-sheet-body">
+      <div id="decisions-chip"></div>
+      <!-- CMX-178: a client-side substring filter over the events already held
+           (decisionsmodel.js's filterDecisionEvents) — finds an OLD decision the
+           short list below has scrolled past, with no new fetch. -->
+      <input type="text" class="decisions-search" id="decisions-search"
+             placeholder="Search task, branch, PR…" autocomplete="off"
+             oninput="chela.setDecisionsQuery(this.value)">
+      <div class="decisions-list" id="decisions-list"></div>
+    </div>
   </div>
-  <div id="decisions-chip"></div>
-  <!-- CMX-178: a client-side substring filter over the events already held
-       (decisionsmodel.js's filterDecisionEvents) — finds an OLD decision the
-       short list below has scrolled past, with no new fetch.
-       CMX-182: the light-dismiss listener (decisions.js openDecisionsMenu)
-       ignores clicks that land anywhere inside #decisions-menu, so this input
-       (and every other descendant) needs no stopPropagation of its own. -->
-  <input type="text" class="decisions-search" id="decisions-search"
-         placeholder="Search task, branch, PR…" autocomplete="off"
-         oninput="chela.setDecisionsQuery(this.value)">
-  <div class="decisions-list" id="decisions-list"></div>
 </div>
 
 <!-- Launcher: "add a project to Favorites" picker (filled from /api/launcher/suggest) -->
