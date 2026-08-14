@@ -69,6 +69,27 @@
 // new assertions appended to test 2 itself (the selection-state gap). See
 // DEFEAT_SHAPES #5 and #39.
 //
+// CMX-287 rework round 5 (PR #358): the judge's round-5 verdict found two more
+// gaps, both left over from property 3's "must" claims in cost.js's own
+// comments never being exercised by any fixture:
+//
+//   - refreshCost()'s `Array.isArray(ctx) ? ctx : []` coercion on /api/cost's
+//     response: every fixture in this file (COST_LIVE and the two re-fetch
+//     payloads) is already an array, so the mutated `(ctx)` (no coercion)
+//     still passed the whole suite — the coercion only matters for a bare
+//     `{}`/non-array response, which nothing here ever sent. Closed by test
+//     2c below, which sends exactly that and asserts the tab falls back to
+//     its empty-state render instead of getting stuck on "Loading…" behind
+//     an unhandled rejection out of the un-awaited refreshCost() call. See
+//     DEFEAT_SHAPES #40.
+//   - renderCostTable()'s per-project `total` (the number project grouping
+//     exists to produce) was rendered into `.cost-project-row`'s own cost
+//     cell but never read back — test 2 pinned the project row's NAME cell,
+//     the agent lines and the fleet total, but not the project row's own
+//     cost cell, so `_fmtCost(p.total)` -> `_fmtCost(0)` stayed green. Closed
+//     by new assertions appended to test 2, reading `.cost-project-row td:
+//     last-child` for both projects. See DEFEAT_SHAPES #41.
+//
 // Also closes DEFEAT_SHAPES #34 here: the fixture used to hand-type its own
 // `<nav id="settings-tabs">`/`<div id="drawer-body">` markup instead of the
 // real chela/dashboard/templates/index.html, so a template mutation (e.g.
@@ -289,6 +310,21 @@ test('the Cost tab renders a project-grouped table joined from /api/agents + /ap
     assert.match(table.textContent, /\$1\.50/, 'the per-agent cost is missing/wrong');
     assert.match(table.textContent, /\$3\.75/, 'the fleet total (1.50 + 2.25) is missing/wrong');
 
+    // The project row's OWN cost cell (its subtotal), not just its name cell
+    // or the sibling agent/fleet-total figures — `renderCostTable()` reduces
+    // each project's agents into `total` and renders it here; with one agent
+    // per project in this fixture the subtotal equals that agent's own cost,
+    // so a mutation that zeroes the subtotal (`_fmtCost(p.total)` ->
+    // `_fmtCost(0)`) is caught by these two lines specifically, not by proximity
+    // to the agent-row/fleet-total assertions above. See DEFEAT_SHAPES #41.
+    const projectRowCosts = {};
+    table.querySelectorAll('.cost-project-row').forEach(tr => {
+        projectRowCosts[tr.querySelector('td:first-child').textContent.trim()] =
+            tr.querySelector('td:last-child').textContent.trim();
+    });
+    assert.equal(projectRowCosts.chelamux, '$1.50', 'the chelamux project row subtotal is missing/wrong');
+    assert.equal(projectRowCosts.nautilus, '$2.25', 'the nautilus project row subtotal is missing/wrong');
+
     fetchCalls = [];
     costPayload = [{ name: 'runner-east', model: 'sonnet', cost_usd: 9 }];
     await window.chela.setCostWindow('7d');
@@ -355,4 +391,32 @@ test('clicking a rendered Cost-window segment — via its REAL onclick attribute
     assert.equal(d7Btn.getAttribute('aria-pressed'), 'true', 'clicking the 7d segment did not set aria-pressed="true"');
     assert.equal(liveBtn.classList.contains('active'), false, 'the Live segment is still .active after clicking 7d');
     assert.equal(liveBtn.getAttribute('aria-pressed'), 'false', 'the Live segment\'s aria-pressed is still "true" after clicking 7d');
+});
+
+// --- 2c. 🔴 the Cost tab survives a non-array /api/cost payload (cost.js's own stated "must") --
+//
+// cost.js's refreshCost() comment states, in its own words, that "Both
+// responses are defensively coerced to arrays — the Settings modal's other
+// tabs tolerate a bare `{}` from a flaky/mocked endpoint ... and this tab
+// must too rather than throwing out of an un-awaited call in
+// renderSettings()". Every /api/cost fixture elsewhere in this file
+// (COST_LIVE and the two re-fetch payloads above) is already an array, so
+// that coercion (`Array.isArray(ctx) ? ctx : []`) is never exercised by any
+// of them — a mutation that drops it (`(ctx)`) leaves every other test in
+// this file green. This test is the one that actually sends the malformed
+// shape the coercion exists for: without it, `.map` throws inside the
+// un-awaited refreshCost(), the rejection is never caught, and `#cost-table`
+// is stuck on its template's hardcoded "Loading…" forever. See
+// DEFEAT_SHAPES #40.
+test('the Cost tab survives a non-array /api/cost payload instead of throwing out of the un-awaited refreshCost()', async () => {
+    costPayload = {};   // a bare object — the flaky/mocked-endpoint shape the comment names
+    await openOnTab('cost');
+
+    const table = document.getElementById('cost-table');
+    assert.ok(table, '#cost-table host missing');
+    assert.doesNotMatch(table.textContent, /Loading/i,
+        'the Cost tab is stuck on "Loading…" after a non-array /api/cost payload — the join/map threw ' +
+        'instead of coercing the payload to an empty array');
+    assert.match(table.textContent, /No cost data yet/,
+        'a non-array /api/cost payload did not fall back to the empty-state render');
 });
