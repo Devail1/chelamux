@@ -4751,11 +4751,13 @@ existing PR updates itself.
 1. **Read the PR thread yourself** — `{{pr_comments_cmd}}`. The comment is the durable
    record, and a human may have added to it since the verdict above was written.
 2. Fix every defect it names, in this worktree. If a guard SURVIVED corruption, check
-   `docs/DEFEAT_SHAPES.md` — it catalogs known ways a guard looks like it works but doesn't
+   `docs/DEFEAT_SHAPES.md` (the catalog itself lives one file per shape under
+   `docs/defeat_shapes/`) — it catalogs known ways a guard looks like it works but doesn't
    (dead-coded statements, fixtures parked on a default, source-constant checks instead of
-   the rendered value…). If the shape the verdict just found isn't listed there yet, add an
-   entry as part of this fix — it is the only durable place that knowledge can land; the
-   judge's own checkout is thrown away when it finishes and cannot commit it itself.
+   the rendered value…). If the shape the verdict just found isn't catalogued yet, add ONE
+   NEW FILE to `docs/defeat_shapes/` as part of this fix — it is the only durable place that
+   knowledge can land; the judge's own checkout is thrown away when it finishes and cannot
+   commit it itself.
 3. Re-run the SAME validation your original task told you to run (this repo's CI gates are
    not optional) — and if a REQUIRED MUTATION SET is above, your self-check experiments
    file MUST include each one **verbatim** (copy the JSON, do not retype it) alongside any
@@ -5098,10 +5100,11 @@ failures, a whole production wiring that could be REVERTED with 1112 passed.
 ## Do this, in order
 
 1. Read what this PR claims: `{{diff_cmd}}` and `{{pr_view_cmd}}`. Skim
-   `docs/DEFEAT_SHAPES.md` — a catalog of ways a guard has already been found to look like it
-   works while missing a real corruption (dead-coded statements, fixtures parked on a
-   default, source-constant checks instead of the rendered value…). Reaching for one of
-   those shapes first is faster than rediscovering it from scratch.
+   `docs/DEFEAT_SHAPES.md` and browse `docs/defeat_shapes/` — a catalog of ways a guard has
+   already been found to look like it works while missing a real corruption (dead-coded
+   statements, fixtures parked on a default, source-constant checks instead of the rendered
+   value…). Reaching for one of those shapes first is faster than rediscovering it from
+   scratch.
 2. For **each guard/invariant it adds** (each new or changed test, each "must never…"
    comment, each accessibility cue), design ONE **minimal, live, syntactically valid**
    mutation to the **production** code that a real guard MUST catch:
