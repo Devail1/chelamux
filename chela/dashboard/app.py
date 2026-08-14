@@ -2363,14 +2363,14 @@ def _session_start_recap(body: dict, explicit_wid: str | None = None):
 @app.route("/hooks/<event>", methods=["POST"])
 @require_auth
 def api_hooks(event):
-    """Receive one Claude Code hook: append it to the event log, and — for exactly one
-    event — hand the agent an answer back.
+    """Receive one Claude Code hook: append it to the event log, and — for a few events —
+    hand the agent something back.
 
     The plugin (``plugin/hooks/hooks.json``, rendered by :func:`chela.hooks.hooks_spec`)
     POSTs each event here as an ``http`` hook, so there is no shell script and no process
     spawn per tool call. Correlation to a window is off the session's origin, not the pane.
 
-    **Every event but one returns ``{}``.** An agent is *blocked* on this request and
+    **Only one event ever decides anything.** An agent is *blocked* on this request and
     Claude Code reads what comes back, so a ``permissionDecision`` or a
     ``hookSpecificOutput`` here is chela answering a prompt on the human's behalf. That is
     now a thing chela deliberately does — for ``PermissionRequest`` on an
@@ -2378,7 +2378,11 @@ def api_hooks(event):
     Telegram topic within the wait budget (:func:`chela.gateanswer.answer_permission_request`).
     It is the ONLY safe way to answer a multi-question / ``multiSelect`` picker: the
     keystroke path has no cursor to read for those shapes, and the one time it guessed it
-    silently answered the wrong option (CMX-32). Nothing else here decides anything.
+    silently answered the wrong option (CMX-32). Nothing else here decides anything —
+    ``UserPromptSubmit``/``Stop`` also return a non-empty body (CMX-277,
+    :func:`chela.hooks.timestamp_response`, gated by ``config.TERMINAL_TIMESTAMPS``), but
+    that body only stamps a ``systemMessage`` timestamp into the live terminal transcript;
+    it answers no prompt and decides nothing. Every other event still returns ``{}``.
 
     **A blocked request is bounded and fails OPEN.** The wait is at most
     ``CHELA_GATE_WAIT_S`` and the number of simultaneously-held gates is capped; past
@@ -2403,6 +2407,10 @@ def api_hooks(event):
     hooks.ingest(event, body, explicit_wid=explicit_wid)
     if event == "SessionStart" and isinstance(body, dict):
         return _session_start_recap(body, explicit_wid)
+    if event in hooks.TIMESTAMP_EVENTS and config.TERMINAL_TIMESTAMPS:
+        # CMX-277: stamp the live terminal wall at the message boundary. See
+        # docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md and hooks.timestamp_response.
+        return jsonify(hooks.timestamp_response(event))
     if event == "PostToolUse" and isinstance(body, dict):
         # The gate is over — whoever answered it. A ⏎ driven into the mirrored pane answers
         # the TUI directly, so a hook we are holding for that same call would otherwise wait

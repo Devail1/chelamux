@@ -12,14 +12,14 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**40** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**41** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
 was never a literal read to begin with), so those 18 are no longer *literal*
-`os.environ.get("CHELA_…")` call sites — see "WIRED" under Groups 2
-and 3) — every literal `CHELA_*` name a Python module in `chela/` reads straight off
-`os.environ`.
+`os.environ.get("CHELA_…")` call sites — see "WIRED" under Groups 2 and 3 — then 40, until
+CMX-277 added `CHELA_TERMINAL_TIMESTAMPS`, group 8) — every literal `CHELA_*` name a
+Python module in `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
 the README config table twice has (CMX-…, see `docs/CONFIG.md` history).
@@ -236,7 +236,7 @@ Connections & Status section already does for other facts), not a write control.
 host." A dashboard writing its own bind host is a process editing the boundary that makes
 "loopback + no-auth" a safe default in the first place.
 
-### 8. Terminal wall (5 of the 58; +7 shell-only, see above) — mixed
+### 8. Terminal wall (6 of the 58; +7 shell-only, see above) — mixed
 
 | Variable | Default | Class | Notes |
 |---|---|---|---|
@@ -244,6 +244,7 @@ host." A dashboard writing its own bind host is a process editing the boundary t
 | `CHELA_TERMINALS_EXPOSE` | `false` | `trust-boundary` | Serve the writable wall on a non-loopback bind — RCE risk, opt-in |
 | `CHELA_TERM_COLS` | `120` | `hot` | Shared collab grid geometry (columns) |
 | `CHELA_TERM_ROWS` | `30` | `hot` | Shared collab grid geometry (rows) |
+| `CHELA_TERMINAL_TIMESTAMPS` | `false` | `hot` | Stamp a `systemMessage` timestamp into the live terminal transcript at the UserPromptSubmit/Stop hooks (CMX-277) — OFF by default (adopter-facing, rendering reliability unverified across Claude Code versions); opt in per-install |
 | `CHELA_WALL_TILE_DISPATCHED` | `false` | `hot` | Give dispatcher-spawned agents a full tile eagerly vs minimized |
 
 A "Terminal wall" tab is the clearest case where scoping to the Python-side 58 alone would

@@ -965,6 +965,19 @@ STATUS_LINE = os.environ.get("CHELA_STATUS_LINE", "true").strip().lower() not in
     "false", "0", "no", "off",
 )
 
+# Live-terminal message timestamps (CMX-277, correcting CMX-270's "not feasible"
+# verdict — see docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md): the UserPromptSubmit/Stop hook
+# responses stamp a `systemMessage` line into the agent's own transcript, which is what
+# the wall's ttyd tile mirrors byte-for-byte. OFF by default — this writes a visible line
+# at every message boundary in every adopter's terminal, and rendering reliability across
+# Claude Code versions is unverified (anthropics/claude-code#50542, observed on 2.1.114):
+# a kill switch you discover only after your terminal starts misbehaving is not the same
+# as never having flipped it on. Liav turns it on with CHELA_TERMINAL_TIMESTAMPS=true on
+# his own box; that is a config change, not a shipped default.
+TERMINAL_TIMESTAMPS = os.environ.get("CHELA_TERMINAL_TIMESTAMPS", "false").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+
 # Embedded ttyd terminal wall on/off (read by the dashboard and the ttyd
 # supervisor in scripts/agent-terminals.sh). The wall — the flagship feature —
 # is ON by default, but it serves writable shells, so the dashboard gates it on
