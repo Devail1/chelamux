@@ -194,3 +194,59 @@ This also fixes a volume problem CMX-277 didn't have to think about: `UserPrompt
 turn — so `chela/dashboard/app.py`'s endpoint answers it ahead of `hooks.ingest` entirely
 and never logs it, keeping the feature off the event log's hot path whether or not
 `CHELA_TERMINAL_TIMESTAMPS` is even on.
+
+## Measured (CMX-285 rework round 1) — fire count and added blocking latency
+
+The open question after the first review round: hooks *block* the agent, and the round-trip
+cost measured against the live dashboard (n=40: median 6.8ms, p90 10.0ms, max 66.6ms) only
+turns into a real number once multiplied by how many times `MessageDisplay` actually fires
+for one reply — a number nothing in the repo had measured yet.
+
+**Why `-p`/print mode can't answer this.** The first attempt used `claude -p "<prompt>"`
+against an isolated dashboard instance (own `CHELA_DIR`, scratch port, so this never touched
+the real orchestrator's state) — a 1460-word reply fired `MessageDisplay` exactly **once**.
+Non-interactive print mode doesn't do the incremental TUI-repaint streaming this hook exists
+for; it's effectively one batch regardless of reply length. The measurement has to run
+through a real interactive session.
+
+**Setup.** Isolated `chela dashboard` instance from this branch (own `CHELA_DIR`/scratch
+port, no auth needed — `require_auth` is a no-op, the boundary is loopback bind), driven by
+three separate real interactive Claude Code 2.1.232 sessions (`claude --settings
+'{"hooks":{"MessageDisplay":[...],"Stop":[...]}}'`, additive so it never touched the
+marketplace-installed plugin) in throwaway tmux sessions, each given the identical prompt
+("write a 1500-word essay on the history of the printing press, no tool use"). Fire count =
+`grep -c "POST /hooks/MessageDisplay"` in the isolated instance's own access log; wall-clock
+= Claude Code's own built-in turn timer (`Baked/Crunched/Brewed for Xs`, shown after every
+reply).
+
+| run | `CHELA_TERMINAL_TIMESTAMPS` | `MessageDisplay` fires | wall-clock |
+|---|---|---|---|
+| A | on | 18 | 63s ("Baked for 1m 3s") |
+| B | off | 20 | 58s ("Crunched for 58s") |
+| C (control, hook not registered at all) | n/a | 0 | 59s ("Brewed for 59s") |
+
+**Fire count for a ~1500-word reply: 18–20** — roughly one `MessageDisplay` batch per
+75–85 words, at a cadence of about one every 3 seconds of streaming. At the PR's own measured
+round-trip, that's ≈122–200ms of added blocking latency (median-to-p90) across the whole
+turn — 0.2–0.3% of the ~60s the turn actually took, and smaller than the 5s (~8%) spread
+already present between runs A/B/C from ordinary generation-speed variance. No systematic
+difference is distinguishable between "on", "off", and "hook not registered at all."
+
+**A finding beyond what was asked:** `CHELA_TERMINAL_TIMESTAMPS` does not gate whether the
+round-trip happens. The hook is registered statically in the installed plugin manifest, so
+Claude Code fires the HTTP request to `/hooks/MessageDisplay` on every batch regardless of
+the flag; the flag only changes what `chela/dashboard/app.py` puts in the response body
+(stamped delta vs. `{}`, both computed in-process, not the network hop). Run C — hook not
+registered at all — is the only one of the three that actually skips the round-trip, and its
+wall-clock (59s) is indistinguishable from A/B's (58–63s), which is itself the strongest
+evidence that the round-trip cost is not observable against generation-speed noise.
+
+**Verdict: `http` stays.** Fire count is bounded (tens, not hundreds, per reply — Claude
+Code's own batching cadence, not something this repo controls or needs to), the added
+latency is a fraction of a percent of total turn time, and it isn't measurably distinguishable
+from run-to-run noise. No transport change, no first-batch logic change, no version-bump
+change — the PR's implementation was already correct; what was missing was this number, not
+a different design. Side note for future spikes here: the *first* MessageDisplay batch in
+each run only landed 3-5s after `Enter` was actually submitted, not the network round-trip —
+that gap is Claude Code's own first-token latency before streaming starts, unrelated to this
+hook.
