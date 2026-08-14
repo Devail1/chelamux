@@ -965,6 +965,41 @@ test('openDecisionsMenu shows the modal; hideDecisionsMenu closes it', () => {
     assert.ok(!isOpen(), 'hideDecisionsMenu must hide the modal');
 });
 
+// 🔴 GUARD (CMX-288 rework round 2): opening the modal must mark every
+// currently-held event seen, clearing the unread badge — the claim the
+// openDecisionsMenu doc comment makes ("Opening marks every currently-held
+// event as seen"). Nothing drove this before: every other test either never
+// primes an unread event, or calls `decisions.hideDecisionsMenu()` (never
+// `openDecisionsMenu()`) in beforeEach. Dead-coding the `_markSeen()` call
+// (`if (false) _markSeen();`) left the badge un-cleared and every one of the
+// 40 prior tests stayed green.
+test('🔴 GUARD: opening the modal marks held events seen, clearing the unread badge', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{ seq: 1, ts: 1000, type: 'finished', wid: '@3', summary: 'cmx-seed', payload: {} }],
+    };
+    await decisions.enterDecisions();
+    // A fresh, definitely-unseen event so the badge has something real to
+    // clear, whatever this file's shared lastSeen cursor already sits at.
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 200000, next_seq: 200000,
+        events: [{
+            seq: 200000, ts: 2000, type: 'run_review', wid: '@4',
+            summary: 'cmx-unread awaiting review', payload: { branch_name: 'cmx-unread' },
+        }],
+    };
+    await decisions.tickDecisions();
+    assert.notEqual(document.querySelector('#decisions-unread').textContent, '',
+        'sanity: there must be an unread event before opening the modal');
+
+    decisions.openDecisionsMenu();
+
+    assert.equal(document.querySelector('#decisions-unread').hidden, true,
+        'opening the modal did not mark held events as seen — the unread badge must clear');
+    assert.equal(document.querySelector('#decisions-unread').textContent, '',
+        'opening the modal did not mark held events as seen — the unread badge must clear');
+});
+
 test('openDecisionsMenu focuses the search box', async () => {
     decisions.openDecisionsMenu();
     await flushMicrotask();
@@ -976,6 +1011,40 @@ test('openDecisionsMenu focuses the search box', async () => {
 test('the REAL index.html wires the modal backdrop to hideDecisionsMenu, same as #palette/#shortcuts-overlay', () => {
     assert.match(REAL_HTML, /id="decisions-menu" onclick="if\(event\.target===this\)chela\.hideDecisionsMenu\(\)"/,
         '#decisions-menu backdrop is not wired to chela.hideDecisionsMenu() in index.html');
+});
+
+// 🔴 GUARD (CMX-288 rework round 2): shape 32's fix pinned ONE wiring point
+// (the backdrop's onclick) against REAL_HTML — but the BODY fixture above
+// hardcodes its OWN onclick attributes on #btn-decisions and the close
+// button, so every test that opens/closes the modal via `decisions.
+// openDecisionsMenu()`/`hideDecisionsMenu()` calls the module export
+// directly and never reads either attribute off the real template. The judge
+// stripped `onclick="chela.openDecisionsMenu()"` off the real #btn-decisions
+// — the ONLY way a human reaches this feature — and all 40 prior tests
+// stayed green, because none of them ever looked at the real button. Same
+// shape as the backdrop test above, aimed at the sibling attribute it never
+// covered.
+test('the REAL index.html wires #btn-decisions to open the modal', () => {
+    assert.match(REAL_HTML, /id="btn-decisions"[^>]*onclick="chela\.openDecisionsMenu\(\)"/,
+        '#btn-decisions is not wired to chela.openDecisionsMenu() in index.html — nothing opens the modal');
+});
+
+// 🔴 GUARD (CMX-288 rework round 2): the modal's ✕ close button, same gap as
+// above — the BODY fixture's own hardcoded onclick means no fixture-driven
+// test can see the real button's onclick stripped.
+test('the REAL index.html wires the modal close button (✕) to hideDecisionsMenu', () => {
+    assert.match(REAL_HTML,
+        /<button class="icon-btn" title="Close" aria-label="Close" onclick="chela\.hideDecisionsMenu\(\)">/,
+        'the modal close button (✕) is not wired to chela.hideDecisionsMenu() in index.html');
+});
+
+// 🔴 GUARD (CMX-288 rework round 2): a11y — the modal sheet must be announced
+// as a dialog. Same shape again: the BODY fixture doesn't even include
+// role="dialog" (see the fixture at the top of this file), so nothing
+// fixture-driven could ever have caught it dropped from the real template.
+test('the REAL index.html announces #decisions-menu\'s sheet with role="dialog"', () => {
+    assert.match(REAL_HTML, /<div class="modal-sheet" role="dialog" aria-label="Decisions">/,
+        '#decisions-menu\'s .modal-sheet is missing role="dialog" in index.html');
 });
 
 // The 'sanity: the modal must start closed' assertion above only proves the
