@@ -1060,33 +1060,96 @@ test('the REAL index.html wires the modal close button (✕) to hideDecisionsMen
         'the modal close button (✕) is not wired to chela.hideDecisionsMenu() in index.html');
 });
 
-// 🔴 GUARD (CMX-288 rework round 3): the three REAL_HTML tests above only
-// prove hop 1 of the chain a human actually reaches this feature through —
-// `#btn-decisions[onclick="chela.X()"] -> window.chela.X -> the module
-// function` — they pin the attribute TEXT but never check that the name it
-// names resolves to anything. The judge measured this directly: dropping
-// `openDecisionsMenu` (or `hideDecisionsMenu`) from the `Object.assign
-// (window.chela, {...})` surface at the bottom of decisions.js left every
-// prior test green, because `index.html` still reads
+// 🔴 GUARD (CMX-288 rework round 3, widened round 4): the three REAL_HTML
+// tests above only prove hop 1 of the chain a human actually reaches this
+// feature through — `#btn-decisions[onclick="chela.X()"] -> window.chela.X
+// -> the module function` — they pin the attribute TEXT but never check that
+// the name it names resolves to anything. The judge measured this directly:
+// dropping `openDecisionsMenu` (or `hideDecisionsMenu`) from the
+// `Object.assign(window.chela, {...})` surface at the bottom of decisions.js
+// left every prior test green, because `index.html` still reads
 // `onclick="chela.openDecisionsMenu()"` — the click would throw in a real
-// browser, but nothing here ever calls it through `window.chela`. Per the
-// judge's own suggestion, the expected names are DERIVED from the onclick
-// attributes parsed out of REAL_HTML rather than hand-listed here, so a
+// browser, but nothing here ever calls it through `window.chela`.
+//
+// Round 3's fix claimed the expected names were DERIVED from REAL_HTML "so a
 // future inline handler is covered automatically instead of needing someone
-// to remember to add a matching assertion.
-test('🔴 GUARD: every chela.X() named in a REAL_HTML #decisions-menu onclick resolves to an actual function on window.chela', () => {
-    const names = [...REAL_HTML.matchAll(/onclick="[^"]*chela\.(\w+)\(\)[^"]*"/g)]
-        .map(m => m[1])
-        .filter(name => name === 'openDecisionsMenu' || name === 'hideDecisionsMenu');
-    const unique = [...new Set(names)].sort();
-    // sanity: both names must actually appear in REAL_HTML, or the assertions
-    // below would vacuously pass over an empty list.
-    assert.deepEqual(unique, ['hideDecisionsMenu', 'openDecisionsMenu'],
-        `expected both openDecisionsMenu and hideDecisionsMenu to appear in a REAL_HTML onclick, found: ${unique.join(',') || '(none)'}`);
+// to remember" — but then re-narrowed that derivation right back to a hand
+// list two lines later (`.filter(name => name === 'openDecisionsMenu' ||
+// name === 'hideDecisionsMenu')`), and its regex only matched EMPTY-paren
+// `onclick="chela.X()"` calls. `setDecisionsQuery` is wired via
+// `oninput="chela.setDecisionsQuery(this.value)"` on the search box (an
+// `oninput`, not `onclick`, and a call WITH an argument) — invisible to both
+// restrictions, so dropping it from the same Object.assign surface would
+// have stayed just as green as `openDecisionsMenu`/`hideDecisionsMenu` did
+// before round 3. This scans BOTH attribute kinds, with or without
+// arguments, so the filter can be dropped and the set derived for real.
+//
+// `openDecisionTicket` (wired via `onclick="chela.openDecisionTicket(this)"`
+// on each row) is deliberately NOT covered by this test: that markup is
+// generated at runtime by decisions.js's `_rowHtml`, never present in the
+// static `index.html` this scans — no REAL_HTML-based derivation, however
+// written, can ever see it. It gets its own hop-2 guard below, against the
+// actually-rendered row.
+function decisionsInlineHandlerNames() {
+    const btn = REAL_HTML.match(/<button class="icon-btn" id="btn-decisions"[\s\S]*?<\/button>/);
+    const menu = REAL_HTML.match(/<div class="palette-overlay" id="decisions-menu"[\s\S]*?\n<!-- Launcher:/);
+    assert.ok(btn, '#btn-decisions button not found in index.html');
+    assert.ok(menu, '#decisions-menu block not found in index.html');
+    const scope = btn[0] + '\n' + menu[0];
+    const names = [...scope.matchAll(/\b(?:onclick|oninput)="[^"]*chela\.(\w+)\([^"]*"/g)].map(m => m[1]);
+    return [...new Set(names)].sort();
+}
+
+test('🔴 GUARD: every chela.X(...) named in an onclick/oninput on #btn-decisions or #decisions-menu resolves to an actual function on window.chela', () => {
+    const unique = decisionsInlineHandlerNames();
+    // sanity: all three names must actually appear, or the loop below would
+    // vacuously pass over a shrunken list (this is what round 3's own filter
+    // silently did to openDecisionTicket/setDecisionsQuery).
+    assert.deepEqual(unique, ['hideDecisionsMenu', 'openDecisionsMenu', 'setDecisionsQuery'],
+        `expected exactly these names in an onclick/oninput within #btn-decisions/#decisions-menu, found: ${unique.join(',') || '(none)'}`);
     for (const name of unique) {
         assert.equal(typeof window.chela[name], 'function',
-            `index.html's onclick calls chela.${name}() but window.chela.${name} is not a function — a real click would throw`);
+            `an inline handler calls chela.${name}(...) but window.chela.${name} is not a function — a real interaction would throw`);
     }
+});
+
+// 🔴 GUARD (CMX-288 rework round 4): hop 2 for the ROW click-through path.
+// Unlike #btn-decisions/#decisions-menu (static markup in index.html),
+// decisions.js's `_rowHtml` renders `onclick="chela.openDecisionTicket(this)"`
+// at RUNTIME — no REAL_HTML scan can ever see it, so the widened guard above
+// structurally cannot cover this hop no matter how its regex is written.
+// Renders a REAL clickable row via enterDecisions(), then compiles+runs the
+// row's ACTUAL onclick attribute through window.chela (same recipe as
+// clickReregisterButton above: jsdom never executes inline onclick without
+// runScripts:"dangerously", so a dispatchEvent('click') would silently prove
+// nothing) — the same two hops a real click goes through (attribute ->
+// window.chela -> function). Dropping openDecisionTicket from the
+// Object.assign(window.chela, {...}) surface throws a TypeError here even
+// though every other test exercising this path (e.g. "clicking a
+// click-through row closes the decisions modal itself", below) calls
+// `decisions.openDecisionTicket(...)` directly — the ES-module binding,
+// which bypasses window.chela entirely and would stay green regardless.
+test('🔴 GUARD: a rendered decision row\'s onclick resolves openDecisionTicket through window.chela', async () => {
+    LOG_RESPONSE = {
+        boot_id: 'b1', gap: null, first_seq: 1, last_seq: 1, next_seq: 1,
+        events: [{
+            seq: 1, ts: 1000, type: 'run_review', wid: '@3', summary: 'cmx-9 awaiting review',
+            payload: { task_id: 't9', title: 'cmx-9 task', run_status: 'awaiting_review' },
+        }],
+    };
+    await decisions.enterDecisions();
+    const row = document.querySelector('#decisions-list .feed-row');
+    assert.ok(row, 'sanity: no clickable row rendered — this test would be vacuous otherwise');
+    const onclick = row.getAttribute('onclick') || '';
+    assert.match(onclick, /^chela\.openDecisionTicket\(this\)$/,
+        'the rendered row is not wired to chela.openDecisionTicket(this)');
+
+    let opened = null;
+    window.chela.openTaskModal = (item) => { opened = item; };
+    const fn = new Function('chela', `return (${onclick})`);
+    await fn.call(row, window.chela);
+
+    assert.ok(opened, 'the row\'s onclick, run through window.chela exactly as a real click would, must open the task modal');
 });
 
 // 🔴 GUARD (CMX-288 rework round 2): a11y — the modal sheet must be announced
@@ -1143,16 +1206,34 @@ test('Esc closes the open decisions modal', () => {
     decisions.openDecisionsMenu();
     assert.ok(isOpen(), 'openDecisionsMenu did not open the modal — this test would be vacuous otherwise');
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
 
     assert.ok(!isOpen(), 'Esc did not close #decisions-menu');
 });
 
-test('Esc is a no-op when the decisions modal is already closed', () => {
+// 🔴 GUARD (CMX-288 rework round 4): "Esc is a no-op when closed" used to be proven only by
+// doesNotThrow + isOpen() staying false — both are satisfied whether or not the handler's
+// `.classList.contains('open')` gate actually runs, because the actions it gates
+// (e.preventDefault() + hideDecisionsMenu()) are themselves idempotent no-ops on an
+// already-closed modal: removing an 'open' class that isn't there changes nothing, so
+// isOpen() reads false either way. The gate's one OBSERVABLE effect while closed is that it
+// must NOT call e.preventDefault() — the module-scope `document` listener (no removal path on
+// close, unlike the old anchored-popover listener) sees every Escape keydown in the dashboard
+// forever, so failing to gate it would cancel Escape's default action for whatever else is
+// actually focused (a terminal pane's textarea, a native dialog, IME composition) even while
+// this modal is shut. Read off `dispatchEvent`'s own return value (false iff some handler
+// called preventDefault on a cancelable event) rather than the modal's state, so dropping the
+// `.classList.contains('open')` condition goes red here even though it stays fully idempotent
+// on every state assertion above.
+test('Esc does not preventDefault() while the decisions modal is already closed', () => {
     assert.ok(!isOpen(), 'sanity: the modal must start closed');
 
-    assert.doesNotThrow(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    const notPrevented = document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+
     assert.ok(!isOpen());
+    assert.ok(notPrevented,
+        'Esc must not call preventDefault() while the decisions modal is closed — the closed-modal ' +
+        'guard exists precisely so Escape falls through to whatever else is actually focused');
 });
 
 test('clicking a click-through row closes the decisions modal itself', async () => {
