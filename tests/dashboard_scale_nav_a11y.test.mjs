@@ -252,6 +252,7 @@ import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py e
 
 import { tileState } from '../chela/dashboard/static/js/wallmodel.js';
 import { navViews } from '../chela/dashboard/static/js/viewreg.js';
+import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const src = p => readFileSync(join(ROOT, p), 'utf8');
@@ -551,28 +552,9 @@ test('non-hue cue — kanban "error" analogue (failed): the status chip carries 
 // rendered node, not source text.
 test('WIRING: a REAL rendered kanban card shows its status chip word AND its error text — not colour-only', async () => {
     const BODY = '<div id="work-board"><div id="kanban-board"></div><div id="kanban-empty"></div><div id="kanban-filters"></div></div>';
-    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
-        { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        // defineProperty, NOT assignment — globalThis.navigator is getter-only
-        // from node 21 (see tests/wall.test.mjs's note).
-        Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
-    }
-    dom.window.matchMedia = q => ({
-        media: q, matches: false, addEventListener() {}, removeEventListener() {},
-        addListener() {}, removeListener() {},
-    });
-    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-    globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;
-    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
-
     // Browser-faithful import order: main.js is the entry (nav <-> main is a
     // cycle — import anything else first and its `let`s are in their TDZ).
-    await import('../chela/dashboard/static/js/main.js');
-    const kanban = await import('../chela/dashboard/static/js/kanban.js');
+    const { modules: { kanban } } = await bootDashboardDom({ body: BODY, extraModules: ['kanban.js'] });
 
     kanban.renderKanban({
         configured: true,
@@ -686,26 +668,9 @@ test('nav inventory: the five deleted views leave no trace — no panel, no tier
 test('WIRING: the REAL renderNav() renders exactly Wall and Work into #side-nav, in order', async () => {
     const BODY = '<div class="app"><aside class="sidebar"><section class="side-section">' +
         '<div class="side-list" id="side-nav"></div></section></aside></div>';
-    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
-        { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
-    }
-    dom.window.matchMedia = q => ({
-        media: q, matches: false, addEventListener() {}, removeEventListener() {},
-        addListener() {}, removeListener() {},
-    });
-    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-    globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;
-    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
-
     // Browser-faithful import order: main.js is the entry (nav <-> main is a
     // cycle — import anything else first and its `let`s are in their TDZ).
-    await import('../chela/dashboard/static/js/main.js');
-    const nav = await import('../chela/dashboard/static/js/nav.js');
+    const { modules: { nav } } = await bootDashboardDom({ body: BODY, extraModules: ['nav.js'] });
 
     nav.renderNav();
     const ids = [...document.querySelectorAll('#side-nav .side-item')].map(el => el.dataset.view);
