@@ -450,24 +450,32 @@
 <!-- Mobile sidebar scrim (off-canvas drawer backdrop) -->
 <div class="drawer-scrim" id="sidebar-scrim" onclick="chela.closeSidebar()"></div>
 
-<!-- Settings drawer (gear / bell) -->
+<!-- Settings modal (gear / bell) — TABBED (CMX-287), replaces the old off-canvas
+     drawer: "make settings easier to navigate, and allow showing cost and maybe
+     other things that are not related to the main views" (Liav). Cost (a nav view
+     CMX-279 deleted for being unopened) lives here now as a tab, not a sidebar row. -->
 <div class="drawer-scrim" id="drawer-scrim" onclick="chela.toggleSettings()"></div>
-<aside class="drawer" id="settings-drawer">
-  <div class="drawer-head">
+<div class="settings-modal" id="settings-drawer" role="dialog" aria-modal="true" aria-label="Settings">
+  <div class="settings-modal-head">
     <span>Settings</span>
     <button class="icon-btn" onclick="chela.toggleSettings()">✕</button>
   </div>
-  <div class="drawer-body" id="drawer-body">
-    <!-- populated by nav.js renderSettings() -->
+  <div class="settings-modal-body">
+    <nav class="settings-tabs" id="settings-tabs">
+      <!-- populated by nav.js renderSettings() -->
+    </nav>
+    <div class="settings-tabpanels" id="drawer-body">
+      <!-- populated by nav.js renderSettings() -->
+    </div>
   </div>
   <!-- AGPL §13: a user interacting with this dashboard over a network must be
        offered the Corresponding Source. Static markup on purpose — a JS-rendered
        offer disappears exactly when the JS breaks, and the obligation does not. -->
-  <div class="drawer-foot">
+  <div class="settings-modal-foot">
     chelamux — <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL v3</a>.
     <a href="https://github.com/Devail1/chelamux" target="_blank" rel="noopener">Source code</a>.
   </div>
-</aside>
+</div>
 
 <!-- "+ new" popover — the LAUNCH surface. Favorites + Recent used to be a third
      sidebar section; they are launch affordances, so they live here, above the

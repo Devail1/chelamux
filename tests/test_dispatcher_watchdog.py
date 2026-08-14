@@ -224,6 +224,15 @@ def test_pane_shows_activity_detects_spinner_and_counter():
     assert not dispatcher._pane_shows_activity(_QUESTION)
 
 
+def test_pane_shows_login_expired_detects_the_banner():
+    banner = "✽ Sonnet 5\n\nLogin expired · Please run /login\n\n❯ \n"
+    assert dispatcher._pane_shows_login_expired(banner)
+    # Ordinary idle/working panes carry no such text.
+    assert not dispatcher._pane_shows_login_expired(_BARE_IDLE)
+    assert not dispatcher._pane_shows_login_expired(_WORKING_WITH_EMPTY_PROMPT)
+    assert not dispatcher._pane_shows_login_expired(_QUESTION)
+
+
 def test_dismiss_input_block_sends_escape(monkeypatch):
     run = Mock()
     monkeypatch.setattr(dispatcher.subprocess, "run", run)
