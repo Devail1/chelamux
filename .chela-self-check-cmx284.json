@@ -1,0 +1,16 @@
+{
+  "experiments": [
+    {
+      "guard": "NEW: test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename — a shape file's H2 heading must match '## N. Title' (WITH the period) and N must match the filename's leading number. A heading that loses its period is invisible to the catalog scan in test_defeat_shapes_catalog_documents_every_seeded_shape (re.split(r\"^## \\\\d+\\\\. \", ...) drops the whole file silently, and a sequential-numbering assertion can't see the gap either since the malformed heading was never counted as a section). This orphaned three shapes on cmx-279's own hand-resolved merge conflict.",
+      "file": "docs/defeat_shapes/21-a-shared-field-value-tested-on-the-sibling-that-motivated.md",
+      "before": "## 21. A shared field value tested on the sibling that motivated it, not on the one that already had it",
+      "after": "## 21 A shared field value tested on the sibling that motivated it, not on the one that already had it"
+    },
+    {
+      "guard": "NEW: test_defeat_shapes_cross_references_resolve_to_shapes_that_exist — every 'shape N' / '[[N|...]]' cross-reference inside docs/defeat_shapes/*.md must resolve to a shape file that actually exists. Under the old single-file catalog, renumbering to resolve a merge conflict could silently orphan a reference with no mechanical way to catch it; one file per shape makes the existing-shape set concrete (the filenames), so this is now checkable.",
+      "file": "docs/defeat_shapes/08-a-differential-guard-that-cancels.md",
+      "before": "shape 6",
+      "after": "shape 66"
+    }
+  ]
+}

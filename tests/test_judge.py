@@ -541,6 +541,67 @@ def test_defeat_shapes_index_carries_no_numbered_sections_of_its_own():
     assert "docs/defeat_shapes/" in text
 
 
+def test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename():
+    """CMX-284 rework round 1: a heading that loses its period is invisible to every tool
+    reading the catalog — `re.split(r"^## \\d+\\. ", ...)` (the scan the sibling test above
+    uses) silently drops a file whose heading doesn't match this exact shape, and a
+    sequential-numbering assertion can't see the gap either, because the malformed heading
+    was never counted as a section in the first place. Hand-resolving a merge conflict this
+    way orphaned three shapes on cmx-279: `## 21. Title` became `## 21 Title` (period
+    dropped), and nothing in the suite noticed.
+
+    Seen to go red: `## 21 A shape with no period` — matches neither `^## \\d+\\. ` (the
+    section scanner) nor this test's own `^## \\d+\\. ` check, so it fails LOUDLY here
+    instead of silently vanishing from the catalog scan.
+    """
+    root = Path(__file__).resolve().parent.parent
+    shapes_dir = root / "docs" / "defeat_shapes"
+    files = sorted(shapes_dir.glob("*.md"))
+    assert files, f"no shape files found under {shapes_dir}"
+    for f in files:
+        filename_num = int(f.name.split("-", 1)[0])
+        first_line = f.read_text().splitlines()[0]
+        m = re.match(r"^## (\d+)\. ", first_line)
+        assert m, (
+            f"{f.name}: heading {first_line!r} does not match '## N. Title' (missing the "
+            f"period after the number makes this shape invisible to the catalog scan)"
+        )
+        heading_num = int(m.group(1))
+        assert heading_num == filename_num, (
+            f"{f.name}: filename number {filename_num} does not match heading number "
+            f"{heading_num}"
+        )
+
+
+def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
+    """CMX-284 rework round 1: entries cross-reference each other by number ("the render-side
+    mirror of shape 13", "[[21|entry 21]]") — under the old single-file catalog, renumbering
+    to resolve a merge conflict could silently orphan a reference (rename shape 13 to 14 and
+    every "shape 13" mention elsewhere now points at the wrong entry, or at nothing), and
+    nobody could check that mechanically because there was no enumerable set of "shapes that
+    exist" independent of the numbering itself. One file per shape makes that set concrete:
+    the filenames. Assert every cross-reference resolves to one of them.
+
+    Seen to go red: a reference left behind as "shape 31" (or any number with no
+    `docs/defeat_shapes/31-*.md` file) after a renumber that missed one mention.
+    """
+    root = Path(__file__).resolve().parent.parent
+    shapes_dir = root / "docs" / "defeat_shapes"
+    files = sorted(shapes_dir.glob("*.md"))
+    assert files, f"no shape files found under {shapes_dir}"
+    existing = {int(f.name.split("-", 1)[0]) for f in files}
+
+    ref_pattern = re.compile(r"\bshapes? (\d+)\b|\[\[(\d+)\|")
+    for f in files:
+        text = f.read_text()
+        for m in ref_pattern.finditer(text):
+            num = int(m.group(1) or m.group(2))
+            assert num in existing, (
+                f"{f.name} references shape {num}, which has no "
+                f"docs/defeat_shapes/{num:02d}-*.md file"
+            )
+
+
 def test_workflow_md_step_3_tells_the_agent_to_keep_the_experiments_file():
     """⛔ CMX-258 rework round 4, finding 3 (WIRING): step 3 tells the agent to KEEP the
     experiments JSON file so step 6 can consume it. If this instruction reverses (an agent
