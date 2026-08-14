@@ -9,17 +9,20 @@
 //   1. 🔴 TAB SWITCHING SHOWS EXACTLY ONE `.active` PANEL/RAIL-ENTRY. The
 //      drawer->modal rewrite's whole point is per-tab panels instead of one
 //      long scroll — if selectSettingsTab() stops toggling the `.active`
-//      class, that regresses silently. ⚠️ NOT GUARDED: whether a
-//      non-`.active` `.settings-tabpanel` is actually PAINTED (i.e. that
-//      `style.css`'s `.settings-tabpanel { display: none }` /
-//      `.settings-tabpanel.active { display: flex }` pair still exists and
-//      still wins) is a *rendered* fact this suite cannot see — jsdom builds
-//      no box model and resolves no layout, and this file never even loads
-//      `style.css`. A CSS mutation that keeps every panel's `display` at
-//      `flex` regardless of `.active` is invisible here at any spelling
-//      (parsing the stylesheet as text to "catch" it is its own defeatable
-//      race — see CMX-117 rounds 3-8). That gap is covered only by manual
-//      verification, not by this suite; see the PR's VERIFY note.
+//      class, that regresses silently. Whether a non-`.active`
+//      `.settings-tabpanel` is actually PAINTED (i.e. that `style.css`'s
+//      `.settings-tabpanel { display: none }` / `.settings-tabpanel.active
+//      { display: flex }` pair still exists and still wins) IS guarded below
+//      — this is a CASCADE fact (specificity/source-order/!important), which
+//      jsdom resolves faithfully via `getComputedStyle` once the REAL
+//      `style.css` is loaded into the document (same recipe as
+//      tests/wire_live_css.test.mjs); it is only *layout* (box geometry,
+//      used values) jsdom cannot do. An earlier round of this file cited
+//      CMX-117 rounds 3-8 to declare this NOT GUARDED — that precedent is
+//      about a *different* technique (regex-parsing the stylesheet as text,
+//      which genuinely cannot rank specificity/order/!important), not about
+//      whether jsdom can resolve cascade at all; conflating the two wrongly
+//      widened the disclaimer. See test 1d below.
 //   2. 🔴 CLICKING A RAIL ENTRY ACTUALLY SWITCHES TABS. Calling
 //      `window.chela.selectSettingsTab(tab)` proves the handler, not the
 //      binding — it never touches the `onclick` attribute `renderSettings()`
@@ -50,10 +53,20 @@
 // `onclick` argument blanked) both stayed green. The orchestrator's own
 // review of that verdict (PR #358 comment, round 4) found the CSS finding
 // UNFAIR (jsdom does no layout and this file never loads style.css — no
-// guard can see it, so it is declared NOT GUARDED above instead of chased)
+// guard can see it, so it was declared NOT GUARDED above instead of chased)
 // and the wiring finding REAL, closed below by driving the actual rendered
 // `onclick` attribute instead of calling `selectSettingsTab()` directly. See
 // DEFEAT_SHAPES #5.
+//
+// CMX-291 (orchestrator, 2026-08-14): the round-3/4 "UNFAIR" call above
+// conflated jsdom's real limit (LAYOUT — box geometry, used values) with a
+// different, narrower one (CASCADE — specificity/source-order/!important),
+// which jsdom DOES resolve via `getComputedStyle` once the real `style.css`
+// is mounted (tests/wire_live_css.test.mjs already relies on exactly this).
+// `display: none` vs `display: flex` is a cascade value, not geometry, so
+// this mutation was guardable all along — closed by test 1d below, which
+// mounts the real `.settings-tabpanel`/`.settings-tabpanel.active` markup
+// under the real stylesheet and reads the cascaded `display` back.
 //
 // CMX-287 rework round 4 (PR #358): the SAME handler-vs-binding hop the
 // round-3 verdict caught on the tab rail turned out to also be open one
@@ -108,6 +121,11 @@ import { JSDOM } from 'jsdom';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
+// The REAL stylesheet — mounted into the shared jsdom document below so
+// getComputedStyle() resolves the actual cascade (specificity/source-order/
+// !important), not a hand-typed stand-in. Same recipe as
+// tests/wire_live_css.test.mjs.
+const CSS = readFileSync(join(ROOT, 'static', 'style.css'), 'utf8');
 
 // The REAL settings modal — scrim + tab rail + tabpanel host — sliced straight
 // out of index.html, not hand-typed, so a mutation to the tab rail's id (the
@@ -140,7 +158,7 @@ function flush() {
 }
 
 before(async () => {
-    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
+    const dom = new JSDOM(`<!doctype html><html><head><style>${CSS}</style></head><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
@@ -280,6 +298,49 @@ test('toggleSettings("notify") opens on the Notifications tab even if another ta
         'toggleSettings(\'notify\') did not land on the Notifications tab — it stayed on the last-selected tab instead');
     assert.equal(document.querySelector('.settings-tab.active').dataset.tab, 'notifications',
         'toggleSettings(\'notify\') did not mark the Notifications rail entry active');
+});
+
+// --- 1d. 🔴 a non-`.active` panel is actually PAINTED `display: none` (CASCADE, not layout) --
+//
+// CMX-291: the round-3/4 "NOT GUARDED" call on this fact conflated jsdom's
+// real limit (LAYOUT — box geometry, used values, e.g. `92vw` -> px,
+// `offsetWidth`) with CASCADE (specificity/source-order/!important), which
+// jsdom resolves faithfully via `getComputedStyle` as long as the REAL
+// `style.css` is loaded into the document — it now is, in `before()` above.
+// This reads the CASCADED `display` off the REAL, renderSettings()-produced
+// `.settings-tabpanel` nodes (not a hand-built stand-in), so a mutation that
+// widens `.settings-tabpanel`'s base rule to `display: flex` (or drops the
+// `.active` override) goes red here even though every DOM-level assertion in
+// test 1 above stays green (`.active` is still the right class on the right
+// node either way — the class alone was never the bug).
+test('a non-active .settings-tabpanel is actually display:none, and the active one is display:flex — REAL cascade', async () => {
+    await openOnTab('cost');
+
+    const panels = document.querySelectorAll('.settings-tabpanel');
+    assert.ok(panels.length >= 2, 'need at least 2 rendered panels to prove the inactive one is hidden');
+
+    const active = document.querySelector('.settings-tabpanel.active');
+    assert.equal(getComputedStyle(active).display, 'flex',
+        'the active .settings-tabpanel does not cascade to display:flex — style.css\'s ' +
+        '.settings-tabpanel.active rule must outrank the base .settings-tabpanel rule');
+
+    const inactive = Array.from(panels).filter(p => p !== active);
+    assert.ok(inactive.length > 0, 'no inactive panel rendered to check');
+    inactive.forEach(p => {
+        assert.equal(getComputedStyle(p).display, 'none',
+            `a non-active .settings-tabpanel (data-tab="${p.dataset.tab}") is not display:none — ` +
+            'the base .settings-tabpanel { display: none } rule is not winning the cascade');
+    });
+
+    // Switch tabs and re-check: proves the cascade tracks the .active class
+    // moving, not a coincidence of which panel happened to render first.
+    window.chela.selectSettingsTab('timing');
+    const activeNow = document.querySelector('.settings-tabpanel.active');
+    assert.equal(activeNow.dataset.tab, 'timing');
+    assert.equal(getComputedStyle(activeNow).display, 'flex',
+        'the newly-active Timing panel does not cascade to display:flex after switching tabs');
+    assert.equal(getComputedStyle(active).display, 'none',
+        'the previously-active Cost panel is still display:flex after switching away from it');
 });
 
 // --- 2. 🔴 the Cost tab joins agents + cost by project, and re-fetches on window change --
