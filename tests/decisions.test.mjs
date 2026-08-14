@@ -1211,6 +1211,30 @@ test('Esc closes the open decisions modal', () => {
     assert.ok(!isOpen(), 'Esc did not close #decisions-menu');
 });
 
+// 🔴 GUARD (CMX-288 rework round 5): the key filter itself, one line above the closed-gate the
+// previous round guarded. The module-scope `document` keydown listener has no removal path, so
+// it sees every keystroke typed anywhere in the dashboard forever — including into
+// #decisions-search, which openDecisionsMenu() itself autofocuses. Dead-coding
+// `if (e.key !== 'Escape') return;` (e.g. `if (false && e.key !== 'Escape') return;`) makes ANY
+// keydown fall through to the open-modal branch: it would close the modal and preventDefault()
+// the keystroke, so the first character typed into the autofocused search box shuts the inbox
+// and is swallowed. The two existing Esc tests above/below only ever dispatch `key: 'Escape'` —
+// they cannot distinguish "the listener checks the key" from "the listener runs unconditionally
+// and Escape happens to trigger the branch both ways" — so this dispatches a non-Escape key
+// instead, with the modal open, and asserts the branch does NOT run.
+test('🔴 GUARD: a non-Escape keydown does not close the modal or preventDefault() while it is open', () => {
+    decisions.openDecisionsMenu();
+    assert.ok(isOpen(), 'sanity: the modal must be open for this test to be meaningful');
+
+    const notPrevented = document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true }));
+
+    assert.ok(isOpen(), 'a non-Escape keydown must not close the decisions modal');
+    assert.ok(notPrevented,
+        'a non-Escape keydown must not be preventDefault()\'d — the module-scope keydown listener sees ' +
+        'every keystroke in the dashboard, including ones typed into the autofocused #decisions-search box, ' +
+        'and must ignore all but Escape');
+});
+
 // 🔴 GUARD (CMX-288 rework round 4): "Esc is a no-op when closed" used to be proven only by
 // doesNotThrow + isOpen() staying false — both are satisfied whether or not the handler's
 // `.classList.contains('open')` gate actually runs, because the actions it gates
