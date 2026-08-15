@@ -399,6 +399,33 @@ def test_a_pin_whose_transcript_does_not_exist_is_refused_via_the_else_arm(
     assert f"but no {SID}.jsonl exists under the projects dir" in res.detail
 
 
+def test_the_pin_tier_is_INERT_for_a_window_that_was_never_pinned(projects, monkeypatch):
+    """DEFEAT_SHAPES #47 — an early-return gate's controlling value is only ever driven with
+    the one input that passes it. Every other test in this file arms the pin via ``_pin(...)``
+    before touching ``resolve_window``; the ``no_pin`` autouse fixture arms the OTHER half
+    (``sessionids.session_id_for`` returning ``None``) on every one of them too, but nothing
+    ever asserted what the pin tier does with that input. A mutant that folds the tier's own
+    entry gate (``if pinned:``) into ``if pinned or True:`` is therefore invisible to every
+    existing pin test: they all still have a real pin armed, so the gate accepting unpinned
+    input as well changes nothing THEY can see. This window is deliberately left unpinned (the
+    autouse fixture is enough — no ``_pin`` call) with a live pane, so if the gate is dead the
+    block runs anyway: ``transcript_for_session(None, ...)`` returns ``None`` (no session id
+    matches nothing), and the tier's own ``else`` arm fabricates
+    ``"chela pinned session None for @1 at spawn, but no None.jsonl exists..."`` into ``tried``
+    — a pin that never existed, named in the exact diagnostic surface CMX-295 added to keep
+    honest. A correct gate never enters the block at all, so that string never appears and the
+    resolution never reports ``source == "pinned"``."""
+    _panes(monkeypatch,
+           sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+                         launched_in="/home/u/repo", started=time.time()))
+    # deliberately no _pin(...) call — the no_pin autouse fixture is the only thing armed
+
+    res = sessions.resolve_window("@1")
+
+    assert res.source != "pinned"
+    assert "chela pinned session" not in res.detail
+
+
 def test_the_event_log_still_wins_over_a_pin_when_both_have_evidence(projects, monkeypatch):
     """Tier 1 is consulted FIRST and is the more current signal when it has one: a fresh,
     hook-confirmed session must not be shadowed by an older pin from the window's original
