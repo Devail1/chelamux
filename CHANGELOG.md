@@ -10,6 +10,8 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-15
+
 ### Fixed
 
 - **The Telegram relay no longer goes silent for one of two sessions running in the same
@@ -751,6 +753,7 @@ Add an entry under `## [Unreleased]` per user-facing PR. It becomes a numbered
 section — and a tag, and a GitHub Release built from it — the next time chelamux
 cuts one; see "Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+[0.6.0]: https://github.com/Devail1/chelamux/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Devail1/chelamux/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Devail1/chelamux/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Devail1/chelamux/compare/v0.2.0...v0.3.0
