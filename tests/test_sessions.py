@@ -375,6 +375,30 @@ def test_a_pin_whose_transcript_cannot_be_STATD_is_refused_not_believed(
     assert "dead predecessor" in res.detail
 
 
+def test_a_pin_whose_transcript_does_not_exist_is_refused_via_the_else_arm(
+        projects, monkeypatch):
+    """The pin block's OTHER branch — ``transcript_for_session`` returns None because
+    nothing under the projects dir is named after the pinned session yet. Not exotic:
+    ``chela.spawn.spawn_window`` writes the pin at launch, before the session has written
+    its first transcript byte, so every freshly spawned window passes through here. Every
+    other pin test in this file creates the pin's transcript before pinning, so the ``else``
+    arm below (``tried.append(... "but no {pinned}.jsonl exists" ...)``) was never reached
+    by the suite — a mutation that folded it into the ``if path is not None`` branch stayed
+    green, because nothing then made the merged branch call ``.stat()`` on the ``None`` it
+    actually got back (which raises ``AttributeError``, not the ``OSError`` the freshness
+    check's fallback guards against, so it isn't swallowed — it blows this test up)."""
+    _panes(monkeypatch,
+           sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+                         launched_in="/home/u/repo", started=time.time()))
+    _pin(monkeypatch, {"@1": SID})                      # pinned, but SID.jsonl was never written
+
+    res = sessions.resolve_window("@1")
+
+    assert res.path is None and not res.ok
+    assert res.source == "none"
+    assert f"but no {SID}.jsonl exists under the projects dir" in res.detail
+
+
 def test_the_event_log_still_wins_over_a_pin_when_both_have_evidence(projects, monkeypatch):
     """Tier 1 is consulted FIRST and is the more current signal when it has one: a fresh,
     hook-confirmed session must not be shadowed by an older pin from the window's original
