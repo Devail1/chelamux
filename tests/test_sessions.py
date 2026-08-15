@@ -297,6 +297,52 @@ def test_a_stale_pin_from_a_dead_predecessor_process_is_refused(projects, monkey
     assert "dead predecessor" in res.detail
 
 
+def test_the_pin_is_refused_when_the_panes_process_start_time_is_UNKNOWN(
+        projects, monkeypatch):
+    """Mirrors ``test_a_window_whose_process_cannot_be_read_does_not_inherit_a_SESSION_
+    either`` (tier 1) for the CMX-295 pin tier: the block comment above the pin says it is
+    'Only consulted for a LIVE pane', and applies the SAME 'no floor, so no bound' rule tier
+    1 states in its own module docstring. Unlike the other pin tests, this one arms the pin
+    with a resolvable, real transcript — so a guard that dropped the ``pane.started is not
+    None`` half of the entry check would actually try to use it (and, since the freshness
+    comparison needs a floor to compare against, blow up rather than coincidentally refuse
+    for some other reason)."""
+    _transcript(projects, "/home/u/repo", SID)                  # the pin WOULD resolve to this
+    _panes(monkeypatch,
+           sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+                         launched_in="/home/u/repo", started=None),   # ← unknown start time
+           sessions.Pane(wid="@2", path="/home/u/repo", command="claude", claude_pid=2,
+                         launched_in="/home/u/repo", started=None))
+    _pin(monkeypatch, {"@1": SID})
+
+    res = sessions.resolve_window("@1")
+    assert res.path is None and not res.ok
+    assert res.session_id != SID
+
+
+def test_a_pin_whose_transcript_cannot_be_STATD_is_refused_not_believed(
+        projects, monkeypatch):
+    """The freshness check's own ``except OSError`` fallback (DEFEAT_SHAPES #40) — a
+    transcript that the glob found but that cannot be stat'd (vanished, or here, a broken
+    symlink) must be treated the same as a stale one: REFUSED, not believed. Nothing in the
+    other pin tests ever makes ``path.stat()`` raise, so this fallback branch was dead
+    weight no matter how the suite ran."""
+    proj = projects / transcripts.encode_cwd("/home/u/repo")
+    proj.mkdir(parents=True)
+    dangling = proj / f"{SID}.jsonl"
+    os.symlink(proj / "does-not-exist", dangling)   # resolves via glob, but stat() raises
+    _panes(monkeypatch,
+           sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+                         launched_in="/home/u/repo", started=time.time()),
+           sessions.Pane(wid="@2", path="/home/u/repo", command="claude", claude_pid=2,
+                         launched_in="/home/u/repo", started=time.time()))
+    _pin(monkeypatch, {"@1": SID})
+
+    res = sessions.resolve_window("@1")
+    assert res.path is None and not res.ok
+    assert "dead predecessor" in res.detail
+
+
 def test_the_event_log_still_wins_over_a_pin_when_both_have_evidence(projects, monkeypatch):
     """Tier 1 is consulted FIRST and is the more current signal when it has one: a fresh,
     hook-confirmed session must not be shadowed by an older pin from the window's original
